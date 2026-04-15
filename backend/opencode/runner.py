@@ -1,0 +1,190 @@
+"""opencode CLI runner — invokes opencode for AI-powered vulnerability analysis."""
+
+import asyncio
+import json
+import os
+from pathlib import Path
+from uuid import uuid4
+
+from backend.config import get_config
+from backend.logger import get_logger
+from backend.models import Candidate, Vulnerability
+
+logger = get_logger(__name__)
+
+
+async def run_audit(
+    workspace: Path,
+    candidate: Candidate,
+    project_id: str,
+    on_output=None,
+    cancel_event: asyncio.Event | None = None,
+) -> Vulnerability | None:
+    """Run opencode to analyze a single candidate vulnerability.
+
+    Args:
+        workspace: Path to the opencode workspace (contains opencode.json + skills).
+        candidate: The candidate vulnerability to analyze.
+        project_id: Project identifier for MCP tool calls.
+        on_output: Optional callback(line: str) called for each output line in real-time.
+        cancel_event: Optional asyncio.Event; when set, the subprocess is killed.
+
+    Returns:
+        A Vulnerability if analysis succeeded, None otherwise.
+    """
+    config = get_config()
+
+    if config.opencode.mock:
+        return _mock_result(candidate)
+
+    skill_name = candidate.vuln_type
+    result_id = uuid4().hex
+
+    prompt = (
+        f"Using the `{skill_name}-analysis` skill, analyze the potential "
+        f"{candidate.vuln_type.upper()} vulnerability at "
+        f"{candidate.file}:{candidate.line} in function `{candidate.function}`. "
+        f"The project_id is `{project_id}`. "
+        f"Details: {candidate.description}\n\n"
+        f"Your result_id is `{result_id}`. "
+        f"When you have finished your analysis, you MUST call the submit_result tool "
+        f"with this result_id and your findings."
+    )
+
+    log_path = workspace / f"opencode_{result_id}.log"
+
+    logger.info(
+        "Running opencode audit: %s:%d (%s) result_id=%s",
+        candidate.file, candidate.line, candidate.vuln_type, result_id,
+    )
+
+    try:
+        await _invoke_opencode(
+            workspace, prompt, config.opencode.timeout,
+            log_path=log_path, on_line=on_output, cancel_event=cancel_event,
+        )
+    except asyncio.TimeoutError:
+        logger.error("opencode timed out for %s:%d", candidate.file, candidate.line)
+        return Vulnerability(
+            file=candidate.file,
+            line=candidate.line,
+            function=candidate.function,
+            vuln_type=candidate.vuln_type,
+            severity="unknown",
+            description=candidate.description,
+            ai_analysis="Analysis timed out",
+            confirmed=False,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("opencode failed for %s:%d", candidate.file, candidate.line)
+        return None
+
+    return _read_result(result_id, candidate)
+
+
+async def _invoke_opencode(
+    workspace: Path,
+    prompt: str,
+    timeout: int,
+    log_path: Path | None = None,
+    on_line=None,
+    cancel_event: asyncio.Event | None = None,
+) -> None:
+    """Invoke opencode CLI, stream output line-by-line, write to log file."""
+    config = get_config()
+    cmd = ["opencode", "run", "--dir", str(workspace)]
+    if config.opencode.model:
+        cmd += ["--model", config.opencode.model]
+    cmd.append(prompt)
+
+    logger.debug("opencode command: %s", " ".join(cmd))
+
+    env = os.environ.copy()
+    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,  # merge stderr into stdout
+        env=env,
+    )
+
+    log_lines: list[str] = []
+    deadline = asyncio.get_event_loop().time() + timeout
+
+    try:
+        async for raw in proc.stdout:
+            if cancel_event and cancel_event.is_set():
+                proc.kill()
+                break
+            if asyncio.get_event_loop().time() > deadline:
+                proc.kill()
+                raise asyncio.TimeoutError()
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            log_lines.append(line)
+            logger.debug("[opencode] %s", line)
+            if on_line:
+                on_line(line)
+    finally:
+        if log_path and log_lines:
+            try:
+                log_path.write_text("\n".join(log_lines), encoding="utf-8")
+            except Exception:
+                pass
+
+    await proc.wait()
+
+    if not (cancel_event and cancel_event.is_set()) and proc.returncode != 0:
+        logger.error("opencode exited with code %d", proc.returncode)
+        raise RuntimeError(f"opencode exited with code {proc.returncode}")
+
+
+def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
+    """Read the result file written by the submit_result MCP tool."""
+    config = get_config()
+    result_path = Path(config.storage.scans_dir) / f"{result_id}.json"
+
+    if not result_path.exists():
+        logger.warning(
+            "submit_result was not called for %s:%d (result_id=%s)",
+            candidate.file, candidate.line, result_id,
+        )
+        return None
+
+    try:
+        data = json.loads(result_path.read_text())
+    except Exception:
+        logger.error("Failed to parse result file for result_id=%s", result_id)
+        return None
+
+    return Vulnerability(
+        file=candidate.file,
+        line=candidate.line,
+        function=candidate.function,
+        vuln_type=candidate.vuln_type,
+        severity=data.get("severity", "unknown"),
+        description=data.get("description", candidate.description),
+        ai_analysis=data.get("ai_analysis", ""),
+        confirmed=data.get("confirmed", False),
+    )
+
+
+def _mock_result(candidate: Candidate) -> Vulnerability:
+    """Return a fake analysis result for testing without opencode."""
+    logger.debug("Mock opencode result for %s:%d", candidate.file, candidate.line)
+    return Vulnerability(
+        file=candidate.file,
+        line=candidate.line,
+        function=candidate.function,
+        vuln_type=candidate.vuln_type,
+        severity="high",
+        description=candidate.description,
+        ai_analysis=(
+            f"[MOCK] Potential {candidate.vuln_type.upper()} detected: "
+            f"{candidate.description}. "
+            f"This is a mock result — configure opencode for real analysis."
+        ),
+        confirmed=True,
+    )

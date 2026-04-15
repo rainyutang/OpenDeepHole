@@ -1,0 +1,16 @@
+services:
+  opendeephole:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - scan-data:/tmp/opendeephole
+      - logs:/app/logs
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENCODE_MODEL=${OPENCODE_MODEL:-anthropic/claude-sonnet-4-20250514}
+    restart: unless-stopped
+
+volumes:
+  scan-data:
+  logs:

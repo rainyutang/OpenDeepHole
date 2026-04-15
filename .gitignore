@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Build output
+backend/static/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project runtime
+/tmp/opendeephole/
+*.log
+logs/
+
+# Environment
+.env
+.env.*
+
+# Docker
+.docker/
+
+# Claude Code
+.claude-trace/
+.claude/
+
+# TypeScript build info
+*.tsbuildinfo

@@ -1,0 +1,23 @@
+# OpenDeepHole Configuration
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+mcp_server:
+  host: "0.0.0.0"
+  port: 8100
+
+opencode:
+  model: ""
+  timeout: 300  # seconds per candidate analysis
+  mock: false    # set to false when opencode is configured
+
+storage:
+  projects_dir: "/tmp/opendeephole/projects"
+  scans_dir: "/tmp/opendeephole/scans"
+  max_upload_size_mb: 100
+
+logging:
+  level: "DEBUG"  # DEBUG, INFO, WARNING, ERROR
+  file: "logs/opendeephole.log"

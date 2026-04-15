@@ -1,0 +1,4 @@
+name: npd
+label: NPD
+description: Null Pointer Dereference
+enabled: true
