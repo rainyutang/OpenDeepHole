@@ -38,3 +38,19 @@ export async function stopScan(scanId: string): Promise<void> {
 export function getReportUrl(scanId: string): string {
   return `/api/scan/${scanId}/report`;
 }
+
+export async function markVulnerability(
+  scanId: string,
+  index: number,
+  verdict: string,
+  reason: string,
+): Promise<void> {
+  await api.post(`/api/scan/${scanId}/mark`, { index, verdict, reason });
+}
+
+export async function saveFalsePositive(
+  scanId: string,
+  index: number,
+): Promise<void> {
+  await api.post(`/api/scan/${scanId}/save-fp`, { index });
+}

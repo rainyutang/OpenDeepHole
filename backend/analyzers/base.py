@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,10 @@ class BaseAnalyzer(ABC):
     project, it is passed in so analyzers can query parsed structures instead
     of re-parsing from scratch. If the index is not yet available (e.g. still
     building) ``db`` will be ``None``.
+
+    ``find_candidates`` may return a list (batch mode) or a generator
+    (streaming mode). In streaming mode, the scan loop can start LLM
+    analysis on each candidate as it is yielded.
     """
 
     vuln_type: str
@@ -31,7 +36,7 @@ class BaseAnalyzer(ABC):
         self,
         project_path: Path,
         db: "CodeDatabase | None" = None,
-    ) -> list[Candidate]:
+    ) -> Iterable[Candidate]:
         """Return candidate vulnerability locations in *project_path*.
 
         Args:
@@ -39,5 +44,6 @@ class BaseAnalyzer(ABC):
             db: Optional pre-built code index for this project.
 
         Returns:
-            List of :class:`Candidate` objects describing potential issues.
+            Iterable of :class:`Candidate` objects. May be a list or a
+            generator for streaming analysis.
         """

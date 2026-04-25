@@ -29,6 +29,8 @@ export interface Vulnerability {
   description: string;
   ai_analysis: string;
   confirmed: boolean;
+  user_verdict?: "confirmed" | "false_positive" | null;
+  user_verdict_reason?: string | null;
 }
 
 export interface Candidate {

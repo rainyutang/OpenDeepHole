@@ -165,16 +165,37 @@ npm run dev
 ### 服务管理
 
 ```bash
-# 重启后端（添加新 checker 后需要重启）
-pkill -f uvicorn
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-
 # 查看日志
 cat logs/opendeephole.log        # 文件日志
 tail -f logs/opendeephole.log    # 实时跟踪
 ```
 
 注意：使用 `--reload` 参数时，修改 `backend/` 下的 Python 文件会自动重载，但 `checkers/` 目录下的变更**不会**自动重载（因为 registry 在启动时一次性加载），需要手动重启。
+
+### 重启服务（修改 MCP Server / 后端 / 添加新 Checker 后）
+
+修改 MCP Server 代码、后端代码、或新增/修改 `checkers/` 下的漏洞类型后，需要重启对应服务才能生效：
+
+```bash
+kill $(lsof -t -i:8000) $(lsof -t -i:8100) 2>/dev/null; sleep 1; python3 -m mcp_server.server & uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+**什么时候需要重启：**
+
+| 修改内容 | 需要重启的服务 |
+|---------|--------------|
+| `mcp_server/` 下的代码 | MCP Server（端口 8100） |
+| `backend/` 下的代码 | 后端会自动热重载（`--reload`），通常无需手动重启 |
+| `checkers/` 下新增或修改 checker | 后端（端口 8000），因为 registry 仅在启动时加载一次 |
+| `checkers/` + `mcp_server/` 同时修改 | 两个都需要重启 |
+
+**Docker 环境下：**
+
+```bash
+docker-compose restart
+# 或完全重建
+docker-compose up --build
+```
 
 ## 配置
 

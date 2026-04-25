@@ -36,6 +36,8 @@ class Vulnerability(BaseModel):
     description: str
     ai_analysis: str
     confirmed: bool
+    user_verdict: str | None = None          # "confirmed" | "false_positive" | None
+    user_verdict_reason: str | None = None   # 用户填写的理由
 
 
 # --- API request/response models ---
@@ -77,8 +79,20 @@ class ScanEvent(BaseModel):
         )
 
 
+class MarkRequest(BaseModel):
+    """Request to mark a vulnerability as confirmed or false positive."""
+    index: int
+    verdict: str        # "confirmed" | "false_positive"
+    reason: str = ""
+
+class SaveFalsePositiveRequest(BaseModel):
+    """Request to save a false positive experience to the project SKILL."""
+    index: int
+
+
 class ScanStatus(BaseModel):
     scan_id: str
+    project_id: str = ""
     status: ScanItemStatus
     progress: float            # 0.0 to 1.0
     total_candidates: int

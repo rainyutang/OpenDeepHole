@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,6 +12,22 @@ from backend.logger import get_logger
 from backend.models import Candidate, Vulnerability
 
 logger = get_logger(__name__)
+
+# Regex to strip ANSI escape sequences from CLI output
+_ANSI_RE = re.compile(
+    r'\x1b\[[0-9;]*[a-zA-Z]'    # CSI sequences: ESC[...X
+    r'|\x1b\][^\x07]*\x07'      # OSC sequences: ESC]...BEL
+    r'|\x1b\[\?[0-9;]*[a-zA-Z]' # Private CSI: ESC[?...X
+    r'|\x1b[()][A-Z0-9]'        # Character set selection
+    r'|\x1b='                    # Keypad mode
+    r'|\x1b>'                    # Keypad mode
+    r'|\r'                       # Carriage return (from \r\n or spinner overwrites)
+)
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences and control characters from text."""
+    return _ANSI_RE.sub('', text)
 
 
 async def run_audit(
@@ -122,7 +139,9 @@ async def _invoke_opencode(
             if asyncio.get_event_loop().time() > deadline:
                 proc.kill()
                 raise asyncio.TimeoutError()
-            line = raw.decode("utf-8", errors="replace").rstrip()
+            line = _strip_ansi(raw.decode("utf-8", errors="replace").rstrip())
+            if not line:
+                continue
             log_lines.append(line)
             logger.debug("[opencode] %s", line)
             if on_line:

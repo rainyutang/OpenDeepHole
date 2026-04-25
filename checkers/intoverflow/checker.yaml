@@ -1,0 +1,4 @@
+name: intoverflow
+label: INTOVFL
+description: 整数翻转/溢出（缺少边界校验导致的整数翻转）
+enabled: true

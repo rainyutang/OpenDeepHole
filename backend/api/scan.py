@@ -14,6 +14,8 @@ from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
     Candidate,
+    MarkRequest,
+    SaveFalsePositiveRequest,
     ScanEvent,
     ScanItemStatus,
     ScanRequest,
@@ -55,6 +57,7 @@ async def start_scan(request: ScanRequest) -> ScanStartResponse:
 
     _scans[scan_id] = ScanStatus(
         scan_id=scan_id,
+        project_id=request.project_id,
         status=ScanItemStatus.PENDING,
         progress=0.0,
         total_candidates=0,
@@ -110,6 +113,71 @@ async def download_report(scan_id: str) -> Response:
     )
 
 
+@router.post("/api/scan/{scan_id}/mark")
+async def mark_vulnerability(scan_id: str, body: MarkRequest) -> dict:
+    """Mark a vulnerability as confirmed or false positive."""
+    if scan_id not in _scans:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    scan = _scans[scan_id]
+    if body.index < 0 or body.index >= len(scan.vulnerabilities):
+        raise HTTPException(status_code=400, detail="Invalid vulnerability index")
+
+    if body.verdict not in ("confirmed", "false_positive"):
+        raise HTTPException(status_code=400, detail="Invalid verdict")
+
+    scan.vulnerabilities[body.index].user_verdict = body.verdict
+    scan.vulnerabilities[body.index].user_verdict_reason = body.reason
+    logger.info("Scan %s: vulnerability %d marked as %s", scan_id, body.index, body.verdict)
+    return {"ok": True}
+
+
+@router.post("/api/scan/{scan_id}/save-fp")
+async def save_false_positive(scan_id: str, body: SaveFalsePositiveRequest) -> dict:
+    """Save a false positive experience to the project's skill_fp directory."""
+    if scan_id not in _scans:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    scan = _scans[scan_id]
+    if body.index < 0 or body.index >= len(scan.vulnerabilities):
+        raise HTTPException(status_code=400, detail="Invalid vulnerability index")
+
+    vuln = scan.vulnerabilities[body.index]
+    if vuln.user_verdict != "false_positive":
+        raise HTTPException(status_code=400, detail="Vulnerability is not marked as false positive")
+
+    config = get_config()
+    project_dir = Path(config.storage.projects_dir) / scan.project_id
+    fp_dir = project_dir / "skill_fp"
+    fp_dir.mkdir(parents=True, exist_ok=True)
+
+    fp_file = fp_dir / f"{vuln.vuln_type}.md"
+
+    # Count existing entries to determine the next number
+    existing_count = 0
+    if fp_file.exists():
+        existing_content = fp_file.read_text(encoding="utf-8")
+        existing_count = existing_content.count("\n- 场景：")
+    else:
+        existing_content = ""
+
+    entry = (
+        f"\n- 场景：{vuln.file}:{vuln.line} — {vuln.function}\n"
+        f"  描述：{vuln.description}\n"
+        f"  理由：{vuln.user_verdict_reason or '无'}\n"
+        f"  来源：{scan_id}\n"
+    )
+
+    with open(fp_file, "a", encoding="utf-8") as f:
+        f.write(entry)
+
+    logger.info(
+        "Scan %s: saved false positive for %s:%d to %s",
+        scan_id, vuln.file, vuln.line, fp_file,
+    )
+    return {"ok": True}
+
+
 async def _wait_for_db(
     project_dir: Path, scan: "ScanStatus", emit_fn
 ) -> "CodeDatabase | None":
@@ -163,94 +231,110 @@ async def _run_scan(
 
         emit("mcp_ready", "MCP Server connected")
 
-        # Phase 1: Static analysis
+        # Phase 1+2: Static analysis + AI audit (streaming)
+        #
+        # For analyzers that return a generator (streaming mode), we start
+        # LLM analysis immediately as each candidate is yielded. For batch
+        # analyzers (returning a list), behavior is equivalent.
         scan.status = ScanItemStatus.ANALYZING
-        candidates: list[Candidate] = []
+        workspace = create_scan_workspace(scan_id, project_dir=project_dir)
+        cancel_event = _scan_cancel_events[scan_id]
+        candidate_index = 0
 
         for checker_name in scan_items:
+            if cancel_event.is_set():
+                break
+
             entry = registry[checker_name]
-            if entry.analyzer:
-                emit("static_analysis", f"Running {entry.label} static analysis...")
-                found = entry.analyzer.find_candidates(project_dir, db=db)
-                candidates.extend(found)
-                emit("static_analysis", f"{entry.label} analysis complete: {len(found)} candidates")
-                logger.info("Scan %s: %s found %d candidates", scan_id, checker_name, len(found))
-            else:
+            if not entry.analyzer:
                 emit("static_analysis", f"{entry.label}: no static analyzer, skipping")
+                continue
 
-        scan.total_candidates = len(candidates)
-        emit("static_analysis", f"Static analysis complete: {len(candidates)} total candidates")
+            emit("static_analysis", f"Running {entry.label} analysis...")
 
-        if not candidates:
-            scan.status = ScanItemStatus.COMPLETE
-            scan.progress = 1.0
-            emit("complete", "No candidates found, scan complete")
-            logger.info("Scan %s: no candidates found, scan complete", scan_id)
-            return
+            # Set up progress callback if the analyzer supports it
+            analyzer = entry.analyzer
+            if hasattr(analyzer, "on_progress"):
+                def _on_progress(current: int, total: int, label: str = entry.label) -> None:
+                    emit("static_analysis", f"{label}: scanned {current}/{total} functions")
+                analyzer.on_progress = _on_progress
 
-        # Phase 2: AI audit
-        scan.status = ScanItemStatus.AUDITING
-        workspace = create_scan_workspace(scan_id)
-        cancel_event = _scan_cancel_events[scan_id]
+            # Iterate candidates (works for both list and generator)
+            checker_count = 0
+            for candidate in analyzer.find_candidates(project_dir, db=db):
+                if cancel_event.is_set():
+                    break
 
-        for i, candidate in enumerate(candidates):
-            if cancel_event.is_set():
-                break
+                checker_count += 1
+                i = candidate_index
+                candidate_index += 1
+                scan.total_candidates = candidate_index
 
-            scan.current_candidate = candidate
-            emit(
-                "auditing",
-                f"[{i + 1}/{len(candidates)}] Auditing {candidate.vuln_type.upper()} "
-                f"at {candidate.file}:{candidate.line} — {candidate.function}",
-                candidate_index=i,
-            )
-            logger.info(
-                "Scan %s: auditing candidate %d/%d — %s:%d",
-                scan_id, i + 1, len(candidates), candidate.file, candidate.line,
-            )
+                # Switch to auditing status on first candidate
+                if scan.status == ScanItemStatus.ANALYZING:
+                    scan.status = ScanItemStatus.AUDITING
 
-            def on_output(line: str, idx: int = i) -> None:
-                if line.strip():
-                    emit("opencode_output", line, candidate_index=idx)
-
-            vuln = await run_audit(
-                workspace, candidate, project_id,
-                on_output=on_output,
-                cancel_event=cancel_event,
-            )
-
-            if cancel_event.is_set():
-                break
-
-            if vuln is None:
-                vuln = Vulnerability(
-                    file=candidate.file,
-                    line=candidate.line,
-                    function=candidate.function,
-                    vuln_type=candidate.vuln_type,
-                    severity="unknown",
-                    description=candidate.description,
-                    ai_analysis="No analysis result (AI did not complete analysis)",
-                    confirmed=False,
+                scan.current_candidate = candidate
+                emit(
+                    "auditing",
+                    f"[候选 {i + 1}] Auditing {candidate.vuln_type.upper()} "
+                    f"at {candidate.file}:{candidate.line} — {candidate.function}",
+                    candidate_index=i,
                 )
-            scan.vulnerabilities.append(vuln)
-            status = "confirmed" if vuln.confirmed else ("not confirmed" if vuln.severity != "unknown" else "no result")
-            emit("auditing", f"[{i + 1}/{len(candidates)}] Result: {status}", candidate_index=i)
+                logger.info(
+                    "Scan %s: auditing candidate %d — %s:%d",
+                    scan_id, i + 1, candidate.file, candidate.line,
+                )
 
-            scan.processed_candidates = i + 1
-            scan.progress = (i + 1) / len(candidates)
+                def on_output(line: str, idx: int = i) -> None:
+                    if line.strip():
+                        emit("opencode_output", line, candidate_index=idx)
+
+                vuln = await run_audit(
+                    workspace, candidate, project_id,
+                    on_output=on_output,
+                    cancel_event=cancel_event,
+                )
+
+                if cancel_event.is_set():
+                    break
+
+                if vuln is None:
+                    vuln = Vulnerability(
+                        file=candidate.file,
+                        line=candidate.line,
+                        function=candidate.function,
+                        vuln_type=candidate.vuln_type,
+                        severity="unknown",
+                        description=candidate.description,
+                        ai_analysis="No analysis result (AI did not complete analysis)",
+                        confirmed=False,
+                    )
+                scan.vulnerabilities.append(vuln)
+                status = "confirmed" if vuln.confirmed else ("not confirmed" if vuln.severity != "unknown" else "no result")
+                emit("auditing", f"[候选 {i + 1}] Result: {status}", candidate_index=i)
+
+                scan.processed_candidates = i + 1
+                scan.progress = (i + 1) / max(scan.total_candidates, 1)
+
+            # Clear progress callback
+            if hasattr(analyzer, "on_progress"):
+                analyzer.on_progress = None
+
+            emit("static_analysis", f"{entry.label} complete: {checker_count} candidates")
+            logger.info("Scan %s: %s found %d candidates", scan_id, checker_name, checker_count)
 
         scan.current_candidate = None
 
         if cancel_event.is_set():
             scan.status = ScanItemStatus.CANCELLED
-            emit("complete", f"Scan cancelled after {scan.processed_candidates}/{len(candidates)} candidates")
+            emit("complete", f"Scan cancelled after {scan.processed_candidates} candidates")
             logger.info("Scan %s: cancelled", scan_id)
             return
 
         confirmed = sum(1 for v in scan.vulnerabilities if v.confirmed)
         scan.status = ScanItemStatus.COMPLETE
-        emit("complete", f"Scan complete: {confirmed} vulnerabilities confirmed out of {len(candidates)} candidates")
+        emit("complete", f"Scan complete: {confirmed} vulnerabilities confirmed out of {candidate_index} candidates")
         logger.info(
             "Scan %s: complete — %d vulnerabilities found",
             scan_id, len(scan.vulnerabilities),
