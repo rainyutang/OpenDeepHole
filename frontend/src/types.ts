@@ -50,6 +50,9 @@ export interface ScanEvent {
 
 export interface ScanStatus {
   scan_id: string;
+  project_id: string;
+  scan_items: string[];
+  created_at: string;
   status: ScanItemStatus;
   progress: number;
   total_candidates: number;
@@ -58,4 +61,32 @@ export interface ScanStatus {
   events: ScanEvent[];
   current_candidate: Candidate | null;
   error_message: string | null;
+  feedback_ids: string[];
+}
+
+export interface FeedbackEntry {
+  id: string;
+  project_id: string;
+  vuln_type: string;
+  verdict: "confirmed" | "false_positive";
+  file: string;
+  line: number;
+  function: string;
+  description: string;
+  reason: string;
+  source_scan_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScanSummary {
+  scan_id: string;
+  project_id: string;
+  status: ScanItemStatus;
+  created_at: string;
+  progress: number;
+  total_candidates: number;
+  processed_candidates: number;
+  vulnerability_count: number;
+  scan_items: string[];
 }

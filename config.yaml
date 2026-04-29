@@ -16,7 +16,7 @@ opencode:
 storage:
   projects_dir: "/tmp/opendeephole/projects"
   scans_dir: "/tmp/opendeephole/scans"
-  max_upload_size_mb: 100
+  max_upload_size_mb: 2048
 
 logging:
   level: "DEBUG"  # DEBUG, INFO, WARNING, ERROR

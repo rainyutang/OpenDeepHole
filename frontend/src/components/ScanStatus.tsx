@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { getScanStatus, stopScan, getReportUrl } from "../api/client";
-import type { ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent } from "../types";
+import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback } from "../api/client";
+import type { ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
 import VulnerabilityList from "./VulnerabilityList";
+import FeedbackManager from "./FeedbackManager";
 
 const PHASES = [
   { key: "init", label: "初始化" },
@@ -19,18 +20,27 @@ function statusToPhaseIndex(status: ScanItemStatus): number {
 
 interface Props {
   scanId: string;
-  onReset: () => void;
+  onBack: () => void;
 }
 
-export default function ScanStatus({ scanId, onReset }: Props) {
+export default function ScanStatus({ scanId, onBack }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [stopping, setStopping] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [lastSeenEvents, setLastSeenEvents] = useState(0);
   const logRef = useRef<HTMLDivElement>(null);
 
+  // Feedback panel state
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
+  const [selectedFeedbackIds, setSelectedFeedbackIds] = useState<Set<string> | null>(null);
+
   const isRunning = scan && (scan.status === "pending" || scan.status === "analyzing" || scan.status === "auditing");
   const isDone = scan && (scan.status === "complete" || scan.status === "error" || scan.status === "cancelled");
+
+  useEffect(() => {
+    getCheckers().then(setCheckers).catch(() => {});
+  }, []);
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval>;
@@ -39,6 +49,10 @@ export default function ScanStatus({ scanId, onReset }: Props) {
       try {
         const data = await getScanStatus(scanId);
         setScan(data);
+        // Initialize selectedFeedbackIds from scan data on first load
+        if (selectedFeedbackIds === null && data.feedback_ids) {
+          setSelectedFeedbackIds(new Set(data.feedback_ids));
+        }
         if (data.status === "complete" || data.status === "error" || data.status === "cancelled") {
           clearInterval(timer);
         }
@@ -50,7 +64,6 @@ export default function ScanStatus({ scanId, onReset }: Props) {
           (err as { response: { status: number } }).response?.status === 404
         ) {
           clearInterval(timer);
-          localStorage.removeItem("odh_scan_state");
           setScan((prev) =>
             prev
               ? { ...prev, status: "error", error_message: "扫描状态丢失（后端已重启），请重新开始扫描。" }
@@ -71,6 +84,16 @@ export default function ScanStatus({ scanId, onReset }: Props) {
       await stopScan(scanId);
     } catch {
       setStopping(false);
+    }
+  };
+
+  // Handle feedback selection change — update backend and refresh skills
+  const handleFeedbackChange = async (ids: Set<string>) => {
+    setSelectedFeedbackIds(ids);
+    try {
+      await updateScanFeedback(scanId, [...ids]);
+    } catch {
+      // ignore
     }
   };
 
@@ -99,6 +122,7 @@ export default function ScanStatus({ scanId, onReset }: Props) {
   const activePhase = statusToPhaseIndex(scan.status);
   const pct = Math.round(scan.progress * 100);
   const unseenCount = scan.events.length - lastSeenEvents;
+  const feedbackCount = selectedFeedbackIds?.size ?? scan.feedback_ids?.length ?? 0;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
@@ -106,28 +130,44 @@ export default function ScanStatus({ scanId, onReset }: Props) {
       <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-6 py-4">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-4">
+            <button
+              onClick={onBack}
+              className="text-sm text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-1"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+              返回
+            </button>
             <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
             <span className="text-sm text-slate-400">
               {scan.status === "cancelled" ? "已取消" : isDone ? "扫描完成" : "扫描中..."}
             </span>
           </div>
           <div className="flex items-center gap-3">
+            {/* Feedback button with count badge */}
+            <button
+              onClick={() => setFeedbackOpen(true)}
+              className="px-3 py-1.5 text-sm font-medium text-slate-300 border border-slate-600 rounded-lg hover:bg-slate-700 transition-colors flex items-center gap-1.5"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+              经验库
+              {feedbackCount > 0 && (
+                <span className="bg-blue-500 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[1.25rem] text-center">
+                  {feedbackCount}
+                </span>
+              )}
+            </button>
             {isDone && (
-              <>
-                <a
-                  href={getReportUrl(scan.scan_id)}
-                  download
-                  className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-                >
-                  下载 CSV
-                </a>
-                <button
-                  onClick={onReset}
-                  className="px-3 py-1.5 text-sm font-medium text-slate-300 border border-slate-600 rounded-lg hover:bg-slate-700 transition-colors"
-                >
-                  新建扫描
-                </button>
-              </>
+              <a
+                href={getReportUrl(scan.scan_id)}
+                download
+                className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+              >
+                下载 CSV
+              </a>
             )}
             {isRunning && (
               <button
@@ -289,6 +329,19 @@ export default function ScanStatus({ scanId, onReset }: Props) {
             </div>
           </div>
         </>
+      )}
+
+      {/* Feedback Manager Panel */}
+      {feedbackOpen && scan.project_id && (
+        <FeedbackManager
+          checkers={checkers.filter((c) => scan.scan_items.includes(c.name))}
+          initialTypes={scan.scan_items}
+          scanId={scanId}
+          projectId={scan.project_id}
+          selectedIds={selectedFeedbackIds ?? new Set(scan.feedback_ids)}
+          onSelectionChange={handleFeedbackChange}
+          onClose={() => setFeedbackOpen(false)}
+        />
       )}
     </div>
   );

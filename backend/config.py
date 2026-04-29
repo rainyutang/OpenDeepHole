@@ -26,7 +26,7 @@ class OpenCodeConfig(BaseModel):
 class StorageConfig(BaseModel):
     projects_dir: str = "/tmp/opendeephole/projects"
     scans_dir: str = "/tmp/opendeephole/scans"
-    max_upload_size_mb: int = 100
+    max_upload_size_mb: int = 2048
 
 
 class LoggingConfig(BaseModel):

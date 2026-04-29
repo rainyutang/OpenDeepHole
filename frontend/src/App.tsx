@@ -1,54 +1,41 @@
 import { useState } from "react";
 import UploadForm from "./components/UploadForm";
 import ScanStatusView from "./components/ScanStatus";
+import ScanHistory from "./components/ScanHistory";
 
-type Page = "upload" | "scanning";
-
-const STORAGE_KEY = "odh_scan_state";
-
-interface PersistedState {
-  page: Page;
-  scanId: string;
-}
-
-function loadPersistedState(): PersistedState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return { page: parsed.page === "results" ? "scanning" : parsed.page, scanId: parsed.scanId };
-    }
-  } catch {}
-  return { page: "upload", scanId: "" };
-}
-
-function persistState(page: Page, scanId: string) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ page, scanId }));
-  } catch {}
-}
+type Page = "history" | "upload" | "scanning";
 
 export default function App() {
-  const [page, setPage] = useState<Page>(() => loadPersistedState().page);
-  const [scanId, setScanId] = useState<string>(() => loadPersistedState().scanId);
+  const [page, setPage] = useState<Page>("history");
+  const [scanId, setScanId] = useState<string>("");
 
   const handleScanStarted = (id: string) => {
     setScanId(id);
     setPage("scanning");
-    persistState("scanning", id);
   };
 
-  const handleReset = () => {
-    setScanId("");
-    setPage("upload");
-    localStorage.removeItem(STORAGE_KEY);
+  const handleViewScan = (id: string) => {
+    setScanId(id);
+    setPage("scanning");
+  };
+
+  const handleBack = () => {
+    setPage("history");
   };
 
   return (
     <>
-      {page === "upload" && <UploadForm onScanStarted={handleScanStarted} />}
+      {page === "history" && (
+        <ScanHistory
+          onNewScan={() => setPage("upload")}
+          onViewScan={handleViewScan}
+        />
+      )}
+      {page === "upload" && (
+        <UploadForm onScanStarted={handleScanStarted} onBack={handleBack} />
+      )}
       {page === "scanning" && (
-        <ScanStatusView scanId={scanId} onReset={handleReset} />
+        <ScanStatusView scanId={scanId} onBack={handleBack} />
       )}
     </>
   );

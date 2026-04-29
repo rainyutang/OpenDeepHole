@@ -6,10 +6,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from backend.api import checkers, scan, upload
+from backend.api import checkers, feedback, scan, upload
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.registry import get_registry
+from backend.store import get_scan_store
 
 logger = get_logger(__name__)
 
@@ -23,12 +24,19 @@ async def lifespan(app: FastAPI):
     Path(config.storage.projects_dir).mkdir(parents=True, exist_ok=True)
     Path(config.storage.scans_dir).mkdir(parents=True, exist_ok=True)
 
+    # Initialize scan store and recover from unclean shutdown
+    store = get_scan_store()
+    recovered = store.mark_running_as_error()
+    if recovered:
+        logger.warning("Marked %d interrupted scan(s) as error on startup", recovered)
+
     # Discover checkers on startup
     registry = get_registry()
     logger.info("Loaded %d checkers: %s", len(registry), list(registry.keys()))
 
     logger.info("OpenDeepHole backend started on port %d", config.server.port)
     yield
+    store.close()
     logger.info("OpenDeepHole backend shutting down")
 
 
@@ -43,6 +51,7 @@ app = FastAPI(
 app.include_router(upload.router)
 app.include_router(scan.router)
 app.include_router(checkers.router)
+app.include_router(feedback.router)
 
 # Serve frontend static files (built by Vite)
 static_dir = Path(__file__).parent / "static"

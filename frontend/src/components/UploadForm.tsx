@@ -1,12 +1,14 @@
 import { useState, useRef, useEffect, type DragEvent } from "react";
-import { getCheckers, uploadSource, startScan } from "../api/client";
+import { getCheckers, uploadSource, startScan, listFeedback } from "../api/client";
 import type { CheckerInfo } from "../types";
+import FeedbackManager from "./FeedbackManager";
 
 interface Props {
   onScanStarted: (scanId: string) => void;
+  onBack: () => void;
 }
 
-export default function UploadForm({ onScanStarted }: Props) {
+export default function UploadForm({ onScanStarted, onBack }: Props) {
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -15,6 +17,12 @@ export default function UploadForm({ onScanStarted }: Props) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Two-step: after upload, allow feedback selection before scan
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [selectedFeedbackIds, setSelectedFeedbackIds] = useState<Set<string>>(new Set());
+  const [feedbackCount, setFeedbackCount] = useState(0);
+
   // Fetch available checkers on mount
   useEffect(() => {
     getCheckers().then((list) => {
@@ -22,6 +30,26 @@ export default function UploadForm({ onScanStarted }: Props) {
       setSelected(new Set(list.map((c) => c.name)));
     });
   }, []);
+
+  // When projectId becomes available, load feedback for selected scan types
+  // and auto-select all false_positive entries
+  useEffect(() => {
+    if (!projectId) return;
+    // Load feedback for all selected vuln types
+    const loadAll = async () => {
+      try {
+        const all = await listFeedback();
+        const fpIds = all
+          .filter((e) => e.verdict === "false_positive" && selected.has(e.vuln_type))
+          .map((e) => e.id);
+        setSelectedFeedbackIds(new Set(fpIds));
+        setFeedbackCount(all.filter((e) => selected.has(e.vuln_type)).length);
+      } catch {
+        // ignore
+      }
+    };
+    loadAll();
+  }, [projectId]);
 
   const toggle = (name: string) => {
     setSelected((prev) => {
@@ -40,7 +68,7 @@ export default function UploadForm({ onScanStarted }: Props) {
     else setError("Only .zip files are accepted");
   };
 
-  const handleSubmit = async () => {
+  const handleUpload = async () => {
     if (!file) return;
     if (selected.size === 0) {
       setError("Please select at least one scan item");
@@ -50,8 +78,7 @@ export default function UploadForm({ onScanStarted }: Props) {
     setError(null);
     try {
       const { project_id } = await uploadSource(file);
-      const { scan_id } = await startScan(project_id, [...selected]);
-      onScanStarted(scan_id);
+      setProjectId(project_id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Upload failed";
       setError(msg);
@@ -60,17 +87,54 @@ export default function UploadForm({ onScanStarted }: Props) {
     }
   };
 
+  const handleStartScan = async () => {
+    if (!projectId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const { scan_id } = await startScan(projectId, [...selected], [...selectedFeedbackIds]);
+      onScanStarted(scan_id);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Scan failed to start";
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (projectId) {
+      await handleStartScan();
+    } else {
+      await handleUpload();
+    }
+  };
+
+  // Filter checkers to those selected, for the FeedbackManager tabs
+  const selectedTypes = [...selected];
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-6">
       <div className="w-full max-w-lg bg-white/95 backdrop-blur rounded-2xl shadow-2xl p-8">
         {/* Header */}
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">
-            OpenDeepHole
-          </h1>
-          <p className="text-sm text-slate-500 mt-1">
-            C/C++ Source Code Audit Tool
-          </p>
+        <div className="mb-8">
+          <button
+            onClick={onBack}
+            className="text-sm text-slate-500 hover:text-slate-700 transition-colors flex items-center gap-1 mb-4"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            返回历史
+          </button>
+          <div className="text-center">
+            <h1 className="text-3xl font-bold text-slate-900 tracking-tight">
+              OpenDeepHole
+            </h1>
+            <p className="text-sm text-slate-500 mt-1">
+              C/C++ Source Code Audit Tool
+            </p>
+          </div>
         </div>
 
         {/* Upload zone */}
@@ -81,11 +145,11 @@ export default function UploadForm({ onScanStarted }: Props) {
               : file
                 ? "border-green-400 bg-green-50"
                 : "border-slate-300 hover:border-slate-400 bg-slate-50"
-          }`}
+          } ${projectId ? "opacity-60 pointer-events-none" : ""}`}
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
-          onClick={() => inputRef.current?.click()}
+          onClick={() => !projectId && inputRef.current?.click()}
         >
           <input
             ref={inputRef}
@@ -101,6 +165,9 @@ export default function UploadForm({ onScanStarted }: Props) {
               <p className="text-xs text-slate-400 mt-1">
                 {(file.size / 1024 / 1024).toFixed(2)} MB
               </p>
+              {projectId && (
+                <p className="text-xs text-green-600 font-medium mt-1">已上传</p>
+              )}
             </div>
           ) : (
             <div>
@@ -151,6 +218,26 @@ export default function UploadForm({ onScanStarted }: Props) {
           )}
         </div>
 
+        {/* Feedback selection (after upload) */}
+        {projectId && (
+          <div className="mt-4 p-3 bg-slate-50 border border-slate-200 rounded-lg">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-slate-700">经验库</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  共 {feedbackCount} 条经验，已选 {selectedFeedbackIds.size} 条用于 SKILL
+                </p>
+              </div>
+              <button
+                onClick={() => setFeedbackOpen(true)}
+                className="text-sm px-3 py-1.5 font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors"
+              >
+                管理经验
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Error */}
         {error && (
           <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
@@ -171,13 +258,27 @@ export default function UploadForm({ onScanStarted }: Props) {
           {loading ? (
             <span className="flex items-center justify-center gap-2">
               <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              Uploading...
+              {projectId ? "Starting..." : "Uploading..."}
             </span>
-          ) : (
+          ) : projectId ? (
             "Start Scan"
+          ) : (
+            "Upload & Continue"
           )}
         </button>
       </div>
+
+      {/* Feedback Manager Panel */}
+      {feedbackOpen && (
+        <FeedbackManager
+          checkers={checkers.filter((c) => selected.has(c.name))}
+          initialTypes={selectedTypes}
+          projectId={projectId || undefined}
+          selectedIds={selectedFeedbackIds}
+          onSelectionChange={setSelectedFeedbackIds}
+          onClose={() => setFeedbackOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -56,6 +56,7 @@ class UploadResponse(BaseModel):
 class ScanRequest(BaseModel):
     project_id: str
     scan_items: list[str]
+    feedback_ids: list[str] = []
 
 
 class ScanStartResponse(BaseModel):
@@ -90,9 +91,48 @@ class SaveFalsePositiveRequest(BaseModel):
     index: int
 
 
+# --- Feedback models ---
+
+class FeedbackEntry(BaseModel):
+    """A user feedback entry stored in the experience database."""
+    id: str
+    project_id: str
+    vuln_type: str
+    verdict: str          # "confirmed" | "false_positive"
+    file: str
+    line: int
+    function: str
+    description: str
+    reason: str = ""
+    source_scan_id: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class FeedbackCreateRequest(BaseModel):
+    """Request to create a new feedback entry."""
+    project_id: str
+    vuln_type: str
+    verdict: str          # "confirmed" | "false_positive"
+    file: str
+    line: int
+    function: str
+    description: str
+    reason: str = ""
+    source_scan_id: str | None = None
+
+
+class FeedbackUpdateRequest(BaseModel):
+    """Request to update an existing feedback entry."""
+    verdict: str | None = None
+    reason: str | None = None
+
+
 class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
+    scan_items: list[str] = []
+    created_at: str = ""
     status: ScanItemStatus
     progress: float            # 0.0 to 1.0
     total_candidates: int
@@ -101,3 +141,24 @@ class ScanStatus(BaseModel):
     events: list[ScanEvent] = []
     current_candidate: Candidate | None = None
     error_message: str | None = None
+    feedback_ids: list[str] = []
+
+
+class ScanMeta(BaseModel):
+    """扫描元数据，记录扫描配置信息。"""
+    scan_items: list[str]
+    created_at: str
+    feedback_ids: list[str] = []
+
+
+class ScanSummary(BaseModel):
+    """扫描列表的摘要信息。"""
+    scan_id: str
+    project_id: str
+    status: ScanItemStatus
+    created_at: str
+    progress: float
+    total_candidates: int
+    processed_candidates: int
+    vulnerability_count: int
+    scan_items: list[str]
