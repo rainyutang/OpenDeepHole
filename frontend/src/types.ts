@@ -62,6 +62,11 @@ export interface ScanStatus {
   current_candidate: Candidate | null;
   error_message: string | null;
   feedback_ids: string[];
+
+  // 静态分析进度
+  static_total_files: number;
+  static_scanned_files: number;
+  static_analysis_done: boolean;
 }
 
 export interface FeedbackEntry {

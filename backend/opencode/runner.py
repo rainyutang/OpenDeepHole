@@ -39,6 +39,10 @@ async def run_audit(
 ) -> Vulnerability | None:
     """Run opencode to analyze a single candidate vulnerability.
 
+    Supports two modes (selected via config):
+    - opencode CLI mode (default): invokes opencode subprocess with MCP tools
+    - LLM API mode (llm_api.enabled=true): direct API call with function calling
+
     Args:
         workspace: Path to the opencode workspace (contains opencode.json + skills).
         candidate: The candidate vulnerability to analyze.
@@ -53,6 +57,15 @@ async def run_audit(
 
     if config.opencode.mock:
         return _mock_result(candidate)
+
+    # LLM API 直调模式
+    if config.llm_api.enabled:
+        from backend.opencode.llm_api_runner import run_audit_via_api
+        return await run_audit_via_api(
+            candidate, project_id,
+            on_output=on_output,
+            cancel_event=cancel_event,
+        )
 
     skill_name = candidate.vuln_type
     result_id = uuid4().hex

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback } from "../api/client";
+import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent } from "../api/client";
 import type { ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
@@ -34,6 +34,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [selectedFeedbackIds, setSelectedFeedbackIds] = useState<Set<string> | null>(null);
+
+  // SKILL preview state
+  const [skillOpen, setSkillOpen] = useState(false);
+  const [skillType, setSkillType] = useState<string | null>(null);
+  const [skillContent, setSkillContent] = useState("");
+  const [skillLoading, setSkillLoading] = useState(false);
 
   const isRunning = scan && (scan.status === "pending" || scan.status === "analyzing" || scan.status === "auditing");
   const isDone = scan && (scan.status === "complete" || scan.status === "error" || scan.status === "cancelled");
@@ -97,19 +103,35 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     }
   };
 
+  const loadSkill = async (vulnType: string) => {
+    setSkillType(vulnType);
+    setSkillLoading(true);
+    try {
+      const content = await getSkillContent(scanId, vulnType);
+      setSkillContent(content);
+    } catch {
+      setSkillContent("加载失败");
+    } finally {
+      setSkillLoading(false);
+    }
+  };
+
+  // Compute filtered log event count for scroll/unseen tracking
+  const logEventCount = scan?.events.filter((e) => e.phase !== "opencode_output").length ?? 0;
+
   // Auto-scroll log
   useEffect(() => {
     if (logRef.current && logOpen) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
-  }, [scan?.events.length, logOpen]);
+  }, [logEventCount, logOpen]);
 
   // Track unseen events
   useEffect(() => {
-    if (logOpen && scan) {
-      setLastSeenEvents(scan.events.length);
+    if (logOpen) {
+      setLastSeenEvents(logEventCount);
     }
-  }, [logOpen, scan?.events.length]);
+  }, [logOpen, logEventCount]);
 
   if (!scan) {
     return (
@@ -121,7 +143,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   const activePhase = statusToPhaseIndex(scan.status);
   const pct = Math.round(scan.progress * 100);
-  const unseenCount = scan.events.length - lastSeenEvents;
+  const logEvents = scan.events.filter((e) => e.phase !== "opencode_output");
+  const unseenCount = logEvents.length - lastSeenEvents;
   const feedbackCount = selectedFeedbackIds?.size ?? scan.feedback_ids?.length ?? 0;
 
   return (
@@ -159,6 +182,20 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                   {feedbackCount}
                 </span>
               )}
+            </button>
+            <button
+              onClick={() => {
+                setSkillOpen(true);
+                if (!skillType && scan.scan_items.length > 0) {
+                  loadSkill(scan.scan_items[0]);
+                }
+              }}
+              className="px-3 py-1.5 text-sm font-medium text-slate-300 border border-slate-600 rounded-lg hover:bg-slate-700 transition-colors flex items-center gap-1.5"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+              </svg>
+              SKILL 预览
             </button>
             {isDone && (
               <a
@@ -218,33 +255,65 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             ))}
           </div>
 
-          {/* Progress bar */}
-          {(scan.status === "auditing" || isDone) && (
-            <div className="flex-1 min-w-0">
-              <div className="flex justify-between text-xs text-slate-400 mb-1">
-                <span>
-                  {scan.processed_candidates} / {scan.total_candidates} 候选点
-                </span>
-                <span>{pct}%</span>
-              </div>
-              <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                <div
-                  className={`h-full rounded-full transition-all duration-500 ${isDone ? "bg-green-500" : "bg-blue-500"}`}
-                  style={{ width: `${pct}%` }}
-                />
-              </div>
-              {scan.current_candidate && (
-                <p className="text-xs text-slate-500 mt-1 truncate">
-                  正在审计：
-                  <span className="font-mono text-slate-400">
-                    {scan.current_candidate.file}:{scan.current_candidate.line}
+          {/* Dual progress bars */}
+          <div className="flex-1 min-w-0 space-y-2">
+            {/* 静态分析进度条 */}
+            {(scan.status === "analyzing" || scan.status === "auditing") && !scan.static_analysis_done && scan.static_total_files > 0 && (
+              <div>
+                <div className="flex justify-between text-xs text-slate-400 mb-1">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 bg-cyan-400 rounded-full animate-pulse" />
+                    静态分析: {scan.static_scanned_files} / {scan.static_total_files} 文件
                   </span>
-                  {" — "}
-                  <span className="text-slate-400">{scan.current_candidate.function}</span>
-                </p>
-              )}
-            </div>
-          )}
+                  <span>{scan.static_total_files > 0 ? Math.round(scan.static_scanned_files / scan.static_total_files * 100) : 0}%</span>
+                </div>
+                <div className="h-1 bg-slate-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-cyan-400 rounded-full transition-all duration-500"
+                    style={{ width: `${scan.static_total_files > 0 ? (scan.static_scanned_files / scan.static_total_files * 100) : 0}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* 静态分析完成标记 */}
+            {scan.static_analysis_done && scan.status === "auditing" && (
+              <div className="text-xs text-green-400 flex items-center gap-1">
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                静态分析完成
+              </div>
+            )}
+
+            {/* LLM 审计进度条 */}
+            {(scan.status === "auditing" || isDone) && (
+              <div>
+                <div className="flex justify-between text-xs text-slate-400 mb-1">
+                  <span>
+                    {scan.processed_candidates} / {scan.total_candidates} 候选点
+                  </span>
+                  <span>{pct}%</span>
+                </div>
+                <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${isDone ? "bg-green-500" : "bg-blue-500"}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                {scan.current_candidate && (
+                  <p className="text-xs text-slate-500 mt-1 truncate">
+                    正在审计：
+                    <span className="font-mono text-slate-400">
+                      {scan.current_candidate.file}:{scan.current_candidate.line}
+                    </span>
+                    {" — "}
+                    <span className="text-slate-400">{scan.current_candidate.function}</span>
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Error */}
@@ -268,6 +337,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           <VulnerabilityList
             scanId={scanId}
             vulnerabilities={scan.vulnerabilities}
+            events={scan.events}
             isScanning={!!isRunning}
             currentCandidate={scan.current_candidate}
             totalCandidates={scan.total_candidates}
@@ -278,7 +348,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
       {/* Log floating button */}
       <button
-        onClick={() => { setLogOpen(true); setLastSeenEvents(scan.events.length); }}
+        onClick={() => { setLogOpen(true); setLastSeenEvents(logEvents.length); }}
         className="fixed bottom-6 right-6 px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-medium rounded-full shadow-lg border border-slate-600 transition-colors z-40 flex items-center gap-2"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -319,10 +389,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               ref={logRef}
               className="flex-1 overflow-y-auto p-3 space-y-1 font-mono text-xs"
             >
-              {scan.events.length === 0 ? (
+              {logEvents.length === 0 ? (
                 <p className="text-slate-500">等待事件...</p>
               ) : (
-                scan.events.map((event, i) => (
+                logEvents.map((event, i) => (
                   <EventLine key={i} event={event} />
                 ))
               )}
@@ -342,6 +412,60 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           onSelectionChange={handleFeedbackChange}
           onClose={() => setFeedbackOpen(false)}
         />
+      )}
+
+      {/* SKILL Preview Panel */}
+      {skillOpen && (
+        <>
+          <div
+            className="fixed inset-0 bg-black/30 z-40"
+            onClick={() => setSkillOpen(false)}
+          />
+          <div className="fixed right-0 top-0 bottom-0 w-[40rem] max-w-full bg-slate-900 border-l border-slate-700 z-50 flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+              <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
+                SKILL 预览
+              </h3>
+              <button
+                onClick={() => setSkillOpen(false)}
+                className="text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {/* Type tabs */}
+            <div className="flex gap-1.5 px-4 py-2.5 border-b border-slate-700/50 overflow-x-auto">
+              {scan.scan_items.map((item) => (
+                <button
+                  key={item}
+                  onClick={() => loadSkill(item)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap ${
+                    skillType === item
+                      ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                      : "text-slate-400 border-slate-700 hover:bg-slate-800"
+                  }`}
+                >
+                  {item.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto p-4">
+              {skillLoading ? (
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <div className="w-3 h-3 border border-slate-600 border-t-blue-400 rounded-full animate-spin" />
+                  加载中...
+                </div>
+              ) : (
+                <pre className="text-xs text-slate-400 whitespace-pre-wrap leading-relaxed font-mono">
+                  {skillContent}
+                </pre>
+              )}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

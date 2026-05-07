@@ -21,3 +21,14 @@ storage:
 logging:
   level: "DEBUG"  # DEBUG, INFO, WARNING, ERROR
   file: "logs/opendeephole.log"
+  max_size_mb: 10      # max size per log file in MB
+  backup_count: 5      # number of rotated log files to keep
+
+llm_api:
+  enabled: false       # true 启用 API 直调模式（优先于 opencode）
+  base_url: ""         # OpenAI 兼容 API 地址
+  api_key: ""          # API key
+  model: "gpt-4o-mini"
+  temperature: 0.1
+  timeout: 120         # 单次调用超时（秒）
+  max_retries: 3

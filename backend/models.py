@@ -86,6 +86,16 @@ class MarkRequest(BaseModel):
     verdict: str        # "confirmed" | "false_positive"
     reason: str = ""
 
+class BatchMarkItem(BaseModel):
+    """Single item in a batch mark request."""
+    index: int
+    verdict: str        # "confirmed" | "false_positive"
+    reason: str = ""
+
+class BatchMarkRequest(BaseModel):
+    """Request to batch-mark multiple vulnerabilities."""
+    items: list[BatchMarkItem]
+
 class SaveFalsePositiveRequest(BaseModel):
     """Request to save a false positive experience to the project SKILL."""
     index: int
@@ -142,6 +152,11 @@ class ScanStatus(BaseModel):
     current_candidate: Candidate | None = None
     error_message: str | None = None
     feedback_ids: list[str] = []
+
+    # 静态分析进度（按文件计）
+    static_total_files: int = 0
+    static_scanned_files: int = 0
+    static_analysis_done: bool = False
 
 
 class ScanMeta(BaseModel):

@@ -1,0 +1,439 @@
+"""LLM API 直调模式 — 通过 OpenAI 兼容 API + function calling 进行漏洞审计。
+
+作为 opencode CLI 模式的替代方案，直接调用 LLM API 并通过 function calling
+让模型查询代码、提交分析结果。结果文件格式与 MCP submit_result 完全一致。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from pathlib import Path
+from uuid import uuid4
+
+from backend.config import get_config
+from backend.logger import get_logger
+from backend.models import Candidate, Vulnerability
+
+logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# System prompt（移植自 llm_reviewer.py，适配 function calling）
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """\
+你是一个专业的 C/C++ 代码审计专家，专门判断静态扫描器报告的漏洞候选是否是真实的 bug。
+
+你会收到一个被扫描出可疑点的函数源码和相关上下文。你可以使用工具查看更多函数定义和结构体定义。
+
+## 判定标准
+
+**判为误报 (false_positive) 的常见情形**：
+1. 判空分支里的退出 — 如 `if (p == NULL) return;`，此时 p 本就是 NULL，无需释放
+2. 该资源在此条路径上还没被分配/填充
+3. 资源所有权已转移 — 如被存入结构体、作为返回值返回给调用者
+4. 资源通过消息发送/投递接口转移（SendMsg/PostMsg/Enqueue/Dispatch 等）
+5. 已通过其他形式释放（析构函数、智能指针、全局清理函数）
+6. 栈上纯值资源，不持有堆内存
+7. 测试/桩代码（路径含 dt/stub/test 等）
+
+**判为真实 bug (true_bug) 的条件**：
+- 变量在当前路径上确实被分配/填充了资源
+- 异常路径的退出前没有调用释放函数，也没有通过其他方式转移所有权
+- 函数的其他路径上有明确的释放调用作为对照
+
+## 工作流程
+1. 阅读提供的函数源码和候选信息
+2. 如需查看其他函数或结构体定义，调用相应工具
+3. 分析完毕后，**必须**调用 submit_result 工具提交结论
+
+注意：分析完成后你 **必须** 调用 submit_result 提交结论，否则结果将丢失。
+"""
+
+# ---------------------------------------------------------------------------
+# Function calling tools 定义
+# ---------------------------------------------------------------------------
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "view_function_code",
+            "description": "查看指定函数的完整源码。用于查看释放函数或相关调用函数的实现。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "function_name": {
+                        "type": "string",
+                        "description": "要查看的函数名",
+                    },
+                },
+                "required": ["function_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_struct_code",
+            "description": "查看指定结构体/类的定义。用于了解数据结构的字段和内存布局。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "struct_name": {
+                        "type": "string",
+                        "description": "要查看的结构体或类名",
+                    },
+                },
+                "required": ["struct_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_result",
+            "description": "提交漏洞分析的最终结论。分析完成后必须调用此工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "是否存在真实漏洞。true=确认漏洞，false=误报",
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                        "description": "严重程度（仅 confirmed=true 时有意义）",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "漏洞的一句话摘要",
+                    },
+                    "ai_analysis": {
+                        "type": "string",
+                        "description": "详细的分析推理过程，需包含具体的代码路径",
+                    },
+                },
+                "required": ["confirmed", "severity", "description", "ai_analysis"],
+            },
+        },
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Tool 执行
+# ---------------------------------------------------------------------------
+
+def _execute_tool(
+    tool_name: str,
+    args: dict,
+    project_id: str,
+    result_id: str,
+) -> tuple[str, bool]:
+    """执行 function call tool，返回 (结果文本, 是否为 submit_result)。"""
+    config = get_config()
+
+    if tool_name == "view_function_code":
+        return _tool_view_function(args, project_id), False
+
+    if tool_name == "view_struct_code":
+        return _tool_view_struct(args, project_id), False
+
+    if tool_name == "submit_result":
+        return _tool_submit_result(args, result_id, config.storage.scans_dir), True
+
+    return f"未知工具: {tool_name}", False
+
+
+def _get_db(project_id: str):
+    """获取项目的 CodeDatabase 实例。"""
+    from code_parser import CodeDatabase
+
+    config = get_config()
+    db_path = Path(config.storage.projects_dir) / project_id / "code_index.db"
+    if not db_path.exists():
+        return None
+    return CodeDatabase(db_path)
+
+
+def _tool_view_function(args: dict, project_id: str) -> str:
+    func_name = args.get("function_name", "")
+    if not func_name:
+        return "错误: 缺少 function_name 参数"
+
+    db = _get_db(project_id)
+    if db is None:
+        return f"无法加载代码索引"
+
+    rows = db.get_functions_by_name(func_name)
+    if not rows:
+        return f"未找到函数 {func_name} 的定义"
+
+    parts = []
+    for row in rows[:3]:  # 最多返回 3 个同名函数
+        body = row["body"] or "(无函数体)"
+        file_path = row["file_path"]
+        start_line = row["start_line"]
+        # 添加行号
+        lines = body.split("\n")
+        numbered = "\n".join(
+            f"{start_line + i:4d} | {ln}" for i, ln in enumerate(lines)
+        )
+        parts.append(f"// 文件: {file_path}:{start_line}\n{numbered}")
+
+    return "\n\n".join(parts)
+
+
+def _tool_view_struct(args: dict, project_id: str) -> str:
+    struct_name = args.get("struct_name", "")
+    if not struct_name:
+        return "错误: 缺少 struct_name 参数"
+
+    db = _get_db(project_id)
+    if db is None:
+        return f"无法加载代码索引"
+
+    rows = db.get_structs_by_name(struct_name)
+    if not rows:
+        return f"未找到结构体 {struct_name} 的定义"
+
+    parts = []
+    for row in rows[:3]:
+        body = row["body"] or "(无定义体)"
+        file_path = row["file_path"]
+        start_line = row["start_line"]
+        parts.append(f"// 文件: {file_path}:{start_line}\n{body}")
+
+    return "\n\n".join(parts)
+
+
+def _tool_submit_result(args: dict, result_id: str, scans_dir: str) -> str:
+    result_path = Path(scans_dir) / f"{result_id}.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps({
+        "confirmed": args.get("confirmed", False),
+        "severity": args.get("severity", "unknown"),
+        "description": args.get("description", ""),
+        "ai_analysis": args.get("ai_analysis", ""),
+    }, ensure_ascii=False), encoding="utf-8")
+    return f"结果已提交（result_id={result_id}）"
+
+
+# ---------------------------------------------------------------------------
+# User prompt 构建
+# ---------------------------------------------------------------------------
+
+def _build_user_prompt(candidate: Candidate, project_id: str) -> str:
+    """构建发给 LLM 的用户提示，包含函数源码和候选信息。"""
+    lines = []
+    lines.append(f"## 被审计的候选漏洞")
+    lines.append(f"- 文件: {candidate.file}")
+    lines.append(f"- 行号: {candidate.line}")
+    lines.append(f"- 函数: {candidate.function}")
+    lines.append(f"- 漏洞类型: {candidate.vuln_type}")
+    lines.append(f"- 静态分析描述: {candidate.description}")
+    lines.append("")
+
+    # 尝试获取函数源码
+    db = _get_db(project_id)
+    if db is not None:
+        rows = db.get_functions_by_name(candidate.function)
+        if rows:
+            row = rows[0]
+            body = row["body"] or ""
+            start_line = row["start_line"]
+            file_path = row["file_path"]
+            body_lines = body.split("\n")
+            numbered = "\n".join(
+                f"{start_line + i:4d} | {ln}" for i, ln in enumerate(body_lines)
+            )
+            lines.append(f"## 函数源码 ({file_path}:{start_line})")
+            lines.append("```c")
+            lines.append(numbered)
+            lines.append("```")
+        else:
+            lines.append(f"## 函数源码\n（代码索引中未找到函数 {candidate.function}）")
+    else:
+        lines.append("## 函数源码\n（代码索引不可用）")
+
+    lines.append("")
+    lines.append("## 任务")
+    lines.append(
+        f"请分析第 {candidate.line} 行的代码是否存在真实漏洞。"
+        f"如果需要查看其他函数或结构体的定义，请使用相应工具。"
+        f"分析完毕后，**必须**调用 submit_result 提交结论。"
+    )
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 核心：LLM API 调用 + function calling 循环
+# ---------------------------------------------------------------------------
+
+async def run_audit_via_api(
+    candidate: Candidate,
+    project_id: str,
+    on_output=None,
+    cancel_event: asyncio.Event | None = None,
+) -> Vulnerability | None:
+    """通过 LLM API + function calling 审计单个候选漏洞。"""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        logger.error("openai SDK 未安装，无法使用 API 直调模式")
+        return None
+
+    config = get_config()
+    llm_cfg = config.llm_api
+    result_id = uuid4().hex
+
+    logger.info(
+        "LLM API audit: %s:%d (%s) result_id=%s",
+        candidate.file, candidate.line, candidate.vuln_type, result_id,
+    )
+
+    # 构建 OpenAI 客户端
+    client_kwargs = {}
+    if llm_cfg.base_url:
+        client_kwargs["base_url"] = llm_cfg.base_url
+    if llm_cfg.api_key:
+        client_kwargs["api_key"] = llm_cfg.api_key
+    client = OpenAI(**client_kwargs)
+
+    # 构建初始消息
+    user_prompt = _build_user_prompt(candidate, project_id)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    if on_output:
+        on_output(f"[API] 开始审计 {candidate.file}:{candidate.line}")
+
+    # Function calling 循环（最多 10 轮，防止无限循环）
+    max_rounds = 10
+    submitted = False
+
+    for round_idx in range(max_rounds):
+        if cancel_event and cancel_event.is_set():
+            return None
+
+        try:
+            resp = await asyncio.to_thread(
+                _call_llm, client, llm_cfg.model, messages,
+                llm_cfg.temperature, llm_cfg.max_retries,
+            )
+        except Exception as e:
+            logger.error("LLM API 调用失败: %s", e)
+            if on_output:
+                on_output(f"[API] LLM 调用失败: {e}")
+            return None
+
+        choice = resp.choices[0]
+        message = choice.message
+
+        # 追加 assistant 消息到历史
+        messages.append(message.model_dump(exclude_none=True))
+
+        # 如果没有 tool_calls，说明 LLM 直接返回了文本
+        if not message.tool_calls:
+            if on_output and message.content:
+                # 截取前 200 字符输出
+                on_output(f"[API] {message.content[:200]}")
+            # 尝试从文本内容中解析 JSON 结果
+            if not submitted and message.content:
+                submitted = _try_parse_text_result(
+                    message.content, result_id, config.storage.scans_dir
+                )
+            break
+
+        # 处理 tool_calls
+        for tool_call in message.tool_calls:
+            func_name = tool_call.function.name
+            try:
+                func_args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                func_args = {}
+
+            if on_output:
+                on_output(f"[API] 调用工具: {func_name}({json.dumps(func_args, ensure_ascii=False)[:100]})")
+
+            result_text, is_submit = _execute_tool(
+                func_name, func_args, project_id, result_id,
+            )
+
+            if is_submit:
+                submitted = True
+
+            # 追加 tool 结果到消息历史
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result_text[:4000],  # 限制长度
+            })
+
+        if submitted:
+            if on_output:
+                on_output(f"[API] 结果已提交")
+            break
+
+    if not submitted:
+        logger.warning(
+            "LLM 未调用 submit_result: %s:%d (result_id=%s)",
+            candidate.file, candidate.line, result_id,
+        )
+        if on_output:
+            on_output(f"[API] 警告: LLM 未提交结果")
+
+    # 读取结果文件（与 opencode 模式共用 _read_result）
+    from backend.opencode.runner import _read_result
+    return _read_result(result_id, candidate)
+
+
+def _call_llm(client, model: str, messages: list, temperature: float, max_retries: int):
+    """同步调用 LLM API（在 asyncio.to_thread 中执行）。"""
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=TOOLS,
+                temperature=temperature,
+            )
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+    raise RuntimeError(f"LLM API 调用失败（重试 {max_retries} 次）: {last_err}")
+
+
+def _try_parse_text_result(content: str, result_id: str, scans_dir: str) -> bool:
+    """尝试从 LLM 的文本回复中解析 JSON 结果（兜底）。"""
+    import re
+
+    # 尝试提取 JSON 块
+    json_match = re.search(r'\{[^{}]*"confirmed"\s*:', content)
+    if not json_match:
+        return False
+
+    # 找到匹配的右括号
+    start = json_match.start()
+    depth = 0
+    for i in range(start, len(content)):
+        if content[i] == '{':
+            depth += 1
+        elif content[i] == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    data = json.loads(content[start:i + 1])
+                    _tool_submit_result(data, result_id, scans_dir)
+                    return True
+                except (json.JSONDecodeError, Exception):
+                    return False
+    return False

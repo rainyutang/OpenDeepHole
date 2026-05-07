@@ -15,6 +15,7 @@ from backend.logger import get_logger
 from backend.models import (
     Candidate,
     FeedbackEntry,
+    BatchMarkRequest,
     MarkRequest,
     SaveFalsePositiveRequest,
     ScanEvent,
@@ -235,32 +236,24 @@ async def download_report(scan_id: str) -> Response:
     )
 
 
-@router.post("/api/scan/{scan_id}/mark")
-async def mark_vulnerability(scan_id: str, body: MarkRequest) -> dict:
-    """Mark a vulnerability as confirmed or false positive.
-
-    Automatically creates or updates a feedback entry in the experience database.
-    Returns {"ok": True, "feedback_id": "<id>"}.
-    """
-    if body.verdict not in ("confirmed", "false_positive"):
+def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str, reason: str) -> str:
+    """Mark a single vulnerability and create feedback. Returns feedback_id."""
+    if verdict not in ("confirmed", "false_positive"):
         raise HTTPException(status_code=400, detail="Invalid verdict")
+    if index < 0 or index >= len(scan.vulnerabilities):
+        raise HTTPException(status_code=400, detail=f"Invalid vulnerability index: {index}")
 
-    # Get the vulnerability to build feedback entry
-    scan = await get_scan_status(scan_id)
-    if body.index < 0 or body.index >= len(scan.vulnerabilities):
-        raise HTTPException(status_code=400, detail="Invalid vulnerability index")
-    vuln = scan.vulnerabilities[body.index]
+    vuln = scan.vulnerabilities[index]
 
     # Update in-memory copy if running
     if scan_id in _running_scans:
         live = _running_scans[scan_id]
-        if body.index < len(live.vulnerabilities):
-            live.vulnerabilities[body.index].user_verdict = body.verdict
-            live.vulnerabilities[body.index].user_verdict_reason = body.reason
+        if index < len(live.vulnerabilities):
+            live.vulnerabilities[index].user_verdict = verdict
+            live.vulnerabilities[index].user_verdict_reason = reason
 
     # Persist verdict to database
-    store = get_scan_store()
-    store.update_vulnerability(scan_id, body.index, body.verdict, body.reason)
+    store.update_vulnerability(scan_id, index, verdict, reason)
 
     # Auto-create feedback entry in experience database
     now = datetime.now(timezone.utc).isoformat()
@@ -269,20 +262,43 @@ async def mark_vulnerability(scan_id: str, body: MarkRequest) -> dict:
         id=feedback_id,
         project_id=scan.project_id,
         vuln_type=vuln.vuln_type,
-        verdict=body.verdict,
+        verdict=verdict,
         file=vuln.file,
         line=vuln.line,
         function=vuln.function,
         description=vuln.description,
-        reason=body.reason,
+        reason=reason,
         source_scan_id=scan_id,
         created_at=now,
         updated_at=now,
     )
     store.add_feedback(entry)
 
-    logger.info("Scan %s: vulnerability %d marked as %s, feedback %s", scan_id, body.index, body.verdict, feedback_id)
+    logger.info("Scan %s: vulnerability %d marked as %s, feedback %s", scan_id, index, verdict, feedback_id)
+    return feedback_id
+
+
+@router.post("/api/scan/{scan_id}/mark")
+async def mark_vulnerability(scan_id: str, body: MarkRequest) -> dict:
+    """Mark a vulnerability as confirmed or false positive."""
+    scan = await get_scan_status(scan_id)
+    store = get_scan_store()
+    feedback_id = _mark_single(scan_id, scan, store, body.index, body.verdict, body.reason)
     return {"ok": True, "feedback_id": feedback_id}
+
+
+@router.post("/api/scan/{scan_id}/batch-mark")
+async def batch_mark_vulnerabilities(scan_id: str, body: BatchMarkRequest) -> dict:
+    """Batch-mark multiple vulnerabilities as confirmed or false positive."""
+    if not body.items:
+        raise HTTPException(status_code=400, detail="No items provided")
+    scan = await get_scan_status(scan_id)
+    store = get_scan_store()
+    feedback_ids = []
+    for item in body.items:
+        fid = _mark_single(scan_id, scan, store, item.index, item.verdict, item.reason)
+        feedback_ids.append(fid)
+    return {"ok": True, "feedback_ids": feedback_ids}
 
 
 @router.post("/api/scan/{scan_id}/save-fp")
@@ -418,6 +434,9 @@ async def _wait_for_db(
     return None
 
 
+_QUEUE_DONE = object()  # 哨兵值：生产者完成
+
+
 async def _run_scan(
     scan_id: str,
     project_id: str,
@@ -427,7 +446,7 @@ async def _run_scan(
     processed_keys: set[tuple[str, int, str, str]] | None = None,
     feedback_entries: list[FeedbackEntry] | None = None,
 ) -> None:
-    """Background task: run static analysis then AI audit for each candidate."""
+    """Background task: producer-consumer pipeline for static analysis + AI audit."""
     scan = _running_scans[scan_id]
     registry = get_registry()
     store = get_scan_store()
@@ -448,7 +467,7 @@ async def _run_scan(
 
         emit("mcp_ready", "MCP Server connected")
 
-        # Phase 1+2: Static analysis + AI audit (streaming)
+        # Phase 1+2: Static analysis + AI audit (concurrent via queue)
         scan.status = ScanItemStatus.ANALYZING
         store.update_scan_progress(scan_id, status=ScanItemStatus.ANALYZING)
 
@@ -456,43 +475,102 @@ async def _run_scan(
         _scan_workspaces[scan_id] = workspace
         store.update_scan_workspace(scan_id, str(workspace))
         cancel_event = _scan_cancel_events[scan_id]
-        candidate_index = scan.processed_candidates
 
-        for checker_name in scan_items:
-            if cancel_event.is_set():
-                break
+        candidate_queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+        producer_error: list[Exception] = []
 
-            entry = registry[checker_name]
-            if not entry.analyzer:
-                emit("static_analysis", f"{entry.label}: no static analyzer, skipping")
-                continue
+        # ---- 生产者：静态分析，将候选放入队列 ----
+        async def _producer() -> None:
+            try:
+                for checker_name in scan_items:
+                    if cancel_event.is_set():
+                        break
 
-            emit("static_analysis", f"Running {entry.label} analysis...")
+                    entry = registry[checker_name]
+                    if not entry.analyzer:
+                        emit("static_analysis", f"{entry.label}: 无静态分析器，跳过")
+                        continue
 
-            # Set up progress callback if the analyzer supports it
-            analyzer = entry.analyzer
-            if hasattr(analyzer, "on_progress"):
-                def _on_progress(current: int, total: int, label: str = entry.label) -> None:
-                    emit("static_analysis", f"{label}: scanned {current}/{total} functions")
-                analyzer.on_progress = _on_progress
+                    emit("static_analysis", f"正在运行 {entry.label} 分析...")
 
-            # Iterate candidates (works for both list and generator)
-            checker_count = 0
-            for candidate in analyzer.find_candidates(project_dir, db=db):
+                    analyzer = entry.analyzer
+
+                    # 设置文件级进度回调
+                    def _on_file_progress(current: int, total: int, label: str = entry.label) -> None:
+                        scan.static_scanned_files = current
+                        scan.static_total_files = total
+                        if current % 50 == 0 or current == total:
+                            emit("static_analysis", f"{label}: 已扫描 {current}/{total} 文件")
+                            store.update_scan_progress(
+                                scan_id,
+                                static_scanned_files=current,
+                                static_total_files=total,
+                            )
+
+                    if hasattr(analyzer, "on_file_progress"):
+                        analyzer.on_file_progress = _on_file_progress
+                    if hasattr(analyzer, "on_progress"):
+                        analyzer.on_progress = _on_file_progress
+
+                    checker_count = 0
+                    for candidate in analyzer.find_candidates(project_dir, db=db):
+                        if cancel_event.is_set():
+                            break
+
+                        cand_key = (candidate.file, candidate.line,
+                                    candidate.function, candidate.vuln_type)
+                        if cand_key in processed_keys:
+                            continue
+
+                        checker_count += 1
+                        scan.total_candidates += 1
+                        store.update_scan_progress(
+                            scan_id, total_candidates=scan.total_candidates,
+                        )
+
+                        await candidate_queue.put(candidate)
+
+                    # 清理进度回调
+                    if hasattr(analyzer, "on_file_progress"):
+                        analyzer.on_file_progress = None
+                    if hasattr(analyzer, "on_progress"):
+                        analyzer.on_progress = None
+
+                    emit("static_analysis", f"{entry.label} 完成: {checker_count} 个候选")
+                    logger.info("Scan %s: %s found %d candidates", scan_id, checker_name, checker_count)
+
+                scan.static_analysis_done = True
+                store.update_scan_progress(scan_id, static_analysis_done=True)
+                emit("static_analysis", "全部静态分析完成")
+            except Exception as e:
+                producer_error.append(e)
+                raise
+            finally:
+                await candidate_queue.put(_QUEUE_DONE)
+
+        # ---- 消费者：LLM 审计，从队列取候选 ----
+        async def _consumer() -> None:
+            candidate_index = scan.processed_candidates
+
+            while True:
+                # 带超时地等待，以便检查 cancel_event
+                try:
+                    item = await asyncio.wait_for(candidate_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if cancel_event.is_set():
+                        break
+                    continue
+
+                if item is _QUEUE_DONE:
+                    break
                 if cancel_event.is_set():
                     break
 
-                # Skip already-processed candidates (resume support)
-                cand_key = (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
-                if cand_key in processed_keys:
-                    continue
-
-                checker_count += 1
+                candidate = item
                 i = candidate_index
                 candidate_index += 1
-                scan.total_candidates = candidate_index
 
-                # Switch to auditing status on first candidate
+                # 切换到 auditing 状态
                 if scan.status == ScanItemStatus.ANALYZING:
                     scan.status = ScanItemStatus.AUDITING
                     store.update_scan_progress(scan_id, status=ScanItemStatus.AUDITING)
@@ -500,7 +578,7 @@ async def _run_scan(
                 scan.current_candidate = candidate
                 emit(
                     "auditing",
-                    f"[候选 {i + 1}] Auditing {candidate.vuln_type.upper()} "
+                    f"[候选 {i + 1}] 审计 {candidate.vuln_type.upper()} "
                     f"at {candidate.file}:{candidate.line} — {candidate.function}",
                     candidate_index=i,
                 )
@@ -543,10 +621,10 @@ async def _run_scan(
                 status = "confirmed" if vuln.confirmed else ("not confirmed" if vuln.severity != "unknown" else "no result")
                 emit("auditing", f"[候选 {i + 1}] Result: {status}", candidate_index=i)
 
+                cand_key = (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
                 scan.processed_candidates = i + 1
                 scan.progress = (i + 1) / max(scan.total_candidates, 1)
 
-                # Persist progress
                 store.add_vulnerability(scan_id, vuln)
                 store.add_processed_key(scan_id, cand_key)
                 store.update_scan_progress(
@@ -555,12 +633,28 @@ async def _run_scan(
                     progress=scan.progress,
                 )
 
-            # Clear progress callback
-            if hasattr(analyzer, "on_progress"):
-                analyzer.on_progress = None
+        # ---- 并发运行生产者和消费者 ----
+        producer_task = asyncio.create_task(_producer())
+        consumer_task = asyncio.create_task(_consumer())
 
-            emit("static_analysis", f"{entry.label} complete: {checker_count} candidates")
-            logger.info("Scan %s: %s found %d candidates", scan_id, checker_name, checker_count)
+        done, pending = await asyncio.wait(
+            [producer_task, consumer_task],
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+
+        # 如果有异常，取消另一个任务
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # 抛出已完成任务中的异常
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                raise exc
 
         scan.current_candidate = None
 
@@ -577,7 +671,7 @@ async def _run_scan(
 
         confirmed = sum(1 for v in scan.vulnerabilities if v.confirmed)
         scan.status = ScanItemStatus.COMPLETE
-        emit("complete", f"Scan complete: {confirmed} vulnerabilities confirmed out of {candidate_index} candidates")
+        emit("complete", f"Scan complete: {confirmed} vulnerabilities confirmed out of {scan.total_candidates} candidates")
         store.update_scan_progress(
             scan_id,
             status=ScanItemStatus.COMPLETE,
@@ -600,7 +694,6 @@ async def _run_scan(
             error_message=str(e),
         )
     finally:
-        # Remove from running scans cache
         _running_scans.pop(scan_id, None)
         _scan_cancel_events.pop(scan_id, None)
         _scan_workspaces.pop(scan_id, None)

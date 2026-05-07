@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +30,10 @@ class BaseAnalyzer(ABC):
     """
 
     vuln_type: str
+
+    # 可选的文件级进度回调: on_file_progress(scanned_files, total_files)
+    # 扫描管线在调用 find_candidates 前设置，完成后清除。
+    on_file_progress: Callable[[int, int], None] | None = None
 
     @abstractmethod
     def find_candidates(

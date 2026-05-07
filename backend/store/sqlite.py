@@ -112,6 +112,12 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN feedback_ids TEXT DEFAULT '[]'")
         if "workspace_path" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN workspace_path TEXT")
+        if "static_total_files" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN static_total_files INTEGER DEFAULT 0")
+        if "static_scanned_files" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN static_scanned_files INTEGER DEFAULT 0")
+        if "static_analysis_done" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN static_analysis_done INTEGER DEFAULT 0")
         self._conn.commit()
 
     # -- helpers --
@@ -134,6 +140,9 @@ class SqliteScanStore(ScanStoreBase):
             current_candidate=current,
             error_message=row["error_message"],
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
+            static_total_files=row["static_total_files"] or 0,
+            static_scanned_files=row["static_scanned_files"] or 0,
+            static_analysis_done=bool(row["static_analysis_done"]),
         )
 
     def _row_to_meta(self, row: sqlite3.Row) -> ScanMeta:
@@ -156,8 +165,9 @@ class SqliteScanStore(ScanStoreBase):
             INSERT OR REPLACE INTO scans
                 (scan_id, project_id, scan_items, status, created_at,
                  progress, total_candidates, processed_candidates,
-                 current_candidate, error_message, feedback_ids)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 current_candidate, error_message, feedback_ids,
+                 static_total_files, static_scanned_files, static_analysis_done)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 scan.scan_id,
@@ -171,6 +181,9 @@ class SqliteScanStore(ScanStoreBase):
                 current_json,
                 scan.error_message,
                 json.dumps(meta.feedback_ids),
+                scan.static_total_files,
+                scan.static_scanned_files,
+                int(scan.static_analysis_done),
             ),
         )
         self._conn.commit()
@@ -233,6 +246,9 @@ class SqliteScanStore(ScanStoreBase):
         current_candidate: Candidate | None = None,
         clear_current_candidate: bool = False,
         error_message: str | None = None,
+        static_total_files: int | None = None,
+        static_scanned_files: int | None = None,
+        static_analysis_done: bool | None = None,
     ) -> None:
         updates: list[str] = []
         params: list = []
@@ -257,6 +273,15 @@ class SqliteScanStore(ScanStoreBase):
         if error_message is not None:
             updates.append("error_message = ?")
             params.append(error_message)
+        if static_total_files is not None:
+            updates.append("static_total_files = ?")
+            params.append(static_total_files)
+        if static_scanned_files is not None:
+            updates.append("static_scanned_files = ?")
+            params.append(static_scanned_files)
+        if static_analysis_done is not None:
+            updates.append("static_analysis_done = ?")
+            params.append(int(static_analysis_done))
 
         if not updates:
             return

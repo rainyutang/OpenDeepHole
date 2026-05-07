@@ -56,6 +56,9 @@ class ScanStoreBase(ABC):
         current_candidate: Candidate | None = None,
         clear_current_candidate: bool = False,
         error_message: str | None = None,
+        static_total_files: int | None = None,
+        static_scanned_files: int | None = None,
+        static_analysis_done: bool | None = None,
     ) -> None:
         """Incrementally update progress fields on the scans row.
 

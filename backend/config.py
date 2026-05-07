@@ -32,6 +32,19 @@ class StorageConfig(BaseModel):
 class LoggingConfig(BaseModel):
     level: str = "INFO"
     file: str = "logs/opendeephole.log"
+    max_size_mb: int = 10
+    backup_count: int = 5
+
+
+class LLMApiConfig(BaseModel):
+    """LLM API 直调模式配置（替代 opencode CLI）。"""
+    enabled: bool = False
+    base_url: str = ""
+    api_key: str = ""
+    model: str = "gpt-4o-mini"
+    temperature: float = 0.1
+    timeout: int = 120
+    max_retries: int = 3
 
 
 class AppConfig(BaseModel):
@@ -40,6 +53,7 @@ class AppConfig(BaseModel):
     opencode: OpenCodeConfig = OpenCodeConfig()
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
+    llm_api: LLMApiConfig = LLMApiConfig()
 
 
 def load_config(config_path: str | None = None) -> AppConfig:
@@ -63,6 +77,16 @@ def load_config(config_path: str | None = None) -> AppConfig:
     # Environment variable overrides
     if model := os.environ.get("OPENCODE_MODEL"):
         raw.setdefault("opencode", {})["model"] = model
+
+    # LLM API environment variable overrides
+    if v := os.environ.get("LLM_API_ENABLED"):
+        raw.setdefault("llm_api", {})["enabled"] = v.lower() in ("1", "true", "yes")
+    if v := os.environ.get("LLM_API_BASE_URL"):
+        raw.setdefault("llm_api", {})["base_url"] = v
+    if v := os.environ.get("LLM_API_KEY"):
+        raw.setdefault("llm_api", {})["api_key"] = v
+    if v := os.environ.get("LLM_API_MODEL"):
+        raw.setdefault("llm_api", {})["model"] = v
 
     return AppConfig(**raw)
 
