@@ -38,7 +38,7 @@ class Analyzer(BaseAnalyzer):
             func_name = func["name"]
             file_path = func["file_path"]
             start_line = func["start_line"]
-            body = func.get("body", "")
+            body = func["body"] or ""
 
             if not body:
                 continue
