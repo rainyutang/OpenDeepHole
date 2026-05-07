@@ -213,7 +213,7 @@ docker-compose up --build
 ```
 OpenDeepHole/
 ├── checkers/              # 插件目录（每种漏洞类型一个子目录）
-│   ├── npd/               # checker.yaml + SKILL.md + analyzer.py
+│   ├── npd/               # checker.yaml + SKILL.md/prompt.txt + analyzer.py
 │   └── oob/
 ├── code_parser/           # 共享 C/C++ 代码解析器
 │   ├── code_database.py   # SQLite 代码索引（函数/结构体/全局变量/调用关系）

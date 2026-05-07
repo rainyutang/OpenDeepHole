@@ -25,6 +25,9 @@ class CheckerEntry:
     skill_path: Path
     analyzer: BaseAnalyzer | None = None
     directory: Path = field(default_factory=Path)
+    single_pass: bool = False
+    mode: str = "opencode"           # "api" | "opencode"
+    prompt_path: Path | None = None  # prompt.txt for API mode
 
 
 _registry: dict[str, CheckerEntry] | None = None
@@ -83,9 +86,20 @@ def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
         meta = yaml.safe_load(f)
 
     name = meta["name"]
+    mode = meta.get("mode", "opencode")
     skill_path = checker_dir / "SKILL.md"
-    if not skill_path.is_file():
-        raise FileNotFoundError(f"SKILL.md not found in {checker_dir}")
+    prompt_path: Path | None = None
+
+    if mode == "api":
+        prompt_path = checker_dir / "prompt.txt"
+        if not prompt_path.is_file():
+            raise FileNotFoundError(
+                f"prompt.txt not found for API mode checker {name} in {checker_dir}"
+            )
+        # SKILL.md is optional for API mode checkers
+    else:
+        if not skill_path.is_file():
+            raise FileNotFoundError(f"SKILL.md not found in {checker_dir}")
 
     analyzer = _load_analyzer(checker_dir, name)
 
@@ -97,6 +111,9 @@ def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
         skill_path=skill_path,
         analyzer=analyzer,
         directory=checker_dir,
+        single_pass=meta.get("single_pass", False),
+        mode=mode,
+        prompt_path=prompt_path,
     )
 
 

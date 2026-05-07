@@ -58,11 +58,21 @@ async def run_audit(
     if config.opencode.mock:
         return _mock_result(candidate)
 
-    # LLM API 直调模式
-    if config.llm_api.enabled:
+    # 按 checker 的 mode 决定调用方式
+    from backend.registry import get_registry
+    registry = get_registry()
+    checker_entry = registry.get(candidate.vuln_type)
+    use_api = (
+        config.llm_api.enabled
+        and checker_entry is not None
+        and checker_entry.mode == "api"
+    )
+
+    if use_api:
         from backend.opencode.llm_api_runner import run_audit_via_api
         return await run_audit_via_api(
             candidate, project_id,
+            prompt_path=checker_entry.prompt_path,
             on_output=on_output,
             cancel_event=cancel_event,
         )
@@ -201,6 +211,57 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
         ai_analysis=data.get("ai_analysis", ""),
         confirmed=data.get("confirmed", False),
     )
+
+
+async def run_audit_batch(
+    workspace: Path,
+    candidates: list[Candidate],
+    project_id: str,
+    on_output=None,
+    cancel_event: asyncio.Event | None = None,
+) -> list[Vulnerability | None]:
+    """Run batch audit for multiple candidates in the same function.
+
+    In LLM API mode, sends all candidates in one LLM call.
+    In opencode CLI mode, falls back to sequential single-candidate calls.
+    """
+    config = get_config()
+
+    if config.opencode.mock:
+        return [_mock_result(c) for c in candidates]
+
+    # 按 checker 的 mode 决定调用方式
+    from backend.registry import get_registry
+    registry = get_registry()
+    checker_entry = registry.get(candidates[0].vuln_type) if candidates else None
+    use_api = (
+        config.llm_api.enabled
+        and checker_entry is not None
+        and checker_entry.mode == "api"
+    )
+
+    if use_api:
+        from backend.opencode.llm_api_runner import run_batch_audit_via_api
+        return await run_batch_audit_via_api(
+            candidates, project_id,
+            prompt_path=checker_entry.prompt_path,
+            on_output=on_output,
+            cancel_event=cancel_event,
+        )
+
+    # opencode CLI 模式：退化为逐个调用
+    results = []
+    for candidate in candidates:
+        if cancel_event and cancel_event.is_set():
+            results.append(None)
+            continue
+        vuln = await run_audit(
+            workspace, candidate, project_id,
+            on_output=on_output,
+            cancel_event=cancel_event,
+        )
+        results.append(vuln)
+    return results
 
 
 def _mock_result(candidate: Candidate) -> Vulnerability:

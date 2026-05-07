@@ -20,12 +20,17 @@ Vulnerability types are **plugin-based**. Each checker is a self-contained direc
 
 ```
 checkers/<name>/
-├── checker.yaml    # Required: name, label, description, enabled
-├── SKILL.md        # Required: opencode skill definition
+├── checker.yaml    # Required: name, label, description, enabled, mode (api|opencode)
+├── SKILL.md        # Required for opencode mode: opencode skill definition
+├── prompt.txt      # Required for api mode: LLM system prompt
 └── analyzer.py     # Optional: static analyzer (class Analyzer extends BaseAnalyzer)
 ```
 
-To add a new checker: create a directory with `checker.yaml` + `SKILL.md`. No code changes needed.
+Each checker can independently choose its AI invocation mode via `checker.yaml`:
+- `mode: opencode` (default) — uses opencode CLI + `SKILL.md`
+- `mode: api` — uses LLM API direct call + `prompt.txt` as system prompt (requires `llm_api.enabled: true` in `config.yaml`)
+
+To add a new checker: create a directory with `checker.yaml` + `SKILL.md` (or `prompt.txt` for API mode). No code changes needed.
 Backend auto-discovers checkers on startup via `backend/registry.py`. Frontend fetches available checkers from `GET /api/checkers`.
 
 **Checker changes require a backend restart** — `checkers/` is not watched by `--reload`. The registry loads once at startup.

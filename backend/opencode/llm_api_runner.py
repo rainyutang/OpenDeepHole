@@ -55,6 +55,37 @@ SYSTEM_PROMPT = """\
 # Function calling tools 定义
 # ---------------------------------------------------------------------------
 
+SUBMIT_RESULT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_result",
+        "description": "提交漏洞分析的最终结论。分析完成后必须调用此工具。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "是否存在真实漏洞。true=确认漏洞，false=误报",
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                    "description": "严重程度（仅 confirmed=true 时有意义）",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "漏洞的一句话摘要",
+                },
+                "ai_analysis": {
+                    "type": "string",
+                    "description": "详细的分析推理过程，需包含具体的代码路径",
+                },
+            },
+            "required": ["confirmed", "severity", "description", "ai_analysis"],
+        },
+    },
+}
+
 TOOLS = [
     {
         "type": "function",
@@ -90,36 +121,95 @@ TOOLS = [
             },
         },
     },
+    SUBMIT_RESULT_TOOL,
+]
+
+# single_pass 模式：仅提供 submit_result，不提供查询工具
+TOOLS_SINGLE_PASS = [SUBMIT_RESULT_TOOL]
+
+# 批量提交工具 — 一次性提交同函数内多个候选的分析结果
+SUBMIT_BATCH_RESULT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_batch_result",
+        "description": "批量提交同一函数内多个漏洞候选的分析结论。每个候选用行号标识。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "results": {
+                    "type": "array",
+                    "description": "每个候选的分析结果",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "line": {
+                                "type": "integer",
+                                "description": "候选所在行号",
+                            },
+                            "confirmed": {
+                                "type": "boolean",
+                                "description": "是否存在真实漏洞",
+                            },
+                            "severity": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
+                                "description": "严重程度",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "漏洞的一句话摘要",
+                            },
+                            "ai_analysis": {
+                                "type": "string",
+                                "description": "详细的分析推理过程",
+                            },
+                        },
+                        "required": ["line", "confirmed", "severity", "description", "ai_analysis"],
+                    },
+                },
+            },
+            "required": ["results"],
+        },
+    },
+}
+
+# 批量模式工具集
+TOOLS_BATCH = [
     {
         "type": "function",
         "function": {
-            "name": "submit_result",
-            "description": "提交漏洞分析的最终结论。分析完成后必须调用此工具。",
+            "name": "view_function_code",
+            "description": "查看指定函数的完整源码。用于查看释放函数或相关调用函数的实现。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "confirmed": {
-                        "type": "boolean",
-                        "description": "是否存在真实漏洞。true=确认漏洞，false=误报",
-                    },
-                    "severity": {
+                    "function_name": {
                         "type": "string",
-                        "enum": ["high", "medium", "low"],
-                        "description": "严重程度（仅 confirmed=true 时有意义）",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "漏洞的一句话摘要",
-                    },
-                    "ai_analysis": {
-                        "type": "string",
-                        "description": "详细的分析推理过程，需包含具体的代码路径",
+                        "description": "要查看的函数名",
                     },
                 },
-                "required": ["confirmed", "severity", "description", "ai_analysis"],
+                "required": ["function_name"],
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_struct_code",
+            "description": "查看指定结构体/类的定义。用于了解数据结构的字段和内存布局。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "struct_name": {
+                        "type": "string",
+                        "description": "要查看的结构体或类名",
+                    },
+                },
+                "required": ["struct_name"],
+            },
+        },
+    },
+    SUBMIT_BATCH_RESULT_TOOL,
 ]
 
 
@@ -261,11 +351,21 @@ def _build_user_prompt(candidate: Candidate, project_id: str) -> str:
 
     lines.append("")
     lines.append("## 任务")
-    lines.append(
-        f"请分析第 {candidate.line} 行的代码是否存在真实漏洞。"
-        f"如果需要查看其他函数或结构体的定义，请使用相应工具。"
-        f"分析完毕后，**必须**调用 submit_result 提交结论。"
-    )
+    # 检查是否 single_pass 模式
+    from backend.registry import get_registry
+    registry = get_registry()
+    checker_entry = registry.get(candidate.vuln_type)
+    if checker_entry and checker_entry.single_pass:
+        lines.append(
+            f"请根据上面提供的函数源码，分析第 {candidate.line} 行的代码是否存在真实漏洞。"
+            f"分析完毕后，**必须**调用 submit_result 提交结论。"
+        )
+    else:
+        lines.append(
+            f"请分析第 {candidate.line} 行的代码是否存在真实漏洞。"
+            f"如果需要查看其他函数或结构体的定义，请使用相应工具。"
+            f"分析完毕后，**必须**调用 submit_result 提交结论。"
+        )
 
     return "\n".join(lines)
 
@@ -277,6 +377,7 @@ def _build_user_prompt(candidate: Candidate, project_id: str) -> str:
 async def run_audit_via_api(
     candidate: Candidate,
     project_id: str,
+    prompt_path: Path | None = None,
     on_output=None,
     cancel_event: asyncio.Event | None = None,
 ) -> Vulnerability | None:
@@ -291,9 +392,15 @@ async def run_audit_via_api(
     llm_cfg = config.llm_api
     result_id = uuid4().hex
 
+    # 检查该 checker 是否为 single_pass 模式（单次 API 调用，仅 submit_result）
+    from backend.registry import get_registry
+    registry = get_registry()
+    checker_entry = registry.get(candidate.vuln_type)
+    single_pass = checker_entry.single_pass if checker_entry else False
+
     logger.info(
-        "LLM API audit: %s:%d (%s) result_id=%s",
-        candidate.file, candidate.line, candidate.vuln_type, result_id,
+        "LLM API audit: %s:%d (%s) result_id=%s single_pass=%s",
+        candidate.file, candidate.line, candidate.vuln_type, result_id, single_pass,
     )
 
     # 构建 OpenAI 客户端
@@ -304,18 +411,25 @@ async def run_audit_via_api(
         client_kwargs["api_key"] = llm_cfg.api_key
     client = OpenAI(**client_kwargs)
 
+    # 加载 system prompt：优先使用 checker 目录下的 prompt.txt
+    system_prompt = SYSTEM_PROMPT
+    if prompt_path and prompt_path.is_file():
+        system_prompt = prompt_path.read_text(encoding="utf-8")
+
     # 构建初始消息
     user_prompt = _build_user_prompt(candidate, project_id)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
 
     if on_output:
         on_output(f"[API] 开始审计 {candidate.file}:{candidate.line}")
 
-    # Function calling 循环（最多 10 轮，防止无限循环）
-    max_rounds = 10
+    # 选择工具集：single_pass 模式仅提供 submit_result
+    tools = TOOLS_SINGLE_PASS if single_pass else TOOLS
+    # single_pass 模式只需 1 轮（LLM 直接返回 submit_result）
+    max_rounds = 1 if single_pass else 10
     submitted = False
 
     for round_idx in range(max_rounds):
@@ -325,7 +439,7 @@ async def run_audit_via_api(
         try:
             resp = await asyncio.to_thread(
                 _call_llm, client, llm_cfg.model, messages,
-                llm_cfg.temperature, llm_cfg.max_retries,
+                llm_cfg.temperature, llm_cfg.max_retries, tools,
             )
         except Exception as e:
             logger.error("LLM API 调用失败: %s", e)
@@ -394,15 +508,17 @@ async def run_audit_via_api(
     return _read_result(result_id, candidate)
 
 
-def _call_llm(client, model: str, messages: list, temperature: float, max_retries: int):
+def _call_llm(client, model: str, messages: list, temperature: float, max_retries: int, tools: list | None = None):
     """同步调用 LLM API（在 asyncio.to_thread 中执行）。"""
+    if tools is None:
+        tools = TOOLS
     last_err = None
     for attempt in range(max_retries):
         try:
             return client.chat.completions.create(
                 model=model,
                 messages=messages,
-                tools=TOOLS,
+                tools=tools,
                 temperature=temperature,
             )
         except Exception as e:
@@ -437,3 +553,227 @@ def _try_parse_text_result(content: str, result_id: str, scans_dir: str) -> bool
                 except (json.JSONDecodeError, Exception):
                     return False
     return False
+
+
+# ---------------------------------------------------------------------------
+# 批量审计：同一函数内多个候选一次性发给 LLM
+# ---------------------------------------------------------------------------
+
+MAX_BATCH_SIZE = 8  # 单次批量审计最大候选数
+
+
+def _build_batch_user_prompt(candidates: list[Candidate], project_id: str) -> str:
+    """构建批量审计的用户提示，一次函数源码 + 多个候选。"""
+    # 所有候选属于同一函数
+    func_name = candidates[0].function
+    file_path = candidates[0].file
+    vuln_type = candidates[0].vuln_type
+
+    lines = []
+    lines.append(f"## 被审计的函数")
+    lines.append(f"- 文件: {file_path}")
+    lines.append(f"- 函数: {func_name}")
+    lines.append(f"- 漏洞类型: {vuln_type}")
+    lines.append("")
+
+    # 获取函数源码（只取一次）
+    db = _get_db(project_id)
+    if db is not None:
+        rows = db.get_functions_by_name(func_name)
+        if rows:
+            row = rows[0]
+            body = row["body"] or ""
+            start_line = row["start_line"]
+            fp = row["file_path"]
+            body_lines = body.split("\n")
+            numbered = "\n".join(
+                f"{start_line + i:4d} | {ln}" for i, ln in enumerate(body_lines)
+            )
+            lines.append(f"## 函数源码 ({fp}:{start_line})")
+            lines.append("```c")
+            lines.append(numbered)
+            lines.append("```")
+        else:
+            lines.append(f"## 函数源码\n（代码索引中未找到函数 {func_name}）")
+    else:
+        lines.append("## 函数源码\n（代码索引不可用）")
+
+    lines.append("")
+    lines.append(f"## 候选漏洞点（共 {len(candidates)} 个）")
+    lines.append("")
+    for i, c in enumerate(candidates, 1):
+        lines.append(f"### 候选 {i}（第 {c.line} 行）")
+        lines.append(f"- 静态分析描述: {c.description}")
+        lines.append("")
+
+    lines.append("## 任务")
+    lines.append(
+        f"请逐一分析上述 {len(candidates)} 个候选漏洞点是否为真实 bug。"
+        f"如果需要查看其他函数或结构体的定义，请使用相应工具。"
+        f"分析完毕后，**必须**调用 submit_batch_result 一次性提交所有候选的结论，"
+        f"results 数组中每个元素的 line 字段对应候选的行号。"
+    )
+
+    return "\n".join(lines)
+
+
+def _execute_batch_tool(
+    tool_name: str,
+    args: dict,
+    project_id: str,
+    result_id_map: dict[int, str],
+    scans_dir: str,
+) -> tuple[str, bool]:
+    """执行批量模式下的 function call tool。"""
+    if tool_name == "view_function_code":
+        return _tool_view_function(args, project_id), False
+
+    if tool_name == "view_struct_code":
+        return _tool_view_struct(args, project_id), False
+
+    if tool_name == "submit_batch_result":
+        results = args.get("results", [])
+        submitted_lines = []
+        for item in results:
+            line = item.get("line")
+            rid = result_id_map.get(line)
+            if rid is None:
+                # 行号不匹配任何候选，跳过
+                continue
+            _tool_submit_result(item, rid, scans_dir)
+            submitted_lines.append(line)
+        return f"已提交 {len(submitted_lines)} 个结果（行号: {submitted_lines}）", True
+
+    return f"未知工具: {tool_name}", False
+
+
+async def run_batch_audit_via_api(
+    candidates: list[Candidate],
+    project_id: str,
+    prompt_path: Path | None = None,
+    on_output=None,
+    cancel_event: asyncio.Event | None = None,
+) -> list[Vulnerability | None]:
+    """通过 LLM API + function calling 批量审计同一函数内的多个候选。"""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        logger.error("openai SDK 未安装，无法使用 API 直调模式")
+        return [None] * len(candidates)
+
+    config = get_config()
+    llm_cfg = config.llm_api
+
+    # 为每个候选生成 result_id，建立 line -> result_id 映射
+    result_id_map: dict[int, str] = {}
+    candidate_by_line: dict[int, Candidate] = {}
+    result_ids: dict[int, str] = {}
+    for c in candidates:
+        rid = uuid4().hex
+        result_id_map[c.line] = rid
+        candidate_by_line[c.line] = c
+        result_ids[c.line] = rid
+
+    func_name = candidates[0].function
+    file_path = candidates[0].file
+    logger.info(
+        "LLM API batch audit: %s:%s (%d candidates)",
+        file_path, func_name, len(candidates),
+    )
+
+    # 构建 OpenAI 客户端
+    client_kwargs = {}
+    if llm_cfg.base_url:
+        client_kwargs["base_url"] = llm_cfg.base_url
+    if llm_cfg.api_key:
+        client_kwargs["api_key"] = llm_cfg.api_key
+    client = OpenAI(**client_kwargs)
+
+    # 加载 system prompt：优先使用 checker 目录下的 prompt.txt
+    system_prompt = SYSTEM_PROMPT
+    if prompt_path and prompt_path.is_file():
+        system_prompt = prompt_path.read_text(encoding="utf-8")
+
+    # 构建消息
+    user_prompt = _build_batch_user_prompt(candidates, project_id)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    if on_output:
+        on_output(f"[API] 批量审计 {file_path}:{func_name}（{len(candidates)} 个候选）")
+
+    submitted = False
+    max_rounds = 10
+
+    for round_idx in range(max_rounds):
+        if cancel_event and cancel_event.is_set():
+            return [None] * len(candidates)
+
+        try:
+            resp = await asyncio.to_thread(
+                _call_llm, client, llm_cfg.model, messages,
+                llm_cfg.temperature, llm_cfg.max_retries, TOOLS_BATCH,
+            )
+        except Exception as e:
+            logger.error("LLM API 批量调用失败: %s", e)
+            if on_output:
+                on_output(f"[API] LLM 调用失败: {e}")
+            return [None] * len(candidates)
+
+        choice = resp.choices[0]
+        message = choice.message
+        messages.append(message.model_dump(exclude_none=True))
+
+        if not message.tool_calls:
+            if on_output and message.content:
+                on_output(f"[API] {message.content[:200]}")
+            break
+
+        for tool_call in message.tool_calls:
+            func_name_tc = tool_call.function.name
+            try:
+                func_args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                func_args = {}
+
+            if on_output:
+                on_output(f"[API] 调用工具: {func_name_tc}({json.dumps(func_args, ensure_ascii=False)[:100]})")
+
+            result_text, is_submit = _execute_batch_tool(
+                func_name_tc, func_args, project_id,
+                result_id_map, config.storage.scans_dir,
+            )
+
+            if is_submit:
+                submitted = True
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result_text[:4000],
+            })
+
+        if submitted:
+            if on_output:
+                on_output(f"[API] 批量结果已提交")
+            break
+
+    if not submitted:
+        logger.warning(
+            "LLM 未调用 submit_batch_result: %s:%s",
+            file_path, func_name,
+        )
+        if on_output:
+            on_output(f"[API] 警告: LLM 未提交批量结果")
+
+    # 读取各候选的结果文件
+    from backend.opencode.runner import _read_result
+    results = []
+    for c in candidates:
+        rid = result_id_map[c.line]
+        vuln = _read_result(rid, c)
+        results.append(vuln)
+
+    return results
