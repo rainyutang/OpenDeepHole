@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from backend.api import checkers, feedback, scan, upload
-from backend.config import get_config
+from backend.config import apply_no_proxy, get_config
 from backend.logger import get_logger
 from backend.registry import get_registry
 from backend.store import get_scan_store
@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     """Application startup and shutdown."""
     config = get_config()
+    apply_no_proxy()
 
     # Ensure storage directories exist
     Path(config.storage.projects_dir).mkdir(parents=True, exist_ok=True)

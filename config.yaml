@@ -1,5 +1,7 @@
 # OpenDeepHole Configuration
 
+no_proxy: ""  # 逗号分隔的不走代理地址，如 "localhost,127.0.0.1,10.0.0.0/8"
+
 server:
   host: "0.0.0.0"
   port: 8000

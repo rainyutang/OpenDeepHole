@@ -4,6 +4,8 @@ import type { ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerIn
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 
+const MAX_LOG_LINES = 500;
+
 const PHASES = [
   { key: "init", label: "初始化" },
   { key: "static_analysis", label: "静态分析" },
@@ -116,8 +118,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     }
   };
 
-  // Compute filtered log event count for scroll/unseen tracking
-  const logEventCount = scan?.events.filter((e) => e.phase !== "opencode_output").length ?? 0;
+  // Compute log event count for scroll/unseen tracking
+  const logEventCount = scan?.events.length ?? 0;
 
   // Auto-scroll log
   useEffect(() => {
@@ -143,8 +145,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   const activePhase = statusToPhaseIndex(scan.status);
   const pct = Math.round(scan.progress * 100);
-  const logEvents = scan.events.filter((e) => e.phase !== "opencode_output");
-  const unseenCount = logEvents.length - lastSeenEvents;
+  const allLogEvents = scan.events;
+  const truncated = allLogEvents.length > MAX_LOG_LINES;
+  const logEvents = truncated ? allLogEvents.slice(-MAX_LOG_LINES) : allLogEvents;
+  const unseenCount = allLogEvents.length - lastSeenEvents;
   const feedbackCount = selectedFeedbackIds?.size ?? scan.feedback_ids?.length ?? 0;
 
   return (
@@ -398,9 +402,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               {logEvents.length === 0 ? (
                 <p className="text-slate-500">等待事件...</p>
               ) : (
-                logEvents.map((event, i) => (
-                  <EventLine key={i} event={event} />
-                ))
+                <>
+                  {truncated && (
+                    <p className="text-slate-600 text-center py-1 border-b border-slate-700/50 mb-1">
+                      ... 已省略 {allLogEvents.length - MAX_LOG_LINES} 条早期日志 ...
+                    </p>
+                  )}
+                  {logEvents.map((event, i) => (
+                    <EventLine key={i} event={event} />
+                  ))}
+                </>
               )}
             </div>
           </div>

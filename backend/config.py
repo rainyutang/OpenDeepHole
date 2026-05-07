@@ -48,6 +48,7 @@ class LLMApiConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    no_proxy: str = ""
     server: ServerConfig = ServerConfig()
     mcp_server: MCPServerConfig = MCPServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
@@ -87,12 +88,22 @@ def load_config(config_path: str | None = None) -> AppConfig:
         raw.setdefault("llm_api", {})["api_key"] = v
     if v := os.environ.get("LLM_API_MODEL"):
         raw.setdefault("llm_api", {})["model"] = v
+    if v := os.environ.get("NO_PROXY"):
+        raw["no_proxy"] = v
 
     return AppConfig(**raw)
 
 
 # Singleton config instance
 _config: AppConfig | None = None
+
+
+def apply_no_proxy() -> None:
+    """Set no_proxy/NO_PROXY environment variables from config if configured."""
+    config = get_config()
+    if config.no_proxy:
+        os.environ['no_proxy'] = config.no_proxy
+        os.environ['NO_PROXY'] = config.no_proxy
 
 
 def get_config() -> AppConfig:

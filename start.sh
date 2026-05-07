@@ -21,7 +21,7 @@ echo "  前端构建完成"
 
 # 3. 启动 MCP Server
 echo "[3/4] 启动 MCP Server (port 8100)..."
-python -m mcp_server.server &
+python3 -m mcp_server.server &
 MCP_PID=$!
 sleep 2
 
