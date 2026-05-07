@@ -2,8 +2,9 @@ import { useState } from "react";
 import UploadForm from "./components/UploadForm";
 import ScanStatusView from "./components/ScanStatus";
 import ScanHistory from "./components/ScanHistory";
+import AgentDownload from "./components/AgentDownload";
 
-type Page = "history" | "upload" | "scanning";
+type Page = "history" | "upload" | "scanning" | "agent";
 
 export default function App() {
   const [page, setPage] = useState<Page>("history");
@@ -29,6 +30,7 @@ export default function App() {
         <ScanHistory
           onNewScan={() => setPage("upload")}
           onViewScan={handleViewScan}
+          onDownloadAgent={() => setPage("agent")}
         />
       )}
       {page === "upload" && (
@@ -36,6 +38,9 @@ export default function App() {
       )}
       {page === "scanning" && (
         <ScanStatusView scanId={scanId} onBack={handleBack} />
+      )}
+      {page === "agent" && (
+        <AgentDownload onBack={handleBack} />
       )}
     </>
   );

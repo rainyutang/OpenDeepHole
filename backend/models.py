@@ -159,6 +159,24 @@ class ScanStatus(BaseModel):
     static_analysis_done: bool = False
 
 
+# --- Agent API models ---
+
+class AgentScanRegister(BaseModel):
+    """Sent by the agent to register a new scan and receive a scan_id."""
+    project_name: str
+    scan_items: list[str]
+    agent_version: str = ""
+
+
+class AgentScanFinish(BaseModel):
+    """Sent by the agent when the scan completes (success or error)."""
+    vulnerabilities: list[Vulnerability]
+    status: str                    # "complete" | "error"
+    total_candidates: int
+    processed_candidates: int
+    error_message: str | None = None
+
+
 class ScanMeta(BaseModel):
     """扫描元数据，记录扫描配置信息。"""
     scan_items: list[str]

@@ -1,0 +1,26 @@
+# OpenDeepHole Agent Configuration
+# Edit this file before running the agent.
+
+# Web server URL (where the OpenDeepHole web UI is hosted)
+server_url: "http://your-server:8000"
+
+# Analysis mode: "api" (direct LLM API) or "opencode" (requires opencode CLI installed)
+mode: "api"
+
+# Checkers to run — leave empty to run all enabled checkers
+# Available: npd, oob, uaf, intoverflow, memleak
+checkers: []
+
+# LLM API settings (used when mode: "api")
+llm_api:
+  base_url: "https://api.anthropic.com"   # OpenAI-compatible endpoint
+  api_key: "your-api-key-here"
+  model: "claude-sonnet-4-6"
+  temperature: 0.1
+  timeout: 120      # seconds per candidate
+  max_retries: 3
+
+# opencode CLI settings (used when mode: "opencode")
+opencode:
+  model: ""         # leave empty to use opencode's default model
+  timeout: 300      # seconds per candidate

@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from backend.api import checkers, feedback, scan, upload
+from backend.api import agent, checkers, feedback, scan, upload
 from backend.config import apply_no_proxy, get_config
 from backend.logger import get_logger
 from backend.registry import get_registry
@@ -53,6 +53,7 @@ app.include_router(upload.router)
 app.include_router(scan.router)
 app.include_router(checkers.router)
 app.include_router(feedback.router)
+app.include_router(agent.router)
 
 # Serve frontend static files (built by Vite)
 static_dir = Path(__file__).parent / "static"

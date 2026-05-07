@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -18,8 +19,27 @@ def _get_config():
 
 
 def _get_db(project_id: str):
-    """返回指定项目的 CodeDatabase，不存在则返回 None。"""
+    """返回指定项目的 CodeDatabase，不存在则返回 None。
+
+    Agent 模式下，AGENT_PROJECT_DIR 环境变量指向本地索引目录，优先于
+    server 模式下的 {projects_dir}/{project_id}/code_index.db 路径。
+    """
     from code_parser import CodeDatabase
+
+    # Agent mode: resolve DB path from env var (set by agent/local_mcp.py)
+    agent_dir = os.environ.get("AGENT_PROJECT_DIR")
+    if agent_dir:
+        cache_key = f"agent:{agent_dir}"
+        if cache_key in _db_cache:
+            return _db_cache[cache_key]
+        db_path = Path(agent_dir) / "code_index.db"
+        if not db_path.exists():
+            return None
+        db = CodeDatabase(db_path)
+        _db_cache[cache_key] = db
+        return db
+
+    # Server mode: resolve by project_id
     if project_id in _db_cache:
         return _db_cache[project_id]
     db_path = Path(_get_config().storage.projects_dir) / project_id / "code_index.db"
