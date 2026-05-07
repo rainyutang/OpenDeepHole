@@ -18,6 +18,7 @@ class MCPServerConfig(BaseModel):
 
 
 class OpenCodeConfig(BaseModel):
+    executable: str = "opencode"  # CLI executable name or full path
     model: str = "anthropic/claude-sonnet-4-20250514"
     timeout: int = 120
     mock: bool = False  # When True, skip real opencode and return fake results

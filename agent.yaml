@@ -22,5 +22,6 @@ llm_api:
 
 # opencode CLI settings (used when mode: "opencode")
 opencode:
-  model: ""         # leave empty to use opencode's default model
+  executable: "opencode"  # opencode 可执行文件名或完整路径，Windows 示例："myopencode" 或 "C:/tools/opencode.cmd"
+  model: ""               # leave empty to use opencode's default model
   timeout: 300      # seconds per candidate

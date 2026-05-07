@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -124,6 +126,24 @@ async def run_audit(
     return _read_result(result_id, candidate)
 
 
+def _resolve_opencode() -> str:
+    """Return the full path to the opencode executable.
+
+    Uses the name/path from config (opencode.executable, default "opencode").
+    On Windows, opencode is typically installed as opencode.cmd (npm package).
+    CreateProcess does not resolve .cmd/.bat extensions automatically, so we
+    use shutil.which which honours PATHEXT on Windows.
+    """
+    name = get_config().opencode.executable or "opencode"
+    resolved = shutil.which(name)
+    if resolved is None:
+        raise FileNotFoundError(
+            f"opencode executable '{name}' not found in PATH. "
+            "Check the opencode.executable setting in config.yaml (or agent.yaml)."
+        )
+    return resolved
+
+
 async def _invoke_opencode(
     workspace: Path,
     prompt: str,
@@ -134,7 +154,8 @@ async def _invoke_opencode(
 ) -> None:
     """Invoke opencode CLI, stream output line-by-line, write to log file."""
     config = get_config()
-    cmd = ["opencode", "run", "--dir", str(workspace)]
+    opencode_exe = _resolve_opencode()
+    cmd = [opencode_exe, "run", "--dir", str(workspace)]
     if config.opencode.model:
         cmd += ["--model", config.opencode.model]
     cmd.append(prompt)
@@ -144,11 +165,17 @@ async def _invoke_opencode(
     env = os.environ.copy()
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
 
+    # On Windows, suppress the console window that would otherwise pop up
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,  # merge stderr into stdout
         env=env,
+        **kwargs,
     )
 
     log_lines: list[str] = []

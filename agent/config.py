@@ -22,6 +22,7 @@ class LLMApiConfig:
 
 @dataclass
 class OpenCodeConfig:
+    executable: str = "opencode"  # CLI executable name or full path
     model: str = ""
     timeout: int = 300
 

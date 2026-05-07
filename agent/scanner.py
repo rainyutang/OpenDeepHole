@@ -29,6 +29,7 @@ def _configure_backend(config: AgentConfig, tmp_dir: Path) -> None:
             "max_retries": config.llm_api.max_retries,
         },
         "opencode": {
+            "executable": config.opencode.executable,
             "model": config.opencode.model,
             "timeout": config.opencode.timeout,
             "mock": False,
