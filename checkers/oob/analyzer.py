@@ -1,6 +1,6 @@
-"""OOB (Out-of-Bounds) static analyzer.
+"""OOB（越界读写）静态分析器。
 
-TODO: Replace placeholder with tree-sitter / joern implementation.
+遍历项目中所有函数，每个函数生成一个候选项交由 AI 进行六场景审计。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 class Analyzer(BaseAnalyzer):
-    """Detect candidate out-of-bounds access locations in C/C++ code."""
+    """为每个函数生成一个 OOB 审计候选项。"""
 
     vuln_type = "oob"
 
@@ -24,9 +24,31 @@ class Analyzer(BaseAnalyzer):
         project_path: Path,
         db: "CodeDatabase | None" = None,
     ) -> list[Candidate]:
-        """Find candidate OOB locations.
+        if db is None:
+            return []
 
-        TODO: Implement with tree-sitter / joern.
-        Currently returns empty list as placeholder.
-        """
-        return []
+        candidates: list[Candidate] = []
+        functions = db.get_all_functions()
+
+        total = len(functions)
+        for idx, func in enumerate(functions):
+            if self.on_file_progress:
+                self.on_file_progress(idx + 1, total)
+
+            func_name = func["name"]
+            file_path = func["file_path"]
+            start_line = func["start_line"]
+            body = func.get("body", "")
+
+            if not body:
+                continue
+
+            candidates.append(Candidate(
+                file=file_path,
+                line=start_line,
+                function=func_name,
+                description=f"对函数 {func_name} 进行越界读写（OOB）六场景审计",
+                vuln_type=self.vuln_type,
+            ))
+
+        return candidates

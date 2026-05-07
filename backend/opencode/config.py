@@ -13,6 +13,9 @@ from backend.registry import get_registry
 
 logger = get_logger(__name__)
 
+# Subdirectories in checker dirs that should be symlinked into the workspace
+_SKILL_RESOURCE_DIRS = {"references", "scripts", "assets"}
+
 
 def create_scan_workspace(
     scan_id: str,
@@ -150,6 +153,15 @@ def _link_skills(
             logger.debug("Merged FP experience into skill for checker %s", name)
         else:
             skill_dest.symlink_to(entry.skill_path.resolve())
+
+        # Symlink whitelisted resource directories (references, scripts, assets)
+        for dir_name in _SKILL_RESOURCE_DIRS:
+            src = entry.directory / dir_name
+            if src.is_dir():
+                link_dest = link_dir / dir_name
+                if link_dest.exists() or link_dest.is_symlink():
+                    os.remove(link_dest)
+                link_dest.symlink_to(src.resolve())
 
     logger.debug("Linked skills for %d checkers", len(registry))
 

@@ -28,6 +28,7 @@ class CheckerEntry:
     single_pass: bool = False
     mode: str = "opencode"           # "api" | "opencode"
     prompt_path: Path | None = None  # prompt.txt for API mode
+    skill_name: str | None = None    # custom skill name (default: {name}-analysis)
 
 
 _registry: dict[str, CheckerEntry] | None = None
@@ -114,6 +115,7 @@ def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
         single_pass=meta.get("single_pass", False),
         mode=mode,
         prompt_path=prompt_path,
+        skill_name=meta.get("skill_name"),
     )
 
 

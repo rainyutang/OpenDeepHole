@@ -77,11 +77,15 @@ async def run_audit(
             cancel_event=cancel_event,
         )
 
-    skill_name = candidate.vuln_type
+    skill_name = (
+        checker_entry.skill_name
+        if checker_entry and checker_entry.skill_name
+        else f"{candidate.vuln_type}-analysis"
+    )
     result_id = uuid4().hex
 
     prompt = (
-        f"Using the `{skill_name}-analysis` skill, analyze the potential "
+        f"Using the `{skill_name}` skill, analyze the potential "
         f"{candidate.vuln_type.upper()} vulnerability at "
         f"{candidate.file}:{candidate.line} in function `{candidate.function}`. "
         f"The project_id is `{project_id}`. "
@@ -153,11 +157,26 @@ async def _invoke_opencode(
 
     log_lines: list[str] = []
     deadline = asyncio.get_event_loop().time() + timeout
+    cancelled = False
+
+    async def _watch_cancel():
+        """Monitor cancel_event and kill the process immediately when set."""
+        nonlocal cancelled
+        while not proc.returncode and proc.returncode is None:
+            await asyncio.sleep(0.2)
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                return
+
+    watcher = asyncio.create_task(_watch_cancel()) if cancel_event else None
 
     try:
         async for raw in proc.stdout:
-            if cancel_event and cancel_event.is_set():
-                proc.kill()
+            if cancelled:
                 break
             if asyncio.get_event_loop().time() > deadline:
                 proc.kill()
@@ -170,6 +189,12 @@ async def _invoke_opencode(
             if on_line:
                 on_line(line)
     finally:
+        if watcher:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
         if log_path and log_lines:
             try:
                 log_path.write_text("\n".join(log_lines), encoding="utf-8")
@@ -178,7 +203,7 @@ async def _invoke_opencode(
 
     await proc.wait()
 
-    if not (cancel_event and cancel_event.is_set()) and proc.returncode != 0:
+    if not cancelled and proc.returncode != 0:
         logger.error("opencode exited with code %d", proc.returncode)
         raise RuntimeError(f"opencode exited with code {proc.returncode}")
 
