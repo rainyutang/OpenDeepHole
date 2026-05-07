@@ -28,7 +28,7 @@ from backend.models import (
     Vulnerability,
 )
 from backend.opencode.config import create_scan_workspace, get_skill_content, refresh_skills
-from backend.opencode.runner import run_audit
+from backend.opencode.runner import run_audit, run_audit_batch
 from backend.registry import get_registry
 from backend.store import get_scan_store
 
@@ -435,6 +435,7 @@ async def _wait_for_db(
 
 
 _QUEUE_DONE = object()  # 哨兵值：生产者完成
+_CHECKER_DONE = object()  # 哨��值：当前 checker 候选产出完毕
 
 
 async def _run_scan(
@@ -476,7 +477,7 @@ async def _run_scan(
         store.update_scan_workspace(scan_id, str(workspace))
         cancel_event = _scan_cancel_events[scan_id]
 
-        candidate_queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+        candidate_queue: asyncio.Queue = asyncio.Queue()
         producer_error: list[Exception] = []
 
         # ---- 生产者：静态分析，将候选放入队列 ----
@@ -499,13 +500,12 @@ async def _run_scan(
                     def _on_file_progress(current: int, total: int, label: str = entry.label) -> None:
                         scan.static_scanned_files = current
                         scan.static_total_files = total
-                        if current % 50 == 0 or current == total:
-                            emit("static_analysis", f"{label}: 已扫描 {current}/{total} 文件")
-                            store.update_scan_progress(
-                                scan_id,
-                                static_scanned_files=current,
-                                static_total_files=total,
-                            )
+                        emit("static_analysis", f"{label}: 已扫描 {current}/{total} 文件")
+                        store.update_scan_progress(
+                            scan_id,
+                            static_scanned_files=current,
+                            static_total_files=total,
+                        )
 
                     if hasattr(analyzer, "on_file_progress"):
                         analyzer.on_file_progress = _on_file_progress
@@ -538,6 +538,7 @@ async def _run_scan(
 
                     emit("static_analysis", f"{entry.label} 完成: {checker_count} 个候选")
                     logger.info("Scan %s: %s found %d candidates", scan_id, checker_name, checker_count)
+                    await candidate_queue.put(_CHECKER_DONE)
 
                 scan.static_analysis_done = True
                 store.update_scan_progress(scan_id, static_analysis_done=True)
@@ -548,9 +549,143 @@ async def _run_scan(
             finally:
                 await candidate_queue.put(_QUEUE_DONE)
 
-        # ---- 消费者：LLM 审计，从队列取候选 ----
+        # ---- 消费者：LLM 审计，按函数分组批量调用 ----
         async def _consumer() -> None:
             candidate_index = scan.processed_candidates
+            # 缓冲区：按 (file, function, vuln_type) 分组
+            buffer: dict[tuple[str, str, str], list[Candidate]] = {}
+
+            async def _flush_buffer() -> None:
+                """将缓冲区中的候选按函数分组批量审计。"""
+                nonlocal candidate_index
+
+                for group_key, group in buffer.items():
+                    if cancel_event.is_set():
+                        break
+
+                    # 切换�� auditing 状态
+                    if scan.status == ScanItemStatus.ANALYZING:
+                        scan.status = ScanItemStatus.AUDITING
+                        store.update_scan_progress(scan_id, status=ScanItemStatus.AUDITING)
+
+                    base_index = candidate_index
+                    scan.current_candidate = group[0]
+
+                    if len(group) == 1:
+                        # 单候选：走原有逻辑
+                        candidate = group[0]
+                        i = candidate_index
+                        candidate_index += 1
+
+                        emit(
+                            "auditing",
+                            f"[候选 {i + 1}] 审计 {candidate.vuln_type.upper()} "
+                            f"at {candidate.file}:{candidate.line} — {candidate.function}",
+                            candidate_index=i,
+                        )
+                        logger.info(
+                            "Scan %s: auditing candidate %d — %s:%d",
+                            scan_id, i + 1, candidate.file, candidate.line,
+                        )
+                        store.update_scan_progress(scan_id, current_candidate=candidate)
+
+                        def on_output(line: str, idx: int = i) -> None:
+                            if line.strip():
+                                emit("opencode_output", line, candidate_index=idx)
+
+                        vuln = await run_audit(
+                            workspace, candidate, project_id,
+                            on_output=on_output,
+                            cancel_event=cancel_event,
+                        )
+
+                        if cancel_event.is_set():
+                            break
+
+                        if vuln is None:
+                            vuln = Vulnerability(
+                                file=candidate.file,
+                                line=candidate.line,
+                                function=candidate.function,
+                                vuln_type=candidate.vuln_type,
+                                severity="unknown",
+                                description=candidate.description,
+                                ai_analysis="No analysis result (AI did not complete analysis)",
+                                confirmed=False,
+                            )
+                        scan.vulnerabilities.append(vuln)
+                        status = "confirmed" if vuln.confirmed else ("not confirmed" if vuln.severity != "unknown" else "no result")
+                        emit("auditing", f"[候选 {i + 1}] Result: {status}", candidate_index=i)
+
+                        cand_key = (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
+                        scan.processed_candidates = i + 1
+                        scan.progress = (i + 1) / max(scan.total_candidates, 1)
+                        store.add_vulnerability(scan_id, vuln)
+                        store.add_processed_key(scan_id, cand_key)
+                        store.update_scan_progress(
+                            scan_id,
+                            processed_candidates=scan.processed_candidates,
+                            progress=scan.progress,
+                        )
+                    else:
+                        # 多候选：批量审计
+                        emit(
+                            "auditing",
+                            f"[批量] 审计 {group[0].vuln_type.upper()} "
+                            f"函数 {group[0].function}（{len(group)} 个候选）",
+                            candidate_index=base_index,
+                        )
+                        logger.info(
+                            "Scan %s: batch auditing %s:%s (%d candidates)",
+                            scan_id, group[0].file, group[0].function, len(group),
+                        )
+                        store.update_scan_progress(scan_id, current_candidate=group[0])
+
+                        def on_batch_output(line: str, idx: int = base_index) -> None:
+                            if line.strip():
+                                emit("opencode_output", line, candidate_index=idx)
+
+                        vulns = await run_audit_batch(
+                            workspace, group, project_id,
+                            on_output=on_batch_output,
+                            cancel_event=cancel_event,
+                        )
+
+                        if cancel_event.is_set():
+                            break
+
+                        for j, (candidate, vuln) in enumerate(zip(group, vulns)):
+                            i = candidate_index
+                            candidate_index += 1
+
+                            if vuln is None:
+                                vuln = Vulnerability(
+                                    file=candidate.file,
+                                    line=candidate.line,
+                                    function=candidate.function,
+                                    vuln_type=candidate.vuln_type,
+                                    severity="unknown",
+                                    description=candidate.description,
+                                    ai_analysis="No analysis result (AI did not complete analysis)",
+                                    confirmed=False,
+                                )
+                            scan.vulnerabilities.append(vuln)
+                            status = "confirmed" if vuln.confirmed else ("not confirmed" if vuln.severity != "unknown" else "no result")
+                            emit("auditing", f"[候选 {i + 1}] Result: {status}", candidate_index=i)
+
+                            cand_key = (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
+                            scan.processed_candidates = i + 1
+                            scan.progress = (i + 1) / max(scan.total_candidates, 1)
+                            store.add_vulnerability(scan_id, vuln)
+                            store.add_processed_key(scan_id, cand_key)
+
+                        store.update_scan_progress(
+                            scan_id,
+                            processed_candidates=scan.processed_candidates,
+                            progress=scan.progress,
+                        )
+
+                buffer.clear()
 
             while True:
                 # 带超时地等待，以便检查 cancel_event
@@ -562,76 +697,17 @@ async def _run_scan(
                     continue
 
                 if item is _QUEUE_DONE:
+                    await _flush_buffer()
                     break
+                if item is _CHECKER_DONE:
+                    await _flush_buffer()
+                    continue
                 if cancel_event.is_set():
                     break
 
                 candidate = item
-                i = candidate_index
-                candidate_index += 1
-
-                # 切换到 auditing 状态
-                if scan.status == ScanItemStatus.ANALYZING:
-                    scan.status = ScanItemStatus.AUDITING
-                    store.update_scan_progress(scan_id, status=ScanItemStatus.AUDITING)
-
-                scan.current_candidate = candidate
-                emit(
-                    "auditing",
-                    f"[候选 {i + 1}] 审计 {candidate.vuln_type.upper()} "
-                    f"at {candidate.file}:{candidate.line} — {candidate.function}",
-                    candidate_index=i,
-                )
-                logger.info(
-                    "Scan %s: auditing candidate %d — %s:%d",
-                    scan_id, i + 1, candidate.file, candidate.line,
-                )
-
-                store.update_scan_progress(
-                    scan_id,
-                    total_candidates=scan.total_candidates,
-                    current_candidate=candidate,
-                )
-
-                def on_output(line: str, idx: int = i) -> None:
-                    if line.strip():
-                        emit("opencode_output", line, candidate_index=idx)
-
-                vuln = await run_audit(
-                    workspace, candidate, project_id,
-                    on_output=on_output,
-                    cancel_event=cancel_event,
-                )
-
-                if cancel_event.is_set():
-                    break
-
-                if vuln is None:
-                    vuln = Vulnerability(
-                        file=candidate.file,
-                        line=candidate.line,
-                        function=candidate.function,
-                        vuln_type=candidate.vuln_type,
-                        severity="unknown",
-                        description=candidate.description,
-                        ai_analysis="No analysis result (AI did not complete analysis)",
-                        confirmed=False,
-                    )
-                scan.vulnerabilities.append(vuln)
-                status = "confirmed" if vuln.confirmed else ("not confirmed" if vuln.severity != "unknown" else "no result")
-                emit("auditing", f"[候选 {i + 1}] Result: {status}", candidate_index=i)
-
-                cand_key = (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
-                scan.processed_candidates = i + 1
-                scan.progress = (i + 1) / max(scan.total_candidates, 1)
-
-                store.add_vulnerability(scan_id, vuln)
-                store.add_processed_key(scan_id, cand_key)
-                store.update_scan_progress(
-                    scan_id,
-                    processed_candidates=scan.processed_candidates,
-                    progress=scan.progress,
-                )
+                key = (candidate.file, candidate.function, candidate.vuln_type)
+                buffer.setdefault(key, []).append(candidate)
 
         # ---- 并发运行生产者和消费者 ----
         producer_task = asyncio.create_task(_producer())

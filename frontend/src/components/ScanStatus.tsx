@@ -291,15 +291,21 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               <div>
                 <div className="flex justify-between text-xs text-slate-400 mb-1">
                   <span>
-                    {scan.processed_candidates} / {scan.total_candidates} 候选点
+                    {scan.static_analysis_done
+                      ? `${scan.processed_candidates} / ${scan.total_candidates} 候选点`
+                      : `已处理 ${scan.processed_candidates} 个候选点`}
                   </span>
-                  <span>{pct}%</span>
+                  <span>{scan.static_analysis_done ? `${pct}%` : ""}</span>
                 </div>
                 <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${isDone ? "bg-green-500" : "bg-blue-500"}`}
-                    style={{ width: `${pct}%` }}
-                  />
+                  {scan.static_analysis_done ? (
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${isDone ? "bg-green-500" : "bg-blue-500"}`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  ) : (
+                    <div className="h-full bg-blue-500/50 rounded-full animate-pulse" style={{ width: "100%" }} />
+                  )}
                 </div>
                 {scan.current_candidate && (
                   <p className="text-xs text-slate-500 mt-1 truncate">

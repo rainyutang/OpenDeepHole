@@ -51,6 +51,14 @@ export async function markVulnerability(
   return data;
 }
 
+export async function batchMarkVulnerabilities(
+  scanId: string,
+  items: Array<{ index: number; verdict: string; reason: string }>,
+): Promise<{ ok: boolean; feedback_ids: string[] }> {
+  const { data } = await api.post(`/api/scan/${scanId}/batch-mark`, { items });
+  return data;
+}
+
 export async function saveFalsePositive(
   scanId: string,
   index: number,

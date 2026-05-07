@@ -128,9 +128,7 @@ def _link_skills(
             lines = []
             for fb in fp_by_type[name]:
                 lines.append(
-                    f"\n- 场景：{fb.file}:{fb.line} — {fb.function}\n"
-                    f"  描述：{fb.description}\n"
-                    f"  理由：{fb.reason or '无'}\n"
+                    f"\n- {fb.reason or fb.description}\n"
                 )
             fp_section = "".join(lines)
         elif fp_dir:

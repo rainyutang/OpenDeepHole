@@ -1,6 +1,7 @@
 """Unified logging configuration for OpenDeepHole."""
 
 import logging
+import logging.handlers
 import sys
 from pathlib import Path
 
@@ -36,10 +37,15 @@ def setup_logging() -> None:
     console.setFormatter(formatter)
     root_logger.addHandler(console)
 
-    # File handler
+    # File handler with rotation
     log_path = Path(config.logging.file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(log_path)
+    max_bytes = config.logging.max_size_mb * 1024 * 1024
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path,
+        maxBytes=max_bytes,
+        backupCount=config.logging.backup_count,
+    )
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
