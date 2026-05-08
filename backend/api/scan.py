@@ -773,6 +773,9 @@ async def _run_scan(
                 try:
                     item = await asyncio.wait_for(candidate_queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
+                    # 超时期间如果 buffer 有数据，flush 它（实现流式并发）
+                    if buffer and not cancel_event.is_set():
+                        await _flush_buffer()
                     if cancel_event.is_set():
                         break
                     continue
@@ -788,6 +791,13 @@ async def _run_scan(
 
                 candidate = item
                 key = (candidate.file, candidate.function, candidate.vuln_type)
+
+                # 新 group key 到达时，flush 旧分组（它们已完整）
+                # 同函数的候选在 find_candidates 中连续产出，
+                # 新 key 说明之前的分组不会再有新成员
+                if key not in buffer and buffer:
+                    await _flush_buffer()
+
                 buffer.setdefault(key, []).append(candidate)
 
         # ---- 并发运行生产者和消费者 ----
