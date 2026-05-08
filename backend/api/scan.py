@@ -3,6 +3,7 @@
 import asyncio
 import csv
 import io
+import queue as _stdlib_queue
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -524,8 +525,12 @@ async def _run_scan(
 
         candidate_queue: asyncio.Queue = asyncio.Queue()
         producer_error: list[Exception] = []
+        _ANALYSIS_DONE = object()  # 哨兵值：单个 checker 分析完成
 
         # ---- 生产者：静态分析，将候选放入队列 ----
+        # find_candidates() 是同步阻塞调用（tree-sitter 解析 / DB 查询），
+        # 在线程池中运行，通过线程安全队列桥接到 async producer，
+        # 保持流式产出（静态分析与 LLM 审计并发）+ 支持取消。
         async def _producer() -> None:
             try:
                 for checker_name in scan_items:
@@ -541,7 +546,7 @@ async def _run_scan(
 
                     analyzer = entry.analyzer
 
-                    # 设置文件级进度回调
+                    # 设置文件级进度回调（从线程中调用，CPython 下线程安全）
                     def _on_file_progress(current: int, total: int, label: str = entry.label) -> None:
                         scan.static_scanned_files = current
                         scan.static_total_files = total
@@ -557,18 +562,40 @@ async def _run_scan(
                     if hasattr(analyzer, "on_progress"):
                         analyzer.on_progress = _on_file_progress
 
-                    # find_candidates() 是同步阻塞调用（tree-sitter 解析 / DB 查询），
-                    # 必须在线程池中运行，否则会阻塞 asyncio 事件循环，
-                    # 导致 FastAPI 无法响应前端轮询请求。
-                    candidates = await asyncio.to_thread(
-                        lambda: list(analyzer.find_candidates(project_dir, db=db))
-                    )
+                    # 线程安全队列：线程中的 find_candidates → async producer
+                    bridge: _stdlib_queue.Queue = _stdlib_queue.Queue(maxsize=200)
+
+                    def _blocking_find(a=analyzer, pd=project_dir, d=db) -> None:
+                        try:
+                            for c in a.find_candidates(pd, db=d):
+                                if cancel_event.is_set():
+                                    break
+                                bridge.put(c)
+                        except Exception as exc:
+                            bridge.put(exc)
+                        finally:
+                            bridge.put(_ANALYSIS_DONE)
+
+                    loop = asyncio.get_running_loop()
+                    fut = loop.run_in_executor(None, _blocking_find)
 
                     checker_count = 0
-                    for candidate in candidates:
-                        if cancel_event.is_set():
-                            break
+                    while True:
+                        # 非阻塞轮询 bridge queue，交还事件循环控制权
+                        try:
+                            item = bridge.get_nowait()
+                        except _stdlib_queue.Empty:
+                            if cancel_event.is_set():
+                                break
+                            await asyncio.sleep(0.05)
+                            continue
 
+                        if item is _ANALYSIS_DONE:
+                            break
+                        if isinstance(item, Exception):
+                            raise item
+
+                        candidate = item
                         cand_key = (candidate.file, candidate.line,
                                     candidate.function, candidate.vuln_type)
                         if cand_key in processed_keys:
@@ -581,6 +608,8 @@ async def _run_scan(
                         )
 
                         await candidate_queue.put(candidate)
+
+                    await asyncio.wrap_future(fut)  # 确保线程完成
 
                     # 清理进度回调
                     if hasattr(analyzer, "on_file_progress"):
