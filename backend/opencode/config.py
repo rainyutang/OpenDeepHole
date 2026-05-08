@@ -69,7 +69,7 @@ def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None
     """Generate opencode.json with MCP server configuration."""
     config = get_config()
     port = mcp_port if mcp_port is not None else config.mcp_server.port
-    mcp_url = f"http://localhost:{port}/mcp"
+    mcp_url = f"http://127.0.0.1:{port}/mcp"
 
     opencode_config = {
         "$schema": "https://opencode.ai/config.json",

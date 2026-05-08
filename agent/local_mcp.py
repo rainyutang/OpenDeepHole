@@ -9,8 +9,6 @@ from __future__ import annotations
 import socket
 import threading
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 
@@ -48,15 +46,13 @@ class LocalMCPServer:
         self._wait_ready()
         return self.port
 
-    def _wait_ready(self, timeout: float = 10.0) -> None:
+    def _wait_ready(self, timeout: float = 15.0) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                urllib.request.urlopen(
-                    f"http://127.0.0.1:{self.port}/mcp", timeout=1
-                )
-                return
-            except (urllib.error.URLError, Exception):
+                with socket.create_connection(("127.0.0.1", self.port), timeout=0.5):
+                    return
+            except OSError:
                 time.sleep(0.1)
 
     def stop(self) -> None:
