@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, type DragEvent } from "react";
-import { getCheckers, uploadSource, startScan, listFeedback } from "../api/client";
-import type { CheckerInfo } from "../types";
+import { getCheckers, uploadSource, startScan, listFeedback, getIndexStatus } from "../api/client";
+import type { CheckerInfo, IndexStatus } from "../types";
 import FeedbackManager from "./FeedbackManager";
 
 interface Props {
@@ -22,6 +22,7 @@ export default function UploadForm({ onScanStarted, onBack }: Props) {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [selectedFeedbackIds, setSelectedFeedbackIds] = useState<Set<string>>(new Set());
   const [feedbackCount, setFeedbackCount] = useState(0);
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
 
   // Fetch available checkers on mount
   useEffect(() => {
@@ -49,6 +50,26 @@ export default function UploadForm({ onScanStarted, onBack }: Props) {
       }
     };
     loadAll();
+  }, [projectId]);
+
+  // Poll indexing progress after upload
+  useEffect(() => {
+    if (!projectId) return;
+    let timer: ReturnType<typeof setInterval>;
+    const poll = async () => {
+      try {
+        const status = await getIndexStatus(projectId);
+        setIndexStatus(status);
+        if (status.status === "done" || status.status === "error") {
+          clearInterval(timer);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    poll();
+    timer = setInterval(poll, 2000);
+    return () => clearInterval(timer);
   }, [projectId]);
 
   const toggle = (name: string) => {
@@ -179,6 +200,40 @@ export default function UploadForm({ onScanStarted, onBack }: Props) {
             </div>
           )}
         </div>
+
+        {/* Indexing progress */}
+        {projectId && indexStatus && indexStatus.status === "parsing" && (
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex justify-between text-xs text-blue-700 mb-1.5">
+              <span>代码索引中...</span>
+              <span>
+                {indexStatus.total_files
+                  ? `${indexStatus.parsed_files} / ${indexStatus.total_files} 文件 (${Math.round(((indexStatus.parsed_files ?? 0) / indexStatus.total_files) * 100)}%)`
+                  : "正在扫描文件..."}
+              </span>
+            </div>
+            <div className="h-1.5 bg-blue-200 rounded-full overflow-hidden">
+              {indexStatus.total_files ? (
+                <div
+                  className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                  style={{ width: `${((indexStatus.parsed_files ?? 0) / indexStatus.total_files) * 100}%` }}
+                />
+              ) : (
+                <div className="h-full bg-blue-400/50 rounded-full animate-pulse" style={{ width: "100%" }} />
+              )}
+            </div>
+          </div>
+        )}
+        {projectId && indexStatus && indexStatus.status === "done" && (
+          <div className="mt-4 p-2 bg-green-50 border border-green-200 rounded-lg">
+            <p className="text-xs text-green-700 text-center font-medium">代码索引完成</p>
+          </div>
+        )}
+        {projectId && indexStatus && indexStatus.status === "error" && (
+          <div className="mt-4 p-2 bg-amber-50 border border-amber-200 rounded-lg">
+            <p className="text-xs text-amber-700 text-center">代码索引失败，扫描将在无索引状态下进行</p>
+          </div>
+        )}
 
         {/* Scan options (dynamically loaded from API) */}
         <div className="mt-6">

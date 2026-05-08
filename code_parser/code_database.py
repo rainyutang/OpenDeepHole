@@ -110,7 +110,6 @@ class CodeDatabase:
         cur = self._conn.execute(
             "INSERT INTO files (path, hash) VALUES (?, ?)", (path, file_hash)
         )
-        self._conn.commit()
         return cur.lastrowid
 
     def insert_function(

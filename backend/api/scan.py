@@ -429,7 +429,11 @@ async def get_scan_skill(scan_id: str, vuln_type: str) -> dict:
 async def _wait_for_db(
     project_dir: Path, scan: ScanStatus, emit_fn
 ) -> "CodeDatabase | None":
-    """Wait up to 120s for the code index DB to be ready, then return it."""
+    """Wait for the code index DB to be ready, with stall detection.
+
+    Instead of a hard 120s timeout, keeps waiting as long as indexing
+    is making progress.  Only gives up after 120s of no progress.
+    """
     import json as _json
 
     from code_parser import CodeDatabase
@@ -437,24 +441,42 @@ async def _wait_for_db(
     status_path = project_dir / "parse_status.json"
     db_path = project_dir / "code_index.db"
 
-    emit_fn("init", "Waiting for code index to be ready...")
-    for _ in range(120):
+    MAX_STALL_SECONDS = 120
+    last_progress = 0
+    stall_counter = 0
+
+    emit_fn("init", "正在等待代码索引...")
+    while True:
         if status_path.exists():
             try:
                 info = _json.loads(status_path.read_text())
                 s = info.get("status")
                 if s == "done":
-                    emit_fn("init", "Code index ready")
+                    emit_fn("init", "代码索引完成")
                     return CodeDatabase(db_path)
                 if s == "error":
-                    emit_fn("init", f"Code index build failed: {info.get('error', '')} — continuing without DB")
+                    emit_fn("init", f"代码索引失败: {info.get('error', '')} — 将在无索引状态下继续")
                     return None
-            except Exception:
-                pass
-        await asyncio.sleep(1)
 
-    emit_fn("init", "Code index timed out — continuing without DB")
-    return None
+                current = info.get("parsed_files", 0)
+                total = info.get("total_files", 0)
+                if current > last_progress:
+                    last_progress = current
+                    stall_counter = 0
+                    emit_fn("init", f"代码索引中: {current}/{total} 文件")
+                else:
+                    stall_counter += 1
+            except Exception:
+                stall_counter += 1
+
+        else:
+            stall_counter += 1
+
+        if stall_counter >= MAX_STALL_SECONDS:
+            emit_fn("init", "代码索引超时（无进展） — 将在无索引状态下继续")
+            return None
+
+        await asyncio.sleep(1)
 
 
 _QUEUE_DONE = object()  # 哨兵值：生产者完成

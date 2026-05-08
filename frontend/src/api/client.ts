@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { CheckerInfo, FeedbackEntry, ScanStatus, ScanStartResponse, ScanSummary, UploadResponse } from "../types";
+import type { CheckerInfo, FeedbackEntry, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, UploadResponse } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -12,6 +12,11 @@ export async function uploadSource(file: File): Promise<UploadResponse> {
   const form = new FormData();
   form.append("file", file);
   const { data } = await api.post<UploadResponse>("/api/upload", form);
+  return data;
+}
+
+export async function getIndexStatus(projectId: string): Promise<IndexStatus> {
+  const { data } = await api.get<IndexStatus>(`/api/project/${projectId}/index-status`);
   return data;
 }
 
