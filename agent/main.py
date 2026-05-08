@@ -132,27 +132,7 @@ async def _main() -> None:
 
 
 def main() -> None:
-    # On Linux with Python 3.10-3.11, asyncio.create_subprocess_exec requires
-    # a ChildWatcher attached to the running loop.  asyncio.run() sets up a
-    # ThreadedChildWatcher by default, but some environments lose it when
-    # uvicorn takes over the loop.  Explicitly attach SafeChildWatcher before
-    # entering the loop so subprocess spawning always works.
-    # Python 3.12+ replaced the watcher mechanism entirely; skip on those.
-    if sys.platform != "win32" and sys.version_info < (3, 12):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            watcher = asyncio.SafeChildWatcher()  # type: ignore[attr-defined]
-            watcher.attach_loop(loop)
-            asyncio.get_event_loop_policy().set_child_watcher(watcher)  # type: ignore[attr-defined]
-            loop.run_until_complete(_main())
-        finally:
-            try:
-                loop.close()
-            except Exception:
-                pass
-    else:
-        asyncio.run(_main())
+    asyncio.run(_main())
 
 
 if __name__ == "__main__":
