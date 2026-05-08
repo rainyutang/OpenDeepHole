@@ -60,6 +60,12 @@ async def _main() -> None:
     if args.name:
         config.agent_name = args.name
 
+    # Apply no_proxy early so httpx respects it for all outbound calls (register, heartbeat, etc.)
+    if config.no_proxy:
+        import os
+        os.environ.setdefault("no_proxy", config.no_proxy)
+        os.environ.setdefault("NO_PROXY", config.no_proxy)
+
     port = config.agent_port
     name = config.agent_name or socket.gethostname()
 

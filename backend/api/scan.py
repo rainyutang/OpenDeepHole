@@ -80,7 +80,7 @@ async def create_scan(body: CreateScanRequest) -> ScanStartResponse:
     # Dispatch to agent
     agent_url = f"http://{agent.ip}:{agent.port}"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
             resp = await client.post(
                 f"{agent_url}/task",
                 json={
@@ -157,7 +157,7 @@ async def stop_scan(scan_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Agent for this scan is not online")
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
             resp = await client.post(f"http://{agent.ip}:{agent.port}/task/{scan_id}/stop")
             resp.raise_for_status()
     except Exception as exc:
@@ -200,7 +200,7 @@ async def resume_scan(scan_id: str) -> ScanStartResponse:
 
     # Call agent resume endpoint
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
             resp = await client.post(
                 f"http://{agent.ip}:{agent.port}/task/{scan_id}/resume",
                 json={
