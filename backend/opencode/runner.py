@@ -179,7 +179,7 @@ async def _invoke_opencode(
     )
 
     log_lines: list[str] = []
-    deadline = asyncio.get_event_loop().time() + timeout
+    deadline = asyncio.get_running_loop().time() + timeout
 
     # Watcher task: kills the process immediately when cancel_event fires,
     # regardless of whether opencode is producing output.
@@ -195,7 +195,7 @@ async def _invoke_opencode(
 
     try:
         async for raw in proc.stdout:
-            if asyncio.get_event_loop().time() > deadline:
+            if asyncio.get_running_loop().time() > deadline:
                 proc.kill()
                 raise asyncio.TimeoutError()
             line = _strip_ansi(raw.decode("utf-8", errors="replace").rstrip())
