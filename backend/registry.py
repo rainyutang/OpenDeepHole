@@ -82,7 +82,7 @@ def discover_checkers(checkers_dir: Path) -> dict[str, CheckerEntry]:
 
 def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
     """Load a single checker from its directory."""
-    with open(yaml_path) as f:
+    with open(yaml_path, encoding="utf-8") as f:
         meta = yaml.safe_load(f)
 
     name = meta["name"]
