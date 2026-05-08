@@ -70,9 +70,12 @@ async def run_audit(
 
     if use_api:
         from backend.opencode.llm_api_runner import run_audit_via_api
+        # 优先使用 workspace 中合并了反馈的 prompt
+        merged_prompt = workspace / ".opencode" / "skills" / candidate.vuln_type / "PROMPT.md"
+        prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
         return await run_audit_via_api(
             candidate, project_id,
-            prompt_path=checker_entry.prompt_path,
+            prompt_path=prompt_path,
             on_output=on_output,
             cancel_event=cancel_event,
         )
@@ -267,9 +270,12 @@ async def run_audit_batch(
 
     if use_api:
         from backend.opencode.llm_api_runner import run_batch_audit_via_api
+        # 优先使用 workspace 中合并了反馈的 prompt
+        merged_prompt = workspace / ".opencode" / "skills" / candidates[0].vuln_type / "PROMPT.md"
+        prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
         return await run_batch_audit_via_api(
             candidates, project_id,
-            prompt_path=checker_entry.prompt_path,
+            prompt_path=prompt_path,
             on_output=on_output,
             cancel_event=cancel_event,
         )

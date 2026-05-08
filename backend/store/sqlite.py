@@ -233,6 +233,13 @@ class SqliteScanStore(ScanStoreBase):
         self._conn.commit()
         return cur.rowcount > 0
 
+    def count_scans_for_project(self, project_id: str) -> int:
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM scans WHERE project_id = ?",
+            (project_id,),
+        )
+        return cur.fetchone()[0]
+
     # -- Progress updates --
 
     def update_scan_progress(

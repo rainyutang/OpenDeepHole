@@ -3,6 +3,7 @@
 import asyncio
 import csv
 import io
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -174,6 +175,10 @@ async def resume_scan(scan_id: str) -> ScanStartResponse:
     # Get already-processed candidate keys
     processed_keys = store.get_processed_keys(scan_id)
 
+    # Reset total_candidates to processed count so the producer can
+    # re-count only the unprocessed ones without double-counting.
+    scan.total_candidates = scan.processed_candidates
+
     # Reset status to PENDING
     scan.status = ScanItemStatus.PENDING
     scan.error_message = None
@@ -182,6 +187,7 @@ async def resume_scan(scan_id: str) -> ScanStartResponse:
         scan_id,
         status=ScanItemStatus.PENDING,
         error_message="",
+        total_candidates=scan.total_candidates,
     )
 
     _running_scans[scan_id] = scan
@@ -203,13 +209,30 @@ async def resume_scan(scan_id: str) -> ScanStartResponse:
 
 @router.delete("/api/scan/{scan_id}")
 async def delete_scan(scan_id: str) -> dict:
-    """Delete a scan record."""
+    """Delete a scan record and clean up project directory if orphaned."""
     if scan_id in _running_scans:
         raise HTTPException(status_code=400, detail="Cannot delete a running scan")
 
     store = get_scan_store()
+
+    # Load scan to get project_id before deletion
+    result = store.load_scan(scan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    scan, _meta = result
+    project_id = scan.project_id
+
     if not store.delete_scan(scan_id):
         raise HTTPException(status_code=404, detail="Scan not found")
+
+    # Clean up project directory if no other scans reference it
+    if store.count_scans_for_project(project_id) == 0:
+        config = get_config()
+        project_dir = Path(config.storage.projects_dir) / project_id
+        if project_dir.is_dir():
+            shutil.rmtree(project_dir, ignore_errors=True)
+            logger.info("Cleaned up orphaned project directory: %s", project_dir)
+
     return {"ok": True}
 
 

@@ -466,11 +466,12 @@ async def run_audit_via_api(
         # 追加 assistant 消息到历史
         messages.append(message.model_dump(exclude_none=True))
 
+        # 始终输出 LLM 的文本内容（分析过程）
+        if on_output and message.content:
+            on_output(f"[API] {message.content[:200]}")
+
         # 如果没有 tool_calls，说明 LLM 直接返回了文本
         if not message.tool_calls:
-            if on_output and message.content:
-                # 截取前 200 字符输出
-                on_output(f"[API] {message.content[:200]}")
             # 尝试从文本内容中解析 JSON 结果
             if not submitted and message.content:
                 submitted = _try_parse_text_result(
@@ -495,6 +496,9 @@ async def run_audit_via_api(
 
             if is_submit:
                 submitted = True
+                if on_output:
+                    on_output(f"[API] 结果已提交")
+                break
 
             # 追加 tool 结果到消息历史
             messages.append({
@@ -504,8 +508,6 @@ async def run_audit_via_api(
             })
 
         if submitted:
-            if on_output:
-                on_output(f"[API] 结果已提交")
             break
 
     if not submitted:
@@ -752,9 +754,11 @@ async def run_batch_audit_via_api(
         message = choice.message
         messages.append(message.model_dump(exclude_none=True))
 
+        # 始终输出 LLM 的文本内容（分析过程）
+        if on_output and message.content:
+            on_output(f"[API] {message.content[:200]}")
+
         if not message.tool_calls:
-            if on_output and message.content:
-                on_output(f"[API] {message.content[:200]}")
             break
 
         for tool_call in message.tool_calls:
@@ -774,6 +778,9 @@ async def run_batch_audit_via_api(
 
             if is_submit:
                 submitted = True
+                if on_output:
+                    on_output(f"[API] 批量结果已提交")
+                break
 
             messages.append({
                 "role": "tool",
@@ -782,8 +789,6 @@ async def run_batch_audit_via_api(
             })
 
         if submitted:
-            if on_output:
-                on_output(f"[API] 批量结果已提交")
             break
 
     if not submitted:
