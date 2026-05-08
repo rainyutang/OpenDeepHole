@@ -68,6 +68,21 @@ class Reporter:
     # Scan events / results
     # ---------------------------------------------------------------------------
 
+    async def report_vulnerability(self, scan_id: str, vuln: Vulnerability) -> None:
+        """Push a single vulnerability result immediately after it is audited."""
+        if self.dry_run:
+            marker = "[VULN]" if vuln.confirmed else "[  FP]"
+            print(f"  {marker} {vuln.vuln_type.upper()} {vuln.file}:{vuln.line} ({vuln.function})")
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/vulnerability",
+                json=vuln.model_dump(),
+                timeout=10.0,
+            )
+        except Exception as e:
+            print(f"Warning: failed to upload vulnerability result: {e}")
+
     async def send_event(self, scan_id: str, event: ScanEvent) -> None:
         """Push a progress event to the server (best-effort, never raises)."""
         if self.dry_run:

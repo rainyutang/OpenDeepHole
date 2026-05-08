@@ -7,10 +7,11 @@ Agent registration / lifecycle:
   DELETE /api/agent/{agent_id}          unregister
 
 Scan events (called by agent during scan):
-  POST /api/agent/scan/{id}/event       push progress event
-  POST /api/agent/scan/{id}/finish      push final results
-  POST /api/agent/scan/{id}/processed   report processed candidate key
-  GET  /api/agent/scan/{id}/processed   fetch processed keys (for resume)
+  POST /api/agent/scan/{id}/event           push progress event
+  POST /api/agent/scan/{id}/vulnerability   push one result immediately after audit
+  POST /api/agent/scan/{id}/finish          push final status (vulnerabilities already stored)
+  POST /api/agent/scan/{id}/processed       report processed candidate key
+  GET  /api/agent/scan/{id}/processed       fetch processed keys (for resume)
 
 Other:
   GET  /api/agent/feedback              fetch false-positive feedback
@@ -40,6 +41,7 @@ from backend.models import (
     AgentScanFinish,
     ScanEvent,
     ScanItemStatus,
+    Vulnerability,
 )
 from backend.store import get_scan_store
 
@@ -196,6 +198,23 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
     return {"ok": True}
 
 
+@router.post("/scan/{scan_id}/vulnerability")
+async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
+    """Agent pushes a single vulnerability result immediately after auditing it."""
+    store = get_scan_store()
+    store.add_vulnerability(scan_id, vuln)
+
+    scan = _running_scans.get(scan_id)
+    if scan is not None:
+        scan.vulnerabilities.append(vuln)
+
+    logger.debug(
+        "Vulnerability reported for scan %s: %s %s:%d confirmed=%s",
+        scan_id, vuln.vuln_type, vuln.file, vuln.line, vuln.confirmed,
+    )
+    return {"ok": True}
+
+
 @router.post("/scan/{scan_id}/finish")
 async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
     """Agent pushes final results when the scan completes, errors, or is cancelled."""
@@ -208,8 +227,12 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
     }
     final_status = status_map.get(body.status, ScanItemStatus.ERROR)
 
-    for vuln in body.vulnerabilities:
-        store.add_vulnerability(scan_id, vuln)
+    # Only add vulnerabilities here if the agent didn't already upload them
+    # incrementally via POST /scan/{id}/vulnerability (legacy / fallback path).
+    existing_count = store.count_vulnerabilities(scan_id)
+    if body.vulnerabilities and existing_count == 0:
+        for vuln in body.vulnerabilities:
+            store.add_vulnerability(scan_id, vuln)
 
     store.update_scan_progress(
         scan_id,
@@ -224,7 +247,9 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
     scan = _running_scans.get(scan_id)
     if scan is not None:
         scan.status = final_status
-        scan.vulnerabilities = body.vulnerabilities
+        # Keep incrementally-built list; only override if we just bulk-inserted
+        if body.vulnerabilities and existing_count == 0:
+            scan.vulnerabilities = body.vulnerabilities
         scan.total_candidates = body.total_candidates
         scan.processed_candidates = body.processed_candidates
         if body.error_message:

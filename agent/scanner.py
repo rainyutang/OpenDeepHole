@@ -221,8 +221,8 @@ async def run_scan(
                     workspace,
                     candidate,
                     scan_id,
-                    on_output=None,
-                    cancel_event=None,
+                    on_output=lambda line: print(f"  [opencode] {line}", flush=True),
+                    cancel_event=cancel_event,
                 )
             except Exception as exc:
                 await emit("auditing", f"[{global_index + 1}] Analysis error: {exc}", candidate_index=global_index)
@@ -243,6 +243,9 @@ async def run_scan(
             result_label = "CONFIRMED" if vuln.confirmed else "not confirmed"
             await emit("auditing", f"[{global_index + 1}] Result: {result_label}", candidate_index=global_index)
 
+            # Upload this result to the server immediately so it appears in the UI
+            await reporter.report_vulnerability(scan_id, vuln)
+
             # Report this candidate as processed so it can be skipped on resume
             await reporter.report_processed_key(
                 scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
@@ -251,7 +254,7 @@ async def run_scan(
         # --- Phase 8: Report results ---
         if cancelled:
             await reporter.finish_scan(
-                scan_id, vulnerabilities, "cancelled", total, already_done + len(vulnerabilities)
+                scan_id, [], "cancelled", total, already_done + len(vulnerabilities)
             )
             # Do NOT delete scan_dir on cancel — needed for resume
             return
@@ -261,7 +264,7 @@ async def run_scan(
             "complete",
             f"Scan complete: {confirmed_count} confirmed / {total} total candidates",
         )
-        await reporter.finish_scan(scan_id, vulnerabilities, "complete", total, total)
+        await reporter.finish_scan(scan_id, [], "complete", total, total)
         # Clean up on successful completion
         shutil.rmtree(scan_dir, ignore_errors=True)
 

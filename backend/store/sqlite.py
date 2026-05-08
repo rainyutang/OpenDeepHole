@@ -327,6 +327,12 @@ class SqliteScanStore(ScanStoreBase):
 
     # -- Vulnerabilities --
 
+    def count_vulnerabilities(self, scan_id: str) -> int:
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM vulnerabilities WHERE scan_id = ?", (scan_id,)
+        )
+        return cur.fetchone()[0]
+
     def add_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
         cur = self._conn.execute(
             "SELECT COALESCE(MAX(idx), -1) FROM vulnerabilities WHERE scan_id = ?",
