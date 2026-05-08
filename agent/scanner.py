@@ -83,6 +83,7 @@ async def run_scan(
     scan_dir.mkdir(parents=True, exist_ok=True)
 
     mcp_server = None
+    workspace: Optional[Path] = None
 
     try:
         # Setup backend config before any backend imports
@@ -139,7 +140,7 @@ async def run_scan(
             await emit("mcp_ready", f"Local MCP server ready on port {mcp_port}")
 
         # --- Phase 4: Create workspace (links SKILLs, merges feedback) ---
-        from backend.opencode.config import create_scan_workspace
+        from backend.opencode.config import create_scan_workspace, cleanup_workspace
         workspace = create_scan_workspace(
             scan_id,
             project_dir=project_path,
@@ -278,3 +279,5 @@ async def run_scan(
     finally:
         if mcp_server:
             mcp_server.stop()
+        if workspace is not None:
+            cleanup_workspace(workspace)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 from backend.config import get_config
@@ -151,15 +152,35 @@ def _link_skills(
             skill_dest.write_text(merged, encoding="utf-8")
             logger.debug("Merged FP experience into skill for checker %s", name)
         else:
-            skill_dest.symlink_to(entry.skill_path.resolve())
+            shutil.copy2(entry.skill_path, skill_dest)
 
     logger.debug("Linked skills for %d checkers", len(registry))
+
+
+def cleanup_workspace(workspace: Path) -> None:
+    """Remove opencode artifacts written into the workspace directory.
+
+    Deletes ``opencode.json`` and the ``.opencode/`` directory that were
+    created by :func:`create_scan_workspace`.  Safe to call even if the
+    files no longer exist.
+    """
+    opencode_json = workspace / "opencode.json"
+    opencode_dir = workspace / ".opencode"
+    try:
+        if opencode_json.exists():
+            opencode_json.unlink()
+    except Exception as exc:
+        logger.warning("Failed to remove opencode.json from workspace: %s", exc)
+    try:
+        if opencode_dir.is_dir():
+            shutil.rmtree(opencode_dir)
+    except Exception as exc:
+        logger.warning("Failed to remove .opencode dir from workspace: %s", exc)
 
 
 def get_skill_content(workspace: Path, vuln_type: str) -> str | None:
     """Read the current SKILL.md content for a given vuln_type from a workspace."""
     skill_path = workspace / ".opencode" / "skills" / vuln_type / "SKILL.md"
     if skill_path.is_file():
-        # Resolve symlink to read actual content
-        return skill_path.resolve().read_text(encoding="utf-8")
+        return skill_path.read_text(encoding="utf-8")
     return None
