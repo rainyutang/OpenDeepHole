@@ -1,26 +1,24 @@
-"""OpenDeepHole Agent — local vulnerability scanner that reports to the web server.
+"""OpenDeepHole Agent Daemon — persistent HTTP server that receives scan tasks.
 
 Usage:
-    python -m agent.main <project_path> [OPTIONS]
+    python -m agent.main [OPTIONS]
 
-    project_path          Path to the C/C++ source directory to scan
     --server URL          Web server URL (overrides agent.yaml server_url)
-    --checkers LIST       Comma-separated checker names, e.g. npd,oob,uaf
-    --name NAME           Display name shown on web UI (default: directory name)
+    --port INT            Agent HTTP port (overrides agent.yaml agent_port, default 7000)
+    --name NAME           Agent display name (overrides agent.yaml agent_name)
     --config FILE         Path to config file (default: ./agent.yaml)
-    --dry-run             Run scan locally without pushing results to server
 
 Examples:
-    python -m agent.main /path/to/project
-    python -m agent.main /path/to/project --server http://192.168.1.10:8000
-    python -m agent.main /path/to/project --checkers npd,oob --name "MyProject v2"
-    python -m agent.main /path/to/project --dry-run
+    python -m agent.main
+    python -m agent.main --server http://192.168.1.10:8000 --port 7001
+    python -m agent.main --name "my-server" --config /etc/opendeephole/agent.yaml
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import socket
 import sys
 from pathlib import Path
 
@@ -28,34 +26,26 @@ from pathlib import Path
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="agent",
-        description="OpenDeepHole local agent — scans C/C++ source and reports to web server",
+        description="OpenDeepHole agent daemon — listens for scan tasks from the web server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("project_path", help="Path to C/C++ source directory")
     parser.add_argument("--server", metavar="URL", help="Web server URL (overrides agent.yaml)")
-    parser.add_argument(
-        "--checkers",
-        metavar="LIST",
-        help="Comma-separated checker names (default: all enabled)",
-    )
-    parser.add_argument("--name", metavar="NAME", help="Display name on web UI")
+    parser.add_argument("--port", metavar="INT", type=int, help="Agent HTTP listen port (default 7000)")
+    parser.add_argument("--name", metavar="NAME", help="Agent display name shown on web UI")
     parser.add_argument("--config", metavar="FILE", help="Path to agent.yaml config file")
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Run scan locally without pushing results to server",
-    )
     return parser.parse_args()
+
+
+async def _heartbeat_loop(reporter, agent_id: str) -> None:
+    """Send heartbeat to server every 30 seconds."""
+    while True:
+        await reporter.heartbeat(agent_id)
+        await asyncio.sleep(30)
 
 
 async def _main() -> None:
     args = _parse_args()
-
-    project_path = Path(args.project_path).resolve()
-    if not project_path.is_dir():
-        print(f"Error: project path does not exist or is not a directory: {project_path}")
-        sys.exit(1)
 
     # Load config
     from agent.config import load_config
@@ -65,14 +55,13 @@ async def _main() -> None:
     # Apply CLI overrides
     if args.server:
         config.server_url = args.server
+    if args.port:
+        config.agent_port = args.port
+    if args.name:
+        config.agent_name = args.name
 
-    checker_names: list[str] = []
-    if args.checkers:
-        checker_names = [c.strip() for c in args.checkers.split(",") if c.strip()]
-    elif config.checkers:
-        checker_names = config.checkers
-
-    scan_name = args.name or project_path.name
+    port = config.agent_port
+    name = config.agent_name or socket.gethostname()
 
     # Validate config
     if config.mode == "api" and not config.llm_api.api_key:
@@ -80,27 +69,60 @@ async def _main() -> None:
     if config.mode == "api" and not config.llm_api.base_url:
         print("Warning: llm_api.base_url is not set in agent.yaml")
 
-    print(f"OpenDeepHole Agent")
-    print(f"  Project : {project_path}")
+    print(f"OpenDeepHole Agent Daemon")
+    print(f"  Name    : {name}")
     print(f"  Server  : {config.server_url}")
+    print(f"  Port    : {port}")
     print(f"  Mode    : {config.mode}")
-    print(f"  Checkers: {checker_names or 'all enabled'}")
-    print(f"  Name    : {scan_name}")
-    if args.dry_run:
-        print(f"  [DRY RUN — results will NOT be sent to server]")
     print()
 
     from agent.reporter import Reporter
-    from agent.scanner import run_scan
+    from agent.task_manager import TaskManager
+    import agent.server as agent_server
 
-    reporter = Reporter(config.server_url, dry_run=args.dry_run)
+    reporter = Reporter(config.server_url)
+    task_manager = TaskManager()
+
+    # Inject globals into agent.server module
+    agent_server._config = config
+    agent_server._reporter = reporter
+    agent_server._task_manager = task_manager
+
+    # Register with server
+    agent_id = None
     try:
-        await run_scan(config, project_path, reporter, scan_name, checker_names)
-    finally:
-        await reporter.close()
+        agent_id = await reporter.register_agent(port=port, name=name)
+        print(f"  Registered as agent_id: {agent_id}")
+        print()
+    except Exception as e:
+        print(f"Warning: failed to register with server: {e}")
+        print("Agent will start but may not receive tasks from the server.")
+        print()
 
-    if not args.dry_run:
-        print(f"\nResults available at: {config.server_url}")
+    # Start heartbeat loop as background task
+    heartbeat_task = None
+    if agent_id:
+        heartbeat_task = asyncio.create_task(_heartbeat_loop(reporter, agent_id))
+
+    # Start uvicorn HTTP server (blocks until shutdown)
+    import uvicorn
+    uv_config = uvicorn.Config(
+        agent_server.app,
+        host="0.0.0.0",
+        port=port,
+        log_level="warning",
+    )
+    server = uvicorn.Server(uv_config)
+
+    try:
+        await server.serve()
+    finally:
+        if heartbeat_task:
+            heartbeat_task.cancel()
+        if agent_id:
+            await reporter.unregister_agent(agent_id)
+            print(f"\nUnregistered agent {agent_id}")
+        await reporter.close()
 
 
 def main() -> None:

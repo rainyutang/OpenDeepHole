@@ -118,6 +118,12 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN static_scanned_files INTEGER DEFAULT 0")
         if "static_analysis_done" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN static_analysis_done INTEGER DEFAULT 0")
+        if "agent_id" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN agent_id TEXT DEFAULT ''")
+        if "project_path" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN project_path TEXT DEFAULT ''")
+        if "scan_name" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN scan_name TEXT DEFAULT ''")
         self._conn.commit()
 
     # -- helpers --
@@ -150,6 +156,9 @@ class SqliteScanStore(ScanStoreBase):
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
+            agent_id=row["agent_id"] if row["agent_id"] is not None else "",
+            project_path=row["project_path"] if row["project_path"] is not None else "",
+            scan_name=row["scan_name"] if row["scan_name"] is not None else "",
         )
 
     # -- Scan lifecycle --
@@ -166,8 +175,9 @@ class SqliteScanStore(ScanStoreBase):
                 (scan_id, project_id, scan_items, status, created_at,
                  progress, total_candidates, processed_candidates,
                  current_candidate, error_message, feedback_ids,
-                 static_total_files, static_scanned_files, static_analysis_done)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 static_total_files, static_scanned_files, static_analysis_done,
+                 agent_id, project_path, scan_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 scan.scan_id,
@@ -184,6 +194,9 @@ class SqliteScanStore(ScanStoreBase):
                 scan.static_total_files,
                 scan.static_scanned_files,
                 int(scan.static_analysis_done),
+                meta.agent_id,
+                meta.project_path,
+                meta.scan_name,
             ),
         )
         self._conn.commit()

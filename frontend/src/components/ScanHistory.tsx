@@ -3,9 +3,9 @@ import { getScans, resumeScan, deleteScan } from "../api/client";
 import type { ScanSummary, ScanItemStatus } from "../types";
 
 interface Props {
-  onNewScan: () => void;
   onViewScan: (scanId: string) => void;
   onDownloadAgent: () => void;
+  onNewScan: () => void;
 }
 
 const STATUS_STYLES: Record<ScanItemStatus, { label: string; cls: string }> = {
@@ -21,7 +21,7 @@ function isRunning(status: ScanItemStatus) {
   return status === "pending" || status === "analyzing" || status === "auditing";
 }
 
-export default function ScanHistory({ onNewScan, onViewScan, onDownloadAgent }: Props) {
+export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -90,7 +90,7 @@ export default function ScanHistory({ onNewScan, onViewScan, onDownloadAgent }: 
           <div className="flex items-center gap-3">
             <button
               onClick={onDownloadAgent}
-              className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+              className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
             >
               ↓ 下载 Agent
             </button>

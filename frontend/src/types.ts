@@ -95,3 +95,12 @@ export interface ScanSummary {
   vulnerability_count: number;
   scan_items: string[];
 }
+
+export interface AgentInfo {
+  agent_id: string;
+  name: string;
+  ip: string;
+  port: number;
+  last_seen: string;
+  online: boolean;
+}

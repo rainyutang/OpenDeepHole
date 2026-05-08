@@ -1,78 +1,124 @@
-"""Agent API — endpoints for local agents to register scans, push events, and submit results.
+"""Agent API — endpoints for local agent daemons to register, heartbeat,
+push events, and submit scan results.
 
-The agent runs on the user's machine and communicates with these endpoints:
+Agent registration / lifecycle:
+  POST /api/agent/register              register agent → agent_id
+  PUT  /api/agent/heartbeat/{agent_id}  heartbeat
+  DELETE /api/agent/{agent_id}          unregister
 
-  POST /api/agent/scan                    register new scan → scan_id
-  POST /api/agent/scan/{id}/event         push progress event
-  POST /api/agent/scan/{id}/finish        push final results
-  GET  /api/agent/feedback                fetch false-positive feedback for SKILL
-  GET  /api/agent/download                download agent package zip
+Scan events (called by agent during scan):
+  POST /api/agent/scan/{id}/event       push progress event
+  POST /api/agent/scan/{id}/finish      push final results
+  POST /api/agent/scan/{id}/processed   report processed candidate key
+  GET  /api/agent/scan/{id}/processed   fetch processed keys (for resume)
+
+Other:
+  GET  /api/agent/feedback              fetch false-positive feedback
+  GET  /api/agent/download              download agent package zip
+  GET  /api/agents                      list registered agents
 """
 
 from __future__ import annotations
 
 import io
+import socket
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-import uuid
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response
+from pydantic import BaseModel
 
 from backend.api.scan import _running_scans
 from backend.logger import get_logger
 from backend.models import (
+    AgentInfo,
     AgentScanFinish,
-    AgentScanRegister,
     ScanEvent,
     ScanItemStatus,
-    ScanMeta,
-    ScanStatus,
 )
 from backend.store import get_scan_store
 
 router = APIRouter(prefix="/api/agent")
+public_router = APIRouter()  # Routes not under /api/agent prefix
 logger = get_logger(__name__)
 
 # Root of the project (two levels up from this file: backend/api/ → backend/ → project root)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# In-memory registry of connected agents
+_registered_agents: dict[str, AgentInfo] = {}
+
 
 # ---------------------------------------------------------------------------
-# Scan lifecycle
+# Agent registration / heartbeat
 # ---------------------------------------------------------------------------
 
+class _AgentRegisterBody(BaseModel):
+    port: int
+    name: str = ""
 
-@router.post("/scan")
-async def agent_register_scan(body: AgentScanRegister) -> dict:
-    """Agent calls this to register a new scan. Returns a scan_id."""
-    scan_id = uuid.uuid4().hex
+
+@router.post("/register")
+async def agent_register(body: _AgentRegisterBody, request: Request) -> dict:
+    """Agent calls this on startup to get an agent_id."""
+    agent_id = uuid.uuid4().hex
+    ip = request.client.host if request.client else "unknown"
     now = datetime.now(timezone.utc).isoformat()
-
-    scan = ScanStatus(
-        scan_id=scan_id,
-        project_id=body.project_name,
-        scan_items=body.scan_items,
-        created_at=now,
-        status=ScanItemStatus.PENDING,
-        progress=0.0,
-        total_candidates=0,
-        processed_candidates=0,
-        vulnerabilities=[],
+    _registered_agents[agent_id] = AgentInfo(
+        agent_id=agent_id,
+        name=body.name or socket.gethostname(),
+        ip=ip,
+        port=body.port,
+        last_seen=now,
     )
-    meta = ScanMeta(scan_items=body.scan_items, created_at=now)
+    logger.info("Agent registered: %s (%s:%d)", agent_id, ip, body.port)
+    return {"agent_id": agent_id}
 
-    store = get_scan_store()
-    store.save_scan(scan, meta)
-    _running_scans[scan_id] = scan
 
-    logger.info(
-        "Agent registered scan %s for project '%s' (checkers: %s)",
-        scan_id, body.project_name, body.scan_items,
-    )
-    return {"scan_id": scan_id}
+@router.put("/heartbeat/{agent_id}")
+async def agent_heartbeat(agent_id: str) -> dict:
+    """Agent sends heartbeat every 30s to stay in the online list."""
+    if agent_id in _registered_agents:
+        _registered_agents[agent_id].last_seen = datetime.now(timezone.utc).isoformat()
+    return {"ok": True}
+
+
+@router.delete("/{agent_id}")
+async def agent_unregister(agent_id: str) -> dict:
+    """Agent calls this on graceful shutdown."""
+    _registered_agents.pop(agent_id, None)
+    logger.info("Agent unregistered: %s", agent_id)
+    return {"ok": True}
+
+
+@router.get("/agents")
+async def list_agents_prefixed() -> list:
+    """Return all registered agents with online status (alias for /api/agents)."""
+    return await list_agents()
+
+
+@public_router.get("/api/agents")
+async def list_agents() -> list:
+    """Return all registered agents with online status (last heartbeat < 90s ago)."""
+    now = datetime.now(timezone.utc)
+    result = []
+    for a in _registered_agents.values():
+        try:
+            last = datetime.fromisoformat(a.last_seen)
+            online = (now - last).total_seconds() < 90
+        except Exception:
+            online = False
+        result.append({**a.model_dump(), "online": online})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Scan events / results (called by agent during scan execution)
+# ---------------------------------------------------------------------------
 
 
 @router.post("/scan/{scan_id}/event")
@@ -85,23 +131,20 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
     if scan is None:
         return {"ok": True}
 
-    # Keep event list capped to avoid memory growth
     scan.events.append(event)
     if len(scan.events) > 500:
         scan.events = scan.events[-500:]
 
-    # Update status and progress fields based on event phase
     progress_kwargs: dict = {}
 
     if event.phase == "init":
         if scan.status == ScanItemStatus.PENDING:
             progress_kwargs["status"] = ScanItemStatus.PENDING
 
-    elif event.phase in ("static_analysis",):
+    elif event.phase == "static_analysis":
         if scan.status in (ScanItemStatus.PENDING,):
             scan.status = ScanItemStatus.ANALYZING
             progress_kwargs["status"] = ScanItemStatus.ANALYZING
-        # candidate_index carries total candidates when static analysis is done
         if event.candidate_index is not None and "total candidate" in event.message.lower():
             scan.total_candidates = event.candidate_index
             progress_kwargs["total_candidates"] = event.candidate_index
@@ -127,14 +170,15 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
 
 @router.post("/scan/{scan_id}/finish")
 async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
-    """Agent pushes final results when the scan completes or errors."""
+    """Agent pushes final results when the scan completes, errors, or is cancelled."""
     store = get_scan_store()
 
-    final_status = (
-        ScanItemStatus.COMPLETE
-        if body.status == "complete"
-        else ScanItemStatus.ERROR
-    )
+    status_map = {
+        "complete": ScanItemStatus.COMPLETE,
+        "cancelled": ScanItemStatus.CANCELLED,
+        "error": ScanItemStatus.ERROR,
+    }
+    final_status = status_map.get(body.status, ScanItemStatus.ERROR)
 
     for vuln in body.vulnerabilities:
         store.add_vulnerability(scan_id, vuln)
@@ -149,7 +193,6 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
         clear_current_candidate=True,
     )
 
-    # Update in-memory copy then remove from running scans
     scan = _running_scans.get(scan_id)
     if scan is not None:
         scan.status = final_status
@@ -168,6 +211,39 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
         scan_id, body.status, confirmed, body.total_candidates,
     )
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Processed keys (resume support)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/scan/{scan_id}/processed")
+async def agent_report_processed(scan_id: str, body: dict) -> dict:
+    """Agent reports a successfully processed candidate key after each audit."""
+    store = get_scan_store()
+    try:
+        key = (
+            str(body["file"]),
+            int(body["line"]),
+            str(body["function"]),
+            str(body["vuln_type"]),
+        )
+        store.add_processed_key(scan_id, key)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid processed key: {e}")
+    return {"ok": True}
+
+
+@router.get("/scan/{scan_id}/processed")
+async def agent_get_processed(scan_id: str) -> list:
+    """Return all processed candidate keys for a scan (used by agent on resume)."""
+    store = get_scan_store()
+    keys = store.get_processed_keys(scan_id)
+    return [
+        {"file": f, "line": line, "function": fn, "vuln_type": vt}
+        for f, line, fn, vt in keys
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +299,7 @@ def _build_agent_zip() -> bytes:
             if file_path.is_file():
                 zf.write(file_path, filename)
 
-        # Add a setup README
-        readme = _AGENT_README.encode("utf-8")
-        zf.writestr("README.txt", readme)
+        zf.writestr("README.txt", _AGENT_README.encode("utf-8"))
 
     return buf.getvalue()
 
@@ -240,28 +314,27 @@ Setup
 
 2. Install Python 3.10+ if not already installed
 
-3. Run the agent:
+3. Run the agent daemon:
 
    Linux/macOS:
      chmod +x run_agent.sh
-     ./run_agent.sh /path/to/your/project --name "MyProject"
+     ./run_agent.sh
 
    Windows:
-     run_agent.bat C:\\path\\to\\your\\project --name "MyProject"
+     run_agent.bat
 
 Options
 -------
-  --server URL        Override server_url from agent.yaml
-  --checkers LIST     Comma-separated checker names (e.g. npd,oob,uaf)
-  --name NAME         Display name shown on the web UI
-  --dry-run           Run scan locally without sending results to server
+  --server URL          Override server_url from agent.yaml
+  --port INT            Agent HTTP listen port (default 7000)
+  --name NAME           Display name shown on the web UI
+
+Usage
+-----
+The agent daemon registers with the server and waits for scan tasks.
+Use the "新建扫描" button in the web UI to start a scan.
 
 Results appear at: <server_url> (the web interface)
-
-Feedback sync
--------------
-False-positive verdicts you mark in the web UI are automatically fetched
-by the agent on the next run and used to improve analysis accuracy.
 """
 
 

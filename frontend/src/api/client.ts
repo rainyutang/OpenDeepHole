@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { CheckerInfo, FeedbackEntry, ScanStatus, ScanStartResponse, ScanSummary, UploadResponse } from "../types";
+import type { AgentInfo, CheckerInfo, FeedbackEntry, ScanStatus, ScanStartResponse, ScanSummary } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -8,23 +8,19 @@ export async function getCheckers(): Promise<CheckerInfo[]> {
   return data;
 }
 
-export async function uploadSource(file: File): Promise<UploadResponse> {
-  const form = new FormData();
-  form.append("file", file);
-  const { data } = await api.post<UploadResponse>("/api/upload", form);
+export async function getAgents(): Promise<AgentInfo[]> {
+  const { data } = await api.get<AgentInfo[]>("/api/agents");
   return data;
 }
 
-export async function startScan(
-  projectId: string,
-  scanItems: string[],
-  feedbackIds: string[] = [],
-): Promise<ScanStartResponse> {
-  const { data } = await api.post<ScanStartResponse>("/api/scan", {
-    project_id: projectId,
-    scan_items: scanItems,
-    feedback_ids: feedbackIds,
-  });
+export async function createScan(body: {
+  agent_id: string;
+  project_path: string;
+  scan_name: string;
+  checkers: string[];
+  feedback_ids?: string[];
+}): Promise<ScanStartResponse> {
+  const { data } = await api.post<ScanStartResponse>("/api/scan", body);
   return data;
 }
 

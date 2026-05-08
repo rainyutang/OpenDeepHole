@@ -177,11 +177,32 @@ class AgentScanFinish(BaseModel):
     error_message: str | None = None
 
 
+class AgentInfo(BaseModel):
+    """Info about a registered agent."""
+    agent_id: str
+    name: str
+    ip: str
+    port: int
+    last_seen: str
+
+
+class CreateScanRequest(BaseModel):
+    """Request to create a new scan via a registered agent."""
+    agent_id: str
+    project_path: str
+    scan_name: str = ""
+    checkers: list[str]
+    feedback_ids: list[str] = []
+
+
 class ScanMeta(BaseModel):
     """扫描元数据，记录扫描配置信息。"""
     scan_items: list[str]
     created_at: str
     feedback_ids: list[str] = []
+    agent_id: str = ""
+    project_path: str = ""
+    scan_name: str = ""
 
 
 class ScanSummary(BaseModel):

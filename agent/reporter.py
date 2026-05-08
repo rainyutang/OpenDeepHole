@@ -18,17 +18,42 @@ class Reporter:
         self.dry_run = dry_run
         self._client = httpx.AsyncClient(timeout=30.0)
 
-    async def register_scan(self, project_name: str, scan_items: list[str]) -> str:
-        """Register a new scan with the server, returns scan_id."""
-        if self.dry_run:
-            import uuid
-            return uuid.uuid4().hex
+    # ---------------------------------------------------------------------------
+    # Agent registration / heartbeat
+    # ---------------------------------------------------------------------------
+
+    async def register_agent(self, port: int, name: str) -> str:
+        """Register with server, return agent_id."""
         resp = await self._client.post(
-            f"{self.server_url}/api/agent/scan",
-            json={"project_name": project_name, "scan_items": scan_items},
+            f"{self.server_url}/api/agent/register",
+            json={"port": port, "name": name},
         )
         resp.raise_for_status()
-        return resp.json()["scan_id"]
+        return resp.json()["agent_id"]
+
+    async def heartbeat(self, agent_id: str) -> None:
+        """Send heartbeat (best-effort)."""
+        try:
+            await self._client.put(
+                f"{self.server_url}/api/agent/heartbeat/{agent_id}",
+                timeout=5.0,
+            )
+        except Exception:
+            pass
+
+    async def unregister_agent(self, agent_id: str) -> None:
+        """Unregister on shutdown (best-effort)."""
+        try:
+            await self._client.delete(
+                f"{self.server_url}/api/agent/{agent_id}",
+                timeout=5.0,
+            )
+        except Exception:
+            pass
+
+    # ---------------------------------------------------------------------------
+    # Scan events / results
+    # ---------------------------------------------------------------------------
 
     async def send_event(self, scan_id: str, event: ScanEvent) -> None:
         """Push a progress event to the server (best-effort, never raises)."""
@@ -84,6 +109,38 @@ class Reporter:
                     print(f"Warning: failed to deliver results to server after 3 attempts: {e}")
                     return
                 await asyncio.sleep(2**attempt)
+
+    async def report_processed_key(
+        self, scan_id: str, file: str, line: int, function: str, vuln_type: str
+    ) -> None:
+        """Report a successfully processed candidate key (fire-and-forget)."""
+        if self.dry_run:
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/processed",
+                json={"file": file, "line": line, "function": function, "vuln_type": vuln_type},
+                timeout=5.0,
+            )
+        except Exception:
+            pass
+
+    async def get_processed_keys(self, scan_id: str) -> set[tuple[str, int, str, str]]:
+        """Fetch already-processed candidate keys for resume (skip these on restart)."""
+        if self.dry_run:
+            return set()
+        try:
+            resp = await self._client.get(
+                f"{self.server_url}/api/agent/scan/{scan_id}/processed",
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return {
+                (item["file"], int(item["line"]), item["function"], item["vuln_type"])
+                for item in resp.json()
+            }
+        except Exception:
+            return set()
 
     async def get_feedback(self, vuln_types: list[str]) -> list[FeedbackEntry]:
         """Fetch false-positive feedback entries from the server for SKILL enrichment."""
