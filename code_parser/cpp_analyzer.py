@@ -7,8 +7,10 @@ Parses C/C++ source files and populates a CodeDatabase with:
 - Global variable references (g_xxx naming convention + explicit globals)
 """
 
+import os
 import re
 from pathlib import Path
+from typing import Callable
 
 import tree_sitter_cpp
 from tree_sitter import Language, Parser
@@ -27,6 +29,19 @@ CPP_LANGUAGE = Language(tree_sitter_cpp.language())
 # File extensions to scan
 _C_CPP_EXTS = {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"}
 
+# Directories to skip during indexing (vendor, build, VCS, etc.)
+_SKIP_DIRS = {
+    ".git", ".svn", ".hg",
+    "node_modules", "vendor", "third_party", "3rdparty", "thirdparty",
+    "external", "extern", "deps",
+    "build", "cmake-build-debug", "cmake-build-release",
+    "out", "output", "_build", ".build",
+    "__pycache__", ".venv", "venv",
+}
+
+# Batch commit interval (number of files per commit)
+_COMMIT_BATCH = 50
+
 
 class CppAnalyzer:
     def __init__(self, db: CodeDatabase) -> None:
@@ -39,18 +54,40 @@ class CppAnalyzer:
     # Public API
     # ------------------------------------------------------------------
 
-    def analyze_directory(self, directory: Path) -> None:
-        """Parse all C/C++ files under *directory* and populate the DB."""
-        for ext in _C_CPP_EXTS:
-            for filepath in directory.rglob(f"*{ext}"):
-                try:
-                    rel_path = str(filepath.relative_to(directory))
-                    source = filepath.read_bytes()
-                    self.analyze_file(rel_path, source)
-                    self.db.commit()  # commit once per file — much faster than per-insert
-                except Exception:
-                    self.db.commit()  # commit whatever succeeded before the error
-                    pass  # skip unparseable files
+    def analyze_directory(
+        self,
+        directory: Path,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Parse all C/C++ files under *directory* and populate the DB.
+
+        Uses os.walk with directory pruning to skip vendor/build/VCS dirs.
+        Commits in batches for better performance on large repos.
+        """
+        # Collect all C/C++ files in one pass, pruning irrelevant dirs
+        files: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(directory):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            for fname in filenames:
+                if Path(fname).suffix in _C_CPP_EXTS:
+                    files.append(Path(dirpath) / fname)
+
+        total = len(files)
+        for idx, filepath in enumerate(files):
+            try:
+                rel_path = str(filepath.relative_to(directory))
+                source = filepath.read_bytes()
+                self.analyze_file(rel_path, source)
+            except Exception:
+                pass  # skip unparseable files
+
+            # Batch commit
+            if (idx + 1) % _COMMIT_BATCH == 0 or idx == total - 1:
+                self.db.commit()
+
+            # Progress callback (every 10 files or last file)
+            if on_progress and (idx % 10 == 0 or idx == total - 1):
+                on_progress(idx + 1, total)
 
     def analyze_file(self, rel_path: str, source: bytes) -> None:
         """Parse a single file and write results to DB."""

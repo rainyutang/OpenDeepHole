@@ -43,18 +43,22 @@
 ```bash
 docker-compose up --build
 ```
-
-**本地运行：**
-
-```bash
-pip install -r requirements.txt
-cd frontend && npm install && npm run build && cd ..
-./start.sh
+checkers/<name>/
+├── checker.yaml    # 必须：name, label, description, enabled[, mode, skill_name]
+├── SKILL.md        # opencode 模式必须：opencode skill 定义
+├── prompt.txt      # api 模式必须：LLM 系统提示词
+└── analyzer.py     # 可选：静态分析器（导出 Analyzer 类，继承 BaseAnalyzer）
 ```
 
 访问 `http://localhost:8000`
 
-### 下载并运行 Agent
+| Checker | 说明 | 模式 | 静态分析器 |
+|---------|------|------|-----------|
+| `npd` | 空指针解引用 (NPD) | opencode | 有（tree-sitter AST 分析） |
+| `oob` | 数组/缓冲区越界 (OOB) | opencode | 有 |
+| `memleak` | 异常分支内存泄漏 (MEMLEAK) | api | 有（自定义解析器） |
+| `intoverflow` | 整数翻转/溢出 (INTOVFL) | opencode | 有（多阶段追踪） |
+| `sensitive_clear` | 敏感信息未清零 (SENSITIVE_CLEAR) | opencode | 有 |
 
 **第 1 步：下载安装包**
 
@@ -161,8 +165,8 @@ name: uaf
 label: UAF
 description: "Use-After-Free 检测"
 enabled: true
-mode: "api"         # "api"（直调 LLM）或 "opencode"（使用 opencode CLI）
-single_pass: false  # api 模式：是否跳过工具调用，单轮输出结论
+# mode: opencode       # 可选，默认 opencode；设为 api 则使用 prompt.txt + LLM 直接调用
+# skill_name: uaf-audit # 可选，opencode 模式下自定义 skill 名称
 ```
 
 每个 Checker 独立配置 `mode`，同一次扫描中不同 Checker 可使用不同调用方式。
@@ -225,11 +229,26 @@ class Analyzer(BaseAnalyzer):
         project_path: Path,
         db: "CodeDatabase | None" = None,
     ) -> list[Candidate]:
+        if db is None:
+            return []
         candidates = []
-        if db:
-            for func in db.get_all_functions():
-                # 静态分析逻辑...
-                pass
+        functions = db.get_all_functions()
+        total = len(functions)
+        for idx, func in enumerate(functions):
+            # 进度回调（可选，用于前端进度条）
+            if self.on_file_progress:
+                self.on_file_progress(idx + 1, total)
+            body = func["body"] or ""
+            if not body:
+                continue
+            # ... 分析逻辑 ...
+            candidates.append(Candidate(
+                file=func["file_path"],
+                line=func["start_line"],
+                function=func["name"],
+                description="检测到可疑模式...",
+                vuln_type=self.vuln_type,
+            ))
         return candidates
 ```
 
@@ -237,8 +256,9 @@ class Analyzer(BaseAnalyzer):
 
 - 类名**必须**是 `Analyzer`
 - **必须**继承 `BaseAnalyzer`
-- `vuln_type` **必须**与 `checker.yaml` 中的 `name` 一致
-- 无 analyzer.py = 跳过静态分析，返回 0 个候选（合法）
+- `vuln_type` **必须**与 `checker.yaml` 中的 `name` 字段一致
+- `find_candidates()` 接收项目根目录路径，返回 `Iterable[Candidate]`（列表或 generator 均可）
+- 可以 `from backend.analyzers.base import BaseAnalyzer, Candidate` 一次性导入所需类
 
 **第 4 步：重启服务端**
 
@@ -246,9 +266,123 @@ class Analyzer(BaseAnalyzer):
 ./start.sh
 ```
 
-Checker 在服务端启动时自动发现，Agent 下次扫描即可使用新 Checker。
+**CodeDatabase API 参考（`code_parser/code_database.py`）：**
 
-## 配置说明
+当 `db` 参数非 `None` 时，可通过以下方法查询预构建的代码索引。所有查询方法返回 `list[sqlite3.Row]`，通过 `row["field_name"]` 访问字段。
+
+| 方法 | 说明 | 返回字段 |
+|------|------|---------|
+| `db.get_all_functions()` | 获取所有函数（按文件和行号排序） | function_id, name, signature, return_type, start_line, end_line, is_static, linkage, body, file_path |
+| `db.get_functions_by_name(name)` | 按名称精确匹配函数 | 同上 |
+| `db.get_function_body(name)` | 获取第一个匹配函数的函数体 | 返回 `str \| None` |
+| `db.get_calls_from_function(function_id)` | 查询指定函数发出的所有调用 | call_id, caller_function_id, callee_name, callee_function_id, line, column, file_path |
+| `db.get_call_sites_by_name(callee_name)` | 查询指定函数名的所有被调用点 | 同上 + caller_name |
+| `db.get_structs_by_name(name)` | 按名称查询结构体/类定义 | struct_id, name, start_line, end_line, definition, file_path |
+| `db.get_global_variables_by_name(name)` | 按名称查询全局变量 | global_var_id, name, start_line, end_line, is_extern, is_static, definition, file_path |
+| `db.get_global_variable_reference_by_name(name)` | 查询全局变量的所有引用点 | reference_id, variable_name, function_id, line, column, context, access_type, file_path, function_name |
+
+**tree-sitter 辅助工具（`code_parser/code_utils.py`）：**
+
+如需在 analyzer 中对函数体进行 AST 分析，可结合 tree-sitter 和以下辅助函数：
+
+| 函数 | 说明 |
+|------|------|
+| `find_nodes_by_type(root_node, node_type, k=0)` | 递归查找所有指定类型的节点（DFS，最大深度 100） |
+| `get_child_node_by_type(root_node, node_type: list)` | 返回第一个类型匹配的直接子节点 |
+| `get_child_nodes_by_type(root_node, node_type: list)` | 返回所有类型匹配的直接子节点 |
+| `get_child_field_text_by_type(root_node, field_name, node_type: list)` | 获取指定字段的文本（仅当字段节点类型匹配时） |
+| `get_child_field_text(root_node, field_name)` | 获取指定字段的文本 |
+
+使用示例：
+
+```python
+import tree_sitter_cpp
+from tree_sitter import Language, Parser
+from code_parser.code_utils import find_nodes_by_type
+
+_CPP = Language(tree_sitter_cpp.language())
+parser = Parser(_CPP)
+
+tree = parser.parse(func_body.encode())
+# 查找所有函数调用节点
+for call in find_nodes_by_type(tree.root_node, "call_expression"):
+    callee = call.child_by_field_name("function")
+    if callee:
+        print(callee.text.decode())
+```
+
+**常见模式：**
+
+*1. 遍历所有函数并分析*
+
+```python
+for func in db.get_all_functions():
+    name = func["name"]
+    body = func["body"] or ""
+    file_path = func["file_path"]
+    start_line = func["start_line"]
+    # 对函数体进行模式匹配或 AST 分析...
+```
+
+*2. 查询调用关系*
+
+```python
+# 查找所有 malloc 调用点
+for call in db.get_call_sites_by_name("malloc"):
+    print(f"{call['file_path']}:{call['line']} — 调用者: {call['caller_name']}")
+
+# 查找某函数内部调用的所有函数
+for call in db.get_calls_from_function(func["function_id"]):
+    print(f"  调用了 {call['callee_name']} at line {call['line']}")
+```
+
+*3. Generator 模式（流式产出）*
+
+`find_candidates` 可返回 `Iterator[Candidate]`，通过 `yield` 流式产出候选项，让 LLM 提前开始处理：
+
+```python
+from collections.abc import Iterator
+
+def find_candidates(self, project_path: Path, db=None) -> Iterator[Candidate]:
+    if db is None:
+        return
+    for func in db.get_all_functions():
+        # ... 分析 ...
+        yield Candidate(file=func["file_path"], ...)
+```
+
+*4. 进度回调*
+
+```python
+functions = db.get_all_functions()
+total = len(functions)
+for idx, func in enumerate(functions):
+    if self.on_file_progress and idx % 20 == 0:  # 每 20 个函数更新一次
+        self.on_file_progress(idx + 1, total)
+```
+
+*5. 不依赖 db 的分析*
+
+也可跳过 db，直接遍历文件系统进行自定义解析（如 memleak checker）：
+
+```python
+def find_candidates(self, project_path: Path, db=None) -> list[Candidate]:
+    candidates = []
+    for src in project_path.rglob("*.c"):
+        source = src.read_bytes()
+        tree = self._parser.parse(source)
+        # 自定义 AST 分析...
+    return candidates
+```
+
+**实现建议：**
+
+- 推荐使用 `db` 查询而非直接遍历文件系统（性能更好，且与 MCP Server 共享同一索引）
+- Generator 模式适合耗时较长的分析器，可让 LLM 提前开始处理已发现的候选项
+- `on_file_progress` 回调用于前端进度条显示，建议在循环中定期调用
+- `description` 字段尽可能详细，它会作为 prompt 的一部分传递给 AI
+- `mode: api` 的 checker 使用 `prompt.txt` 而非 `SKILL.md`，适用于无需 MCP 工具的场景
+- 返回空列表是合法的，表示未找到候选点
 
 ### 服务端 config.yaml
 
@@ -336,10 +470,14 @@ OpenDeepHole/
 ├── checkers/              # 插件目录（每种漏洞类型一个子目录）
 │   ├── npd/               # checker.yaml + SKILL.md/prompt.txt + analyzer.py
 │   ├── oob/
-│   ├── uaf/
+│   ├── memleak/
 │   ├── intoverflow/
-│   └── memleak/
-├── code_parser/           # 共享 C/C++ 代码解析器（tree-sitter + SQLite）
+│   └── sensitive_clear/
+├── code_parser/           # 共享 C/C++ 代码解析器
+│   ├── code_database.py   # SQLite 代码索引（函数/结构体/全局变量/调用关系）
+│   ├── cpp_analyzer.py    # tree-sitter C++ 解析器
+│   ├── code_utils.py      # tree-sitter 节点遍历辅助函数
+│   └── code_struct.py     # 解析结果数据类
 ├── frontend/              # React + TypeScript + Vite + Tailwind CSS
 ├── backend/
 │   ├── api/

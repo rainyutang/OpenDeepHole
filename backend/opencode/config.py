@@ -14,6 +14,9 @@ from backend.registry import get_registry
 
 logger = get_logger(__name__)
 
+# Subdirectories in checker dirs that should be symlinked into the workspace
+_SKILL_RESOURCE_DIRS = {"references", "scripts", "assets"}
+
 
 def create_scan_workspace(
     scan_id: str,
@@ -113,20 +116,8 @@ def _link_skills(
 
     registry = get_registry()
     for name, entry in registry.items():
-        if not entry.skill_path.is_file():
-            logger.warning("SKILL.md not found for checker %s", name)
-            continue
-
-        link_dir = skills_target / name
-        link_dir.mkdir(exist_ok=True)
-
-        skill_dest = link_dir / "SKILL.md"
-        if skill_dest.exists():
-            os.remove(skill_dest)
-
+        # 构建反馈内容（API 和 opencode 模式共用）
         fp_section: str | None = None
-
-        # Prefer structured feedback entries
         if name in fp_by_type:
             lines = []
             for fb in fp_by_type[name]:
@@ -135,10 +126,42 @@ def _link_skills(
                 )
             fp_section = "".join(lines)
         elif fp_dir:
-            # Legacy: read from flat file
             fp_file = fp_dir / f"{name}.md"
             if fp_file.is_file():
                 fp_section = fp_file.read_text(encoding="utf-8")
+
+        link_dir = skills_target / name
+        link_dir.mkdir(exist_ok=True)
+
+        # API 模式：将 prompt.txt（合并反馈）写入 PROMPT.md
+        if entry.mode == "api":
+            if entry.prompt_path and entry.prompt_path.is_file():
+                prompt_dest = link_dir / "PROMPT.md"
+                if prompt_dest.exists():
+                    os.remove(prompt_dest)
+                original = entry.prompt_path.read_text(encoding="utf-8")
+                if fp_section:
+                    merged = (
+                        original.rstrip()
+                        + "\n\n## 历史误报经验\n\n"
+                        + "以下是用户在审计过程中确认的误报案例，"
+                        + "分析时应参考这些经验避免重复误判：\n"
+                        + fp_section
+                    )
+                    prompt_dest.write_text(merged, encoding="utf-8")
+                    logger.debug("Merged FP experience into prompt for checker %s", name)
+                else:
+                    prompt_dest.write_text(original, encoding="utf-8")
+            continue
+
+        # opencode 模式：原有 SKILL.md 逻辑
+        if not entry.skill_path.is_file():
+            logger.warning("SKILL.md not found for checker %s", name)
+            continue
+
+        skill_dest = link_dir / "SKILL.md"
+        if skill_dest.exists():
+            os.remove(skill_dest)
 
         if fp_section:
             original = entry.skill_path.read_text(encoding="utf-8")
@@ -153,6 +176,15 @@ def _link_skills(
             logger.debug("Merged FP experience into skill for checker %s", name)
         else:
             shutil.copy2(entry.skill_path, skill_dest)
+
+        # Symlink whitelisted resource directories (references, scripts, assets)
+        for dir_name in _SKILL_RESOURCE_DIRS:
+            src = entry.directory / dir_name
+            if src.is_dir():
+                link_dest = link_dir / dir_name
+                if link_dest.exists() or link_dest.is_symlink():
+                    os.remove(link_dest)
+                link_dest.symlink_to(src.resolve())
 
     logger.debug("Linked skills for %d checkers", len(registry))
 
@@ -179,8 +211,11 @@ def cleanup_workspace(workspace: Path) -> None:
 
 
 def get_skill_content(workspace: Path, vuln_type: str) -> str | None:
-    """Read the current SKILL.md content for a given vuln_type from a workspace."""
-    skill_path = workspace / ".opencode" / "skills" / vuln_type / "SKILL.md"
-    if skill_path.is_file():
-        return skill_path.read_text(encoding="utf-8")
+    """Read the current SKILL/PROMPT content for a given vuln_type from a workspace."""
+    skill_dir = workspace / ".opencode" / "skills" / vuln_type
+    # 优先 SKILL.md（opencode 模式），其次 PROMPT.md（API 模式）
+    for filename in ("SKILL.md", "PROMPT.md"):
+        path = skill_dir / filename
+        if path.is_file():
+            return path.resolve().read_text(encoding="utf-8")
     return None

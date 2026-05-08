@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentRemoteConfig, CheckerInfo, FeedbackEntry, ScanStatus, ScanStartResponse, ScanSummary } from "../types";
+import type { CheckerInfo, FeedbackEntry, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, UploadResponse } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -13,14 +13,21 @@ export async function getAgents(): Promise<AgentInfo[]> {
   return data;
 }
 
-export async function createScan(body: {
-  agent_id: string;
-  project_path: string;
-  scan_name: string;
-  checkers: string[];
-  feedback_ids?: string[];
-}): Promise<ScanStartResponse> {
-  const { data } = await api.post<ScanStartResponse>("/api/scan", body);
+export async function getIndexStatus(projectId: string): Promise<IndexStatus> {
+  const { data } = await api.get<IndexStatus>(`/api/project/${projectId}/index-status`);
+  return data;
+}
+
+export async function startScan(
+  projectId: string,
+  scanItems: string[],
+  feedbackIds: string[] = [],
+): Promise<ScanStartResponse> {
+  const { data } = await api.post<ScanStartResponse>("/api/scan", {
+    project_id: projectId,
+    scan_items: scanItems,
+    feedback_ids: feedbackIds,
+  });
   return data;
 }
 

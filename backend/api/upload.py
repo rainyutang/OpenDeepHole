@@ -25,17 +25,39 @@ def _parse_project(project_id: str, project_dir: Path) -> None:
     status_path = project_dir / "parse_status.json"
     db_path = project_dir / "code_index.db"
 
-    status_path.write_text(json.dumps({"status": "parsing"}))
+    status_path.write_text(json.dumps({"status": "parsing", "parsed_files": 0, "total_files": 0}))
     try:
         db = CodeDatabase(db_path)
         analyzer = CppAnalyzer(db)
-        analyzer.analyze_directory(project_dir)
+
+        def _on_progress(current: int, total: int) -> None:
+            status_path.write_text(json.dumps({
+                "status": "parsing",
+                "parsed_files": current,
+                "total_files": total,
+            }))
+
+        analyzer.analyze_directory(project_dir, on_progress=_on_progress)
         db.close()
         status_path.write_text(json.dumps({"status": "done"}))
         logger.info("Project %s: code index built at %s", project_id, db_path)
     except Exception as exc:
         logger.exception("Project %s: code indexing failed", project_id)
         status_path.write_text(json.dumps({"status": "error", "error": str(exc)}))
+
+
+@router.get("/api/project/{project_id}/index-status")
+async def get_index_status(project_id: str) -> dict:
+    """Return the current code indexing progress for a project."""
+    config = get_config()
+    project_dir = Path(config.storage.projects_dir) / project_id
+    status_path = project_dir / "parse_status.json"
+    if not status_path.exists():
+        return {"status": "not_started"}
+    try:
+        return json.loads(status_path.read_text())
+    except Exception:
+        return {"status": "unknown"}
 
 
 @router.post("/api/upload", response_model=UploadResponse)
