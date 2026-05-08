@@ -30,13 +30,12 @@ class OpenCodeConfig:
 @dataclass
 class AgentConfig:
     server_url: str = "http://localhost:8000"
+    agent_port: int = 7000
+    agent_name: str = ""
+    no_proxy: str = ""
     checkers: list = field(default_factory=list)
-    mode: str = "api"  # "api" | "opencode"
     llm_api: LLMApiConfig = field(default_factory=LLMApiConfig)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
-    agent_port: int = 7000
-    agent_name: str = ""  # defaults to hostname
-    no_proxy: str = ""
 
 
 def load_config(path: Optional[Path] = None) -> AgentConfig:
@@ -64,11 +63,10 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
     return AgentConfig(
         server_url=raw.get("server_url", "http://localhost:8000"),
-        checkers=raw.get("checkers", []),
-        mode=raw.get("mode", "api"),
-        llm_api=LLMApiConfig(**llm_raw),
-        opencode=OpenCodeConfig(**oc_raw),
         agent_port=raw.get("agent_port", 7000),
         agent_name=raw.get("agent_name", ""),
         no_proxy=raw.get("no_proxy", ""),
+        checkers=raw.get("checkers", []),
+        llm_api=LLMApiConfig(**llm_raw),
+        opencode=OpenCodeConfig(**oc_raw),
     )

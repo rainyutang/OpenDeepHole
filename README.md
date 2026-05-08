@@ -1,6 +1,6 @@
 # OpenDeepHole
 
-基于 SKILL 的 C/C++ 源码白盒审计工具。核心漏洞挖掘在用户本地执行，结果汇报到 Web 服务器统一展示。
+基于 SKILL 的 C/C++ 源码白盒审计工具。核心漏洞挖掘在用户本地 Agent 上执行，源码不离开本机，结果汇报到 Web 服务器统一展示。
 
 ## 整体架构
 
@@ -8,20 +8,31 @@
 [服务器端]
   FastAPI (port 8000)
   ├── Web UI（React + Tailwind CSS）
-  ├── 接收 Agent 上报的扫描结果
+  ├── 接收 Agent 注册、心跳、扫描事件、扫描结果
   ├── 存储扫描历史和误报反馈
+  ├── 向 Agent 下发扫描任务（新建扫描时推送）
   └── 提供 Agent 下载包
 
 [用户本地]
-  opendeephole-agent（从 Web UI 下载）
-  ├── 代码索引（tree-sitter → SQLite）
-  ├── 静态分析（checker 插件）
-  ├── AI 审计（直接调 LLM API 或本地 opencode CLI）
-  └── 将漏洞结果上报服务器
+  opendeephole-agent（守护进程，从 Web UI 下载）
+  ├── 启动后向服务器注册，保持心跳
+  ├── 等待服务器推送扫描任务
+  ├── 收到任务后：代码索引 → 静态分析 → AI 审计
+  └── 实时将事件和漏洞结果上报服务器
+```
+
+**交互流程：**
+
+```
+用户在 Web UI 点击「新建扫描」
+  → 选择在线 Agent、填写代码路径（Agent 所在机器的路径）、选择检查项
+  → 服务器推送任务到 Agent
+  → Agent 在本地执行完整扫描流程
+  → 进度和结果实时显示在 Web UI
 ```
 
 **源码不离开本地**：Agent 只上报漏洞分析结论，不上传源码文件。  
-**误报反馈闭环**：用户在 Web UI 标记误报后，Agent 下次运行时自动拉取这些经验，注入 SKILL 中减少重复误报。
+**误报反馈闭环**：用户在 Web UI 标记误报后，Agent 下次扫描前自动拉取这些经验，注入 SKILL 中减少重复误报。
 
 ## 快速开始
 
@@ -45,46 +56,84 @@ cd frontend && npm install && npm run build && cd ..
 
 ### 下载并运行 Agent
 
-1. 打开 Web UI，点击右上角 **「下载 Agent」**，保存 `opendeephole-agent.zip`
+**第 1 步：下载安装包**
 
-2. 解压，编辑 `agent.yaml`：
+打开 Web UI，点击右上角 **「下载 Agent」**，保存 `opendeephole-agent.zip`，解压到本地目录。
+
+**第 2 步：配置 agent.yaml**
 
 ```yaml
+# Web Server 地址
 server_url: "http://your-server:8000"
 
-mode: "api"   # 直调 LLM API（推荐）；或 "opencode"（需本地安装 opencode CLI）
+# Agent 监听端口（确保防火墙放行）
+agent_port: 7000
 
+# Agent 显示名称（显示在新建扫描的下拉列表中）
+agent_name: "my-agent"
+
+# LLM API 配置（供 mode: api 的检查项使用）
 llm_api:
   base_url: "https://api.anthropic.com"
   api_key: "your-api-key-here"
   model: "claude-sonnet-4-6"
+
+# opencode CLI 配置（供 mode: opencode 的检查项使用）
+opencode:
+  executable: "opencode"
+  timeout: 300
 ```
 
-3. 运行 Agent：
+> 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
+
+**第 3 步：启动 Agent 守护进程**
 
 ```bash
 # Linux / macOS
 chmod +x run_agent.sh
-./run_agent.sh /path/to/your/project --name "MyProject"
+./run_agent.sh
 
 # Windows
-run_agent.bat C:\path\to\your\project --name "MyProject"
+run_agent.bat
 ```
 
-4. 回到 Web UI 查看实时扫描进度和漏洞结果。
-
-### Agent 命令行参数
+启动成功后，终端输出类似：
 
 ```
-./run_agent.sh <项目路径> [选项]
+OpenDeepHole Agent Daemon
+  Name    : my-agent
+  Server  : http://your-server:8000
+  Port    : 7000
+
+  Registered as agent_id: a1b2c3d4...
+```
+
+Agent 常驻后台等待任务，无需每次手动启动。
+
+**第 4 步：在 Web UI 创建扫描任务**
+
+1. 点击右上角「新建扫描」
+2. 从下拉列表选择已在线的 Agent
+3. 填写代码路径（Agent 所在机器上的绝对路径，如 `/home/user/myproject`）
+4. 选择要运行的检查项，点击「开始扫描」
+5. 扫描进度实时显示在当前页面
+
+### Agent 启动参数
+
+```
+./run_agent.sh [选项]
 
 选项：
   --server URL        覆盖 agent.yaml 中的 server_url
-  --checkers LIST     指定 checker，逗号分隔，如 npd,oob,uaf
-  --name NAME         扫描在 Web UI 显示的名称（默认为目录名）
+  --port INT          覆盖监听端口（默认 7000）
+  --name NAME         覆盖 Agent 显示名称
   --config FILE       指定配置文件路径（默认 ./agent.yaml）
-  --dry-run           本地执行，不向服务器上报结果
 ```
+
+### 停止与恢复扫描
+
+- **停止**：在扫描详情页点击「停止扫描」，服务器直接通知 Agent 停止。当前候选处理完成后立即停止，已处理的结果保留。
+- **恢复**：在扫描列表页点击「恢复」，服务器通知 Agent 继续同一扫描任务，自动跳过已处理的候选，从断点继续。无需重新启动 Agent 或重新索引代码。
 
 ## 误报反馈机制
 
@@ -115,6 +164,8 @@ enabled: true
 mode: "api"         # "api"（直调 LLM）或 "opencode"（使用 opencode CLI）
 single_pass: false  # api 模式：是否跳过工具调用，单轮输出结论
 ```
+
+每个 Checker 独立配置 `mode`，同一次扫描中不同 Checker 可使用不同调用方式。
 
 **内置 Checker：**
 
@@ -195,7 +246,7 @@ class Analyzer(BaseAnalyzer):
 ./start.sh
 ```
 
-Checker 在服务端启动时自动发现，Agent 下次运行即可使用新 Checker。
+Checker 在服务端启动时自动发现，Agent 下次扫描即可使用新 Checker。
 
 ## 配置说明
 
@@ -209,7 +260,6 @@ server:
 storage:
   projects_dir: "/tmp/opendeephole/projects"
   scans_dir: "/tmp/opendeephole/scans"
-  max_upload_size_mb: 2048
 
 logging:
   level: "INFO"
@@ -219,20 +269,34 @@ logging:
 ### Agent agent.yaml
 
 ```yaml
+# Web Server 地址
 server_url: "http://your-server:8000"
-mode: "api"            # "api" 或 "opencode"
-checkers: []           # 空列表 = 运行所有已启用 checker
 
-llm_api:               # mode: "api" 时使用
+# Agent 守护进程监听端口
+agent_port: 7000
+
+# Agent 显示名称（留空则使用主机名）
+agent_name: ""
+
+# 代理跳过列表，逗号分隔
+no_proxy: ""
+
+# 要运行的检查项，留空则运行全部已启用的检查项
+checkers: []
+
+# LLM API 配置（供 mode: api 的检查项使用）
+llm_api:
   base_url: "https://api.anthropic.com"
-  api_key: "your-api-key"
+  api_key: "your-api-key-here"
   model: "claude-sonnet-4-6"
   temperature: 0.1
   timeout: 120
   max_retries: 3
 
-opencode:              # mode: "opencode" 时使用
-  model: ""            # 空 = 使用 opencode 默认模型
+# opencode CLI 配置（供 mode: opencode 的检查项使用）
+opencode:
+  executable: "opencode"
+  model: ""      # 留空则使用 opencode 默认模型
   timeout: 300
 ```
 
@@ -263,10 +327,12 @@ tail -f logs/opendeephole.log
 OpenDeepHole/
 ├── agent/                 # 本地 Agent Python 包
 │   ├── config.py          # agent.yaml 配置加载
-│   ├── reporter.py        # 向服务器上报进度和结果
+│   ├── main.py            # 守护进程入口（启动 uvicorn + 注册 + 心跳）
+│   ├── server.py          # Agent HTTP 服务（接收任务、停止、恢复）
+│   ├── task_manager.py    # 任务生命周期管理（创建/停止/恢复）
 │   ├── scanner.py         # 完整扫描流程（索引→静态分析→AI审计→上报）
-│   ├── local_mcp.py       # opencode 模式：本地启动 MCP Server
-│   └── main.py            # CLI 入口
+│   ├── reporter.py        # 向服务器上报进度和结果
+│   └── local_mcp.py       # opencode 模式：本地启动 MCP Server
 ├── checkers/              # 插件目录（每种漏洞类型一个子目录）
 │   ├── npd/               # checker.yaml + SKILL.md/prompt.txt + analyzer.py
 │   ├── oob/
@@ -277,8 +343,8 @@ OpenDeepHole/
 ├── frontend/              # React + TypeScript + Vite + Tailwind CSS
 ├── backend/
 │   ├── api/
-│   │   ├── agent.py       # Agent 专用 API（注册扫描/上报结果/下载包）
-│   │   ├── scan.py        # 扫描管理 API
+│   │   ├── agent.py       # Agent 专用 API（注册/心跳/注销/任务下发/结果接收/下载包）
+│   │   ├── scan.py        # 扫描管理 API（新建/停止/恢复/查询）
 │   │   ├── feedback.py    # 误报反馈 CRUD
 │   │   └── checkers.py    # Checker 列表 API
 │   ├── registry.py        # Checker 自动发现与注册
@@ -286,8 +352,8 @@ OpenDeepHole/
 │   └── opencode/          # opencode CLI + LLM API 集成
 ├── mcp_server/            # MCP Server（Agent opencode 模式本地启动）
 ├── agent.yaml             # Agent 配置模板
-├── run_agent.sh           # Agent 启动脚本（Linux/macOS）
-├── run_agent.bat          # Agent 启动脚本（Windows）
+├── run_agent.sh           # Agent 守护进程启动脚本（Linux/macOS）
+├── run_agent.bat          # Agent 守护进程启动脚本（Windows）
 ├── requirements-agent.txt # Agent 最小依赖
 ├── config.yaml            # 服务端全局配置
 ├── start.sh               # 服务端一键启动脚本

@@ -20,7 +20,7 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
     modules use the agent's settings (LLM API key, scans_dir, etc.)."""
     raw = {
         "llm_api": {
-            "enabled": config.mode == "api",
+            "enabled": True,  # per-checker mode in checker.yaml controls api vs opencode
             "base_url": config.llm_api.base_url,
             "api_key": config.llm_api.api_key,
             "model": config.llm_api.model,
@@ -95,9 +95,7 @@ async def run_scan(
 
         await emit("init", f"Scan started: {scan_name}")
         await emit("init", f"Project: {project_path}")
-        await emit("init", f"Mode: {config.mode}, Checkers: {checker_names or 'all'}")
-        if is_resume:
-            await emit("init", "Mode: resume (skipping already-processed candidates)")
+        await emit("init", f"Checkers: {checker_names or 'all'}" + (" (resume)" if is_resume else ""))
 
         # Load checker registry (discovers from bundled checkers/ dir)
         from backend.registry import get_registry
@@ -131,9 +129,10 @@ async def run_scan(
         if feedback_entries:
             await emit("init", f"Fetched {len(feedback_entries)} feedback entries from server")
 
-        # --- Phase 3: Start local MCP (opencode mode only) ---
+        # --- Phase 3: Start local MCP (needed by any opencode-mode checker) ---
         mcp_port = None
-        if config.mode == "opencode":
+        needs_opencode = any(entry.mode == "opencode" for entry in registry.values())
+        if needs_opencode:
             from agent.local_mcp import LocalMCPServer
             mcp_server = LocalMCPServer()
             mcp_port = mcp_server.start()
@@ -216,26 +215,14 @@ async def run_scan(
 
             vuln: Optional[Vulnerability] = None
             try:
-                if config.mode == "api":
-                    from backend.opencode.llm_api_runner import run_audit_via_api
-                    entry = registry.get(candidate.vuln_type)
-                    prompt_path = entry.prompt_path if entry else None
-                    vuln = await run_audit_via_api(
-                        candidate,
-                        scan_id,
-                        prompt_path=prompt_path,
-                        on_output=None,
-                        cancel_event=None,
-                    )
-                else:
-                    from backend.opencode.runner import run_audit
-                    vuln = await run_audit(
-                        workspace,
-                        candidate,
-                        scan_id,
-                        on_output=None,
-                        cancel_event=None,
-                    )
+                from backend.opencode.runner import run_audit
+                vuln = await run_audit(
+                    workspace,
+                    candidate,
+                    scan_id,
+                    on_output=None,
+                    cancel_event=None,
+                )
             except Exception as exc:
                 await emit("auditing", f"[{global_index + 1}] Analysis error: {exc}", candidate_index=global_index)
 

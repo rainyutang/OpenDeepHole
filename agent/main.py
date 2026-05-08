@@ -63,17 +63,10 @@ async def _main() -> None:
     port = config.agent_port
     name = config.agent_name or socket.gethostname()
 
-    # Validate config
-    if config.mode == "api" and not config.llm_api.api_key:
-        print("Warning: llm_api.api_key is not set in agent.yaml")
-    if config.mode == "api" and not config.llm_api.base_url:
-        print("Warning: llm_api.base_url is not set in agent.yaml")
-
     print(f"OpenDeepHole Agent Daemon")
     print(f"  Name    : {name}")
     print(f"  Server  : {config.server_url}")
     print(f"  Port    : {port}")
-    print(f"  Mode    : {config.mode}")
     print()
 
     from agent.reporter import Reporter
