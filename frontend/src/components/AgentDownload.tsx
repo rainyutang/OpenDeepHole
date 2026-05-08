@@ -1,11 +1,247 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { getAgents, getAgentConfig, updateAgentConfig } from "../api/client";
+import type { AgentInfo, AgentRemoteConfig } from "../types";
 
 interface Props {
   onBack: () => void;
 }
 
+const DEFAULT_CONFIG: AgentRemoteConfig = {
+  no_proxy: "",
+  llm_api: {
+    base_url: "https://api.anthropic.com",
+    api_key: "",
+    model: "claude-sonnet-4-6",
+    temperature: 0.1,
+    timeout: 120,
+    max_retries: 3,
+  },
+  opencode: {
+    executable: "opencode",
+    model: "",
+    timeout: 300,
+  },
+};
+
+function deepClone<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+interface AgentConfigPanelProps {
+  agent: AgentInfo;
+}
+
+function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
+  const [open, setOpen] = useState(false);
+  const [cfg, setCfg] = useState<AgentRemoteConfig>(deepClone(DEFAULT_CONFIG));
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleOpen = async () => {
+    setOpen(true);
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getAgentConfig(agent.agent_id);
+      setCfg(data);
+    } catch {
+      setError("加载配置失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await updateAgentConfig(agent.agent_id, cfg);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      setError("保存失败，请重试");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const setLLM = (key: keyof AgentRemoteConfig["llm_api"], value: string | number) => {
+    setCfg((prev) => ({ ...prev, llm_api: { ...prev.llm_api, [key]: value } }));
+  };
+
+  const setOC = (key: keyof AgentRemoteConfig["opencode"], value: string | number) => {
+    setCfg((prev) => ({ ...prev, opencode: { ...prev.opencode, [key]: value } }));
+  };
+
+  return (
+    <div className="bg-slate-800/60 border border-slate-700 rounded-xl overflow-hidden">
+      {/* Agent row */}
+      <div className="flex items-center gap-3 px-4 py-3">
+        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${agent.online ? "bg-green-400" : "bg-slate-500"}`} />
+        <div className="flex-1 min-w-0">
+          <span className="text-sm font-medium text-white">{agent.name}</span>
+          <span className="ml-2 text-xs text-slate-400">{agent.ip}:{agent.port}</span>
+        </div>
+        <span className={`text-xs px-2 py-0.5 rounded border mr-2 ${
+          agent.online
+            ? "bg-green-500/20 text-green-400 border-green-500/30"
+            : "bg-slate-700 text-slate-500 border-slate-600"
+        }`}>
+          {agent.online ? "在线" : "离线"}
+        </span>
+        <button
+          onClick={open ? () => setOpen(false) : handleOpen}
+          className="px-3 py-1.5 text-xs font-medium bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors flex items-center gap-1"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+          配置
+        </button>
+      </div>
+
+      {/* Config form */}
+      {open && (
+        <div className="border-t border-slate-700 px-4 py-4">
+          {loading ? (
+            <div className="flex justify-center py-6">
+              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {/* LLM API */}
+              <div>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">LLM API 配置</h3>
+                <div className="grid grid-cols-1 gap-3">
+                  <Field label="API 地址" hint="OpenAI 兼容接口">
+                    <input type="text" value={cfg.llm_api.base_url}
+                      onChange={(e) => setLLM("base_url", e.target.value)}
+                      className={inputCls} placeholder="https://api.anthropic.com" />
+                  </Field>
+                  <Field label="API Key">
+                    <input type="password" value={cfg.llm_api.api_key}
+                      onChange={(e) => setLLM("api_key", e.target.value)}
+                      className={inputCls} placeholder="sk-..." />
+                  </Field>
+                  <Field label="模型">
+                    <input type="text" value={cfg.llm_api.model}
+                      onChange={(e) => setLLM("model", e.target.value)}
+                      className={inputCls} placeholder="claude-sonnet-4-6" />
+                  </Field>
+                  <div className="grid grid-cols-3 gap-3">
+                    <Field label="超时（秒）">
+                      <input type="number" value={cfg.llm_api.timeout}
+                        onChange={(e) => setLLM("timeout", Number(e.target.value))}
+                        className={inputCls} min={10} />
+                    </Field>
+                    <Field label="最大重试">
+                      <input type="number" value={cfg.llm_api.max_retries}
+                        onChange={(e) => setLLM("max_retries", Number(e.target.value))}
+                        className={inputCls} min={0} max={10} />
+                    </Field>
+                    <Field label="Temperature">
+                      <input type="number" value={cfg.llm_api.temperature}
+                        onChange={(e) => setLLM("temperature", Number(e.target.value))}
+                        className={inputCls} min={0} max={2} step={0.1} />
+                    </Field>
+                  </div>
+                </div>
+              </div>
+
+              {/* opencode */}
+              <div>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">opencode 配置</h3>
+                <div className="grid grid-cols-1 gap-3">
+                  <Field label="可执行文件" hint="CLI 名称或完整路径">
+                    <input type="text" value={cfg.opencode.executable}
+                      onChange={(e) => setOC("executable", e.target.value)}
+                      className={inputCls} placeholder="opencode" />
+                  </Field>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="模型" hint="留空使用默认">
+                      <input type="text" value={cfg.opencode.model}
+                        onChange={(e) => setOC("model", e.target.value)}
+                        className={inputCls} placeholder="（默认）" />
+                    </Field>
+                    <Field label="超时（秒）">
+                      <input type="number" value={cfg.opencode.timeout}
+                        onChange={(e) => setOC("timeout", Number(e.target.value))}
+                        className={inputCls} min={30} />
+                    </Field>
+                  </div>
+                </div>
+              </div>
+
+              {/* no_proxy */}
+              <div>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">网络</h3>
+                <Field label="代理跳过列表" hint="逗号分隔，如 localhost,10.0.0.0/8">
+                  <input type="text" value={cfg.no_proxy}
+                    onChange={(e) => setCfg((prev) => ({ ...prev, no_proxy: e.target.value }))}
+                    className={inputCls} placeholder="localhost,127.0.0.1" />
+                </Field>
+              </div>
+
+              {error && (
+                <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                  {error}
+                </p>
+              )}
+
+              <div className="flex justify-end gap-2 pt-1">
+                <button onClick={() => setOpen(false)}
+                  className="px-4 py-1.5 text-sm text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors">
+                  关闭
+                </button>
+                <button onClick={handleSave} disabled={saving}
+                  className="px-4 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg transition-colors">
+                  {saving ? "保存中…" : saved ? "已保存 ✓" : "保存配置"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const inputCls =
+  "w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors";
+
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-slate-300 mb-1">
+        {label}
+        {hint && <span className="ml-1 text-slate-500 font-normal">— {hint}</span>}
+      </label>
+      {children}
+    </div>
+  );
+}
+
 export default function AgentDownload({ onBack }: Props) {
   const [downloading, setDownloading] = useState(false);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+
+  useEffect(() => {
+    getAgents().then(setAgents).catch(() => {});
+    const id = setInterval(() => getAgents().then(setAgents).catch(() => {}), 10000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleDownload = async () => {
     setDownloading(true);
@@ -42,13 +278,29 @@ export default function AgentDownload({ onBack }: Props) {
             </svg>
             返回
           </button>
-          <h1 className="text-xl font-bold text-white">下载 Agent</h1>
+          <h1 className="text-xl font-bold text-white">Agent 管理</h1>
+        </div>
+
+        {/* 已连接 Agent */}
+        <div className="mb-6">
+          <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">已连接 Agent</h2>
+          {agents.length === 0 ? (
+            <div className="bg-slate-800/40 border border-slate-700 rounded-xl px-5 py-4 text-sm text-slate-500">
+              暂无 Agent 连接到本服务器。下载并启动 Agent 后，它将自动出现在这里。
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {agents.map((a) => (
+                <AgentConfigPanel key={a.agent_id} agent={a} />
+              ))}
+            </div>
+          )}
         </div>
 
         {/* 简介 */}
         <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5 mb-5">
           <p className="text-slate-300 text-sm leading-relaxed">
-            Agent 是运行在你本地机器上的常驻服务程序。它启动后向 Web Server 注册，由 Web 端「新建扫描」下发任务，在本地执行代码索引、静态分析和 AI 审计，仅将漏洞结果回传到服务端展示。<span className="text-slate-400">源代码始终不离开本机。</span>
+            Agent 是运行在你本地机器上的常驻服务程序。启动后向本服务器注册，由 Web 端「新建扫描」下发任务，在本地执行代码索引、静态分析和 AI 审计，仅将漏洞结果回传到服务端展示。<span className="text-slate-400">源代码始终不离开本机。</span>
           </p>
         </div>
 
@@ -65,42 +317,15 @@ export default function AgentDownload({ onBack }: Props) {
           >
             {downloading ? "正在下载..." : "下载 opendeephole-agent.zip"}
           </button>
-          <p className="text-slate-500 text-xs mt-3">解压后即可使用，无需编译。需要 Python 3.10+。</p>
+          <p className="text-slate-500 text-xs mt-3">
+            解压后即可使用，无需编译。需要 Python 3.10+。下载包中 <code className="text-blue-400">agent.yaml</code> 已自动填入本服务器地址 <code className="text-blue-400">{origin}</code>。
+          </p>
         </div>
 
-        {/* 第二步：配置 */}
+        {/* 第二步：启动 */}
         <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5 mb-5">
           <h2 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
             <span className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold">2</span>
-            编辑 <code className="text-blue-400 font-mono">agent.yaml</code>
-          </h2>
-          <p className="text-slate-400 text-sm mb-3">解压后修改以下关键配置项：</p>
-          <pre className="bg-slate-900 border border-slate-700 rounded-lg p-4 text-sm text-slate-300 overflow-x-auto leading-relaxed">{`# Web Server 地址（本服务的访问地址）
-server_url: "${origin}"
-
-# Agent 监听端口（默认 7000，确保防火墙放行）
-agent_port: 7000
-
-# Agent 显示名称（在新建扫描的下拉列表中显示）
-agent_name: "my-agent"
-
-# LLM API 配置（供 mode: api 的检查项使用）
-# 各检查项的调用方式在其 checker.yaml 中独立配置
-llm_api:
-  base_url: "https://api.anthropic.com"
-  api_key: "your-api-key-here"
-  model: "claude-sonnet-4-6"
-
-# opencode CLI 配置（供 mode: opencode 的检查项使用）
-opencode:
-  executable: "opencode"
-  timeout: 300`}</pre>
-        </div>
-
-        {/* 第三步：启动 */}
-        <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5 mb-5">
-          <h2 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
-            <span className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold">3</span>
             启动 Agent 守护进程
           </h2>
 
@@ -115,7 +340,7 @@ opencode:
             <pre className="bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-green-400 overflow-x-auto">{`run_agent.bat`}</pre>
           </div>
 
-          <p className="text-slate-400 text-sm mb-2">启动成功后，Agent 会自动注册到 Server，终端输出类似：</p>
+          <p className="text-slate-400 text-sm mb-2">启动成功后，Agent 自动注册到本服务器，终端输出类似：</p>
           <pre className="bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs text-slate-400 overflow-x-auto">{`OpenDeepHole Agent Daemon
   Name    : my-agent
   Server  : ${origin}
@@ -123,13 +348,23 @@ opencode:
 
   Registered as agent_id: a1b2c3d4...`}</pre>
 
-          <div className="mt-4 pt-4 border-t border-slate-700">
-            <p className="text-slate-400 text-xs mb-2 font-medium">可选启动参数：</p>
-            <pre className="bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs text-slate-400 overflow-x-auto">{`  --server URL    覆盖 agent.yaml 中的 server_url
-  --port INT      覆盖监听端口（默认 7000）
-  --name NAME     覆盖 Agent 显示名称
-  --config FILE   指定 agent.yaml 路径`}</pre>
-          </div>
+          <p className="text-slate-400 text-xs mt-3">
+            可选：在 <code className="text-blue-400">agent.yaml</code> 中修改 <code className="text-blue-400">agent_name</code>（显示名称）和 <code className="text-blue-400">agent_port</code>（监听端口，默认 7000）。LLM API 等其他配置可在此页面直接配置，无需手动编辑文件。
+          </p>
+        </div>
+
+        {/* 第三步：配置 */}
+        <div className="bg-slate-800/60 border border-slate-700 rounded-xl p-5 mb-5">
+          <h2 className="text-base font-semibold text-white mb-4 flex items-center gap-2">
+            <span className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center font-bold">3</span>
+            在此页面配置 Agent
+          </h2>
+          <p className="text-slate-300 text-sm mb-2">
+            Agent 启动并连接后，会在顶部「已连接 Agent」列表中出现。点击对应 Agent 的「配置」按钮，填写 LLM API Key 等信息并保存。
+          </p>
+          <p className="text-slate-400 text-sm">
+            配置立即生效——下次扫描开始时 Agent 自动拉取最新配置，无需重启。
+          </p>
         </div>
 
         {/* 第四步：新建扫描 */}

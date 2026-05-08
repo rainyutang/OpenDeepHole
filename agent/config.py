@@ -38,6 +38,23 @@ class AgentConfig:
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
 
 
+def apply_remote_config(config: AgentConfig, remote: dict) -> None:
+    """Apply a server-managed config dict onto a local AgentConfig in-place.
+
+    Only non-empty values from the remote dict override local settings.
+    server_url, agent_port, and agent_name are never overwritten (they are
+    local-only settings).
+    """
+    if remote.get("no_proxy"):
+        config.no_proxy = remote["no_proxy"]
+    for attr, sub_cfg in [("llm_api", config.llm_api), ("opencode", config.opencode)]:
+        section = remote.get(attr) or {}
+        for f in dataclasses.fields(sub_cfg):
+            v = section.get(f.name)
+            if v not in (None, ""):
+                setattr(sub_cfg, f.name, v)
+
+
 def load_config(path: Optional[Path] = None) -> AgentConfig:
     """Load agent config from agent.yaml, searching standard locations."""
     if path is None:

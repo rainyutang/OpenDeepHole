@@ -90,13 +90,20 @@ async def _main() -> None:
     # Register with server
     agent_id = None
     try:
-        agent_id = await reporter.register_agent(port=port, name=name)
+        from agent.config import apply_remote_config
+        agent_id, remote_cfg = await reporter.register_agent(port=port, name=name)
         print(f"  Registered as agent_id: {agent_id}")
+        if remote_cfg:
+            apply_remote_config(config, remote_cfg)
+            print(f"  Config loaded from server")
         print()
     except Exception as e:
         print(f"Warning: failed to register with server: {e}")
         print("Agent will start but may not receive tasks from the server.")
         print()
+
+    # Expose agent_id so server.py can use it for config refresh
+    agent_server._agent_id = agent_id
 
     # Start heartbeat loop as background task
     heartbeat_task = None

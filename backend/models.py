@@ -186,6 +186,28 @@ class AgentInfo(BaseModel):
     last_seen: str
 
 
+class AgentLLMApiConfig(BaseModel):
+    base_url: str = "https://api.anthropic.com"
+    api_key: str = ""
+    model: str = "claude-sonnet-4-6"
+    temperature: float = 0.1
+    timeout: int = 120
+    max_retries: int = 3
+
+
+class AgentOpenCodeConfig(BaseModel):
+    executable: str = "opencode"
+    model: str = ""
+    timeout: int = 300
+
+
+class AgentRemoteConfig(BaseModel):
+    """Agent configuration managed from the server Web UI."""
+    no_proxy: str = ""
+    llm_api: AgentLLMApiConfig = AgentLLMApiConfig()
+    opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
+
+
 class CreateScanRequest(BaseModel):
     """Request to create a new scan via a registered agent."""
     agent_id: str

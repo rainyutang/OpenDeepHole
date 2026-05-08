@@ -22,14 +22,27 @@ class Reporter:
     # Agent registration / heartbeat
     # ---------------------------------------------------------------------------
 
-    async def register_agent(self, port: int, name: str) -> str:
-        """Register with server, return agent_id."""
+    async def register_agent(self, port: int, name: str) -> tuple[str, dict | None]:
+        """Register with server, return (agent_id, remote_config | None)."""
         resp = await self._client.post(
             f"{self.server_url}/api/agent/register",
             json={"port": port, "name": name},
         )
         resp.raise_for_status()
-        return resp.json()["agent_id"]
+        data = resp.json()
+        return data["agent_id"], data.get("config")
+
+    async def fetch_config(self, agent_id: str) -> dict | None:
+        """Fetch the latest server-managed config for this agent."""
+        try:
+            resp = await self._client.get(
+                f"{self.server_url}/api/agent/{agent_id}/config",
+                timeout=5.0,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return None
 
     async def heartbeat(self, agent_id: str) -> None:
         """Send heartbeat (best-effort)."""

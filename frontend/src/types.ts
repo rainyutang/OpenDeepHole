@@ -104,3 +104,24 @@ export interface AgentInfo {
   last_seen: string;
   online: boolean;
 }
+
+export interface AgentLLMApiConfig {
+  base_url: string;
+  api_key: string;
+  model: string;
+  temperature: number;
+  timeout: number;
+  max_retries: number;
+}
+
+export interface AgentOpenCodeConfig {
+  executable: string;
+  model: string;
+  timeout: number;
+}
+
+export interface AgentRemoteConfig {
+  no_proxy: string;
+  llm_api: AgentLLMApiConfig;
+  opencode: AgentOpenCodeConfig;
+}

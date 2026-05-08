@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, CheckerInfo, FeedbackEntry, ScanStatus, ScanStartResponse, ScanSummary } from "../types";
+import type { AgentInfo, AgentRemoteConfig, CheckerInfo, FeedbackEntry, ScanStatus, ScanStartResponse, ScanSummary } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -131,4 +131,15 @@ export async function resumeScan(scanId: string): Promise<ScanStartResponse> {
 
 export async function deleteScan(scanId: string): Promise<void> {
   await api.delete(`/api/scan/${scanId}`);
+}
+
+// --- Agent config ---
+
+export async function getAgentConfig(agentId: string): Promise<AgentRemoteConfig> {
+  const { data } = await api.get<AgentRemoteConfig>(`/api/agent/${agentId}/config`);
+  return data;
+}
+
+export async function updateAgentConfig(agentId: string, config: AgentRemoteConfig): Promise<void> {
+  await api.put(`/api/agent/${agentId}/config`, config);
 }

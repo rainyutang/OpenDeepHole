@@ -17,6 +17,7 @@ from pydantic import BaseModel
 _config = None      # AgentConfig
 _reporter = None    # Reporter
 _task_manager = None  # TaskManager
+_agent_id = None    # str | None
 
 app = FastAPI(title="OpenDeepHole Agent", version="0.1.0")
 router = APIRouter()
@@ -37,6 +38,16 @@ class ResumeTaskRequest(BaseModel):
 
 async def _run(task, is_resume: bool) -> None:
     """Internal coroutine that calls run_scan from agent.scanner."""
+    # Refresh config from server so UI changes take effect without restart
+    if _reporter is not None and _agent_id is not None:
+        try:
+            from agent.config import apply_remote_config
+            remote_cfg = await _reporter.fetch_config(_agent_id)
+            if remote_cfg:
+                apply_remote_config(_config, remote_cfg)
+        except Exception:
+            pass
+
     from agent.scanner import run_scan
     try:
         await run_scan(

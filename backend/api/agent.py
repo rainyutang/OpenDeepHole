@@ -36,6 +36,7 @@ from backend.api.scan import _running_scans
 from backend.logger import get_logger
 from backend.models import (
     AgentInfo,
+    AgentRemoteConfig,
     AgentScanFinish,
     ScanEvent,
     ScanItemStatus,
@@ -51,6 +52,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # In-memory registry of connected agents
 _registered_agents: dict[str, AgentInfo] = {}
+
+# Agent configs persisted by agent_name (survives agent reconnects)
+_agent_configs: dict[str, AgentRemoteConfig] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +80,11 @@ async def agent_register(body: _AgentRegisterBody, request: Request) -> dict:
         last_seen=now,
     )
     logger.info("Agent registered: %s (%s:%d)", agent_id, ip, body.port)
-    return {"agent_id": agent_id}
+    cfg = _agent_configs.get(name)
+    return {
+        "agent_id": agent_id,
+        "config": cfg.model_dump() if cfg else None,
+    }
 
 
 @router.put("/heartbeat/{agent_id}")
@@ -92,6 +100,26 @@ async def agent_unregister(agent_id: str) -> dict:
     """Agent calls this on graceful shutdown."""
     _registered_agents.pop(agent_id, None)
     logger.info("Agent unregistered: %s", agent_id)
+    return {"ok": True}
+
+
+@router.get("/{agent_id}/config")
+async def get_agent_config(agent_id: str) -> AgentRemoteConfig:
+    """Return the server-managed config for an agent (defaults if not yet saved)."""
+    agent = _registered_agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return _agent_configs.get(agent.name, AgentRemoteConfig())
+
+
+@router.put("/{agent_id}/config")
+async def update_agent_config(agent_id: str, body: AgentRemoteConfig) -> dict:
+    """Save the server-managed config for an agent (keyed by agent name)."""
+    agent = _registered_agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    _agent_configs[agent.name] = body
+    logger.info("Config updated for agent %s (%s)", agent_id, agent.name)
     return {"ok": True}
 
 
@@ -281,7 +309,7 @@ _AGENT_ROOT_FILES = [
 ]
 
 
-def _build_agent_zip() -> bytes:
+def _build_agent_zip(server_url: str = "") -> bytes:
     """Build the agent zip in-memory from the project source."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -296,7 +324,16 @@ def _build_agent_zip() -> bytes:
 
         for filename in _AGENT_ROOT_FILES:
             file_path = _PROJECT_ROOT / filename
-            if file_path.is_file():
+            if not file_path.is_file():
+                continue
+            if filename == "agent.yaml" and server_url:
+                content = file_path.read_text(encoding="utf-8")
+                content = content.replace(
+                    'server_url: "http://your-server:8000"',
+                    f'server_url: "{server_url}"',
+                )
+                zf.writestr(filename, content.encode("utf-8"))
+            else:
                 zf.write(file_path, filename)
 
         zf.writestr("README.txt", _AGENT_README.encode("utf-8"))
@@ -339,10 +376,11 @@ Results appear at: <server_url> (the web interface)
 
 
 @router.get("/download")
-async def agent_download() -> Response:
-    """Serve the agent package as a downloadable zip."""
+async def agent_download(request: Request) -> Response:
+    """Serve the agent package as a downloadable zip with server_url pre-filled."""
     try:
-        data = _build_agent_zip()
+        server_url = str(request.base_url).rstrip("/")
+        data = _build_agent_zip(server_url)
     except Exception as exc:
         logger.exception("Failed to build agent zip")
         raise HTTPException(status_code=500, detail=f"Failed to build agent package: {exc}")
