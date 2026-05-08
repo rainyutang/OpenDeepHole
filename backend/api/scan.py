@@ -557,8 +557,15 @@ async def _run_scan(
                     if hasattr(analyzer, "on_progress"):
                         analyzer.on_progress = _on_file_progress
 
+                    # find_candidates() 是同步阻塞调用（tree-sitter 解析 / DB 查询），
+                    # 必须在线程池中运行，否则会阻塞 asyncio 事件循环，
+                    # 导致 FastAPI 无法响应前端轮询请求。
+                    candidates = await asyncio.to_thread(
+                        lambda: list(analyzer.find_candidates(project_dir, db=db))
+                    )
+
                     checker_count = 0
-                    for candidate in analyzer.find_candidates(project_dir, db=db):
+                    for candidate in candidates:
                         if cancel_event.is_set():
                             break
 
