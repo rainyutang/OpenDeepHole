@@ -148,6 +148,10 @@ async def run_scan(
             db = CodeDatabase(db_path)
             CppAnalyzer(db).analyze_directory(project_path)
             await emit("init", "Code indexing complete")
+            # Flush WAL → main DB file before copying to index store.
+            # In WAL mode, committed data lives in the -wal sidecar until a
+            # checkpoint; copying without this produces an empty/stale DB.
+            db.checkpoint()
             # Persist to index store for future scans.
             index_store.save(project_path, db_path)
             await emit("init", f"代码索引已保存（路径: {project_path}）")

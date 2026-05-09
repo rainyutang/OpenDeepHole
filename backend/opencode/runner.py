@@ -251,26 +251,14 @@ async def _invoke_opencode(
 
     log_lines: list[str] = []
     deadline = asyncio.get_event_loop().time() + timeout
-    cancelled = False
-
-    async def _watch_cancel():
-        """Monitor cancel_event and kill the process immediately when set."""
-        nonlocal cancelled
-        while not proc.returncode and proc.returncode is None:
-            await asyncio.sleep(0.2)
-            if cancel_event and cancel_event.is_set():
-                cancelled = True
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                return
-
-    watcher = asyncio.create_task(_watch_cancel()) if cancel_event else None
+    timed_out = False
 
     try:
-        async for raw in proc.stdout:
-            if cancelled:
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                timed_out = True
+                _kill()
                 break
             try:
                 line = await asyncio.wait_for(queue.get(), timeout=min(remaining, 1.0))
@@ -300,7 +288,8 @@ async def _invoke_opencode(
     if timed_out:
         raise asyncio.TimeoutError()
 
-    if not cancelled and proc.returncode != 0:
+    proc = proc_holder[0]
+    if proc and proc.returncode not in (0, None):
         logger.error("opencode exited with code %d", proc.returncode)
         raise RuntimeError(f"opencode exited with code {proc.returncode}")
 
