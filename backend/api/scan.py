@@ -4,20 +4,25 @@ All scanning is performed by local agent daemons. This module creates scan recor
 delegates execution to agents, and provides read/status/mark endpoints.
 """
 
+import asyncio
 import csv
 import io
 import uuid
 from datetime import datetime, timezone
 
-import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
 from backend.logger import get_logger
 from backend.models import (
+    AgentFpReviewFinish,
+    AgentFpReviewResult,
     BatchMarkRequest,
     CreateScanRequest,
     FeedbackEntry,
+    FpReviewJob,
+    FpReviewResult,
+    FpReviewStatus,
     MarkRequest,
     ScanItemStatus,
     ScanMeta,
@@ -77,31 +82,25 @@ async def create_scan(body: CreateScanRequest) -> ScanStartResponse:
     store.save_scan(scan, meta)
     _running_scans[scan_id] = scan
 
-    # Dispatch to agent
-    agent_url = f"http://{agent.ip}:{agent.port}"
-    try:
-        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
-            resp = await client.post(
-                f"{agent_url}/task",
-                json={
-                    "scan_id": scan_id,
-                    "project_path": body.project_path,
-                    "checkers": body.checkers,
-                    "scan_name": scan_name,
-                },
-            )
-            resp.raise_for_status()
-    except Exception as exc:
-        # Mark scan as error if agent call fails
-        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message=str(exc))
+    # Dispatch to agent via WebSocket
+    from backend.api.agent import send_agent_command
+    ok = await send_agent_command(body.agent_id, {
+        "type": "task",
+        "scan_id": scan_id,
+        "project_path": body.project_path,
+        "checkers": body.checkers,
+        "scan_name": scan_name,
+    })
+    if not ok:
+        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
         scan.status = ScanItemStatus.ERROR
         _running_scans.pop(scan_id, None)
-        logger.error("Failed to dispatch scan %s to agent %s: %s", scan_id, body.agent_id, exc)
-        raise HTTPException(status_code=502, detail=f"Failed to reach agent: {exc}")
+        logger.error("Failed to dispatch scan %s: agent %s not connected", scan_id, body.agent_id)
+        raise HTTPException(status_code=502, detail="Agent not connected")
 
     logger.info(
-        "Created scan %s for project '%s', dispatched to agent %s (%s:%d)",
-        scan_id, scan_name, body.agent_id, agent.ip, agent.port,
+        "Created scan %s for project '%s', dispatched to agent %s (%s)",
+        scan_id, scan_name, body.agent_id, agent.ip,
     )
     return ScanStartResponse(scan_id=scan_id)
 
@@ -156,13 +155,11 @@ async def stop_scan(scan_id: str) -> dict:
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent for this scan is not online")
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
-            resp = await client.post(f"http://{agent.ip}:{agent.port}/task/{scan_id}/stop")
-            resp.raise_for_status()
-    except Exception as exc:
-        logger.error("Failed to stop scan %s on agent %s: %s", scan_id, agent_id, exc)
-        raise HTTPException(status_code=502, detail=f"Failed to reach agent: {exc}")
+    from backend.api.agent import send_agent_command
+    ok = await send_agent_command(agent_id, {"type": "stop", "scan_id": scan_id})
+    if not ok:
+        logger.error("Failed to stop scan %s: agent %s not connected", scan_id, agent_id)
+        raise HTTPException(status_code=502, detail="Agent not connected")
 
     logger.info("Stop requested for scan %s via agent %s", scan_id, agent_id)
     return {"ok": True}
@@ -198,24 +195,21 @@ async def resume_scan(scan_id: str) -> ScanStartResponse:
     scan.error_message = None
     _running_scans[scan_id] = scan
 
-    # Call agent resume endpoint
-    try:
-        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
-            resp = await client.post(
-                f"http://{agent.ip}:{agent.port}/task/{scan_id}/resume",
-                json={
-                    "project_path": meta.project_path,
-                    "checkers": meta.scan_items,
-                    "scan_name": meta.scan_name,
-                },
-            )
-            resp.raise_for_status()
-    except Exception as exc:
-        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message=str(exc))
+    # Send resume command to agent via WebSocket
+    from backend.api.agent import send_agent_command
+    ok = await send_agent_command(meta.agent_id, {
+        "type": "resume",
+        "scan_id": scan_id,
+        "project_path": meta.project_path,
+        "checkers": meta.scan_items,
+        "scan_name": meta.scan_name,
+    })
+    if not ok:
+        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
         scan.status = ScanItemStatus.ERROR
         _running_scans.pop(scan_id, None)
-        logger.error("Failed to resume scan %s on agent %s: %s", scan_id, meta.agent_id, exc)
-        raise HTTPException(status_code=502, detail=f"Failed to reach agent: {exc}")
+        logger.error("Failed to resume scan %s: agent %s not connected", scan_id, meta.agent_id)
+        raise HTTPException(status_code=502, detail="Agent not connected")
 
     logger.info("Resumed scan %s via agent %s", scan_id, meta.agent_id)
     return ScanStartResponse(scan_id=scan_id)
@@ -288,6 +282,22 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
     )
     store.add_feedback(entry)
     logger.info("Scan %s: vulnerability %d marked as %s, feedback %s", scan_id, index, verdict, feedback_id)
+
+    # Push feedback update to the agent that ran this scan (best-effort)
+    try:
+        scan_result = store.load_scan(scan_id)
+        if scan_result is not None:
+            agent_id = scan_result[1].agent_id
+            if agent_id:
+                from backend.api.agent import send_agent_command
+                import asyncio
+                asyncio.create_task(send_agent_command(agent_id, {
+                    "type": "feedback_update",
+                    "entry": entry.model_dump(),
+                }))
+    except Exception:
+        pass
+
     return feedback_id
 
 
@@ -317,6 +327,102 @@ async def batch_mark_vulnerabilities(scan_id: str, body: BatchMarkRequest) -> di
 # ---------------------------------------------------------------------------
 # Scan feedback endpoint (DB-only; no server-side workspace to refresh)
 # ---------------------------------------------------------------------------
+
+
+@router.post("/api/scan/{scan_id}/fp_review", response_model=dict)
+async def trigger_fp_review(scan_id: str) -> dict:
+    """Trigger AI false-positive review for all confirmed vulnerabilities in a scan."""
+    from backend.api.agent import send_agent_command
+
+    scan = await get_scan_status(scan_id)
+    if scan.status not in (ScanItemStatus.COMPLETE, ScanItemStatus.ERROR, ScanItemStatus.CANCELLED):
+        raise HTTPException(status_code=400, detail="Scan must be complete/error/cancelled to trigger FP review")
+
+    confirmed = [
+        {
+            "index": i,
+            "file": v.file,
+            "line": v.line,
+            "function": v.function,
+            "vuln_type": v.vuln_type,
+            "description": v.description,
+            "ai_analysis": v.ai_analysis,
+        }
+        for i, v in enumerate(scan.vulnerabilities)
+        if v.confirmed
+    ]
+    if not confirmed:
+        raise HTTPException(status_code=400, detail="No confirmed vulnerabilities to review")
+
+    store = get_scan_store()
+    result = store.load_scan(scan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    meta = result[1]
+
+    if not meta.agent_id:
+        raise HTTPException(status_code=400, detail="No agent associated with this scan")
+
+    review_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    store.create_fp_review_job(review_id, scan_id, len(confirmed), now)
+
+    ok = await send_agent_command(meta.agent_id, {
+        "type": "fp_review",
+        "scan_id": scan_id,
+        "review_id": review_id,
+        "project_path": meta.project_path,
+        "vulnerabilities": confirmed,
+    })
+    if not ok:
+        store.update_fp_review_job(review_id, status="error", error_message="Agent not connected")
+        raise HTTPException(status_code=502, detail="Agent not connected")
+
+    store.update_fp_review_job(review_id, status="running")
+    logger.info("FP review %s triggered for scan %s (%d candidates)", review_id, scan_id, len(confirmed))
+    return {"ok": True, "review_id": review_id}
+
+
+@router.get("/api/scan/{scan_id}/fp_review", response_model=FpReviewJob)
+async def get_fp_review(scan_id: str) -> FpReviewJob:
+    """Get the latest FP review job and results for a scan."""
+    store = get_scan_store()
+    job = store.get_fp_review_by_scan(scan_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No FP review found for this scan")
+    return job
+
+
+@router.post("/api/scan/{scan_id}/fp_review/result")
+async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dict:
+    """Agent pushes a single FP review result."""
+    store = get_scan_store()
+    now = datetime.now(timezone.utc).isoformat()
+    result = FpReviewResult(
+        vuln_index=body.vuln_index,
+        verdict=body.verdict,
+        reason=body.reason,
+        created_at=now,
+    )
+    store.add_fp_review_result(body.review_id, result)
+    job = store.get_fp_review_job(body.review_id)
+    if job is not None:
+        store.update_fp_review_job(body.review_id, processed=len(job.results))
+    logger.debug("FP review result for %s vuln[%d]: %s", scan_id, body.vuln_index, body.verdict)
+    return {"ok": True}
+
+
+@router.post("/api/scan/{scan_id}/fp_review/finish")
+async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dict:
+    """Agent signals FP review job is complete."""
+    store = get_scan_store()
+    store.update_fp_review_job(
+        body.review_id,
+        status=body.status,
+        error_message=body.error_message,
+    )
+    logger.info("FP review %s finished with status %s", body.review_id, body.status)
+    return {"ok": True}
 
 
 @router.put("/api/scan/{scan_id}/feedback")

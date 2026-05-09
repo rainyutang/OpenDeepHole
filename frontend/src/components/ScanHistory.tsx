@@ -25,6 +25,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: 
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   const fetchScans = async () => {
     try {
@@ -58,7 +59,10 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: 
     }
   };
 
-  const handleDelete = async (scanId: string) => {
+  const handleDeleteConfirm = async () => {
+    if (!deleteConfirmId) return;
+    const scanId = deleteConfirmId;
+    setDeleteConfirmId(null);
     setActionLoading(scanId);
     try {
       await deleteScan(scanId);
@@ -80,6 +84,30 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: 
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
+      {deleteConfirmId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-6 w-80">
+            <h3 className="text-base font-semibold text-white mb-2">确认删除</h3>
+            <p className="text-sm text-slate-400 mb-5">
+              确定要删除扫描任务 <span className="font-mono text-slate-300">{deleteConfirmId.slice(0, 8)}</span> 吗？此操作无法撤销。
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className="px-4 py-1.5 text-sm text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleDeleteConfirm}
+                className="px-4 py-1.5 text-sm font-medium text-white bg-red-600 hover:bg-red-500 rounded-lg transition-colors"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-6 py-4">
         <div className="flex items-center justify-between">
@@ -208,7 +236,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: 
                           )}
                           {canDelete && (
                             <button
-                              onClick={() => handleDelete(scan.scan_id)}
+                              onClick={() => setDeleteConfirmId(scan.scan_id)}
                               disabled={isLoading}
                               className="text-xs px-2 py-1 rounded text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
                             >

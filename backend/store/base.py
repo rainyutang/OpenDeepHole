@@ -12,6 +12,8 @@ from abc import ABC, abstractmethod
 from backend.models import (
     Candidate,
     FeedbackEntry,
+    FpReviewJob,
+    FpReviewResult,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -134,6 +136,35 @@ class ScanStoreBase(ABC):
         """Mark all scans with running status (pending/analyzing/auditing)
         as *error*. Returns the number of scans affected.
         Used on startup to recover from unclean shutdown."""
+
+    # -- FP Review jobs --
+
+    @abstractmethod
+    def create_fp_review_job(self, review_id: str, scan_id: str, total: int, created_at: str) -> None:
+        """Create a new FP review job record."""
+
+    @abstractmethod
+    def get_fp_review_job(self, review_id: str) -> FpReviewJob | None:
+        """Return the FP review job, including its results. None if not found."""
+
+    @abstractmethod
+    def get_fp_review_by_scan(self, scan_id: str) -> FpReviewJob | None:
+        """Return the latest FP review job for a scan (most recently created)."""
+
+    @abstractmethod
+    def update_fp_review_job(
+        self,
+        review_id: str,
+        *,
+        status: str | None = None,
+        processed: int | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Update status/progress on an FP review job."""
+
+    @abstractmethod
+    def add_fp_review_result(self, review_id: str, result: FpReviewResult) -> None:
+        """Append a single vulnerability FP review result to a job."""
 
     # -- Cleanup --
 

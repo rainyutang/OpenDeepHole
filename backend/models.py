@@ -182,7 +182,7 @@ class AgentInfo(BaseModel):
     agent_id: str
     name: str
     ip: str
-    port: int
+    port: int = 0
     last_seen: str
 
 
@@ -238,3 +238,52 @@ class ScanSummary(BaseModel):
     processed_candidates: int
     vulnerability_count: int
     scan_items: list[str]
+
+
+# --- FP Review models ---
+
+class FpReviewStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+
+class FpReviewResult(BaseModel):
+    """Per-vulnerability false-positive review result."""
+    vuln_index: int           # index in the parent scan's vulnerability list
+    verdict: str              # "tp" (true positive) | "fp" (false positive)
+    reason: str               # AI reasoning
+    created_at: str
+
+
+class FpReviewJob(BaseModel):
+    """A false-positive review job for a scan."""
+    review_id: str
+    scan_id: str
+    status: FpReviewStatus
+    created_at: str
+    total: int = 0
+    processed: int = 0
+    results: list[FpReviewResult] = []
+    error_message: str | None = None
+
+
+class FpReviewTriggerRequest(BaseModel):
+    """Request body for POST /api/scan/{scan_id}/fp_review."""
+    pass  # no extra fields needed for now
+
+
+class AgentFpReviewResult(BaseModel):
+    """Sent by the agent to push a single FP review result."""
+    review_id: str
+    vuln_index: int
+    verdict: str       # "tp" | "fp"
+    reason: str
+
+
+class AgentFpReviewFinish(BaseModel):
+    """Sent by the agent when the FP review job is complete."""
+    review_id: str
+    status: str        # "complete" | "error"
+    error_message: str | None = None

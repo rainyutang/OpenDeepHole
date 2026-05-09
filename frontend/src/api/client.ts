@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentRemoteConfig, CheckerInfo, FeedbackEntry, ScanStatus, ScanStartResponse, ScanSummary } from "../types";
+import type { AgentInfo, AgentRemoteConfig, CheckerInfo, FeedbackEntry, FpReviewJob, ScanStatus, ScanStartResponse, ScanSummary } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -142,4 +142,16 @@ export async function getAgentConfig(agentId: string): Promise<AgentRemoteConfig
 
 export async function updateAgentConfig(agentId: string, config: AgentRemoteConfig): Promise<void> {
   await api.put(`/api/agent/${agentId}/config`, config);
+}
+
+// --- FP Review ---
+
+export async function triggerFpReview(scanId: string): Promise<{ ok: boolean; review_id: string }> {
+  const { data } = await api.post(`/api/scan/${scanId}/fp_review`);
+  return data;
+}
+
+export async function getFpReview(scanId: string): Promise<FpReviewJob> {
+  const { data } = await api.get<FpReviewJob>(`/api/scan/${scanId}/fp_review`);
+  return data;
 }

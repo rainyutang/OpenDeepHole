@@ -1,22 +1,24 @@
-"""Agent API — endpoints for local agent daemons to register, heartbeat,
-push events, and submit scan results.
+"""Agent API — endpoints for local agent daemons to connect, push events, and submit scan results.
 
-Agent registration / lifecycle:
-  POST /api/agent/register              register agent → agent_id
-  PUT  /api/agent/heartbeat/{agent_id}  heartbeat
-  DELETE /api/agent/{agent_id}          unregister
+WebSocket (preferred, v2):
+  WS   /api/agent/ws              agent connects, receives task/stop/resume commands
+
+HTTP registration (legacy, v1):
+  POST /api/agent/register        register agent → agent_id
+  PUT  /api/agent/heartbeat/{id}  heartbeat
+  DELETE /api/agent/{id}          unregister
 
 Scan events (called by agent during scan):
-  POST /api/agent/scan/{id}/event           push progress event
-  POST /api/agent/scan/{id}/vulnerability   push one result immediately after audit
-  POST /api/agent/scan/{id}/finish          push final status (vulnerabilities already stored)
-  POST /api/agent/scan/{id}/processed       report processed candidate key
-  GET  /api/agent/scan/{id}/processed       fetch processed keys (for resume)
+  POST /api/agent/scan/{id}/event
+  POST /api/agent/scan/{id}/vulnerability
+  POST /api/agent/scan/{id}/finish
+  POST /api/agent/scan/{id}/processed
+  GET  /api/agent/scan/{id}/processed
 
 Other:
-  GET  /api/agent/feedback              fetch false-positive feedback
-  GET  /api/agent/download              download agent package zip
-  GET  /api/agents                      list registered agents
+  GET  /api/agent/feedback
+  GET  /api/agent/download
+  GET  /api/agents
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -55,12 +57,83 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # In-memory registry of connected agents
 _registered_agents: dict[str, AgentInfo] = {}
 
+# Active WebSocket connections keyed by agent_id (WebSocket mode)
+_agent_ws: dict[str, WebSocket] = {}
+
 # Agent configs persisted by agent_name (survives agent reconnects)
 _agent_configs: dict[str, AgentRemoteConfig] = {}
 
 
 # ---------------------------------------------------------------------------
-# Agent registration / heartbeat
+# WebSocket — preferred connection method (v2)
+# ---------------------------------------------------------------------------
+
+@router.websocket("/ws")
+async def agent_websocket(websocket: WebSocket) -> None:
+    """Agent connects here and receives task/stop/resume commands."""
+    await websocket.accept()
+    agent_id = None
+    try:
+        msg = await websocket.receive_json()
+        if msg.get("type") != "hello":
+            await websocket.close(code=4000)
+            return
+
+        name = msg.get("name") or socket.gethostname()
+        agent_id = uuid.uuid4().hex
+        ip = websocket.client.host if websocket.client else "unknown"
+        now = datetime.now(timezone.utc).isoformat()
+
+        _registered_agents[agent_id] = AgentInfo(
+            agent_id=agent_id,
+            name=name,
+            ip=ip,
+            port=0,
+            last_seen=now,
+        )
+        _agent_ws[agent_id] = websocket
+
+        cfg = _agent_configs.get(name, AgentRemoteConfig())
+        await websocket.send_json({
+            "type": "welcome",
+            "agent_id": agent_id,
+            "config": cfg.model_dump(),
+        })
+
+        logger.info("Agent connected via WebSocket: %s (%s)", agent_id, name)
+
+        # Keep connection alive; agent may send pings or acks
+        while True:
+            await websocket.receive_text()
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning("Agent WebSocket error for %s: %s", agent_id, e)
+    finally:
+        if agent_id:
+            _agent_ws.pop(agent_id, None)
+            _registered_agents.pop(agent_id, None)
+            logger.info("Agent disconnected: %s", agent_id)
+
+
+async def send_agent_command(agent_id: str, command: dict) -> bool:
+    """Send a JSON command to an agent via its WebSocket. Returns True on success."""
+    ws = _agent_ws.get(agent_id)
+    if ws is None:
+        return False
+    try:
+        await ws.send_json(command)
+        return True
+    except Exception as e:
+        logger.warning("Failed to send command to agent %s: %s", agent_id, e)
+        _agent_ws.pop(agent_id, None)
+        _registered_agents.pop(agent_id, None)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Agent registration / heartbeat (HTTP legacy mode, v1)
 # ---------------------------------------------------------------------------
 
 class _AgentRegisterBody(BaseModel):
@@ -70,19 +143,20 @@ class _AgentRegisterBody(BaseModel):
 
 @router.post("/register")
 async def agent_register(body: _AgentRegisterBody, request: Request) -> dict:
-    """Agent calls this on startup to get an agent_id."""
+    """Agent calls this on startup to get an agent_id. (Legacy HTTP mode)"""
     agent_id = uuid.uuid4().hex
     ip = request.client.host if request.client else "unknown"
     now = datetime.now(timezone.utc).isoformat()
+    agent_name = body.name or socket.gethostname()
     _registered_agents[agent_id] = AgentInfo(
         agent_id=agent_id,
-        name=body.name or socket.gethostname(),
+        name=agent_name,
         ip=ip,
         port=body.port,
         last_seen=now,
     )
-    logger.info("Agent registered: %s (%s:%d)", agent_id, ip, body.port)
-    cfg = _agent_configs.get(name)
+    logger.info("Agent registered (HTTP): %s (%s:%d)", agent_id, ip, body.port)
+    cfg = _agent_configs.get(agent_name)
     return {
         "agent_id": agent_id,
         "config": cfg.model_dump() if cfg else None,
@@ -91,7 +165,7 @@ async def agent_register(body: _AgentRegisterBody, request: Request) -> dict:
 
 @router.put("/heartbeat/{agent_id}")
 async def agent_heartbeat(agent_id: str) -> dict:
-    """Agent sends heartbeat every 30s to stay in the online list."""
+    """Agent sends heartbeat every 30s to stay in the online list. (Legacy HTTP mode)"""
     if agent_id in _registered_agents:
         _registered_agents[agent_id].last_seen = datetime.now(timezone.utc).isoformat()
     return {"ok": True}
@@ -101,6 +175,7 @@ async def agent_heartbeat(agent_id: str) -> dict:
 async def agent_unregister(agent_id: str) -> dict:
     """Agent calls this on graceful shutdown."""
     _registered_agents.pop(agent_id, None)
+    _agent_ws.pop(agent_id, None)
     logger.info("Agent unregistered: %s", agent_id)
     return {"ok": True}
 
@@ -116,12 +191,15 @@ async def get_agent_config(agent_id: str) -> AgentRemoteConfig:
 
 @router.put("/{agent_id}/config")
 async def update_agent_config(agent_id: str, body: AgentRemoteConfig) -> dict:
-    """Save the server-managed config for an agent (keyed by agent name)."""
+    """Save the server-managed config for an agent (keyed by agent name).
+    Also pushes the updated config to the agent via WebSocket if connected."""
     agent = _registered_agents.get(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     _agent_configs[agent.name] = body
     logger.info("Config updated for agent %s (%s)", agent_id, agent.name)
+    # Push update to agent immediately if connected via WebSocket
+    await send_agent_command(agent_id, {"type": "config", "config": body.model_dump()})
     return {"ok": True}
 
 
@@ -133,15 +211,24 @@ async def list_agents_prefixed() -> list:
 
 @public_router.get("/api/agents")
 async def list_agents() -> list:
-    """Return all registered agents with online status (last heartbeat < 90s ago)."""
+    """Return all registered agents with online status.
+
+    WebSocket agents: online = WebSocket connection is active.
+    Legacy HTTP agents: online = last heartbeat < 90 seconds ago.
+    """
     now = datetime.now(timezone.utc)
     result = []
     for a in _registered_agents.values():
-        try:
-            last = datetime.fromisoformat(a.last_seen)
-            online = (now - last).total_seconds() < 90
-        except Exception:
-            online = False
+        if a.agent_id in _agent_ws:
+            # WebSocket connection is live
+            online = True
+        else:
+            # Fall back to heartbeat-based check for legacy HTTP-registered agents
+            try:
+                last = datetime.fromisoformat(a.last_seen)
+                online = (now - last).total_seconds() < 90
+            except Exception:
+                online = False
         result.append({**a.model_dump(), "online": online})
     return result
 
@@ -227,8 +314,6 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
     }
     final_status = status_map.get(body.status, ScanItemStatus.ERROR)
 
-    # Only add vulnerabilities here if the agent didn't already upload them
-    # incrementally via POST /scan/{id}/vulnerability (legacy / fallback path).
     existing_count = store.count_vulnerabilities(scan_id)
     if body.vulnerabilities and existing_count == 0:
         for vuln in body.vulnerabilities:
@@ -247,7 +332,6 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
     scan = _running_scans.get(scan_id)
     if scan is not None:
         scan.status = final_status
-        # Keep incrementally-built list; only override if we just bulk-inserted
         if body.vulnerabilities and existing_count == 0:
             scan.vulnerabilities = body.vulnerabilities
         scan.total_candidates = body.total_candidates
@@ -306,10 +390,7 @@ async def agent_get_processed(scan_id: str) -> list:
 
 @router.get("/feedback")
 async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
-    """Return false-positive feedback entries for the agent to enrich SKILLs.
-
-    Query param ``vuln_types``: comma-separated list of checker names to filter.
-    """
+    """Return false-positive feedback entries for the agent to enrich SKILLs."""
     store = get_scan_store()
     if vuln_types:
         names = [v.strip() for v in vuln_types.split(",") if v.strip()]
@@ -388,12 +469,11 @@ Setup
 Options
 -------
   --server URL          Override server_url from agent.yaml
-  --port INT            Agent HTTP listen port (default 7000)
   --name NAME           Display name shown on the web UI
 
 Usage
 -----
-The agent daemon registers with the server and waits for scan tasks.
+The agent daemon connects to the server via WebSocket and waits for scan tasks.
 Use the "新建扫描" button in the web UI to start a scan.
 
 Results appear at: <server_url> (the web interface)

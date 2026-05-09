@@ -82,7 +82,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
         <span className={`w-2 h-2 rounded-full flex-shrink-0 ${agent.online ? "bg-green-400" : "bg-slate-500"}`} />
         <div className="flex-1 min-w-0">
           <span className="text-sm font-medium text-white">{agent.name}</span>
-          <span className="ml-2 text-xs text-slate-400">{agent.ip}:{agent.port}</span>
+          <span className="ml-2 text-xs text-slate-400">{agent.ip}</span>
         </div>
         <span className={`text-xs px-2 py-0.5 rounded border mr-2 ${
           agent.online
@@ -344,12 +344,12 @@ export default function AgentDownload({ onBack }: Props) {
           <pre className="bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs text-slate-400 overflow-x-auto">{`OpenDeepHole Agent Daemon
   Name    : my-agent
   Server  : ${origin}
-  Port    : 7000
 
-  Registered as agent_id: a1b2c3d4...`}</pre>
+Connecting to ws://.../api/agent/ws ...
+  Connected. Agent ID: a1b2c3d4...`}</pre>
 
           <p className="text-slate-400 text-xs mt-3">
-            可选：在 <code className="text-blue-400">agent.yaml</code> 中修改 <code className="text-blue-400">agent_name</code>（显示名称）和 <code className="text-blue-400">agent_port</code>（监听端口，默认 7000）。LLM API 等其他配置可在此页面直接配置，无需手动编辑文件。
+            可选：在 <code className="text-blue-400">agent.yaml</code> 中修改 <code className="text-blue-400">agent_name</code>（显示名称）。LLM API 等其他配置可在此页面直接配置，无需手动编辑文件。
           </p>
         </div>
 

@@ -154,8 +154,10 @@ async def run_scan(
         needs_opencode = any(entry.mode == "opencode" for entry in registry.values())
         if needs_opencode:
             from agent.local_mcp import LocalMCPServer
+            from agent import mcp_registry
             mcp_server = LocalMCPServer()
             mcp_port = mcp_server.start()
+            mcp_registry.register(project_path, mcp_port, scan_id)
             await emit("mcp_ready", f"Local MCP server ready on port {mcp_port}")
 
         # --- Phase 4: Create workspace (links SKILLs, merges feedback) ---
@@ -312,6 +314,8 @@ async def run_scan(
 
     finally:
         if mcp_server:
+            from agent import mcp_registry
+            mcp_registry.unregister(project_path)
             mcp_server.stop()
         if workspace is not None:
             cleanup_workspace(workspace)
