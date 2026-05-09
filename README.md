@@ -1,29 +1,47 @@
 # OpenDeepHole
 
-基于 SKILL 的 C/C++ 源码白盒审计工具。通过静态分析找到候选漏洞点，再由 AI（opencode + skills）进行深度语义分析。
+基于 SKILL 的 C/C++ 源码白盒审计工具。核心漏洞挖掘在用户本地 Agent 上执行，源码不离开本机，结果汇报到 Web 服务器统一展示。
 
-## 架构
+## 整体架构
 
 ```
-单 Docker 容器
-├── MCP Server (port 8100) — 常驻进程，提供源码查询工具
-└── FastAPI (port 8000) — 后端 API + 前端静态文件（React + Tailwind CSS）
-    └── opencode CLI — 由后端 subprocess 调用，通过 MCP 工具访问源码
+[服务器端]
+  FastAPI (port 8000)
+  ├── Web UI（React + Tailwind CSS）
+  ├── 接收 Agent 注册、心跳、扫描事件、扫描结果
+  ├── 存储扫描历史和误报反馈
+  ├── 向 Agent 下发扫描任务（新建扫描时推送）
+  └── 提供 Agent 下载包
+
+[用户本地]
+  opendeephole-agent（守护进程，从 Web UI 下载）
+  ├── 启动后向服务器注册，保持心跳
+  ├── 等待服务器推送扫描任务
+  ├── 收到任务后：代码索引 → 静态分析 → AI 审计
+  └── 实时将事件和漏洞结果上报服务器
 ```
 
-### 扫描流程
+**交互流程：**
 
-1. 用户上传源码 zip，选择扫描项
-2. **代码解析**（后台异步）：`CppAnalyzer` 用 tree-sitter 全量解析源码，结果存入 SQLite（`code_index.db`）
-3. 扫描等待解析完成后，静态分析器从 `CodeDatabase` 查询数据，找到候选漏洞点
-4. 每个候选点传递给 opencode，指定对应 skill + MCP 工具（MCP 工具也从同一 `CodeDatabase` 读取）
-5. AI 深度分析，判断是否为真实漏洞
-6. 汇总结果，前端展示漏洞列表，支持下载报告
+```
+用户在 Web UI 点击「新建扫描」
+  → 选择在线 Agent、填写代码路径（Agent 所在机器的路径）、选择检查项
+  → 服务器推送任务到 Agent
+  → Agent 在本地执行完整扫描流程
+  → 进度和结果实时显示在 Web UI
+```
 
-## 插件式 Checker 架构
+**源码不离开本地**：Agent 只上报漏洞分析结论，不上传源码文件。  
+**误报反馈闭环**：用户在 Web UI 标记误报后，Agent 下次扫描前自动拉取这些经验，注入 SKILL 中减少重复误报。
 
-漏洞类型以插件形式组织在 `checkers/` 目录下，添加新类型无需修改代码：
+## 快速开始
 
+### 部署服务器
+
+**Docker（推荐）：**
+
+```bash
+docker-compose up --build
 ```
 checkers/<name>/
 ├── checker.yaml    # 必须：name, label, description, enabled[, mode, skill_name]
@@ -32,7 +50,7 @@ checkers/<name>/
 └── analyzer.py     # 可选：静态分析器（导出 Analyzer 类，继承 BaseAnalyzer）
 ```
 
-**内置 Checker：**
+访问 `http://localhost:8000`
 
 | Checker | 说明 | 模式 | 静态分析器 |
 |---------|------|------|-----------|
@@ -42,51 +60,156 @@ checkers/<name>/
 | `intoverflow` | 整数翻转/溢出 (INTOVFL) | opencode | 有（多阶段追踪） |
 | `sensitive_clear` | 敏感信息未清零 (SENSITIVE_CLEAR) | opencode | 有 |
 
-### 添加新 Checker
+**第 1 步：下载安装包**
 
-**第 1 步：创建目录和元数据**
+打开 Web UI，点击右上角 **「下载 Agent」**，保存 `opendeephole-agent.zip`，解压到本地目录。
 
-```bash
-mkdir checkers/uaf
+**第 2 步：配置 agent.yaml**
+
+```yaml
+# Web Server 地址
+server_url: "http://your-server:8000"
+
+# Agent 监听端口（确保防火墙放行）
+agent_port: 7000
+
+# Agent 显示名称（显示在新建扫描的下拉列表中）
+agent_name: "my-agent"
+
+# LLM API 配置（供 mode: api 的检查项使用）
+llm_api:
+  base_url: "https://api.anthropic.com"
+  api_key: "your-api-key-here"
+  model: "claude-sonnet-4-6"
+
+# opencode CLI 配置（供 mode: opencode 的检查项使用）
+opencode:
+  executable: "opencode"
+  timeout: 300
 ```
 
-创建 `checkers/uaf/checker.yaml`：
+> 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
+
+**第 3 步：启动 Agent 守护进程**
+
+```bash
+# Linux / macOS
+chmod +x run_agent.sh
+./run_agent.sh
+
+# Windows
+run_agent.bat
+```
+
+启动成功后，终端输出类似：
+
+```
+OpenDeepHole Agent Daemon
+  Name    : my-agent
+  Server  : http://your-server:8000
+  Port    : 7000
+
+  Registered as agent_id: a1b2c3d4...
+```
+
+Agent 常驻后台等待任务，无需每次手动启动。
+
+**第 4 步：在 Web UI 创建扫描任务**
+
+1. 点击右上角「新建扫描」
+2. 从下拉列表选择已在线的 Agent
+3. 填写代码路径（Agent 所在机器上的绝对路径，如 `/home/user/myproject`）
+4. 选择要运行的检查项，点击「开始扫描」
+5. 扫描进度实时显示在当前页面
+
+### Agent 启动参数
+
+```
+./run_agent.sh [选项]
+
+选项：
+  --server URL        覆盖 agent.yaml 中的 server_url
+  --port INT          覆盖监听端口（默认 7000）
+  --name NAME         覆盖 Agent 显示名称
+  --config FILE       指定配置文件路径（默认 ./agent.yaml）
+```
+
+### 停止与恢复扫描
+
+- **停止**：在扫描详情页点击「停止扫描」，服务器直接通知 Agent 停止。当前候选处理完成后立即停止，已处理的结果保留。
+- **恢复**：在扫描列表页点击「恢复」，服务器通知 Agent 继续同一扫描任务，自动跳过已处理的候选，从断点继续。无需重新启动 Agent 或重新索引代码。
+
+## 误报反馈机制
+
+1. 在 Web UI 的漏洞列表中，将误报标记为「误报 (false_positive)」
+2. Agent 下次扫描前自动拉取 `GET /api/agent/feedback`
+3. 这些误报经验被注入到对应 SKILL 文件的「历史误报经验」章节
+4. LLM 在分析同类候选时参考这些经验，减少重复误判
+
+## 插件式 Checker 架构
+
+漏洞类型以插件形式组织在 `checkers/` 目录下，添加新类型无需修改代码：
+
+```
+checkers/<name>/
+├── checker.yaml    # 必须：name, label, description, enabled, mode
+├── SKILL.md        # opencode 模式必须；定义 AI 分析技巧
+├── prompt.txt      # api 模式可选；自定义系统提示词
+└── analyzer.py     # 可选：静态分析器（导出 Analyzer 类，继承 BaseAnalyzer）
+```
+
+**checker.yaml 格式：**
 
 ```yaml
 name: uaf
 label: UAF
-description: Use-After-Free
+description: "Use-After-Free 检测"
 enabled: true
 # mode: opencode       # 可选，默认 opencode；设为 api 则使用 prompt.txt + LLM 直接调用
 # skill_name: uaf-audit # 可选，opencode 模式下自定义 skill 名称
 ```
 
-**第 2 步：编写 SKILL.md**
+每个 Checker 独立配置 `mode`，同一次扫描中不同 Checker 可使用不同调用方式。
 
-参考 `checkers/npd/SKILL.md` 模板，编写 opencode skill 定义。SKILL.md 指导 AI 如何分析该类漏洞，必须要求 AI 输出 ````json:result` 格式块。
+**内置 Checker：**
 
-**第 3 步（可选）：编写 analyzer.py**
+| Checker | 说明 |
+|---------|------|
+| `npd` | 空指针解引用 (Null Pointer Dereference) |
+| `oob` | 数组/缓冲区越界 (Out-of-Bounds Access) |
+| `uaf` | Use-After-Free |
+| `intoverflow` | 整数翻转/溢出 |
+| `memleak` | 内存泄漏 |
 
-如果需要静态分析预筛选候选点，创建 `checkers/uaf/analyzer.py`。如果不提供，该 checker 会跳过静态分析阶段。
+### 添加新 Checker
 
-**第 4 步：重启服务**
+**第 1 步：创建目录和元数据**
 
 ```bash
-# 本地开发
-pkill -f uvicorn
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-
-# Docker
-docker-compose restart
+mkdir checkers/mycheck
 ```
 
-Checker 在后端启动时自动发现注册，前端通过 `GET /api/checkers` 动态获取列表，无需重新构建前端。
+`checkers/mycheck/checker.yaml`：
 
-### 编写 analyzer.py 指南
+```yaml
+name: mycheck
+label: MYCHECK
+description: "我的自定义漏洞检测"
+enabled: true
+mode: "api"
+```
 
-analyzer.py 是可选的静态分析器，用于在 AI 审计前预筛选候选漏洞点。
+**第 2 步（api 模式）：编写 prompt.txt**
 
-**基本结构：**
+```
+你是专业的 C/C++ 漏洞审计专家。请分析以下函数是否存在 XXX 漏洞...
+```
+
+**第 2 步（opencode 模式）：编写 SKILL.md**
+
+参考 `checkers/npd/SKILL.md`，定义分析步骤和可用 MCP 工具。
+
+**第 3 步（可选）：编写 analyzer.py**
 
 ```python
 from __future__ import annotations
@@ -99,7 +222,7 @@ if TYPE_CHECKING:
 
 
 class Analyzer(BaseAnalyzer):
-    vuln_type = "uaf"  # 必须与 checker.yaml 的 name 一致
+    vuln_type = "mycheck"  # 必须与 checker.yaml 的 name 一致
 
     def find_candidates(
         self,
@@ -129,24 +252,18 @@ class Analyzer(BaseAnalyzer):
         return candidates
 ```
 
-**约定和要求：**
+**约定：**
 
-- 类名**必须**是 `Analyzer`（registry 按此名称动态加载）
+- 类名**必须**是 `Analyzer`
 - **必须**继承 `BaseAnalyzer`
 - `vuln_type` **必须**与 `checker.yaml` 中的 `name` 字段一致
 - `find_candidates()` 接收项目根目录路径，返回 `Iterable[Candidate]`（列表或 generator 均可）
 - 可以 `from backend.analyzers.base import BaseAnalyzer, Candidate` 一次性导入所需类
 
-**Candidate 字段说明：**
+**第 4 步：重启服务端**
 
-```python
-Candidate(
-    file="src/main.c",      # 相对于项目根目录的文件路径
-    line=42,                 # 漏洞所在行号
-    function="process_data", # 漏洞所在函数名
-    description="...",       # 漏洞描述（传递给 AI 的上下文）
-    vuln_type="uaf",         # 漏洞类型（与 checker name 一致）
-)
+```bash
+./start.sh
 ```
 
 **CodeDatabase API 参考（`code_parser/code_database.py`）：**
@@ -267,80 +384,89 @@ def find_candidates(self, project_path: Path, db=None) -> list[Candidate]:
 - `mode: api` 的 checker 使用 `prompt.txt` 而非 `SKILL.md`，适用于无需 MCP 工具的场景
 - 返回空列表是合法的，表示未找到候选点
 
-## 快速开始
+### 服务端 config.yaml
 
-### Docker 部署
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 8000
 
-```bash
-docker-compose up --build
+storage:
+  projects_dir: "/tmp/opendeephole/projects"
+  scans_dir: "/tmp/opendeephole/scans"
+
+logging:
+  level: "INFO"
+  file: "logs/opendeephole.log"
 ```
 
-访问 http://localhost:8000
+### Agent agent.yaml
 
-### 本地开发
+```yaml
+# Web Server 地址
+server_url: "http://your-server:8000"
+
+# Agent 守护进程监听端口
+agent_port: 7000
+
+# Agent 显示名称（留空则使用主机名）
+agent_name: ""
+
+# 代理跳过列表，逗号分隔
+no_proxy: ""
+
+# 要运行的检查项，留空则运行全部已启用的检查项
+checkers: []
+
+# LLM API 配置（供 mode: api 的检查项使用）
+llm_api:
+  base_url: "https://api.anthropic.com"
+  api_key: "your-api-key-here"
+  model: "claude-sonnet-4-6"
+  temperature: 0.1
+  timeout: 120
+  max_retries: 3
+
+# opencode CLI 配置（供 mode: opencode 的检查项使用）
+opencode:
+  executable: "opencode"
+  model: ""      # 留空则使用 opencode 默认模型
+  timeout: 300
+```
+
+## 本地开发
 
 ```bash
-# 后端
+# 后端（含热重载）
 pip install -r requirements.txt
-python3 -m mcp_server.server &    # 启动 MCP Server
 uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 
-# 前端（开发模式）
+# 前端开发服务器（代理到 localhost:8000）
 cd frontend
 npm install
 npm run dev
-```
 
-### 服务管理
+# 构建前端
+npm run build
 
-```bash
 # 查看日志
-cat logs/opendeephole.log        # 文件日志
-tail -f logs/opendeephole.log    # 实时跟踪
+tail -f logs/opendeephole.log
 ```
 
-注意：使用 `--reload` 参数时，修改 `backend/` 下的 Python 文件会自动重载，但 `checkers/` 目录下的变更**不会**自动重载（因为 registry 在启动时一次性加载），需要手动重启。
-
-### 重启服务（修改 MCP Server / 后端 / 添加新 Checker 后）
-
-修改 MCP Server 代码、后端代码、或新增/修改 `checkers/` 下的漏洞类型后，需要重启对应服务才能生效：
-
-```bash
-kill $(lsof -t -i:8000) $(lsof -t -i:8100) 2>/dev/null; sleep 1; python3 -m mcp_server.server & uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-**什么时候需要重启：**
-
-| 修改内容 | 需要重启的服务 |
-|---------|--------------|
-| `mcp_server/` 下的代码 | MCP Server（端口 8100） |
-| `backend/` 下的代码 | 后端会自动热重载（`--reload`），通常无需手动重启 |
-| `checkers/` 下新增或修改 checker | 后端（端口 8000），因为 registry 仅在启动时加载一次 |
-| `checkers/` + `mcp_server/` 同时修改 | 两个都需要重启 |
-
-**Docker 环境下：**
-
-```bash
-docker-compose restart
-# 或完全重建
-docker-compose up --build
-```
-
-## 配置
-
-编辑 `config.yaml` 修改端口、存储路径、opencode 模型、日志级别等配置。
-
-## 环境变量
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `OPENCODE_MODEL` | AI 模型 | `anthropic/claude-sonnet-4-20250514` |
-| `ANTHROPIC_API_KEY` | Anthropic API Key | - |
+> **注意：** 修改 `checkers/` 下的内容需重启后端（registry 在启动时一次性加载）。
 
 ## 项目结构
 
 ```
 OpenDeepHole/
+├── agent/                 # 本地 Agent Python 包
+│   ├── config.py          # agent.yaml 配置加载
+│   ├── main.py            # 守护进程入口（启动 uvicorn + 注册 + 心跳）
+│   ├── server.py          # Agent HTTP 服务（接收任务、停止、恢复）
+│   ├── task_manager.py    # 任务生命周期管理（创建/停止/恢复）
+│   ├── scanner.py         # 完整扫描流程（索引→静态分析→AI审计→上报）
+│   ├── reporter.py        # 向服务器上报进度和结果
+│   └── local_mcp.py       # opencode 模式：本地启动 MCP Server
 ├── checkers/              # 插件目录（每种漏洞类型一个子目录）
 │   ├── npd/               # checker.yaml + SKILL.md/prompt.txt + analyzer.py
 │   ├── oob/
@@ -354,12 +480,21 @@ OpenDeepHole/
 │   └── code_struct.py     # 解析结果数据类
 ├── frontend/              # React + TypeScript + Vite + Tailwind CSS
 ├── backend/
-│   ├── api/               # FastAPI 路由（upload, scan, checkers）
+│   ├── api/
+│   │   ├── agent.py       # Agent 专用 API（注册/心跳/注销/任务下发/结果接收/下载包）
+│   │   ├── scan.py        # 扫描管理 API（新建/停止/恢复/查询）
+│   │   ├── feedback.py    # 误报反馈 CRUD
+│   │   └── checkers.py    # Checker 列表 API
 │   ├── registry.py        # Checker 自动发现与注册
-│   ├── analyzers/base.py  # 静态分析器基类（含可选 db 参数）
-│   └── opencode/          # opencode CLI 集成
-├── mcp_server/            # MCP Server（源码查询工具，使用 code_index.db）
-├── config.yaml            # 全局配置
+│   ├── analyzers/base.py  # 静态分析器基类
+│   └── opencode/          # opencode CLI + LLM API 集成
+├── mcp_server/            # MCP Server（Agent opencode 模式本地启动）
+├── agent.yaml             # Agent 配置模板
+├── run_agent.sh           # Agent 守护进程启动脚本（Linux/macOS）
+├── run_agent.bat          # Agent 守护进程启动脚本（Windows）
+├── requirements-agent.txt # Agent 最小依赖
+├── config.yaml            # 服务端全局配置
+├── start.sh               # 服务端一键启动脚本
 ├── Dockerfile
 └── docker-compose.yml
 ```

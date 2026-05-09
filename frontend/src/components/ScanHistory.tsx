@@ -3,8 +3,9 @@ import { getScans, resumeScan, deleteScan } from "../api/client";
 import type { ScanSummary, ScanItemStatus } from "../types";
 
 interface Props {
-  onNewScan: () => void;
   onViewScan: (scanId: string) => void;
+  onDownloadAgent: () => void;
+  onNewScan: () => void;
 }
 
 const STATUS_STYLES: Record<ScanItemStatus, { label: string; cls: string }> = {
@@ -20,7 +21,7 @@ function isRunning(status: ScanItemStatus) {
   return status === "pending" || status === "analyzing" || status === "auditing";
 }
 
-export default function ScanHistory({ onNewScan, onViewScan }: Props) {
+export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -86,12 +87,20 @@ export default function ScanHistory({ onNewScan, onViewScan }: Props) {
             <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
             <p className="text-sm text-slate-400 mt-0.5">C/C++ Source Code Audit Tool</p>
           </div>
-          <button
-            onClick={onNewScan}
-            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-          >
-            + 新建扫描
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={onDownloadAgent}
+              className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+            >
+              ↓ 下载 Agent
+            </button>
+            <button
+              onClick={onNewScan}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+            >
+              + 新建扫描
+            </button>
+          </div>
         </div>
       </div>
 

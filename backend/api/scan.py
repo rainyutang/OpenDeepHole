@@ -1,51 +1,115 @@
-"""Scan API — start scans, poll status, download reports, resume, list, delete."""
+"""Scan API — create, query status, stop, resume, download reports, manage feedback.
 
-import asyncio
+All scanning is performed by local agent daemons. This module creates scan records,
+delegates execution to agents, and provides read/status/mark endpoints.
+"""
+
 import csv
 import io
 import queue as _stdlib_queue
 import shutil
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
-from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
-    Candidate,
-    FeedbackEntry,
     BatchMarkRequest,
+    CreateScanRequest,
+    FeedbackEntry,
     MarkRequest,
-    SaveFalsePositiveRequest,
-    ScanEvent,
     ScanItemStatus,
     ScanMeta,
-    ScanRequest,
     ScanStartResponse,
     ScanStatus,
     ScanSummary,
-    Vulnerability,
 )
-from backend.opencode.config import create_scan_workspace, get_skill_content, refresh_skills
-from backend.opencode.runner import run_audit, run_audit_batch
-from backend.registry import get_registry
 from backend.store import get_scan_store
 
 router = APIRouter()
 logger = get_logger(__name__)
 
-# In-memory state for *running* scans only (high-frequency polling).
-# Completed/cancelled scans are served from the database.
+# In-memory state for running scans (high-frequency polling).
+# Populated when scans are created/resumed, removed by agent.py when agents finish.
 _running_scans: dict[str, ScanStatus] = {}
-_scan_cancel_events: dict[str, asyncio.Event] = {}
-_scan_workspaces: dict[str, Path] = {}
 
 
 # ---------------------------------------------------------------------------
-# List / Create / Status / Stop / Resume / Delete
+# Create scan (new flow: agent_id + project_path instead of upload)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/scan", response_model=ScanStartResponse)
+async def create_scan(body: CreateScanRequest) -> ScanStartResponse:
+    """Create a new scan and dispatch it to the specified agent daemon."""
+    from backend.api.agent import _registered_agents
+
+    agent = _registered_agents.get(body.agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Agent '{body.agent_id}' not found or not registered")
+
+    scan_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    scan_name = body.scan_name or body.project_path.split("/")[-1] or scan_id
+
+    scan = ScanStatus(
+        scan_id=scan_id,
+        project_id=scan_name,
+        scan_items=body.checkers,
+        created_at=now,
+        status=ScanItemStatus.PENDING,
+        progress=0.0,
+        total_candidates=0,
+        processed_candidates=0,
+        vulnerabilities=[],
+    )
+    meta = ScanMeta(
+        scan_items=body.checkers,
+        created_at=now,
+        feedback_ids=body.feedback_ids,
+        agent_id=body.agent_id,
+        project_path=body.project_path,
+        scan_name=scan_name,
+    )
+
+    store = get_scan_store()
+    store.save_scan(scan, meta)
+    _running_scans[scan_id] = scan
+
+    # Dispatch to agent
+    agent_url = f"http://{agent.ip}:{agent.port}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            resp = await client.post(
+                f"{agent_url}/task",
+                json={
+                    "scan_id": scan_id,
+                    "project_path": body.project_path,
+                    "checkers": body.checkers,
+                    "scan_name": scan_name,
+                },
+            )
+            resp.raise_for_status()
+    except Exception as exc:
+        # Mark scan as error if agent call fails
+        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message=str(exc))
+        scan.status = ScanItemStatus.ERROR
+        _running_scans.pop(scan_id, None)
+        logger.error("Failed to dispatch scan %s to agent %s: %s", scan_id, body.agent_id, exc)
+        raise HTTPException(status_code=502, detail=f"Failed to reach agent: {exc}")
+
+    logger.info(
+        "Created scan %s for project '%s', dispatched to agent %s (%s:%d)",
+        scan_id, scan_name, body.agent_id, agent.ip, agent.port,
+    )
+    return ScanStartResponse(scan_id=scan_id)
+
+
+# ---------------------------------------------------------------------------
+# List / Status / Stop / Resume / Delete
 # ---------------------------------------------------------------------------
 
 
@@ -54,8 +118,6 @@ async def list_scans() -> list[ScanSummary]:
     """List all scans (summary view), most recent first."""
     store = get_scan_store()
     summaries = store.list_scans()
-
-    # Patch running scans with live progress from memory
     for s in summaries:
         if s.scan_id in _running_scans:
             live = _running_scans[s.scan_id]
@@ -67,71 +129,11 @@ async def list_scans() -> list[ScanSummary]:
     return summaries
 
 
-@router.post("/api/scan", response_model=ScanStartResponse)
-async def start_scan(request: ScanRequest) -> ScanStartResponse:
-    """Start a vulnerability scan on an uploaded project."""
-    config = get_config()
-    project_dir = Path(config.storage.projects_dir) / request.project_id
-
-    if not project_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    if not request.scan_items:
-        raise HTTPException(status_code=400, detail="No scan items selected")
-
-    # Validate requested checkers exist
-    registry = get_registry()
-    for item in request.scan_items:
-        if item not in registry:
-            raise HTTPException(status_code=400, detail=f"Unknown checker: {item}")
-
-    scan_id = uuid.uuid4().hex
-    now = datetime.now(timezone.utc).isoformat()
-
-    scan = ScanStatus(
-        scan_id=scan_id,
-        project_id=request.project_id,
-        scan_items=request.scan_items,
-        created_at=now,
-        status=ScanItemStatus.PENDING,
-        progress=0.0,
-        total_candidates=0,
-        processed_candidates=0,
-        vulnerabilities=[],
-        feedback_ids=request.feedback_ids,
-    )
-    meta = ScanMeta(scan_items=request.scan_items, created_at=now, feedback_ids=request.feedback_ids)
-
-    # Persist initial state
-    store = get_scan_store()
-    store.save_scan(scan, meta)
-
-    _running_scans[scan_id] = scan
-    _scan_cancel_events[scan_id] = asyncio.Event()
-
-    # Resolve feedback entries for SKILL merging
-    feedback_entries = []
-    if request.feedback_ids:
-        feedback_entries = store.get_feedback_by_ids(request.feedback_ids)
-
-    # Launch scan in background
-    asyncio.create_task(
-        _run_scan(scan_id, request.project_id, project_dir, request.scan_items,
-                  feedback_entries=feedback_entries)
-    )
-
-    logger.info("Started scan %s for project %s", scan_id, request.project_id)
-    return ScanStartResponse(scan_id=scan_id)
-
-
 @router.get("/api/scan/{scan_id}", response_model=ScanStatus)
 async def get_scan_status(scan_id: str) -> ScanStatus:
     """Get the current status and results of a scan."""
-    # Prefer in-memory copy for running scans (lower latency)
     if scan_id in _running_scans:
         return _running_scans[scan_id]
-
-    # Fall back to database
     store = get_scan_store()
     result = store.load_scan(scan_id)
     if result is None:
@@ -141,18 +143,38 @@ async def get_scan_status(scan_id: str) -> ScanStatus:
 
 @router.post("/api/scan/{scan_id}/stop")
 async def stop_scan(scan_id: str) -> dict:
-    """Request cancellation of a running scan."""
+    """Signal the agent to stop processing this scan."""
+    from backend.api.agent import _registered_agents
+
     if scan_id not in _running_scans:
         raise HTTPException(status_code=404, detail="Scan not found or not running")
-    event = _scan_cancel_events.get(scan_id)
-    if event:
-        event.set()
+
+    # Look up the agent for this scan
+    store = get_scan_store()
+    result = store.load_scan(scan_id)
+    agent_id = result[1].agent_id if result else ""
+    agent = _registered_agents.get(agent_id) if agent_id else None
+
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent for this scan is not online")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            resp = await client.post(f"http://{agent.ip}:{agent.port}/task/{scan_id}/stop")
+            resp.raise_for_status()
+    except Exception as exc:
+        logger.error("Failed to stop scan %s on agent %s: %s", scan_id, agent_id, exc)
+        raise HTTPException(status_code=502, detail=f"Failed to reach agent: {exc}")
+
+    logger.info("Stop requested for scan %s via agent %s", scan_id, agent_id)
     return {"ok": True}
 
 
 @router.post("/api/scan/{scan_id}/resume", response_model=ScanStartResponse)
 async def resume_scan(scan_id: str) -> ScanStartResponse:
-    """Resume an interrupted (cancelled/error) scan from where it left off."""
+    """Reset a cancelled/error scan to PENDING and tell the agent to resume."""
+    from backend.api.agent import _registered_agents
+
     if scan_id in _running_scans:
         raise HTTPException(status_code=400, detail="Scan is already running")
 
@@ -165,16 +187,12 @@ async def resume_scan(scan_id: str) -> ScanStartResponse:
     if scan.status not in (ScanItemStatus.CANCELLED, ScanItemStatus.ERROR):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot resume scan with status '{scan.status.value}'"
+            detail=f"Cannot resume scan with status '{scan.status.value}'",
         )
 
-    config = get_config()
-    project_dir = Path(config.storage.projects_dir) / scan.project_id
-    if not project_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Project directory not found")
-
-    # Get already-processed candidate keys
-    processed_keys = store.get_processed_keys(scan_id)
+    agent = _registered_agents.get(meta.agent_id) if meta.agent_id else None
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent for this scan is not online")
 
     # Reset total_candidates to processed count so the producer can
     # re-count only the unprocessed ones without double-counting.
@@ -192,19 +210,27 @@ async def resume_scan(scan_id: str) -> ScanStartResponse:
     )
 
     _running_scans[scan_id] = scan
-    _scan_cancel_events[scan_id] = asyncio.Event()
 
-    asyncio.create_task(
-        _run_scan(
-            scan_id,
-            scan.project_id,
-            project_dir,
-            meta.scan_items,
-            processed_keys=processed_keys,
-        )
-    )
+    # Call agent resume endpoint
+    try:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            resp = await client.post(
+                f"http://{agent.ip}:{agent.port}/task/{scan_id}/resume",
+                json={
+                    "project_path": meta.project_path,
+                    "checkers": meta.scan_items,
+                    "scan_name": meta.scan_name,
+                },
+            )
+            resp.raise_for_status()
+    except Exception as exc:
+        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message=str(exc))
+        scan.status = ScanItemStatus.ERROR
+        _running_scans.pop(scan_id, None)
+        logger.error("Failed to resume scan %s on agent %s: %s", scan_id, meta.agent_id, exc)
+        raise HTTPException(status_code=502, detail=f"Failed to reach agent: {exc}")
 
-    logger.info("Resumed scan %s", scan_id)
+    logger.info("Resumed scan %s via agent %s", scan_id, meta.agent_id)
     return ScanStartResponse(scan_id=scan_id)
 
 
@@ -213,7 +239,6 @@ async def delete_scan(scan_id: str) -> dict:
     """Delete a scan record and clean up project directory if orphaned."""
     if scan_id in _running_scans:
         raise HTTPException(status_code=400, detail="Cannot delete a running scan")
-
     store = get_scan_store()
 
     # Load scan to get project_id before deletion
@@ -246,22 +271,20 @@ async def delete_scan(scan_id: str) -> dict:
 async def download_report(scan_id: str) -> Response:
     """Download the scan results as a CSV report."""
     scan = await get_scan_status(scan_id)
-
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["file", "line", "function", "vuln_type", "severity", "confirmed", "description", "ai_analysis"])
     for v in scan.vulnerabilities:
         writer.writerow([v.file, v.line, v.function, v.vuln_type, v.severity, v.confirmed, v.description, v.ai_analysis])
-
     return Response(
-        content="\ufeff" + buf.getvalue(),
+        content="﻿" + buf.getvalue(),
         media_type="text/csv; charset=utf-8-sig",
         headers={"Content-Disposition": f'attachment; filename="report-{scan_id}.csv"'},
     )
 
 
 def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str, reason: str) -> str:
-    """Mark a single vulnerability and create feedback. Returns feedback_id."""
+    """Mark a single vulnerability and create a feedback entry. Returns feedback_id."""
     if verdict not in ("confirmed", "false_positive"):
         raise HTTPException(status_code=400, detail="Invalid verdict")
     if index < 0 or index >= len(scan.vulnerabilities):
@@ -269,17 +292,14 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
 
     vuln = scan.vulnerabilities[index]
 
-    # Update in-memory copy if running
     if scan_id in _running_scans:
         live = _running_scans[scan_id]
         if index < len(live.vulnerabilities):
             live.vulnerabilities[index].user_verdict = verdict
             live.vulnerabilities[index].user_verdict_reason = reason
 
-    # Persist verdict to database
     store.update_vulnerability(scan_id, index, verdict, reason)
 
-    # Auto-create feedback entry in experience database
     now = datetime.now(timezone.utc).isoformat()
     feedback_id = uuid.uuid4().hex
     entry = FeedbackEntry(
@@ -297,7 +317,6 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
         updated_at=now,
     )
     store.add_feedback(entry)
-
     logger.info("Scan %s: vulnerability %d marked as %s, feedback %s", scan_id, index, verdict, feedback_id)
     return feedback_id
 
@@ -318,87 +337,26 @@ async def batch_mark_vulnerabilities(scan_id: str, body: BatchMarkRequest) -> di
         raise HTTPException(status_code=400, detail="No items provided")
     scan = await get_scan_status(scan_id)
     store = get_scan_store()
-    feedback_ids = []
-    for item in body.items:
-        fid = _mark_single(scan_id, scan, store, item.index, item.verdict, item.reason)
-        feedback_ids.append(fid)
+    feedback_ids = [
+        _mark_single(scan_id, scan, store, item.index, item.verdict, item.reason)
+        for item in body.items
+    ]
     return {"ok": True, "feedback_ids": feedback_ids}
 
 
-@router.post("/api/scan/{scan_id}/save-fp")
-async def save_false_positive(scan_id: str, body: SaveFalsePositiveRequest) -> dict:
-    """Save a false positive experience to the project's skill_fp directory."""
-    scan = await get_scan_status(scan_id)
-
-    if body.index < 0 or body.index >= len(scan.vulnerabilities):
-        raise HTTPException(status_code=400, detail="Invalid vulnerability index")
-
-    vuln = scan.vulnerabilities[body.index]
-    if vuln.user_verdict != "false_positive":
-        raise HTTPException(status_code=400, detail="Vulnerability is not marked as false positive")
-
-    config = get_config()
-    project_dir = Path(config.storage.projects_dir) / scan.project_id
-    fp_dir = project_dir / "skill_fp"
-    fp_dir.mkdir(parents=True, exist_ok=True)
-
-    fp_file = fp_dir / f"{vuln.vuln_type}.md"
-
-    entry = (
-        f"\n- 场景：{vuln.file}:{vuln.line} — {vuln.function}\n"
-        f"  描述：{vuln.description}\n"
-        f"  理由：{vuln.user_verdict_reason or '无'}\n"
-        f"  来源：{scan_id}\n"
-    )
-
-    with open(fp_file, "a", encoding="utf-8") as f:
-        f.write(entry)
-
-    logger.info(
-        "Scan %s: saved false positive for %s:%d to %s",
-        scan_id, vuln.file, vuln.line, fp_file,
-    )
-    return {"ok": True}
-
-
 # ---------------------------------------------------------------------------
-# Scan feedback + SKILL endpoints
+# Scan feedback endpoint (DB-only; no server-side workspace to refresh)
 # ---------------------------------------------------------------------------
 
 
 @router.put("/api/scan/{scan_id}/feedback")
 async def update_scan_feedback(scan_id: str, body: dict) -> dict:
-    """Update the feedback entries applied to a running scan.
-
-    Regenerates SKILL files so the next LLM audit picks up the changes.
-    Body: {"feedback_ids": ["id1", "id2", ...]}
-    """
+    """Update the feedback entry IDs associated with a scan."""
     feedback_ids: list[str] = body.get("feedback_ids", [])
-
     store = get_scan_store()
-    feedback_entries = store.get_feedback_by_ids(feedback_ids) if feedback_ids else []
-
-    # Update in-memory state
     if scan_id in _running_scans:
         _running_scans[scan_id].feedback_ids = feedback_ids
-
-    # Persist
     store.update_scan_feedback_ids(scan_id, feedback_ids)
-
-    # Regenerate SKILL files in workspace
-    workspace = _scan_workspaces.get(scan_id)
-    if workspace is None:
-        wp = store.get_scan_workspace(scan_id)
-        if wp:
-            workspace = Path(wp)
-
-    if workspace and workspace.is_dir():
-        scan = await get_scan_status(scan_id)
-        config = get_config()
-        project_dir = Path(config.storage.projects_dir) / scan.project_id
-        refresh_skills(workspace, project_dir, feedback_entries)
-        logger.info("Scan %s: refreshed skills with %d feedback entries", scan_id, len(feedback_entries))
-
     return {"ok": True}
 
 

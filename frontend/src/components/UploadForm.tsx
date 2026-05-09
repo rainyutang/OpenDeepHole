@@ -4,11 +4,11 @@ import type { CheckerInfo, IndexStatus } from "../types";
 import FeedbackManager from "./FeedbackManager";
 
 interface Props {
-  onScanStarted: (scanId: string) => void;
+  onScanStarted?: (scanId: string) => void;
   onBack: () => void;
 }
 
-export default function UploadForm({ onScanStarted, onBack }: Props) {
+export default function UploadForm({ onBack }: Props) {
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -18,7 +18,7 @@ export default function UploadForm({ onScanStarted, onBack }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Two-step: after upload, allow feedback selection before scan
-  const [projectId, setProjectId] = useState<string | null>(null);
+  const [projectId] = useState<string | null>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [selectedFeedbackIds, setSelectedFeedbackIds] = useState<Set<string>>(new Set());
   const [feedbackCount, setFeedbackCount] = useState(0);
@@ -98,8 +98,8 @@ export default function UploadForm({ onScanStarted, onBack }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const { project_id } = await uploadSource(file);
-      setProjectId(project_id);
+      // Legacy upload flow — not used in the new agent-based architecture
+      setError("Upload flow is no longer supported. Use 新建扫描 instead.");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Upload failed";
       setError(msg);
@@ -113,8 +113,8 @@ export default function UploadForm({ onScanStarted, onBack }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const { scan_id } = await startScan(projectId, [...selected], [...selectedFeedbackIds]);
-      onScanStarted(scan_id);
+      // Legacy scan start — not used in the new agent-based architecture
+      setError("Direct scan start is no longer supported. Use 新建扫描 instead.");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Scan failed to start";
       setError(msg);

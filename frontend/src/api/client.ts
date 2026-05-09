@@ -8,10 +8,8 @@ export async function getCheckers(): Promise<CheckerInfo[]> {
   return data;
 }
 
-export async function uploadSource(file: File): Promise<UploadResponse> {
-  const form = new FormData();
-  form.append("file", file);
-  const { data } = await api.post<UploadResponse>("/api/upload", form);
+export async function getAgents(): Promise<AgentInfo[]> {
+  const { data } = await api.get<AgentInfo[]>("/api/agents");
   return data;
 }
 
@@ -140,4 +138,15 @@ export async function resumeScan(scanId: string): Promise<ScanStartResponse> {
 
 export async function deleteScan(scanId: string): Promise<void> {
   await api.delete(`/api/scan/${scanId}`);
+}
+
+// --- Agent config ---
+
+export async function getAgentConfig(agentId: string): Promise<AgentRemoteConfig> {
+  const { data } = await api.get<AgentRemoteConfig>(`/api/agent/${agentId}/config`);
+  return data;
+}
+
+export async function updateAgentConfig(agentId: string, config: AgentRemoteConfig): Promise<void> {
+  await api.put(`/api/agent/${agentId}/config`, config);
 }

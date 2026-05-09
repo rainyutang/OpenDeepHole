@@ -4,6 +4,9 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -131,6 +134,24 @@ async def run_audit(
     return _read_result(result_id, candidate)
 
 
+def _resolve_opencode() -> str:
+    """Return the full path to the opencode executable.
+
+    Uses the name/path from config (opencode.executable, default "opencode").
+    On Windows, opencode is typically installed as opencode.cmd (npm package).
+    CreateProcess does not resolve .cmd/.bat extensions automatically, so we
+    use shutil.which which honours PATHEXT on Windows.
+    """
+    name = get_config().opencode.executable or "opencode"
+    resolved = shutil.which(name)
+    if resolved is None:
+        raise FileNotFoundError(
+            f"opencode executable '{name}' not found in PATH. "
+            "Check the opencode.executable setting in config.yaml (or agent.yaml)."
+        )
+    return resolved
+
+
 async def _invoke_opencode(
     workspace: Path,
     prompt: str,
@@ -139,9 +160,16 @@ async def _invoke_opencode(
     on_line=None,
     cancel_event: asyncio.Event | None = None,
 ) -> None:
-    """Invoke opencode CLI, stream output line-by-line, write to log file."""
+    """Invoke opencode CLI, stream output line-by-line, write to log file.
+
+    Uses subprocess.Popen in a thread executor instead of
+    asyncio.create_subprocess_exec to avoid the asyncio child-watcher
+    requirement on Linux (which raises NotImplementedError in some
+    environments regardless of Python version).
+    """
     config = get_config()
-    cmd = ["opencode", "run", "--dir", str(workspace)]
+    opencode_exe = _resolve_opencode()
+    cmd = [opencode_exe, "run", "--dir", str(workspace)]
     if config.opencode.model:
         cmd += ["--model", config.opencode.model]
     cmd.append(prompt)
@@ -151,12 +179,57 @@ async def _invoke_opencode(
     env = os.environ.copy()
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,  # merge stderr into stdout
-        env=env,
-    )
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
+    loop = asyncio.get_running_loop()
+    # Queue carries output lines; None is the end-of-stream sentinel.
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    proc_holder: list[subprocess.Popen | None] = [None]
+
+    def _stream() -> int:
+        """Blocking: run opencode, push lines into the asyncio queue."""
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            **kwargs,
+        )
+        proc_holder[0] = proc
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = _strip_ansi(raw.decode("utf-8", errors="replace").rstrip())
+                if line:
+                    loop.call_soon_threadsafe(queue.put_nowait, line)
+        finally:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            proc.wait()
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+        return proc.returncode
+
+    def _kill() -> None:
+        proc = proc_holder[0]
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    stream_future = loop.run_in_executor(None, _stream)
+
+    # Watcher: kill proc immediately when cancel_event fires.
+    async def _cancel_watcher() -> None:
+        if cancel_event:
+            await cancel_event.wait()
+            _kill()
+
+    watcher = asyncio.create_task(_cancel_watcher()) if cancel_event else None
 
     log_lines: list[str] = []
     deadline = asyncio.get_event_loop().time() + timeout
@@ -181,12 +254,12 @@ async def _invoke_opencode(
         async for raw in proc.stdout:
             if cancelled:
                 break
-            if asyncio.get_event_loop().time() > deadline:
-                proc.kill()
-                raise asyncio.TimeoutError()
-            line = _strip_ansi(raw.decode("utf-8", errors="replace").rstrip())
-            if not line:
+            try:
+                line = await asyncio.wait_for(queue.get(), timeout=min(remaining, 1.0))
+            except asyncio.TimeoutError:
                 continue
+            if line is None:  # end-of-stream sentinel
+                break
             log_lines.append(line)
             logger.debug("[opencode] %s", line)
             if on_line:
@@ -204,7 +277,10 @@ async def _invoke_opencode(
             except Exception:
                 pass
 
-    await proc.wait()
+    await stream_future  # wait for thread to exit cleanly
+
+    if timed_out:
+        raise asyncio.TimeoutError()
 
     if not cancelled and proc.returncode != 0:
         logger.error("opencode exited with code %d", proc.returncode)

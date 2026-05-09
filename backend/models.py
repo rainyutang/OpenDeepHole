@@ -159,11 +159,72 @@ class ScanStatus(BaseModel):
     static_analysis_done: bool = False
 
 
+# --- Agent API models ---
+
+class AgentScanRegister(BaseModel):
+    """Sent by the agent to register a new scan and receive a scan_id."""
+    project_name: str
+    scan_items: list[str]
+    agent_version: str = ""
+
+
+class AgentScanFinish(BaseModel):
+    """Sent by the agent when the scan completes (success or error)."""
+    vulnerabilities: list[Vulnerability]
+    status: str                    # "complete" | "error"
+    total_candidates: int
+    processed_candidates: int
+    error_message: str | None = None
+
+
+class AgentInfo(BaseModel):
+    """Info about a registered agent."""
+    agent_id: str
+    name: str
+    ip: str
+    port: int
+    last_seen: str
+
+
+class AgentLLMApiConfig(BaseModel):
+    base_url: str = "https://api.anthropic.com"
+    api_key: str = ""
+    model: str = "claude-sonnet-4-6"
+    temperature: float = 0.1
+    timeout: int = 120
+    max_retries: int = 3
+
+
+class AgentOpenCodeConfig(BaseModel):
+    executable: str = "opencode"
+    model: str = ""
+    timeout: int = 300
+
+
+class AgentRemoteConfig(BaseModel):
+    """Agent configuration managed from the server Web UI."""
+    no_proxy: str = ""
+    llm_api: AgentLLMApiConfig = AgentLLMApiConfig()
+    opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
+
+
+class CreateScanRequest(BaseModel):
+    """Request to create a new scan via a registered agent."""
+    agent_id: str
+    project_path: str
+    scan_name: str = ""
+    checkers: list[str]
+    feedback_ids: list[str] = []
+
+
 class ScanMeta(BaseModel):
     """扫描元数据，记录扫描配置信息。"""
     scan_items: list[str]
     created_at: str
     feedback_ids: list[str] = []
+    agent_id: str = ""
+    project_path: str = ""
+    scan_name: str = ""
 
 
 class ScanSummary(BaseModel):

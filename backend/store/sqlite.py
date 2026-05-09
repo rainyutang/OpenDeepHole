@@ -120,6 +120,12 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN static_scanned_files INTEGER DEFAULT 0")
         if "static_analysis_done" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN static_analysis_done INTEGER DEFAULT 0")
+        if "agent_id" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN agent_id TEXT DEFAULT ''")
+        if "project_path" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN project_path TEXT DEFAULT ''")
+        if "scan_name" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN scan_name TEXT DEFAULT ''")
         self._conn.commit()
 
     # -- helpers --
@@ -152,6 +158,9 @@ class SqliteScanStore(ScanStoreBase):
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
+            agent_id=row["agent_id"] if row["agent_id"] is not None else "",
+            project_path=row["project_path"] if row["project_path"] is not None else "",
+            scan_name=row["scan_name"] if row["scan_name"] is not None else "",
         )
 
     # -- Scan lifecycle --
@@ -327,6 +336,12 @@ class SqliteScanStore(ScanStoreBase):
         return row[0] if row else None
 
     # -- Vulnerabilities --
+
+    def count_vulnerabilities(self, scan_id: str) -> int:
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM vulnerabilities WHERE scan_id = ?", (scan_id,)
+        )
+        return cur.fetchone()[0]
 
     def add_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
         with self._lock:

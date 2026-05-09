@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 from backend.config import get_config
@@ -21,6 +22,7 @@ def create_scan_workspace(
     scan_id: str,
     project_dir: Path | None = None,
     feedback_entries: list[FeedbackEntry] | None = None,
+    mcp_port: int | None = None,
 ) -> Path:
     """Create an opencode workspace for a scan.
 
@@ -46,7 +48,7 @@ def create_scan_workspace(
         workspace = Path(config.storage.scans_dir) / scan_id
         workspace.mkdir(parents=True, exist_ok=True)
 
-    _write_opencode_config(workspace)
+    _write_opencode_config(workspace, mcp_port=mcp_port)
     refresh_skills(workspace, project_dir, feedback_entries)
 
     logger.info("Created opencode workspace: %s", workspace)
@@ -66,10 +68,11 @@ def refresh_skills(
     _link_skills(workspace, project_dir, feedback_entries=feedback_entries)
 
 
-def _write_opencode_config(workspace: Path) -> None:
+def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None:
     """Generate opencode.json with MCP server configuration."""
     config = get_config()
-    mcp_url = f"http://localhost:{config.mcp_server.port}/mcp"
+    port = mcp_port if mcp_port is not None else config.mcp_server.port
+    mcp_url = f"http://127.0.0.1:{port}/mcp"
 
     opencode_config = {
         "$schema": "https://opencode.ai/config.json",
@@ -172,7 +175,7 @@ def _link_skills(
             skill_dest.write_text(merged, encoding="utf-8")
             logger.debug("Merged FP experience into skill for checker %s", name)
         else:
-            skill_dest.symlink_to(entry.skill_path.resolve())
+            shutil.copy2(entry.skill_path, skill_dest)
 
         # Symlink whitelisted resource directories (references, scripts, assets)
         for dir_name in _SKILL_RESOURCE_DIRS:
@@ -184,6 +187,27 @@ def _link_skills(
                 link_dest.symlink_to(src.resolve())
 
     logger.debug("Linked skills for %d checkers", len(registry))
+
+
+def cleanup_workspace(workspace: Path) -> None:
+    """Remove opencode artifacts written into the workspace directory.
+
+    Deletes ``opencode.json`` and the ``.opencode/`` directory that were
+    created by :func:`create_scan_workspace`.  Safe to call even if the
+    files no longer exist.
+    """
+    opencode_json = workspace / "opencode.json"
+    opencode_dir = workspace / ".opencode"
+    try:
+        if opencode_json.exists():
+            opencode_json.unlink()
+    except Exception as exc:
+        logger.warning("Failed to remove opencode.json from workspace: %s", exc)
+    try:
+        if opencode_dir.is_dir():
+            shutil.rmtree(opencode_dir)
+    except Exception as exc:
+        logger.warning("Failed to remove .opencode dir from workspace: %s", exc)
 
 
 def get_skill_content(workspace: Path, vuln_type: str) -> str | None:

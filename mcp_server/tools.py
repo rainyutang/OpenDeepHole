@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -18,8 +19,27 @@ def _get_config():
 
 
 def _get_db(project_id: str):
-    """返回指定项目的 CodeDatabase，不存在则返回 None。"""
+    """返回指定项目的 CodeDatabase，不存在则返回 None。
+
+    Agent 模式下，AGENT_PROJECT_DIR 环境变量指向本地索引目录，优先于
+    server 模式下的 {projects_dir}/{project_id}/code_index.db 路径。
+    """
     from code_parser import CodeDatabase
+
+    # Agent mode: resolve DB path from env var (set by agent/local_mcp.py)
+    agent_dir = os.environ.get("AGENT_PROJECT_DIR")
+    if agent_dir:
+        cache_key = f"agent:{agent_dir}"
+        if cache_key in _db_cache:
+            return _db_cache[cache_key]
+        db_path = Path(agent_dir) / "code_index.db"
+        if not db_path.exists():
+            return None
+        db = CodeDatabase(db_path)
+        _db_cache[cache_key] = db
+        return db
+
+    # Server mode: resolve by project_id
     if project_id in _db_cache:
         return _db_cache[project_id]
     db_path = Path(_get_config().storage.projects_dir) / project_id / "code_index.db"
@@ -28,6 +48,17 @@ def _get_db(project_id: str):
     db = CodeDatabase(db_path)
     _db_cache[project_id] = db
     return db
+
+
+def _mcp_log(direction: str, tool: str, detail: str) -> None:
+    print(f"  [MCP {direction}] {tool} | {detail}", flush=True)
+
+
+def _preview(text: str, max_chars: int = 120) -> str:
+    text = text.replace("\n", "\\n")
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}… ({len(text)} chars)"
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -46,17 +77,24 @@ def register_tools(mcp: FastMCP) -> None:
         返回：
             函数体代码（包含文件路径和行号信息），未找到则返回提示。
         """
+        _mcp_log("▶", "view_function_code", f"function_name={function_name!r}")
         db = _get_db(project_id)
         if db is None:
-            return f"项目 {project_id} 的代码索引不可用。"
+            result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log("◀", "view_function_code", result)
+            return result
         rows = db.get_functions_by_name(function_name)
         if not rows:
-            return f"未找到函数 '{function_name}'。"
+            result = f"未找到函数 '{function_name}'。"
+            _mcp_log("◀", "view_function_code", result)
+            return result
         parts = [
             f"// {row['file_path']}:{row['start_line']}-{row['end_line']}\n{row['body']}"
             for row in rows
         ]
-        return "\n\n".join(parts)
+        result = "\n\n".join(parts)
+        _mcp_log("◀", "view_function_code", f"{len(rows)} match(es), {len(result)} chars")
+        return result
 
     @mcp.tool()
     def view_struct_code(project_id: str, struct_name: str) -> str:
@@ -71,17 +109,24 @@ def register_tools(mcp: FastMCP) -> None:
         返回：
             结构体定义代码（包含文件路径和行号信息），未找到则返回提示。
         """
+        _mcp_log("▶", "view_struct_code", f"struct_name={struct_name!r}")
         db = _get_db(project_id)
         if db is None:
-            return f"项目 {project_id} 的代码索引不可用。"
+            result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log("◀", "view_struct_code", result)
+            return result
         rows = db.get_structs_by_name(struct_name)
         if not rows:
-            return f"未找到结构体 '{struct_name}'。"
+            result = f"未找到结构体 '{struct_name}'。"
+            _mcp_log("◀", "view_struct_code", result)
+            return result
         parts = [
             f"// {row['file_path']}:{row['start_line']}-{row['end_line']}\n{row['definition']}"
             for row in rows
         ]
-        return "\n\n".join(parts)
+        result = "\n\n".join(parts)
+        _mcp_log("◀", "view_struct_code", f"{len(rows)} match(es), {len(result)} chars")
+        return result
 
     @mcp.tool()
     def view_global_variable_definition(project_id: str, global_variable_name: str) -> str:
@@ -95,17 +140,24 @@ def register_tools(mcp: FastMCP) -> None:
         返回：
             全局变量定义代码，未找到则返回提示。
         """
+        _mcp_log("▶", "view_global_variable_definition", f"name={global_variable_name!r}")
         db = _get_db(project_id)
         if db is None:
-            return f"项目 {project_id} 的代码索引不可用。"
+            result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log("◀", "view_global_variable_definition", result)
+            return result
         rows = db.get_global_variables_by_name(global_variable_name)
         if not rows:
-            return f"未找到全局变量 '{global_variable_name}'。"
+            result = f"未找到全局变量 '{global_variable_name}'。"
+            _mcp_log("◀", "view_global_variable_definition", result)
+            return result
         parts = [
             f"// {row['file_path']}:{row['start_line']}\n{row['definition']}"
             for row in rows
         ]
-        return "\n\n".join(parts)
+        result = "\n\n".join(parts)
+        _mcp_log("◀", "view_global_variable_definition", f"{len(rows)} match(es), {len(result)} chars")
+        return result
 
     @mcp.tool()
     def find_function_references(project_id: str, function_name: str) -> str:
@@ -119,16 +171,23 @@ def register_tools(mcp: FastMCP) -> None:
         返回：
             每行一个调用位置，格式为 "调用者函数名  文件路径:行号"。
         """
+        _mcp_log("▶", "find_function_references", f"function_name={function_name!r}")
         db = _get_db(project_id)
         if db is None:
-            return f"项目 {project_id} 的代码索引不可用。"
+            result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log("◀", "find_function_references", result)
+            return result
         rows = db.get_call_sites_by_name(function_name)
         if not rows:
-            return f"未找到函数 '{function_name}' 的引用位置。"
-        return "\n".join(
+            result = f"未找到函数 '{function_name}' 的引用位置。"
+            _mcp_log("◀", "find_function_references", result)
+            return result
+        result = "\n".join(
             f"{row['caller_name'] or '未知'}  {row['file_path']}:{row['line']}"
             for row in rows
         )
+        _mcp_log("◀", "find_function_references", f"{len(rows)} reference(s)")
+        return result
 
     @mcp.tool()
     def find_global_variable_references(project_id: str, global_variable_name: str) -> str:
@@ -142,16 +201,23 @@ def register_tools(mcp: FastMCP) -> None:
         返回：
             每行一个引用，格式为 "引用函数名  文件路径:行号  访问类型  引用代码行"。
         """
+        _mcp_log("▶", "find_global_variable_references", f"name={global_variable_name!r}")
         db = _get_db(project_id)
         if db is None:
-            return f"项目 {project_id} 的代码索引不可用。"
+            result = f"项目 {project_id} 的代码索引不可用。"
+            _mcp_log("◀", "find_global_variable_references", result)
+            return result
         rows = db.get_global_variable_reference_by_name(global_variable_name)
         if not rows:
-            return f"未找到全局变量 '{global_variable_name}' 的引用。"
-        return "\n".join(
+            result = f"未找到全局变量 '{global_variable_name}' 的引用。"
+            _mcp_log("◀", "find_global_variable_references", result)
+            return result
+        result = "\n".join(
             f"{row['function_name'] or '未知'}  {row['file_path']}:{row['line']}  [{row['access_type']}]  {row['context']}"
             for row in rows
         )
+        _mcp_log("◀", "find_global_variable_references", f"{len(rows)} reference(s)")
+        return result
 
     @mcp.tool()
     def submit_result(
@@ -174,6 +240,8 @@ def register_tools(mcp: FastMCP) -> None:
         返回：
             提交成功的确认消息。
         """
+        _mcp_log("▶", "submit_result",
+                 f"confirmed={confirmed} severity={severity!r} description={_preview(description)}")
         scans_dir = _get_config().storage.scans_dir
         result_path = Path(scans_dir) / f"{result_id}.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,4 +251,5 @@ def register_tools(mcp: FastMCP) -> None:
             "description": description,
             "ai_analysis": ai_analysis,
         }, ensure_ascii=False))
+        _mcp_log("◀", "submit_result", f"saved → {result_path}")
         return f"结果已提交（result_id={result_id}）。"

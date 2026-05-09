@@ -1,0 +1,266 @@
+import { useEffect, useState } from "react";
+import { getAgents, getCheckers, createScan } from "../api/client";
+import type { AgentInfo, CheckerInfo } from "../types";
+
+interface Props {
+  onScanStarted: (scanId: string) => void;
+  onBack: () => void;
+}
+
+export default function NewScanForm({ onScanStarted, onBack }: Props) {
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [selectedAgent, setSelectedAgent] = useState<string>("");
+  const [projectPath, setProjectPath] = useState<string>("");
+  const [scanName, setScanName] = useState<string>("");
+  const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [agentList, checkerList] = await Promise.all([getAgents(), getCheckers()]);
+        setAgents(agentList);
+        setCheckers(checkerList);
+        // Pre-select all checkers
+        setSelectedCheckers(new Set(checkerList.map((c) => c.name)));
+        // Pre-select first online agent
+        const onlineAgent = agentList.find((a) => a.online);
+        if (onlineAgent) setSelectedAgent(onlineAgent.agent_id);
+      } catch (e) {
+        setError("加载数据失败，请重试");
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  const toggleChecker = (name: string) => {
+    setSelectedCheckers((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (!selectedAgent) {
+      setError("请选择一个 Agent");
+      return;
+    }
+    if (!projectPath.trim()) {
+      setError("请输入项目路径");
+      return;
+    }
+    if (selectedCheckers.size === 0) {
+      setError("请至少选择一个检查项");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const resp = await createScan({
+        agent_id: selectedAgent,
+        project_path: projectPath.trim(),
+        scan_name: scanName.trim(),
+        checkers: Array.from(selectedCheckers),
+      });
+      onScanStarted(resp.scan_id);
+    } catch (e: unknown) {
+      const msg =
+        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "创建扫描失败，请检查 Agent 是否在线";
+      setError(msg);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
+      {/* Header */}
+      <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-6 py-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
+            <p className="text-sm text-slate-400 mt-0.5">C/C++ Source Code Audit Tool</p>
+          </div>
+          <button
+            onClick={onBack}
+            className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+          >
+            返回
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 px-6 py-6 max-w-2xl mx-auto w-full">
+        <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-6">
+          新建扫描
+        </h2>
+
+        {loading ? (
+          <div className="flex items-center justify-center h-48">
+            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {/* Agent selection */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <label className="block text-sm font-medium text-slate-300 mb-3">
+                选择 Agent
+              </label>
+              {agents.length === 0 ? (
+                <p className="text-sm text-slate-500">暂无在线 Agent。请先运行 ./run_agent.sh</p>
+              ) : (
+                <div className="space-y-2">
+                  {agents.map((agent) => (
+                    <label
+                      key={agent.agent_id}
+                      className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                        selectedAgent === agent.agent_id
+                          ? "border-blue-500 bg-blue-500/10"
+                          : "border-slate-600 hover:border-slate-500"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="agent"
+                        value={agent.agent_id}
+                        checked={selectedAgent === agent.agent_id}
+                        onChange={() => setSelectedAgent(agent.agent_id)}
+                        className="sr-only"
+                      />
+                      <span
+                        className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                          agent.online ? "bg-green-400" : "bg-slate-500"
+                        }`}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <span className="text-sm font-medium text-white">{agent.name}</span>
+                        <span className="ml-2 text-xs text-slate-400">
+                          {agent.ip}:{agent.port}
+                        </span>
+                      </div>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded border ${
+                          agent.online
+                            ? "bg-green-500/20 text-green-400 border-green-500/30"
+                            : "bg-slate-700 text-slate-500 border-slate-600"
+                        }`}
+                      >
+                        {agent.online ? "在线" : "离线"}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Project path */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <label className="block text-sm font-medium text-slate-300 mb-3">
+                项目路径
+              </label>
+              <input
+                type="text"
+                value={projectPath}
+                onChange={(e) => setProjectPath(e.target.value)}
+                placeholder="/path/to/your/c-project"
+                className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
+              />
+              <p className="text-xs text-slate-500 mt-2">
+                Agent 所在机器上的 C/C++ 源代码目录绝对路径
+              </p>
+            </div>
+
+            {/* Scan name */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <label className="block text-sm font-medium text-slate-300 mb-3">
+                扫描名称 <span className="text-slate-500 font-normal">（可选）</span>
+              </label>
+              <input
+                type="text"
+                value={scanName}
+                onChange={(e) => setScanName(e.target.value)}
+                placeholder="留空则使用目录名"
+                className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors"
+              />
+            </div>
+
+            {/* Checker selection */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <label className="block text-sm font-medium text-slate-300 mb-3">
+                检查项
+              </label>
+              {checkers.length === 0 ? (
+                <p className="text-sm text-slate-500">无可用检查项</p>
+              ) : (
+                <div className="space-y-2">
+                  {checkers.map((checker) => (
+                    <label
+                      key={checker.name}
+                      className="flex items-start gap-3 p-3 rounded-lg border border-slate-600 hover:border-slate-500 cursor-pointer transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedCheckers.has(checker.name)}
+                        onChange={() => toggleChecker(checker.name)}
+                        className="mt-0.5 w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+                      />
+                      <div>
+                        <span className="text-sm font-medium text-white">{checker.label}</span>
+                        <p className="text-xs text-slate-400 mt-0.5">{checker.description}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Error */}
+            {error && (
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-400">
+                {error}
+              </div>
+            )}
+
+            {/* Submit */}
+            <div className="flex gap-3">
+              <button
+                type="submit"
+                disabled={submitting || agents.length === 0}
+                className="flex-1 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+              >
+                {submitting ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    创建中...
+                  </span>
+                ) : (
+                  "开始扫描"
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={onBack}
+                className="px-6 py-2.5 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+              >
+                取消
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}

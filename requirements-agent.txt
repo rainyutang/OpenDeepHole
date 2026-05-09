@@ -1,0 +1,15 @@
+# Agent dependencies — minimal subset needed to run the local agent
+# Install with: pip install -r requirements-agent.txt
+
+httpx>=0.27.0
+pyyaml>=6.0
+pydantic>=2.0
+openai>=1.0.0
+tree-sitter>=0.22.0
+tree-sitter-cpp>=0.22.0
+uvicorn>=0.29.0
+# fastapi>=0.115.0 required: starlette 0.46+ removed on_startup/on_shutdown from
+# Router.__init__(); older fastapi still passes those args and will crash on import.
+fastapi>=0.115.0
+fastmcp>=0.1.0
+mcp>=1.0.0
