@@ -193,8 +193,8 @@ def _infer_wrapper_allocs(project_path: Path, db: "CodeDatabase | None") -> set[
             all_funcs = []
 
         for func in all_funcs:
-            body = func.get("body") or ""
-            name = func.get("name") or ""
+            body = func["body"] or ""
+            name = func["name"] or ""
             if not body or not name:
                 continue
             # 跳过已知内置函数自身
@@ -602,7 +602,7 @@ class Analyzer(BaseAnalyzer):
 def _collect_function_names(project_path: Path, db: "CodeDatabase | None") -> set[str]:
     if db is not None:
         try:
-            return {f["name"] for f in db.get_all_functions() if f.get("name")}
+            return {f["name"] for f in db.get_all_functions() if f["name"]}
         except Exception:
             pass
 
