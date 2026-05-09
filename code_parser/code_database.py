@@ -279,6 +279,16 @@ class CodeDatabase:
             (variable_name,),
         ).fetchall()
 
+    def checkpoint(self) -> None:
+        """Flush WAL into the main DB file so the file can be safely copied.
+
+        In WAL mode, committed data lives in the -wal sidecar until a
+        checkpoint merges it back.  Call this before copying/backing up
+        the DB file to ensure the copy is self-contained.
+        """
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self._conn.commit()
+
     def close(self) -> None:
         self._conn.close()
 

@@ -1,0 +1,53 @@
+# resleak — 自定义资源分配/释放函数配置
+#
+# 用于告诉检测器项目中自定义的 malloc/free 类函数对，
+# 以及自定义的资源获取/释放函数对（文件、连接、句柄等）。
+#
+# 【方式一】精确指定函数对
+# alloc_func: 分配/获取资源的函数名
+# free_func:  对应的释放函数名（单个字符串或列表）
+# type:       资源类型描述（用于候选描述，便于 AI 理解）
+#
+# pairs:
+#   - alloc: "xmalloc"
+#     free:  "xfree"
+#     type:  "heap memory"
+#
+#   - alloc: "conn_create"
+#     free:  ["conn_destroy", "conn_close"]
+#     type:  "database connection"
+#
+#   - alloc: "VOS_Malloc"
+#     free:  "VOS_Free"
+#     type:  "heap memory"
+
+pairs: []
+
+# 【方式二】命名模式自动匹配
+# 函数名匹配 alloc_patterns 时视为分配函数，匹配 free_patterns 时视为释放函数。
+# 两者之间的配对关系由 AI 在验证阶段判断。
+#
+# 注意：模式过于宽泛会产生大量误报候选，建议只填写项目特有的前缀/后缀。
+#
+# naming:
+#   alloc_patterns:
+#     - "^VOS_Malloc"
+#     - "_Alloc$"
+#     - "_Create$"
+#     - "_Open$"
+#   free_patterns:
+#     - "^VOS_Free"
+#     - "_Free$"
+#     - "_Destroy$"
+#     - "_Close$"
+
+naming:
+  alloc_patterns: []
+  free_patterns: []
+
+# 【方式三】自动推断（从代码库分析）
+# 扫描项目中所有返回指针的函数，检查其内部是否调用了已知分配函数（malloc/calloc 等）。
+# 推断出的包装函数自动加入分配函数列表。
+# 注意：推断需要 CodeDatabase（扫描时自动构建），首次扫描或大项目可能较慢。
+
+auto_infer: true

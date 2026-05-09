@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, type DragEvent } from "react";
-import { getCheckers, uploadSource, startScan, listFeedback, getIndexStatus } from "../api/client";
+import { getCheckers, listFeedback, getIndexStatus } from "../api/client";
 import type { CheckerInfo, IndexStatus } from "../types";
 import FeedbackManager from "./FeedbackManager";
 

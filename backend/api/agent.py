@@ -63,6 +63,9 @@ _agent_ws: dict[str, WebSocket] = {}
 # Agent configs persisted by agent_name (survives agent reconnects)
 _agent_configs: dict[str, AgentRemoteConfig] = {}
 
+# In-memory index progress store: scan_id → {status, parsed_files, total_files}
+_scan_index_statuses: dict[str, dict] = {}
+
 
 # ---------------------------------------------------------------------------
 # WebSocket — preferred connection method (v2)
@@ -381,6 +384,41 @@ async def agent_get_processed(scan_id: str) -> list:
         {"file": f, "line": line, "function": fn, "vuln_type": vt}
         for f, line, fn, vt in keys
     ]
+
+
+# ---------------------------------------------------------------------------
+# Index progress (pushed by agent during code indexing phase)
+# ---------------------------------------------------------------------------
+
+
+class _IndexStatusBody(BaseModel):
+    status: str           # "parsing" | "done" | "error"
+    parsed_files: int = 0
+    total_files: int = 0
+
+
+@router.post("/scan/{scan_id}/index-status")
+async def agent_push_index_status(scan_id: str, body: _IndexStatusBody) -> dict:
+    """Agent pushes code-indexing progress. Stored in memory for frontend polling."""
+    _scan_index_statuses[scan_id] = body.model_dump()
+
+    # Mirror counts into the running scan so the frontend can read them via the
+    # existing scan-status polling endpoint (scan.static_total_files, etc.)
+    scan = _running_scans.get(scan_id)
+    if scan is not None:
+        scan.static_total_files = body.total_files
+        scan.static_scanned_files = body.parsed_files
+
+    return {"ok": True}
+
+
+@router.get("/scan/{scan_id}/index-status")
+async def agent_get_index_status(scan_id: str) -> dict:
+    """Return the current code-indexing progress for an agent scan."""
+    status = _scan_index_statuses.get(scan_id)
+    if status is None:
+        return {"status": "not_started"}
+    return status
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -83,10 +84,13 @@ async def run_audit(
             cancel_event=cancel_event,
         )
 
+    # Skill directory is .opencode/skills/<name>/ where <name> == vuln_type.
+    # Use checker_entry.skill_name if explicitly set, otherwise fall back to
+    # vuln_type so the name matches the actual directory opencode will look up.
     skill_name = (
         checker_entry.skill_name
         if checker_entry and checker_entry.skill_name
-        else f"{candidate.vuln_type}-analysis"
+        else candidate.vuln_type
     )
     result_id = uuid4().hex
 
@@ -138,18 +142,35 @@ def _resolve_opencode() -> str:
     """Return the full path to the opencode executable.
 
     Uses the name/path from config (opencode.executable, default "opencode").
-    On Windows, opencode is typically installed as opencode.cmd (npm package).
-    CreateProcess does not resolve .cmd/.bat extensions automatically, so we
-    use shutil.which which honours PATHEXT on Windows.
+    Falls back to a bash login shell lookup so that executables installed in
+    non-standard locations (e.g. ~/.bun/bin, ~/.local/bin) that are added to
+    PATH by ~/.profile or ~/.bash_profile are found even when the Python
+    process was started without sourcing those files.
     """
     name = get_config().opencode.executable or "opencode"
+    # Direct resolution: works when the binary is already in the current PATH
     resolved = shutil.which(name)
-    if resolved is None:
-        raise FileNotFoundError(
-            f"opencode executable '{name}' not found in PATH. "
-            "Check the opencode.executable setting in config.yaml (or agent.yaml)."
-        )
-    return resolved
+    if resolved:
+        return resolved
+    # Login-shell fallback: sources ~/.profile / ~/.bash_profile which typically
+    # extend PATH for user-installed tools (npm, bun, pipx, etc.)
+    if sys.platform != "win32":
+        try:
+            result = subprocess.run(
+                ["bash", "-lc", f"command -v {shlex.quote(name)}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                path = result.stdout.strip()
+                if path:
+                    logger.debug("opencode resolved via login shell: %s", path)
+                    return path
+        except Exception:
+            pass
+    raise FileNotFoundError(
+        f"opencode executable '{name}' not found in PATH. "
+        "Check the opencode.executable setting in agent.yaml."
+    )
 
 
 async def _invoke_opencode(
@@ -233,26 +254,14 @@ async def _invoke_opencode(
 
     log_lines: list[str] = []
     deadline = asyncio.get_event_loop().time() + timeout
-    cancelled = False
-
-    async def _watch_cancel():
-        """Monitor cancel_event and kill the process immediately when set."""
-        nonlocal cancelled
-        while not proc.returncode and proc.returncode is None:
-            await asyncio.sleep(0.2)
-            if cancel_event and cancel_event.is_set():
-                cancelled = True
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                return
-
-    watcher = asyncio.create_task(_watch_cancel()) if cancel_event else None
+    timed_out = False
 
     try:
-        async for raw in proc.stdout:
-            if cancelled:
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                timed_out = True
+                _kill()
                 break
             try:
                 line = await asyncio.wait_for(queue.get(), timeout=min(remaining, 1.0))
@@ -282,7 +291,8 @@ async def _invoke_opencode(
     if timed_out:
         raise asyncio.TimeoutError()
 
-    if not cancelled and proc.returncode != 0:
+    proc = proc_holder[0]
+    if proc and proc.returncode not in (0, None):
         logger.error("opencode exited with code %d", proc.returncode)
         raise RuntimeError(f"opencode exited with code {proc.returncode}")
 

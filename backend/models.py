@@ -1,5 +1,7 @@
 """Pydantic models for API requests, responses, and internal data."""
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -196,7 +198,7 @@ class AgentLLMApiConfig(BaseModel):
 
 
 class AgentOpenCodeConfig(BaseModel):
-    executable: str = "opencode"
+    executable: str = ""   # empty = not set by server; agent falls back to agent.yaml
     model: str = ""
     timeout: int = 300
 

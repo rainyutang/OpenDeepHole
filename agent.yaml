@@ -8,7 +8,7 @@ server_url: "http://your-server:8000"
 agent_name: ""
 
 # 代理跳过列表，逗号分隔，如 "localhost,127.0.0.1,10.0.0.0/8"
-no_proxy: ""
+no_proxy: "10.0.0.0/8"
 
 # 要运行的检查项，留空则运行全部已启用的检查项
 # 可选值: npd, oob, uaf, intoverflow, memleak
@@ -26,6 +26,6 @@ llm_api:
 
 # opencode CLI 配置（供 mode: opencode 的检查项使用）
 opencode:
-  executable: "opencode"  # 可执行文件名或完整路径，Windows 示例："myopencode"
+  executable: "nga"  # 可执行文件名或完整路径，Windows 示例："myopencode"
   model: ""               # 留空则使用 opencode 默认模型
-  timeout: 300            # 单次调用超时（秒）
+  timeout: 1200            # 单次调用超时（秒）

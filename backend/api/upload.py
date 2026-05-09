@@ -48,7 +48,21 @@ def _parse_project(project_id: str, project_dir: Path) -> None:
 
 @router.get("/api/project/{project_id}/index-status")
 async def get_index_status(project_id: str) -> dict:
-    """Return the current code indexing progress for a project."""
+    """Return the current code indexing progress for a project.
+
+    For agent-based scans the project_id equals the scan_name; we check
+    the in-memory agent index status store first so agent progress is
+    visible through the same polling URL the frontend already uses.
+    """
+    from backend.api.agent import _scan_index_statuses
+    from backend.api.scan import _running_scans
+
+    # Agent scans: find a running scan whose project_id (scan_name) matches
+    for scan_id, scan in _running_scans.items():
+        if scan.project_id == project_id and scan_id in _scan_index_statuses:
+            return _scan_index_statuses[scan_id]
+
+    # Server-hosted upload scans: read the file-based status
     config = get_config()
     project_dir = Path(config.storage.projects_dir) / project_id
     status_path = project_dir / "parse_status.json"

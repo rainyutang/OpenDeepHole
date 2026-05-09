@@ -121,28 +121,64 @@ async def run_scan(
         index_store = IndexStore()
         db = None
         db_path = scan_dir / "code_index.db"
+        # Only need the DB open if static analysis will run (no cached candidates yet)
+        need_db_open = not candidates_cache_path.exists()
 
-        if is_resume and candidates_cache_path.exists() and db_path.exists():
-            # Resume: scan_dir preserved from cancelled run, DB already present.
-            await emit("init", "Resume: 跳过代码索引（使用已有 code_index.db）")
+        def _db_has_data(path: Path) -> bool:
+            """Return True only if the DB file contains indexed functions."""
+            from code_parser import CodeDatabase
+            try:
+                _d = CodeDatabase(path)
+                count = _d._conn.execute("SELECT COUNT(*) FROM functions").fetchone()[0]
+                _d.close()
+                return count > 0
+            except Exception:
+                return False
 
-        elif not db_path.exists() and (existing := index_store.lookup(project_path)):
-            # Fresh scan: reuse a previously saved index for this path (or a parent).
+        do_index = True  # set False when a valid existing DB is found
+
+        if db_path.exists():
+            # DB already in scan dir — validate it has data before trusting it
+            if not need_db_open or _db_has_data(db_path):
+                await emit("init", "跳过代码索引（使用已有 code_index.db）")
+                if need_db_open:
+                    from code_parser import CodeDatabase
+                    db = CodeDatabase(db_path)
+                do_index = False
+            else:
+                # Empty/corrupt DB in scan dir → delete and re-index
+                db_path.unlink(missing_ok=True)
+
+        elif (existing := index_store.lookup(project_path)):
             shutil.copy2(existing, db_path)
             entry = index_store._registry.get(str(project_path.resolve()), {})
             indexed_at = entry.get("indexed_at", "unknown")
-            await emit("init", f"复用已有代码索引（上次索引时间: {indexed_at}），跳过重新索引")
+            if not need_db_open or _db_has_data(db_path):
+                await emit("init", f"复用已有代码索引（上次索引时间: {indexed_at}），跳过重新索引")
+                if need_db_open:
+                    from code_parser import CodeDatabase
+                    db = CodeDatabase(db_path)
+                do_index = False
+            else:
+                # Cached DB is empty (e.g. saved before WAL-checkpoint fix) →
+                # purge from store and re-index
+                db_path.unlink(missing_ok=True)
+                index_store.remove(project_path)
+                await emit("init", "已有代码索引为空（需重建），重新索引...")
 
-        else:
-            # No usable index found — run full indexing.
+        if do_index:
             await emit("init", "Indexing source code (tree-sitter)...")
+            await reporter.send_index_status(scan_id, "parsing", 0, 0)
             from code_parser import CodeDatabase, CppAnalyzer
             db = CodeDatabase(db_path)
             CppAnalyzer(db).analyze_directory(project_path)
             await emit("init", "Code indexing complete")
-            # Persist to index store for future scans.
+            # Flush WAL → main DB file before copying to index store so the
+            # stored file is self-contained (no -wal sidecar needed).
+            db.checkpoint()
             index_store.save(project_path, db_path)
             await emit("init", f"代码索引已保存（路径: {project_path}）")
+            await reporter.send_index_status(scan_id, "done", 0, 0)
 
         # --- Phase 2: Fetch feedback for SKILL enrichment ---
         feedback_entries = await reporter.get_feedback(list(registry.keys()))
@@ -170,10 +206,13 @@ async def run_scan(
         )
         await emit("init", "Analysis workspace ready")
 
-        # --- Phase 5: Static analysis (or load from cache on resume) ---
+        # --- Phase 5: Static analysis (or load from cache) ---
+        # Skip static analysis only when a candidates cache file already exists
+        # (written by a previous run of this scan_id).  DB existence alone does
+        # NOT skip this phase.
         candidates: list[Candidate] = []
-        if is_resume and candidates_cache_path.exists():
-            await emit("static_analysis", "Resume: 从缓存加载静态分析结果...")
+        if candidates_cache_path.exists():
+            await emit("static_analysis", "从缓存加载静态分析结果...")
             cached = json.loads(candidates_cache_path.read_text(encoding="utf-8"))
             candidates = [Candidate(**d) for d in cached]
             total = len(candidates)
