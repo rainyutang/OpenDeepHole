@@ -84,6 +84,13 @@ export interface FeedbackEntry {
   updated_at: string;
 }
 
+export interface IndexStatus {
+  status: "not_started" | "parsing" | "done" | "error" | "unknown";
+  parsed_files?: number;
+  total_files?: number;
+  error?: string;
+}
+
 export interface ScanSummary {
   scan_id: string;
   project_id: string;

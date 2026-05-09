@@ -73,18 +73,25 @@ async def run_audit(
 
     if use_api:
         from backend.opencode.llm_api_runner import run_audit_via_api
+        # 优先使用 workspace 中合并了反馈的 prompt
+        merged_prompt = workspace / ".opencode" / "skills" / candidate.vuln_type / "PROMPT.md"
+        prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
         return await run_audit_via_api(
             candidate, project_id,
-            prompt_path=checker_entry.prompt_path,
+            prompt_path=prompt_path,
             on_output=on_output,
             cancel_event=cancel_event,
         )
 
-    skill_name = candidate.vuln_type
+    skill_name = (
+        checker_entry.skill_name
+        if checker_entry and checker_entry.skill_name
+        else f"{candidate.vuln_type}-analysis"
+    )
     result_id = uuid4().hex
 
     prompt = (
-        f"Using the `{skill_name}-analysis` skill, analyze the potential "
+        f"Using the `{skill_name}` skill, analyze the potential "
         f"{candidate.vuln_type.upper()} vulnerability at "
         f"{candidate.file}:{candidate.line} in function `{candidate.function}`. "
         f"The project_id is `{project_id}`. "
@@ -225,15 +232,27 @@ async def _invoke_opencode(
     watcher = asyncio.create_task(_cancel_watcher()) if cancel_event else None
 
     log_lines: list[str] = []
-    deadline = loop.time() + timeout
-    timed_out = False
+    deadline = asyncio.get_event_loop().time() + timeout
+    cancelled = False
+
+    async def _watch_cancel():
+        """Monitor cancel_event and kill the process immediately when set."""
+        nonlocal cancelled
+        while not proc.returncode and proc.returncode is None:
+            await asyncio.sleep(0.2)
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                return
+
+    watcher = asyncio.create_task(_watch_cancel()) if cancel_event else None
 
     try:
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                _kill()
-                timed_out = True
+        async for raw in proc.stdout:
+            if cancelled:
                 break
             try:
                 line = await asyncio.wait_for(queue.get(), timeout=min(remaining, 1.0))
@@ -248,6 +267,10 @@ async def _invoke_opencode(
     finally:
         if watcher:
             watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
         if log_path and log_lines:
             try:
                 log_path.write_text("\n".join(log_lines), encoding="utf-8")
@@ -259,12 +282,9 @@ async def _invoke_opencode(
     if timed_out:
         raise asyncio.TimeoutError()
 
-    proc = proc_holder[0]
-    returncode = proc.returncode if proc is not None else -1
-    cancelled = cancel_event is not None and cancel_event.is_set()
-    if not cancelled and returncode != 0:
-        logger.error("opencode exited with code %d", returncode)
-        raise RuntimeError(f"opencode exited with code {returncode}")
+    if not cancelled and proc.returncode != 0:
+        logger.error("opencode exited with code %d", proc.returncode)
+        raise RuntimeError(f"opencode exited with code {proc.returncode}")
 
 
 def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
@@ -326,9 +346,12 @@ async def run_audit_batch(
 
     if use_api:
         from backend.opencode.llm_api_runner import run_batch_audit_via_api
+        # 优先使用 workspace 中合并了反馈的 prompt
+        merged_prompt = workspace / ".opencode" / "skills" / candidates[0].vuln_type / "PROMPT.md"
+        prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
         return await run_batch_audit_via_api(
             candidates, project_id,
-            prompt_path=checker_entry.prompt_path,
+            prompt_path=prompt_path,
             on_output=on_output,
             cancel_event=cancel_event,
         )

@@ -614,14 +614,24 @@ class MemLeakDetector:
 _SOURCE_EXTS = {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp"}
 
 
+_SKIP_DIRS = {
+    ".git", ".svn", ".hg",
+    "node_modules", "vendor", "third_party", "3rdparty", "thirdparty",
+    "external", "extern", "deps",
+    "build", "cmake-build-debug", "cmake-build-release",
+    "out", "output", "_build", ".build",
+    "__pycache__", ".venv", "venv",
+}
+
+
 def _collect_source_files(root: Path) -> list[Path]:
+    import os
     files = []
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
-        if p.suffix.lower() not in _SOURCE_EXTS:
-            continue
-        files.append(p)
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fname in filenames:
+            if Path(fname).suffix.lower() in _SOURCE_EXTS:
+                files.append(Path(dirpath) / fname)
     return sorted(files)
 
 

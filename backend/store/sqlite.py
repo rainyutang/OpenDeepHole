@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 from backend.models import (
@@ -123,6 +124,7 @@ class SqliteScanStore(ScanStoreBase):
         self._conn = sqlite3.connect(
             str(db_path), check_same_thread=False
         )
+        self._lock = threading.Lock()  # 保护多线程下 execute+commit 的原子性
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
@@ -216,37 +218,34 @@ class SqliteScanStore(ScanStoreBase):
             if scan.current_candidate
             else None
         )
-        self._conn.execute(
-            """\
-            INSERT OR REPLACE INTO scans
-                (scan_id, project_id, scan_items, status, created_at,
-                 progress, total_candidates, processed_candidates,
-                 current_candidate, error_message, feedback_ids,
-                 static_total_files, static_scanned_files, static_analysis_done,
-                 agent_id, project_path, scan_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                scan.scan_id,
-                scan.project_id,
-                json.dumps(meta.scan_items),
-                scan.status.value,
-                meta.created_at,
-                scan.progress,
-                scan.total_candidates,
-                scan.processed_candidates,
-                current_json,
-                scan.error_message,
-                json.dumps(meta.feedback_ids),
-                scan.static_total_files,
-                scan.static_scanned_files,
-                int(scan.static_analysis_done),
-                meta.agent_id,
-                meta.project_path,
-                meta.scan_name,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT OR REPLACE INTO scans
+                    (scan_id, project_id, scan_items, status, created_at,
+                     progress, total_candidates, processed_candidates,
+                     current_candidate, error_message, feedback_ids,
+                     static_total_files, static_scanned_files, static_analysis_done)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan.scan_id,
+                    scan.project_id,
+                    json.dumps(meta.scan_items),
+                    scan.status.value,
+                    meta.created_at,
+                    scan.progress,
+                    scan.total_candidates,
+                    scan.processed_candidates,
+                    current_json,
+                    scan.error_message,
+                    json.dumps(meta.feedback_ids),
+                    scan.static_total_files,
+                    scan.static_scanned_files,
+                    int(scan.static_analysis_done),
+                ),
+            )
+            self._conn.commit()
 
     def load_scan(self, scan_id: str) -> tuple[ScanStatus, ScanMeta] | None:
         self._conn.row_factory = sqlite3.Row
@@ -287,11 +286,19 @@ class SqliteScanStore(ScanStoreBase):
         return result
 
     def delete_scan(self, scan_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM scans WHERE scan_id = ?", (scan_id,)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def count_scans_for_project(self, project_id: str) -> int:
         cur = self._conn.execute(
-            "DELETE FROM scans WHERE scan_id = ?", (scan_id,)
+            "SELECT COUNT(*) FROM scans WHERE project_id = ?",
+            (project_id,),
         )
-        self._conn.commit()
-        return cur.rowcount > 0
+        return cur.fetchone()[0]
 
     # -- Progress updates --
 
@@ -348,22 +355,25 @@ class SqliteScanStore(ScanStoreBase):
 
         params.append(scan_id)
         sql = f"UPDATE scans SET {', '.join(updates)} WHERE scan_id = ?"
-        self._conn.execute(sql, params)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(sql, params)
+            self._conn.commit()
 
     def update_scan_feedback_ids(self, scan_id: str, feedback_ids: list[str]) -> None:
-        self._conn.execute(
-            "UPDATE scans SET feedback_ids = ? WHERE scan_id = ?",
-            (json.dumps(feedback_ids), scan_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE scans SET feedback_ids = ? WHERE scan_id = ?",
+                (json.dumps(feedback_ids), scan_id),
+            )
+            self._conn.commit()
 
     def update_scan_workspace(self, scan_id: str, workspace_path: str) -> None:
-        self._conn.execute(
-            "UPDATE scans SET workspace_path = ? WHERE scan_id = ?",
-            (workspace_path, scan_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE scans SET workspace_path = ? WHERE scan_id = ?",
+                (workspace_path, scan_id),
+            )
+            self._conn.commit()
 
     def get_scan_workspace(self, scan_id: str) -> str | None:
         cur = self._conn.execute(
@@ -381,50 +391,52 @@ class SqliteScanStore(ScanStoreBase):
         return cur.fetchone()[0]
 
     def add_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
-        cur = self._conn.execute(
-            "SELECT COALESCE(MAX(idx), -1) FROM vulnerabilities WHERE scan_id = ?",
-            (scan_id,),
-        )
-        next_idx = cur.fetchone()[0] + 1
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT COALESCE(MAX(idx), -1) FROM vulnerabilities WHERE scan_id = ?",
+                (scan_id,),
+            )
+            next_idx = cur.fetchone()[0] + 1
 
-        self._conn.execute(
-            """\
-            INSERT INTO vulnerabilities
-                (scan_id, idx, file, line, function, vuln_type,
-                 severity, description, ai_analysis, confirmed,
-                 user_verdict, user_verdict_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                scan_id,
-                next_idx,
-                vuln.file,
-                vuln.line,
-                vuln.function,
-                vuln.vuln_type,
-                vuln.severity,
-                vuln.description,
-                vuln.ai_analysis,
-                1 if vuln.confirmed else 0,
-                vuln.user_verdict,
-                vuln.user_verdict_reason,
-            ),
-        )
-        self._conn.commit()
-        return next_idx
+            self._conn.execute(
+                """\
+                INSERT INTO vulnerabilities
+                    (scan_id, idx, file, line, function, vuln_type,
+                     severity, description, ai_analysis, confirmed,
+                     user_verdict, user_verdict_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    next_idx,
+                    vuln.file,
+                    vuln.line,
+                    vuln.function,
+                    vuln.vuln_type,
+                    vuln.severity,
+                    vuln.description,
+                    vuln.ai_analysis,
+                    1 if vuln.confirmed else 0,
+                    vuln.user_verdict,
+                    vuln.user_verdict_reason,
+                ),
+            )
+            self._conn.commit()
+            return next_idx
 
     def update_vulnerability(
         self, scan_id: str, index: int, verdict: str, reason: str
     ) -> None:
-        self._conn.execute(
-            """\
-            UPDATE vulnerabilities
-            SET user_verdict = ?, user_verdict_reason = ?
-            WHERE scan_id = ? AND idx = ?
-            """,
-            (verdict, reason, scan_id, index),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """\
+                UPDATE vulnerabilities
+                SET user_verdict = ?, user_verdict_reason = ?
+                WHERE scan_id = ? AND idx = ?
+                """,
+                (verdict, reason, scan_id, index),
+            )
+            self._conn.commit()
 
     def get_vulnerabilities(self, scan_id: str) -> list[Vulnerability]:
         self._conn.row_factory = sqlite3.Row
@@ -454,21 +466,22 @@ class SqliteScanStore(ScanStoreBase):
     # -- Events --
 
     def add_event(self, scan_id: str, event: ScanEvent) -> None:
-        self._conn.execute(
-            """\
-            INSERT INTO events
-                (scan_id, timestamp, phase, message, candidate_index)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                scan_id,
-                event.timestamp,
-                event.phase,
-                event.message,
-                event.candidate_index,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO events
+                    (scan_id, timestamp, phase, message, candidate_index)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    event.timestamp,
+                    event.phase,
+                    event.message,
+                    event.candidate_index,
+                ),
+            )
+            self._conn.commit()
 
     def get_events(self, scan_id: str) -> list[ScanEvent]:
         self._conn.row_factory = sqlite3.Row
@@ -491,15 +504,16 @@ class SqliteScanStore(ScanStoreBase):
     def add_processed_key(
         self, scan_id: str, key: tuple[str, int, str, str]
     ) -> None:
-        self._conn.execute(
-            """\
-            INSERT OR IGNORE INTO processed_keys
-                (scan_id, file, line, function, vuln_type)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (scan_id, *key),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT OR IGNORE INTO processed_keys
+                    (scan_id, file, line, function, vuln_type)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (scan_id, *key),
+            )
+            self._conn.commit()
 
     def get_processed_keys(
         self, scan_id: str
@@ -513,21 +527,22 @@ class SqliteScanStore(ScanStoreBase):
     # -- Feedback entries --
 
     def add_feedback(self, entry: FeedbackEntry) -> None:
-        self._conn.execute(
-            """\
-            INSERT INTO feedback_entries
-                (id, project_id, vuln_type, verdict, file, line, function,
-                 description, reason, source_scan_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                entry.id, entry.project_id, entry.vuln_type, entry.verdict,
-                entry.file, entry.line, entry.function, entry.description,
-                entry.reason, entry.source_scan_id,
-                entry.created_at, entry.updated_at,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO feedback_entries
+                    (id, project_id, vuln_type, verdict, file, line, function,
+                     description, reason, source_scan_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.id, entry.project_id, entry.vuln_type, entry.verdict,
+                    entry.file, entry.line, entry.function, entry.description,
+                    entry.reason, entry.source_scan_id,
+                    entry.created_at, entry.updated_at,
+                ),
+            )
+            self._conn.commit()
 
     def update_feedback(self, feedback_id: str, verdict: str | None, reason: str | None) -> bool:
         updates: list[str] = []
@@ -547,19 +562,21 @@ class SqliteScanStore(ScanStoreBase):
             ).isoformat()
         )
         params.append(feedback_id)
-        cur = self._conn.execute(
-            f"UPDATE feedback_entries SET {', '.join(updates)} WHERE id = ?",
-            params,
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE feedback_entries SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def delete_feedback(self, feedback_id: str) -> bool:
-        cur = self._conn.execute(
-            "DELETE FROM feedback_entries WHERE id = ?", (feedback_id,)
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM feedback_entries WHERE id = ?", (feedback_id,)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def list_feedback(self, vuln_type: str | None = None, project_id: str | None = None) -> list[FeedbackEntry]:
         self._conn.row_factory = sqlite3.Row
@@ -608,16 +625,17 @@ class SqliteScanStore(ScanStoreBase):
     # -- Crash recovery --
 
     def mark_running_as_error(self) -> int:
-        cur = self._conn.execute(
-            """\
-            UPDATE scans SET status = 'error',
-                             error_message = 'Process terminated unexpectedly',
-                             current_candidate = NULL
-            WHERE status IN ('pending', 'analyzing', 'auditing')
-            """
-        )
-        self._conn.commit()
-        return cur.rowcount
+        with self._lock:
+            cur = self._conn.execute(
+                """\
+                UPDATE scans SET status = 'error',
+                                 error_message = 'Process terminated unexpectedly',
+                                 current_candidate = NULL
+                WHERE status IN ('pending', 'analyzing', 'auditing')
+                """
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     # -- FP Review jobs --
 

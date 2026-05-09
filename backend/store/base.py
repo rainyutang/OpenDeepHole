@@ -44,6 +44,10 @@ class ScanStoreBase(ABC):
     def delete_scan(self, scan_id: str) -> bool:
         """Delete a scan record. Returns whether the record existed."""
 
+    @abstractmethod
+    def count_scans_for_project(self, project_id: str) -> int:
+        """Return the number of scans referencing the given project_id."""
+
     # -- Progress updates (called frequently during a running scan) --
 
     @abstractmethod

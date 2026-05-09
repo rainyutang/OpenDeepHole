@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview } from "../api/client";
-import type { FpReviewJob, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
+import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getIndexStatus } from "../api/client";
+import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 
@@ -46,6 +46,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   // FP review state
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
   const [fpReviewLoading, setFpReviewLoading] = useState(false);
+
+  // Code indexing progress
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
 
   const isRunning = scan && (scan.status === "pending" || scan.status === "analyzing" || scan.status === "auditing");
   const isDone = scan && (scan.status === "complete" || scan.status === "error" || scan.status === "cancelled");
@@ -128,6 +131,30 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     if (!scan || !isDone) return;
     getFpReview(scanId).then(setFpReview).catch(() => {});
   }, [isDone, scanId]);
+
+  // Poll indexing progress while scan is waiting for code index
+  useEffect(() => {
+    if (!scan?.project_id) return;
+    if (scan.status !== "pending" && scan.status !== "analyzing") return;
+    if (scan.static_total_files > 0) return;
+    if (indexStatus?.status === "done" || indexStatus?.status === "error") return;
+
+    let timer: ReturnType<typeof setInterval>;
+    const poll = async () => {
+      try {
+        const status = await getIndexStatus(scan.project_id);
+        setIndexStatus(status);
+        if (status.status === "done" || status.status === "error") {
+          clearInterval(timer);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    poll();
+    timer = setInterval(poll, 2000);
+    return () => clearInterval(timer);
+  }, [scan?.project_id, scan?.status, scan?.static_total_files, indexStatus?.status]);
 
   const handleStop = async () => {
     setStopping(true);
@@ -334,6 +361,33 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
           {/* Dual progress bars */}
           <div className="flex-1 min-w-0 space-y-2">
+            {/* 代码索引进度条 */}
+            {indexStatus && indexStatus.status === "parsing" && scan.static_total_files === 0 && (
+              <div>
+                <div className="flex justify-between text-xs text-slate-400 mb-1">
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />
+                    代码索引: {indexStatus.parsed_files ?? 0} / {indexStatus.total_files ?? "?"} 文件
+                  </span>
+                  <span>
+                    {indexStatus.total_files
+                      ? `${Math.round(((indexStatus.parsed_files ?? 0) / indexStatus.total_files) * 100)}%`
+                      : ""}
+                  </span>
+                </div>
+                <div className="h-1 bg-slate-700 rounded-full overflow-hidden">
+                  {indexStatus.total_files ? (
+                    <div
+                      className="h-full bg-amber-400 rounded-full transition-all duration-500"
+                      style={{ width: `${((indexStatus.parsed_files ?? 0) / indexStatus.total_files) * 100}%` }}
+                    />
+                  ) : (
+                    <div className="h-full bg-amber-400/50 rounded-full animate-pulse" style={{ width: "100%" }} />
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* 静态分析进度条 */}
             {(scan.status === "analyzing" || scan.status === "auditing") && !scan.static_analysis_done && scan.static_total_files > 0 && (
               <div>

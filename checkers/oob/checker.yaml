@@ -2,3 +2,4 @@ name: oob
 label: OOB
 description: Out-of-Bounds Access
 enabled: true
+skill_name: oob-audit
