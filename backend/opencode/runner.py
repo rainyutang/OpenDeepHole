@@ -84,10 +84,13 @@ async def run_audit(
             cancel_event=cancel_event,
         )
 
+    # Skill directory is .opencode/skills/<name>/ where <name> == vuln_type.
+    # Use checker_entry.skill_name if explicitly set, otherwise fall back to
+    # vuln_type so the name matches the actual directory opencode will look up.
     skill_name = (
         checker_entry.skill_name
         if checker_entry and checker_entry.skill_name
-        else f"{candidate.vuln_type}-analysis"
+        else candidate.vuln_type
     )
     result_id = uuid4().hex
 

@@ -108,6 +108,25 @@ class Reporter:
                     return
                 await asyncio.sleep(2**attempt)
 
+    async def send_index_status(
+        self,
+        scan_id: str,
+        status: str,
+        parsed_files: int = 0,
+        total_files: int = 0,
+    ) -> None:
+        """Push code-indexing progress to the server (best-effort, never raises)."""
+        if self.dry_run:
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/index-status",
+                json={"status": status, "parsed_files": parsed_files, "total_files": total_files},
+                timeout=5.0,
+            )
+        except Exception:
+            pass
+
     async def report_processed_key(
         self, scan_id: str, file: str, line: int, function: str, vuln_type: str
     ) -> None:
