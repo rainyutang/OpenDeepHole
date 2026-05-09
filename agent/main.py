@@ -74,10 +74,14 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             from agent.fp_reviewer import update_local_feedback
             update_local_feedback(entry)
     elif cmd_type == "config":
-        from agent.config import apply_remote_config
+        from agent.config import apply_remote_config, save_config
         if msg.get("config"):
             apply_remote_config(config, msg["config"])
-            print("Config updated from server")
+            try:
+                save_config(config)
+                print("Config updated from server and persisted to agent.yaml")
+            except Exception as e:
+                print(f"Config updated from server (warning: failed to persist: {e})")
     else:
         print(f"Unknown command type: {cmd_type!r}")
 

@@ -36,6 +36,8 @@ class AgentConfig:
     checkers: list = field(default_factory=list)
     llm_api: LLMApiConfig = field(default_factory=LLMApiConfig)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
+    # Runtime-only: path to the loaded config file (not serialized)
+    config_file: Optional[Path] = field(default=None, repr=False, compare=False)
 
 
 def apply_remote_config(config: AgentConfig, remote: dict) -> None:
@@ -78,7 +80,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     llm_raw = {k: v for k, v in raw.get("llm_api", {}).items() if k in llm_fields}
     oc_raw = {k: v for k, v in raw.get("opencode", {}).items() if k in oc_fields}
 
-    return AgentConfig(
+    cfg = AgentConfig(
         server_url=raw.get("server_url", "http://localhost:8000"),
         agent_port=raw.get("agent_port", 7000),
         agent_name=raw.get("agent_name", ""),
@@ -86,4 +88,29 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         checkers=raw.get("checkers", []),
         llm_api=LLMApiConfig(**llm_raw),
         opencode=OpenCodeConfig(**oc_raw),
+        config_file=path,
     )
+    return cfg
+
+
+def save_config(config: AgentConfig) -> None:
+    """Persist remotely-managed config sections back to agent.yaml.
+
+    Only overwrites llm_api, opencode, and no_proxy — local fields like
+    server_url, agent_name, and agent_port are preserved as-is.
+    """
+    path = config.config_file
+    if not path or not Path(path).is_file():
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except Exception:
+        raw = {}
+    raw["no_proxy"] = config.no_proxy
+    raw["llm_api"] = {f.name: getattr(config.llm_api, f.name)
+                      for f in dataclasses.fields(config.llm_api)}
+    raw["opencode"] = {f.name: getattr(config.opencode, f.name)
+                       for f in dataclasses.fields(config.opencode)}
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -138,18 +139,35 @@ def _resolve_opencode() -> str:
     """Return the full path to the opencode executable.
 
     Uses the name/path from config (opencode.executable, default "opencode").
-    On Windows, opencode is typically installed as opencode.cmd (npm package).
-    CreateProcess does not resolve .cmd/.bat extensions automatically, so we
-    use shutil.which which honours PATHEXT on Windows.
+    Falls back to a bash login shell lookup so that executables installed in
+    non-standard locations (e.g. ~/.bun/bin, ~/.local/bin) that are added to
+    PATH by ~/.profile or ~/.bash_profile are found even when the Python
+    process was started without sourcing those files.
     """
     name = get_config().opencode.executable or "opencode"
+    # Direct resolution: works when the binary is already in the current PATH
     resolved = shutil.which(name)
-    if resolved is None:
-        raise FileNotFoundError(
-            f"opencode executable '{name}' not found in PATH. "
-            "Check the opencode.executable setting in config.yaml (or agent.yaml)."
-        )
-    return resolved
+    if resolved:
+        return resolved
+    # Login-shell fallback: sources ~/.profile / ~/.bash_profile which typically
+    # extend PATH for user-installed tools (npm, bun, pipx, etc.)
+    if sys.platform != "win32":
+        try:
+            result = subprocess.run(
+                ["bash", "-lc", f"command -v {shlex.quote(name)}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                path = result.stdout.strip()
+                if path:
+                    logger.debug("opencode resolved via login shell: %s", path)
+                    return path
+        except Exception:
+            pass
+    raise FileNotFoundError(
+        f"opencode executable '{name}' not found in PATH. "
+        "Check the opencode.executable setting in agent.yaml."
+    )
 
 
 async def _invoke_opencode(
