@@ -121,17 +121,25 @@ async def run_scan(
         index_store = IndexStore()
         db = None
         db_path = scan_dir / "code_index.db"
+        # Only need the DB open if static analysis will run (no cached candidates yet)
+        need_db_open = not candidates_cache_path.exists()
 
-        if is_resume and candidates_cache_path.exists() and db_path.exists():
-            # Resume: scan_dir preserved from cancelled run, DB already present.
-            await emit("init", "Resume: 跳过代码索引（使用已有 code_index.db）")
+        if db_path.exists():
+            # DB already present in scan dir (from a prior run of this scan).
+            await emit("init", "跳过代码索引（使用已有 code_index.db）")
+            if need_db_open:
+                from code_parser import CodeDatabase
+                db = CodeDatabase(db_path)
 
-        elif not db_path.exists() and (existing := index_store.lookup(project_path)):
+        elif (existing := index_store.lookup(project_path)):
             # Fresh scan: reuse a previously saved index for this path (or a parent).
             shutil.copy2(existing, db_path)
             entry = index_store._registry.get(str(project_path.resolve()), {})
             indexed_at = entry.get("indexed_at", "unknown")
             await emit("init", f"复用已有代码索引（上次索引时间: {indexed_at}），跳过重新索引")
+            if need_db_open:
+                from code_parser import CodeDatabase
+                db = CodeDatabase(db_path)
 
         else:
             # No usable index found — run full indexing.
@@ -170,10 +178,13 @@ async def run_scan(
         )
         await emit("init", "Analysis workspace ready")
 
-        # --- Phase 5: Static analysis (or load from cache on resume) ---
+        # --- Phase 5: Static analysis (or load from cache) ---
+        # Skip static analysis only when a candidates cache file already exists
+        # (written by a previous run of this scan_id).  DB existence alone does
+        # NOT skip this phase.
         candidates: list[Candidate] = []
-        if is_resume and candidates_cache_path.exists():
-            await emit("static_analysis", "Resume: 从缓存加载静态分析结果...")
+        if candidates_cache_path.exists():
+            await emit("static_analysis", "从缓存加载静态分析结果...")
             cached = json.loads(candidates_cache_path.read_text(encoding="utf-8"))
             candidates = [Candidate(**d) for d in cached]
             total = len(candidates)
