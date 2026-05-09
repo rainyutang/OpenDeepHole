@@ -1,5 +1,5 @@
 ---
-name: resleak-analysis
+name: resleak
 description: 验证各类资源泄露候选漏洞（文件/套接字/锁/内存/映射/数据库/线程等）
 ---
 
