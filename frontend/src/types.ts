@@ -107,7 +107,7 @@ export interface AgentInfo {
   agent_id: string;
   name: string;
   ip: string;
-  port: number;
+  port?: number;
   last_seen: string;
   online: boolean;
 }
@@ -131,4 +131,24 @@ export interface AgentRemoteConfig {
   no_proxy: string;
   llm_api: AgentLLMApiConfig;
   opencode: AgentOpenCodeConfig;
+}
+
+export type FpReviewStatus = "pending" | "running" | "complete" | "error";
+
+export interface FpReviewResult {
+  vuln_index: number;
+  verdict: "tp" | "fp";
+  reason: string;
+  created_at: string;
+}
+
+export interface FpReviewJob {
+  review_id: string;
+  scan_id: string;
+  status: FpReviewStatus;
+  created_at: string;
+  total: number;
+  processed: number;
+  results: FpReviewResult[];
+  error_message: string | null;
 }

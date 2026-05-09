@@ -11,7 +11,7 @@ from backend.models import FeedbackEntry, ScanEvent, Vulnerability
 
 
 class Reporter:
-    """Sends scan events and final results to the web server."""
+    """Sends scan events and final results to the web server via HTTP."""
 
     def __init__(self, server_url: str, dry_run: bool = False) -> None:
         self.server_url = server_url.rstrip("/")
@@ -19,18 +19,8 @@ class Reporter:
         self._client = httpx.AsyncClient(timeout=30.0)
 
     # ---------------------------------------------------------------------------
-    # Agent registration / heartbeat
+    # Config fetch (used before each scan to get latest server-managed settings)
     # ---------------------------------------------------------------------------
-
-    async def register_agent(self, port: int, name: str) -> tuple[str, dict | None]:
-        """Register with server, return (agent_id, remote_config | None)."""
-        resp = await self._client.post(
-            f"{self.server_url}/api/agent/register",
-            json={"port": port, "name": name},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["agent_id"], data.get("config")
 
     async def fetch_config(self, agent_id: str) -> dict | None:
         """Fetch the latest server-managed config for this agent."""
@@ -43,26 +33,6 @@ class Reporter:
             return resp.json()
         except Exception:
             return None
-
-    async def heartbeat(self, agent_id: str) -> None:
-        """Send heartbeat (best-effort)."""
-        try:
-            await self._client.put(
-                f"{self.server_url}/api/agent/heartbeat/{agent_id}",
-                timeout=5.0,
-            )
-        except Exception:
-            pass
-
-    async def unregister_agent(self, agent_id: str) -> None:
-        """Unregister on shutdown (best-effort)."""
-        try:
-            await self._client.delete(
-                f"{self.server_url}/api/agent/{agent_id}",
-                timeout=5.0,
-            )
-        except Exception:
-            pass
 
     # ---------------------------------------------------------------------------
     # Scan events / results
@@ -184,6 +154,57 @@ class Reporter:
             return [FeedbackEntry(**item) for item in resp.json()]
         except Exception:
             return []
+
+    async def push_fp_result(
+        self,
+        scan_id: str,
+        review_id: str,
+        vuln_index: int,
+        verdict: str,
+        reason: str,
+    ) -> None:
+        """Push a single FP review result to the server."""
+        if self.dry_run:
+            marker = "FP" if verdict == "fp" else "TP"
+            print(f"  [fp_review] [{marker}] vuln[{vuln_index}]: {reason[:80]}")
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/scan/{scan_id}/fp_review/result",
+                json={
+                    "review_id": review_id,
+                    "vuln_index": vuln_index,
+                    "verdict": verdict,
+                    "reason": reason,
+                },
+                timeout=10.0,
+            )
+        except Exception as e:
+            print(f"Warning: failed to push FP review result: {e}")
+
+    async def finish_fp_review(
+        self,
+        scan_id: str,
+        review_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """Signal to the server that the FP review job is complete."""
+        if self.dry_run:
+            print(f"  [fp_review] Finished with status: {status}")
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/scan/{scan_id}/fp_review/finish",
+                json={
+                    "review_id": review_id,
+                    "status": status,
+                    "error_message": error_message,
+                },
+                timeout=10.0,
+            )
+        except Exception as e:
+            print(f"Warning: failed to signal FP review finish: {e}")
 
     async def close(self) -> None:
         await self._client.aclose()

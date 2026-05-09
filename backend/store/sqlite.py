@@ -10,6 +10,9 @@ from pathlib import Path
 from backend.models import (
     Candidate,
     FeedbackEntry,
+    FpReviewJob,
+    FpReviewResult,
+    FpReviewStatus,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -88,6 +91,28 @@ CREATE TABLE IF NOT EXISTS feedback_entries (
 
 CREATE INDEX IF NOT EXISTS idx_feedback_project ON feedback_entries(project_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_project_type ON feedback_entries(project_id, vuln_type);
+
+CREATE TABLE IF NOT EXISTS fp_review_jobs (
+    review_id     TEXT PRIMARY KEY,
+    scan_id       TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    created_at    TEXT NOT NULL,
+    total         INTEGER DEFAULT 0,
+    processed     INTEGER DEFAULT 0,
+    error_message TEXT
+);
+
+CREATE TABLE IF NOT EXISTS fp_review_results (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    review_id   TEXT NOT NULL REFERENCES fp_review_jobs(review_id) ON DELETE CASCADE,
+    vuln_index  INTEGER NOT NULL,
+    verdict     TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    UNIQUE(review_id, vuln_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fp_review_scan ON fp_review_jobs(scan_id);
 """
 
 
@@ -126,6 +151,28 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN project_path TEXT DEFAULT ''")
         if "scan_name" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN scan_name TEXT DEFAULT ''")
+        # Ensure FP review tables exist (created by _SCHEMA on fresh DBs; add for old ones)
+        self._conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS fp_review_jobs (
+                review_id     TEXT PRIMARY KEY,
+                scan_id       TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'pending',
+                created_at    TEXT NOT NULL,
+                total         INTEGER DEFAULT 0,
+                processed     INTEGER DEFAULT 0,
+                error_message TEXT
+            );
+            CREATE TABLE IF NOT EXISTS fp_review_results (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                review_id   TEXT NOT NULL REFERENCES fp_review_jobs(review_id) ON DELETE CASCADE,
+                vuln_index  INTEGER NOT NULL,
+                verdict     TEXT NOT NULL,
+                reason      TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                UNIQUE(review_id, vuln_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fp_review_scan ON fp_review_jobs(scan_id);
+        """)
         self._conn.commit()
 
     # -- helpers --
@@ -589,6 +636,105 @@ class SqliteScanStore(ScanStoreBase):
             )
             self._conn.commit()
             return cur.rowcount
+
+    # -- FP Review jobs --
+
+    def create_fp_review_job(self, review_id: str, scan_id: str, total: int, created_at: str) -> None:
+        self._conn.execute(
+            """\
+            INSERT INTO fp_review_jobs (review_id, scan_id, status, created_at, total, processed)
+            VALUES (?, ?, 'pending', ?, ?, 0)
+            """,
+            (review_id, scan_id, created_at, total),
+        )
+        self._conn.commit()
+
+    def get_fp_review_job(self, review_id: str) -> FpReviewJob | None:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute(
+            "SELECT * FROM fp_review_jobs WHERE review_id = ?", (review_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_fp_review_job(row)
+
+    def get_fp_review_by_scan(self, scan_id: str) -> FpReviewJob | None:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute(
+            "SELECT * FROM fp_review_jobs WHERE scan_id = ? ORDER BY created_at DESC LIMIT 1",
+            (scan_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_fp_review_job(row)
+
+    def _row_to_fp_review_job(self, row: sqlite3.Row) -> FpReviewJob:
+        review_id = row["review_id"]
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute(
+            "SELECT * FROM fp_review_results WHERE review_id = ? ORDER BY id",
+            (review_id,),
+        )
+        results = [
+            FpReviewResult(
+                vuln_index=r["vuln_index"],
+                verdict=r["verdict"],
+                reason=r["reason"],
+                created_at=r["created_at"],
+            )
+            for r in cur.fetchall()
+        ]
+        return FpReviewJob(
+            review_id=review_id,
+            scan_id=row["scan_id"],
+            status=FpReviewStatus(row["status"]),
+            created_at=row["created_at"],
+            total=row["total"],
+            processed=row["processed"],
+            results=results,
+            error_message=row["error_message"],
+        )
+
+    def update_fp_review_job(
+        self,
+        review_id: str,
+        *,
+        status: str | None = None,
+        processed: int | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        updates: list[str] = []
+        params: list = []
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if processed is not None:
+            updates.append("processed = ?")
+            params.append(processed)
+        if error_message is not None:
+            updates.append("error_message = ?")
+            params.append(error_message)
+        if not updates:
+            return
+        params.append(review_id)
+        self._conn.execute(
+            f"UPDATE fp_review_jobs SET {', '.join(updates)} WHERE review_id = ?",
+            params,
+        )
+        self._conn.commit()
+
+    def add_fp_review_result(self, review_id: str, result: FpReviewResult) -> None:
+        self._conn.execute(
+            """\
+            INSERT OR REPLACE INTO fp_review_results
+                (review_id, vuln_index, verdict, reason, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (review_id, result.vuln_index, result.verdict, result.reason, result.created_at),
+        )
+        self._conn.commit()
 
     # -- Cleanup --
 

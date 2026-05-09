@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 from pathlib import Path
@@ -113,17 +114,35 @@ async def run_scan(
 
         await emit("init", f"Loaded {len(registry)} checker(s): {list(registry.keys())}")
 
-        # --- Phase 1: Index source code ---
-        await emit("init", "Indexing source code (tree-sitter)...")
-        from code_parser import CodeDatabase, CppAnalyzer
+        candidates_cache_path = scan_dir / "candidates.json"
 
-        # DB at scan_dir/code_index.db
+        # --- Phase 1: Index source code ---
+        from agent.index_store import IndexStore
+        index_store = IndexStore()
+        db = None
         db_path = scan_dir / "code_index.db"
 
-        db = CodeDatabase(db_path)
-        cpp_analyzer = CppAnalyzer(db)
-        cpp_analyzer.analyze_directory(project_path)
-        await emit("init", "Code indexing complete")
+        if is_resume and candidates_cache_path.exists() and db_path.exists():
+            # Resume: scan_dir preserved from cancelled run, DB already present.
+            await emit("init", "Resume: 跳过代码索引（使用已有 code_index.db）")
+
+        elif not db_path.exists() and (existing := index_store.lookup(project_path)):
+            # Fresh scan: reuse a previously saved index for this path (or a parent).
+            shutil.copy2(existing, db_path)
+            entry = index_store._registry.get(str(project_path.resolve()), {})
+            indexed_at = entry.get("indexed_at", "unknown")
+            await emit("init", f"复用已有代码索引（上次索引时间: {indexed_at}），跳过重新索引")
+
+        else:
+            # No usable index found — run full indexing.
+            await emit("init", "Indexing source code (tree-sitter)...")
+            from code_parser import CodeDatabase, CppAnalyzer
+            db = CodeDatabase(db_path)
+            CppAnalyzer(db).analyze_directory(project_path)
+            await emit("init", "Code indexing complete")
+            # Persist to index store for future scans.
+            index_store.save(project_path, db_path)
+            await emit("init", f"代码索引已保存（路径: {project_path}）")
 
         # --- Phase 2: Fetch feedback for SKILL enrichment ---
         feedback_entries = await reporter.get_feedback(list(registry.keys()))
@@ -135,8 +154,10 @@ async def run_scan(
         needs_opencode = any(entry.mode == "opencode" for entry in registry.values())
         if needs_opencode:
             from agent.local_mcp import LocalMCPServer
+            from agent import mcp_registry
             mcp_server = LocalMCPServer()
             mcp_port = mcp_server.start()
+            mcp_registry.register(project_path, mcp_port, scan_id)
             await emit("mcp_ready", f"Local MCP server ready on port {mcp_port}")
 
         # --- Phase 4: Create workspace (links SKILLs, merges feedback) ---
@@ -149,25 +170,37 @@ async def run_scan(
         )
         await emit("init", "Analysis workspace ready")
 
-        # --- Phase 5: Static analysis ---
-        await emit("static_analysis", "Running static analyzers...")
+        # --- Phase 5: Static analysis (or load from cache on resume) ---
         candidates: list[Candidate] = []
+        if is_resume and candidates_cache_path.exists():
+            await emit("static_analysis", "Resume: 从缓存加载静态分析结果...")
+            cached = json.loads(candidates_cache_path.read_text(encoding="utf-8"))
+            candidates = [Candidate(**d) for d in cached]
+            total = len(candidates)
+            await emit("static_analysis", f"已加载 {total} 个缓存候选点", candidate_index=total)
+        else:
+            await emit("static_analysis", "Running static analyzers...")
+            for name, entry in registry.items():
+                if not entry.analyzer:
+                    await emit("static_analysis", f"{entry.label}: no static analyzer, skipping")
+                    continue
+                count_before = len(candidates)
+                for cand in entry.analyzer.find_candidates(project_path, db=db):
+                    candidates.append(cand)
+                count = len(candidates) - count_before
+                await emit("static_analysis", f"{entry.label}: {count} candidate(s) found")
 
-        for name, entry in registry.items():
-            if not entry.analyzer:
-                await emit("static_analysis", f"{entry.label}: no static analyzer, skipping")
-                continue
-            count_before = len(candidates)
-            for cand in entry.analyzer.find_candidates(project_path, db=db):
-                candidates.append(cand)
-            count = len(candidates) - count_before
-            await emit("static_analysis", f"{entry.label}: {count} candidate(s) found")
+            total = len(candidates)
+            await emit("static_analysis", f"Static analysis done: {total} total candidate(s)", candidate_index=total)
 
-        total = len(candidates)
-        # candidate_index carries total count so the server can track progress
-        await emit("static_analysis", f"Static analysis done: {total} total candidate(s)", candidate_index=total)
+            # Persist candidates so resume can skip re-indexing and re-analysis
+            candidates_cache_path.write_text(
+                json.dumps([c.model_dump() for c in candidates], ensure_ascii=False),
+                encoding="utf-8",
+            )
 
-        db.close()
+        if db is not None:
+            db.close()
 
         if total == 0:
             await emit("complete", "No candidates found — nothing to audit")
@@ -281,6 +314,8 @@ async def run_scan(
 
     finally:
         if mcp_server:
+            from agent import mcp_registry
+            mcp_registry.unregister(project_path)
             mcp_server.stop()
         if workspace is not None:
             cleanup_workspace(workspace)

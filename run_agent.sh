@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Install dependencies if needed (only on first run or after update)
-if ! python3 -c "import httpx" 2>/dev/null; then
+if ! python3 -c "import httpx, websockets" 2>/dev/null; then
     echo "Installing agent dependencies..."
     pip3 install -r requirements-agent.txt
 fi

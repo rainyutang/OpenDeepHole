@@ -1,44 +1,19 @@
-"""FastAPI HTTP server that the agent daemon runs.
-
-Endpoints:
-  GET  /health                      → {"ok": true}
-  POST /task                        → start a new scan task
-  POST /task/{scan_id}/stop         → set cancel_event
-  POST /task/{scan_id}/resume       → clear cancel_event + (re-)create asyncio task
-"""
+"""Agent command handlers — invoked by the WebSocket message loop in main.py."""
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException
-from pydantic import BaseModel
-
-# Module-level globals injected by agent/main.py before server starts
-_config = None      # AgentConfig
-_reporter = None    # Reporter
+# Module-level globals injected by agent/main.py before connection starts
+_config = None       # AgentConfig
+_reporter = None     # Reporter
 _task_manager = None  # TaskManager
-_agent_id = None    # str | None
-
-app = FastAPI(title="OpenDeepHole Agent", version="0.1.0")
-router = APIRouter()
-
-
-class StartTaskRequest(BaseModel):
-    scan_id: str
-    project_path: str
-    checkers: list[str]
-    scan_name: str = ""
-
-
-class ResumeTaskRequest(BaseModel):
-    project_path: Optional[str] = None
-    checkers: Optional[list[str]] = None
-    scan_name: Optional[str] = None
+_agent_id: Optional[str] = None  # Assigned by server on WebSocket connect
 
 
 async def _run(task, is_resume: bool) -> None:
-    """Internal coroutine that calls run_scan from agent.scanner."""
-    # Refresh config from server so UI changes take effect without restart
+    """Run a scan task, refreshing config from server first."""
     if _reporter is not None and _agent_id is not None:
         try:
             from agent.config import apply_remote_config
@@ -64,80 +39,98 @@ async def _run(task, is_resume: bool) -> None:
         _task_manager.remove(task.scan_id)
 
 
-@router.get("/health")
-async def health() -> dict:
-    return {"ok": True}
-
-
-@router.post("/task")
-async def start_task(body: StartTaskRequest) -> dict:
-    """Start a new scan task."""
-    import asyncio
+async def handle_task(scan_id: str, project_path: str, checkers: list[str], scan_name: str) -> None:
+    """Handle a 'task' command — start a new scan."""
     if _task_manager is None:
-        raise HTTPException(status_code=503, detail="Agent not initialized")
+        print(f"Warning: task_manager not initialized, ignoring task {scan_id}")
+        return
 
-    existing = _task_manager.get(body.scan_id)
+    existing = _task_manager.get(scan_id)
     if existing is not None:
-        raise HTTPException(status_code=409, detail=f"Task {body.scan_id} already exists")
+        print(f"Warning: task {scan_id} already exists, ignoring duplicate")
+        return
 
     task = _task_manager.create(
-        scan_id=body.scan_id,
-        project_path=body.project_path,
-        checkers=body.checkers,
-        scan_name=body.scan_name,
+        scan_id=scan_id,
+        project_path=project_path,
+        checkers=checkers,
+        scan_name=scan_name,
     )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=False))
-    return {"ok": True, "scan_id": body.scan_id}
+    print(f"Started task {scan_id}")
 
 
-@router.post("/task/{scan_id}/stop")
-async def stop_task(scan_id: str) -> dict:
-    """Set cancel_event to stop the running task."""
+async def handle_stop(scan_id: str) -> None:
+    """Handle a 'stop' command — cancel a running scan."""
     if _task_manager is None:
-        raise HTTPException(status_code=503, detail="Agent not initialized")
+        return
     stopped = _task_manager.stop(scan_id)
-    if not stopped:
-        raise HTTPException(status_code=404, detail=f"Task {scan_id} not found")
-    return {"ok": True}
+    if stopped:
+        print(f"Stopping task {scan_id}")
+    else:
+        print(f"Warning: task {scan_id} not found for stop")
 
 
-@router.post("/task/{scan_id}/resume")
-async def resume_task(scan_id: str, body: ResumeTaskRequest) -> dict:
-    """Resume a stopped/cancelled task. Creates a new asyncio task if needed."""
-    import asyncio
+async def handle_resume(
+    scan_id: str,
+    project_path: Optional[str] = None,
+    checkers: Optional[list[str]] = None,
+    scan_name: Optional[str] = None,
+) -> None:
+    """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
-        raise HTTPException(status_code=503, detail="Agent not initialized")
+        return
 
     task = _task_manager.resume(scan_id)
     if task is None:
-        # Task lost from memory (agent restarted) — recreate from body
-        if body.project_path is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Task not found in memory and project_path not provided for recreation",
-            )
+        if project_path is None:
+            print(f"Warning: task {scan_id} not found and project_path not provided")
+            return
         task = _task_manager.create(
             scan_id=scan_id,
-            project_path=body.project_path,
-            checkers=body.checkers or [],
-            scan_name=body.scan_name or "",
+            project_path=project_path,
+            checkers=checkers or [],
+            scan_name=scan_name or "",
         )
     else:
-        # Update fields if provided
-        if body.project_path:
-            from pathlib import Path
-            task.project_path = Path(body.project_path)
-        if body.checkers is not None:
-            task.checkers = body.checkers
-        if body.scan_name is not None:
-            task.scan_name = body.scan_name
+        if project_path:
+            task.project_path = Path(project_path)
+        if checkers is not None:
+            task.checkers = checkers
+        if scan_name is not None:
+            task.scan_name = scan_name
 
-    # Cancel any lingering asyncio task
     if task.asyncio_task and not task.asyncio_task.done():
         task.asyncio_task.cancel()
 
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=True))
-    return {"ok": True, "scan_id": scan_id}
+    print(f"Resumed task {scan_id}")
 
 
-app.include_router(router)
+async def handle_fp_review(
+    scan_id: str,
+    review_id: str,
+    project_path: str,
+    vulnerabilities: list[dict],
+) -> None:
+    """Handle an 'fp_review' command — start AI false-positive review."""
+    if _config is None or _reporter is None:
+        print(f"Warning: agent not fully initialized, ignoring fp_review {review_id}")
+        return
+
+    async def _run_review() -> None:
+        from agent.fp_reviewer import run_fp_review
+        try:
+            await run_fp_review(
+                config=_config,
+                reporter=_reporter,
+                scan_id=scan_id,
+                review_id=review_id,
+                project_path=project_path,
+                vulnerabilities=vulnerabilities,
+            )
+        except Exception as exc:
+            print(f"[fp_review] Unhandled error in review {review_id}: {exc}")
+
+    asyncio.create_task(_run_review())
+    print(f"Started FP review {review_id} for scan {scan_id}")

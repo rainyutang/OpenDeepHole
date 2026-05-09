@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent, getIndexStatus } from "../api/client";
-import type { ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, IndexStatus } from "../types";
+import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getIndexStatus } from "../api/client";
+import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 
@@ -42,6 +42,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [skillType, setSkillType] = useState<string | null>(null);
   const [skillContent, setSkillContent] = useState("");
   const [skillLoading, setSkillLoading] = useState(false);
+
+  // FP review state
+  const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
+  const [fpReviewLoading, setFpReviewLoading] = useState(false);
 
   // Code indexing progress
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
@@ -89,14 +93,50 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     return () => clearInterval(timer);
   }, [scanId]);
 
+  // Poll for FP review status when a review is running
+  useEffect(() => {
+    if (!fpReview || fpReview.status === "complete" || fpReview.status === "error") return;
+    const timer = setInterval(async () => {
+      try {
+        const job = await getFpReview(scanId);
+        setFpReview(job);
+        if (job.status === "complete" || job.status === "error") {
+          clearInterval(timer);
+        }
+      } catch {
+        clearInterval(timer);
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [fpReview?.status, scanId]);
+
+  const handleFpReview = async () => {
+    setFpReviewLoading(true);
+    try {
+      await triggerFpReview(scanId);
+      const job = await getFpReview(scanId);
+      setFpReview(job);
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response: { data: { detail: string } } }).response?.data?.detail
+        : "触发失败";
+      alert(`AI去误报失败：${msg || "未知错误"}`);
+    } finally {
+      setFpReviewLoading(false);
+    }
+  };
+
+  // Load existing FP review on scan load
+  useEffect(() => {
+    if (!scan || !isDone) return;
+    getFpReview(scanId).then(setFpReview).catch(() => {});
+  }, [isDone, scanId]);
+
   // Poll indexing progress while scan is waiting for code index
   useEffect(() => {
     if (!scan?.project_id) return;
-    // Only poll while in early phases where indexing matters
     if (scan.status !== "pending" && scan.status !== "analyzing") return;
-    // Stop polling if static analysis has already started producing results
     if (scan.static_total_files > 0) return;
-    // Stop if indexing already done
     if (indexStatus?.status === "done" || indexStatus?.status === "error") return;
 
     let timer: ReturnType<typeof setInterval>;
@@ -231,6 +271,36 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               </svg>
               SKILL 预览
             </button>
+            {isDone && (
+              <button
+                onClick={handleFpReview}
+                disabled={fpReviewLoading || (fpReview?.status === "running" || fpReview?.status === "pending")}
+                className="px-3 py-1.5 text-sm font-medium text-amber-400 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                title="使用 AI 对已确认漏洞逐条进行误报复核"
+              >
+                {(fpReview?.status === "running" || fpReview?.status === "pending") ? (
+                  <>
+                    <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
+                    复核中 {fpReview.processed}/{fpReview.total}
+                  </>
+                ) : fpReviewLoading ? (
+                  <>
+                    <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
+                    启动中...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    AI去误报
+                    {fpReview?.status === "complete" && (
+                      <span className="text-xs text-green-400 ml-0.5">✓</span>
+                    )}
+                  </>
+                )}
+              </button>
+            )}
             {isDone && (
               <a
                 href={getReportUrl(scan.scan_id)}
@@ -409,6 +479,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             currentCandidate={scan.current_candidate}
             totalCandidates={scan.total_candidates}
             processedCandidates={scan.processed_candidates}
+            fpReview={fpReview}
           />
         )}
       </div>
