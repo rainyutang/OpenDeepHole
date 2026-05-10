@@ -19,6 +19,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     ScanSummary,
+    UserInDB,
     Vulnerability,
 )
 
@@ -133,6 +134,10 @@ class ScanStoreBase(ABC):
     def get_feedback_by_ids(self, ids: list[str]) -> list[FeedbackEntry]:
         """Return feedback entries matching the given IDs."""
 
+    @abstractmethod
+    def list_feedback_by_scan(self, scan_id: str) -> list[FeedbackEntry]:
+        """Return feedback entries created from a specific scan."""
+
     # -- Bulk status update (crash recovery) --
 
     @abstractmethod
@@ -169,6 +174,48 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def add_fp_review_result(self, review_id: str, result: FpReviewResult) -> None:
         """Append a single vulnerability FP review result to a job."""
+
+    # -- Users --
+
+    @abstractmethod
+    def create_user(
+        self, user_id: str, username: str, password_hash: str, role: str, agent_token: str
+    ) -> None:
+        """Create a new user."""
+
+    @abstractmethod
+    def get_user_by_id(self, user_id: str) -> UserInDB | None:
+        """Return a user by ID, or None."""
+
+    @abstractmethod
+    def get_user_by_username(self, username: str) -> UserInDB | None:
+        """Return a user by username, or None."""
+
+    @abstractmethod
+    def get_user_by_agent_token(self, agent_token: str) -> UserInDB | None:
+        """Return a user by agent_token, or None."""
+
+    @abstractmethod
+    def list_users(self) -> list[UserInDB]:
+        """Return all users."""
+
+    @abstractmethod
+    def delete_user(self, user_id: str) -> bool:
+        """Delete a user. Returns False if not found."""
+
+    @abstractmethod
+    def update_user_password(self, user_id: str, password_hash: str) -> bool:
+        """Update a user's password hash. Returns False if not found."""
+
+    @abstractmethod
+    def count_users(self) -> int:
+        """Return the total number of users."""
+
+    # -- Scans filtered by user --
+
+    @abstractmethod
+    def list_scans_by_user(self, user_id: str) -> list[ScanSummary]:
+        """List scans owned by a specific user."""
 
     # -- Cleanup --
 

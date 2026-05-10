@@ -1,3 +1,20 @@
+// --- Auth ---
+
+export interface User {
+  user_id: string;
+  username: string;
+  role: "admin" | "user";
+  agent_token: string;
+  created_at: string;
+}
+
+export interface TokenResponse {
+  token: string;
+  user: User;
+}
+
+// --- Scan ---
+
 export type ScanItemStatus =
   | "pending"
   | "analyzing"
@@ -29,6 +46,7 @@ export interface Vulnerability {
   description: string;
   ai_analysis: string;
   confirmed: boolean;
+  ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "";
   user_verdict?: "confirmed" | "false_positive" | null;
   user_verdict_reason?: string | null;
 }

@@ -18,6 +18,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     ScanSummary,
+    UserInDB,
     Vulnerability,
 )
 
@@ -113,6 +114,15 @@ CREATE TABLE IF NOT EXISTS fp_review_results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fp_review_scan ON fp_review_jobs(scan_id);
+
+CREATE TABLE IF NOT EXISTS users (
+    user_id       TEXT PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'user',
+    agent_token   TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
 """
 
 
@@ -151,6 +161,26 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN project_path TEXT DEFAULT ''")
         if "scan_name" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN scan_name TEXT DEFAULT ''")
+        if "user_id" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN user_id TEXT DEFAULT ''")
+        # vulnerabilities 表迁移
+        vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
+        vuln_cols = {r[1] for r in vuln_cur.fetchall()}
+        if "ai_verdict" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN ai_verdict TEXT DEFAULT ''"
+            )
+        # Ensure users table exists
+        self._conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS users (
+                user_id       TEXT PRIMARY KEY,
+                username      TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT 'user',
+                agent_token   TEXT NOT NULL,
+                created_at    TEXT NOT NULL
+            );
+        """)
         # Ensure FP review tables exist (created by _SCHEMA on fresh DBs; add for old ones)
         self._conn.executescript("""\
             CREATE TABLE IF NOT EXISTS fp_review_jobs (
@@ -208,6 +238,7 @@ class SqliteScanStore(ScanStoreBase):
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
             project_path=row["project_path"] if row["project_path"] is not None else "",
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
+            user_id=row["user_id"] if row["user_id"] is not None else "",
         )
 
     # -- Scan lifecycle --
@@ -225,8 +256,9 @@ class SqliteScanStore(ScanStoreBase):
                     (scan_id, project_id, scan_items, status, created_at,
                      progress, total_candidates, processed_candidates,
                      current_candidate, error_message, feedback_ids,
-                     static_total_files, static_scanned_files, static_analysis_done)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     static_total_files, static_scanned_files, static_analysis_done,
+                     user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -243,6 +275,7 @@ class SqliteScanStore(ScanStoreBase):
                     scan.static_total_files,
                     scan.static_scanned_files,
                     int(scan.static_analysis_done),
+                    meta.user_id,
                 ),
             )
             self._conn.commit()
@@ -257,6 +290,20 @@ class SqliteScanStore(ScanStoreBase):
             return None
         return self._row_to_scan_status(row), self._row_to_meta(row)
 
+    def _row_to_scan_summary(self, row: sqlite3.Row) -> ScanSummary:
+        return ScanSummary(
+            scan_id=row["scan_id"],
+            project_id=row["project_id"],
+            status=ScanItemStatus(row["status"]),
+            created_at=row["created_at"],
+            progress=row["progress"],
+            total_candidates=row["total_candidates"],
+            processed_candidates=row["processed_candidates"],
+            vulnerability_count=row["vuln_count"],
+            scan_items=json.loads(row["scan_items"]),
+            user_id=row["user_id"] if row["user_id"] is not None else "",
+        )
+
     def list_scans(self) -> list[ScanSummary]:
         self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
@@ -268,22 +315,22 @@ class SqliteScanStore(ScanStoreBase):
             ORDER BY s.created_at DESC
             """
         )
-        result = []
-        for row in cur.fetchall():
-            result.append(
-                ScanSummary(
-                    scan_id=row["scan_id"],
-                    project_id=row["project_id"],
-                    status=ScanItemStatus(row["status"]),
-                    created_at=row["created_at"],
-                    progress=row["progress"],
-                    total_candidates=row["total_candidates"],
-                    processed_candidates=row["processed_candidates"],
-                    vulnerability_count=row["vuln_count"],
-                    scan_items=json.loads(row["scan_items"]),
-                )
-            )
-        return result
+        return [self._row_to_scan_summary(row) for row in cur.fetchall()]
+
+    def list_scans_by_user(self, user_id: str) -> list[ScanSummary]:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute(
+            """\
+            SELECT s.*, COUNT(v.id) AS vuln_count
+            FROM scans s
+            LEFT JOIN vulnerabilities v ON s.scan_id = v.scan_id
+            WHERE s.user_id = ?
+            GROUP BY s.scan_id
+            ORDER BY s.created_at DESC
+            """,
+            (user_id,),
+        )
+        return [self._row_to_scan_summary(row) for row in cur.fetchall()]
 
     def delete_scan(self, scan_id: str) -> bool:
         with self._lock:
@@ -403,8 +450,8 @@ class SqliteScanStore(ScanStoreBase):
                 INSERT INTO vulnerabilities
                     (scan_id, idx, file, line, function, vuln_type,
                      severity, description, ai_analysis, confirmed,
-                     user_verdict, user_verdict_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ai_verdict, user_verdict, user_verdict_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -417,6 +464,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.description,
                     vuln.ai_analysis,
                     1 if vuln.confirmed else 0,
+                    vuln.ai_verdict,
                     vuln.user_verdict,
                     vuln.user_verdict_reason,
                 ),
@@ -457,6 +505,7 @@ class SqliteScanStore(ScanStoreBase):
                 description=r["description"],
                 ai_analysis=r["ai_analysis"],
                 confirmed=bool(r["confirmed"]),
+                ai_verdict=r["ai_verdict"] or "",
                 user_verdict=r["user_verdict"],
                 user_verdict_reason=r["user_verdict_reason"],
             )
@@ -592,6 +641,14 @@ class SqliteScanStore(ScanStoreBase):
         cur = self._conn.execute(
             f"SELECT * FROM feedback_entries{where} ORDER BY created_at DESC",
             params,
+        )
+        return [self._row_to_feedback(r) for r in cur.fetchall()]
+
+    def list_feedback_by_scan(self, scan_id: str) -> list[FeedbackEntry]:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute(
+            "SELECT * FROM feedback_entries WHERE source_scan_id = ? ORDER BY created_at DESC",
+            (scan_id,),
         )
         return [self._row_to_feedback(r) for r in cur.fetchall()]
 
@@ -735,6 +792,82 @@ class SqliteScanStore(ScanStoreBase):
             (review_id, result.vuln_index, result.verdict, result.reason, result.created_at),
         )
         self._conn.commit()
+
+    # -- Users --
+
+    def create_user(
+        self, user_id: str, username: str, password_hash: str, role: str, agent_token: str
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO users (user_id, username, password_hash, role, agent_token, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    username,
+                    password_hash,
+                    role,
+                    agent_token,
+                    __import__("datetime").datetime.now(
+                        __import__("datetime").timezone.utc
+                    ).isoformat(),
+                ),
+            )
+            self._conn.commit()
+
+    def _row_to_user(self, row: sqlite3.Row) -> UserInDB:
+        return UserInDB(
+            user_id=row["user_id"],
+            username=row["username"],
+            password_hash=row["password_hash"],
+            role=row["role"],
+            agent_token=row["agent_token"],
+            created_at=row["created_at"],
+        )
+
+    def get_user_by_id(self, user_id: str) -> UserInDB | None:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        return self._row_to_user(row) if row else None
+
+    def get_user_by_username(self, username: str) -> UserInDB | None:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        return self._row_to_user(row) if row else None
+
+    def get_user_by_agent_token(self, agent_token: str) -> UserInDB | None:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute("SELECT * FROM users WHERE agent_token = ?", (agent_token,))
+        row = cur.fetchone()
+        return self._row_to_user(row) if row else None
+
+    def list_users(self) -> list[UserInDB]:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute("SELECT * FROM users ORDER BY created_at")
+        return [self._row_to_user(row) for row in cur.fetchall()]
+
+    def delete_user(self, user_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def update_user_password(self, user_id: str, password_hash: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE users SET password_hash = ? WHERE user_id = ?",
+                (password_hash, user_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def count_users(self) -> int:
+        cur = self._conn.execute("SELECT COUNT(*) FROM users")
+        return cur.fetchone()[0]
 
     # -- Cleanup --
 

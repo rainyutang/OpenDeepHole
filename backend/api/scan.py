@@ -13,9 +13,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
+from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
@@ -33,6 +34,7 @@ from backend.models import (
     ScanStartResponse,
     ScanStatus,
     ScanSummary,
+    User,
 )
 from backend.store import get_scan_store
 
@@ -43,6 +45,24 @@ logger = get_logger(__name__)
 # Populated when scans are created/resumed, removed by agent.py when agents finish.
 _running_scans: dict[str, ScanStatus] = {}
 
+# Map scan_id → user_id for ownership checks on in-memory scans
+_scan_owners: dict[str, str] = {}
+
+
+def _check_scan_owner(scan_id: str, user: User) -> None:
+    """Raise 403 if the user doesn't own the scan and isn't admin."""
+    if user.role == "admin":
+        return
+    if scan_id in _scan_owners and _scan_owners[scan_id] == user.user_id:
+        return
+    store = get_scan_store()
+    result = store.load_scan(scan_id)
+    if result is not None:
+        _, meta = result
+        if meta.user_id == user.user_id:
+            return
+    raise HTTPException(status_code=403, detail="Access denied")
+
 
 # ---------------------------------------------------------------------------
 # Create scan (new flow: agent_id + project_path instead of upload)
@@ -50,13 +70,20 @@ _running_scans: dict[str, ScanStatus] = {}
 
 
 @router.post("/api/scan", response_model=ScanStartResponse)
-async def create_scan(body: CreateScanRequest) -> ScanStartResponse:
+async def create_scan(
+    body: CreateScanRequest,
+    current_user: User = Depends(get_current_user),
+) -> ScanStartResponse:
     """Create a new scan and dispatch it to the specified agent daemon."""
     from backend.api.agent import _registered_agents
 
     agent = _registered_agents.get(body.agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agent '{body.agent_id}' not found or not registered")
+
+    # Verify the agent belongs to this user (or user is admin)
+    if current_user.role != "admin" and agent.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Agent does not belong to you")
 
     scan_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
@@ -80,11 +107,13 @@ async def create_scan(body: CreateScanRequest) -> ScanStartResponse:
         agent_id=body.agent_id,
         project_path=body.project_path,
         scan_name=scan_name,
+        user_id=current_user.user_id,
     )
 
     store = get_scan_store()
     store.save_scan(scan, meta)
     _running_scans[scan_id] = scan
+    _scan_owners[scan_id] = current_user.user_id
 
     # Dispatch to agent via WebSocket
     from backend.api.agent import send_agent_command
@@ -115,10 +144,13 @@ async def create_scan(body: CreateScanRequest) -> ScanStartResponse:
 
 
 @router.get("/api/scans", response_model=list[ScanSummary])
-async def list_scans() -> list[ScanSummary]:
-    """List all scans (summary view), most recent first."""
+async def list_scans(current_user: User = Depends(get_current_user)) -> list[ScanSummary]:
+    """List scans visible to the current user (admin sees all)."""
     store = get_scan_store()
-    summaries = store.list_scans()
+    if current_user.role == "admin":
+        summaries = store.list_scans()
+    else:
+        summaries = store.list_scans_by_user(current_user.user_id)
     for s in summaries:
         if s.scan_id in _running_scans:
             live = _running_scans[s.scan_id]
@@ -131,8 +163,12 @@ async def list_scans() -> list[ScanSummary]:
 
 
 @router.get("/api/scan/{scan_id}", response_model=ScanStatus)
-async def get_scan_status(scan_id: str) -> ScanStatus:
+async def get_scan_status(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ScanStatus:
     """Get the current status and results of a scan."""
+    _check_scan_owner(scan_id, current_user)
     if scan_id in _running_scans:
         return _running_scans[scan_id]
     store = get_scan_store()
@@ -143,8 +179,12 @@ async def get_scan_status(scan_id: str) -> ScanStatus:
 
 
 @router.post("/api/scan/{scan_id}/stop")
-async def stop_scan(scan_id: str) -> dict:
+async def stop_scan(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict:
     """Signal the agent to stop processing this scan."""
+    _check_scan_owner(scan_id, current_user)
     from backend.api.agent import _registered_agents
 
     if scan_id not in _running_scans:
@@ -170,8 +210,12 @@ async def stop_scan(scan_id: str) -> dict:
 
 
 @router.post("/api/scan/{scan_id}/resume", response_model=ScanStartResponse)
-async def resume_scan(scan_id: str) -> ScanStartResponse:
+async def resume_scan(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ScanStartResponse:
     """Reset a cancelled/error scan to PENDING and tell the agent to resume."""
+    _check_scan_owner(scan_id, current_user)
     from backend.api.agent import _registered_agents
 
     if scan_id in _running_scans:
@@ -231,8 +275,12 @@ async def resume_scan(scan_id: str) -> ScanStartResponse:
 
 
 @router.delete("/api/scan/{scan_id}")
-async def delete_scan(scan_id: str) -> dict:
+async def delete_scan(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict:
     """Delete a scan record and clean up project directory if orphaned."""
+    _check_scan_owner(scan_id, current_user)
     if scan_id in _running_scans:
         raise HTTPException(status_code=400, detail="Cannot delete a running scan")
     store = get_scan_store()
@@ -264,9 +312,13 @@ async def delete_scan(scan_id: str) -> dict:
 
 
 @router.get("/api/scan/{scan_id}/report")
-async def download_report(scan_id: str) -> Response:
+async def download_report(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> Response:
     """Download the scan results as a CSV report."""
-    scan = await get_scan_status(scan_id)
+    _check_scan_owner(scan_id, current_user)
+    scan = await get_scan_status(scan_id, current_user)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["file", "line", "function", "vuln_type", "severity", "confirmed", "description", "ai_analysis"])
@@ -334,20 +386,30 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
 
 
 @router.post("/api/scan/{scan_id}/mark")
-async def mark_vulnerability(scan_id: str, body: MarkRequest) -> dict:
+async def mark_vulnerability(
+    scan_id: str,
+    body: MarkRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict:
     """Mark a vulnerability as confirmed or false positive."""
-    scan = await get_scan_status(scan_id)
+    _check_scan_owner(scan_id, current_user)
+    scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
     feedback_id = _mark_single(scan_id, scan, store, body.index, body.verdict, body.reason)
     return {"ok": True, "feedback_id": feedback_id}
 
 
 @router.post("/api/scan/{scan_id}/batch-mark")
-async def batch_mark_vulnerabilities(scan_id: str, body: BatchMarkRequest) -> dict:
+async def batch_mark_vulnerabilities(
+    scan_id: str,
+    body: BatchMarkRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict:
     """Batch-mark multiple vulnerabilities as confirmed or false positive."""
+    _check_scan_owner(scan_id, current_user)
     if not body.items:
         raise HTTPException(status_code=400, detail="No items provided")
-    scan = await get_scan_status(scan_id)
+    scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
     feedback_ids = [
         _mark_single(scan_id, scan, store, item.index, item.verdict, item.reason)
@@ -362,11 +424,15 @@ async def batch_mark_vulnerabilities(scan_id: str, body: BatchMarkRequest) -> di
 
 
 @router.post("/api/scan/{scan_id}/fp_review", response_model=dict)
-async def trigger_fp_review(scan_id: str) -> dict:
+async def trigger_fp_review(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict:
     """Trigger AI false-positive review for all confirmed vulnerabilities in a scan."""
+    _check_scan_owner(scan_id, current_user)
     from backend.api.agent import send_agent_command
 
-    scan = await get_scan_status(scan_id)
+    scan = await get_scan_status(scan_id, current_user)
     if scan.status not in (ScanItemStatus.COMPLETE, ScanItemStatus.ERROR, ScanItemStatus.CANCELLED):
         raise HTTPException(status_code=400, detail="Scan must be complete/error/cancelled to trigger FP review")
 
@@ -416,8 +482,12 @@ async def trigger_fp_review(scan_id: str) -> dict:
 
 
 @router.get("/api/scan/{scan_id}/fp_review", response_model=FpReviewJob)
-async def get_fp_review(scan_id: str) -> FpReviewJob:
+async def get_fp_review(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> FpReviewJob:
     """Get the latest FP review job and results for a scan."""
+    _check_scan_owner(scan_id, current_user)
     store = get_scan_store()
     job = store.get_fp_review_by_scan(scan_id)
     if job is None:
@@ -458,8 +528,13 @@ async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dic
 
 
 @router.put("/api/scan/{scan_id}/feedback")
-async def update_scan_feedback(scan_id: str, body: dict) -> dict:
+async def update_scan_feedback(
+    scan_id: str,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+) -> dict:
     """Update the feedback entry IDs associated with a scan."""
+    _check_scan_owner(scan_id, current_user)
     feedback_ids: list[str] = body.get("feedback_ids", [])
     store = get_scan_store()
     if scan_id in _running_scans:
@@ -469,23 +544,78 @@ async def update_scan_feedback(scan_id: str, body: dict) -> dict:
 
 
 @router.get("/api/scan/{scan_id}/skill/{vuln_type}")
-async def get_scan_skill(scan_id: str, vuln_type: str) -> dict:
-    """Get the current SKILL content for a vuln_type in a scan's workspace."""
-    workspace = _scan_workspaces.get(scan_id)
-    if workspace is None:
-        store = get_scan_store()
-        wp = store.get_scan_workspace(scan_id)
-        if wp:
-            workspace = Path(wp)
+async def get_scan_skill(
+    scan_id: str,
+    vuln_type: str,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Get the SKILL/prompt content for a vuln_type, merged with scan feedback.
 
-    if not workspace or not workspace.is_dir():
-        raise HTTPException(status_code=404, detail="Scan workspace not found")
+    Reads directly from the checker registry (not the workspace) so it works
+    regardless of where the agent runs.  Feedback entries associated with
+    this scan are merged into a "历史误报经验" section, same as the agent
+    workspace builder does.
+    """
+    from backend.registry import get_registry
 
-    content = get_skill_content(workspace, vuln_type)
-    if content is None:
-        raise HTTPException(status_code=404, detail=f"SKILL not found for {vuln_type}")
+    registry = get_registry()
+    entry = registry.get(vuln_type)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Checker not found: {vuln_type}")
 
-    return {"vuln_type": vuln_type, "content": content}
+    # Read base content
+    if entry.mode == "api":
+        if not entry.prompt_path or not entry.prompt_path.is_file():
+            raise HTTPException(status_code=404, detail=f"prompt.txt not found for {vuln_type}")
+        original = entry.prompt_path.read_text(encoding="utf-8")
+    else:
+        if not entry.skill_path.is_file():
+            raise HTTPException(status_code=404, detail=f"SKILL.md not found for {vuln_type}")
+        original = entry.skill_path.read_text(encoding="utf-8")
+
+    # Collect false-positive feedback from two sources:
+    # 1. feedback_ids configured on this scan (pre-selected experience)
+    # 2. feedback entries created by marking vulnerabilities in this scan
+    store = get_scan_store()
+    all_fb: list[FeedbackEntry] = []
+
+    # Source 1: pre-configured feedback_ids
+    scan = _running_scans.get(scan_id)
+    feedback_ids = scan.feedback_ids if scan else []
+    if not feedback_ids:
+        loaded = store.load_scan(scan_id)
+        if loaded:
+            _, meta = loaded
+            feedback_ids = meta.feedback_ids
+    if feedback_ids:
+        all_fb.extend(store.get_feedback_by_ids(feedback_ids))
+
+    # Source 2: feedback created from this scan's marks
+    all_fb.extend(store.list_feedback_by_scan(scan_id))
+
+    # Deduplicate by id
+    seen: set[str] = set()
+    unique_fb: list[FeedbackEntry] = []
+    for fb in all_fb:
+        if fb.id not in seen:
+            seen.add(fb.id)
+            unique_fb.append(fb)
+
+    fp_lines = [
+        f"\n- {fb.reason or fb.description}\n"
+        for fb in unique_fb
+        if fb.verdict == "false_positive" and fb.vuln_type == vuln_type
+    ]
+    fp_section = ""
+    if fp_lines:
+        fp_section = (
+            "\n\n## 历史误报经验\n\n"
+            "以下是用户在审计过程中确认的误报案例，"
+            "分析时应参考这些经验避免重复误判：\n"
+            + "".join(fp_lines)
+        )
+
+    return {"vuln_type": vuln_type, "content": original.rstrip() + fp_section}
 
 
 # ---------------------------------------------------------------------------
@@ -759,9 +889,11 @@ async def _run_scan(
                                 description=candidate.description,
                                 ai_analysis="No analysis result (AI did not complete analysis)",
                                 confirmed=False,
+                                ai_verdict="no_result",
                             )
                         scan.vulnerabilities.append(vuln)
-                        status = "confirmed" if vuln.confirmed else ("not confirmed" if vuln.severity != "unknown" else "no result")
+                        _vl = {"confirmed": "confirmed", "not_confirmed": "not confirmed", "timeout": "timeout", "no_result": "no result"}
+                        status = _vl.get(vuln.ai_verdict, "not confirmed")
                         emit("auditing", f"[候选 {i + 1}] Result: {status}", candidate_index=i)
 
                         cand_key = (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
@@ -815,9 +947,11 @@ async def _run_scan(
                                     description=candidate.description,
                                     ai_analysis="No analysis result (AI did not complete analysis)",
                                     confirmed=False,
+                                    ai_verdict="no_result",
                                 )
                             scan.vulnerabilities.append(vuln)
-                            status = "confirmed" if vuln.confirmed else ("not confirmed" if vuln.severity != "unknown" else "no result")
+                            _vl2 = {"confirmed": "confirmed", "not_confirmed": "not confirmed", "timeout": "timeout", "no_result": "no result"}
+                            status = _vl2.get(vuln.ai_verdict, "not confirmed")
                             emit("auditing", f"[候选 {i + 1}] Result: {status}", candidate_index=i)
 
                             cand_key = (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
@@ -928,5 +1062,6 @@ async def _run_scan(
         )
     finally:
         _running_scans.pop(scan_id, None)
+        _scan_owners.pop(scan_id, None)
         _scan_cancel_events.pop(scan_id, None)
         _scan_workspaces.pop(scan_id, None)

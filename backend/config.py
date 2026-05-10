@@ -1,6 +1,7 @@
 """Application configuration loaded from config.yaml."""
 
 import os
+import secrets
 from pathlib import Path
 
 import yaml
@@ -12,6 +13,13 @@ class ServerConfig(BaseModel):
     port: int = 8000
 
 
+class AuthConfig(BaseModel):
+    secret_key: str = ""
+    token_expire_hours: int = 24
+    default_admin_username: str = "admin"
+    default_admin_password: str = "admin123"
+
+
 class MCPServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8100
@@ -21,6 +29,7 @@ class OpenCodeConfig(BaseModel):
     executable: str = "opencode"  # CLI executable name or full path
     model: str = "anthropic/claude-sonnet-4-20250514"
     timeout: int = 120
+    max_retries: int = 2  # retry on transient errors (not timeout)
     mock: bool = False  # When True, skip real opencode and return fake results
 
 
@@ -56,6 +65,7 @@ class AppConfig(BaseModel):
     storage: StorageConfig = StorageConfig()
     logging: LoggingConfig = LoggingConfig()
     llm_api: LLMApiConfig = LLMApiConfig()
+    auth: AuthConfig = AuthConfig()
 
 
 def load_config(config_path: str | None = None) -> AppConfig:
@@ -113,3 +123,15 @@ def get_config() -> AppConfig:
     if _config is None:
         _config = load_config()
     return _config
+
+
+_auth_secret: str | None = None
+
+
+def get_auth_secret_key() -> str:
+    """Return the JWT signing key, auto-generating one if not configured."""
+    global _auth_secret
+    if _auth_secret is None:
+        key = get_config().auth.secret_key
+        _auth_secret = key if key else secrets.token_hex(32)
+    return _auth_secret
