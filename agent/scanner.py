@@ -33,6 +33,7 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
             "executable": config.opencode.executable,
             "model": config.opencode.model,
             "timeout": config.opencode.timeout,
+            "max_retries": config.opencode.max_retries,
             "mock": False,
         },
         # scan_dir IS the scan-specific directory; DB at scan_dir/code_index.db
@@ -295,6 +296,7 @@ async def run_scan(
                     scan_id,
                     on_output=lambda line: print(f"  [opencode] {line}", flush=True),
                     cancel_event=cancel_event,
+                    timeout=config.opencode.timeout,
                 )
             except Exception as exc:
                 await emit("auditing", f"[{global_index + 1}] Analysis error: {exc}", candidate_index=global_index)
@@ -309,10 +311,17 @@ async def run_scan(
                     description=candidate.description,
                     ai_analysis="No analysis result returned",
                     confirmed=False,
+                    ai_verdict="no_result",
                 )
 
             vulnerabilities.append(vuln)
-            result_label = "CONFIRMED" if vuln.confirmed else "not confirmed"
+            _verdict_labels = {
+                "confirmed": "CONFIRMED",
+                "not_confirmed": "not confirmed",
+                "timeout": "TIMEOUT",
+                "no_result": "no result",
+            }
+            result_label = _verdict_labels.get(vuln.ai_verdict, "not confirmed")
             await emit("auditing", f"[{global_index + 1}] Result: {result_label}", candidate_index=global_index)
 
             # Upload this result to the server immediately so it appears in the UI

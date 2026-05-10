@@ -182,6 +182,9 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">进度</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">漏洞数</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">检查项</th>
+                  {user.role === "admin" && (
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">创建者</th>
+                  )}
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">创建时间</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">操作</th>
                 </tr>
@@ -239,6 +242,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                           ))}
                         </div>
                       </td>
+                      {user.role === "admin" && (
+                        <td className="px-4 py-3 text-xs text-slate-300">
+                          {scan.username || "-"}
+                        </td>
+                      )}
                       <td className="px-4 py-3 text-xs text-slate-400">
                         {formatTime(scan.created_at)}
                       </td>

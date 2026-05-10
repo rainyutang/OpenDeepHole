@@ -16,6 +16,7 @@ from backend.models import (
     ChangePasswordRequest,
     CreateUserRequest,
     LoginRequest,
+    RegisterRequest,
     TokenResponse,
     User,
 )
@@ -41,6 +42,33 @@ async def login(body: LoginRequest) -> TokenResponse:
         created_at=user_in_db.created_at,
     )
     logger.info("User '%s' logged in", user_in_db.username)
+    return TokenResponse(token=token, user=user)
+
+
+@router.post("/register", response_model=TokenResponse)
+async def register(body: RegisterRequest) -> TokenResponse:
+    if len(body.username) < 2:
+        raise HTTPException(status_code=400, detail="Username must be at least 2 characters")
+    if len(body.password) < 4:
+        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+
+    store = get_scan_store()
+    if store.get_user_by_username(body.username) is not None:
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    user_id = uuid.uuid4().hex
+    agent_token = uuid.uuid4().hex
+    store.create_user(user_id, body.username, hash_password(body.password), "user", agent_token)
+
+    token = create_token(user_id, body.username, "user")
+    user = User(
+        user_id=user_id,
+        username=body.username,
+        role="user",
+        agent_token=agent_token,
+        created_at="",
+    )
+    logger.info("New user registered: '%s'", body.username)
     return TokenResponse(token=token, user=user)
 
 

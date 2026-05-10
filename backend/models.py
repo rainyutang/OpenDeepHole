@@ -47,6 +47,11 @@ class CreateUserRequest(BaseModel):
     role: str = "user"
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
 class ChangePasswordRequest(BaseModel):
     old_password: str
     new_password: str
@@ -279,6 +284,7 @@ class ScanSummary(BaseModel):
     vulnerability_count: int
     scan_items: list[str]
     user_id: str = ""
+    username: str = ""
 
 
 # --- FP Review models ---

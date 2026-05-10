@@ -170,6 +170,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     setSelectedFeedbackIds(ids);
     try {
       await updateScanFeedback(scanId, [...ids]);
+      // Refresh SKILL preview if it's currently open
+      if (skillOpen && skillType) {
+        const content = await getSkillContent(scanId, skillType);
+        setSkillContent(content);
+      }
     } catch {
       // ignore
     }

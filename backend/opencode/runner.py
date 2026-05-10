@@ -40,6 +40,7 @@ async def run_audit(
     project_id: str,
     on_output=None,
     cancel_event: asyncio.Event | None = None,
+    timeout: int | None = None,
 ) -> Vulnerability | None:
     """Run opencode to analyze a single candidate vulnerability.
 
@@ -53,6 +54,7 @@ async def run_audit(
         project_id: Project identifier for MCP tool calls.
         on_output: Optional callback(line: str) called for each output line in real-time.
         cancel_event: Optional asyncio.Event; when set, the subprocess is killed.
+        timeout: Per-candidate timeout in seconds. Falls back to config if not provided.
 
     Returns:
         A Vulnerability if analysis succeeded, None otherwise.
@@ -61,6 +63,8 @@ async def run_audit(
 
     if config.opencode.mock:
         return _mock_result(candidate)
+
+    effective_timeout = timeout if timeout is not None else config.opencode.timeout
 
     # 按 checker 的 mode 决定调用方式
     from backend.registry import get_registry
@@ -92,50 +96,84 @@ async def run_audit(
         if checker_entry and checker_entry.skill_name
         else candidate.vuln_type
     )
-    result_id = uuid4().hex
+    max_retries = config.opencode.max_retries
 
-    prompt = (
-        f"Using the `{skill_name}` skill, analyze the potential "
-        f"{candidate.vuln_type.upper()} vulnerability at "
-        f"{candidate.file}:{candidate.line} in function `{candidate.function}`. "
-        f"The project_id is `{project_id}`. "
-        f"Details: {candidate.description}\n\n"
-        f"Your result_id is `{result_id}`. "
-        f"When you have finished your analysis, you MUST call the submit_result tool "
-        f"with this result_id and your findings."
-    )
+    for attempt in range(1, max_retries + 2):  # attempt 1 .. max_retries+1
+        result_id = uuid4().hex
 
-    log_path = workspace / f"opencode_{result_id}.log"
-
-    logger.info(
-        "Running opencode audit: %s:%d (%s) result_id=%s",
-        candidate.file, candidate.line, candidate.vuln_type, result_id,
-    )
-
-    try:
-        await _invoke_opencode(
-            workspace, prompt, config.opencode.timeout,
-            log_path=log_path, on_line=on_output, cancel_event=cancel_event,
+        prompt = (
+            f"Using the `{skill_name}` skill, analyze the potential "
+            f"{candidate.vuln_type.upper()} vulnerability at "
+            f"{candidate.file}:{candidate.line} in function `{candidate.function}`. "
+            f"The project_id is `{project_id}`. "
+            f"Details: {candidate.description}\n\n"
+            f"Your result_id is `{result_id}`. "
+            f"When you have finished your analysis, you MUST call the submit_result tool "
+            f"with this result_id and your findings."
         )
-    except asyncio.TimeoutError:
-        logger.error("opencode timed out for %s:%d", candidate.file, candidate.line)
-        return Vulnerability(
-            file=candidate.file,
-            line=candidate.line,
-            function=candidate.function,
-            vuln_type=candidate.vuln_type,
-            severity="unknown",
-            description=candidate.description,
-            ai_analysis="Analysis timed out",
-            confirmed=False,
+
+        log_path = workspace / f"opencode_{result_id}.log"
+
+        logger.info(
+            "Running opencode audit: %s:%d (%s) result_id=%s timeout=%ds attempt=%d/%d",
+            candidate.file, candidate.line, candidate.vuln_type, result_id,
+            effective_timeout, attempt, max_retries + 1,
         )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.exception("opencode failed for %s:%d", candidate.file, candidate.line)
+
+        try:
+            await _invoke_opencode(
+                workspace, prompt, effective_timeout,
+                log_path=log_path, on_line=on_output, cancel_event=cancel_event,
+            )
+        except asyncio.TimeoutError:
+            # Timeout — no retry; check if result was submitted before kill
+            logger.error("opencode timed out for %s:%d (timeout=%ds)", candidate.file, candidate.line, effective_timeout)
+            result = _read_result(result_id, candidate)
+            if result is not None:
+                logger.info("Result file found despite timeout — using submitted result")
+                return result
+            return Vulnerability(
+                file=candidate.file,
+                line=candidate.line,
+                function=candidate.function,
+                vuln_type=candidate.vuln_type,
+                severity="unknown",
+                description=candidate.description,
+                ai_analysis="Analysis timed out",
+                confirmed=False,
+                ai_verdict="timeout",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Process error (e.g. certificate error, crash) — may retry
+            logger.exception("opencode failed for %s:%d (attempt %d)", candidate.file, candidate.line, attempt)
+            if attempt <= max_retries:
+                logger.info("Retrying opencode for %s:%d ...", candidate.file, candidate.line)
+                if on_output:
+                    on_output(f"[retry {attempt}/{max_retries}] opencode error: {exc}")
+                continue
+            return None
+
+        # Process completed — check result
+        result = _read_result(result_id, candidate)
+        if result is not None:
+            return result
+
+        # submit_result was not called — retry if attempts remain
+        if attempt <= max_retries:
+            logger.warning(
+                "opencode did not call submit_result for %s:%d (attempt %d), retrying...",
+                candidate.file, candidate.line, attempt,
+            )
+            if on_output:
+                on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
+            continue
+
+        logger.warning("opencode did not call submit_result for %s:%d after %d attempts", candidate.file, candidate.line, attempt)
         return None
 
-    return _read_result(result_id, candidate)
+    return None  # should not reach here
 
 
 def _resolve_opencode() -> str:
@@ -315,6 +353,7 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
         logger.error("Failed to parse result file for result_id=%s", result_id)
         return None
 
+    confirmed = data.get("confirmed", False)
     return Vulnerability(
         file=candidate.file,
         line=candidate.line,
@@ -323,7 +362,8 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
         severity=data.get("severity", "unknown"),
         description=data.get("description", candidate.description),
         ai_analysis=data.get("ai_analysis", ""),
-        confirmed=data.get("confirmed", False),
+        confirmed=confirmed,
+        ai_verdict="confirmed" if confirmed else "not_confirmed",
     )
 
 
@@ -333,6 +373,7 @@ async def run_audit_batch(
     project_id: str,
     on_output=None,
     cancel_event: asyncio.Event | None = None,
+    timeout: int | None = None,
 ) -> list[Vulnerability | None]:
     """Run batch audit for multiple candidates in the same function.
 
@@ -376,6 +417,7 @@ async def run_audit_batch(
             workspace, candidate, project_id,
             on_output=on_output,
             cancel_event=cancel_event,
+            timeout=timeout,
         )
         results.append(vuln)
     return results
@@ -397,4 +439,5 @@ def _mock_result(candidate: Candidate) -> Vulnerability:
             f"This is a mock result — configure opencode for real analysis."
         ),
         confirmed=True,
+        ai_verdict="confirmed",
     )

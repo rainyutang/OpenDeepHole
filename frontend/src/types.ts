@@ -119,6 +119,8 @@ export interface ScanSummary {
   processed_candidates: number;
   vulnerability_count: number;
   scan_items: string[];
+  user_id?: string;
+  username?: string;
 }
 
 export interface AgentInfo {

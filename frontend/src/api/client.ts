@@ -34,6 +34,13 @@ export async function login(username: string, password: string): Promise<TokenRe
   return data;
 }
 
+export async function register(username: string, password: string): Promise<TokenResponse> {
+  const { data } = await api.post<TokenResponse>("/api/auth/register", { username, password });
+  localStorage.setItem("auth_token", data.token);
+  localStorage.setItem("auth_user", JSON.stringify(data.user));
+  return data;
+}
+
 export function logout(): void {
   localStorage.removeItem("auth_token");
   localStorage.removeItem("auth_user");

@@ -5,14 +5,17 @@ import ScanHistory from "./components/ScanHistory";
 import AgentDownload from "./components/AgentDownload";
 import NewScanForm from "./components/NewScanForm";
 import LoginPage from "./components/LoginPage";
+import RegisterPage from "./components/RegisterPage";
 import UserManagement from "./components/UserManagement";
 import type { User } from "./types";
 
 type Page = "history" | "newScan" | "scanning" | "agent" | "users";
+type AuthPage = "login" | "register";
 
 export default function App() {
   const [user, setUser] = useState<User | null>(getStoredUser);
   const [page, setPage] = useState<Page>("history");
+  const [authPage, setAuthPage] = useState<AuthPage>("login");
   const [scanId, setScanId] = useState<string>("");
 
   useEffect(() => {
@@ -32,7 +35,10 @@ export default function App() {
   };
 
   if (!user || !isAuthenticated()) {
-    return <LoginPage onLogin={handleLogin} />;
+    if (authPage === "register") {
+      return <RegisterPage onRegister={handleLogin} onGoLogin={() => setAuthPage("login")} />;
+    }
+    return <LoginPage onLogin={handleLogin} onGoRegister={() => setAuthPage("register")} />;
   }
 
   const handleViewScan = (id: string) => {

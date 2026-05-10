@@ -302,15 +302,17 @@ class SqliteScanStore(ScanStoreBase):
             vulnerability_count=row["vuln_count"],
             scan_items=json.loads(row["scan_items"]),
             user_id=row["user_id"] if row["user_id"] is not None else "",
+            username=row["username"] if "username" in row.keys() and row["username"] is not None else "",
         )
 
     def list_scans(self) -> list[ScanSummary]:
         self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             """\
-            SELECT s.*, COUNT(v.id) AS vuln_count
+            SELECT s.*, COUNT(v.id) AS vuln_count, u.username
             FROM scans s
             LEFT JOIN vulnerabilities v ON s.scan_id = v.scan_id
+            LEFT JOIN users u ON s.user_id = u.user_id
             GROUP BY s.scan_id
             ORDER BY s.created_at DESC
             """
@@ -321,9 +323,10 @@ class SqliteScanStore(ScanStoreBase):
         self._conn.row_factory = sqlite3.Row
         cur = self._conn.execute(
             """\
-            SELECT s.*, COUNT(v.id) AS vuln_count
+            SELECT s.*, COUNT(v.id) AS vuln_count, u.username
             FROM scans s
             LEFT JOIN vulnerabilities v ON s.scan_id = v.scan_id
+            LEFT JOIN users u ON s.user_id = u.user_id
             WHERE s.user_id = ?
             GROUP BY s.scan_id
             ORDER BY s.created_at DESC

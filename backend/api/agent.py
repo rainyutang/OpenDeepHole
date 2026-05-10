@@ -224,6 +224,7 @@ async def update_agent_config(
         raise HTTPException(status_code=403, detail="Access denied")
     _agent_configs[agent.name] = body
     logger.info("Config updated for agent %s (%s)", agent_id, agent.name)
+    # Push update to agent immediately if connected via WebSocket
     await send_agent_command(agent_id, {"type": "config", "config": body.model_dump(exclude_defaults=True)})
     return {"ok": True}
 
