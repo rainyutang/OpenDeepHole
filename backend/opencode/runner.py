@@ -115,6 +115,9 @@ async def run_audit(
 
         log_path = workspace / f"opencode_{result_id}.log"
 
+        if on_output:
+            on_output(f"[opencode] 初始提示词:\n{prompt}")
+
         logger.info(
             "Running opencode audit: %s:%d (%s) result_id=%s timeout=%ds attempt=%d/%d",
             candidate.file, candidate.line, candidate.vuln_type, result_id,
