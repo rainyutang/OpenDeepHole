@@ -246,7 +246,12 @@ export default function AgentDownload({ onBack }: Props) {
   const handleDownload = async () => {
     setDownloading(true);
     try {
-      const resp = await fetch("/api/agent/download");
+      const token = localStorage.getItem("auth_token");
+      const resp = await fetch("/api/agent/download", {
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
