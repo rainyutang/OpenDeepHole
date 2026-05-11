@@ -7,3 +7,5 @@ pydantic>=2.10.0
 pyyaml>=6.0.2
 tree-sitter>=0.23.0
 tree-sitter-cpp>=0.23.0
+PyJWT>=2.8.0
+bcrypt>=4.1.0

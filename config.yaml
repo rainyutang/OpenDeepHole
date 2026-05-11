@@ -14,6 +14,7 @@ opencode:
   executable: "opencode"  # opencode 可执行文件名或完整路径，如 "myopencode" 或 "C:/tools/opencode.cmd"
   model: ""
   timeout: 300  # seconds per candidate analysis
+  max_retries: 2  # retry on transient errors (not timeout)
   mock: false    # set to false when opencode is configured
 
 storage:
@@ -35,3 +36,9 @@ llm_api:
   temperature: 0.1
   timeout: 120         # 单次调用超时（秒）
   max_retries: 3
+
+auth:
+  secret_key: ""                  # JWT 签名密钥，留空则自动生成（重启后旧 token 失效）
+  token_expire_hours: 24          # JWT 过期时间（小时）
+  default_admin_username: "admin" # 首次启动时创建的管理员用户名
+  default_admin_password: "admin123"  # 首次启动时创建的管理员密码（请修改）

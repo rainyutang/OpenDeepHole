@@ -3,13 +3,15 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from backend.auth import get_current_user
 from backend.logger import get_logger
 from backend.models import (
     FeedbackCreateRequest,
     FeedbackEntry,
     FeedbackUpdateRequest,
+    User,
 )
 from backend.store import get_scan_store
 
@@ -18,14 +20,21 @@ logger = get_logger(__name__)
 
 
 @router.get("/api/feedback", response_model=list[FeedbackEntry])
-async def list_feedback(vuln_type: str | None = None, project_id: str | None = None) -> list[FeedbackEntry]:
+async def list_feedback(
+    vuln_type: str | None = None,
+    project_id: str | None = None,
+    current_user: User = Depends(get_current_user),
+) -> list[FeedbackEntry]:
     """List feedback entries, optionally filtered by vuln_type and/or project_id."""
     store = get_scan_store()
     return store.list_feedback(vuln_type, project_id)
 
 
 @router.post("/api/feedback", response_model=FeedbackEntry)
-async def create_feedback(body: FeedbackCreateRequest) -> FeedbackEntry:
+async def create_feedback(
+    body: FeedbackCreateRequest,
+    current_user: User = Depends(get_current_user),
+) -> FeedbackEntry:
     """Create a new feedback entry."""
     if body.verdict not in ("confirmed", "false_positive"):
         raise HTTPException(status_code=400, detail="Invalid verdict")
@@ -52,7 +61,11 @@ async def create_feedback(body: FeedbackCreateRequest) -> FeedbackEntry:
 
 
 @router.put("/api/feedback/{feedback_id}", response_model=FeedbackEntry)
-async def update_feedback(feedback_id: str, body: FeedbackUpdateRequest) -> FeedbackEntry:
+async def update_feedback(
+    feedback_id: str,
+    body: FeedbackUpdateRequest,
+    current_user: User = Depends(get_current_user),
+) -> FeedbackEntry:
     """Update an existing feedback entry."""
     if body.verdict is not None and body.verdict not in ("confirmed", "false_positive"):
         raise HTTPException(status_code=400, detail="Invalid verdict")
@@ -68,7 +81,10 @@ async def update_feedback(feedback_id: str, body: FeedbackUpdateRequest) -> Feed
 
 
 @router.delete("/api/feedback/{feedback_id}")
-async def delete_feedback(feedback_id: str) -> dict:
+async def delete_feedback(
+    feedback_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict:
     """Delete a feedback entry."""
     store = get_scan_store()
     if not store.delete_feedback(feedback_id):

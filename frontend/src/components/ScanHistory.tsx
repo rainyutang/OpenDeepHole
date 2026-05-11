@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { getScans, resumeScan, deleteScan } from "../api/client";
-import type { ScanSummary, ScanItemStatus } from "../types";
+import type { ScanSummary, ScanItemStatus, User } from "../types";
 
 interface Props {
   onViewScan: (scanId: string) => void;
   onDownloadAgent: () => void;
   onNewScan: () => void;
+  user: User;
+  onLogout: () => void;
+  onManageUsers: () => void;
 }
 
 const STATUS_STYLES: Record<ScanItemStatus, { label: string; cls: string }> = {
@@ -21,7 +24,7 @@ function isRunning(status: ScanItemStatus) {
   return status === "pending" || status === "analyzing" || status === "auditing";
 }
 
-export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: Props) {
+export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -116,17 +119,39 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: 
             <p className="text-sm text-slate-400 mt-0.5">C/C++ Source Code Audit Tool</p>
           </div>
           <div className="flex items-center gap-3">
+            <span className="text-sm text-slate-400">
+              {user.username}
+              {user.role === "admin" && (
+                <span className="ml-1.5 text-xs font-semibold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                  Admin
+                </span>
+              )}
+            </span>
+            {user.role === "admin" && (
+              <button
+                onClick={onManageUsers}
+                className="px-3 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+              >
+                Users
+              </button>
+            )}
             <button
               onClick={onDownloadAgent}
               className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
             >
-              ↓ 下载 Agent
+              Agent
             </button>
             <button
               onClick={onNewScan}
               className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
             >
-              + 新建扫描
+              + Scan
+            </button>
+            <button
+              onClick={onLogout}
+              className="px-3 py-2 text-sm font-medium text-slate-400 hover:text-red-400 transition-colors"
+            >
+              Logout
             </button>
           </div>
         </div>
@@ -157,6 +182,9 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: 
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">进度</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">漏洞数</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">检查项</th>
+                  {user.role === "admin" && (
+                    <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">创建者</th>
+                  )}
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">创建时间</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">操作</th>
                 </tr>
@@ -214,6 +242,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan }: 
                           ))}
                         </div>
                       </td>
+                      {user.role === "admin" && (
+                        <td className="px-4 py-3 text-xs text-slate-300">
+                          {scan.username || "-"}
+                        </td>
+                      )}
                       <td className="px-4 py-3 text-xs text-slate-400">
                         {formatTime(scan.created_at)}
                       </td>

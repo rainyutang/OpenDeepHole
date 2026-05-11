@@ -6,7 +6,10 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from backend.api import agent, checkers, feedback, scan
+import uuid
+
+from backend.api import agent, auth, checkers, feedback, scan
+from backend.auth import hash_password
 from backend.config import apply_no_proxy, get_config
 from backend.logger import get_logger
 from backend.registry import get_registry
@@ -31,6 +34,23 @@ async def lifespan(app: FastAPI):
     if recovered:
         logger.warning("Marked %d interrupted scan(s) as error on startup", recovered)
 
+    # Seed default admin user if no users exist
+    if store.count_users() == 0:
+        auth_cfg = config.auth
+        admin_id = uuid.uuid4().hex
+        agent_token = uuid.uuid4().hex
+        store.create_user(
+            admin_id,
+            auth_cfg.default_admin_username,
+            hash_password(auth_cfg.default_admin_password),
+            "admin",
+            agent_token,
+        )
+        logger.info(
+            "Created default admin user '%s' (change password after first login)",
+            auth_cfg.default_admin_username,
+        )
+
     # Discover checkers on startup
     registry = get_registry()
     logger.info("Loaded %d checkers: %s", len(registry), list(registry.keys()))
@@ -49,6 +69,7 @@ app = FastAPI(
 )
 
 # API routes
+app.include_router(auth.router)
 app.include_router(scan.router)
 app.include_router(checkers.router)
 app.include_router(feedback.router)

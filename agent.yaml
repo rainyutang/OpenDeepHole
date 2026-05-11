@@ -7,6 +7,9 @@ server_url: "http://your-server:8000"
 # Agent 显示名称（显示在新建扫描的下拉列表中），留空则使用主机名
 agent_name: ""
 
+# 用户归属 token（下载 Agent 时自动填入，勿手动修改）
+owner_token: ""
+
 # 代理跳过列表，逗号分隔，如 "localhost,127.0.0.1,10.0.0.0/8"
 no_proxy: "10.0.0.0/8"
 
@@ -29,3 +32,4 @@ opencode:
   executable: "nga"  # 可执行文件名或完整路径，Windows 示例："myopencode"
   model: ""               # 留空则使用 opencode 默认模型
   timeout: 1200            # 单次调用超时（秒）
+  max_retries: 2           # 非超时错误重试次数

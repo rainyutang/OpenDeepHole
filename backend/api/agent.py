@@ -31,11 +31,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from backend.api.scan import _running_scans
+from backend.api.scan import _running_scans, _scan_owners
+from backend.auth import get_current_user
 from backend.logger import get_logger
 from backend.models import (
     AgentInfo,
@@ -43,6 +44,7 @@ from backend.models import (
     AgentScanFinish,
     ScanEvent,
     ScanItemStatus,
+    User,
     Vulnerability,
 )
 from backend.store import get_scan_store
@@ -83,9 +85,18 @@ async def agent_websocket(websocket: WebSocket) -> None:
             return
 
         name = msg.get("name") or socket.gethostname()
+        owner_token = msg.get("owner_token", "")
         agent_id = uuid.uuid4().hex
         ip = websocket.client.host if websocket.client else "unknown"
         now = datetime.now(timezone.utc).isoformat()
+
+        # Resolve owner_token to user_id
+        user_id = ""
+        if owner_token:
+            store = get_scan_store()
+            owner = store.get_user_by_agent_token(owner_token)
+            if owner:
+                user_id = owner.user_id
 
         _registered_agents[agent_id] = AgentInfo(
             agent_id=agent_id,
@@ -93,6 +104,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             ip=ip,
             port=0,
             last_seen=now,
+            user_id=user_id,
         )
         _agent_ws[agent_id] = websocket
 
@@ -100,10 +112,10 @@ async def agent_websocket(websocket: WebSocket) -> None:
         await websocket.send_json({
             "type": "welcome",
             "agent_id": agent_id,
-            "config": cfg.model_dump(),
+            "config": cfg.model_dump(exclude_defaults=True),
         })
 
-        logger.info("Agent connected via WebSocket: %s (%s)", agent_id, name)
+        logger.info("Agent connected via WebSocket: %s (%s) user=%s", agent_id, name, user_id or "(none)")
 
         # Keep connection alive; agent may send pings or acks
         while True:
@@ -162,7 +174,7 @@ async def agent_register(body: _AgentRegisterBody, request: Request) -> dict:
     cfg = _agent_configs.get(agent_name)
     return {
         "agent_id": agent_id,
-        "config": cfg.model_dump() if cfg else None,
+        "config": cfg.model_dump(exclude_defaults=True) if cfg else None,
     }
 
 
@@ -184,37 +196,50 @@ async def agent_unregister(agent_id: str) -> dict:
 
 
 @router.get("/{agent_id}/config")
-async def get_agent_config(agent_id: str) -> AgentRemoteConfig:
+async def get_agent_config(
+    agent_id: str,
+    current_user: User = Depends(get_current_user),
+) -> AgentRemoteConfig:
     """Return the server-managed config for an agent (defaults if not yet saved)."""
     agent = _registered_agents.get(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
+    if current_user.role != "admin" and agent.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     return _agent_configs.get(agent.name, AgentRemoteConfig())
 
 
 @router.put("/{agent_id}/config")
-async def update_agent_config(agent_id: str, body: AgentRemoteConfig) -> dict:
+async def update_agent_config(
+    agent_id: str,
+    body: AgentRemoteConfig,
+    current_user: User = Depends(get_current_user),
+) -> dict:
     """Save the server-managed config for an agent (keyed by agent name).
     Also pushes the updated config to the agent via WebSocket if connected."""
     agent = _registered_agents.get(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
+    if current_user.role != "admin" and agent.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     _agent_configs[agent.name] = body
     logger.info("Config updated for agent %s (%s)", agent_id, agent.name)
     # Push update to agent immediately if connected via WebSocket
-    await send_agent_command(agent_id, {"type": "config", "config": body.model_dump()})
+    await send_agent_command(agent_id, {"type": "config", "config": body.model_dump(exclude_defaults=True)})
     return {"ok": True}
 
 
 @router.get("/agents")
-async def list_agents_prefixed() -> list:
+async def list_agents_prefixed(
+    current_user: User = Depends(get_current_user),
+) -> list:
     """Return all registered agents with online status (alias for /api/agents)."""
-    return await list_agents()
+    return await list_agents(current_user)
 
 
 @public_router.get("/api/agents")
-async def list_agents() -> list:
-    """Return all registered agents with online status.
+async def list_agents(current_user: User = Depends(get_current_user)) -> list:
+    """Return agents with online status. Admin sees all; users see only their own.
 
     WebSocket agents: online = WebSocket connection is active.
     Legacy HTTP agents: online = last heartbeat < 90 seconds ago.
@@ -222,11 +247,11 @@ async def list_agents() -> list:
     now = datetime.now(timezone.utc)
     result = []
     for a in _registered_agents.values():
+        if current_user.role != "admin" and a.user_id != current_user.user_id:
+            continue
         if a.agent_id in _agent_ws:
-            # WebSocket connection is live
             online = True
         else:
-            # Fall back to heartbeat-based check for legacy HTTP-registered agents
             try:
                 last = datetime.fromisoformat(a.last_seen)
                 online = (now - last).total_seconds() < 90
@@ -344,6 +369,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
         if final_status == ScanItemStatus.COMPLETE:
             scan.progress = 1.0
         _running_scans.pop(scan_id, None)
+        _scan_owners.pop(scan_id, None)
 
     confirmed = sum(1 for v in body.vulnerabilities if v.confirmed)
     logger.info(
@@ -453,7 +479,7 @@ _AGENT_ROOT_FILES = [
 ]
 
 
-def _build_agent_zip(server_url: str = "") -> bytes:
+def _build_agent_zip(server_url: str = "", owner_token: str = "") -> bytes:
     """Build the agent zip in-memory from the project source."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -470,12 +496,18 @@ def _build_agent_zip(server_url: str = "") -> bytes:
             file_path = _PROJECT_ROOT / filename
             if not file_path.is_file():
                 continue
-            if filename == "agent.yaml" and server_url:
+            if filename == "agent.yaml":
                 content = file_path.read_text(encoding="utf-8")
-                content = content.replace(
-                    'server_url: "http://your-server:8000"',
-                    f'server_url: "{server_url}"',
-                )
+                if server_url:
+                    content = content.replace(
+                        'server_url: "http://your-server:8000"',
+                        f'server_url: "{server_url}"',
+                    )
+                if owner_token:
+                    content = content.replace(
+                        'owner_token: ""',
+                        f'owner_token: "{owner_token}"',
+                    )
                 zf.writestr(filename, content.encode("utf-8"))
             else:
                 zf.write(file_path, filename)
@@ -519,11 +551,14 @@ Results appear at: <server_url> (the web interface)
 
 
 @router.get("/download")
-async def agent_download(request: Request) -> Response:
-    """Serve the agent package as a downloadable zip with server_url pre-filled."""
+async def agent_download(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Serve the agent package as a downloadable zip with server_url and owner_token pre-filled."""
     try:
         server_url = str(request.base_url).rstrip("/")
-        data = _build_agent_zip(server_url)
+        data = _build_agent_zip(server_url, owner_token=current_user.agent_token)
     except Exception as exc:
         logger.exception("Failed to build agent zip")
         raise HTTPException(status_code=500, detail=f"Failed to build agent package: {exc}")

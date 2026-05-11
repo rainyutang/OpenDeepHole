@@ -17,6 +17,46 @@ class ScanItemStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+# --- User / Auth models ---
+
+class User(BaseModel):
+    user_id: str
+    username: str
+    role: str  # "admin" | "user"
+    agent_token: str = ""
+    created_at: str = ""
+
+
+class UserInDB(User):
+    password_hash: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    token: str
+    user: User
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
 # --- Internal models ---
 
 class Candidate(BaseModel):
@@ -38,6 +78,7 @@ class Vulnerability(BaseModel):
     description: str
     ai_analysis: str
     confirmed: bool
+    ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result"
     user_verdict: str | None = None          # "confirmed" | "false_positive" | None
     user_verdict_reason: str | None = None   # 用户填写的理由
 
@@ -186,6 +227,7 @@ class AgentInfo(BaseModel):
     ip: str
     port: int = 0
     last_seen: str
+    user_id: str = ""
 
 
 class AgentLLMApiConfig(BaseModel):
@@ -200,7 +242,7 @@ class AgentLLMApiConfig(BaseModel):
 class AgentOpenCodeConfig(BaseModel):
     executable: str = ""   # empty = not set by server; agent falls back to agent.yaml
     model: str = ""
-    timeout: int = 300
+    timeout: int = 0       # 0 = not set by server; excluded from serialization
 
 
 class AgentRemoteConfig(BaseModel):
@@ -227,6 +269,7 @@ class ScanMeta(BaseModel):
     agent_id: str = ""
     project_path: str = ""
     scan_name: str = ""
+    user_id: str = ""
 
 
 class ScanSummary(BaseModel):
@@ -240,6 +283,8 @@ class ScanSummary(BaseModel):
     processed_candidates: int
     vulnerability_count: int
     scan_items: list[str]
+    user_id: str = ""
+    username: str = ""
 
 
 # --- FP Review models ---

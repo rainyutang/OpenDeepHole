@@ -25,6 +25,7 @@ class OpenCodeConfig:
     executable: str = "opencode"  # CLI executable name or full path
     model: str = ""
     timeout: int = 300
+    max_retries: int = 2          # retry on transient errors (not timeout)
 
 
 @dataclass
@@ -32,6 +33,7 @@ class AgentConfig:
     server_url: str = "http://localhost:8000"
     agent_port: int = 7000
     agent_name: str = ""
+    owner_token: str = ""
     no_proxy: str = ""
     checkers: list = field(default_factory=list)
     llm_api: LLMApiConfig = field(default_factory=LLMApiConfig)
@@ -53,7 +55,7 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         section = remote.get(attr) or {}
         for f in dataclasses.fields(sub_cfg):
             v = section.get(f.name)
-            if v not in (None, ""):
+            if v not in (None, "", 0):
                 setattr(sub_cfg, f.name, v)
 
 
@@ -84,6 +86,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         server_url=raw.get("server_url", "http://localhost:8000"),
         agent_port=raw.get("agent_port", 7000),
         agent_name=raw.get("agent_name", ""),
+        owner_token=raw.get("owner_token", ""),
         no_proxy=raw.get("no_proxy", ""),
         checkers=raw.get("checkers", []),
         llm_api=LLMApiConfig(**llm_raw),
