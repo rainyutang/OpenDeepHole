@@ -246,15 +246,20 @@ async def _invoke_opencode(
     prompt_file_path = prompt_file.name
 
     # 构建 shell 命令：通过管道符将临时文件内容传入 opencode
-    cmd_parts = [shlex.quote(opencode_exe), "run", "--dir", shlex.quote(str(workspace))]
-    if config.opencode.model:
-        cmd_parts += ["--model", shlex.quote(config.opencode.model)]
-
     if sys.platform == "win32":
-        # Windows: type prompt.txt | opencode run ...
-        shell_cmd = f'type {prompt_file_path} | {" ".join(cmd_parts)}'
+        # Windows cmd：用双引号包裹路径
+        def _win_quote(s: str) -> str:
+            return f'"{s}"' if " " in s else s
+
+        cmd_parts = [_win_quote(opencode_exe), "run", "--dir", _win_quote(str(workspace))]
+        if config.opencode.model:
+            cmd_parts += ["--model", config.opencode.model]
+        shell_cmd = f'type "{prompt_file_path}" | {" ".join(cmd_parts)}'
     else:
-        # Linux/macOS: cat prompt.txt | opencode run ...
+        # Linux/macOS：用 shlex.quote 包裹路径
+        cmd_parts = [shlex.quote(opencode_exe), "run", "--dir", shlex.quote(str(workspace))]
+        if config.opencode.model:
+            cmd_parts += ["--model", shlex.quote(config.opencode.model)]
         shell_cmd = f'cat {shlex.quote(prompt_file_path)} | {" ".join(cmd_parts)}'
 
     logger.debug("opencode command (prompt via pipe): %s", shell_cmd)
