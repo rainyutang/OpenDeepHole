@@ -235,9 +235,8 @@ async def _invoke_opencode(
     cmd = [opencode_exe, "run", "--dir", str(workspace)]
     if config.opencode.model:
         cmd += ["--model", config.opencode.model]
-    cmd.append(prompt)
 
-    logger.debug("opencode command: %s", " ".join(cmd))
+    logger.debug("opencode command (prompt via stdin): %s", " ".join(cmd))
 
     env = os.environ.copy()
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
@@ -255,6 +254,7 @@ async def _invoke_opencode(
         """Blocking: run opencode, push lines into the asyncio queue."""
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=env,
@@ -262,6 +262,10 @@ async def _invoke_opencode(
         )
         proc_holder[0] = proc
         try:
+            # 通过 stdin 传递 prompt，避免命令行长度截断
+            if proc.stdin is not None:
+                proc.stdin.write(prompt.encode("utf-8"))
+                proc.stdin.close()
             assert proc.stdout is not None
             for raw in proc.stdout:
                 line = _strip_ansi(raw.decode("utf-8", errors="replace").rstrip())
