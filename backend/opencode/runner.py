@@ -245,24 +245,26 @@ async def _invoke_opencode(
     prompt_file.close()
     prompt_file_path = prompt_file.name
 
-    # 构建 shell 命令：通过管道符将临时文件内容传入 opencode
+    # 构建命令：prompt 通过临时文件 + shell 命令替换传递，避免命令行长度截断
     if sys.platform == "win32":
-        # Windows cmd：用双引号包裹路径
-        def _win_quote(s: str) -> str:
-            return f'"{s}"' if " " in s else s
-
-        cmd_parts = [_win_quote(opencode_exe), "run", "--dir", _win_quote(str(workspace))]
+        # Windows：直接传参（CreateProcess 支持 32767 字符，远大于 cmd.exe 的 8191 限制）
+        cmd = [opencode_exe, "run", "--dir", str(workspace)]
         if config.opencode.model:
-            cmd_parts += ["--model", config.opencode.model]
-        shell_cmd = f'type "{prompt_file_path}" | {" ".join(cmd_parts)}'
+            cmd += ["--model", config.opencode.model]
+        cmd.append(prompt)
+        shell_cmd = None
+        # 不再需要临时文件
+        os.unlink(prompt_file_path)
+        prompt_file_path = None
     else:
-        # Linux/macOS：用 shlex.quote 包裹路径
+        # Linux/macOS：通过 $(cat file) 将临时文件内容作为参数传递
         cmd_parts = [shlex.quote(opencode_exe), "run", "--dir", shlex.quote(str(workspace))]
         if config.opencode.model:
             cmd_parts += ["--model", shlex.quote(config.opencode.model)]
-        shell_cmd = f'cat {shlex.quote(prompt_file_path)} | {" ".join(cmd_parts)}'
+        shell_cmd = f'{" ".join(cmd_parts)} "$(cat {shlex.quote(prompt_file_path)})"'
+        cmd = None
 
-    logger.debug("opencode command (prompt via pipe): %s", shell_cmd)
+    logger.debug("opencode command: %s", shell_cmd or " ".join(cmd))
 
     env = os.environ.copy()
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
@@ -280,16 +282,29 @@ async def _invoke_opencode(
 
     def _stream() -> int:
         """Blocking: run opencode, push lines into the asyncio queue."""
-        proc = subprocess.Popen(
-            shell_cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env,
-            **kwargs,
-        )
+        if shell_cmd is not None:
+            # Linux/macOS: shell 模式，通过 $(cat file) 传递 prompt
+            proc = subprocess.Popen(
+                shell_cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env,
+                **kwargs,
+            )
+        else:
+            # Windows: 直接传参模式
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env,
+                **kwargs,
+            )
         proc_holder[0] = proc
         try:
             assert proc.stdout is not None
@@ -309,11 +324,12 @@ async def _invoke_opencode(
                 pass
             proc.wait()
             loop.call_soon_threadsafe(queue.put_nowait, None)
-            # 清理临时文件
-            try:
-                os.unlink(prompt_file_path)
-            except Exception:
-                pass
+            # 清理临时文件（Windows 下已提前删除）
+            if prompt_file_path is not None:
+                try:
+                    os.unlink(prompt_file_path)
+                except Exception:
+                    pass
         return proc.returncode
 
     def _kill() -> None:
