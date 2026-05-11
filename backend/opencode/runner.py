@@ -4,10 +4,12 @@ import asyncio
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -257,18 +259,31 @@ async def _invoke_opencode(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
             env=env,
+            start_new_session=True,
             **kwargs,
         )
         proc_holder[0] = proc
         try:
-            # 通过 stdin 传递 prompt，避免命令行长度截断
-            if proc.stdin is not None:
-                proc.stdin.write(prompt.encode("utf-8"))
-                proc.stdin.close()
+            # 独立线程写 stdin，避免阻塞 stdout 读取
+            def _feed():
+                try:
+                    proc.stdin.write(prompt)
+                    proc.stdin.close()
+                except Exception:
+                    pass
+            threading.Thread(target=_feed, daemon=True).start()
+
             assert proc.stdout is not None
-            for raw in proc.stdout:
-                line = _strip_ansi(raw.decode("utf-8", errors="replace").rstrip())
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                line = _strip_ansi(line.rstrip())
                 if line:
                     loop.call_soon_threadsafe(queue.put_nowait, line)
         finally:
@@ -284,9 +299,12 @@ async def _invoke_opencode(
         proc = proc_holder[0]
         if proc is not None:
             try:
-                proc.kill()
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except Exception:
-                pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
     stream_future = loop.run_in_executor(None, _stream)
 
