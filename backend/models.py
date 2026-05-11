@@ -267,6 +267,7 @@ class ScanMeta(BaseModel):
     created_at: str
     feedback_ids: list[str] = []
     agent_id: str = ""
+    agent_name: str = ""
     project_path: str = ""
     scan_name: str = ""
     user_id: str = ""

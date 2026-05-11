@@ -243,7 +243,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             </button>
             <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
             <span className="text-sm text-slate-400">
-              {scan.status === "cancelled" ? "已取消" : isDone ? "扫描完成" : "扫描中..."}
+              {scan.status === "cancelled"
+                ? (scan.error_message?.includes("Agent") ? "Agent 断开，已中断" : "已取消")
+                : isDone ? "扫描完成" : "扫描中..."}
             </span>
           </div>
           <div className="flex items-center gap-3">
@@ -276,36 +278,43 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               </svg>
               SKILL 预览
             </button>
-            {isDone && (
-              <button
-                onClick={handleFpReview}
-                disabled={fpReviewLoading || (fpReview?.status === "running" || fpReview?.status === "pending")}
-                className="px-3 py-1.5 text-sm font-medium text-amber-400 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-                title="使用 AI 对已确认漏洞逐条进行误报复核"
-              >
-                {(fpReview?.status === "running" || fpReview?.status === "pending") ? (
-                  <>
-                    <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
-                    复核中 {fpReview.processed}/{fpReview.total}
-                  </>
-                ) : fpReviewLoading ? (
-                  <>
-                    <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
-                    启动中...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    AI去误报
-                    {fpReview?.status === "complete" && (
-                      <span className="text-xs text-green-400 ml-0.5">✓</span>
-                    )}
-                  </>
-                )}
-              </button>
-            )}
+            {(() => {
+              const confirmedVulns = scan.vulnerabilities.filter(
+                (v) => v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed)
+              ).length;
+              const canTrigger = isDone && confirmedVulns > 0;
+              const isReviewing = fpReview?.status === "running" || fpReview?.status === "pending";
+              return (
+                <button
+                  onClick={handleFpReview}
+                  disabled={!canTrigger || fpReviewLoading || !!isReviewing}
+                  className="px-3 py-1.5 text-sm font-medium text-amber-400 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                  title={!canTrigger ? "需要扫描完成且存在 LLM 正报才可使用" : "使用 AI 对已确认漏洞逐条进行误报复核"}
+                >
+                  {isReviewing ? (
+                    <>
+                      <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
+                      复核中 {fpReview!.processed}/{fpReview!.total}
+                    </>
+                  ) : fpReviewLoading ? (
+                    <>
+                      <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
+                      启动中...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      AI去误报
+                      {fpReview?.status === "complete" && (
+                        <span className="text-xs text-green-400 ml-0.5">✓</span>
+                      )}
+                    </>
+                  )}
+                </button>
+              );
+            })()}
             {isDone && (
               <a
                 href={getReportUrl(scan.scan_id)}

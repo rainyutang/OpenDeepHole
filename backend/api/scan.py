@@ -105,6 +105,7 @@ async def create_scan(
         created_at=now,
         feedback_ids=body.feedback_ids,
         agent_id=body.agent_id,
+        agent_name=agent.name,
         project_path=body.project_path,
         scan_name=scan_name,
         user_id=current_user.user_id,
@@ -197,13 +198,32 @@ async def stop_scan(
     agent = _registered_agents.get(agent_id) if agent_id else None
 
     if agent is None:
-        raise HTTPException(status_code=404, detail="Agent for this scan is not online")
+        # Agent 离线，直接标记扫描为 CANCELLED
+        store.update_scan_progress(
+            scan_id,
+            status=ScanItemStatus.CANCELLED,
+            error_message="Agent 离线，扫描已取消",
+            clear_current_candidate=True,
+        )
+        _running_scans.pop(scan_id, None)
+        _scan_owners.pop(scan_id, None)
+        logger.info("Scan %s cancelled (agent %s offline)", scan_id, agent_id)
+        return {"ok": True}
 
     from backend.api.agent import send_agent_command
     ok = await send_agent_command(agent_id, {"type": "stop", "scan_id": scan_id})
     if not ok:
-        logger.error("Failed to stop scan %s: agent %s not connected", scan_id, agent_id)
-        raise HTTPException(status_code=502, detail="Agent not connected")
+        # Agent 发送失败，直接标记为 CANCELLED
+        store.update_scan_progress(
+            scan_id,
+            status=ScanItemStatus.CANCELLED,
+            error_message="Agent 离线，扫描已取消",
+            clear_current_candidate=True,
+        )
+        _running_scans.pop(scan_id, None)
+        _scan_owners.pop(scan_id, None)
+        logger.info("Scan %s cancelled (agent %s send failed)", scan_id, agent_id)
+        return {"ok": True}
 
     logger.info("Stop requested for scan %s via agent %s", scan_id, agent_id)
     return {"ok": True}
@@ -233,9 +253,38 @@ async def resume_scan(
             detail=f"Cannot resume scan with status '{scan.status.value}'",
         )
 
-    agent = _registered_agents.get(meta.agent_id) if meta.agent_id else None
+    agent_id = meta.agent_id
+    agent = _registered_agents.get(agent_id) if agent_id else None
+
+    # If original agent is offline, try to find a reconnected agent by name
+    if agent is None and meta.agent_name:
+        from backend.api.agent import _agent_ws
+        for aid, ainfo in _registered_agents.items():
+            if ainfo.name == meta.agent_name and aid in _agent_ws:
+                # Verify ownership: same user or admin
+                if current_user.role == "admin" or ainfo.user_id == current_user.user_id:
+                    agent = ainfo
+                    agent_id = aid
+                    break
+
+    # Fallback: find any online agent belonging to the same user
     if agent is None:
-        raise HTTPException(status_code=404, detail="Agent for this scan is not online")
+        from backend.api.agent import _agent_ws
+        for aid, ainfo in _registered_agents.items():
+            if aid in _agent_ws:
+                if current_user.role == "admin" or ainfo.user_id == current_user.user_id:
+                    agent = ainfo
+                    agent_id = aid
+                    break
+
+    if agent is None:
+        raise HTTPException(status_code=404, detail="没有在线的 Agent，请先启动 Agent")
+
+    # Update scan meta with new agent_id if it changed
+    if agent_id != meta.agent_id:
+        meta.agent_id = agent_id
+        meta.agent_name = agent.name
+        store.update_scan_agent(scan_id, agent_id, agent.name)
 
     # Reset total_candidates to processed count so the producer can
     # re-count only the unprocessed ones without double-counting.
@@ -256,7 +305,7 @@ async def resume_scan(
 
     # Send resume command to agent via WebSocket
     from backend.api.agent import send_agent_command
-    ok = await send_agent_command(meta.agent_id, {
+    ok = await send_agent_command(agent_id, {
         "type": "resume",
         "scan_id": scan_id,
         "project_path": meta.project_path,
@@ -267,10 +316,10 @@ async def resume_scan(
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
         scan.status = ScanItemStatus.ERROR
         _running_scans.pop(scan_id, None)
-        logger.error("Failed to resume scan %s: agent %s not connected", scan_id, meta.agent_id)
+        logger.error("Failed to resume scan %s: agent %s not connected", scan_id, agent_id)
         raise HTTPException(status_code=502, detail="Agent not connected")
 
-    logger.info("Resumed scan %s via agent %s", scan_id, meta.agent_id)
+    logger.info("Resumed scan %s via agent %s", scan_id, agent_id)
     return ScanStartResponse(scan_id=scan_id)
 
 

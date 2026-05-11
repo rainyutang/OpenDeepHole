@@ -36,9 +36,8 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
             "max_retries": config.opencode.max_retries,
             "mock": False,
         },
-        # scan_dir IS the scan-specific directory; DB at scan_dir/code_index.db
-        # llm_api_runner._get_db(project_id) uses {projects_dir}/{project_id}/code_index.db
-        # so set projects_dir to scan_dir.parent and project_id = scan_id
+        # AGENT_PROJECT_DIR env var tells MCP to find code_index.db in project dir
+        # projects_dir/scans_dir are only used for result JSON files
         "storage": {
             "projects_dir": str(scan_dir.parent),
             "scans_dir": str(scan_dir.parent),
@@ -118,10 +117,11 @@ async def run_scan(
         candidates_cache_path = scan_dir / "candidates.json"
 
         # --- Phase 1: Index source code ---
+        # code_index.db is stored directly in the project directory
         from agent.index_store import IndexStore
         index_store = IndexStore()
         db = None
-        db_path = scan_dir / "code_index.db"
+        db_path = index_store.db_path(project_path)
         # Only need the DB open if static analysis will run (no cached candidates yet)
         need_db_open = not candidates_cache_path.exists()
 
@@ -139,7 +139,7 @@ async def run_scan(
         do_index = True  # set False when a valid existing DB is found
 
         if db_path.exists():
-            # DB already in scan dir — validate it has data before trusting it
+            # DB already in project dir — validate it has data before trusting it
             if not need_db_open or _db_has_data(db_path):
                 await emit("init", "跳过代码索引（使用已有 code_index.db）")
                 if need_db_open:
@@ -147,24 +147,8 @@ async def run_scan(
                     db = CodeDatabase(db_path)
                 do_index = False
             else:
-                # Empty/corrupt DB in scan dir → delete and re-index
+                # Empty/corrupt DB → delete and re-index
                 db_path.unlink(missing_ok=True)
-
-        elif (existing := index_store.lookup(project_path)):
-            shutil.copy2(existing, db_path)
-            entry = index_store._registry.get(str(project_path.resolve()), {})
-            indexed_at = entry.get("indexed_at", "unknown")
-            if not need_db_open or _db_has_data(db_path):
-                await emit("init", f"复用已有代码索引（上次索引时间: {indexed_at}），跳过重新索引")
-                if need_db_open:
-                    from code_parser import CodeDatabase
-                    db = CodeDatabase(db_path)
-                do_index = False
-            else:
-                # Cached DB is empty (e.g. saved before WAL-checkpoint fix) →
-                # purge from store and re-index
-                db_path.unlink(missing_ok=True)
-                index_store.remove(project_path)
                 await emit("init", "已有代码索引为空（需重建），重新索引...")
 
         if do_index:
@@ -174,12 +158,13 @@ async def run_scan(
             db = CodeDatabase(db_path)
             CppAnalyzer(db).analyze_directory(project_path)
             await emit("init", "Code indexing complete")
-            # Flush WAL → main DB file before copying to index store so the
-            # stored file is self-contained (no -wal sidecar needed).
+            # Flush WAL so the DB file is self-contained
             db.checkpoint()
-            index_store.save(project_path, db_path)
-            await emit("init", f"代码索引已保存（路径: {project_path}）")
+            await emit("init", f"代码索引已保存（路径: {db_path}）")
             await reporter.send_index_status(scan_id, "done", 0, 0)
+
+        # Set AGENT_PROJECT_DIR so MCP tools find code_index.db in project dir
+        os.environ["AGENT_PROJECT_DIR"] = str(project_path.resolve())
 
         # --- Phase 2: Fetch feedback for SKILL enrichment ---
         feedback_entries = await reporter.get_feedback(list(registry.keys()))
@@ -361,6 +346,7 @@ async def run_scan(
         raise
 
     finally:
+        os.environ.pop("AGENT_PROJECT_DIR", None)
         if mcp_server:
             from agent import mcp_registry
             mcp_registry.unregister(project_path)

@@ -157,6 +157,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN static_analysis_done INTEGER DEFAULT 0")
         if "agent_id" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN agent_id TEXT DEFAULT ''")
+        if "agent_name" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN agent_name TEXT DEFAULT ''")
         if "project_path" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN project_path TEXT DEFAULT ''")
         if "scan_name" not in cols:
@@ -236,6 +238,7 @@ class SqliteScanStore(ScanStoreBase):
             created_at=row["created_at"],
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
+            agent_name=row["agent_name"] if row["agent_name"] is not None else "",
             project_path=row["project_path"] if row["project_path"] is not None else "",
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             user_id=row["user_id"] if row["user_id"] is not None else "",
@@ -257,8 +260,8 @@ class SqliteScanStore(ScanStoreBase):
                      progress, total_candidates, processed_candidates,
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
-                     user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, agent_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -276,6 +279,7 @@ class SqliteScanStore(ScanStoreBase):
                     scan.static_scanned_files,
                     int(scan.static_analysis_done),
                     meta.user_id,
+                    meta.agent_name,
                 ),
             )
             self._conn.commit()
@@ -407,6 +411,21 @@ class SqliteScanStore(ScanStoreBase):
         sql = f"UPDATE scans SET {', '.join(updates)} WHERE scan_id = ?"
         with self._lock:
             self._conn.execute(sql, params)
+            self._conn.commit()
+
+    def update_scan_agent(self, scan_id: str, agent_id: str, agent_name: str = "") -> None:
+        """Update the agent_id (and optionally agent_name) for a scan."""
+        with self._lock:
+            if agent_name:
+                self._conn.execute(
+                    "UPDATE scans SET agent_id = ?, agent_name = ? WHERE scan_id = ?",
+                    (agent_id, agent_name, scan_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE scans SET agent_id = ? WHERE scan_id = ?",
+                    (agent_id, scan_id),
+                )
             self._conn.commit()
 
     def update_scan_feedback_ids(self, scan_id: str, feedback_ids: list[str]) -> None:

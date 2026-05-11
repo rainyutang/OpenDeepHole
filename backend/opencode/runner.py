@@ -99,7 +99,7 @@ async def run_audit(
     max_retries = config.opencode.max_retries
 
     for attempt in range(1, max_retries + 2):  # attempt 1 .. max_retries+1
-        result_id = uuid4().hex
+        result_id = f"result-{uuid4().hex}"
 
         prompt = (
             f"Using the `{skill_name}` skill, analyze the potential "

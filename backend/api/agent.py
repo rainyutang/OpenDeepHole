@@ -73,6 +73,39 @@ _scan_index_statuses: dict[str, dict] = {}
 # WebSocket — preferred connection method (v2)
 # ---------------------------------------------------------------------------
 
+
+def _mark_agent_scans_cancelled(agent_id: str) -> None:
+    """Mark all running scans belonging to this agent as CANCELLED.
+
+    Called when an agent disconnects so the frontend shows the correct state.
+    """
+    store = get_scan_store()
+    scan_ids_to_remove: list[str] = []
+    for scan_id in list(_running_scans):
+        result = store.load_scan(scan_id)
+        if result is None:
+            continue
+        _, meta = result
+        if meta.agent_id != agent_id:
+            continue
+        store.update_scan_progress(
+            scan_id,
+            status=ScanItemStatus.CANCELLED,
+            error_message="Agent 断开连接",
+            clear_current_candidate=True,
+        )
+        scan = _running_scans.get(scan_id)
+        if scan is not None:
+            scan.status = ScanItemStatus.CANCELLED
+            scan.error_message = "Agent 断开连接"
+        scan_ids_to_remove.append(scan_id)
+        logger.info("Scan %s cancelled due to agent %s disconnect", scan_id, agent_id)
+
+    for scan_id in scan_ids_to_remove:
+        _running_scans.pop(scan_id, None)
+        _scan_owners.pop(scan_id, None)
+
+
 @router.websocket("/ws")
 async def agent_websocket(websocket: WebSocket) -> None:
     """Agent connects here and receives task/stop/resume commands."""
@@ -127,6 +160,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
         logger.warning("Agent WebSocket error for %s: %s", agent_id, e)
     finally:
         if agent_id:
+            _mark_agent_scans_cancelled(agent_id)
             _agent_ws.pop(agent_id, None)
             _registered_agents.pop(agent_id, None)
             logger.info("Agent disconnected: %s", agent_id)

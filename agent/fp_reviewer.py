@@ -254,19 +254,11 @@ async def run_fp_review(
 def _find_db_dir(project_path: Path, scan_id: str) -> Optional[Path]:
     """Find the directory that contains code_index.db for this project.
 
-    Tries IndexStore first (persistent across scans), then falls back to the
-    scan_dir which is preserved for error/cancelled scans.
+    code_index.db is stored directly in the project directory.
     """
-    from agent.index_store import IndexStore
-    db = IndexStore().lookup(project_path)
-    if db is not None:
-        return db.parent
-
-    # Error/cancelled scans keep their scan_dir (not cleaned up)
-    scan_dir = Path.home() / ".opendeephole" / "scans" / scan_id
-    if (scan_dir / "code_index.db").exists():
-        return scan_dir
-
+    resolved = project_path.resolve()
+    if (resolved / "code_index.db").exists():
+        return resolved
     return None
 
 
