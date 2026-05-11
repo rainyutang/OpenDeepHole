@@ -9,7 +9,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -232,13 +231,33 @@ async def _invoke_opencode(
     requirement on Linux (which raises NotImplementedError in some
     environments regardless of Python version).
     """
+    import tempfile
+
     config = get_config()
     opencode_exe = _resolve_opencode()
-    cmd = [opencode_exe, "run", "--dir", str(workspace)]
-    if config.opencode.model:
-        cmd += ["--model", config.opencode.model]
 
-    logger.debug("opencode command (prompt via stdin): %s", " ".join(cmd))
+    # 将 prompt 写入临时文件，通过管道符传递给 opencode，避免命令行长度截断
+    prompt_file = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", encoding="utf-8", delete=False,
+        dir=str(workspace),
+    )
+    prompt_file.write(prompt)
+    prompt_file.close()
+    prompt_file_path = prompt_file.name
+
+    # 构建 shell 命令：通过管道符将临时文件内容传入 opencode
+    cmd_parts = [shlex.quote(opencode_exe), "run", "--dir", shlex.quote(str(workspace))]
+    if config.opencode.model:
+        cmd_parts += ["--model", shlex.quote(config.opencode.model)]
+
+    if sys.platform == "win32":
+        # Windows: type prompt.txt | opencode run ...
+        shell_cmd = f'type {prompt_file_path} | {" ".join(cmd_parts)}'
+    else:
+        # Linux/macOS: cat prompt.txt | opencode run ...
+        shell_cmd = f'cat {shlex.quote(prompt_file_path)} | {" ".join(cmd_parts)}'
+
+    logger.debug("opencode command (prompt via pipe): %s", shell_cmd)
 
     env = os.environ.copy()
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
@@ -246,6 +265,8 @@ async def _invoke_opencode(
     kwargs: dict = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
 
     loop = asyncio.get_running_loop()
     # Queue carries output lines; None is the end-of-stream sentinel.
@@ -255,27 +276,17 @@ async def _invoke_opencode(
     def _stream() -> int:
         """Blocking: run opencode, push lines into the asyncio queue."""
         proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
+            shell_cmd,
+            shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             env=env,
-            start_new_session=True,
             **kwargs,
         )
         proc_holder[0] = proc
         try:
-            # 独立线程写 stdin，避免阻塞 stdout 读取
-            def _feed():
-                try:
-                    proc.stdin.write(prompt)
-                    proc.stdin.close()
-                except Exception:
-                    pass
-            threading.Thread(target=_feed, daemon=True).start()
-
             assert proc.stdout is not None
             while True:
                 line = proc.stdout.readline()
@@ -293,13 +304,21 @@ async def _invoke_opencode(
                 pass
             proc.wait()
             loop.call_soon_threadsafe(queue.put_nowait, None)
+            # 清理临时文件
+            try:
+                os.unlink(prompt_file_path)
+            except Exception:
+                pass
         return proc.returncode
 
     def _kill() -> None:
         proc = proc_holder[0]
         if proc is not None:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                if sys.platform != "win32":
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                else:
+                    proc.kill()
             except Exception:
                 try:
                     proc.kill()
