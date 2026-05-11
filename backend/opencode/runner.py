@@ -102,14 +102,15 @@ async def run_audit(
         result_id = f"result-{uuid4().hex}"
 
         prompt = (
-            f"Using the `{skill_name}` skill, analyze the potential "
-            f"{candidate.vuln_type.upper()} vulnerability at "
-            f"{candidate.file}:{candidate.line} in function `{candidate.function}`. "
-            f"The project_id is `{project_id}`. "
-            f"Details: {candidate.description}\n\n"
-            f"Your result_id is `{result_id}`. "
-            f"When you have finished your analysis, you MUST call the submit_result tool "
-            f"with this result_id and your findings."
+            f"使用 `{skill_name}` 技能，分析位于 "
+            f"{candidate.file}:{candidate.line} 函数 `{candidate.function}` 中"
+            f"潜在的 {candidate.vuln_type.upper()} 漏洞。"
+            f"project_id 为 `{project_id}`。"
+            f"详情：{candidate.description}\n\n"
+            f"你的 result_id 是 `{result_id}`。"
+            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交你的结论。\n\n"
+            f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
+            f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
         )
 
         log_path = workspace / f"opencode_{result_id}.log"
