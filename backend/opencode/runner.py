@@ -292,6 +292,8 @@ async def _invoke_opencode(
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                encoding="utf-8",
+                errors="replace",
                 env=env,
                 **kwargs,
             )
@@ -303,6 +305,8 @@ async def _invoke_opencode(
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                encoding="utf-8",
+                errors="replace",
                 env=env,
                 **kwargs,
             )
