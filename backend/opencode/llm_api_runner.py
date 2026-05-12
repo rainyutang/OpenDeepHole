@@ -439,9 +439,11 @@ async def run_audit_via_api(
             return None
 
         try:
+            _cancel_fn = cancel_event.is_set if cancel_event else None
             llm_task = asyncio.create_task(asyncio.to_thread(
                 _call_llm, client, llm_cfg.model, messages,
                 llm_cfg.temperature, llm_cfg.max_retries, tools,
+                cancel_check=_cancel_fn,
             ))
             if cancel_event:
                 cancel_task = asyncio.create_task(cancel_event.wait())
@@ -525,12 +527,14 @@ async def run_audit_via_api(
     return _read_result(result_id, candidate)
 
 
-def _call_llm(client, model: str, messages: list, temperature: float, max_retries: int, tools: list | None = None):
+def _call_llm(client, model: str, messages: list, temperature: float, max_retries: int, tools: list | None = None, cancel_check=None):
     """同步调用 LLM API（在 asyncio.to_thread 中执行）。"""
     if tools is None:
         tools = TOOLS
     last_err = None
     for attempt in range(max_retries):
+        if cancel_check and cancel_check():
+            raise RuntimeError("Cancelled")
         try:
             return client.chat.completions.create(
                 model=model,
@@ -541,6 +545,8 @@ def _call_llm(client, model: str, messages: list, temperature: float, max_retrie
         except Exception as e:
             last_err = e
             if attempt < max_retries - 1:
+                if cancel_check and cancel_check():
+                    raise RuntimeError("Cancelled")
                 time.sleep(2 ** attempt)
     raise RuntimeError(f"LLM API 调用失败（重试 {max_retries} 次）: {last_err}")
 

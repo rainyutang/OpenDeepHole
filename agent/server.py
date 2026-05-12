@@ -102,6 +102,10 @@ async def handle_resume(
 
     if task.asyncio_task and not task.asyncio_task.done():
         task.asyncio_task.cancel()
+        try:
+            await task.asyncio_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=True))
     print(f"Resumed task {scan_id}")

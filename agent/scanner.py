@@ -156,7 +156,16 @@ async def run_scan(
             await reporter.send_index_status(scan_id, "parsing", 0, 0)
             from code_parser import CodeDatabase, CppAnalyzer
             db = CodeDatabase(db_path)
-            CppAnalyzer(db).analyze_directory(project_path)
+            CppAnalyzer(db).analyze_directory(
+                project_path,
+                cancel_check=cancel_event.is_set,
+            )
+            if cancel_event.is_set():
+                db.close()
+                db_path.unlink(missing_ok=True)
+                await emit("init", "Code indexing stopped by user")
+                await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
+                return
             await emit("init", "Code indexing complete")
             # Flush WAL so the DB file is self-contained
             db.checkpoint()
@@ -205,15 +214,31 @@ async def run_scan(
             await emit("static_analysis", f"已加载 {total} 个缓存候选点", candidate_index=total)
         else:
             await emit("static_analysis", "Running static analyzers...")
+            static_cancelled = False
             for name, entry in registry.items():
+                if cancel_event.is_set():
+                    static_cancelled = True
+                    break
                 if not entry.analyzer:
                     await emit("static_analysis", f"{entry.label}: no static analyzer, skipping")
                     continue
                 count_before = len(candidates)
                 for cand in entry.analyzer.find_candidates(project_path, db=db):
+                    if cancel_event.is_set():
+                        static_cancelled = True
+                        break
                     candidates.append(cand)
+                if static_cancelled:
+                    break
                 count = len(candidates) - count_before
                 await emit("static_analysis", f"{entry.label}: {count} candidate(s) found")
+
+            if static_cancelled:
+                await emit("static_analysis", "Static analysis stopped by user")
+                if db is not None:
+                    db.close()
+                await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
+                return
 
             total = len(candidates)
             await emit("static_analysis", f"Static analysis done: {total} total candidate(s)", candidate_index=total)
@@ -285,6 +310,16 @@ async def run_scan(
                 )
             except Exception as exc:
                 await emit("auditing", f"[{global_index + 1}] Analysis error: {exc}", candidate_index=global_index)
+
+            # If cancelled during this candidate's analysis, do NOT mark as processed
+            if cancel_event.is_set():
+                await emit(
+                    "auditing",
+                    f"Scan stopped during candidate {global_index + 1}",
+                    candidate_index=global_index,
+                )
+                cancelled = True
+                break
 
             if vuln is None:
                 vuln = Vulnerability(
