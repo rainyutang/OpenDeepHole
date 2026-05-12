@@ -178,7 +178,8 @@ async def run_fp_review(
             reason = "Review incomplete — no result returned"
 
             try:
-                cancel_event = asyncio.Event()
+                import threading
+                cancel_event = threading.Event()
                 log_path = review_dir / f"fp_{result_id}.log"
 
                 await _invoke_opencode(

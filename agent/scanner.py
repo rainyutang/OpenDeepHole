@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -71,7 +72,7 @@ async def run_scan(
     scan_name: str,
     checker_names: list[str],
     scan_id: str,                    # pre-assigned by server
-    cancel_event: asyncio.Event,     # from task_manager
+    cancel_event: threading.Event,   # from task_manager
     is_resume: bool = False,
 ) -> None:
     """Orchestrate the full local pipeline: index → static analysis → AI audit → report.

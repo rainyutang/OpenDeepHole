@@ -1,6 +1,7 @@
 """Manages scan tasks for the agent daemon."""
 from __future__ import annotations
 import asyncio
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -12,7 +13,7 @@ class ScanTask:
     project_path: Path
     checkers: list[str]
     scan_name: str
-    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
     asyncio_task: Optional[asyncio.Task] = None
 
 

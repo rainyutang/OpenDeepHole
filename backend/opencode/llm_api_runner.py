@@ -381,7 +381,7 @@ async def run_audit_via_api(
     project_id: str,
     prompt_path: Path | None = None,
     on_output=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
 ) -> Vulnerability | None:
     """通过 LLM API + function calling 审计单个候选漏洞。"""
     try:
@@ -446,7 +446,10 @@ async def run_audit_via_api(
                 cancel_check=_cancel_fn,
             ))
             if cancel_event:
-                cancel_task = asyncio.create_task(cancel_event.wait())
+                async def _wait_cancel():
+                    while not cancel_event.is_set():
+                        await asyncio.sleep(0.2)
+                cancel_task = asyncio.create_task(_wait_cancel())
                 done, pending = await asyncio.wait(
                     [llm_task, cancel_task],
                     return_when=asyncio.FIRST_COMPLETED,
@@ -675,7 +678,7 @@ async def run_batch_audit_via_api(
     project_id: str,
     prompt_path: Path | None = None,
     on_output=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
 ) -> list[Vulnerability | None]:
     """通过 LLM API + function calling 批量审计同一函数内的多个候选。"""
     try:
@@ -740,7 +743,10 @@ async def run_batch_audit_via_api(
                 llm_cfg.temperature, llm_cfg.max_retries, TOOLS_BATCH,
             ))
             if cancel_event:
-                cancel_task = asyncio.create_task(cancel_event.wait())
+                async def _wait_cancel():
+                    while not cancel_event.is_set():
+                        await asyncio.sleep(0.2)
+                cancel_task = asyncio.create_task(_wait_cancel())
                 done, pending = await asyncio.wait(
                     [llm_task, cancel_task],
                     return_when=asyncio.FIRST_COMPLETED,

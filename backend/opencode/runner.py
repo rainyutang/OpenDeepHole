@@ -40,7 +40,7 @@ async def run_audit(
     candidate: Candidate,
     project_id: str,
     on_output=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
     timeout: int | None = None,
 ) -> Vulnerability | None:
     """Run opencode to analyze a single candidate vulnerability.
@@ -54,7 +54,7 @@ async def run_audit(
         candidate: The candidate vulnerability to analyze.
         project_id: Project identifier for MCP tool calls.
         on_output: Optional callback(line: str) called for each output line in real-time.
-        cancel_event: Optional asyncio.Event; when set, the subprocess is killed.
+        cancel_event: Optional threading.Event; when set, the subprocess is killed.
         timeout: Per-candidate timeout in seconds. Falls back to config if not provided.
 
     Returns:
@@ -223,7 +223,7 @@ async def _invoke_opencode(
     timeout: int,
     log_path: Path | None = None,
     on_line=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
 ) -> None:
     """Invoke opencode CLI, stream output line-by-line, write to log file.
 
@@ -356,7 +356,8 @@ async def _invoke_opencode(
     # Watcher: kill proc immediately when cancel_event fires.
     async def _cancel_watcher() -> None:
         if cancel_event:
-            await cancel_event.wait()
+            while not cancel_event.is_set():
+                await asyncio.sleep(0.2)
             _kill()
 
     watcher = asyncio.create_task(_cancel_watcher()) if cancel_event else None
@@ -443,7 +444,7 @@ async def run_audit_batch(
     candidates: list[Candidate],
     project_id: str,
     on_output=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
     timeout: int | None = None,
 ) -> list[Vulnerability | None]:
     """Run batch audit for multiple candidates in the same function.
