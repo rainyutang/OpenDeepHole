@@ -99,6 +99,8 @@ async def create_scan(
         total_candidates=0,
         processed_candidates=0,
         vulnerabilities=[],
+        agent_name=agent.name,
+        agent_online=True,
     )
     meta = ScanMeta(
         scan_items=body.checkers,
@@ -147,6 +149,8 @@ async def create_scan(
 @router.get("/api/scans", response_model=list[ScanSummary])
 async def list_scans(current_user: User = Depends(get_current_user)) -> list[ScanSummary]:
     """List scans visible to the current user (admin sees all)."""
+    from backend.api.agent import is_agent_name_online
+
     store = get_scan_store()
     if current_user.role == "admin":
         summaries = store.list_scans()
@@ -160,6 +164,9 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
             s.total_candidates = live.total_candidates
             s.processed_candidates = live.processed_candidates
             s.vulnerability_count = len(live.vulnerabilities)
+        # Populate agent online status
+        if s.agent_name:
+            s.agent_online = is_agent_name_online(s.agent_name)
     return summaries
 
 
@@ -169,14 +176,22 @@ async def get_scan_status(
     current_user: User = Depends(get_current_user),
 ) -> ScanStatus:
     """Get the current status and results of a scan."""
+    from backend.api.agent import is_agent_name_online
+
     _check_scan_owner(scan_id, current_user)
     if scan_id in _running_scans:
-        return _running_scans[scan_id]
-    store = get_scan_store()
-    result = store.load_scan(scan_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    return result[0]
+        scan = _running_scans[scan_id]
+    else:
+        store = get_scan_store()
+        result = store.load_scan(scan_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        scan = result[0]
+        scan.agent_name = result[1].agent_name
+    # Populate agent online status
+    if scan.agent_name:
+        scan.agent_online = is_agent_name_online(scan.agent_name)
+    return scan
 
 
 @router.post("/api/scan/{scan_id}/stop")
@@ -184,48 +199,36 @@ async def stop_scan(
     scan_id: str,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Signal the agent to stop processing this scan."""
+    """Immediately cancel the scan, then best-effort notify the agent."""
     _check_scan_owner(scan_id, current_user)
     from backend.api.agent import _registered_agents
 
-    if scan_id not in _running_scans:
-        raise HTTPException(status_code=404, detail="Scan not found or not running")
-
-    # Look up the agent for this scan
     store = get_scan_store()
+
+    # Immediately mark as CANCELLED in DB and in-memory
+    store.update_scan_progress(
+        scan_id,
+        status=ScanItemStatus.CANCELLED,
+        error_message="用户手动停止",
+        clear_current_candidate=True,
+    )
+    scan = _running_scans.pop(scan_id, None)
+    if scan is not None:
+        scan.status = ScanItemStatus.CANCELLED
+        scan.error_message = "用户手动停止"
+    _scan_owners.pop(scan_id, None)
+
+    # Best-effort: send stop command to agent (fire-and-forget)
     result = store.load_scan(scan_id)
     agent_id = result[1].agent_id if result else ""
-    agent = _registered_agents.get(agent_id) if agent_id else None
+    if agent_id and _registered_agents.get(agent_id):
+        from backend.api.agent import send_agent_command
+        try:
+            await send_agent_command(agent_id, {"type": "stop", "scan_id": scan_id})
+        except Exception:
+            pass
 
-    if agent is None:
-        # Agent 离线，直接标记扫描为 CANCELLED
-        store.update_scan_progress(
-            scan_id,
-            status=ScanItemStatus.CANCELLED,
-            error_message="Agent 离线，扫描已取消",
-            clear_current_candidate=True,
-        )
-        _running_scans.pop(scan_id, None)
-        _scan_owners.pop(scan_id, None)
-        logger.info("Scan %s cancelled (agent %s offline)", scan_id, agent_id)
-        return {"ok": True}
-
-    from backend.api.agent import send_agent_command
-    ok = await send_agent_command(agent_id, {"type": "stop", "scan_id": scan_id})
-    if not ok:
-        # Agent 发送失败，直接标记为 CANCELLED
-        store.update_scan_progress(
-            scan_id,
-            status=ScanItemStatus.CANCELLED,
-            error_message="Agent 离线，扫描已取消",
-            clear_current_candidate=True,
-        )
-        _running_scans.pop(scan_id, None)
-        _scan_owners.pop(scan_id, None)
-        logger.info("Scan %s cancelled (agent %s send failed)", scan_id, agent_id)
-        return {"ok": True}
-
-    logger.info("Stop requested for scan %s via agent %s", scan_id, agent_id)
+    logger.info("Scan %s cancelled immediately by user", scan_id)
     return {"ok": True}
 
 
@@ -253,32 +256,25 @@ async def resume_scan(
             detail=f"Cannot resume scan with status '{scan.status.value}'",
         )
 
+    # Only allow resume when the original agent (by name) is online
     agent_id = meta.agent_id
     agent = _registered_agents.get(agent_id) if agent_id else None
 
-    # If original agent is offline, try to find a reconnected agent by name
+    # If original agent_id is stale (reconnected), find it by name
     if agent is None and meta.agent_name:
         from backend.api.agent import _agent_ws
         for aid, ainfo in _registered_agents.items():
             if ainfo.name == meta.agent_name and aid in _agent_ws:
-                # Verify ownership: same user or admin
-                if current_user.role == "admin" or ainfo.user_id == current_user.user_id:
-                    agent = ainfo
-                    agent_id = aid
-                    break
-
-    # Fallback: find any online agent belonging to the same user
-    if agent is None:
-        from backend.api.agent import _agent_ws
-        for aid, ainfo in _registered_agents.items():
-            if aid in _agent_ws:
                 if current_user.role == "admin" or ainfo.user_id == current_user.user_id:
                     agent = ainfo
                     agent_id = aid
                     break
 
     if agent is None:
-        raise HTTPException(status_code=404, detail="没有在线的 Agent，请先启动 Agent")
+        raise HTTPException(
+            status_code=400,
+            detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
+        )
 
     # Update scan meta with new agent_id if it changed
     if agent_id != meta.agent_id:
@@ -294,6 +290,8 @@ async def resume_scan(
     scan.status = ScanItemStatus.PENDING
     scan.error_message = None
     scan.current_candidate = None
+    scan.agent_name = agent.name
+    scan.agent_online = True
     store.update_scan_progress(
         scan_id,
         status=ScanItemStatus.PENDING,

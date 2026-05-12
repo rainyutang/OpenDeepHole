@@ -201,6 +201,10 @@ class ScanStatus(BaseModel):
     static_scanned_files: int = 0
     static_analysis_done: bool = False
 
+    # Agent 信息
+    agent_name: str = ""
+    agent_online: bool = False
+
 
 # --- Agent API models ---
 
@@ -286,6 +290,8 @@ class ScanSummary(BaseModel):
     scan_items: list[str]
     user_id: str = ""
     username: str = ""
+    agent_name: str = ""
+    agent_online: bool = False
 
 
 # --- FP Review models ---

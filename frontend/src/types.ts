@@ -85,6 +85,10 @@ export interface ScanStatus {
   static_total_files: number;
   static_scanned_files: number;
   static_analysis_done: boolean;
+
+  // Agent 信息
+  agent_name?: string;
+  agent_online?: boolean;
 }
 
 export interface FeedbackEntry {
@@ -121,6 +125,8 @@ export interface ScanSummary {
   scan_items: string[];
   user_id?: string;
   username?: string;
+  agent_name?: string;
+  agent_online?: boolean;
 }
 
 export interface AgentInfo {

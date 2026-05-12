@@ -166,6 +166,14 @@ async def agent_websocket(websocket: WebSocket) -> None:
             logger.info("Agent disconnected: %s", agent_id)
 
 
+def is_agent_name_online(agent_name: str) -> bool:
+    """Check if any registered agent with the given name has an active WebSocket."""
+    for aid, ainfo in _registered_agents.items():
+        if ainfo.name == agent_name and aid in _agent_ws:
+            return True
+    return False
+
+
 async def send_agent_command(agent_id: str, command: dict) -> bool:
     """Send a JSON command to an agent via its WebSocket. Returns True on success."""
     ws = _agent_ws.get(agent_id)

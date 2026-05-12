@@ -247,6 +247,19 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 ? (scan.error_message?.includes("Agent") ? "Agent 断开，已中断" : "已取消")
                 : isDone ? "扫描完成" : "扫描中..."}
             </span>
+            {scan.agent_name && (
+              <span className="flex items-center gap-1.5 text-sm text-slate-400 border-l border-slate-600 pl-4">
+                <span
+                  className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                    scan.agent_online ? "bg-green-400" : "bg-slate-500"
+                  }`}
+                />
+                Agent: {scan.agent_name}
+                {!scan.agent_online && (
+                  <span className="text-xs text-slate-500">(离线)</span>
+                )}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3">
             {/* Feedback button with count badge */}

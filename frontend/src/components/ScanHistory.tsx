@@ -182,6 +182,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">进度</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">漏洞数</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">检查项</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Agent</th>
                   {user.role === "admin" && (
                     <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">创建者</th>
                   )}
@@ -242,6 +243,20 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                           ))}
                         </div>
                       </td>
+                      <td className="px-4 py-3">
+                        {scan.agent_name ? (
+                          <span className="flex items-center gap-1.5 text-xs text-slate-300">
+                            <span
+                              className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                                scan.agent_online ? "bg-green-400" : "bg-slate-500"
+                              }`}
+                            />
+                            {scan.agent_name}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-slate-500">-</span>
+                        )}
+                      </td>
                       {user.role === "admin" && (
                         <td className="px-4 py-3 text-xs text-slate-300">
                           {scan.username || "-"}
@@ -261,7 +276,8 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                           {canResume && (
                             <button
                               onClick={() => handleResume(scan.scan_id)}
-                              disabled={isLoading}
+                              disabled={isLoading || !scan.agent_online}
+                              title={!scan.agent_online ? "Agent 离线，无法恢复" : undefined}
                               className="text-xs px-2 py-1 rounded text-amber-400 hover:bg-amber-500/10 disabled:opacity-50 transition-colors"
                             >
                               {isLoading ? "..." : "恢复"}

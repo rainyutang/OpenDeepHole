@@ -307,6 +307,7 @@ class SqliteScanStore(ScanStoreBase):
             scan_items=json.loads(row["scan_items"]),
             user_id=row["user_id"] if row["user_id"] is not None else "",
             username=row["username"] if "username" in row.keys() and row["username"] is not None else "",
+            agent_name=row["agent_name"] if row["agent_name"] is not None else "",
         )
 
     def list_scans(self) -> list[ScanSummary]:
