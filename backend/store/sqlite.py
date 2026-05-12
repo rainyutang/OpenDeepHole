@@ -260,8 +260,8 @@ class SqliteScanStore(ScanStoreBase):
                      progress, total_candidates, processed_candidates,
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
-                     user_id, agent_name)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, agent_name, agent_id, project_path, scan_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -280,6 +280,9 @@ class SqliteScanStore(ScanStoreBase):
                     int(scan.static_analysis_done),
                     meta.user_id,
                     meta.agent_name,
+                    meta.agent_id,
+                    meta.project_path,
+                    meta.scan_name,
                 ),
             )
             self._conn.commit()

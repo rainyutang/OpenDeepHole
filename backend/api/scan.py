@@ -205,6 +205,10 @@ async def stop_scan(
 
     store = get_scan_store()
 
+    # Resolve agent_id BEFORE popping from memory
+    result = store.load_scan(scan_id)
+    agent_id = result[1].agent_id if result else ""
+
     # Immediately mark as CANCELLED in DB and in-memory
     store.update_scan_progress(
         scan_id,
@@ -219,8 +223,6 @@ async def stop_scan(
     _scan_owners.pop(scan_id, None)
 
     # Best-effort: send stop command to agent (fire-and-forget)
-    result = store.load_scan(scan_id)
-    agent_id = result[1].agent_id if result else ""
     if agent_id and _registered_agents.get(agent_id):
         from backend.api.agent import send_agent_command
         try:
