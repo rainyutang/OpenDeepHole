@@ -472,6 +472,36 @@ async def agent_push_index_status(scan_id: str, body: _IndexStatusBody) -> dict:
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Static analysis progress (pushed by agent during static analysis phase)
+# ---------------------------------------------------------------------------
+
+
+class _StaticProgressBody(BaseModel):
+    scanned: int = 0
+    total: int = 0
+    done: bool = False
+
+
+@router.post("/scan/{scan_id}/static-progress")
+async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) -> dict:
+    """Agent pushes static analysis progress (function/file counts)."""
+    scan = _running_scans.get(scan_id)
+    if scan is not None:
+        scan.static_total_files = body.total
+        scan.static_scanned_files = body.scanned
+        scan.static_analysis_done = body.done
+
+    store = get_scan_store()
+    store.update_scan_progress(
+        scan_id,
+        static_total_files=body.total,
+        static_scanned_files=body.scanned,
+        static_analysis_done=body.done,
+    )
+    return {"ok": True}
+
+
 @router.get("/scan/{scan_id}/index-status")
 async def agent_get_index_status(scan_id: str) -> dict:
     """Return the current code-indexing progress for an agent scan."""

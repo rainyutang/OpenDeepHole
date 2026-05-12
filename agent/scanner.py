@@ -156,10 +156,26 @@ async def run_scan(
             await reporter.send_index_status(scan_id, "parsing", 0, 0)
             from code_parser import CodeDatabase, CppAnalyzer
             db = CodeDatabase(db_path)
-            CppAnalyzer(db).analyze_directory(
-                project_path,
-                cancel_check=cancel_event.is_set,
-            )
+            analyzer = CppAnalyzer(db)
+            loop = asyncio.get_running_loop()
+
+            def _on_index_progress(parsed: int, total: int) -> None:
+                pct = round(parsed / total * 100) if total else 0
+                print(f"\r  [index] {parsed}/{total} files ({pct}%)", end="", flush=True)
+                asyncio.run_coroutine_threadsafe(
+                    reporter.send_index_status(scan_id, "parsing", parsed, total),
+                    loop,
+                )
+
+            def _do_index() -> None:
+                analyzer.analyze_directory(
+                    project_path,
+                    on_progress=_on_index_progress,
+                    cancel_check=cancel_event.is_set,
+                )
+                print()  # newline after progress
+
+            await loop.run_in_executor(None, _do_index)
             if cancel_event.is_set():
                 db.close()
                 db_path.unlink(missing_ok=True)
@@ -214,24 +230,46 @@ async def run_scan(
             await emit("static_analysis", f"已加载 {total} 个缓存候选点", candidate_index=total)
         else:
             await emit("static_analysis", "Running static analyzers...")
-            static_cancelled = False
-            for name, entry in registry.items():
-                if cancel_event.is_set():
-                    static_cancelled = True
-                    break
-                if not entry.analyzer:
-                    await emit("static_analysis", f"{entry.label}: no static analyzer, skipping")
-                    continue
-                count_before = len(candidates)
-                for cand in entry.analyzer.find_candidates(project_path, db=db):
+
+            loop = asyncio.get_running_loop()
+
+            def _run_static_analysis() -> tuple[list[Candidate], bool]:
+                """Run all static analyzers in a thread so the event loop stays free."""
+                result: list[Candidate] = []
+                analyzer_entries = [(n, e) for n, e in registry.items() if e.analyzer]
+                for idx, (_name, entry) in enumerate(analyzer_entries, 1):
                     if cancel_event.is_set():
-                        static_cancelled = True
-                        break
-                    candidates.append(cand)
-                if static_cancelled:
-                    break
-                count = len(candidates) - count_before
-                await emit("static_analysis", f"{entry.label}: {count} candidate(s) found")
+                        return result, True
+                    print(f"  [static] [{idx}/{len(analyzer_entries)}] {entry.label}...", flush=True)
+
+                    # Set file-level progress callback
+                    def _on_progress(scanned: int, total: int, label: str = entry.label) -> None:
+                        print(f"\r  [static] {label}: {scanned}/{total}", end="", flush=True)
+                        asyncio.run_coroutine_threadsafe(
+                            reporter.send_static_progress(scan_id, scanned, total),
+                            loop,
+                        )
+
+                    if hasattr(entry.analyzer, "on_file_progress"):
+                        entry.analyzer.on_file_progress = _on_progress
+
+                    count_before = len(result)
+                    for cand in entry.analyzer.find_candidates(project_path, db=db):
+                        if cancel_event.is_set():
+                            return result, True
+                        result.append(cand)
+
+                    if hasattr(entry.analyzer, "on_file_progress"):
+                        entry.analyzer.on_file_progress = None
+
+                    count = len(result) - count_before
+                    print(f"\n  [static] [{idx}/{len(analyzer_entries)}] {entry.label}: {count} candidate(s)", flush=True)
+                return result, False
+
+            candidates, static_cancelled = await loop.run_in_executor(None, _run_static_analysis)
+
+            # Mark static analysis as done on the server
+            await reporter.send_static_progress(scan_id, 0, 0, done=True)
 
             if static_cancelled:
                 await emit("static_analysis", "Static analysis stopped by user")
