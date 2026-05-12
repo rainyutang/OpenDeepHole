@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getIndexStatus } from "../api/client";
+import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getIndexStatus, getFpReviewSkill } from "../api/client";
 import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
@@ -185,6 +185,19 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     setSkillLoading(true);
     try {
       const content = await getSkillContent(scanId, vulnType);
+      setSkillContent(content);
+    } catch {
+      setSkillContent("加载失败");
+    } finally {
+      setSkillLoading(false);
+    }
+  };
+
+  const loadFpReviewSkill = async () => {
+    setSkillType("__fp_review__");
+    setSkillLoading(true);
+    try {
+      const content = await getFpReviewSkill();
       setSkillContent(content);
     } catch {
       setSkillContent("加载失败");
@@ -507,6 +520,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             totalCandidates={scan.total_candidates}
             processedCandidates={scan.processed_candidates}
             fpReview={fpReview}
+            onVulnMarked={() => {
+              if (skillOpen && skillType && skillType !== "__fp_review__") {
+                getSkillContent(scanId, skillType).then(setSkillContent).catch(() => {});
+              }
+            }}
           />
         )}
       </div>
@@ -622,6 +640,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                   {item.toUpperCase()}
                 </button>
               ))}
+              <button
+                onClick={() => loadFpReviewSkill()}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap ${
+                  skillType === "__fp_review__"
+                    ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                    : "text-slate-400 border-slate-700 hover:bg-slate-800"
+                }`}
+              >
+                FP REVIEW
+              </button>
             </div>
             {/* Content */}
             <div className="flex-1 overflow-y-auto p-4">

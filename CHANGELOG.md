@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-05-12 (4)
+
+- **修复** Agent 重启后点击"AI去误报"仍报 Agent 未连接，现在按 agent_name 查找在线 Agent 而非依赖过期的 agent_id
+- **修复** 标记漏洞反馈时推送 feedback_update 到 Agent 同样受过期 agent_id 影响，已一并修复
+- **新增** SKILL 预览面板新增 "FP REVIEW" 标签，可查看去误报复核使用的 SKILL 内容
+- **新增** 在漏洞列表中标记反馈后，SKILL 预览自动同步刷新
+- **新增** FP 复核完成后，筛选栏新增 "FP复核:确认" 和 "FP复核:误报" 过滤按钮
+
 ## 2026-05-12 (3)
 
 - **新增** LLM API 直调模式支持流式传输（`agent.yaml` 中配置 `llm_api.stream: true`），兼容仅支持流式返回的 API 接口

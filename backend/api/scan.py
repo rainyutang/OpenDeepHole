@@ -420,11 +420,18 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
     try:
         scan_result = store.load_scan(scan_id)
         if scan_result is not None:
-            agent_id = scan_result[1].agent_id
-            if agent_id:
-                from backend.api.agent import send_agent_command
-                import asyncio
-                asyncio.create_task(send_agent_command(agent_id, {
+            smeta = scan_result[1]
+            from backend.api.agent import _registered_agents, _agent_ws, send_agent_command
+            import asyncio
+            target_id = smeta.agent_id
+            # Resolve stale agent_id by name
+            if (not target_id or target_id not in _agent_ws) and smeta.agent_name:
+                for aid, ainfo in _registered_agents.items():
+                    if ainfo.name == smeta.agent_name and aid in _agent_ws:
+                        target_id = aid
+                        break
+            if target_id and target_id in _agent_ws:
+                asyncio.create_task(send_agent_command(target_id, {
                     "type": "feedback_update",
                     "entry": entry.model_dump(),
                 }))
@@ -507,14 +514,34 @@ async def trigger_fp_review(
         raise HTTPException(status_code=404, detail="Scan not found")
     meta = result[1]
 
-    if not meta.agent_id:
+    if not meta.agent_id and not meta.agent_name:
         raise HTTPException(status_code=400, detail="No agent associated with this scan")
+
+    # Resolve agent_id — may be stale if agent reconnected
+    from backend.api.agent import _registered_agents, _agent_ws
+    agent_id = meta.agent_id
+    if not agent_id or agent_id not in _agent_ws:
+        agent_id = None
+        if meta.agent_name:
+            for aid, ainfo in _registered_agents.items():
+                if ainfo.name == meta.agent_name and aid in _agent_ws:
+                    agent_id = aid
+                    break
+    if agent_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
+        )
+
+    # Update stored agent_id if it changed
+    if agent_id != meta.agent_id:
+        store.update_scan_agent(scan_id, agent_id, meta.agent_name)
 
     review_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     store.create_fp_review_job(review_id, scan_id, len(confirmed), now)
 
-    ok = await send_agent_command(meta.agent_id, {
+    ok = await send_agent_command(agent_id, {
         "type": "fp_review",
         "scan_id": scan_id,
         "review_id": review_id,
@@ -665,6 +692,18 @@ async def get_scan_skill(
         )
 
     return {"vuln_type": vuln_type, "content": original.rstrip() + fp_section}
+
+
+@router.get("/api/fp-review/skill")
+async def get_fp_review_skill(
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Return the FP review skill (fp_review.md) content."""
+    skill_path = Path(__file__).resolve().parent.parent.parent / "agent" / "skills" / "fp_review.md"
+    if not skill_path.is_file():
+        raise HTTPException(status_code=404, detail="fp_review.md not found")
+    content = skill_path.read_text(encoding="utf-8")
+    return {"content": content}
 
 
 # ---------------------------------------------------------------------------
