@@ -55,6 +55,7 @@ class LLMApiConfig(BaseModel):
     temperature: float = 0.1
     timeout: int = 120
     max_retries: int = 3
+    stream: bool = False
 
 
 class AppConfig(BaseModel):

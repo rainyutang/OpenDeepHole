@@ -66,6 +66,7 @@ class Candidate(BaseModel):
     function: str
     description: str
     vuln_type: str
+    related_functions: list[str] = []
 
 
 class Vulnerability(BaseModel):

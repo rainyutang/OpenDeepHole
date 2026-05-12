@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-05-12 (3)
+
+- **新增** LLM API 直调模式支持流式传输（`agent.yaml` 中配置 `llm_api.stream: true`），兼容仅支持流式返回的 API 接口
+- **优化** memleak checker 的 prompt 中直接内嵌释放函数源码，LLM 无需调用查询工具即可获得完整上下文
+- **新增** Candidate 模型新增 `related_functions` 字段，支持静态分析器将关联函数名传递给 AI 审计阶段
+
 ## 2026-05-12 (2)
 
 - **重构** 停止机制：点击停止按钮后立即将扫描标记为已取消，不再依赖 Agent 响应，Agent 保持在线不断开

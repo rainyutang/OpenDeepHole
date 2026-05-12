@@ -120,6 +120,7 @@ class Issue:
     leaked: list
     free_lines: dict
     hint: str
+    free_func_names: set = field(default_factory=set)
 
 
 # ============================================================
@@ -519,8 +520,11 @@ class MemLeakDetector:
                 continue
 
             details = []
+            free_funcs = set()
             for v in sorted(missing):
-                free_lines = sorted({f.line for f in all_frees if f.var_name == v})
+                matching_frees = [f for f in all_frees if f.var_name == v]
+                free_lines = sorted({f.line for f in matching_frees})
+                free_funcs.update(f.func_name for f in matching_frees)
                 details.append((v, free_lines))
 
             hint = "; ".join(
@@ -534,6 +538,7 @@ class MemLeakDetector:
                 leaked=[self._display_name(v) for v, _ in details],
                 free_lines={self._display_name(v): lines for v, lines in details},
                 hint=f"{ex.kind} 前未释放: {hint}",
+                free_func_names=free_funcs,
             ))
 
     # ============================================================
@@ -576,13 +581,16 @@ class MemLeakDetector:
                     continue
 
                 truly_leaked = []
+                free_funcs = set()
                 for v in sorted(leaked):
-                    other_path_free_lines = sorted({
-                        f.line for f in loop_frees
+                    matching_frees = [
+                        f for f in loop_frees
                         if f.var_name == v
                         and not self._is_ancestor_of(f.node, cont.node)
-                    })
+                    ]
+                    other_path_free_lines = sorted({f.line for f in matching_frees})
                     if other_path_free_lines:
+                        free_funcs.update(f.func_name for f in matching_frees)
                         truly_leaked.append((v, other_path_free_lines))
 
                 if truly_leaked:
@@ -597,6 +605,7 @@ class MemLeakDetector:
                         leaked=[self._display_name(v) for v, _ in truly_leaked],
                         free_lines={self._display_name(v): lines for v, lines in truly_leaked},
                         hint=f"循环中 continue 前未释放: {details}",
+                        free_func_names=free_funcs,
                     ))
 
     def run(self) -> list[Issue]:
@@ -700,4 +709,5 @@ class Analyzer(BaseAnalyzer):
                         f"{issue.hint}"
                     ),
                     vuln_type="memleak",
+                    related_functions=sorted(issue.free_func_names),
                 )

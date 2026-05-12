@@ -29,6 +29,7 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
             "temperature": config.llm_api.temperature,
             "timeout": config.llm_api.timeout,
             "max_retries": config.llm_api.max_retries,
+            "stream": config.llm_api.stream,
         },
         "opencode": {
             "executable": config.opencode.executable,

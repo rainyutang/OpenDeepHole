@@ -26,6 +26,7 @@ llm_api:
   temperature: 0.1
   timeout: 120      # 单次调用超时（秒）
   max_retries: 3
+  stream: false      # 是否使用流式传输（部分 API 仅支持流式）
 
 # opencode CLI 配置（供 mode: opencode 的检查项使用）
 opencode:

@@ -18,6 +18,7 @@ class LLMApiConfig:
     temperature: float = 0.1
     timeout: int = 120
     max_retries: int = 3
+    stream: bool = False
 
 
 @dataclass
