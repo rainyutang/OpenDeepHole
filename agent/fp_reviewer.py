@@ -313,7 +313,7 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
 
 
 def _create_fp_workspace(project_path: Path, mcp_port: int) -> Path:
-    """Write opencode.json and the fp-review SKILL into the project directory."""
+    """Write opencode.json and the fp-review SKILL (with user feedback) into the project directory."""
     workspace = project_path
 
     (workspace / "opencode.json").write_text(
@@ -333,7 +333,24 @@ def _create_fp_workspace(project_path: Path, mcp_port: int) -> Path:
     skills_dir = workspace / ".opencode" / "skills" / "fp-review"
     skills_dir.mkdir(parents=True, exist_ok=True)
     skill_src = Path(__file__).parent / "skills" / "fp_review.md"
-    shutil.copy2(skill_src, skills_dir / "SKILL.md")
+    content = skill_src.read_text(encoding="utf-8")
+
+    # Merge local user feedback into the SKILL
+    feedback = load_local_feedback()
+    fp_lines: list[str] = []
+    for entries in feedback.values():
+        for entry in entries:
+            if entry.get("verdict") == "false_positive" and entry.get("reason"):
+                fp_lines.append(f"\n- {entry['reason']}\n")
+    if fp_lines:
+        content = content.rstrip() + (
+            "\n\n## 历史误报经验\n\n"
+            "以下是用户在审计过程中确认的误报案例，"
+            "复核时应参考这些经验避免重复误判：\n"
+            + "".join(fp_lines)
+        )
+
+    (skills_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
     return workspace
 

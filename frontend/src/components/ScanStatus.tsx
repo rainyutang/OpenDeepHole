@@ -197,7 +197,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     setSkillType("__fp_review__");
     setSkillLoading(true);
     try {
-      const content = await getFpReviewSkill();
+      const content = await getFpReviewSkill(scanId);
       setSkillContent(content);
     } catch {
       setSkillContent("加载失败");
@@ -308,14 +308,14 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               const confirmedVulns = scan.vulnerabilities.filter(
                 (v) => v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed)
               ).length;
-              const canTrigger = isDone && confirmedVulns > 0;
+              const canTrigger = confirmedVulns > 0;
               const isReviewing = fpReview?.status === "running" || fpReview?.status === "pending";
               return (
                 <button
                   onClick={handleFpReview}
                   disabled={!canTrigger || fpReviewLoading || !!isReviewing}
                   className="px-3 py-1.5 text-sm font-medium text-amber-400 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-                  title={!canTrigger ? "需要扫描完成且存在 LLM 正报才可使用" : "使用 AI 对已确认漏洞逐条进行误报复核"}
+                  title={!canTrigger ? "需要存在 LLM 正报才可使用" : "使用 AI 对已确认漏洞逐条进行误报复核"}
                 >
                   {isReviewing ? (
                     <>
@@ -521,8 +521,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             processedCandidates={scan.processed_candidates}
             fpReview={fpReview}
             onVulnMarked={() => {
-              if (skillOpen && skillType && skillType !== "__fp_review__") {
-                getSkillContent(scanId, skillType).then(setSkillContent).catch(() => {});
+              if (skillOpen && skillType) {
+                if (skillType === "__fp_review__") {
+                  getFpReviewSkill(scanId).then(setSkillContent).catch(() => {});
+                } else {
+                  getSkillContent(scanId, skillType).then(setSkillContent).catch(() => {});
+                }
               }
             }}
           />

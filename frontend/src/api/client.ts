@@ -254,7 +254,7 @@ export async function getFpReview(scanId: string): Promise<FpReviewJob> {
   return data;
 }
 
-export async function getFpReviewSkill(): Promise<string> {
-  const { data } = await api.get<{ content: string }>("/api/fp-review/skill");
+export async function getFpReviewSkill(scanId: string): Promise<string> {
+  const { data } = await api.get<{ content: string }>(`/api/scan/${scanId}/fp-review/skill`);
   return data.content;
 }

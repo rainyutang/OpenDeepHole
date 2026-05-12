@@ -489,8 +489,6 @@ async def trigger_fp_review(
     from backend.api.agent import send_agent_command
 
     scan = await get_scan_status(scan_id, current_user)
-    if scan.status not in (ScanItemStatus.COMPLETE, ScanItemStatus.ERROR, ScanItemStatus.CANCELLED):
-        raise HTTPException(status_code=400, detail="Scan must be complete/error/cancelled to trigger FP review")
 
     confirmed = [
         {
@@ -678,9 +676,9 @@ async def get_scan_skill(
             unique_fb.append(fb)
 
     fp_lines = [
-        f"\n- {fb.reason or fb.description}\n"
+        f"\n- {fb.reason}\n"
         for fb in unique_fb
-        if fb.verdict == "false_positive" and fb.vuln_type == vuln_type
+        if fb.verdict == "false_positive" and fb.vuln_type == vuln_type and fb.reason
     ]
     fp_section = ""
     if fp_lines:
@@ -694,16 +692,55 @@ async def get_scan_skill(
     return {"vuln_type": vuln_type, "content": original.rstrip() + fp_section}
 
 
-@router.get("/api/fp-review/skill")
+@router.get("/api/scan/{scan_id}/fp-review/skill")
 async def get_fp_review_skill(
+    scan_id: str,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Return the FP review skill (fp_review.md) content."""
+    """Return the FP review skill content, merged with user feedback for this scan."""
+    _check_scan_owner(scan_id, current_user)
     skill_path = Path(__file__).resolve().parent.parent.parent / "agent" / "skills" / "fp_review.md"
     if not skill_path.is_file():
         raise HTTPException(status_code=404, detail="fp_review.md not found")
-    content = skill_path.read_text(encoding="utf-8")
-    return {"content": content}
+    original = skill_path.read_text(encoding="utf-8")
+
+    # Merge user feedback from this scan
+    store = get_scan_store()
+    all_fb: list[FeedbackEntry] = []
+
+    scan = _running_scans.get(scan_id)
+    feedback_ids = scan.feedback_ids if scan else []
+    if not feedback_ids:
+        loaded = store.load_scan(scan_id)
+        if loaded:
+            _, meta = loaded
+            feedback_ids = meta.feedback_ids
+    if feedback_ids:
+        all_fb.extend(store.get_feedback_by_ids(feedback_ids))
+    all_fb.extend(store.list_feedback_by_scan(scan_id))
+
+    seen: set[str] = set()
+    unique_fb: list[FeedbackEntry] = []
+    for fb in all_fb:
+        if fb.id not in seen:
+            seen.add(fb.id)
+            unique_fb.append(fb)
+
+    fp_lines = [
+        f"\n- {fb.reason}\n"
+        for fb in unique_fb
+        if fb.verdict == "false_positive" and fb.reason
+    ]
+    fp_section = ""
+    if fp_lines:
+        fp_section = (
+            "\n\n## 历史误报经验\n\n"
+            "以下是用户在审计过程中确认的误报案例，"
+            "复核时应参考这些经验避免重复误判：\n"
+            + "".join(fp_lines)
+        )
+
+    return {"content": original.rstrip() + fp_section}
 
 
 # ---------------------------------------------------------------------------
