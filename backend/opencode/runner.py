@@ -420,7 +420,7 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
         return None
 
     try:
-        data = json.loads(result_path.read_text())
+        data = json.loads(result_path.read_text(encoding="utf-8"))
     except Exception:
         logger.error("Failed to parse result file for result_id=%s", result_id)
         return None
