@@ -136,7 +136,7 @@ async def run_fp_review(
 
         await emit("fp_review", f"Starting FP review: {len(vulnerabilities)} confirmed vulnerabilities")
 
-        # Create workspace with the fp-review skill
+        # Create workspace with opencode.json + fp-review SKILL (merged with user feedback)
         workspace = _create_fp_workspace(project, mcp_port)
         await emit("fp_review", "FP review workspace ready")
 
@@ -151,22 +151,19 @@ async def run_fp_review(
             result_id = uuid4().hex
 
             prompt = (
-                f"Using the `fp-review` skill, review the following confirmed vulnerability "
-                f"to determine if it is a FALSE POSITIVE or TRUE POSITIVE.\n\n"
-                f"Vulnerability Type: {vuln['vuln_type'].upper()}\n"
-                f"File: {vuln['file']}\n"
-                f"Line: {vuln['line']}\n"
-                f"Function: {vuln['function']}\n"
-                f"Description: {vuln['description']}\n\n"
-                f"Original AI Analysis:\n{vuln['ai_analysis']}\n\n"
-                f"The project_id is `{project_id_for_prompt}`.\n"
-                f"Your result_id is `{result_id}`.\n"
-                f"When you have finished your analysis, you MUST call the submit_result tool "
-                f"with this result_id.\n"
-                f"Use confirmed=true if this is a TRUE POSITIVE (real vulnerability).\n"
-                f"Use confirmed=false if this is a FALSE POSITIVE.\n"
-                f"Explain your reasoning in the ai_analysis field."
+                f"使用 `fp-review` 技能，复核位于 "
+                f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
+                f"已确认的 {vuln['vuln_type'].upper()} 漏洞。"
+                f"project_id 为 `{project_id_for_prompt}`。"
+                f"原始描述：{vuln['description']} "
+                f"原始 AI 分析：{vuln['ai_analysis']} "
+                f"你的 result_id 是 `{result_id}`。"
+                f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交结论。"
+                f"真正报使用 confirmed=true，误报使用 confirmed=false。"
+                f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
+                f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
             )
+            prompt = prompt.replace('\n', ' ')
 
             await emit(
                 "fp_review",

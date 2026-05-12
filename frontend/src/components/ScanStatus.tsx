@@ -306,7 +306,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             </button>
             {(() => {
               const confirmedVulns = scan.vulnerabilities.filter(
-                (v) => v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed)
+                (v) => (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed)) && !v.user_verdict
               ).length;
               const canTrigger = confirmedVulns > 0;
               const isReviewing = fpReview?.status === "running" || fpReview?.status === "pending";

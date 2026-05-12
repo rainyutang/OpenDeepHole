@@ -501,7 +501,7 @@ async def trigger_fp_review(
             "ai_analysis": v.ai_analysis,
         }
         for i, v in enumerate(scan.vulnerabilities)
-        if v.confirmed
+        if v.confirmed and not v.user_verdict
     ]
     if not confirmed:
         raise HTTPException(status_code=400, detail="No confirmed vulnerabilities to review")
