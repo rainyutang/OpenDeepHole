@@ -210,6 +210,10 @@ async def get_checker_dashboard(
 
     static_issue_count = sum(item.static_issue_count for item in checkers)
     llm_issue_count = sum(item.llm_issue_count for item in checkers)
+    fp_review_issue_count = sum(item.fp_review_issue_count for item in checkers)
+    fp_review_false_positive_count = sum(
+        item.fp_review_false_positive_count for item in checkers
+    )
     human_confirmed_count = sum(item.human_confirmed_count for item in checkers)
     accuracy_basis_count = sum(item.accuracy_basis_count for item in checkers)
 
@@ -220,6 +224,9 @@ async def get_checker_dashboard(
             project_count=len(all_projects),
             static_issue_count=static_issue_count,
             llm_issue_count=llm_issue_count,
+            fp_review_issue_count=fp_review_issue_count,
+            fp_review_false_positive_count=fp_review_false_positive_count,
+            total_issue_count=llm_issue_count - fp_review_false_positive_count,
             human_confirmed_count=human_confirmed_count,
             accuracy_basis_count=accuracy_basis_count,
             accuracy=_accuracy(human_confirmed_count, accuracy_basis_count),

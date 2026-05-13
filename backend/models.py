@@ -343,6 +343,9 @@ class CheckerDashboardSummary(BaseModel):
     project_count: int = 0
     static_issue_count: int = 0
     llm_issue_count: int = 0
+    fp_review_issue_count: int = 0
+    fp_review_false_positive_count: int = 0
+    total_issue_count: int = 0
     human_confirmed_count: int = 0
     accuracy_basis_count: int = 0
     accuracy: float | None = None

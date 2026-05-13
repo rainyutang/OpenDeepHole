@@ -84,14 +84,15 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
           </div>
         ) : data ? (
           <div className="max-w-7xl mx-auto">
-            <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 mb-6">
-              <MetricTile label="SKILL 数" value={data.summary.checker_count} />
-              <MetricTile label="扫描数" value={data.summary.scan_count} />
-              <MetricTile label="项目数" value={data.summary.project_count} />
-              <MetricTile label="静态报告" value={data.summary.static_issue_count} />
-              <MetricTile label="LLM 判定问题" value={data.summary.llm_issue_count} />
+            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-6">
+              <MetricTile label="SKILL" value={data.summary.checker_count} />
+              <MetricTile label="静态发现" value={data.summary.static_issue_count} />
+              <MetricTile label="LLM 确认" value={data.summary.llm_issue_count} />
+              <MetricTile label="复核确认" value={data.summary.fp_review_issue_count} />
+              <MetricTile label="有效问题" value={data.summary.total_issue_count} />
+              <MetricTile label="人工确认" value={data.summary.human_confirmed_count} />
               <MetricTile
-                label="整体准确率"
+                label="准确率"
                 value={formatAccuracy(data.summary.accuracy)}
                 sub={`${data.summary.human_confirmed_count}/${data.summary.accuracy_basis_count}`}
                 tone="emerald"
@@ -273,7 +274,7 @@ function CheckerDetail({
           <thead>
             <tr className="bg-slate-950/40 border-b border-slate-800">
               <Th>扫描</Th>
-              <Th>状态</Th>
+              <Th className="w-24 min-w-[6rem]">状态</Th>
               <Th>项目</Th>
               <Th>静态</Th>
               <Th>LLM 问题</Th>
@@ -322,8 +323,8 @@ function ScanRow({
           {scan.scan_id.slice(0, 8)}
         </button>
       </td>
-      <td className="px-4 py-3">
-        <span className={`text-xs font-semibold px-2 py-0.5 rounded border ${st.cls}`}>
+      <td className="px-4 py-3 w-24 min-w-[6rem]">
+        <span className={`inline-flex min-w-[3.5rem] justify-center whitespace-nowrap text-xs font-semibold px-2 py-0.5 rounded border ${st.cls}`}>
           {st.label}
         </span>
       </td>
@@ -381,9 +382,9 @@ function MiniStat({ label, value }: { label: string; value: number }) {
   );
 }
 
-function Th({ children }: { children: ReactNode }) {
+function Th({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
-    <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">
+    <th className={`text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap ${className}`}>
       {children}
     </th>
   );

@@ -224,6 +224,9 @@ export interface CheckerDashboardSummary {
   project_count: number;
   static_issue_count: number;
   llm_issue_count: number;
+  fp_review_issue_count: number;
+  fp_review_false_positive_count: number;
+  total_issue_count: number;
   human_confirmed_count: number;
   accuracy_basis_count: number;
   accuracy: number | null;
