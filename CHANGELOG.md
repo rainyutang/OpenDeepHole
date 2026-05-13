@@ -4,6 +4,7 @@
 
 - **优化** 服务端数据默认保存到项目上层 `OpenDeepHoleData/` 目录，不再写入 `/tmp/opendeephole`
 - **优化** Docker 持久化卷同步挂载到 `/OpenDeepHoleData`
+- **修复** Agent 模式下 `submit_result` 结果文件保存到扫描根目录的问题，改为保存到当前扫描目录，并增强结果读取路径日志
 
 ## 2026-05-12 (5)
 

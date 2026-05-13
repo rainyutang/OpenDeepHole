@@ -250,6 +250,6 @@ def register_tools(mcp: FastMCP) -> None:
             "severity": severity,
             "description": description,
             "ai_analysis": ai_analysis,
-        }, ensure_ascii=False))
+        }, ensure_ascii=False), encoding="utf-8")
         _mcp_log("◀", "submit_result", f"saved → {result_path}")
         return f"结果已提交（result_id={result_id}）。"

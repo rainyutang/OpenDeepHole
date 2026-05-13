@@ -414,15 +414,18 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
 
     if not result_path.exists():
         logger.warning(
-            "submit_result was not called for %s:%d (result_id=%s)",
-            candidate.file, candidate.line, result_id,
+            "submit_result was not called for %s:%d (result_id=%s, path=%s)",
+            candidate.file, candidate.line, result_id, result_path,
         )
         return None
 
     try:
         data = json.loads(result_path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.error("Failed to parse result file for result_id=%s", result_id)
+    except Exception as exc:
+        logger.error(
+            "Failed to parse result file for result_id=%s path=%s: %s",
+            result_id, result_path, exc,
+        )
         return None
 
     confirmed = data.get("confirmed", False)

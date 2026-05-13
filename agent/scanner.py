@@ -38,11 +38,12 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
             "max_retries": config.opencode.max_retries,
             "mock": False,
         },
-        # AGENT_PROJECT_DIR env var tells MCP to find code_index.db in project dir
-        # projects_dir/scans_dir are only used for result JSON files
+        # AGENT_PROJECT_DIR tells MCP to find code_index.db in the project dir.
+        # Keep result JSON files isolated inside this scan's directory so the
+        # MCP submit path and opencode result read path cannot cross scans.
         "storage": {
             "projects_dir": str(scan_dir.parent),
-            "scans_dir": str(scan_dir.parent),
+            "scans_dir": str(scan_dir),
         },
         "logging": {
             "level": "INFO",
