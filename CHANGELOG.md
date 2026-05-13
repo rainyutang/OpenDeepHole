@@ -2,6 +2,8 @@
 
 ## 2026-05-13
 
+- **新增** 管理员 Checker 看板，按 SKILL 汇总扫描项目、静态报告问题数、LLM 判定问题数、FP 复核结果、人工确认数和准确率
+- **新增** 管理员扫描历史页新增 Dashboard 入口，可点击每个 SKILL 查看对应扫描明细
 - **优化** 服务端数据默认保存到项目上层 `OpenDeepHoleData/` 目录，不再写入 `/tmp/opendeephole`
 - **优化** Docker 持久化卷同步挂载到 `/OpenDeepHoleData`
 - **修复** Agent 模式下 `submit_result` 结果文件保存到扫描根目录的问题，改为保存到当前扫描目录，并增强结果读取路径日志

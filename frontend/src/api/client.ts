@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentRemoteConfig, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, TokenResponse, User } from "../types";
+import type { AgentInfo, AgentRemoteConfig, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, TokenResponse, User } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -229,6 +229,11 @@ export async function resumeScan(scanId: string): Promise<ScanStartResponse> {
 
 export async function deleteScan(scanId: string): Promise<void> {
   await api.delete(`/api/scan/${scanId}`);
+}
+
+export async function getCheckerDashboard(): Promise<CheckerDashboardResponse> {
+  const { data } = await api.get<CheckerDashboardResponse>("/api/admin/checker-dashboard");
+  return data;
 }
 
 // --- Agent config ---

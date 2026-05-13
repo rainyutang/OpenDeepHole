@@ -295,6 +295,65 @@ class ScanSummary(BaseModel):
     agent_online: bool = False
 
 
+# --- Admin dashboard models ---
+
+class CheckerScanDashboardStats(BaseModel):
+    """Per-checker stats for one scan shown in the admin checker dashboard."""
+    scan_id: str
+    project_id: str
+    scan_name: str = ""
+    project_path: str = ""
+    status: ScanItemStatus
+    created_at: str
+    username: str = ""
+    agent_name: str = ""
+    static_issue_count: int = 0
+    llm_issue_count: int = 0
+    fp_review_issue_count: int = 0
+    fp_review_false_positive_count: int = 0
+    human_confirmed_count: int = 0
+    human_false_positive_count: int = 0
+    accuracy_basis_count: int = 0
+    accuracy: float | None = None
+
+
+class CheckerDashboardStats(BaseModel):
+    """Aggregated stats for a checker/SKILL."""
+    checker: str
+    label: str
+    description: str = ""
+    scan_count: int = 0
+    project_count: int = 0
+    projects: list[str] = []
+    static_issue_count: int = 0
+    llm_issue_count: int = 0
+    fp_review_issue_count: int = 0
+    fp_review_false_positive_count: int = 0
+    human_confirmed_count: int = 0
+    human_false_positive_count: int = 0
+    accuracy_basis_count: int = 0
+    accuracy: float | None = None
+    scans: list[CheckerScanDashboardStats] = []
+
+
+class CheckerDashboardSummary(BaseModel):
+    """Top-level summary for the admin checker dashboard."""
+    checker_count: int = 0
+    scan_count: int = 0
+    project_count: int = 0
+    static_issue_count: int = 0
+    llm_issue_count: int = 0
+    human_confirmed_count: int = 0
+    accuracy_basis_count: int = 0
+    accuracy: float | None = None
+
+
+class CheckerDashboardResponse(BaseModel):
+    """Admin checker dashboard response."""
+    summary: CheckerDashboardSummary
+    checkers: list[CheckerDashboardStats]
+
+
 # --- FP Review models ---
 
 class FpReviewStatus(str, Enum):

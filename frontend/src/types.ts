@@ -178,3 +178,58 @@ export interface FpReviewJob {
   results: FpReviewResult[];
   error_message: string | null;
 }
+
+// --- Admin dashboard ---
+
+export interface CheckerScanDashboardStats {
+  scan_id: string;
+  project_id: string;
+  scan_name: string;
+  project_path: string;
+  status: ScanItemStatus;
+  created_at: string;
+  username: string;
+  agent_name: string;
+  static_issue_count: number;
+  llm_issue_count: number;
+  fp_review_issue_count: number;
+  fp_review_false_positive_count: number;
+  human_confirmed_count: number;
+  human_false_positive_count: number;
+  accuracy_basis_count: number;
+  accuracy: number | null;
+}
+
+export interface CheckerDashboardStats {
+  checker: string;
+  label: string;
+  description: string;
+  scan_count: number;
+  project_count: number;
+  projects: string[];
+  static_issue_count: number;
+  llm_issue_count: number;
+  fp_review_issue_count: number;
+  fp_review_false_positive_count: number;
+  human_confirmed_count: number;
+  human_false_positive_count: number;
+  accuracy_basis_count: number;
+  accuracy: number | null;
+  scans: CheckerScanDashboardStats[];
+}
+
+export interface CheckerDashboardSummary {
+  checker_count: number;
+  scan_count: number;
+  project_count: number;
+  static_issue_count: number;
+  llm_issue_count: number;
+  human_confirmed_count: number;
+  accuracy_basis_count: number;
+  accuracy: number | null;
+}
+
+export interface CheckerDashboardResponse {
+  summary: CheckerDashboardSummary;
+  checkers: CheckerDashboardStats[];
+}

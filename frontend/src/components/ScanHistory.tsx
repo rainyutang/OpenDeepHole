@@ -9,6 +9,7 @@ interface Props {
   user: User;
   onLogout: () => void;
   onManageUsers: () => void;
+  onCheckerDashboard: () => void;
 }
 
 const STATUS_STYLES: Record<ScanItemStatus, { label: string; cls: string }> = {
@@ -24,7 +25,7 @@ function isRunning(status: ScanItemStatus) {
   return status === "pending" || status === "analyzing" || status === "auditing";
 }
 
-export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers }: Props) {
+export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -128,12 +129,20 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
               )}
             </span>
             {user.role === "admin" && (
-              <button
-                onClick={onManageUsers}
-                className="px-3 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
-              >
-                Users
-              </button>
+              <>
+                <button
+                  onClick={onCheckerDashboard}
+                  className="px-3 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+                >
+                  Dashboard
+                </button>
+                <button
+                  onClick={onManageUsers}
+                  className="px-3 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+                >
+                  Users
+                </button>
+              </>
             )}
             <button
               onClick={onDownloadAgent}
