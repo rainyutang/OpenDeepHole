@@ -142,9 +142,12 @@ class ScanStoreBase(ABC):
 
     @abstractmethod
     def mark_running_as_error(self) -> int:
-        """Mark all scans with running status (pending/analyzing/auditing)
-        as *error*. Returns the number of scans affected.
-        Used on startup to recover from unclean shutdown."""
+        """Mark non-agent scans with running status as *error*.
+
+        Agent-owned scans may still be running locally while the server restarts,
+        so they are recovered through the agent reconnect handshake instead.
+        Returns the number of scans affected.
+        """
 
     # -- FP Review jobs --
 

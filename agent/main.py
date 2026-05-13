@@ -111,7 +111,11 @@ async def _ws_loop(config, task_manager, reporter) -> None:
             print(f"Connecting to {ws_url} ...")
             async with websockets.connect(ws_url, ping_interval=30, ping_timeout=10) as ws:
                 # Handshake
-                hello_msg = {"type": "hello", "name": name}
+                hello_msg = {
+                    "type": "hello",
+                    "name": name,
+                    "active_scans": task_manager.active_snapshots(),
+                }
                 if config.owner_token:
                     hello_msg["owner_token"] = config.owner_token
                 await ws.send(json.dumps(hello_msg))

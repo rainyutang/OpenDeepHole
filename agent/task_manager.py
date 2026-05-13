@@ -58,3 +58,19 @@ class TaskManager:
 
     def remove(self, scan_id: str) -> None:
         self._tasks.pop(scan_id, None)
+
+    def active_snapshots(self) -> list[dict]:
+        """Return serializable metadata for scans still running locally."""
+        active: list[dict] = []
+        for task in self._tasks.values():
+            if task.cancel_event.is_set():
+                continue
+            if task.asyncio_task is None or task.asyncio_task.done():
+                continue
+            active.append({
+                "scan_id": task.scan_id,
+                "project_path": str(task.project_path),
+                "checkers": task.checkers,
+                "scan_name": task.scan_name,
+            })
+        return active

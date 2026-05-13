@@ -362,10 +362,6 @@ async def resume_scan(
         meta.agent_name = agent.name
         store.update_scan_agent(scan_id, agent_id, agent.name)
 
-    # Reset total_candidates to processed count so the producer can
-    # re-count only the unprocessed ones without double-counting.
-    scan.total_candidates = scan.processed_candidates
-
     # Reset status to PENDING
     scan.status = ScanItemStatus.PENDING
     scan.error_message = None
@@ -376,10 +372,10 @@ async def resume_scan(
         scan_id,
         status=ScanItemStatus.PENDING,
         error_message="",
-        total_candidates=scan.total_candidates,
     )
 
     _running_scans[scan_id] = scan
+    _scan_owners[scan_id] = current_user.user_id
 
     # Send resume command to agent via WebSocket
     from backend.api.agent import send_agent_command

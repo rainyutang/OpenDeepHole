@@ -715,6 +715,7 @@ class SqliteScanStore(ScanStoreBase):
                                  error_message = 'Process terminated unexpectedly',
                                  current_candidate = NULL
                 WHERE status IN ('pending', 'analyzing', 'auditing')
+                  AND (agent_name IS NULL OR agent_name = '')
                 """
             )
             self._conn.commit()
