@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 
 from backend.config import get_config
@@ -16,6 +17,20 @@ logger = get_logger(__name__)
 
 # Subdirectories in checker dirs that should be symlinked into the workspace
 _SKILL_RESOURCE_DIRS = {"references", "scripts", "assets"}
+
+_workspace_locks: dict[str, threading.RLock] = {}
+_workspace_locks_guard = threading.Lock()
+
+
+def get_workspace_lock(workspace: Path) -> threading.RLock:
+    """Return a process-local lock for opencode files in one workspace."""
+    key = str(workspace.resolve())
+    with _workspace_locks_guard:
+        lock = _workspace_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _workspace_locks[key] = lock
+        return lock
 
 
 def create_scan_workspace(
@@ -48,8 +63,9 @@ def create_scan_workspace(
         workspace = Path(config.storage.scans_dir) / scan_id
         workspace.mkdir(parents=True, exist_ok=True)
 
-    _write_opencode_config(workspace, mcp_port=mcp_port)
-    refresh_skills(workspace, project_dir, feedback_entries)
+    with get_workspace_lock(workspace):
+        _write_opencode_config(workspace, mcp_port=mcp_port)
+        refresh_skills(workspace, project_dir, feedback_entries)
 
     logger.info("Created opencode workspace: %s", workspace)
     return workspace
@@ -65,7 +81,8 @@ def refresh_skills(
     Can be called mid-scan to hot-update skills when the user changes
     the active feedback entries.
     """
-    _link_skills(workspace, project_dir, feedback_entries=feedback_entries)
+    with get_workspace_lock(workspace):
+        _link_skills(workspace, project_dir, feedback_entries=feedback_entries)
 
 
 def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None:
@@ -192,22 +209,44 @@ def _link_skills(
 def cleanup_workspace(workspace: Path) -> None:
     """Remove opencode artifacts written into the workspace directory.
 
-    Deletes ``opencode.json`` and the ``.opencode/`` directory that were
-    created by :func:`create_scan_workspace`.  Safe to call even if the
-    files no longer exist.
+    Only removes checker skill directories created by
+    :func:`create_scan_workspace`.  Shared FP review artifacts such as
+    ``.opencode/skills/fp-review`` are preserved so a resumed scan finishing
+    cannot break a concurrent false-positive review.
     """
-    opencode_json = workspace / "opencode.json"
-    opencode_dir = workspace / ".opencode"
-    try:
-        if opencode_json.exists():
-            opencode_json.unlink()
-    except Exception as exc:
-        logger.warning("Failed to remove opencode.json from workspace: %s", exc)
-    try:
-        if opencode_dir.is_dir():
-            shutil.rmtree(opencode_dir)
-    except Exception as exc:
-        logger.warning("Failed to remove .opencode dir from workspace: %s", exc)
+    with get_workspace_lock(workspace):
+        skills_dir = workspace / ".opencode" / "skills"
+        try:
+            if skills_dir.is_dir():
+                for checker_name in get_registry().keys():
+                    skill_dir = skills_dir / checker_name
+                    if skill_dir.is_symlink():
+                        skill_dir.unlink()
+                    elif skill_dir.is_dir():
+                        shutil.rmtree(skill_dir)
+        except Exception as exc:
+            logger.warning("Failed to remove checker skill dirs from workspace: %s", exc)
+
+        try:
+            if skills_dir.is_dir() and not any(skills_dir.iterdir()):
+                skills_dir.rmdir()
+        except Exception as exc:
+            logger.warning("Failed to remove empty skills dir from workspace: %s", exc)
+
+        opencode_dir = workspace / ".opencode"
+        try:
+            if opencode_dir.is_dir() and not any(opencode_dir.iterdir()):
+                opencode_dir.rmdir()
+        except Exception as exc:
+            logger.warning("Failed to remove empty .opencode dir from workspace: %s", exc)
+
+        opencode_json = workspace / "opencode.json"
+        try:
+            # Keep MCP config while any skill remains, especially fp-review.
+            if opencode_json.exists() and not opencode_dir.exists():
+                opencode_json.unlink()
+        except Exception as exc:
+            logger.warning("Failed to remove opencode.json from workspace: %s", exc)
 
 
 def get_skill_content(workspace: Path, vuln_type: str) -> str | None:

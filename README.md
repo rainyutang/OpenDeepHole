@@ -394,13 +394,15 @@ server:
   port: 8000
 
 storage:
-  projects_dir: "/tmp/opendeephole/projects"
-  scans_dir: "/tmp/opendeephole/scans"
+  projects_dir: "../OpenDeepHoleData/projects"
+  scans_dir: "../OpenDeepHoleData/scans"
 
 logging:
   level: "INFO"
   file: "logs/opendeephole.log"
 ```
+
+`storage` 中的相对路径会按 `config.yaml` 所在目录解析；默认会落到 OpenDeepHole 项目上层的 `OpenDeepHoleData/`。
 
 ### Agent agent.yaml
 
@@ -473,9 +475,9 @@ Agent 运行时会在以下位置产生数据：
 
 | 位置 | 内容 |
 |------|------|
-| `/tmp/opendeephole/scans/` | 扫描结果 JSON（submit_result 输出） |
+| `../OpenDeepHoleData/scans/` | 扫描结果 JSON（submit_result 输出）和 `scans.db` |
+| `../OpenDeepHoleData/projects/` | 服务端上传扫描的项目缓存 |
 | `logs/opendeephole.log` | 服务端日志（滚动，默认 10MB × 5 份） |
-| 内存中 SQLite | 扫描记录、漏洞、事件、反馈（服务端存储） |
 
 > **注意：** `code_index.db` 直接保存在被扫描的代码仓目录下。对于大型代码仓，该文件可能有几十到几百 MB。如需清理，直接删除项目目录下的 `code_index.db` 即可，下次扫描会自动重建。
 

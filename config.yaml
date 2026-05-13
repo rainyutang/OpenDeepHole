@@ -18,8 +18,8 @@ opencode:
   mock: false    # set to false when opencode is configured
 
 storage:
-  projects_dir: "/tmp/opendeephole/projects"
-  scans_dir: "/tmp/opendeephole/scans"
+  projects_dir: "../OpenDeepHoleData/projects"
+  scans_dir: "../OpenDeepHoleData/scans"
   max_upload_size_mb: 2048
 
 logging:

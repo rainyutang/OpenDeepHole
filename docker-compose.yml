@@ -4,7 +4,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - scan-data:/tmp/opendeephole
+      - server-data:/OpenDeepHoleData
       - logs:/app/logs
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -12,5 +12,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  scan-data:
+  server-data:
   logs:

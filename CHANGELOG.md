@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2026-05-13
+
+- **优化** 服务端数据默认保存到项目上层 `OpenDeepHoleData/` 目录，不再写入 `/tmp/opendeephole`
+- **优化** Docker 持久化卷同步挂载到 `/OpenDeepHoleData`
+
 ## 2026-05-12 (5)
 
 - **修复** 去误报 prompt 改为中文单行格式，修复 LLM 找不到 fp-review 技能的问题

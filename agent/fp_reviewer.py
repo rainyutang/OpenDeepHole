@@ -310,63 +310,68 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
 
 
 def _create_fp_workspace(project_path: Path, mcp_port: int) -> Path:
-    """Write opencode.json and the fp-review SKILL (with user feedback) into the project directory."""
+    """Ensure project-root opencode config and fp-review SKILL exist."""
+    from backend.opencode.config import get_workspace_lock
+
     workspace = project_path
 
-    (workspace / "opencode.json").write_text(
-        json.dumps({
-            "$schema": "https://opencode.ai/config.json",
-            "mcp": {
-                "deephole-code": {
-                    "type": "remote",
-                    "url": f"http://127.0.0.1:{mcp_port}/mcp",
-                    "enabled": True,
-                }
-            },
-        }, indent=2),
-        encoding="utf-8",
-    )
-
-    skills_dir = workspace / ".opencode" / "skills" / "fp-review"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    skill_src = Path(__file__).parent / "skills" / "fp_review.md"
-    content = skill_src.read_text(encoding="utf-8")
-
-    # Merge local user feedback into the SKILL
-    feedback = load_local_feedback()
-    fp_lines: list[str] = []
-    for entries in feedback.values():
-        for entry in entries:
-            if entry.get("verdict") == "false_positive" and entry.get("reason"):
-                fp_lines.append(f"\n- {entry['reason']}\n")
-    if fp_lines:
-        content = content.rstrip() + (
-            "\n\n## 历史误报经验\n\n"
-            "以下是用户在审计过程中确认的误报案例，"
-            "复核时应参考这些经验避免重复误判：\n"
-            + "".join(fp_lines)
+    with get_workspace_lock(workspace):
+        (workspace / "opencode.json").write_text(
+            json.dumps({
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": {
+                    "deephole-code": {
+                        "type": "remote",
+                        "url": f"http://127.0.0.1:{mcp_port}/mcp",
+                        "enabled": True,
+                    }
+                },
+            }, indent=2),
+            encoding="utf-8",
         )
 
-    (skills_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        skills_dir = workspace / ".opencode" / "skills" / "fp-review"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        skill_src = Path(__file__).parent / "skills" / "fp_review.md"
+        content = skill_src.read_text(encoding="utf-8")
+
+        # Merge local user feedback into the SKILL
+        feedback = load_local_feedback()
+        fp_lines: list[str] = []
+        for entries in feedback.values():
+            for entry in entries:
+                if entry.get("verdict") == "false_positive" and entry.get("reason"):
+                    fp_lines.append(f"\n- {entry['reason']}\n")
+        if fp_lines:
+            content = content.rstrip() + (
+                "\n\n## 历史误报经验\n\n"
+                "以下是用户在审计过程中确认的误报案例，"
+                "复核时应参考这些经验避免重复误判：\n"
+                + "".join(fp_lines)
+            )
+
+        (skills_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
     return workspace
 
 
 def _cleanup_fp_workspace(workspace: Path) -> None:
     """Remove FP review artifacts written into the project directory."""
-    try:
-        (workspace / "opencode.json").unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
-        fp_skill_dir = workspace / ".opencode" / "skills" / "fp-review"
-        if fp_skill_dir.is_dir():
-            shutil.rmtree(fp_skill_dir)
-        skills_dir = workspace / ".opencode" / "skills"
-        if skills_dir.is_dir() and not any(skills_dir.iterdir()):
-            skills_dir.rmdir()
-        oc_dir = workspace / ".opencode"
-        if oc_dir.is_dir() and not any(oc_dir.iterdir()):
-            oc_dir.rmdir()
-    except Exception:
-        pass
+    from backend.opencode.config import get_workspace_lock
+
+    with get_workspace_lock(workspace):
+        try:
+            fp_skill_dir = workspace / ".opencode" / "skills" / "fp-review"
+            if fp_skill_dir.is_dir():
+                shutil.rmtree(fp_skill_dir)
+            skills_dir = workspace / ".opencode" / "skills"
+            if skills_dir.is_dir() and not any(skills_dir.iterdir()):
+                skills_dir.rmdir()
+            oc_dir = workspace / ".opencode"
+            if oc_dir.is_dir() and not any(oc_dir.iterdir()):
+                oc_dir.rmdir()
+            opencode_json = workspace / "opencode.json"
+            if opencode_json.exists() and not oc_dir.exists():
+                opencode_json.unlink()
+        except Exception:
+            pass
