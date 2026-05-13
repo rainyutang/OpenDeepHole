@@ -20,6 +20,7 @@ from backend.models import ScanEvent
 
 
 _FP_FEEDBACK_FILE = Path.home() / ".opendeephole" / "fp_feedback.json"
+_FP_REVIEW_FEEDBACK: dict[str, list[dict]] = {}
 
 
 def load_local_feedback() -> dict:
@@ -50,6 +51,16 @@ def update_local_feedback(entry: dict) -> None:
         print(f"Warning: failed to update local FP feedback: {exc}")
 
 
+def set_fp_review_feedback(scan_id: str, feedback_entries: list[dict]) -> None:
+    """Replace the selected feedback snapshot for an active FP review."""
+    _FP_REVIEW_FEEDBACK[scan_id] = feedback_entries
+
+
+def get_fp_review_feedback(scan_id: str) -> list[dict]:
+    """Return the latest selected feedback snapshot for an active FP review."""
+    return list(_FP_REVIEW_FEEDBACK.get(scan_id, []))
+
+
 async def run_fp_review(
     config,
     reporter,
@@ -57,6 +68,7 @@ async def run_fp_review(
     review_id: str,
     project_path: str,
     vulnerabilities: list[dict],
+    feedback_entries: list[dict] | None = None,
 ) -> None:
     """Run FP review for a list of confirmed vulnerabilities.
 
@@ -83,6 +95,7 @@ async def run_fp_review(
     project = Path(project_path)
     review_dir = Path.home() / ".opendeephole" / "fp_reviews" / review_id
     review_dir.mkdir(parents=True, exist_ok=True)
+    set_fp_review_feedback(scan_id, feedback_entries or [])
 
     # Detect active MCP server for this project
     from agent import mcp_registry
@@ -136,7 +149,7 @@ async def run_fp_review(
 
         await emit("fp_review", f"Starting FP review: {len(vulnerabilities)} confirmed vulnerabilities")
 
-        # Create workspace with opencode.json + fp-review SKILL (merged with user feedback)
+        # Create workspace with opencode.json + fp-review SKILL.
         workspace = _create_fp_workspace(project, mcp_port)
         await emit("fp_review", "FP review workspace ready")
 
@@ -149,6 +162,12 @@ async def run_fp_review(
         for vuln in vulnerabilities:
             idx = vuln["index"]
             result_id = uuid4().hex
+            _create_fp_workspace(
+                project,
+                mcp_port,
+                vuln_type=vuln["vuln_type"],
+                feedback_entries=get_fp_review_feedback(scan_id),
+            )
 
             prompt = (
                 f"使用 `fp-review` 技能，复核位于 "
@@ -242,6 +261,7 @@ async def run_fp_review(
             _cfg_mod._config = None
             import backend.registry as _reg_mod
             _reg_mod._registry = None
+        _FP_REVIEW_FEEDBACK.pop(scan_id, None)
         shutil.rmtree(review_dir, ignore_errors=True)
 
 
@@ -309,7 +329,12 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
     _reg._registry = None
 
 
-def _create_fp_workspace(project_path: Path, mcp_port: int) -> Path:
+def _create_fp_workspace(
+    project_path: Path,
+    mcp_port: int,
+    vuln_type: str | None = None,
+    feedback_entries: list[dict] | None = None,
+) -> Path:
     """Ensure project-root opencode config and fp-review SKILL exist."""
     from backend.opencode.config import get_workspace_lock
 
@@ -335,18 +360,20 @@ def _create_fp_workspace(project_path: Path, mcp_port: int) -> Path:
         skill_src = Path(__file__).parent / "skills" / "fp_review.md"
         content = skill_src.read_text(encoding="utf-8")
 
-        # Merge local user feedback into the SKILL
-        feedback = load_local_feedback()
         fp_lines: list[str] = []
-        for entries in feedback.values():
-            for entry in entries:
-                if entry.get("verdict") == "false_positive" and entry.get("reason"):
-                    fp_lines.append(f"\n- {entry['reason']}\n")
+        for entry in feedback_entries or []:
+            if vuln_type and entry.get("vuln_type") != vuln_type:
+                continue
+            reason = entry.get("reason")
+            if not reason:
+                continue
+            verdict_label = "正报" if entry.get("verdict") == "confirmed" else "误报"
+            fp_lines.append(f"\n- [{verdict_label}] {reason}\n")
         if fp_lines:
             content = content.rstrip() + (
-                "\n\n## 历史误报经验\n\n"
-                "以下是用户在审计过程中确认的误报案例，"
-                "复核时应参考这些经验避免重复误判：\n"
+                "\n\n## 历史用户经验\n\n"
+                "以下是用户在审计过程中选择注入的经验，"
+                "复核时应结合这些经验校验结论：\n"
                 + "".join(fp_lines)
             )
 

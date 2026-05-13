@@ -179,7 +179,7 @@ class Reporter:
             return set()
 
     async def get_feedback(self, vuln_types: list[str]) -> list[FeedbackEntry]:
-        """Fetch false-positive feedback entries from the server for SKILL enrichment."""
+        """Fetch feedback entries from the server for SKILL enrichment."""
         if self.dry_run or not vuln_types:
             return []
         try:

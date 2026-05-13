@@ -526,7 +526,7 @@ async def agent_get_index_status(scan_id: str) -> dict:
 
 @router.get("/feedback")
 async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
-    """Return false-positive feedback entries for the agent to enrich SKILLs."""
+    """Return feedback entries for the agent to enrich SKILLs."""
     store = get_scan_store()
     if vuln_types:
         names = [v.strip() for v in vuln_types.split(",") if v.strip()]

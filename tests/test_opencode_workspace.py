@@ -46,8 +46,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
 
-            with patch("agent.fp_reviewer.load_local_feedback", return_value={}):
-                self.assertEqual(_create_fp_workspace(workspace, 9123), workspace)
+            self.assertEqual(_create_fp_workspace(workspace, 9123), workspace)
 
             config = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
             self.assertEqual(
@@ -55,6 +54,28 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 "http://127.0.0.1:9123/mcp",
             )
             self.assertTrue((workspace / ".opencode" / "skills" / "fp-review" / "SKILL.md").is_file())
+
+    def test_fp_workspace_injects_only_selected_feedback_for_vuln_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+
+            _create_fp_workspace(
+                workspace,
+                9123,
+                vuln_type="npd",
+                feedback_entries=[
+                    {"vuln_type": "npd", "verdict": "confirmed", "reason": "npd true-positive rule"},
+                    {"vuln_type": "npd", "verdict": "false_positive", "reason": "npd false-positive rule"},
+                    {"vuln_type": "oob", "verdict": "false_positive", "reason": "oob rule"},
+                    {"vuln_type": "npd", "verdict": "false_positive", "reason": ""},
+                ],
+            )
+
+            skill = (workspace / ".opencode" / "skills" / "fp-review" / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("历史用户经验", skill)
+            self.assertIn("[正报] npd true-positive rule", skill)
+            self.assertIn("[误报] npd false-positive rule", skill)
+            self.assertNotIn("oob rule", skill)
 
     def test_fp_cleanup_only_removes_fp_review_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

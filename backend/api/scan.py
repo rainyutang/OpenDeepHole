@@ -64,6 +64,82 @@ def _check_scan_owner(scan_id: str, user: User) -> None:
     raise HTTPException(status_code=403, detail="Access denied")
 
 
+def _latest_fp_review_result_map(scan_id: str) -> dict[int, FpReviewResult]:
+    """Return the latest FP review result per vulnerability index for a scan."""
+    store = get_scan_store()
+    latest: dict[int, FpReviewResult] = {}
+    for result in store.list_fp_review_results_by_scan(scan_id):
+        latest[result.vuln_index] = result
+    return latest
+
+
+def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJob:
+    """Attach scan-wide latest per-vulnerability results to the current job."""
+    latest_results = sorted(
+        _latest_fp_review_result_map(scan_id).values(),
+        key=lambda result: result.vuln_index,
+    )
+    return FpReviewJob(
+        review_id=job.review_id,
+        scan_id=job.scan_id,
+        status=job.status,
+        created_at=job.created_at,
+        total=job.total,
+        processed=job.processed,
+        results=latest_results,
+        error_message=job.error_message,
+    )
+
+
+def _scan_feedback_ids(scan_id: str) -> list[str]:
+    scan = _running_scans.get(scan_id)
+    if scan is not None:
+        return scan.feedback_ids
+    loaded = get_scan_store().load_scan(scan_id)
+    if loaded is None:
+        return []
+    return loaded[1].feedback_ids
+
+
+def _selected_feedback_entries(scan_id: str, feedback_ids: list[str] | None = None) -> list[FeedbackEntry]:
+    ids = feedback_ids if feedback_ids is not None else _scan_feedback_ids(scan_id)
+    if not ids:
+        return []
+    return get_scan_store().get_feedback_by_ids(ids)
+
+
+def _resolve_scan_agent_id(meta: ScanMeta) -> str | None:
+    from backend.api.agent import _agent_ws, _registered_agents
+
+    agent_id = meta.agent_id
+    if agent_id and agent_id in _agent_ws:
+        return agent_id
+    if meta.agent_name:
+        for aid, ainfo in _registered_agents.items():
+            if ainfo.name == meta.agent_name and aid in _agent_ws:
+                return aid
+    return None
+
+
+async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str]) -> None:
+    """Best-effort update of the selected feedback entries on the owning agent."""
+    loaded = get_scan_store().load_scan(scan_id)
+    if loaded is None:
+        return
+    _, meta = loaded
+    agent_id = _resolve_scan_agent_id(meta)
+    if agent_id is None:
+        return
+    from backend.api.agent import send_agent_command
+
+    entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, feedback_ids)]
+    await send_agent_command(agent_id, {
+        "type": "feedback_selection_update",
+        "scan_id": scan_id,
+        "feedback_entries": entries,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Create scan (new flow: agent_id + project_path instead of upload)
 # ---------------------------------------------------------------------------
@@ -120,12 +196,14 @@ async def create_scan(
 
     # Dispatch to agent via WebSocket
     from backend.api.agent import send_agent_command
+    feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, body.feedback_ids)]
     ok = await send_agent_command(body.agent_id, {
         "type": "task",
         "scan_id": scan_id,
         "project_path": body.project_path,
         "checkers": body.checkers,
         "scan_name": scan_name,
+        "feedback_entries": feedback_entries,
     })
     if not ok:
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
@@ -305,12 +383,14 @@ async def resume_scan(
 
     # Send resume command to agent via WebSocket
     from backend.api.agent import send_agent_command
+    feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
     ok = await send_agent_command(agent_id, {
         "type": "resume",
         "scan_id": scan_id,
         "project_path": meta.project_path,
         "checkers": meta.scan_items,
         "scan_name": meta.scan_name,
+        "feedback_entries": feedback_entries,
     })
     if not ok:
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
@@ -489,6 +569,8 @@ async def trigger_fp_review(
     from backend.api.agent import send_agent_command
 
     scan = await get_scan_status(scan_id, current_user)
+    store = get_scan_store()
+    latest_fp_results = _latest_fp_review_result_map(scan_id)
 
     confirmed = [
         {
@@ -501,12 +583,18 @@ async def trigger_fp_review(
             "ai_analysis": v.ai_analysis,
         }
         for i, v in enumerate(scan.vulnerabilities)
-        if v.confirmed and not v.user_verdict
+        if (
+            v.confirmed
+            and not v.user_verdict
+            and (
+                i not in latest_fp_results
+                or latest_fp_results[i].verdict == "tp"
+            )
+        )
     ]
     if not confirmed:
         raise HTTPException(status_code=400, detail="No confirmed vulnerabilities to review")
 
-    store = get_scan_store()
     result = store.load_scan(scan_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -535,6 +623,7 @@ async def trigger_fp_review(
     if agent_id != meta.agent_id:
         store.update_scan_agent(scan_id, agent_id, meta.agent_name)
 
+    feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
     review_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     store.create_fp_review_job(review_id, scan_id, len(confirmed), now)
@@ -545,6 +634,7 @@ async def trigger_fp_review(
         "review_id": review_id,
         "project_path": meta.project_path,
         "vulnerabilities": confirmed,
+        "feedback_entries": feedback_entries,
     })
     if not ok:
         store.update_fp_review_job(review_id, status="error", error_message="Agent not connected")
@@ -566,7 +656,7 @@ async def get_fp_review(
     job = store.get_fp_review_by_scan(scan_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No FP review found for this scan")
-    return job
+    return _merge_latest_fp_review_results(job, scan_id)
 
 
 @router.post("/api/scan/{scan_id}/fp_review/result")
@@ -614,6 +704,10 @@ async def update_scan_feedback(
     if scan_id in _running_scans:
         _running_scans[scan_id].feedback_ids = feedback_ids
     store.update_scan_feedback_ids(scan_id, feedback_ids)
+    try:
+        await _push_feedback_selection_update(scan_id, feedback_ids)
+    except Exception as exc:
+        logger.debug("Failed to push feedback selection update for scan %s: %s", scan_id, exc)
     return {"ok": True}
 
 
@@ -627,7 +721,7 @@ async def get_scan_skill(
 
     Reads directly from the checker registry (not the workspace) so it works
     regardless of where the agent runs.  Feedback entries associated with
-    this scan are merged into a "历史误报经验" section, same as the agent
+    this scan are merged into a "历史用户经验" section, same as the agent
     workspace builder does.
     """
     from backend.registry import get_registry
@@ -647,25 +741,8 @@ async def get_scan_skill(
             raise HTTPException(status_code=404, detail=f"SKILL.md not found for {vuln_type}")
         original = entry.skill_path.read_text(encoding="utf-8")
 
-    # Collect false-positive feedback from two sources:
-    # 1. feedback_ids configured on this scan (pre-selected experience)
-    # 2. feedback entries created by marking vulnerabilities in this scan
-    store = get_scan_store()
-    all_fb: list[FeedbackEntry] = []
-
-    # Source 1: pre-configured feedback_ids
-    scan = _running_scans.get(scan_id)
-    feedback_ids = scan.feedback_ids if scan else []
-    if not feedback_ids:
-        loaded = store.load_scan(scan_id)
-        if loaded:
-            _, meta = loaded
-            feedback_ids = meta.feedback_ids
-    if feedback_ids:
-        all_fb.extend(store.get_feedback_by_ids(feedback_ids))
-
-    # Source 2: feedback created from this scan's marks
-    all_fb.extend(store.list_feedback_by_scan(scan_id))
+    # Collect only feedback entries selected for this scan.
+    all_fb: list[FeedbackEntry] = _selected_feedback_entries(scan_id)
 
     # Deduplicate by id
     seen: set[str] = set()
@@ -678,14 +755,14 @@ async def get_scan_skill(
     fp_lines = [
         f"\n- {fb.reason}\n"
         for fb in unique_fb
-        if fb.verdict == "false_positive" and fb.vuln_type == vuln_type and fb.reason
+        if fb.vuln_type == vuln_type and fb.reason
     ]
     fp_section = ""
     if fp_lines:
         fp_section = (
-            "\n\n## 历史误报经验\n\n"
-            "以下是用户在审计过程中确认的误报案例，"
-            "分析时应参考这些经验避免重复误判：\n"
+            "\n\n## 历史用户经验\n\n"
+            "以下是用户在审计过程中选择注入的经验，"
+            "分析时应结合这些经验校验结论：\n"
             + "".join(fp_lines)
         )
 
@@ -704,20 +781,8 @@ async def get_fp_review_skill(
         raise HTTPException(status_code=404, detail="fp_review.md not found")
     original = skill_path.read_text(encoding="utf-8")
 
-    # Merge user feedback from this scan
-    store = get_scan_store()
-    all_fb: list[FeedbackEntry] = []
-
-    scan = _running_scans.get(scan_id)
-    feedback_ids = scan.feedback_ids if scan else []
-    if not feedback_ids:
-        loaded = store.load_scan(scan_id)
-        if loaded:
-            _, meta = loaded
-            feedback_ids = meta.feedback_ids
-    if feedback_ids:
-        all_fb.extend(store.get_feedback_by_ids(feedback_ids))
-    all_fb.extend(store.list_feedback_by_scan(scan_id))
+    # Merge only feedback entries selected for this scan.
+    all_fb: list[FeedbackEntry] = _selected_feedback_entries(scan_id)
 
     seen: set[str] = set()
     unique_fb: list[FeedbackEntry] = []
@@ -726,17 +791,22 @@ async def get_fp_review_skill(
             seen.add(fb.id)
             unique_fb.append(fb)
 
-    fp_lines = [
-        f"\n- {fb.reason}\n"
-        for fb in unique_fb
-        if fb.verdict == "false_positive" and fb.reason
-    ]
+    by_type: dict[str, list[FeedbackEntry]] = {}
+    for fb in unique_fb:
+        if fb.reason:
+            by_type.setdefault(fb.vuln_type, []).append(fb)
+    fp_lines: list[str] = []
+    for vuln_type in sorted(by_type):
+        fp_lines.append(f"\n### {vuln_type.upper()}\n")
+        for fb in by_type[vuln_type]:
+            verdict_label = "正报" if fb.verdict == "confirmed" else "误报"
+            fp_lines.append(f"\n- [{verdict_label}] {fb.reason}\n")
     fp_section = ""
     if fp_lines:
         fp_section = (
-            "\n\n## 历史误报经验\n\n"
-            "以下是用户在审计过程中确认的误报案例，"
-            "复核时应参考这些经验避免重复误判：\n"
+            "\n\n## 历史用户经验\n\n"
+            "以下是用户在审计过程中选择注入的经验，"
+            "复核时应结合对应类型的经验校验结论：\n"
             + "".join(fp_lines)
         )
 

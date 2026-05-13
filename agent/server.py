@@ -33,13 +33,20 @@ async def _run(task, is_resume: bool) -> None:
             checker_names=task.checkers,
             scan_id=task.scan_id,
             cancel_event=task.cancel_event,
+            feedback_entries=task.feedback_entries,
             is_resume=is_resume,
         )
     finally:
         _task_manager.remove(task.scan_id)
 
 
-async def handle_task(scan_id: str, project_path: str, checkers: list[str], scan_name: str) -> None:
+async def handle_task(
+    scan_id: str,
+    project_path: str,
+    checkers: list[str],
+    scan_name: str,
+    feedback_entries: list[dict] | None = None,
+) -> None:
     """Handle a 'task' command — start a new scan."""
     if _task_manager is None:
         print(f"Warning: task_manager not initialized, ignoring task {scan_id}")
@@ -55,6 +62,7 @@ async def handle_task(scan_id: str, project_path: str, checkers: list[str], scan
         project_path=project_path,
         checkers=checkers,
         scan_name=scan_name,
+        feedback_entries=feedback_entries,
     )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=False))
     print(f"Started task {scan_id}")
@@ -76,6 +84,7 @@ async def handle_resume(
     project_path: Optional[str] = None,
     checkers: Optional[list[str]] = None,
     scan_name: Optional[str] = None,
+    feedback_entries: Optional[list[dict]] = None,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
@@ -91,6 +100,7 @@ async def handle_resume(
             project_path=project_path,
             checkers=checkers or [],
             scan_name=scan_name or "",
+            feedback_entries=feedback_entries,
         )
     else:
         if project_path:
@@ -99,6 +109,8 @@ async def handle_resume(
             task.checkers = checkers
         if scan_name is not None:
             task.scan_name = scan_name
+        if feedback_entries is not None:
+            task.feedback_entries = feedback_entries
 
     if task.asyncio_task and not task.asyncio_task.done():
         task.asyncio_task.cancel()
@@ -116,6 +128,7 @@ async def handle_fp_review(
     review_id: str,
     project_path: str,
     vulnerabilities: list[dict],
+    feedback_entries: list[dict] | None = None,
 ) -> None:
     """Handle an 'fp_review' command — start AI false-positive review."""
     if _config is None or _reporter is None:
@@ -132,9 +145,27 @@ async def handle_fp_review(
                 review_id=review_id,
                 project_path=project_path,
                 vulnerabilities=vulnerabilities,
+                feedback_entries=feedback_entries or [],
             )
         except Exception as exc:
             print(f"[fp_review] Unhandled error in review {review_id}: {exc}")
 
     asyncio.create_task(_run_review())
     print(f"Started FP review {review_id} for scan {scan_id}")
+
+
+async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[dict]) -> None:
+    """Handle selected feedback changes while a scan or FP review is active."""
+    if _task_manager is not None:
+        task = _task_manager.get(scan_id)
+        if task is not None:
+            task.feedback_entries = feedback_entries
+            try:
+                from backend.models import FeedbackEntry
+                from backend.opencode.config import refresh_skills
+                selected_feedback = [FeedbackEntry(**entry) for entry in feedback_entries]
+                refresh_skills(task.project_path, task.project_path, selected_feedback)
+            except Exception as exc:
+                print(f"Warning: failed to refresh scan skills for feedback update: {exc}")
+    from agent.fp_reviewer import set_fp_review_feedback
+    set_fp_review_feedback(scan_id, feedback_entries)

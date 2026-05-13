@@ -51,6 +51,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             project_path=msg["project_path"],
             checkers=msg.get("checkers", []),
             scan_name=msg.get("scan_name", ""),
+            feedback_entries=msg.get("feedback_entries", []),
         )
     elif cmd_type == "stop":
         await agent_server.handle_stop(msg["scan_id"])
@@ -60,6 +61,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             project_path=msg.get("project_path"),
             checkers=msg.get("checkers"),
             scan_name=msg.get("scan_name"),
+            feedback_entries=msg.get("feedback_entries"),
         )
     elif cmd_type == "fp_review":
         await agent_server.handle_fp_review(
@@ -67,6 +69,12 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             review_id=msg["review_id"],
             project_path=msg["project_path"],
             vulnerabilities=msg.get("vulnerabilities", []),
+            feedback_entries=msg.get("feedback_entries", []),
+        )
+    elif cmd_type == "feedback_selection_update":
+        await agent_server.handle_feedback_selection_update(
+            scan_id=msg["scan_id"],
+            feedback_entries=msg.get("feedback_entries", []),
         )
     elif cmd_type == "feedback_update":
         entry = msg.get("entry")

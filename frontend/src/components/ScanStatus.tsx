@@ -168,16 +168,26 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   // Handle feedback selection change — update backend and refresh skills
   const handleFeedbackChange = async (ids: Set<string>) => {
     setSelectedFeedbackIds(ids);
+    setScan((prev) => prev ? { ...prev, feedback_ids: [...ids] } : prev);
     try {
       await updateScanFeedback(scanId, [...ids]);
       // Refresh SKILL preview if it's currently open
       if (skillOpen && skillType) {
-        const content = await getSkillContent(scanId, skillType);
+        const content = skillType === "__fp_review__"
+          ? await getFpReviewSkill(scanId)
+          : await getSkillContent(scanId, skillType);
         setSkillContent(content);
       }
     } catch {
       // ignore
     }
+  };
+
+  const addSelectedFeedbackIds = async (feedbackIds: string[]) => {
+    if (feedbackIds.length === 0) return;
+    const next = new Set(selectedFeedbackIds ?? scan?.feedback_ids ?? []);
+    for (const id of feedbackIds) next.add(id);
+    await handleFeedbackChange(next);
   };
 
   const loadSkill = async (vulnType: string) => {
@@ -520,6 +530,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             totalCandidates={scan.total_candidates}
             processedCandidates={scan.processed_candidates}
             fpReview={fpReview}
+            onFeedbackCreated={addSelectedFeedbackIds}
             onVulnMarked={() => {
               if (skillOpen && skillType) {
                 if (skillType === "__fp_review__") {
@@ -604,6 +615,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           projectId={scan.project_id}
           selectedIds={selectedFeedbackIds ?? new Set(scan.feedback_ids)}
           onSelectionChange={handleFeedbackChange}
+          onFeedbackCreated={addSelectedFeedbackIds}
           onClose={() => setFeedbackOpen(false)}
         />
       )}

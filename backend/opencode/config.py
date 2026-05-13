@@ -113,20 +113,18 @@ def _link_skills(
 ) -> None:
     """Create skill definitions from all registered checkers.
 
-    When *feedback_entries* are provided, false-positive entries are grouped
-    by vuln_type and appended to the corresponding SKILL as a "历史误报经验"
-    section.  Falls back to the legacy ``skill_fp/`` flat files when no
-    entries are supplied.
+    When *feedback_entries* are provided, entries are grouped by vuln_type and
+    appended to the corresponding SKILL as a "历史用户经验" section. Falls back
+    to the legacy ``skill_fp/`` flat files when no entries are supplied.
     """
     skills_target = workspace / ".opencode" / "skills"
     skills_target.mkdir(parents=True, exist_ok=True)
 
     # Group feedback entries by vuln_type for quick lookup
-    fp_by_type: dict[str, list[FeedbackEntry]] = {}
+    feedback_by_type: dict[str, list[FeedbackEntry]] = {}
     if feedback_entries:
         for fb in feedback_entries:
-            if fb.verdict == "false_positive":
-                fp_by_type.setdefault(fb.vuln_type, []).append(fb)
+            feedback_by_type.setdefault(fb.vuln_type, []).append(fb)
 
     # Legacy fallback directory
     fp_dir = project_dir / "skill_fp" if project_dir else None
@@ -135,12 +133,13 @@ def _link_skills(
     for name, entry in registry.items():
         # 构建反馈内容（API 和 opencode 模式共用）
         fp_section: str | None = None
-        if name in fp_by_type:
+        if name in feedback_by_type:
             lines = []
-            for fb in fp_by_type[name]:
-                lines.append(
-                    f"\n- {fb.reason or fb.description}\n"
-                )
+            for fb in feedback_by_type[name]:
+                text = fb.reason or fb.description
+                if text:
+                    verdict_label = "正报" if fb.verdict == "confirmed" else "误报"
+                    lines.append(f"\n- [{verdict_label}] {text}\n")
             fp_section = "".join(lines)
         elif fp_dir:
             fp_file = fp_dir / f"{name}.md"
@@ -160,9 +159,9 @@ def _link_skills(
                 if fp_section:
                     merged = (
                         original.rstrip()
-                        + "\n\n## 历史误报经验\n\n"
-                        + "以下是用户在审计过程中确认的误报案例，"
-                        + "分析时应参考这些经验避免重复误判：\n"
+                        + "\n\n## 历史用户经验\n\n"
+                        + "以下是用户在审计过程中选择注入的经验，"
+                        + "分析时应结合这些经验校验结论：\n"
                         + fp_section
                     )
                     prompt_dest.write_text(merged, encoding="utf-8")
@@ -184,9 +183,9 @@ def _link_skills(
             original = entry.skill_path.read_text(encoding="utf-8")
             merged = (
                 original.rstrip()
-                + "\n\n## 历史误报经验\n\n"
-                + "以下是用户在审计过程中确认的误报案例，"
-                + "分析时应参考这些经验避免重复误判：\n"
+                + "\n\n## 历史用户经验\n\n"
+                + "以下是用户在审计过程中选择注入的经验，"
+                + "分析时应结合这些经验校验结论：\n"
                 + fp_section
             )
             skill_dest.write_text(merged, encoding="utf-8")

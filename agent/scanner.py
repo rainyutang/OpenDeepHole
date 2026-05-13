@@ -14,7 +14,7 @@ import yaml
 
 from agent.config import AgentConfig
 from agent.reporter import Reporter
-from backend.models import Candidate, ScanEvent, Vulnerability
+from backend.models import Candidate, FeedbackEntry, ScanEvent, Vulnerability
 
 
 def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
@@ -75,6 +75,7 @@ async def run_scan(
     checker_names: list[str],
     scan_id: str,                    # pre-assigned by server
     cancel_event: threading.Event,   # from task_manager
+    feedback_entries: list[dict] | None = None,
     is_resume: bool = False,
 ) -> None:
     """Orchestrate the full local pipeline: index → static analysis → AI audit → report.
@@ -194,10 +195,13 @@ async def run_scan(
         # Set AGENT_PROJECT_DIR so MCP tools find code_index.db in project dir
         os.environ["AGENT_PROJECT_DIR"] = str(project_path.resolve())
 
-        # --- Phase 2: Fetch feedback for SKILL enrichment ---
-        feedback_entries = await reporter.get_feedback(list(registry.keys()))
-        if feedback_entries:
-            await emit("init", f"Fetched {len(feedback_entries)} feedback entries from server")
+        # --- Phase 2: Use selected feedback for SKILL enrichment ---
+        selected_feedback = [
+            FeedbackEntry(**entry)
+            for entry in (feedback_entries or [])
+        ]
+        if selected_feedback:
+            await emit("init", f"Loaded {len(selected_feedback)} selected feedback entries")
 
         # --- Phase 3: Start local MCP (needed by any opencode-mode checker) ---
         mcp_port = None
@@ -215,7 +219,7 @@ async def run_scan(
         workspace = create_scan_workspace(
             scan_id,
             project_dir=project_path,
-            feedback_entries=feedback_entries,
+            feedback_entries=selected_feedback,
             mcp_port=mcp_port,
         )
         await emit("init", "Analysis workspace ready")

@@ -13,6 +13,7 @@ class ScanTask:
     project_path: Path
     checkers: list[str]
     scan_name: str
+    feedback_entries: list[dict] = field(default_factory=list)
     cancel_event: threading.Event = field(default_factory=threading.Event)
     asyncio_task: Optional[asyncio.Task] = None
 
@@ -21,8 +22,21 @@ class TaskManager:
     def __init__(self):
         self._tasks: dict[str, ScanTask] = {}
 
-    def create(self, scan_id: str, project_path: str, checkers: list[str], scan_name: str) -> ScanTask:
-        task = ScanTask(scan_id=scan_id, project_path=Path(project_path), checkers=checkers, scan_name=scan_name)
+    def create(
+        self,
+        scan_id: str,
+        project_path: str,
+        checkers: list[str],
+        scan_name: str,
+        feedback_entries: list[dict] | None = None,
+    ) -> ScanTask:
+        task = ScanTask(
+            scan_id=scan_id,
+            project_path=Path(project_path),
+            checkers=checkers,
+            scan_name=scan_name,
+            feedback_entries=feedback_entries or [],
+        )
         self._tasks[scan_id] = task
         return task
 

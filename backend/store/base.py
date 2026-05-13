@@ -161,6 +161,10 @@ class ScanStoreBase(ABC):
         """Return the latest FP review job for a scan (most recently created)."""
 
     @abstractmethod
+    def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
+        """Return all FP review results for a scan, oldest first."""
+
+    @abstractmethod
     def update_fp_review_job(
         self,
         review_id: str,

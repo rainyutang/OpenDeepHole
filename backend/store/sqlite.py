@@ -753,6 +753,28 @@ class SqliteScanStore(ScanStoreBase):
             return None
         return self._row_to_fp_review_job(row)
 
+    def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute(
+            """\
+            SELECT r.*
+            FROM fp_review_results r
+            JOIN fp_review_jobs j ON j.review_id = r.review_id
+            WHERE j.scan_id = ?
+            ORDER BY j.created_at ASC, r.created_at ASC, r.id ASC
+            """,
+            (scan_id,),
+        )
+        return [
+            FpReviewResult(
+                vuln_index=r["vuln_index"],
+                verdict=r["verdict"],
+                reason=r["reason"],
+                created_at=r["created_at"],
+            )
+            for r in cur.fetchall()
+        ]
+
     def _row_to_fp_review_job(self, row: sqlite3.Row) -> FpReviewJob:
         review_id = row["review_id"]
         self._conn.row_factory = sqlite3.Row

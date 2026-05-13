@@ -17,6 +17,7 @@ interface Props {
   /** When provided, entries can be selected for SKILL inclusion. */
   selectedIds?: Set<string>;
   onSelectionChange?: (ids: Set<string>) => void;
+  onFeedbackCreated?: (feedbackIds: string[]) => void | Promise<void>;
   /** project_id to associate when creating new entries from a scan. */
   projectId?: string;
   onClose: () => void;
@@ -28,6 +29,7 @@ export default function FeedbackManager({
   scanId,
   selectedIds,
   onSelectionChange,
+  onFeedbackCreated,
   projectId,
   onClose,
 }: Props) {
@@ -110,10 +112,9 @@ export default function FeedbackManager({
 
   const handleSelectAll = () => {
     if (!onSelectionChange) return;
-    const fpEntries = entries.filter((e) => e.verdict === "false_positive");
     // Merge with existing selections from other types
     const next = new Set(selectedIds);
-    for (const e of fpEntries) next.add(e.id);
+    for (const e of entries) next.add(e.id);
     onSelectionChange(next);
   };
 
@@ -174,6 +175,7 @@ export default function FeedbackManager({
         reason: addForm.reason,
       });
       setEntries((prev) => [entry, ...prev]);
+      await onFeedbackCreated?.([entry.id]);
       setAddMode(false);
       setAddForm({
         vuln_type: activeType || "",
@@ -267,7 +269,7 @@ export default function FeedbackManager({
                 onClick={handleSelectAll}
                 className="text-xs px-2 py-1 text-slate-400 hover:text-slate-200 transition-colors"
               >
-                全选误报
+                全选当前类型
               </button>
               <button
                 onClick={handleSelectNone}
@@ -474,16 +476,13 @@ function FeedbackRow({
     <div className={`px-5 py-3 hover:bg-slate-800/30 transition-colors ${selected ? "bg-blue-500/5" : ""}`}>
       <div className="flex items-start gap-3">
         {/* Selection checkbox */}
-        {selectable && entry.verdict === "false_positive" && (
+        {selectable && (
           <input
             type="checkbox"
             checked={selected}
             onChange={onToggleSelect}
             className="mt-1 w-3.5 h-3.5 rounded text-blue-600 accent-blue-600 shrink-0"
           />
-        )}
-        {selectable && entry.verdict !== "false_positive" && (
-          <div className="w-3.5 shrink-0" />
         )}
 
         <div className="flex-1 min-w-0">
