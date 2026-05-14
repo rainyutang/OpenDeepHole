@@ -3,6 +3,8 @@
 ## 2026-05-14
 
 - **新增** 登录用户可查看 SKILL/checker 介绍页，优先展示各 checker 的 `SCENARIOS.md`，缺失时回退展示 `SKILL.md`
+- **优化** SKILL/checker 介绍页改用现成 Markdown 渲染库，支持标题、列表、代码块、引用和表格样式
+- **优化** SKILL/checker 介绍页展示全部 checker，不受 `checker.yaml` 中 `enabled` 开关影响
 - **优化** Checker Dashboard 左侧 SKILL 列表精简为名称和简介，详细统计保留在右侧详情视图
 - **修复** 扫描详情页在 Agent 断开后重新连接时仍显示红色“Agent 断开连接”的旧错误提示，在线状态与断连提示保持一致
 - **修复** Agent 连接后的配置页面与本地 `agent.yaml` 不一致的问题，Agent 握手会上报当前配置，页面优先展示真实配置
