@@ -14,9 +14,16 @@ REM Before first run: edit agent.yaml to set server_url and llm_api.api_key
 
 cd /d "%~dp0"
 
-python3 -c "import httpx" 2>nul || (
-    echo Installing agent dependencies...
-    pip install -r requirements-agent.txt
+where python3 >nul 2>nul
+if %errorlevel%==0 (
+    set "PYTHON_CMD=python3"
+) else (
+    set "PYTHON_CMD=python"
 )
 
-python3 -m agent.main %*
+%PYTHON_CMD% -c "import httpx" 2>nul || (
+    echo Installing agent dependencies...
+    %PYTHON_CMD% -m pip install -r requirements-agent.txt
+)
+
+%PYTHON_CMD% -m agent.main %*

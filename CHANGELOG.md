@@ -10,6 +10,7 @@
 - **优化** memleak checker 改为按函数合并疑似问题点，同一函数只调用一次 LLM 并在单个 `submit_result` 中汇总所有点位
 - **新增** Agent API 直调模式在控制台打印完整初始提示词，包含实际发送给 LLM 的 system 和 user 内容
 - **修复** MEMLEAK API 直调模式优先读取 Agent 项目目录下的 `code_index.db`，避免 prompt 的函数源码段误显示“代码索引不可用”
+- **修复** Windows Agent 启动脚本在系统缺少 `python3` 命令时无法启动的问题，自动回退使用 `python`
 
 ## 2026-05-13
 
