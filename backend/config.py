@@ -31,7 +31,7 @@ class MCPServerConfig(BaseModel):
 class OpenCodeConfig(BaseModel):
     executable: str = "opencode"  # CLI executable name or full path
     model: str = "anthropic/claude-sonnet-4-20250514"
-    timeout: int = 120
+    timeout: int = 1200
     max_retries: int = 2  # retry on transient errors (not timeout)
     mock: bool = False  # When True, skip real opencode and return fake results
 
@@ -56,13 +56,13 @@ class LLMApiConfig(BaseModel):
     api_key: str = ""
     model: str = "gpt-4o-mini"
     temperature: float = 0.1
-    timeout: int = 120
+    timeout: int = 300
     max_retries: int = 3
     stream: bool = False
 
 
 class AppConfig(BaseModel):
-    no_proxy: str = ""
+    no_proxy: str = "10.0.0.0/8"
     server: ServerConfig = ServerConfig()
     mcp_server: MCPServerConfig = MCPServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()

@@ -2,6 +2,10 @@
 
 ## 2026-05-14
 
+- **修复** Agent 连接后的配置页面与本地 `agent.yaml` 不一致的问题，Agent 握手会上报当前配置，页面优先展示真实配置
+- **优化** Agent 配置默认值：API 调用超时改为 300 秒，opencode 超时改为 1200 秒，代理跳过列表默认包含 `10.0.0.0/8`
+- **新增** Agent 配置页面支持显示和保存 LLM API 流式传输开关、opencode 最大重试次数，并确保保存后立即推送到在线 Agent 且写回 `agent.yaml`
+- **调整** NPD、OOB、RESLEAK、SENSITIVE_CLEAR 检查项默认禁用
 - **优化** memleak checker 改为按函数合并疑似问题点，同一函数只调用一次 LLM 并在单个 `submit_result` 中汇总所有点位
 - **新增** Agent API 直调模式在控制台打印完整初始提示词，包含实际发送给 LLM 的 system 和 user 内容
 

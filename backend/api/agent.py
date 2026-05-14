@@ -272,6 +272,13 @@ async def agent_websocket(websocket: WebSocket) -> None:
 
         _reattach_active_agent_scans(agent_id, agent_info, msg.get("active_scans") or [])
 
+        reported_config = msg.get("config")
+        if reported_config and name not in _agent_configs:
+            try:
+                _agent_configs[name] = AgentRemoteConfig(**reported_config)
+            except Exception as e:
+                logger.warning("Ignoring invalid config reported by agent %s: %s", name, e)
+
         cfg = _agent_configs.get(name, AgentRemoteConfig())
         await websocket.send_json({
             "type": "welcome",
@@ -398,7 +405,7 @@ async def update_agent_config(
     _agent_configs[agent.name] = body
     logger.info("Config updated for agent %s (%s)", agent_id, agent.name)
     # Push update to agent immediately if connected via WebSocket
-    await send_agent_command(agent_id, {"type": "config", "config": body.model_dump(exclude_defaults=True)})
+    await send_agent_command(agent_id, {"type": "config", "config": body.model_dump()})
     return {"ok": True}
 
 

@@ -88,7 +88,7 @@ llm_api:
 # opencode CLI 配置（供 mode: opencode 的检查项使用）
 opencode:
   executable: "opencode"
-  timeout: 300
+  timeout: 1200
 ```
 
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
@@ -417,7 +417,7 @@ agent_name: ""
 owner_token: ""
 
 # 代理跳过列表，逗号分隔
-no_proxy: ""
+no_proxy: "10.0.0.0/8"
 
 # 要运行的检查项，留空则运行全部已启用的检查项
 checkers: []
@@ -428,14 +428,16 @@ llm_api:
   api_key: "your-api-key-here"
   model: "claude-sonnet-4-6"
   temperature: 0.1
-  timeout: 120
+  timeout: 300
   max_retries: 3
+  stream: false
 
 # opencode CLI 配置（供 mode: opencode 的检查项使用）
 opencode:
   executable: "opencode"
   model: ""      # 留空则使用 opencode 默认模型
-  timeout: 300
+  timeout: 1200
+  max_retries: 2
 ```
 
 ## 本地开发

@@ -24,7 +24,7 @@ llm_api:
   api_key: "your-api-key-here"
   model: "claude-sonnet-4-6"
   temperature: 0.1
-  timeout: 120      # 单次调用超时（秒）
+  timeout: 300      # 单次调用超时（秒）
   max_retries: 3
   stream: false      # 是否使用流式传输（部分 API 仅支持流式）
 

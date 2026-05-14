@@ -98,7 +98,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
     """WebSocket connection loop with automatic reconnect."""
     import websockets
     import agent.server as agent_server
-    from agent.config import apply_remote_config
+    from agent.config import apply_remote_config, remote_config_dict
 
     name = config.agent_name or socket.gethostname()
     ws_url = config.server_url.replace("http://", "ws://").replace("https://", "wss://")
@@ -114,6 +114,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 hello_msg = {
                     "type": "hello",
                     "name": name,
+                    "config": remote_config_dict(config),
                     "active_scans": task_manager.active_snapshots(),
                 }
                 if config.owner_token:
@@ -131,7 +132,12 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 agent_server._agent_id = agent_id
 
                 if welcome.get("config"):
+                    from agent.config import save_config
                     apply_remote_config(config, welcome["config"])
+                    try:
+                        save_config(config)
+                    except Exception as e:
+                        print(f"Config received from server (warning: failed to persist: {e})")
 
                 reconnect_delay = 2  # reset backoff on successful connect
                 print(f"  Connected. Agent ID: {agent_id}")

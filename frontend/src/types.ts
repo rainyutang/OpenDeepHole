@@ -145,12 +145,14 @@ export interface AgentLLMApiConfig {
   temperature: number;
   timeout: number;
   max_retries: number;
+  stream: boolean;
 }
 
 export interface AgentOpenCodeConfig {
   executable: string;
   model: string;
   timeout: number;
+  max_retries: number;
 }
 
 export interface AgentRemoteConfig {

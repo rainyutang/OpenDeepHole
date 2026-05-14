@@ -7,19 +7,21 @@ interface Props {
 }
 
 const DEFAULT_CONFIG: AgentRemoteConfig = {
-  no_proxy: "",
+  no_proxy: "10.0.0.0/8",
   llm_api: {
     base_url: "https://api.anthropic.com",
     api_key: "",
     model: "claude-sonnet-4-6",
     temperature: 0.1,
-    timeout: 120,
+    timeout: 300,
     max_retries: 3,
+    stream: false,
   },
   opencode: {
     executable: "opencode",
     model: "",
-    timeout: 300,
+    timeout: 1200,
+    max_retries: 2,
   },
 };
 
@@ -67,7 +69,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     }
   };
 
-  const setLLM = (key: keyof AgentRemoteConfig["llm_api"], value: string | number) => {
+  const setLLM = (key: keyof AgentRemoteConfig["llm_api"], value: string | number | boolean) => {
     setCfg((prev) => ({ ...prev, llm_api: { ...prev.llm_api, [key]: value } }));
   };
 
@@ -132,7 +134,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       onChange={(e) => setLLM("model", e.target.value)}
                       className={inputCls} placeholder="claude-sonnet-4-6" />
                   </Field>
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <Field label="超时（秒）">
                       <input type="number" value={cfg.llm_api.timeout}
                         onChange={(e) => setLLM("timeout", Number(e.target.value))}
@@ -149,6 +151,15 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                         className={inputCls} min={0} max={2} step={0.1} />
                     </Field>
                   </div>
+                  <label className="flex items-center gap-2 text-sm text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={cfg.llm_api.stream}
+                      onChange={(e) => setLLM("stream", e.target.checked)}
+                      className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                    />
+                    使用流式传输
+                  </label>
                 </div>
               </div>
 
@@ -161,7 +172,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       onChange={(e) => setOC("executable", e.target.value)}
                       className={inputCls} placeholder="opencode" />
                   </Field>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <Field label="模型" hint="留空使用默认">
                       <input type="text" value={cfg.opencode.model}
                         onChange={(e) => setOC("model", e.target.value)}
@@ -171,6 +182,11 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       <input type="number" value={cfg.opencode.timeout}
                         onChange={(e) => setOC("timeout", Number(e.target.value))}
                         className={inputCls} min={30} />
+                    </Field>
+                    <Field label="最大重试">
+                      <input type="number" value={cfg.opencode.max_retries}
+                        onChange={(e) => setOC("max_retries", Number(e.target.value))}
+                        className={inputCls} min={0} max={10} />
                     </Field>
                   </div>
                 </div>
@@ -368,7 +384,7 @@ Connecting to ws://.../api/agent/ws ...
             Agent 启动并连接后，会在顶部「已连接 Agent」列表中出现。点击对应 Agent 的「配置」按钮，填写 LLM API Key 等信息并保存。
           </p>
           <p className="text-slate-400 text-sm">
-            配置立即生效——下次扫描开始时 Agent 自动拉取最新配置，无需重启。
+            保存后会立即推送到在线 Agent 并写回 agent.yaml。正在运行的扫描继续使用启动时配置，后续扫描使用新配置。
           </p>
         </div>
 

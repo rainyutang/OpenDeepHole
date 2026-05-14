@@ -240,19 +240,21 @@ class AgentLLMApiConfig(BaseModel):
     api_key: str = ""
     model: str = "claude-sonnet-4-6"
     temperature: float = 0.1
-    timeout: int = 120
+    timeout: int = 300
     max_retries: int = 3
+    stream: bool = False
 
 
 class AgentOpenCodeConfig(BaseModel):
-    executable: str = ""   # empty = not set by server; agent falls back to agent.yaml
+    executable: str = "opencode"
     model: str = ""
-    timeout: int = 0       # 0 = not set by server; excluded from serialization
+    timeout: int = 1200
+    max_retries: int = 2
 
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    no_proxy: str = ""
+    no_proxy: str = "10.0.0.0/8"
     llm_api: AgentLLMApiConfig = AgentLLMApiConfig()
     opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
 
