@@ -5,6 +5,7 @@ import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 
 const MAX_LOG_LINES = 500;
+const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 
 const PHASES = [
   { key: "init", label: "初始化" },
@@ -18,6 +19,10 @@ function statusToPhaseIndex(status: ScanItemStatus): number {
   if (status === "analyzing") return 1;
   if (status === "auditing") return 2;
   return 3;
+}
+
+function isAgentDisconnectError(message: string | null | undefined): boolean {
+  return !!message && message.includes(AGENT_DISCONNECT_ERROR);
 }
 
 interface Props {
@@ -68,7 +73,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         if (selectedFeedbackIds === null && data.feedback_ids) {
           setSelectedFeedbackIds(new Set(data.feedback_ids));
         }
-        if (data.status === "complete" || data.status === "error" || data.status === "cancelled") {
+        const isRecoverableDisconnect =
+          data.status === "cancelled" && isAgentDisconnectError(data.error_message) && !data.agent_online;
+        if (
+          (data.status === "complete" || data.status === "error" || data.status === "cancelled") &&
+          !isRecoverableDisconnect
+        ) {
           clearInterval(timer);
         }
       } catch (err: unknown) {
@@ -248,6 +258,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const logEvents = truncated ? allLogEvents.slice(-MAX_LOG_LINES) : allLogEvents;
   const unseenCount = allLogEvents.length - lastSeenEvents;
   const feedbackCount = selectedFeedbackIds?.size ?? scan.feedback_ids?.length ?? 0;
+  const agentDisconnectError = isAgentDisconnectError(scan.error_message);
+  const staleAgentDisconnectError = scan.status === "cancelled" && agentDisconnectError && !!scan.agent_online;
+  const visibleErrorMessage = staleAgentDisconnectError ? null : scan.error_message;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
@@ -267,7 +280,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
             <span className="text-sm text-slate-400">
               {scan.status === "cancelled"
-                ? (scan.error_message?.includes("Agent") ? "Agent 断开，已中断" : "已取消")
+                ? (agentDisconnectError ? (scan.agent_online ? "扫描已中断" : "Agent 断开，已中断") : "已取消")
                 : isDone ? "扫描完成" : "扫描中..."}
             </span>
             {scan.agent_name && (
@@ -504,9 +517,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         </div>
 
         {/* Error */}
-        {scan.error_message && (
+        {visibleErrorMessage && (
           <div className="mt-3 p-2.5 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-400">
-            {scan.error_message}
+            {visibleErrorMessage}
           </div>
         )}
       </div>
