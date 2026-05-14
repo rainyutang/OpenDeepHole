@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -257,6 +258,13 @@ def _execute_tool(
 def _get_db(project_id: str):
     """获取项目的 CodeDatabase 实例。"""
     from code_parser import CodeDatabase
+
+    agent_dir = os.environ.get("AGENT_PROJECT_DIR")
+    if agent_dir:
+        db_path = Path(agent_dir) / "code_index.db"
+        if not db_path.exists():
+            return None
+        return CodeDatabase(db_path)
 
     config = get_config()
     db_path = Path(config.storage.projects_dir) / project_id / "code_index.db"
