@@ -18,6 +18,20 @@ from backend.models import Candidate, Vulnerability
 
 logger = get_logger(__name__)
 
+
+def _emit_initial_api_prompt(on_output, messages: list[dict]) -> None:
+    """Print the complete initial prompt sent to the LLM API."""
+    if not on_output:
+        return
+
+    sections = ["[API] 初始提示词"]
+    for message in messages:
+        role = message.get("role", "unknown")
+        content = message.get("content") or ""
+        sections.append(f"--- {role} ---\n{content}")
+    on_output("\n".join(sections))
+
+
 # ---------------------------------------------------------------------------
 # System prompt（移植自 llm_reviewer.py，适配 function calling）
 # ---------------------------------------------------------------------------
@@ -450,6 +464,7 @@ async def run_audit_via_api(
 
     if on_output:
         on_output(f"[API] 开始审计 {candidate.file}:{candidate.line}")
+    _emit_initial_api_prompt(on_output, messages)
 
     # 选择工具集：single_pass 模式仅提供 submit_result
     tools = TOOLS_SINGLE_PASS if single_pass else TOOLS
@@ -839,6 +854,7 @@ async def run_batch_audit_via_api(
 
     if on_output:
         on_output(f"[API] 批量审计 {file_path}:{func_name}（{len(candidates)} 个候选）")
+    _emit_initial_api_prompt(on_output, messages)
 
     submitted = False
     max_rounds = 10
