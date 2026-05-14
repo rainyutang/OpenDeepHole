@@ -10,6 +10,7 @@ interface Props {
   onLogout: () => void;
   onManageUsers: () => void;
   onCheckerDashboard: () => void;
+  onCheckerCatalog: () => void;
 }
 
 const STATUS_STYLES: Record<ScanItemStatus, { label: string; cls: string }> = {
@@ -25,7 +26,7 @@ function isRunning(status: ScanItemStatus) {
   return status === "pending" || status === "analyzing" || status === "auditing";
 }
 
-export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard }: Props) {
+export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -144,6 +145,12 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                 </button>
               </>
             )}
+            <button
+              onClick={onCheckerCatalog}
+              className="px-3 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+            >
+              SKILL
+            </button>
             <button
               onClick={onDownloadAgent}
               className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"

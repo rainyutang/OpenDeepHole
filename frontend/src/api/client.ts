@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentRemoteConfig, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, TokenResponse, User } from "../types";
+import type { AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, TokenResponse, User } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -85,6 +85,11 @@ export async function deleteUser(userId: string): Promise<void> {
 
 export async function getCheckers(): Promise<CheckerInfo[]> {
   const { data } = await api.get<CheckerInfo[]>("/api/checkers");
+  return data;
+}
+
+export async function getCheckerCatalog(): Promise<CheckerCatalogItem[]> {
+  const { data } = await api.get<CheckerCatalogItem[]>("/api/checkers/catalog");
   return data;
 }
 

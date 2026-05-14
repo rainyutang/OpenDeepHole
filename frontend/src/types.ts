@@ -29,6 +29,14 @@ export interface CheckerInfo {
   description: string;
 }
 
+export interface CheckerCatalogItem {
+  name: string;
+  label: string;
+  description: string;
+  introduction: string;
+  introduction_source: string;
+}
+
 export interface UploadResponse {
   project_id: string;
 }

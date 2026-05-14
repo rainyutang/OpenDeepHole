@@ -93,6 +93,15 @@ class CheckerInfo(BaseModel):
     description: str
 
 
+class CheckerCatalogItem(BaseModel):
+    """Detailed checker/SKILL introduction for the checker catalog page."""
+    name: str
+    label: str
+    description: str
+    introduction: str = ""
+    introduction_source: str = ""
+
+
 class UploadResponse(BaseModel):
     project_id: str
 

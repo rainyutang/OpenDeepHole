@@ -103,7 +103,7 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                    SKILL 准确率
+                    SKILL 列表
                   </h2>
                   <span className="text-xs text-slate-500">点击查看详情</span>
                 </div>
@@ -166,7 +166,6 @@ function CheckerCard({
   active: boolean;
   onClick: () => void;
 }) {
-  const pct = accuracyPercent(checker.accuracy);
   const activeCls = active
     ? "border-blue-500/60 bg-blue-500/10"
     : "border-slate-800 bg-slate-900/60 hover:bg-slate-900 hover:border-slate-700";
@@ -176,36 +175,13 @@ function CheckerCard({
       onClick={onClick}
       className={`w-full rounded-lg border px-4 py-3 text-left transition-colors ${activeCls}`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-sm font-semibold text-white truncate">{checker.label}</span>
-            <span className="text-[11px] font-semibold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded">
-              {checker.checker.toUpperCase()}
-            </span>
-          </div>
-          <p className="text-xs text-slate-500 line-clamp-2 min-h-8">{checker.description || "暂无描述"}</p>
-        </div>
-        <div className="text-right shrink-0">
-          <div className={checker.accuracy === null ? "text-lg font-semibold text-slate-500" : "text-lg font-semibold text-emerald-300"}>
-            {formatAccuracy(checker.accuracy)}
-          </div>
-          <div className="text-[11px] text-slate-500">
-            {checker.human_confirmed_count}/{checker.accuracy_basis_count}
-          </div>
-        </div>
+      <div className="flex items-center gap-2 mb-1">
+        <span className="min-w-0 text-sm font-semibold text-white truncate">{checker.label}</span>
+        <span className="shrink-0 text-[11px] font-semibold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded">
+          {checker.checker.toUpperCase()}
+        </span>
       </div>
-      <div className="mt-3 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full bg-emerald-400 transition-all"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <MiniStat label="扫描" value={checker.scan_count} />
-        <MiniStat label="项目" value={checker.project_count} />
-        <MiniStat label="静态" value={checker.static_issue_count} />
-      </div>
+      <p className="text-xs text-slate-500 line-clamp-2 min-h-8">{checker.description || "暂无描述"}</p>
     </button>
   );
 }
@@ -373,26 +349,12 @@ function DetailStat({
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: number }) {
-  return (
-    <div>
-      <div className="text-[11px] text-slate-600">{label}</div>
-      <div className="text-sm font-semibold text-slate-300">{value}</div>
-    </div>
-  );
-}
-
 function Th({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
     <th className={`text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap ${className}`}>
       {children}
     </th>
   );
-}
-
-function accuracyPercent(value: number | null) {
-  if (value === null) return 0;
-  return Math.max(0, Math.min(100, Math.round(value * 100)));
 }
 
 function formatAccuracy(value: number | null) {
