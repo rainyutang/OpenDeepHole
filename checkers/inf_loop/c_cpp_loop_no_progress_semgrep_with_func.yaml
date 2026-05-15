@@ -1,0 +1,650 @@
+rules:
+- id: c-cpp.loop.local-while-continue-no-progress
+  languages:
+  - c
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. CWE-835 potential infinite loop: local loop-progress variable `$I` is used in the while condition,
+    but this `continue` branch does not visibly update `$I` before jumping back to the condition. If the branch is reachable
+    for the same input/state, the loop can repeatedly process the same element/offset/pointer. Origin=local variable; risk
+    is usually lower than parameter/global state but still important for parser loops. Add `++$I`, `$I += step`, `$I = next`,
+    `break`, or `return` on this path, and validate zero-length/unknown-record cases.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - c
+    - cpp
+    loop_var_origin: local
+    confidence: MEDIUM
+    scan_focus: continue path without progress
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: "if ($COND) {\n  ...\n  continue;\n}\n"
+  - pattern-either:
+    - pattern-inside: '$T $I = $INIT;
+
+        ...
+
+        '
+    - pattern-inside: '$T *$I = $INIT;
+
+        ...
+
+        '
+  - pattern-either:
+    - pattern-inside: "while ($I != $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I < $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I <= $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I > $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I >= $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I) {\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  ++$I;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I++;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  --$I;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I--;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I += $STEP;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I -= $STEP;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I = $NEXT;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  break;\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  return ...;\n  ...\n}\n"
+- id: c-cpp.loop.param-while-continue-no-progress
+  languages:
+  - c
+  - cpp
+  severity: ERROR
+  message: 'Function=`$F`. CWE-835 potential infinite loop: function parameter `$I` controls a while loop, but this `continue`
+    branch does not visibly update `$I`. Origin=function parameter; risk is higher because callers or external input may choose
+    the initial pointer/offset/iterator/state. Ensure the branch consumes input, advances `$I`, or exits; validate zero-length
+    and unknown-type records.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - c
+    - cpp
+    loop_var_origin: function-parameter
+    confidence: MEDIUM
+    scan_focus: continue path without progress
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: "if ($COND) {\n  ...\n  continue;\n}\n"
+  - pattern-either:
+    - pattern-inside: "$RET $F(..., $T $I, ...) {\n  ...\n}\n"
+    - pattern-inside: "$RET $F(..., $T *$I, ...) {\n  ...\n}\n"
+  - pattern-either:
+    - pattern-inside: "while ($I != $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I < $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I <= $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I > $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I >= $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I) {\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  ++$I;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I++;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  --$I;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I--;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I += $STEP;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I -= $STEP;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I = $NEXT;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  break;\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  return ...;\n  ...\n}\n"
+- id: c-cpp.loop.global-while-continue-no-progress
+  languages:
+  - c
+  - cpp
+  severity: ERROR
+  message: 'Function=`$F`. CWE-835 potential infinite loop: module/namespace-scope variable `$I` appears to control a while
+    loop, but this `continue` branch does not visibly update `$I`. Origin=global or namespace-scope variable; risk is higher
+    because state may be shared, persistent, or externally influenced. Confirm that every reachable branch advances state
+    or exits.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - c
+    - cpp
+    loop_var_origin: global-or-namespace-scope
+    confidence: LOW
+    scan_focus: continue path without progress
+    note: Global classification is heuristic; review namespace/class/member cases manually.
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: "if ($COND) {\n  ...\n  continue;\n}\n"
+  - pattern-either:
+    - pattern-inside: "$T $I;\n...\n$RET $F(...) {\n  ...\n}\n"
+    - pattern-inside: "$T $I = $INIT;\n...\n$RET $F(...) {\n  ...\n}\n"
+    - pattern-inside: "$T *$I;\n...\n$RET $F(...) {\n  ...\n}\n"
+    - pattern-inside: "$T *$I = $INIT;\n...\n$RET $F(...) {\n  ...\n}\n"
+  - pattern-either:
+    - pattern-inside: "while ($I != $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I < $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I <= $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I > $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I >= $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I) {\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  ++$I;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I++;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  --$I;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I--;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I += $STEP;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I -= $STEP;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I = $NEXT;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  break;\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  return ...;\n  ...\n}\n"
+- id: c-cpp.loop.for-empty-update-continue-no-progress-local
+  languages:
+  - c
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. CWE-835 potential infinite loop: local variable `$I` is controlled by a `for` loop whose increment
+    expression is empty; this `continue` branch does not visibly update `$I`. In `for(init; cond; )`, `continue` jumps directly
+    to the condition, not to any hidden increment. Move the increment into the loop header or advance `$I` before every continue.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - c
+    - cpp
+    loop_var_origin: local-for-init
+    confidence: HIGH
+    scan_focus: empty for update plus continue path
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: "if ($COND) {\n  ...\n  continue;\n}\n"
+  - pattern-either:
+    - pattern-inside: "for ($T $I = $INIT; $I != $END; ) {\n  ...\n}\n"
+    - pattern-inside: "for ($T $I = $INIT; $I < $END; ) {\n  ...\n}\n"
+    - pattern-inside: "for ($T *$I = $INIT; $I != $END; ) {\n  ...\n}\n"
+    - pattern-inside: "for ($T *$I = $INIT; $I < $END; ) {\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  ++$I;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I++;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I += $STEP;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I = $NEXT;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  break;\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  return ...;\n  ...\n}\n"
+- id: c-cpp.loop.param-or-global-for-empty-update-continue-no-progress
+  languages:
+  - c
+  - cpp
+  severity: ERROR
+  message: 'Function=`$F`. CWE-835 potential infinite loop: `$I` controls a `for(; cond; )` loop with no increment expression,
+    and this continue branch does not visibly update `$I`. Origin=parameter/global/member/unknown because `$I` is not declared
+    in the for initializer. Risk is higher when `$I` is an input offset, pointer, or iterator. Ensure each continue path advances
+    or exits.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - c
+    - cpp
+    loop_var_origin: parameter-global-member-or-unknown
+    confidence: MEDIUM
+    scan_focus: empty for update plus continue path
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: "if ($COND) {\n  ...\n  continue;\n}\n"
+  - pattern-either:
+    - pattern-inside: "for (; $I != $END; ) {\n  ...\n}\n"
+    - pattern-inside: "for (; $I < $END; ) {\n  ...\n}\n"
+    - pattern-inside: "for (; $I <= $END; ) {\n  ...\n}\n"
+    - pattern-inside: "for (; $I; ) {\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  ++$I;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I++;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I += $STEP;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I = $NEXT;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  break;\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  return ...;\n  ...\n}\n"
+- id: c-cpp.loop.do-while-continue-no-progress
+  languages:
+  - c
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. CWE-835 potential infinite loop: `continue` in this do-while loop reaches the condition without
+    a visible update to `$I`. If normal progress is placed after this branch, the branch can repeatedly re-evaluate the same
+    condition/state. Review malformed-record and error-handling paths.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - c
+    - cpp
+    loop_var_origin: unknown
+    confidence: MEDIUM
+    scan_focus: do-while continue path without progress
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: "if ($COND) {\n  ...\n  continue;\n}\n"
+  - pattern-either:
+    - pattern-inside: "do {\n  ...\n} while ($I != $END);\n"
+    - pattern-inside: "do {\n  ...\n} while ($I < $END);\n"
+    - pattern-inside: "do {\n  ...\n} while ($I);\n"
+  - pattern-not: "if ($COND) {\n  ...\n  ++$I;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I++;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I += $STEP;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $I = $NEXT;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  break;\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  return ...;\n  ...\n}\n"
+- id: c-cpp.loop.unchecked-zero-step-add-assign
+  languages:
+  - c
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. CWE-835 potential infinite loop: loop-progress variable `$I` is advanced by `$STEP` with `$I +=
+    $STEP`, but the loop body does not show a zero/non-positive-step guard. If `$STEP` can be 0, for example from a length
+    field, record size, callback return, or decoded packet length, `$I` will not progress. Validate `$STEP > 0` before updating
+    `$I`.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - c
+    - cpp
+    loop_var_origin: unknown
+    confidence: MEDIUM
+    scan_focus: unchecked variable step
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: '$I += $STEP;
+
+      '
+  - pattern-either:
+    - pattern-inside: "while ($I < $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I <= $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I != $END) {\n  ...\n}\n"
+    - pattern-inside: "for (; $I < $END; ) {\n  ...\n}\n"
+    - pattern-inside: "for (; $I != $END; ) {\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  if ($STEP == 0) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  if ($STEP <= 0) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  if (!$STEP) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "for (...; ...; ...) {\n  ...\n  if ($STEP == 0) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "for (...; ...; ...) {\n  ...\n  if ($STEP <= 0) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "for (...; ...; ...) {\n  ...\n  if (!$STEP) {\n    ...\n  }\n  ...\n}\n"
+- id: c-cpp.loop.unchecked-zero-step-assignment-add
+  languages:
+  - c
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. CWE-835 potential infinite loop: loop-progress variable `$I` is advanced as `$I = $I + $STEP` or
+    `$I = $STEP + $I`, but the loop body does not show a zero/non-positive-step guard. If `$STEP` may be 0, the loop can reprocess
+    the same offset/pointer/index. Validate `$STEP > 0` or exit on malformed length.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - c
+    - cpp
+    loop_var_origin: unknown
+    confidence: MEDIUM
+    scan_focus: unchecked variable step
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern-either:
+    - pattern: '$I = $I + $STEP;
+
+        '
+    - pattern: '$I = $STEP + $I;
+
+        '
+  - pattern-either:
+    - pattern-inside: "while ($I < $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I <= $END) {\n  ...\n}\n"
+    - pattern-inside: "while ($I != $END) {\n  ...\n}\n"
+    - pattern-inside: "for (; $I < $END; ) {\n  ...\n}\n"
+    - pattern-inside: "for (; $I != $END; ) {\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  if ($STEP == 0) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  if ($STEP <= 0) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  if (!$STEP) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "for (...; ...; ...) {\n  ...\n  if ($STEP == 0) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "for (...; ...; ...) {\n  ...\n  if ($STEP <= 0) {\n    ...\n  }\n  ...\n}\n"
+  - pattern-not-inside: "for (...; ...; ...) {\n  ...\n  if (!$STEP) {\n    ...\n  }\n  ...\n}\n"
+- id: cpp.iterator.erase-without-reassign-in-loop
+  languages:
+  - cpp
+  severity: ERROR
+  message: 'Function=`$F`. CWE-835/iterator invalidation risk: `$C.erase($IT)` is called inside a loop controlled by `$IT`,
+    but the returned next iterator is not visibly assigned back to `$IT`. The erased iterator becomes invalid for standard
+    containers, and continuing the loop can crash, skip elements, or loop on stale state. Prefer `$IT = $C.erase($IT)` or
+    erase using `$C.erase($IT++)` only when that pattern is intentional and reviewed.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - cpp
+    loop_var_origin: iterator
+    confidence: MEDIUM
+    scan_focus: erase without iterator update
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: '$C.erase($IT);
+
+      '
+  - pattern-either:
+    - pattern-inside: "while ($IT != $END) {\n  ...\n}\n"
+    - pattern-inside: "for (...; $IT != $END; ...) {\n  ...\n}\n"
+    - pattern-inside: "for (...; $IT != $C.end(); ...) {\n  ...\n}\n"
+  - pattern-not: '$IT = $C.erase($IT);
+
+      '
+  - pattern-not: '$C.erase($IT++);
+
+      '
+  - pattern-not: '$C.erase(++$IT);
+
+      '
+  - pattern-not-inside: "{\n  ...\n  $C.erase($IT);\n  ...\n  break;\n  ...\n}\n"
+  - pattern-not-inside: "{\n  ...\n  $C.erase($IT);\n  ...\n  return ...;\n  ...\n}\n"
+- id: cpp.iterator.continue-without-progress
+  languages:
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. CWE-835 potential infinite loop: iterator `$IT` controls the loop, but this continue branch does
+    not visibly advance it. This is common in container parsing code when unknown/invalid elements are skipped incorrectly.
+    Add `++$IT`, `$IT = next`, `$IT = container.erase($IT)`, `std::advance($IT, n)`, or exit on the branch.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - cpp
+    loop_var_origin: local-iterator-or-unknown
+    confidence: MEDIUM
+    scan_focus: iterator continue path without progress
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: "if ($COND) {\n  ...\n  continue;\n}\n"
+  - pattern-either:
+    - pattern-inside: "while ($IT != $C.end()) {\n  ...\n}\n"
+    - pattern-inside: "for (...; $IT != $C.end(); ) {\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  ++$IT;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $IT++;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  $IT = $NEXT;\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  std::advance($IT, ...);\n  ...\n  continue;\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  break;\n  ...\n}\n"
+  - pattern-not: "if ($COND) {\n  ...\n  return ...;\n  ...\n}\n"
+- id: cpp.string-find-without-position-advance
+  languages:
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. CWE-835 potential infinite loop: `$POS` is reassigned from `$S.find(..., $POS)` and the loop body
+    does not visibly advance `$POS`. `find` can return the same match again when restarted at the same position. Advance by
+    delimiter length after handling the match and reject empty delimiters.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - cpp
+    loop_var_origin: position-variable
+    confidence: HIGH
+    scan_focus: string find cursor not advanced
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern-either:
+    - pattern: "while (($POS = $S.find($NEEDLE, $POS)) != $NPOS) {\n  ...\n}\n"
+    - pattern: "while (($POS = $S.find($NEEDLE, $POS)) < $LIMIT) {\n  ...\n}\n"
+  - pattern-not: "while (($POS = $S.find($NEEDLE, $POS)) != $NPOS) {\n  ...\n  ++$POS;\n  ...\n}\n"
+  - pattern-not: "while (($POS = $S.find($NEEDLE, $POS)) != $NPOS) {\n  ...\n  $POS++;\n  ...\n}\n"
+  - pattern-not: "while (($POS = $S.find($NEEDLE, $POS)) != $NPOS) {\n  ...\n  $POS += $N;\n  ...\n}\n"
+  - pattern-not: "while (($POS = $S.find($NEEDLE, $POS)) != $NPOS) {\n  ...\n  $POS = $NEXT;\n  ...\n}\n"
+- id: cpp.associative-lower-bound-key-not-advanced
+  languages:
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. CWE-835 potential infinite loop: loop repeatedly calls `$C.lower_bound($KEY)` but does not visibly
+    advance `$KEY` or `$IT` after processing a hit. If `$KEY` remains equal to the current key, `lower_bound` can return the
+    same iterator forever. Prefer iterating with `++$IT` from the first `lower_bound` result.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - cpp
+    loop_var_origin: key-cursor
+    confidence: MEDIUM
+    scan_focus: lower_bound cursor not advanced
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern: "while (...) {\n  ...\n  $IT = $C.lower_bound($KEY);\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  $KEY = $NEXT;\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  ++$KEY;\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  $KEY++;\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  ++$IT;\n  ...\n}\n"
+  - pattern-not-inside: "while (...) {\n  ...\n  $IT++;\n  ...\n}\n"
+- id: cpp.container-mutated-during-iterator-loop
+  languages:
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. Iterator-loop progress risk: loop iterates over `$C` using `$IT`, while the body also mutates `$C`.
+    For vectors this may invalidate iterators; for lists/deques it may move the end boundary; for unordered containers insertion
+    may rehash. This can cause skipped elements, stale iterators, or non-termination when newly inserted elements are also
+    processed. Prefer two-phase collection, a fixed initial boundary, or explicit worklist limits.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - cpp
+    loop_var_origin: iterator
+    confidence: LOW
+    scan_focus: container grows or mutates during traversal
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern-either:
+    - pattern-inside: "for (auto $IT = $C.begin(); $IT != $C.end(); ++$IT) {\n  ...\n}\n"
+    - pattern-inside: "for (auto $IT = $C.begin(); $IT != $C.end(); $IT++) {\n  ...\n}\n"
+    - pattern-inside: "while ($IT != $C.end()) {\n  ...\n}\n"
+  - pattern-either:
+    - pattern: '$C.push_back(...);
+
+        '
+    - pattern: '$C.emplace_back(...);
+
+        '
+    - pattern: '$C.push_front(...);
+
+        '
+    - pattern: '$C.emplace_front(...);
+
+        '
+    - pattern: '$C.insert(...);
+
+        '
+    - pattern: '$C.emplace(...);
+
+        '
+- id: cpp.range-for-mutates-same-container
+  languages:
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. Iterator invalidation/non-termination risk: range-for over `$C` mutates the same container in the
+    loop body. The hidden iterators used by range-for can be invalidated, and appending work to the same container can make
+    traversal unbounded. Use a separate `pending` container or iterate over a snapshot/fixed initial size.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - cpp
+    loop_var_origin: hidden-range-for-iterator
+    confidence: MEDIUM
+    scan_focus: range-for container mutation
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern-either:
+    - pattern-inside: "for (auto $X : $C) {\n  ...\n}\n"
+    - pattern-inside: "for (auto &$X : $C) {\n  ...\n}\n"
+    - pattern-inside: "for (const auto &$X : $C) {\n  ...\n}\n"
+  - pattern-either:
+    - pattern: '$C.push_back(...);
+
+        '
+    - pattern: '$C.emplace_back(...);
+
+        '
+    - pattern: '$C.push_front(...);
+
+        '
+    - pattern: '$C.emplace_front(...);
+
+        '
+    - pattern: '$C.insert(...);
+
+        '
+    - pattern: '$C.emplace(...);
+
+        '
+- id: cpp.worklist-reenqueue-same-item-without-state-change
+  languages:
+  - cpp
+  severity: WARNING
+  message: 'Function=`$F`. CWE-835 potential worklist infinite loop: the loop pops `$X` from `$Q` and can push the same `$X`
+    back before continuing. If no retry counter, visited set, or state transition occurs, the queue may never drain. Add bounded
+    retries, state mutation, duplicate suppression, or failure handling.'
+  metadata:
+    cwe: CWE-835
+    category: security
+    technology:
+    - cpp
+    loop_var_origin: queue-work-item
+    confidence: LOW
+    scan_focus: same item re-enqueued
+    reports_function_name: true
+    function_name_metavariable: $F
+    function_context_note: Function name is captured from the enclosing C/C++ function or qualified method definition.
+  patterns:
+  - pattern-either:
+    - pattern-inside: "$RET $F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET $QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET *$QUAL::$F(...) {\n  ...\n}"
+    - pattern-inside: "$RET &$QUAL::$F(...) {\n  ...\n}"
+  - pattern-either:
+    - pattern: "while (!$Q.empty()) {\n  ...\n  $T $X = $Q.front();\n  ...\n  $Q.pop();\n  ...\n  if ($COND) {\n    ...\n\
+        \    $Q.push($X);\n    ...\n    continue;\n  }\n  ...\n}\n"
+    - pattern: "while ($Q.size() != 0) {\n  ...\n  $T $X = $Q.front();\n  ...\n  $Q.pop();\n  ...\n  if ($COND) {\n    ...\n\
+        \    $Q.push($X);\n    ...\n    continue;\n  }\n  ...\n}\n"
+  - pattern-not: "while (...) {\n  ...\n  $X.$FIELD++;\n  ...\n  $Q.push($X);\n  ...\n}\n"
+  - pattern-not: "while (...) {\n  ...\n  ++$X.$FIELD;\n  ...\n  $Q.push($X);\n  ...\n}\n"
+  - pattern-not: "while (...) {\n  ...\n  $VISITED.insert(...);\n  ...\n  $Q.push($X);\n  ...\n}\n"

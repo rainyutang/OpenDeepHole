@@ -1,0 +1,8 @@
+name: inf_loop
+label: Infinite Loop / 死循环
+description: >
+  检测可能导致程序无限循环的代码模式（CWE-835），
+  包括循环控制变量未在 continue 前更新、C++ 迭代器失效、
+  容器遍历中修改容器、zero-step 步进等。
+enabled: true
+mode: opencode
