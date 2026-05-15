@@ -8,17 +8,19 @@
 [服务器端]
   FastAPI (port 8000)
   ├── Web UI（React + Tailwind CSS）
-  ├── 接收 Agent 注册、心跳、扫描事件、扫描结果
+  ├── WebSocket /api/agent/ws 接受 Agent 连接
+  ├── 通过 WS 下发扫描任务（task / stop / resume）
+  ├── 接收 Agent 上报的扫描事件和漏洞结果（HTTP POST）
   ├── 存储扫描历史和误报反馈
-  ├── 向 Agent 下发扫描任务（新建扫描时推送）
   └── 提供 Agent 下载包
 
 [用户本地]
   opendeephole-agent（守护进程，从 Web UI 下载）
-  ├── 启动后向服务器注册，保持心跳
-  ├── 等待服务器推送扫描任务
+  ├── 启动后主动向服务器发起 WebSocket 连接
+  ├── 发送 hello 握手，接收 welcome 确认
+  ├── 等待服务器通过 WS 推送扫描任务
   ├── 收到任务后：代码索引 → 静态分析 → AI 审计
-  └── 实时将事件和漏洞结果上报服务器
+  └── 实时通过 HTTP POST 将事件和漏洞结果上报服务器
 ```
 
 **交互流程：**
@@ -26,7 +28,7 @@
 ```
 用户在 Web UI 点击「新建扫描」
   → 选择在线 Agent、填写代码路径（Agent 所在机器的路径）、选择检查项
-  → 服务器推送任务到 Agent
+  → 服务器通过 WebSocket 推送任务到 Agent
   → Agent 在本地执行完整扫描流程
   → 进度和结果实时显示在 Web UI
 ```
@@ -59,6 +61,7 @@ checkers/<name>/
 | `memleak` | 异常分支内存泄漏 (MEMLEAK) | api | 有（自定义解析器） |
 | `intoverflow` | 整数翻转/溢出 (INTOVFL) | opencode | 有（多阶段追踪） |
 | `sensitive_clear` | 敏感信息未清零 (SENSITIVE_CLEAR) | opencode | 有 |
+| `resleak` | 全类型资源泄露 (RESLEAK) | opencode | 有 |
 
 **第 1 步：下载安装包**
 
@@ -70,11 +73,11 @@ checkers/<name>/
 # Web Server 地址
 server_url: "http://your-server:8000"
 
-# Agent 监听端口（确保防火墙放行）
-agent_port: 7000
-
-# Agent 显示名称（显示在新建扫描的下拉列表中）
+# Agent 显示名称（显示在新建扫描的下拉列表中），留空则使用主机名
 agent_name: "my-agent"
+
+# 用户归属 token（下载 Agent 时自动填入，勿手动修改）
+owner_token: ""
 
 # LLM API 配置（供 mode: api 的检查项使用）
 llm_api:
@@ -85,7 +88,7 @@ llm_api:
 # opencode CLI 配置（供 mode: opencode 的检查项使用）
 opencode:
   executable: "opencode"
-  timeout: 300
+  timeout: 1200
 ```
 
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
@@ -104,15 +107,14 @@ run_agent.bat
 启动成功后，终端输出类似：
 
 ```
-OpenDeepHole Agent Daemon
+OpenDeepHole Agent
   Name    : my-agent
   Server  : http://your-server:8000
-  Port    : 7000
 
-  Registered as agent_id: a1b2c3d4...
+  Connected via WebSocket, agent_id: a1b2c3d4...
 ```
 
-Agent 常驻后台等待任务，无需每次手动启动。
+Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 
 **第 4 步：在 Web UI 创建扫描任务**
 
@@ -129,7 +131,6 @@ Agent 常驻后台等待任务，无需每次手动启动。
 
 选项：
   --server URL        覆盖 agent.yaml 中的 server_url
-  --port INT          覆盖监听端口（默认 7000）
   --name NAME         覆盖 Agent 显示名称
   --config FILE       指定配置文件路径（默认 ./agent.yaml）
 ```
@@ -141,10 +142,10 @@ Agent 常驻后台等待任务，无需每次手动启动。
 
 ## 误报反馈机制
 
-1. 在 Web UI 的漏洞列表中，将误报标记为「误报 (false_positive)」
-2. Agent 下次扫描前自动拉取 `GET /api/agent/feedback`
-3. 这些误报经验被注入到对应 SKILL 文件的「历史误报经验」章节
-4. LLM 在分析同类候选时参考这些经验，减少重复误判
+1. 在 Web UI 的漏洞列表或经验库中提交正报/误报反馈
+2. 经验库中打勾的反馈会记录到本次扫描的 `feedback_ids`
+3. 已选反馈按漏洞类型注入到对应 SKILL 文件的「历史用户经验」章节
+4. LLM 在分析同类候选时参考这些经验，校验并减少重复误判
 
 ## 插件式 Checker 架构
 
@@ -177,9 +178,10 @@ enabled: true
 |---------|------|
 | `npd` | 空指针解引用 (Null Pointer Dereference) |
 | `oob` | 数组/缓冲区越界 (Out-of-Bounds Access) |
-| `uaf` | Use-After-Free |
 | `intoverflow` | 整数翻转/溢出 |
 | `memleak` | 内存泄漏 |
+| `sensitive_clear` | 敏感信息未清零 |
+| `resleak` | 全类型资源泄露（文件/套接字/锁/内存映射等） |
 
 ### 添加新 Checker
 
@@ -392,13 +394,15 @@ server:
   port: 8000
 
 storage:
-  projects_dir: "/tmp/opendeephole/projects"
-  scans_dir: "/tmp/opendeephole/scans"
+  projects_dir: "../OpenDeepHoleData/projects"
+  scans_dir: "../OpenDeepHoleData/scans"
 
 logging:
   level: "INFO"
   file: "logs/opendeephole.log"
 ```
+
+`storage` 中的相对路径会按 `config.yaml` 所在目录解析；默认会落到 OpenDeepHole 项目上层的 `OpenDeepHoleData/`。
 
 ### Agent agent.yaml
 
@@ -406,14 +410,14 @@ logging:
 # Web Server 地址
 server_url: "http://your-server:8000"
 
-# Agent 守护进程监听端口
-agent_port: 7000
-
 # Agent 显示名称（留空则使用主机名）
 agent_name: ""
 
+# 用户归属 token（下载 Agent 时自动填入，勿手动修改）
+owner_token: ""
+
 # 代理跳过列表，逗号分隔
-no_proxy: ""
+no_proxy: "10.0.0.0/8"
 
 # 要运行的检查项，留空则运行全部已启用的检查项
 checkers: []
@@ -424,14 +428,16 @@ llm_api:
   api_key: "your-api-key-here"
   model: "claude-sonnet-4-6"
   temperature: 0.1
-  timeout: 120
+  timeout: 300
   max_retries: 3
+  stream: false
 
 # opencode CLI 配置（供 mode: opencode 的检查项使用）
 opencode:
   executable: "opencode"
   model: ""      # 留空则使用 opencode 默认模型
-  timeout: 300
+  timeout: 1200
+  max_retries: 2
 ```
 
 ## 本地开发
@@ -455,14 +461,36 @@ tail -f logs/opendeephole.log
 
 > **注意：** 修改 `checkers/` 下的内容需重启后端（registry 在启动时一次性加载）。
 
+## 数据存储位置
+
+Agent 运行时会在以下位置产生数据：
+
+| 位置 | 内容 | 生命周期 |
+|------|------|---------|
+| `<项目目录>/code_index.db` | tree-sitter 代码索引（函数/结构体/调用关系） | 持久保留，后续扫描复用 |
+| `~/.opendeephole/scans/<scan_id>/` | 扫描工作目录（candidates.json、config.yaml、agent.log） | 扫描成功后自动删除；取消/出错时保留用于恢复 |
+| `~/.opendeephole/fp_feedback.json` | 本地误报反馈缓存 | 持久保留 |
+| `~/.opendeephole/fp_reviews/<review_id>/` | 误报复审临时目录 | 复审完成后自动删除 |
+| `<项目目录>/opencode.json` + `<项目目录>/.opencode/` | opencode 工作区（SKILL 文件、MCP 配置） | 扫描完成后自动清理 |
+
+服务端数据：
+
+| 位置 | 内容 |
+|------|------|
+| `../OpenDeepHoleData/scans/` | 扫描结果 JSON（submit_result 输出）和 `scans.db` |
+| `../OpenDeepHoleData/projects/` | 服务端上传扫描的项目缓存 |
+| `logs/opendeephole.log` | 服务端日志（滚动，默认 10MB × 5 份） |
+
+> **注意：** `code_index.db` 直接保存在被扫描的代码仓目录下。对于大型代码仓，该文件可能有几十到几百 MB。如需清理，直接删除项目目录下的 `code_index.db` 即可，下次扫描会自动重建。
+
 ## 项目结构
 
 ```
 OpenDeepHole/
 ├── agent/                 # 本地 Agent Python 包
 │   ├── config.py          # agent.yaml 配置加载
-│   ├── main.py            # 守护进程入口（启动 uvicorn + 注册 + 心跳）
-│   ├── server.py          # Agent HTTP 服务（接收任务、停止、恢复）
+│   ├── main.py            # 守护进程入口（WebSocket 连接 + 自动重连）
+│   ├── server.py          # WebSocket 命令处理（task/stop/resume）
 │   ├── task_manager.py    # 任务生命周期管理（创建/停止/恢复）
 │   ├── scanner.py         # 完整扫描流程（索引→静态分析→AI审计→上报）
 │   ├── reporter.py        # 向服务器上报进度和结果
@@ -472,7 +500,8 @@ OpenDeepHole/
 │   ├── oob/
 │   ├── memleak/
 │   ├── intoverflow/
-│   └── sensitive_clear/
+│   ├── sensitive_clear/
+│   └── resleak/
 ├── code_parser/           # 共享 C/C++ 代码解析器
 │   ├── code_database.py   # SQLite 代码索引（函数/结构体/全局变量/调用关系）
 │   ├── cpp_analyzer.py    # tree-sitter C++ 解析器
@@ -481,10 +510,11 @@ OpenDeepHole/
 ├── frontend/              # React + TypeScript + Vite + Tailwind CSS
 ├── backend/
 │   ├── api/
-│   │   ├── agent.py       # Agent 专用 API（注册/心跳/注销/任务下发/结果接收/下载包）
+│   │   ├── agent.py       # Agent WebSocket 连接、命令下发、结果接收、下载包
 │   │   ├── scan.py        # 扫描管理 API（新建/停止/恢复/查询）
 │   │   ├── feedback.py    # 误报反馈 CRUD
-│   │   └── checkers.py    # Checker 列表 API
+│   │   ├── checkers.py    # Checker 列表 API
+│   │   └── auth.py        # 用户认证与管理 API
 │   ├── registry.py        # Checker 自动发现与注册
 │   ├── analyzers/base.py  # 静态分析器基类
 │   └── opencode/          # opencode CLI + LLM API 集成

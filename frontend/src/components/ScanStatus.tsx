@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getIndexStatus } from "../api/client";
+import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getIndexStatus, getFpReviewSkill } from "../api/client";
 import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 
 const MAX_LOG_LINES = 500;
+const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 
 const PHASES = [
   { key: "init", label: "初始化" },
@@ -18,6 +19,10 @@ function statusToPhaseIndex(status: ScanItemStatus): number {
   if (status === "analyzing") return 1;
   if (status === "auditing") return 2;
   return 3;
+}
+
+function isAgentDisconnectError(message: string | null | undefined): boolean {
+  return !!message && message.includes(AGENT_DISCONNECT_ERROR);
 }
 
 interface Props {
@@ -68,7 +73,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         if (selectedFeedbackIds === null && data.feedback_ids) {
           setSelectedFeedbackIds(new Set(data.feedback_ids));
         }
-        if (data.status === "complete" || data.status === "error" || data.status === "cancelled") {
+        const isRecoverableDisconnect =
+          data.status === "cancelled" && isAgentDisconnectError(data.error_message) && !data.agent_online;
+        if (
+          (data.status === "complete" || data.status === "error" || data.status === "cancelled") &&
+          !isRecoverableDisconnect
+        ) {
           clearInterval(timer);
         }
       } catch (err: unknown) {
@@ -168,11 +178,14 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   // Handle feedback selection change — update backend and refresh skills
   const handleFeedbackChange = async (ids: Set<string>) => {
     setSelectedFeedbackIds(ids);
+    setScan((prev) => prev ? { ...prev, feedback_ids: [...ids] } : prev);
     try {
       await updateScanFeedback(scanId, [...ids]);
       // Refresh SKILL preview if it's currently open
       if (skillOpen && skillType) {
-        const content = await getSkillContent(scanId, skillType);
+        const content = skillType === "__fp_review__"
+          ? await getFpReviewSkill(scanId)
+          : await getSkillContent(scanId, skillType);
         setSkillContent(content);
       }
     } catch {
@@ -180,11 +193,31 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     }
   };
 
+  const addSelectedFeedbackIds = async (feedbackIds: string[]) => {
+    if (feedbackIds.length === 0) return;
+    const next = new Set(selectedFeedbackIds ?? scan?.feedback_ids ?? []);
+    for (const id of feedbackIds) next.add(id);
+    await handleFeedbackChange(next);
+  };
+
   const loadSkill = async (vulnType: string) => {
     setSkillType(vulnType);
     setSkillLoading(true);
     try {
       const content = await getSkillContent(scanId, vulnType);
+      setSkillContent(content);
+    } catch {
+      setSkillContent("加载失败");
+    } finally {
+      setSkillLoading(false);
+    }
+  };
+
+  const loadFpReviewSkill = async () => {
+    setSkillType("__fp_review__");
+    setSkillLoading(true);
+    try {
+      const content = await getFpReviewSkill(scanId);
       setSkillContent(content);
     } catch {
       setSkillContent("加载失败");
@@ -225,6 +258,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const logEvents = truncated ? allLogEvents.slice(-MAX_LOG_LINES) : allLogEvents;
   const unseenCount = allLogEvents.length - lastSeenEvents;
   const feedbackCount = selectedFeedbackIds?.size ?? scan.feedback_ids?.length ?? 0;
+  const agentDisconnectError = isAgentDisconnectError(scan.error_message);
+  const staleAgentDisconnectError = scan.status === "cancelled" && agentDisconnectError && !!scan.agent_online;
+  const visibleErrorMessage = staleAgentDisconnectError ? null : scan.error_message;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
@@ -243,8 +279,23 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             </button>
             <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
             <span className="text-sm text-slate-400">
-              {scan.status === "cancelled" ? "已取消" : isDone ? "扫描完成" : "扫描中..."}
+              {scan.status === "cancelled"
+                ? (agentDisconnectError ? (scan.agent_online ? "扫描已中断" : "Agent 断开，已中断") : "已取消")
+                : isDone ? "扫描完成" : "扫描中..."}
             </span>
+            {scan.agent_name && (
+              <span className="flex items-center gap-1.5 text-sm text-slate-400 border-l border-slate-600 pl-4">
+                <span
+                  className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                    scan.agent_online ? "bg-green-400" : "bg-slate-500"
+                  }`}
+                />
+                Agent: {scan.agent_name}
+                {!scan.agent_online && (
+                  <span className="text-xs text-slate-500">(离线)</span>
+                )}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3">
             {/* Feedback button with count badge */}
@@ -276,36 +327,43 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               </svg>
               SKILL 预览
             </button>
-            {isDone && (
-              <button
-                onClick={handleFpReview}
-                disabled={fpReviewLoading || (fpReview?.status === "running" || fpReview?.status === "pending")}
-                className="px-3 py-1.5 text-sm font-medium text-amber-400 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-                title="使用 AI 对已确认漏洞逐条进行误报复核"
-              >
-                {(fpReview?.status === "running" || fpReview?.status === "pending") ? (
-                  <>
-                    <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
-                    复核中 {fpReview.processed}/{fpReview.total}
-                  </>
-                ) : fpReviewLoading ? (
-                  <>
-                    <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
-                    启动中...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    AI去误报
-                    {fpReview?.status === "complete" && (
-                      <span className="text-xs text-green-400 ml-0.5">✓</span>
-                    )}
-                  </>
-                )}
-              </button>
-            )}
+            {(() => {
+              const confirmedVulns = scan.vulnerabilities.filter(
+                (v) => (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed)) && !v.user_verdict
+              ).length;
+              const canTrigger = confirmedVulns > 0;
+              const isReviewing = fpReview?.status === "running" || fpReview?.status === "pending";
+              return (
+                <button
+                  onClick={handleFpReview}
+                  disabled={!canTrigger || fpReviewLoading || !!isReviewing}
+                  className="px-3 py-1.5 text-sm font-medium text-amber-400 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                  title={!canTrigger ? "需要存在 LLM 正报才可使用" : "使用 AI 对已确认漏洞逐条进行误报复核"}
+                >
+                  {isReviewing ? (
+                    <>
+                      <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
+                      复核中 {fpReview!.processed}/{fpReview!.total}
+                    </>
+                  ) : fpReviewLoading ? (
+                    <>
+                      <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
+                      启动中...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      AI去误报
+                      {fpReview?.status === "complete" && (
+                        <span className="text-xs text-green-400 ml-0.5">✓</span>
+                      )}
+                    </>
+                  )}
+                </button>
+              );
+            })()}
             {isDone && (
               <a
                 href={getReportUrl(scan.scan_id)}
@@ -459,9 +517,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         </div>
 
         {/* Error */}
-        {scan.error_message && (
+        {visibleErrorMessage && (
           <div className="mt-3 p-2.5 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-400">
-            {scan.error_message}
+            {visibleErrorMessage}
           </div>
         )}
       </div>
@@ -485,6 +543,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             totalCandidates={scan.total_candidates}
             processedCandidates={scan.processed_candidates}
             fpReview={fpReview}
+            onFeedbackCreated={addSelectedFeedbackIds}
+            onVulnMarked={() => {
+              if (skillOpen && skillType) {
+                if (skillType === "__fp_review__") {
+                  getFpReviewSkill(scanId).then(setSkillContent).catch(() => {});
+                } else {
+                  getSkillContent(scanId, skillType).then(setSkillContent).catch(() => {});
+                }
+              }
+            }}
           />
         )}
       </div>
@@ -560,6 +628,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           projectId={scan.project_id}
           selectedIds={selectedFeedbackIds ?? new Set(scan.feedback_ids)}
           onSelectionChange={handleFeedbackChange}
+          onFeedbackCreated={addSelectedFeedbackIds}
           onClose={() => setFeedbackOpen(false)}
         />
       )}
@@ -600,6 +669,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                   {item.toUpperCase()}
                 </button>
               ))}
+              <button
+                onClick={() => loadFpReviewSkill()}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap ${
+                  skillType === "__fp_review__"
+                    ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                    : "text-slate-400 border-slate-700 hover:bg-slate-800"
+                }`}
+              >
+                FP REVIEW
+              </button>
             </div>
             {/* Content */}
             <div className="flex-1 overflow-y-auto p-4">

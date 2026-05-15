@@ -7,6 +7,9 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "OpenDeepHoleData"
+
 
 class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
@@ -28,14 +31,14 @@ class MCPServerConfig(BaseModel):
 class OpenCodeConfig(BaseModel):
     executable: str = "opencode"  # CLI executable name or full path
     model: str = "anthropic/claude-sonnet-4-20250514"
-    timeout: int = 120
+    timeout: int = 1200
     max_retries: int = 2  # retry on transient errors (not timeout)
     mock: bool = False  # When True, skip real opencode and return fake results
 
 
 class StorageConfig(BaseModel):
-    projects_dir: str = "/tmp/opendeephole/projects"
-    scans_dir: str = "/tmp/opendeephole/scans"
+    projects_dir: str = str(_DEFAULT_DATA_ROOT / "projects")
+    scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
     max_upload_size_mb: int = 2048
 
 
@@ -53,12 +56,13 @@ class LLMApiConfig(BaseModel):
     api_key: str = ""
     model: str = "gpt-4o-mini"
     temperature: float = 0.1
-    timeout: int = 120
+    timeout: int = 300
     max_retries: int = 3
+    stream: bool = False
 
 
 class AppConfig(BaseModel):
-    no_proxy: str = ""
+    no_proxy: str = "10.0.0.0/8"
     server: ServerConfig = ServerConfig()
     mcp_server: MCPServerConfig = MCPServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
@@ -83,6 +87,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
     if path.is_file():
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
+        _resolve_storage_paths(raw, path.parent)
     else:
         raw = {}
 
@@ -103,6 +108,17 @@ def load_config(config_path: str | None = None) -> AppConfig:
         raw["no_proxy"] = v
 
     return AppConfig(**raw)
+
+
+def _resolve_storage_paths(raw: dict, base_dir: Path) -> None:
+    """Resolve relative server storage paths from the config file location."""
+    storage = raw.get("storage")
+    if not isinstance(storage, dict):
+        return
+    for key in ("projects_dir", "scans_dir"):
+        value = storage.get(key)
+        if isinstance(value, str) and value and not Path(value).is_absolute():
+            storage[key] = str((base_dir / value).resolve())
 
 
 # Singleton config instance

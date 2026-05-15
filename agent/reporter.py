@@ -127,6 +127,25 @@ class Reporter:
         except Exception:
             pass
 
+    async def send_static_progress(
+        self,
+        scan_id: str,
+        scanned: int,
+        total: int,
+        done: bool = False,
+    ) -> None:
+        """Push static analysis progress to the server (best-effort, never raises)."""
+        if self.dry_run:
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/static-progress",
+                json={"scanned": scanned, "total": total, "done": done},
+                timeout=5.0,
+            )
+        except Exception:
+            pass
+
     async def report_processed_key(
         self, scan_id: str, file: str, line: int, function: str, vuln_type: str
     ) -> None:
@@ -160,7 +179,7 @@ class Reporter:
             return set()
 
     async def get_feedback(self, vuln_types: list[str]) -> list[FeedbackEntry]:
-        """Fetch false-positive feedback entries from the server for SKILL enrichment."""
+        """Fetch feedback entries from the server for SKILL enrichment."""
         if self.dry_run or not vuln_types:
             return []
         try:

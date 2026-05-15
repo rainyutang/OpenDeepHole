@@ -116,10 +116,12 @@ class ExitSite:
 class Issue:
     kind: str
     func: str
+    func_start_line: int
     line: int
     leaked: list
     free_lines: dict
     hint: str
+    free_func_names: set = field(default_factory=set)
 
 
 # ============================================================
@@ -501,6 +503,7 @@ class MemLeakDetector:
         should_free_vars = {f.var_name for f in all_frees}
         exits = self.collect_exits(body, kinds={"return", "goto"})
         fname = self.function_name(func_node)
+        func_start_line = self.line(func_node)
 
         for ex in exits:
             freed_before = self.freed_vars_before(ex.node, body)
@@ -519,8 +522,11 @@ class MemLeakDetector:
                 continue
 
             details = []
+            free_funcs = set()
             for v in sorted(missing):
-                free_lines = sorted({f.line for f in all_frees if f.var_name == v})
+                matching_frees = [f for f in all_frees if f.var_name == v]
+                free_lines = sorted({f.line for f in matching_frees})
+                free_funcs.update(f.func_name for f in matching_frees)
                 details.append((v, free_lines))
 
             hint = "; ".join(
@@ -530,10 +536,12 @@ class MemLeakDetector:
             self.issues.append(Issue(
                 kind="error_path_leak",
                 func=fname,
+                func_start_line=func_start_line,
                 line=ex.line,
                 leaked=[self._display_name(v) for v, _ in details],
                 free_lines={self._display_name(v): lines for v, lines in details},
                 hint=f"{ex.kind} 前未释放: {hint}",
+                free_func_names=free_funcs,
             ))
 
     # ============================================================
@@ -545,6 +553,7 @@ class MemLeakDetector:
             return
 
         fname = self.function_name(func_node)
+        func_start_line = self.line(func_node)
         loops = self.find_loops_in(body)
         loop_types = {"for_statement", "while_statement",
                       "do_statement", "for_range_loop"}
@@ -576,13 +585,16 @@ class MemLeakDetector:
                     continue
 
                 truly_leaked = []
+                free_funcs = set()
                 for v in sorted(leaked):
-                    other_path_free_lines = sorted({
-                        f.line for f in loop_frees
+                    matching_frees = [
+                        f for f in loop_frees
                         if f.var_name == v
                         and not self._is_ancestor_of(f.node, cont.node)
-                    })
+                    ]
+                    other_path_free_lines = sorted({f.line for f in matching_frees})
                     if other_path_free_lines:
+                        free_funcs.update(f.func_name for f in matching_frees)
                         truly_leaked.append((v, other_path_free_lines))
 
                 if truly_leaked:
@@ -593,10 +605,12 @@ class MemLeakDetector:
                     self.issues.append(Issue(
                         kind="continue_leak",
                         func=fname,
+                        func_start_line=func_start_line,
                         line=cont.line,
                         leaked=[self._display_name(v) for v, _ in truly_leaked],
                         free_lines={self._display_name(v): lines for v, lines in truly_leaked},
                         hint=f"循环中 continue 前未释放: {details}",
+                        free_func_names=free_funcs,
                     ))
 
     def run(self) -> list[Issue]:
@@ -658,7 +672,7 @@ class Analyzer(BaseAnalyzer):
         project_path: Path,
         db: "CodeDatabase | None" = None,
     ) -> Iterator[Candidate]:
-        """逐文件扫描，yield 候选漏洞点。"""
+        """逐文件扫描，按函数合并后 yield 候选漏洞点。"""
         files = _collect_source_files(project_path)
         total = len(files)
 
@@ -686,18 +700,38 @@ class Analyzer(BaseAnalyzer):
             except ValueError:
                 rel_path = str(file_path)
 
+            groups: dict[tuple[str, int], list[Issue]] = {}
             for issue in issues:
-                kind_desc = KIND_DESC.get(issue.kind, issue.kind)
-                leaked_str = ", ".join(issue.leaked)
+                key = (issue.func, issue.func_start_line)
+                groups.setdefault(key, []).append(issue)
+
+            for (_func, _start_line), group in groups.items():
+                group.sort(key=lambda item: (item.line, item.kind))
+                first = group[0]
+                related_functions = sorted({
+                    name
+                    for issue in group
+                    for name in issue.free_func_names
+                })
+
+                detail_lines = []
+                for index, issue in enumerate(group, 1):
+                    kind_desc = KIND_DESC.get(issue.kind, issue.kind)
+                    leaked_str = ", ".join(issue.leaked)
+                    detail_lines.append(
+                        f"{index}. 第 {issue.line} 行 [{kind_desc}] "
+                        f"变量 {leaked_str} 在退出点前未释放。{issue.hint}"
+                    )
 
                 yield Candidate(
                     file=rel_path,
-                    line=issue.line,
-                    function=issue.func,
+                    line=first.line,
+                    function=first.func,
                     description=(
-                        f"[{kind_desc}] 函数 '{issue.func}' 中，"
-                        f"变量 {leaked_str} 在退出点（第 {issue.line} 行）前未释放。"
-                        f"{issue.hint}"
+                        f"函数 '{first.func}' 中发现 {len(group)} 个疑似内存泄漏点，"
+                        "请在一次审计中统一判断并只提交一个结果。\n"
+                        + "\n".join(detail_lines)
                     ),
                     vuln_type="memleak",
+                    related_functions=related_functions,
                 )

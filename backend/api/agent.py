@@ -68,10 +68,171 @@ _agent_configs: dict[str, AgentRemoteConfig] = {}
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
 
+_AGENT_DISCONNECT_ERROR = "Agent 断开连接"
+_SERVER_RESTART_ERROR = "Process terminated unexpectedly"
+
+
+def _is_infrastructure_interruption(scan_status: ScanItemStatus, error_message: str | None) -> bool:
+    """Return True for states caused by server/connection loss, not user intent."""
+    if scan_status == ScanItemStatus.CANCELLED:
+        return error_message == _AGENT_DISCONNECT_ERROR
+    if scan_status == ScanItemStatus.ERROR:
+        return error_message == _SERVER_RESTART_ERROR
+    return scan_status in (
+        ScanItemStatus.PENDING,
+        ScanItemStatus.ANALYZING,
+        ScanItemStatus.AUDITING,
+    )
+
+
+def _best_running_status(scan_total_candidates: int, static_done: bool) -> ScanItemStatus:
+    if static_done or scan_total_candidates > 0:
+        return ScanItemStatus.AUDITING
+    return ScanItemStatus.ANALYZING
+
+
+def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: list) -> None:
+    """Restore server-side running state for scans still running in this agent."""
+    if not active_scans:
+        return
+
+    store = get_scan_store()
+    for item in active_scans:
+        if not isinstance(item, dict):
+            continue
+        scan_id = str(item.get("scan_id") or "")
+        if not scan_id:
+            continue
+
+        loaded = store.load_scan(scan_id)
+        if loaded is None:
+            logger.warning("Agent %s reported unknown active scan %s", agent_id, scan_id)
+            continue
+
+        scan, meta = loaded
+        if meta.agent_name and meta.agent_name != agent.name:
+            logger.warning(
+                "Ignoring active scan %s from agent %s: stored agent_name=%s",
+                scan_id,
+                agent.name,
+                meta.agent_name,
+            )
+            continue
+        if meta.user_id and agent.user_id and meta.user_id != agent.user_id:
+            logger.warning(
+                "Ignoring active scan %s from agent %s: owner mismatch",
+                scan_id,
+                agent.name,
+            )
+            continue
+        if not _is_infrastructure_interruption(scan.status, scan.error_message):
+            logger.info(
+                "Ignoring active scan %s from agent %s: status=%s error=%r",
+                scan_id,
+                agent.name,
+                scan.status.value,
+                scan.error_message,
+            )
+            continue
+
+        if scan.status not in (
+            ScanItemStatus.PENDING,
+            ScanItemStatus.ANALYZING,
+            ScanItemStatus.AUDITING,
+        ):
+            scan.status = _best_running_status(scan.total_candidates, scan.static_analysis_done)
+        scan.error_message = None
+        scan.current_candidate = None
+        scan.agent_name = agent.name
+        scan.agent_online = True
+
+        store.update_scan_agent(scan_id, agent_id, agent.name)
+        store.update_scan_progress(
+            scan_id,
+            status=scan.status,
+            error_message="",
+            clear_current_candidate=True,
+        )
+        _running_scans[scan_id] = scan
+        if meta.user_id:
+            _scan_owners[scan_id] = meta.user_id
+        logger.info("Reattached active scan %s from agent %s", scan_id, agent_id)
+
+
+def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
+    """Load a recoverable scan into memory when events arrive after restart."""
+    scan = _running_scans.get(scan_id)
+    if scan is not None:
+        return scan
+
+    loaded = get_scan_store().load_scan(scan_id)
+    if loaded is None:
+        return None
+
+    scan, meta = loaded
+    if not _is_infrastructure_interruption(scan.status, scan.error_message):
+        return None
+
+    if scan.status not in (
+        ScanItemStatus.PENDING,
+        ScanItemStatus.ANALYZING,
+        ScanItemStatus.AUDITING,
+    ):
+        scan.status = _best_running_status(scan.total_candidates, scan.static_analysis_done)
+        get_scan_store().update_scan_progress(
+            scan_id,
+            status=scan.status,
+            error_message="",
+            clear_current_candidate=True,
+        )
+        scan.error_message = None
+        scan.current_candidate = None
+
+    scan.agent_name = meta.agent_name
+    if meta.agent_name:
+        scan.agent_online = is_agent_name_online(meta.agent_name)
+    _running_scans[scan_id] = scan
+    if meta.user_id:
+        _scan_owners[scan_id] = meta.user_id
+    return scan
+
 
 # ---------------------------------------------------------------------------
 # WebSocket — preferred connection method (v2)
 # ---------------------------------------------------------------------------
+
+
+def _mark_agent_scans_cancelled(agent_id: str) -> None:
+    """Mark all running scans belonging to this agent as CANCELLED.
+
+    Called when an agent disconnects so the frontend shows the correct state.
+    """
+    store = get_scan_store()
+    scan_ids_to_remove: list[str] = []
+    for scan_id in list(_running_scans):
+        result = store.load_scan(scan_id)
+        if result is None:
+            continue
+        _, meta = result
+        if meta.agent_id != agent_id:
+            continue
+        store.update_scan_progress(
+            scan_id,
+            status=ScanItemStatus.CANCELLED,
+            error_message=_AGENT_DISCONNECT_ERROR,
+            clear_current_candidate=True,
+        )
+        scan = _running_scans.get(scan_id)
+        if scan is not None:
+            scan.status = ScanItemStatus.CANCELLED
+            scan.error_message = _AGENT_DISCONNECT_ERROR
+        scan_ids_to_remove.append(scan_id)
+        logger.info("Scan %s cancelled due to agent %s disconnect", scan_id, agent_id)
+
+    for scan_id in scan_ids_to_remove:
+        _running_scans.pop(scan_id, None)
+        _scan_owners.pop(scan_id, None)
+
 
 @router.websocket("/ws")
 async def agent_websocket(websocket: WebSocket) -> None:
@@ -98,7 +259,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             if owner:
                 user_id = owner.user_id
 
-        _registered_agents[agent_id] = AgentInfo(
+        agent_info = AgentInfo(
             agent_id=agent_id,
             name=name,
             ip=ip,
@@ -106,7 +267,17 @@ async def agent_websocket(websocket: WebSocket) -> None:
             last_seen=now,
             user_id=user_id,
         )
+        _registered_agents[agent_id] = agent_info
         _agent_ws[agent_id] = websocket
+
+        _reattach_active_agent_scans(agent_id, agent_info, msg.get("active_scans") or [])
+
+        reported_config = msg.get("config")
+        if reported_config and name not in _agent_configs:
+            try:
+                _agent_configs[name] = AgentRemoteConfig(**reported_config)
+            except Exception as e:
+                logger.warning("Ignoring invalid config reported by agent %s: %s", name, e)
 
         cfg = _agent_configs.get(name, AgentRemoteConfig())
         await websocket.send_json({
@@ -127,9 +298,18 @@ async def agent_websocket(websocket: WebSocket) -> None:
         logger.warning("Agent WebSocket error for %s: %s", agent_id, e)
     finally:
         if agent_id:
+            _mark_agent_scans_cancelled(agent_id)
             _agent_ws.pop(agent_id, None)
             _registered_agents.pop(agent_id, None)
             logger.info("Agent disconnected: %s", agent_id)
+
+
+def is_agent_name_online(agent_name: str) -> bool:
+    """Check if any registered agent with the given name has an active WebSocket."""
+    for aid, ainfo in _registered_agents.items():
+        if ainfo.name == agent_name and aid in _agent_ws:
+            return True
+    return False
 
 
 async def send_agent_command(agent_id: str, command: dict) -> bool:
@@ -225,7 +405,7 @@ async def update_agent_config(
     _agent_configs[agent.name] = body
     logger.info("Config updated for agent %s (%s)", agent_id, agent.name)
     # Push update to agent immediately if connected via WebSocket
-    await send_agent_command(agent_id, {"type": "config", "config": body.model_dump(exclude_defaults=True)})
+    await send_agent_command(agent_id, {"type": "config", "config": body.model_dump()})
     return {"ok": True}
 
 
@@ -272,7 +452,7 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
     store = get_scan_store()
     store.add_event(scan_id, event)
 
-    scan = _running_scans.get(scan_id)
+    scan = _ensure_running_scan(scan_id)
     if scan is None:
         return {"ok": True}
 
@@ -290,7 +470,7 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
         if scan.status in (ScanItemStatus.PENDING,):
             scan.status = ScanItemStatus.ANALYZING
             progress_kwargs["status"] = ScanItemStatus.ANALYZING
-        if event.candidate_index is not None and "total candidate" in event.message.lower():
+        if event.candidate_index is not None:
             scan.total_candidates = event.candidate_index
             progress_kwargs["total_candidates"] = event.candidate_index
 
@@ -319,7 +499,7 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
     store = get_scan_store()
     store.add_vulnerability(scan_id, vuln)
 
-    scan = _running_scans.get(scan_id)
+    scan = _ensure_running_scan(scan_id)
     if scan is not None:
         scan.vulnerabilities.append(vuln)
 
@@ -342,6 +522,20 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
     }
     final_status = status_map.get(body.status, ScanItemStatus.ERROR)
 
+    loaded = store.load_scan(scan_id)
+    existing_scan = loaded[0] if loaded is not None else None
+    final_total = body.total_candidates
+    final_processed = body.processed_candidates
+    if final_status != ScanItemStatus.COMPLETE and existing_scan is not None:
+        if final_total == 0 and existing_scan.total_candidates > 0:
+            final_total = existing_scan.total_candidates
+        if (
+            body.total_candidates == 0
+            and body.processed_candidates == 0
+            and existing_scan.processed_candidates > 0
+        ):
+            final_processed = existing_scan.processed_candidates
+
     existing_count = store.count_vulnerabilities(scan_id)
     if body.vulnerabilities and existing_count == 0:
         for vuln in body.vulnerabilities:
@@ -351,8 +545,8 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
         scan_id,
         status=final_status,
         progress=1.0 if final_status == ScanItemStatus.COMPLETE else None,
-        total_candidates=body.total_candidates,
-        processed_candidates=body.processed_candidates,
+        total_candidates=final_total,
+        processed_candidates=final_processed,
         error_message=body.error_message,
         clear_current_candidate=True,
     )
@@ -362,8 +556,8 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
         scan.status = final_status
         if body.vulnerabilities and existing_count == 0:
             scan.vulnerabilities = body.vulnerabilities
-        scan.total_candidates = body.total_candidates
-        scan.processed_candidates = body.processed_candidates
+        scan.total_candidates = final_total
+        scan.processed_candidates = final_processed
         if body.error_message:
             scan.error_message = body.error_message
         if final_status == ScanItemStatus.COMPLETE:
@@ -374,7 +568,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
     confirmed = sum(1 for v in body.vulnerabilities if v.confirmed)
     logger.info(
         "Agent finished scan %s: %s — %d confirmed / %d candidates",
-        scan_id, body.status, confirmed, body.total_candidates,
+        scan_id, body.status, confirmed, final_total,
     )
     return {"ok": True}
 
@@ -396,6 +590,22 @@ async def agent_report_processed(scan_id: str, body: dict) -> dict:
             str(body["vuln_type"]),
         )
         store.add_processed_key(scan_id, key)
+        processed = len(store.get_processed_keys(scan_id))
+        loaded = store.load_scan(scan_id)
+        if loaded is not None:
+            scan, _meta = loaded
+            processed = max(processed, scan.processed_candidates)
+            progress = processed / scan.total_candidates if scan.total_candidates > 0 else None
+            store.update_scan_progress(
+                scan_id,
+                processed_candidates=processed,
+                progress=progress,
+            )
+            live = _running_scans.get(scan_id)
+            if live is not None:
+                live.processed_candidates = processed
+                if progress is not None:
+                    live.progress = progress
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid processed key: {e}")
     return {"ok": True}
@@ -430,11 +640,41 @@ async def agent_push_index_status(scan_id: str, body: _IndexStatusBody) -> dict:
 
     # Mirror counts into the running scan so the frontend can read them via the
     # existing scan-status polling endpoint (scan.static_total_files, etc.)
-    scan = _running_scans.get(scan_id)
+    scan = _ensure_running_scan(scan_id)
     if scan is not None:
         scan.static_total_files = body.total_files
         scan.static_scanned_files = body.parsed_files
 
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Static analysis progress (pushed by agent during static analysis phase)
+# ---------------------------------------------------------------------------
+
+
+class _StaticProgressBody(BaseModel):
+    scanned: int = 0
+    total: int = 0
+    done: bool = False
+
+
+@router.post("/scan/{scan_id}/static-progress")
+async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) -> dict:
+    """Agent pushes static analysis progress (function/file counts)."""
+    scan = _ensure_running_scan(scan_id)
+    if scan is not None:
+        scan.static_total_files = body.total
+        scan.static_scanned_files = body.scanned
+        scan.static_analysis_done = body.done
+
+    store = get_scan_store()
+    store.update_scan_progress(
+        scan_id,
+        static_total_files=body.total,
+        static_scanned_files=body.scanned,
+        static_analysis_done=body.done,
+    )
     return {"ok": True}
 
 
@@ -454,7 +694,7 @@ async def agent_get_index_status(scan_id: str) -> dict:
 
 @router.get("/feedback")
 async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
-    """Return false-positive feedback entries for the agent to enrich SKILLs."""
+    """Return feedback entries for the agent to enrich SKILLs."""
     store = get_scan_store()
     if vuln_types:
         names = [v.strip() for v in vuln_types.split(",") if v.strip()]

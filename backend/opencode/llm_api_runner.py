@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -17,6 +18,20 @@ from backend.logger import get_logger
 from backend.models import Candidate, Vulnerability
 
 logger = get_logger(__name__)
+
+
+def _emit_initial_api_prompt(on_output, messages: list[dict]) -> None:
+    """Print the complete initial prompt sent to the LLM API."""
+    if not on_output:
+        return
+
+    sections = ["[API] 初始提示词"]
+    for message in messages:
+        role = message.get("role", "unknown")
+        content = message.get("content") or ""
+        sections.append(f"--- {role} ---\n{content}")
+    on_output("\n".join(sections))
+
 
 # ---------------------------------------------------------------------------
 # System prompt（移植自 llm_reviewer.py，适配 function calling）
@@ -49,6 +64,8 @@ SYSTEM_PROMPT = """\
 3. 分析完毕后，**必须**调用 submit_result 工具提交结论
 
 注意：分析完成后你 **必须** 调用 submit_result 提交结论，否则结果将丢失。
+
+**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。所有工具调用（包括 submit_result）必须由你自己直接执行。**
 """
 
 # ---------------------------------------------------------------------------
@@ -242,6 +259,13 @@ def _get_db(project_id: str):
     """获取项目的 CodeDatabase 实例。"""
     from code_parser import CodeDatabase
 
+    agent_dir = os.environ.get("AGENT_PROJECT_DIR")
+    if agent_dir:
+        db_path = Path(agent_dir) / "code_index.db"
+        if not db_path.exists():
+            return None
+        return CodeDatabase(db_path)
+
     config = get_config()
     db_path = Path(config.storage.projects_dir) / project_id / "code_index.db"
     if not db_path.exists():
@@ -349,6 +373,29 @@ def _build_user_prompt(candidate: Candidate, project_id: str) -> str:
     else:
         lines.append("## 函数源码\n（代码索引不可用）")
 
+    # 内嵌相关函数源码（如释放函数），避免 LLM 需要调用查询工具
+    if candidate.related_functions and db is not None:
+        found_any = False
+        for rf_name in candidate.related_functions:
+            rf_rows = db.get_functions_by_name(rf_name)
+            if rf_rows:
+                if not found_any:
+                    lines.append("")
+                    lines.append("## 相关函数源码")
+                    found_any = True
+                for rf_row in rf_rows[:2]:  # 同名函数最多展示 2 个
+                    rf_body = rf_row["body"] or "(无函数体)"
+                    rf_start = rf_row["start_line"]
+                    rf_file = rf_row["file_path"]
+                    rf_lines = rf_body.split("\n")
+                    rf_numbered = "\n".join(
+                        f"{rf_start + i:4d} | {ln}" for i, ln in enumerate(rf_lines)
+                    )
+                    lines.append(f"\n### {rf_name} ({rf_file}:{rf_start})")
+                    lines.append("```c")
+                    lines.append(rf_numbered)
+                    lines.append("```")
+
     lines.append("")
     lines.append("## 任务")
     # 检查是否 single_pass 模式
@@ -379,7 +426,7 @@ async def run_audit_via_api(
     project_id: str,
     prompt_path: Path | None = None,
     on_output=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
 ) -> Vulnerability | None:
     """通过 LLM API + function calling 审计单个候选漏洞。"""
     try:
@@ -425,6 +472,7 @@ async def run_audit_via_api(
 
     if on_output:
         on_output(f"[API] 开始审计 {candidate.file}:{candidate.line}")
+    _emit_initial_api_prompt(on_output, messages)
 
     # 选择工具集：single_pass 模式仅提供 submit_result
     tools = TOOLS_SINGLE_PASS if single_pass else TOOLS
@@ -437,12 +485,18 @@ async def run_audit_via_api(
             return None
 
         try:
+            _cancel_fn = cancel_event.is_set if cancel_event else None
             llm_task = asyncio.create_task(asyncio.to_thread(
                 _call_llm, client, llm_cfg.model, messages,
                 llm_cfg.temperature, llm_cfg.max_retries, tools,
+                cancel_check=_cancel_fn,
+                stream=llm_cfg.stream,
             ))
             if cancel_event:
-                cancel_task = asyncio.create_task(cancel_event.wait())
+                async def _wait_cancel():
+                    while not cancel_event.is_set():
+                        await asyncio.sleep(0.2)
+                cancel_task = asyncio.create_task(_wait_cancel())
                 done, pending = await asyncio.wait(
                     [llm_task, cancel_task],
                     return_when=asyncio.FIRST_COMPLETED,
@@ -523,22 +577,112 @@ async def run_audit_via_api(
     return _read_result(result_id, candidate)
 
 
-def _call_llm(client, model: str, messages: list, temperature: float, max_retries: int, tools: list | None = None):
+def _accumulate_stream(stream_iter, model: str, cancel_check=None):
+    """消费流式响应迭代器，累积为完整的 ChatCompletion 对象。"""
+    from openai.types.chat import ChatCompletion, ChatCompletionMessage
+    from openai.types.chat.chat_completion import Choice
+    from openai.types.chat.chat_completion_message_tool_call import (
+        ChatCompletionMessageToolCall, Function,
+    )
+
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}  # index -> {"id", "name", "arguments"}
+    finish_reason = None
+
+    for chunk in stream_iter:
+        if cancel_check and cancel_check():
+            stream_iter.close()
+            raise RuntimeError("Cancelled")
+
+        if not chunk.choices:
+            continue
+
+        delta = chunk.choices[0].delta
+
+        if delta.content:
+            content_parts.append(delta.content)
+
+        if delta.tool_calls:
+            for tc_delta in delta.tool_calls:
+                idx = tc_delta.index
+                if idx not in tool_calls:
+                    tool_calls[idx] = {"id": "", "name": "", "arguments": ""}
+                if tc_delta.id:
+                    tool_calls[idx]["id"] = tc_delta.id
+                if tc_delta.function:
+                    if tc_delta.function.name:
+                        tool_calls[idx]["name"] = tc_delta.function.name
+                    if tc_delta.function.arguments:
+                        tool_calls[idx]["arguments"] += tc_delta.function.arguments
+
+        if chunk.choices[0].finish_reason:
+            finish_reason = chunk.choices[0].finish_reason
+
+    # 构建完整响应对象
+    tc_list = None
+    if tool_calls:
+        tc_list = [
+            ChatCompletionMessageToolCall(
+                id=tool_calls[idx]["id"],
+                type="function",
+                function=Function(
+                    name=tool_calls[idx]["name"],
+                    arguments=tool_calls[idx]["arguments"],
+                ),
+            )
+            for idx in sorted(tool_calls.keys())
+        ]
+
+    content = "".join(content_parts) if content_parts else None
+    message = ChatCompletionMessage(
+        role="assistant",
+        content=content,
+        tool_calls=tc_list,
+    )
+
+    return ChatCompletion(
+        id="stream-accumulated",
+        choices=[Choice(
+            index=0,
+            message=message,
+            finish_reason=finish_reason or "stop",
+        )],
+        created=int(time.time()),
+        model=model,
+        object="chat.completion",
+    )
+
+
+def _call_llm(client, model: str, messages: list, temperature: float, max_retries: int, tools: list | None = None, cancel_check=None, stream: bool = False):
     """同步调用 LLM API（在 asyncio.to_thread 中执行）。"""
     if tools is None:
         tools = TOOLS
     last_err = None
     for attempt in range(max_retries):
+        if cancel_check and cancel_check():
+            raise RuntimeError("Cancelled")
         try:
-            return client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                temperature=temperature,
-            )
+            if stream:
+                stream_iter = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    temperature=temperature,
+                    stream=True,
+                )
+                return _accumulate_stream(stream_iter, model, cancel_check)
+            else:
+                return client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    temperature=temperature,
+                )
         except Exception as e:
             last_err = e
             if attempt < max_retries - 1:
+                if cancel_check and cancel_check():
+                    raise RuntimeError("Cancelled")
                 time.sleep(2 ** attempt)
     raise RuntimeError(f"LLM API 调用失败（重试 {max_retries} 次）: {last_err}")
 
@@ -667,7 +811,7 @@ async def run_batch_audit_via_api(
     project_id: str,
     prompt_path: Path | None = None,
     on_output=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
 ) -> list[Vulnerability | None]:
     """通过 LLM API + function calling 批量审计同一函数内的多个候选。"""
     try:
@@ -718,6 +862,7 @@ async def run_batch_audit_via_api(
 
     if on_output:
         on_output(f"[API] 批量审计 {file_path}:{func_name}（{len(candidates)} 个候选）")
+    _emit_initial_api_prompt(on_output, messages)
 
     submitted = False
     max_rounds = 10
@@ -730,9 +875,13 @@ async def run_batch_audit_via_api(
             llm_task = asyncio.create_task(asyncio.to_thread(
                 _call_llm, client, llm_cfg.model, messages,
                 llm_cfg.temperature, llm_cfg.max_retries, TOOLS_BATCH,
+                stream=llm_cfg.stream,
             ))
             if cancel_event:
-                cancel_task = asyncio.create_task(cancel_event.wait())
+                async def _wait_cancel():
+                    while not cancel_event.is_set():
+                        await asyncio.sleep(0.2)
+                cancel_task = asyncio.create_task(_wait_cancel())
                 done, pending = await asyncio.wait(
                     [llm_task, cancel_task],
                     return_when=asyncio.FIRST_COMPLETED,

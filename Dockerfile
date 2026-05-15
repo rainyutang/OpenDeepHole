@@ -35,7 +35,7 @@ COPY --from=frontend-build /app/backend/static ./backend/static/
 RUN chmod +x start.sh
 
 # Create storage directories
-RUN mkdir -p /tmp/opendeephole/projects /tmp/opendeephole/scans logs
+RUN mkdir -p /OpenDeepHoleData/projects /OpenDeepHoleData/scans logs
 
 EXPOSE 8000
 

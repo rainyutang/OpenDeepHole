@@ -72,7 +72,7 @@ Each scan runs the full pipeline locally on the agent machine:
 ```
 
 **Resume support**: scan dir at `~/.opendeephole/scans/<scan_id>/` is preserved on cancel/error.  
-**Index cache**: `agent/index_store.py` keeps `~/.opendeephole/indexes/` so identical project paths skip re-indexing.
+**Index storage**: `code_index.db` is stored directly in the project directory (`<project_path>/code_index.db`). Re-scanning the same project reuses the existing index.
 
 ## Plugin Architecture (Checkers)
 
@@ -187,7 +187,7 @@ agent/
   scanner.py      — Full local scan pipeline (index → static → AI → report)
   reporter.py     — HTTP client: pushes events/results to backend
   task_manager.py — In-memory task registry with cancel_event per scan
-  index_store.py  — Persistent code index cache (~/.opendeephole/indexes/)
+  index_store.py  — Manages code_index.db in project directory
   local_mcp.py    — LocalMCPServer: runs MCP server in-process on random port
   config.py       — AgentConfig, load_config(), apply_remote_config()
 

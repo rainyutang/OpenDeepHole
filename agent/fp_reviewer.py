@@ -20,6 +20,7 @@ from backend.models import ScanEvent
 
 
 _FP_FEEDBACK_FILE = Path.home() / ".opendeephole" / "fp_feedback.json"
+_FP_REVIEW_FEEDBACK: dict[str, list[dict]] = {}
 
 
 def load_local_feedback() -> dict:
@@ -50,6 +51,16 @@ def update_local_feedback(entry: dict) -> None:
         print(f"Warning: failed to update local FP feedback: {exc}")
 
 
+def set_fp_review_feedback(scan_id: str, feedback_entries: list[dict]) -> None:
+    """Replace the selected feedback snapshot for an active FP review."""
+    _FP_REVIEW_FEEDBACK[scan_id] = feedback_entries
+
+
+def get_fp_review_feedback(scan_id: str) -> list[dict]:
+    """Return the latest selected feedback snapshot for an active FP review."""
+    return list(_FP_REVIEW_FEEDBACK.get(scan_id, []))
+
+
 async def run_fp_review(
     config,
     reporter,
@@ -57,6 +68,7 @@ async def run_fp_review(
     review_id: str,
     project_path: str,
     vulnerabilities: list[dict],
+    feedback_entries: list[dict] | None = None,
 ) -> None:
     """Run FP review for a list of confirmed vulnerabilities.
 
@@ -83,6 +95,7 @@ async def run_fp_review(
     project = Path(project_path)
     review_dir = Path.home() / ".opendeephole" / "fp_reviews" / review_id
     review_dir.mkdir(parents=True, exist_ok=True)
+    set_fp_review_feedback(scan_id, feedback_entries or [])
 
     # Detect active MCP server for this project
     from agent import mcp_registry
@@ -136,7 +149,7 @@ async def run_fp_review(
 
         await emit("fp_review", f"Starting FP review: {len(vulnerabilities)} confirmed vulnerabilities")
 
-        # Create workspace with the fp-review skill
+        # Create workspace with opencode.json + fp-review SKILL.
         workspace = _create_fp_workspace(project, mcp_port)
         await emit("fp_review", "FP review workspace ready")
 
@@ -149,24 +162,27 @@ async def run_fp_review(
         for vuln in vulnerabilities:
             idx = vuln["index"]
             result_id = uuid4().hex
+            _create_fp_workspace(
+                project,
+                mcp_port,
+                vuln_type=vuln["vuln_type"],
+                feedback_entries=get_fp_review_feedback(scan_id),
+            )
 
             prompt = (
-                f"Using the `fp-review` skill, review the following confirmed vulnerability "
-                f"to determine if it is a FALSE POSITIVE or TRUE POSITIVE.\n\n"
-                f"Vulnerability Type: {vuln['vuln_type'].upper()}\n"
-                f"File: {vuln['file']}\n"
-                f"Line: {vuln['line']}\n"
-                f"Function: {vuln['function']}\n"
-                f"Description: {vuln['description']}\n\n"
-                f"Original AI Analysis:\n{vuln['ai_analysis']}\n\n"
-                f"The project_id is `{project_id_for_prompt}`.\n"
-                f"Your result_id is `{result_id}`.\n"
-                f"When you have finished your analysis, you MUST call the submit_result tool "
-                f"with this result_id.\n"
-                f"Use confirmed=true if this is a TRUE POSITIVE (real vulnerability).\n"
-                f"Use confirmed=false if this is a FALSE POSITIVE.\n"
-                f"Explain your reasoning in the ai_analysis field."
+                f"使用 `fp-review` 技能，复核位于 "
+                f"{vuln['file']}:{vuln['line']} 函数 `{vuln['function']}` 中"
+                f"已确认的 {vuln['vuln_type'].upper()} 漏洞。"
+                f"project_id 为 `{project_id_for_prompt}`。"
+                f"原始描述：{vuln['description']} "
+                f"原始 AI 分析：{vuln['ai_analysis']} "
+                f"你的 result_id 是 `{result_id}`。"
+                f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交结论。"
+                f"真正报使用 confirmed=true，误报使用 confirmed=false。"
+                f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
+                f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
             )
+            prompt = prompt.replace('\n', ' ')
 
             await emit(
                 "fp_review",
@@ -178,7 +194,8 @@ async def run_fp_review(
             reason = "Review incomplete — no result returned"
 
             try:
-                cancel_event = asyncio.Event()
+                import threading
+                cancel_event = threading.Event()
                 log_path = review_dir / f"fp_{result_id}.log"
 
                 await _invoke_opencode(
@@ -244,6 +261,7 @@ async def run_fp_review(
             _cfg_mod._config = None
             import backend.registry as _reg_mod
             _reg_mod._registry = None
+        _FP_REVIEW_FEEDBACK.pop(scan_id, None)
         shutil.rmtree(review_dir, ignore_errors=True)
 
 
@@ -254,19 +272,11 @@ async def run_fp_review(
 def _find_db_dir(project_path: Path, scan_id: str) -> Optional[Path]:
     """Find the directory that contains code_index.db for this project.
 
-    Tries IndexStore first (persistent across scans), then falls back to the
-    scan_dir which is preserved for error/cancelled scans.
+    code_index.db is stored directly in the project directory.
     """
-    from agent.index_store import IndexStore
-    db = IndexStore().lookup(project_path)
-    if db is not None:
-        return db.parent
-
-    # Error/cancelled scans keep their scan_dir (not cleaned up)
-    scan_dir = Path.home() / ".opendeephole" / "scans" / scan_id
-    if (scan_dir / "code_index.db").exists():
-        return scan_dir
-
+    resolved = project_path.resolve()
+    if (resolved / "code_index.db").exists():
+        return resolved
     return None
 
 
@@ -288,11 +298,13 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
             "temperature": config.llm_api.temperature,
             "timeout": config.llm_api.timeout,
             "max_retries": config.llm_api.max_retries,
+            "stream": config.llm_api.stream,
         },
         "opencode": {
             "executable": config.opencode.executable,
             "model": config.opencode.model,
             "timeout": config.opencode.timeout,
+            "max_retries": config.opencode.max_retries,
             "mock": False,
         },
         "storage": {
@@ -319,47 +331,76 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
     _reg._registry = None
 
 
-def _create_fp_workspace(project_path: Path, mcp_port: int) -> Path:
-    """Write opencode.json and the fp-review SKILL into the project directory."""
+def _create_fp_workspace(
+    project_path: Path,
+    mcp_port: int,
+    vuln_type: str | None = None,
+    feedback_entries: list[dict] | None = None,
+) -> Path:
+    """Ensure project-root opencode config and fp-review SKILL exist."""
+    from backend.opencode.config import get_workspace_lock
+
     workspace = project_path
 
-    (workspace / "opencode.json").write_text(
-        json.dumps({
-            "$schema": "https://opencode.ai/config.json",
-            "mcp": {
-                "deephole-code": {
-                    "type": "remote",
-                    "url": f"http://127.0.0.1:{mcp_port}/mcp",
-                    "enabled": True,
-                }
-            },
-        }, indent=2),
-        encoding="utf-8",
-    )
+    with get_workspace_lock(workspace):
+        (workspace / "opencode.json").write_text(
+            json.dumps({
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": {
+                    "deephole-code": {
+                        "type": "remote",
+                        "url": f"http://127.0.0.1:{mcp_port}/mcp",
+                        "enabled": True,
+                    }
+                },
+            }, indent=2),
+            encoding="utf-8",
+        )
 
-    skills_dir = workspace / ".opencode" / "skills" / "fp-review"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    skill_src = Path(__file__).parent / "skills" / "fp_review.md"
-    shutil.copy2(skill_src, skills_dir / "SKILL.md")
+        skills_dir = workspace / ".opencode" / "skills" / "fp-review"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        skill_src = Path(__file__).parent / "skills" / "fp_review.md"
+        content = skill_src.read_text(encoding="utf-8")
+
+        fp_lines: list[str] = []
+        for entry in feedback_entries or []:
+            if vuln_type and entry.get("vuln_type") != vuln_type:
+                continue
+            reason = entry.get("reason")
+            if not reason:
+                continue
+            verdict_label = "正报" if entry.get("verdict") == "confirmed" else "误报"
+            fp_lines.append(f"\n- [{verdict_label}] {reason}\n")
+        if fp_lines:
+            content = content.rstrip() + (
+                "\n\n## 历史用户经验\n\n"
+                "以下是用户在审计过程中选择注入的经验，"
+                "复核时应结合这些经验校验结论：\n"
+                + "".join(fp_lines)
+            )
+
+        (skills_dir / "SKILL.md").write_text(content, encoding="utf-8")
 
     return workspace
 
 
 def _cleanup_fp_workspace(workspace: Path) -> None:
     """Remove FP review artifacts written into the project directory."""
-    try:
-        (workspace / "opencode.json").unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
-        fp_skill_dir = workspace / ".opencode" / "skills" / "fp-review"
-        if fp_skill_dir.is_dir():
-            shutil.rmtree(fp_skill_dir)
-        skills_dir = workspace / ".opencode" / "skills"
-        if skills_dir.is_dir() and not any(skills_dir.iterdir()):
-            skills_dir.rmdir()
-        oc_dir = workspace / ".opencode"
-        if oc_dir.is_dir() and not any(oc_dir.iterdir()):
-            oc_dir.rmdir()
-    except Exception:
-        pass
+    from backend.opencode.config import get_workspace_lock
+
+    with get_workspace_lock(workspace):
+        try:
+            fp_skill_dir = workspace / ".opencode" / "skills" / "fp-review"
+            if fp_skill_dir.is_dir():
+                shutil.rmtree(fp_skill_dir)
+            skills_dir = workspace / ".opencode" / "skills"
+            if skills_dir.is_dir() and not any(skills_dir.iterdir()):
+                skills_dir.rmdir()
+            oc_dir = workspace / ".opencode"
+            if oc_dir.is_dir() and not any(oc_dir.iterdir()):
+                oc_dir.rmdir()
+            opencode_json = workspace / "opencode.json"
+            if opencode_json.exists() and not oc_dir.exists():
+                opencode_json.unlink()
+        except Exception:
+            pass

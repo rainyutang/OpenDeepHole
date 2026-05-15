@@ -16,15 +16,16 @@ class LLMApiConfig:
     api_key: str = ""
     model: str = "claude-sonnet-4-6"
     temperature: float = 0.1
-    timeout: int = 120
+    timeout: int = 300
     max_retries: int = 3
+    stream: bool = False
 
 
 @dataclass
 class OpenCodeConfig:
     executable: str = "opencode"  # CLI executable name or full path
     model: str = ""
-    timeout: int = 300
+    timeout: int = 1200
     max_retries: int = 2          # retry on transient errors (not timeout)
 
 
@@ -34,7 +35,7 @@ class AgentConfig:
     agent_port: int = 7000
     agent_name: str = ""
     owner_token: str = ""
-    no_proxy: str = ""
+    no_proxy: str = "10.0.0.0/8"
     checkers: list = field(default_factory=list)
     llm_api: LLMApiConfig = field(default_factory=LLMApiConfig)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
@@ -45,18 +46,32 @@ class AgentConfig:
 def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     """Apply a server-managed config dict onto a local AgentConfig in-place.
 
-    Only non-empty values from the remote dict override local settings.
-    server_url, agent_port, and agent_name are never overwritten (they are
-    local-only settings).
+    Fields present in the remote dict override local settings, including
+    falsey values like stream=false. server_url, agent_port, and agent_name
+    are never overwritten because they are local-only settings.
     """
-    if remote.get("no_proxy"):
+    if "no_proxy" in remote and remote["no_proxy"] is not None:
         config.no_proxy = remote["no_proxy"]
     for attr, sub_cfg in [("llm_api", config.llm_api), ("opencode", config.opencode)]:
         section = remote.get(attr) or {}
         for f in dataclasses.fields(sub_cfg):
-            v = section.get(f.name)
-            if v not in (None, "", 0):
-                setattr(sub_cfg, f.name, v)
+            if f.name in section and section[f.name] is not None:
+                setattr(sub_cfg, f.name, section[f.name])
+
+
+def remote_config_dict(config: AgentConfig) -> dict:
+    """Return the server-managed subset of the local Agent config."""
+    return {
+        "no_proxy": config.no_proxy,
+        "llm_api": {
+            f.name: getattr(config.llm_api, f.name)
+            for f in dataclasses.fields(config.llm_api)
+        },
+        "opencode": {
+            f.name: getattr(config.opencode, f.name)
+            for f in dataclasses.fields(config.opencode)
+        },
+    }
 
 
 def load_config(path: Optional[Path] = None) -> AgentConfig:
@@ -87,7 +102,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         agent_port=raw.get("agent_port", 7000),
         agent_name=raw.get("agent_name", ""),
         owner_token=raw.get("owner_token", ""),
-        no_proxy=raw.get("no_proxy", ""),
+        no_proxy=raw.get("no_proxy", "10.0.0.0/8"),
         checkers=raw.get("checkers", []),
         llm_api=LLMApiConfig(**llm_raw),
         opencode=OpenCodeConfig(**oc_raw),

@@ -1,5 +1,5 @@
 name: oob
 label: OOB
 description: Out-of-Bounds Access
-enabled: true
+enabled: false
 skill_name: oob-audit

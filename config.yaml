@@ -1,6 +1,6 @@
 # OpenDeepHole Configuration
 
-no_proxy: ""  # 逗号分隔的不走代理地址，如 "localhost,127.0.0.1,10.0.0.0/8"
+no_proxy: "10.0.0.0/8"  # 逗号分隔的不走代理地址，如 "localhost,127.0.0.1,10.0.0.0/8"
 
 server:
   host: "0.0.0.0"
@@ -13,13 +13,13 @@ mcp_server:
 opencode:
   executable: "opencode"  # opencode 可执行文件名或完整路径，如 "myopencode" 或 "C:/tools/opencode.cmd"
   model: ""
-  timeout: 300  # seconds per candidate analysis
+  timeout: 1200  # seconds per candidate analysis
   max_retries: 2  # retry on transient errors (not timeout)
   mock: false    # set to false when opencode is configured
 
 storage:
-  projects_dir: "/tmp/opendeephole/projects"
-  scans_dir: "/tmp/opendeephole/scans"
+  projects_dir: "../OpenDeepHoleData/projects"
+  scans_dir: "../OpenDeepHoleData/scans"
   max_upload_size_mb: 2048
 
 logging:
@@ -34,7 +34,7 @@ llm_api:
   api_key: ""          # API key
   model: "gpt-4o-mini"
   temperature: 0.1
-  timeout: 120         # 单次调用超时（秒）
+  timeout: 300         # 单次调用超时（秒）
   max_retries: 3
 
 auth:

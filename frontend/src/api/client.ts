@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentRemoteConfig, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, TokenResponse, User } from "../types";
+import type { AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, TokenResponse, User } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -85,6 +85,11 @@ export async function deleteUser(userId: string): Promise<void> {
 
 export async function getCheckers(): Promise<CheckerInfo[]> {
   const { data } = await api.get<CheckerInfo[]>("/api/checkers");
+  return data;
+}
+
+export async function getCheckerCatalog(): Promise<CheckerCatalogItem[]> {
+  const { data } = await api.get<CheckerCatalogItem[]>("/api/checkers/catalog");
   return data;
 }
 
@@ -231,6 +236,11 @@ export async function deleteScan(scanId: string): Promise<void> {
   await api.delete(`/api/scan/${scanId}`);
 }
 
+export async function getCheckerDashboard(): Promise<CheckerDashboardResponse> {
+  const { data } = await api.get<CheckerDashboardResponse>("/api/admin/checker-dashboard");
+  return data;
+}
+
 // --- Agent config ---
 
 export async function getAgentConfig(agentId: string): Promise<AgentRemoteConfig> {
@@ -252,4 +262,9 @@ export async function triggerFpReview(scanId: string): Promise<{ ok: boolean; re
 export async function getFpReview(scanId: string): Promise<FpReviewJob> {
   const { data } = await api.get<FpReviewJob>(`/api/scan/${scanId}/fp_review`);
   return data;
+}
+
+export async function getFpReviewSkill(scanId: string): Promise<string> {
+  const { data } = await api.get<{ content: string }>(`/api/scan/${scanId}/fp-review/skill`);
+  return data.content;
 }

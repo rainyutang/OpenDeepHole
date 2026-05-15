@@ -7,9 +7,11 @@ import NewScanForm from "./components/NewScanForm";
 import LoginPage from "./components/LoginPage";
 import RegisterPage from "./components/RegisterPage";
 import UserManagement from "./components/UserManagement";
+import AdminCheckerDashboard from "./components/AdminCheckerDashboard";
+import CheckerCatalogPage from "./components/CheckerCatalogPage";
 import type { User } from "./types";
 
-type Page = "history" | "newScan" | "scanning" | "agent" | "users";
+type Page = "history" | "newScan" | "scanning" | "agent" | "users" | "checkerDashboard" | "checkerCatalog";
 type AuthPage = "login" | "register";
 
 export default function App() {
@@ -65,6 +67,8 @@ export default function App() {
           user={user}
           onLogout={handleLogout}
           onManageUsers={() => setPage("users")}
+          onCheckerDashboard={() => setPage("checkerDashboard")}
+          onCheckerCatalog={() => setPage("checkerCatalog")}
         />
       )}
       {page === "newScan" && (
@@ -78,6 +82,12 @@ export default function App() {
       )}
       {page === "users" && (
         <UserManagement onBack={handleBack} user={user} />
+      )}
+      {page === "checkerDashboard" && (
+        <AdminCheckerDashboard onBack={handleBack} onViewScan={handleViewScan} />
+      )}
+      {page === "checkerCatalog" && (
+        <CheckerCatalogPage onBack={handleBack} />
       )}
     </>
   );

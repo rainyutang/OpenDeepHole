@@ -66,6 +66,7 @@ class Candidate(BaseModel):
     function: str
     description: str
     vuln_type: str
+    related_functions: list[str] = []
 
 
 class Vulnerability(BaseModel):
@@ -90,6 +91,15 @@ class CheckerInfo(BaseModel):
     name: str
     label: str
     description: str
+
+
+class CheckerCatalogItem(BaseModel):
+    """Detailed checker/SKILL introduction for the checker catalog page."""
+    name: str
+    label: str
+    description: str
+    introduction: str = ""
+    introduction_source: str = ""
 
 
 class UploadResponse(BaseModel):
@@ -201,6 +211,10 @@ class ScanStatus(BaseModel):
     static_scanned_files: int = 0
     static_analysis_done: bool = False
 
+    # Agent 信息
+    agent_name: str = ""
+    agent_online: bool = False
+
 
 # --- Agent API models ---
 
@@ -235,19 +249,21 @@ class AgentLLMApiConfig(BaseModel):
     api_key: str = ""
     model: str = "claude-sonnet-4-6"
     temperature: float = 0.1
-    timeout: int = 120
+    timeout: int = 300
     max_retries: int = 3
+    stream: bool = False
 
 
 class AgentOpenCodeConfig(BaseModel):
-    executable: str = ""   # empty = not set by server; agent falls back to agent.yaml
+    executable: str = "opencode"
     model: str = ""
-    timeout: int = 0       # 0 = not set by server; excluded from serialization
+    timeout: int = 1200
+    max_retries: int = 2
 
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    no_proxy: str = ""
+    no_proxy: str = "10.0.0.0/8"
     llm_api: AgentLLMApiConfig = AgentLLMApiConfig()
     opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
 
@@ -267,6 +283,7 @@ class ScanMeta(BaseModel):
     created_at: str
     feedback_ids: list[str] = []
     agent_id: str = ""
+    agent_name: str = ""
     project_path: str = ""
     scan_name: str = ""
     user_id: str = ""
@@ -285,6 +302,70 @@ class ScanSummary(BaseModel):
     scan_items: list[str]
     user_id: str = ""
     username: str = ""
+    agent_name: str = ""
+    agent_online: bool = False
+
+
+# --- Admin dashboard models ---
+
+class CheckerScanDashboardStats(BaseModel):
+    """Per-checker stats for one scan shown in the admin checker dashboard."""
+    scan_id: str
+    project_id: str
+    scan_name: str = ""
+    project_path: str = ""
+    status: ScanItemStatus
+    created_at: str
+    username: str = ""
+    agent_name: str = ""
+    static_issue_count: int = 0
+    llm_issue_count: int = 0
+    fp_review_issue_count: int = 0
+    fp_review_false_positive_count: int = 0
+    human_confirmed_count: int = 0
+    human_false_positive_count: int = 0
+    accuracy_basis_count: int = 0
+    accuracy: float | None = None
+
+
+class CheckerDashboardStats(BaseModel):
+    """Aggregated stats for a checker/SKILL."""
+    checker: str
+    label: str
+    description: str = ""
+    scan_count: int = 0
+    project_count: int = 0
+    projects: list[str] = []
+    static_issue_count: int = 0
+    llm_issue_count: int = 0
+    fp_review_issue_count: int = 0
+    fp_review_false_positive_count: int = 0
+    human_confirmed_count: int = 0
+    human_false_positive_count: int = 0
+    accuracy_basis_count: int = 0
+    accuracy: float | None = None
+    scans: list[CheckerScanDashboardStats] = []
+
+
+class CheckerDashboardSummary(BaseModel):
+    """Top-level summary for the admin checker dashboard."""
+    checker_count: int = 0
+    scan_count: int = 0
+    project_count: int = 0
+    static_issue_count: int = 0
+    llm_issue_count: int = 0
+    fp_review_issue_count: int = 0
+    fp_review_false_positive_count: int = 0
+    total_issue_count: int = 0
+    human_confirmed_count: int = 0
+    accuracy_basis_count: int = 0
+    accuracy: float | None = None
+
+
+class CheckerDashboardResponse(BaseModel):
+    """Admin checker dashboard response."""
+    summary: CheckerDashboardSummary
+    checkers: list[CheckerDashboardStats]
 
 
 # --- FP Review models ---

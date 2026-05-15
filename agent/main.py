@@ -51,6 +51,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             project_path=msg["project_path"],
             checkers=msg.get("checkers", []),
             scan_name=msg.get("scan_name", ""),
+            feedback_entries=msg.get("feedback_entries", []),
         )
     elif cmd_type == "stop":
         await agent_server.handle_stop(msg["scan_id"])
@@ -60,6 +61,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             project_path=msg.get("project_path"),
             checkers=msg.get("checkers"),
             scan_name=msg.get("scan_name"),
+            feedback_entries=msg.get("feedback_entries"),
         )
     elif cmd_type == "fp_review":
         await agent_server.handle_fp_review(
@@ -67,6 +69,12 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             review_id=msg["review_id"],
             project_path=msg["project_path"],
             vulnerabilities=msg.get("vulnerabilities", []),
+            feedback_entries=msg.get("feedback_entries", []),
+        )
+    elif cmd_type == "feedback_selection_update":
+        await agent_server.handle_feedback_selection_update(
+            scan_id=msg["scan_id"],
+            feedback_entries=msg.get("feedback_entries", []),
         )
     elif cmd_type == "feedback_update":
         entry = msg.get("entry")
@@ -90,7 +98,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
     """WebSocket connection loop with automatic reconnect."""
     import websockets
     import agent.server as agent_server
-    from agent.config import apply_remote_config
+    from agent.config import apply_remote_config, remote_config_dict
 
     name = config.agent_name or socket.gethostname()
     ws_url = config.server_url.replace("http://", "ws://").replace("https://", "wss://")
@@ -103,7 +111,12 @@ async def _ws_loop(config, task_manager, reporter) -> None:
             print(f"Connecting to {ws_url} ...")
             async with websockets.connect(ws_url, ping_interval=30, ping_timeout=10) as ws:
                 # Handshake
-                hello_msg = {"type": "hello", "name": name}
+                hello_msg = {
+                    "type": "hello",
+                    "name": name,
+                    "config": remote_config_dict(config),
+                    "active_scans": task_manager.active_snapshots(),
+                }
                 if config.owner_token:
                     hello_msg["owner_token"] = config.owner_token
                 await ws.send(json.dumps(hello_msg))
@@ -119,7 +132,12 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 agent_server._agent_id = agent_id
 
                 if welcome.get("config"):
+                    from agent.config import save_config
                     apply_remote_config(config, welcome["config"])
+                    try:
+                        save_config(config)
+                    except Exception as e:
+                        print(f"Config received from server (warning: failed to persist: {e})")
 
                 reconnect_delay = 2  # reset backoff on successful connect
                 print(f"  Connected. Agent ID: {agent_id}")

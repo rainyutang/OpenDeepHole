@@ -157,6 +157,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN static_analysis_done INTEGER DEFAULT 0")
         if "agent_id" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN agent_id TEXT DEFAULT ''")
+        if "agent_name" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN agent_name TEXT DEFAULT ''")
         if "project_path" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN project_path TEXT DEFAULT ''")
         if "scan_name" not in cols:
@@ -236,6 +238,7 @@ class SqliteScanStore(ScanStoreBase):
             created_at=row["created_at"],
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
+            agent_name=row["agent_name"] if row["agent_name"] is not None else "",
             project_path=row["project_path"] if row["project_path"] is not None else "",
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             user_id=row["user_id"] if row["user_id"] is not None else "",
@@ -257,8 +260,8 @@ class SqliteScanStore(ScanStoreBase):
                      progress, total_candidates, processed_candidates,
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
-                     user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, agent_name, agent_id, project_path, scan_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -276,6 +279,10 @@ class SqliteScanStore(ScanStoreBase):
                     scan.static_scanned_files,
                     int(scan.static_analysis_done),
                     meta.user_id,
+                    meta.agent_name,
+                    meta.agent_id,
+                    meta.project_path,
+                    meta.scan_name,
                 ),
             )
             self._conn.commit()
@@ -303,6 +310,7 @@ class SqliteScanStore(ScanStoreBase):
             scan_items=json.loads(row["scan_items"]),
             user_id=row["user_id"] if row["user_id"] is not None else "",
             username=row["username"] if "username" in row.keys() and row["username"] is not None else "",
+            agent_name=row["agent_name"] if row["agent_name"] is not None else "",
         )
 
     def list_scans(self) -> list[ScanSummary]:
@@ -407,6 +415,21 @@ class SqliteScanStore(ScanStoreBase):
         sql = f"UPDATE scans SET {', '.join(updates)} WHERE scan_id = ?"
         with self._lock:
             self._conn.execute(sql, params)
+            self._conn.commit()
+
+    def update_scan_agent(self, scan_id: str, agent_id: str, agent_name: str = "") -> None:
+        """Update the agent_id (and optionally agent_name) for a scan."""
+        with self._lock:
+            if agent_name:
+                self._conn.execute(
+                    "UPDATE scans SET agent_id = ?, agent_name = ? WHERE scan_id = ?",
+                    (agent_id, agent_name, scan_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE scans SET agent_id = ? WHERE scan_id = ?",
+                    (agent_id, scan_id),
+                )
             self._conn.commit()
 
     def update_scan_feedback_ids(self, scan_id: str, feedback_ids: list[str]) -> None:
@@ -692,6 +715,7 @@ class SqliteScanStore(ScanStoreBase):
                                  error_message = 'Process terminated unexpectedly',
                                  current_candidate = NULL
                 WHERE status IN ('pending', 'analyzing', 'auditing')
+                  AND (agent_name IS NULL OR agent_name = '')
                 """
             )
             self._conn.commit()
@@ -729,6 +753,28 @@ class SqliteScanStore(ScanStoreBase):
         if row is None:
             return None
         return self._row_to_fp_review_job(row)
+
+    def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute(
+            """\
+            SELECT r.*
+            FROM fp_review_results r
+            JOIN fp_review_jobs j ON j.review_id = r.review_id
+            WHERE j.scan_id = ?
+            ORDER BY j.created_at ASC, r.created_at ASC, r.id ASC
+            """,
+            (scan_id,),
+        )
+        return [
+            FpReviewResult(
+                vuln_index=r["vuln_index"],
+                verdict=r["verdict"],
+                reason=r["reason"],
+                created_at=r["created_at"],
+            )
+            for r in cur.fetchall()
+        ]
 
     def _row_to_fp_review_job(self, row: sqlite3.Row) -> FpReviewJob:
         review_id = row["review_id"]

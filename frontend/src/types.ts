@@ -29,6 +29,14 @@ export interface CheckerInfo {
   description: string;
 }
 
+export interface CheckerCatalogItem {
+  name: string;
+  label: string;
+  description: string;
+  introduction: string;
+  introduction_source: string;
+}
+
 export interface UploadResponse {
   project_id: string;
 }
@@ -85,6 +93,10 @@ export interface ScanStatus {
   static_total_files: number;
   static_scanned_files: number;
   static_analysis_done: boolean;
+
+  // Agent 信息
+  agent_name?: string;
+  agent_online?: boolean;
 }
 
 export interface FeedbackEntry {
@@ -121,6 +133,8 @@ export interface ScanSummary {
   scan_items: string[];
   user_id?: string;
   username?: string;
+  agent_name?: string;
+  agent_online?: boolean;
 }
 
 export interface AgentInfo {
@@ -139,12 +153,14 @@ export interface AgentLLMApiConfig {
   temperature: number;
   timeout: number;
   max_retries: number;
+  stream: boolean;
 }
 
 export interface AgentOpenCodeConfig {
   executable: string;
   model: string;
   timeout: number;
+  max_retries: number;
 }
 
 export interface AgentRemoteConfig {
@@ -171,4 +187,62 @@ export interface FpReviewJob {
   processed: number;
   results: FpReviewResult[];
   error_message: string | null;
+}
+
+// --- Admin dashboard ---
+
+export interface CheckerScanDashboardStats {
+  scan_id: string;
+  project_id: string;
+  scan_name: string;
+  project_path: string;
+  status: ScanItemStatus;
+  created_at: string;
+  username: string;
+  agent_name: string;
+  static_issue_count: number;
+  llm_issue_count: number;
+  fp_review_issue_count: number;
+  fp_review_false_positive_count: number;
+  human_confirmed_count: number;
+  human_false_positive_count: number;
+  accuracy_basis_count: number;
+  accuracy: number | null;
+}
+
+export interface CheckerDashboardStats {
+  checker: string;
+  label: string;
+  description: string;
+  scan_count: number;
+  project_count: number;
+  projects: string[];
+  static_issue_count: number;
+  llm_issue_count: number;
+  fp_review_issue_count: number;
+  fp_review_false_positive_count: number;
+  human_confirmed_count: number;
+  human_false_positive_count: number;
+  accuracy_basis_count: number;
+  accuracy: number | null;
+  scans: CheckerScanDashboardStats[];
+}
+
+export interface CheckerDashboardSummary {
+  checker_count: number;
+  scan_count: number;
+  project_count: number;
+  static_issue_count: number;
+  llm_issue_count: number;
+  fp_review_issue_count: number;
+  fp_review_false_positive_count: number;
+  total_issue_count: number;
+  human_confirmed_count: number;
+  accuracy_basis_count: number;
+  accuracy: number | null;
+}
+
+export interface CheckerDashboardResponse {
+  summary: CheckerDashboardSummary;
+  checkers: CheckerDashboardStats[];
 }

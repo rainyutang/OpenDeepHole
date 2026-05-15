@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -39,7 +40,7 @@ async def run_audit(
     candidate: Candidate,
     project_id: str,
     on_output=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
     timeout: int | None = None,
 ) -> Vulnerability | None:
     """Run opencode to analyze a single candidate vulnerability.
@@ -53,7 +54,7 @@ async def run_audit(
         candidate: The candidate vulnerability to analyze.
         project_id: Project identifier for MCP tool calls.
         on_output: Optional callback(line: str) called for each output line in real-time.
-        cancel_event: Optional asyncio.Event; when set, the subprocess is killed.
+        cancel_event: Optional threading.Event; when set, the subprocess is killed.
         timeout: Per-candidate timeout in seconds. Falls back to config if not provided.
 
     Returns:
@@ -99,20 +100,25 @@ async def run_audit(
     max_retries = config.opencode.max_retries
 
     for attempt in range(1, max_retries + 2):  # attempt 1 .. max_retries+1
-        result_id = uuid4().hex
+        result_id = f"result-{uuid4().hex}"
 
         prompt = (
-            f"Using the `{skill_name}` skill, analyze the potential "
-            f"{candidate.vuln_type.upper()} vulnerability at "
-            f"{candidate.file}:{candidate.line} in function `{candidate.function}`. "
-            f"The project_id is `{project_id}`. "
-            f"Details: {candidate.description}\n\n"
-            f"Your result_id is `{result_id}`. "
-            f"When you have finished your analysis, you MUST call the submit_result tool "
-            f"with this result_id and your findings."
+            f"使用 `{skill_name}` 技能，分析位于 "
+            f"{candidate.file}:{candidate.line} 函数 `{candidate.function}` 中"
+            f"潜在的 {candidate.vuln_type.upper()} 漏洞。"
+            f"project_id 为 `{project_id}`。"
+            f"详情：{candidate.description} "
+            f"你的 result_id 是 `{result_id}`。"
+            f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交你的结论。"
+            f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
+            f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
         )
+        prompt = prompt.replace('\n', ' ')
 
         log_path = workspace / f"opencode_{result_id}.log"
+
+        if on_output:
+            on_output(f"[opencode] 初始提示词:\n{prompt}")
 
         logger.info(
             "Running opencode audit: %s:%d (%s) result_id=%s timeout=%ds attempt=%d/%d",
@@ -217,7 +223,7 @@ async def _invoke_opencode(
     timeout: int,
     log_path: Path | None = None,
     on_line=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
 ) -> None:
     """Invoke opencode CLI, stream output line-by-line, write to log file.
 
@@ -226,14 +232,40 @@ async def _invoke_opencode(
     requirement on Linux (which raises NotImplementedError in some
     environments regardless of Python version).
     """
+    import tempfile
+
     config = get_config()
     opencode_exe = _resolve_opencode()
-    cmd = [opencode_exe, "run", "--dir", str(workspace)]
-    if config.opencode.model:
-        cmd += ["--model", config.opencode.model]
-    cmd.append(prompt)
 
-    logger.debug("opencode command: %s", " ".join(cmd))
+    # 将 prompt 写入临时文件，通过管道符传递给 opencode，避免命令行长度截断
+    prompt_file = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", encoding="utf-8", delete=False,
+        dir=str(workspace),
+    )
+    prompt_file.write(prompt)
+    prompt_file.close()
+    prompt_file_path = prompt_file.name
+
+    # 构建命令：prompt 通过临时文件 + shell 命令替换传递，避免命令行长度截断
+    if sys.platform == "win32":
+        # Windows：直接传参（CreateProcess 支持 32767 字符，远大于 cmd.exe 的 8191 限制）
+        cmd = [opencode_exe, "run", "--dir", str(workspace)]
+        if config.opencode.model:
+            cmd += ["--model", config.opencode.model]
+        cmd.append(prompt)
+        shell_cmd = None
+        # 不再需要临时文件
+        os.unlink(prompt_file_path)
+        prompt_file_path = None
+    else:
+        # Linux/macOS：通过 $(cat file) 将临时文件内容作为参数传递
+        cmd_parts = [shlex.quote(opencode_exe), "run", "--dir", shlex.quote(str(workspace))]
+        if config.opencode.model:
+            cmd_parts += ["--model", shlex.quote(config.opencode.model)]
+        shell_cmd = f'{" ".join(cmd_parts)} "$(cat {shlex.quote(prompt_file_path)})"'
+        cmd = None
+
+    logger.debug("opencode command: %s", shell_cmd or " ".join(cmd))
 
     env = os.environ.copy()
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
@@ -241,6 +273,8 @@ async def _invoke_opencode(
     kwargs: dict = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
 
     loop = asyncio.get_running_loop()
     # Queue carries output lines; None is the end-of-stream sentinel.
@@ -249,18 +283,43 @@ async def _invoke_opencode(
 
     def _stream() -> int:
         """Blocking: run opencode, push lines into the asyncio queue."""
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-            **kwargs,
-        )
+        if shell_cmd is not None:
+            # Linux/macOS: shell 模式，通过 $(cat file) 传递 prompt
+            proc = subprocess.Popen(
+                shell_cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                **kwargs,
+            )
+        else:
+            # Windows: 直接传参模式
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                **kwargs,
+            )
         proc_holder[0] = proc
         try:
             assert proc.stdout is not None
-            for raw in proc.stdout:
-                line = _strip_ansi(raw.decode("utf-8", errors="replace").rstrip())
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                line = _strip_ansi(line.rstrip())
                 if line:
                     loop.call_soon_threadsafe(queue.put_nowait, line)
         finally:
@@ -270,22 +329,35 @@ async def _invoke_opencode(
                 pass
             proc.wait()
             loop.call_soon_threadsafe(queue.put_nowait, None)
+            # 清理临时文件（Windows 下已提前删除）
+            if prompt_file_path is not None:
+                try:
+                    os.unlink(prompt_file_path)
+                except Exception:
+                    pass
         return proc.returncode
 
     def _kill() -> None:
         proc = proc_holder[0]
         if proc is not None:
             try:
-                proc.kill()
+                if sys.platform != "win32":
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                else:
+                    proc.kill()
             except Exception:
-                pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
     stream_future = loop.run_in_executor(None, _stream)
 
     # Watcher: kill proc immediately when cancel_event fires.
     async def _cancel_watcher() -> None:
         if cancel_event:
-            await cancel_event.wait()
+            while not cancel_event.is_set():
+                await asyncio.sleep(0.2)
             _kill()
 
     watcher = asyncio.create_task(_cancel_watcher()) if cancel_event else None
@@ -342,15 +414,18 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
 
     if not result_path.exists():
         logger.warning(
-            "submit_result was not called for %s:%d (result_id=%s)",
-            candidate.file, candidate.line, result_id,
+            "submit_result was not called for %s:%d (result_id=%s, path=%s)",
+            candidate.file, candidate.line, result_id, result_path,
         )
         return None
 
     try:
-        data = json.loads(result_path.read_text())
-    except Exception:
-        logger.error("Failed to parse result file for result_id=%s", result_id)
+        data = json.loads(result_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.error(
+            "Failed to parse result file for result_id=%s path=%s: %s",
+            result_id, result_path, exc,
+        )
         return None
 
     confirmed = data.get("confirmed", False)
@@ -372,7 +447,7 @@ async def run_audit_batch(
     candidates: list[Candidate],
     project_id: str,
     on_output=None,
-    cancel_event: asyncio.Event | None = None,
+    cancel_event=None,
     timeout: int | None = None,
 ) -> list[Vulnerability | None]:
     """Run batch audit for multiple candidates in the same function.

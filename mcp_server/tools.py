@@ -231,7 +231,7 @@ def register_tools(mcp: FastMCP) -> None:
         提交本次漏洞分析的最终结论。分析完成后必须调用此工具，否则结果将丢失。
 
         参数：
-            result_id: 分析任务标识符（由分析提示中提供，原样传入，不要修改）。
+            result_id: 分析任务标识符（以 "result-" 开头，由分析提示中提供，原样传入，不要修改）。
             confirmed: 是否存在真实漏洞。true 表示确认漏洞，false 表示误报。
             severity: 严重程度，可选值为 "high"、"medium"、"low"（仅 confirmed=true 时有意义）。
             description: 漏洞的一句话摘要。
@@ -250,6 +250,6 @@ def register_tools(mcp: FastMCP) -> None:
             "severity": severity,
             "description": description,
             "ai_analysis": ai_analysis,
-        }, ensure_ascii=False))
+        }, ensure_ascii=False), encoding="utf-8")
         _mcp_log("◀", "submit_result", f"saved → {result_path}")
         return f"结果已提交（result_id={result_id}）。"

@@ -58,11 +58,13 @@ class CppAnalyzer:
         self,
         directory: Path,
         on_progress: Callable[[int, int], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         """Parse all C/C++ files under *directory* and populate the DB.
 
         Uses os.walk with directory pruning to skip vendor/build/VCS dirs.
         Commits in batches for better performance on large repos.
+        If *cancel_check* returns True, indexing stops early.
         """
         # Collect all C/C++ files in one pass, pruning irrelevant dirs
         files: list[Path] = []
@@ -74,6 +76,9 @@ class CppAnalyzer:
 
         total = len(files)
         for idx, filepath in enumerate(files):
+            if cancel_check and cancel_check():
+                break
+
             try:
                 rel_path = str(filepath.relative_to(directory))
                 source = filepath.read_bytes()
