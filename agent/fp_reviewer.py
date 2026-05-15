@@ -40,8 +40,14 @@ def update_local_feedback(entry: dict) -> None:
         vuln_type = entry.get("vuln_type", "unknown")
         if vuln_type not in feedback:
             feedback[vuln_type] = []
-        existing_ids = {e.get("id") for e in feedback[vuln_type]}
-        if entry.get("id") not in existing_ids:
+        entry_id = entry.get("id")
+        replaced = False
+        for index, existing in enumerate(feedback[vuln_type]):
+            if entry_id and existing.get("id") == entry_id:
+                feedback[vuln_type][index] = entry
+                replaced = True
+                break
+        if not replaced:
             feedback[vuln_type].append(entry)
         _FP_FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
         _FP_FEEDBACK_FILE.write_text(

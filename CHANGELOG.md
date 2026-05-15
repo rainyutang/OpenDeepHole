@@ -6,6 +6,7 @@
 - **新增** 扫描下发时自动将选中的 checker 同步到 Agent，Agent 可直接使用新 checker 执行静态分析和 AI 审计
 - **新增** `checker.yaml` 支持 `visibility: admin/public`，测试阶段 checker 可仅管理员可见，发布后再切换为所有用户可见
 - **修复** Windows Agent 安装依赖时 `requirements-agent.txt` 在 GBK/CP936 环境下可能触发编码错误的问题
+- **修复** 同一条漏洞报告多次提交用户反馈时改为覆盖原反馈，避免 SKILL 历史经验中重复注入同一误报
 
 ## 2026-05-14
 

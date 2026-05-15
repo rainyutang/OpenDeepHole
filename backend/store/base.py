@@ -119,6 +119,10 @@ class ScanStoreBase(ABC):
         """Create a new feedback entry."""
 
     @abstractmethod
+    def upsert_feedback_for_report(self, entry: FeedbackEntry) -> FeedbackEntry:
+        """Create or replace feedback for the same source vulnerability report."""
+
+    @abstractmethod
     def update_feedback(self, feedback_id: str, verdict: str | None, reason: str | None) -> bool:
         """Update verdict/reason on a feedback entry. Returns False if not found."""
 

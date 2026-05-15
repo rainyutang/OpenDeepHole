@@ -509,9 +509,8 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
     store.update_vulnerability(scan_id, index, verdict, reason)
 
     now = datetime.now(timezone.utc).isoformat()
-    feedback_id = uuid.uuid4().hex
     entry = FeedbackEntry(
-        id=feedback_id,
+        id=uuid.uuid4().hex,
         project_id=scan.project_id,
         vuln_type=vuln.vuln_type,
         verdict=verdict,
@@ -524,8 +523,8 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
         created_at=now,
         updated_at=now,
     )
-    store.add_feedback(entry)
-    logger.info("Scan %s: vulnerability %d marked as %s, feedback %s", scan_id, index, verdict, feedback_id)
+    entry = store.upsert_feedback_for_report(entry)
+    logger.info("Scan %s: vulnerability %d marked as %s, feedback %s", scan_id, index, verdict, entry.id)
 
     # Push feedback update to the agent that ran this scan (best-effort)
     try:
@@ -549,7 +548,7 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
     except Exception:
         pass
 
-    return feedback_id
+    return entry.id
 
 
 @router.post("/api/scan/{scan_id}/mark")

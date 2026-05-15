@@ -619,6 +619,83 @@ class SqliteScanStore(ScanStoreBase):
             )
             self._conn.commit()
 
+    def upsert_feedback_for_report(self, entry: FeedbackEntry) -> FeedbackEntry:
+        if not entry.source_scan_id:
+            self.add_feedback(entry)
+            return entry
+
+        self._conn.row_factory = sqlite3.Row
+        with self._lock:
+            cur = self._conn.execute(
+                """\
+                SELECT id
+                FROM feedback_entries
+                WHERE source_scan_id = ?
+                  AND project_id = ?
+                  AND vuln_type = ?
+                  AND file = ?
+                  AND line = ?
+                  AND function = ?
+                  AND description = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (
+                    entry.source_scan_id,
+                    entry.project_id,
+                    entry.vuln_type,
+                    entry.file,
+                    entry.line,
+                    entry.function,
+                    entry.description,
+                ),
+            )
+            matching_ids = [row["id"] for row in cur.fetchall()]
+            if not matching_ids:
+                self._conn.execute(
+                    """\
+                    INSERT INTO feedback_entries
+                        (id, project_id, vuln_type, verdict, file, line, function,
+                         description, reason, source_scan_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry.id, entry.project_id, entry.vuln_type, entry.verdict,
+                        entry.file, entry.line, entry.function, entry.description,
+                        entry.reason, entry.source_scan_id,
+                        entry.created_at, entry.updated_at,
+                    ),
+                )
+                kept_id = entry.id
+            else:
+                kept_id = matching_ids[0]
+                self._conn.execute(
+                    """\
+                    UPDATE feedback_entries
+                    SET verdict = ?,
+                        reason = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (entry.verdict, entry.reason, entry.updated_at, kept_id),
+                )
+                duplicate_ids = matching_ids[1:]
+                if duplicate_ids:
+                    placeholders = ", ".join("?" for _ in duplicate_ids)
+                    self._conn.execute(
+                        f"DELETE FROM feedback_entries WHERE id IN ({placeholders})",
+                        duplicate_ids,
+                    )
+            self._conn.commit()
+
+            cur = self._conn.execute(
+                "SELECT * FROM feedback_entries WHERE id = ?",
+                (kept_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError(f"feedback entry not found after upsert: {kept_id}")
+            return self._row_to_feedback(row)
+
     def update_feedback(self, feedback_id: str, verdict: str | None, reason: str | None) -> bool:
         updates: list[str] = []
         params: list = []
