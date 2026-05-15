@@ -1,5 +1,5 @@
 ---
-name: npd-analysis
+name: npd
 description: Analyze C/C++ code for Null Pointer Dereference (NPD) vulnerabilities
 ---
 

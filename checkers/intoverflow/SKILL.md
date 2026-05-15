@@ -1,5 +1,5 @@
 ---
-name: intoverflow-analysis
+name: intoverflow
 description: 验证整数翻转/溢出候选漏洞，通过数据流分析降低误报
 ---
 
