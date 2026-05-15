@@ -166,11 +166,13 @@ name: uaf
 label: UAF
 description: "Use-After-Free 检测"
 enabled: true
+visibility: public    # public: 所有用户可见；admin: 仅管理员测试可见
 # mode: opencode       # 可选，默认 opencode；设为 api 则使用 prompt.txt + LLM 直接调用
 # skill_name: uaf-audit # 可选，opencode 模式下自定义 skill 名称
 ```
 
 每个 Checker 独立配置 `mode`，同一次扫描中不同 Checker 可使用不同调用方式。
+新增或修改 `checkers/` 下的 checker 后无需重启后端；后端会在列表刷新和点击开始扫描时重新扫描目录。测试阶段建议设置 `visibility: admin`，只有管理员能看到并启动该 checker；测试完成后改为 `visibility: public` 即可对所有用户开放。
 
 **内置 Checker：**
 
@@ -459,7 +461,7 @@ npm run build
 tail -f logs/opendeephole.log
 ```
 
-> **注意：** 修改 `checkers/` 下的内容需重启后端（registry 在启动时一次性加载）。
+> **注意：** Agent 需要运行支持 checker 同步的新版本。之后新增 checker 时，只要点击开始扫描，后端会把本次选中的 checker 同步到 Agent，无需重启后端或 Agent。
 
 ## 数据存储位置
 

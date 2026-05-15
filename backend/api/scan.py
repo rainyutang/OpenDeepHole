@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
+from backend.checker_sync import build_checker_packages
 from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
@@ -37,6 +38,7 @@ from backend.models import (
     User,
 )
 from backend.store import get_scan_store
+from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -121,6 +123,35 @@ def _resolve_scan_agent_id(meta: ScanMeta) -> str | None:
     return None
 
 
+def _validated_checker_names(checkers: list[str], user: User) -> list[str]:
+    """Refresh checker registry and validate requested scan checkers."""
+    registry = refresh_registry()
+    names = list(dict.fromkeys(checkers))
+    if not names:
+        raise HTTPException(status_code=400, detail="No checkers selected")
+
+    unknown = [name for name in names if name not in registry]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown checkers: {', '.join(unknown)}")
+
+    admin_only = [
+        name for name in names
+        if registry[name].visibility == CHECKER_VISIBILITY_ADMIN and user.role != "admin"
+    ]
+    if admin_only:
+        raise HTTPException(status_code=403, detail=f"Checker is admin-only: {', '.join(admin_only)}")
+
+    return names
+
+
+def _checker_packages_for(names: list[str]) -> list[dict[str, str]]:
+    registry = refresh_registry()
+    missing = [name for name in names if name not in registry]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Checker unavailable: {', '.join(missing)}")
+    return build_checker_packages(registry, names)
+
+
 async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str]) -> None:
     """Best-effort update of the selected feedback entries on the owning agent."""
     loaded = get_scan_store().load_scan(scan_id)
@@ -161,6 +192,8 @@ async def create_scan(
     if current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Agent does not belong to you")
 
+    checker_names = _validated_checker_names(body.checkers, current_user)
+    checker_packages = _checker_packages_for(checker_names)
     scan_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     scan_name = body.scan_name or body.project_path.split("/")[-1] or scan_id
@@ -168,7 +201,7 @@ async def create_scan(
     scan = ScanStatus(
         scan_id=scan_id,
         project_id=scan_name,
-        scan_items=body.checkers,
+        scan_items=checker_names,
         created_at=now,
         status=ScanItemStatus.PENDING,
         progress=0.0,
@@ -179,7 +212,7 @@ async def create_scan(
         agent_online=True,
     )
     meta = ScanMeta(
-        scan_items=body.checkers,
+        scan_items=checker_names,
         created_at=now,
         feedback_ids=body.feedback_ids,
         agent_id=body.agent_id,
@@ -201,9 +234,10 @@ async def create_scan(
         "type": "task",
         "scan_id": scan_id,
         "project_path": body.project_path,
-        "checkers": body.checkers,
+        "checkers": checker_names,
         "scan_name": scan_name,
         "feedback_entries": feedback_entries,
+        "checker_packages": checker_packages,
     })
     if not ok:
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
@@ -387,6 +421,7 @@ async def resume_scan(
         "checkers": meta.scan_items,
         "scan_name": meta.scan_name,
         "feedback_entries": feedback_entries,
+        "checker_packages": _checker_packages_for(meta.scan_items),
     })
     if not ok:
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")

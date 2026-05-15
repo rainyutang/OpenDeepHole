@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-05-15
+
+- **新增** Checker 热更新：后端在刷新列表和创建扫描时重新扫描 `checkers/` 目录，新增 checker 无需重启服务端
+- **新增** 扫描下发时自动将选中的 checker 同步到 Agent，Agent 可直接使用新 checker 执行静态分析和 AI 审计
+- **新增** `checker.yaml` 支持 `visibility: admin/public`，测试阶段 checker 可仅管理员可见，发布后再切换为所有用户可见
+
 ## 2026-05-14
 
 - **新增** 登录用户可查看 SKILL/checker 介绍页，优先展示各 checker 的 `SCENARIOS.md`，缺失时回退展示 `SKILL.md`

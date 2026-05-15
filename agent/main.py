@@ -52,6 +52,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             checkers=msg.get("checkers", []),
             scan_name=msg.get("scan_name", ""),
             feedback_entries=msg.get("feedback_entries", []),
+            checker_packages=msg.get("checker_packages", []),
         )
     elif cmd_type == "stop":
         await agent_server.handle_stop(msg["scan_id"])
@@ -62,6 +63,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> None:
             checkers=msg.get("checkers"),
             scan_name=msg.get("scan_name"),
             feedback_entries=msg.get("feedback_entries"),
+            checker_packages=msg.get("checker_packages"),
         )
     elif cmd_type == "fp_review":
         await agent_server.handle_fp_review(

@@ -135,7 +135,7 @@ class AdminCheckerDashboardTests(unittest.TestCase):
 
         with (
             patch("backend.api.admin.get_scan_store", return_value=FakeScanStore(scan, meta)),
-            patch("backend.api.admin.get_registry", return_value=registry),
+            patch("backend.api.admin.refresh_registry", return_value=registry),
         ):
             response = asyncio.run(
                 get_checker_dashboard(
