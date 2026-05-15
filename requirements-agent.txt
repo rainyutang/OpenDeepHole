@@ -1,4 +1,5 @@
-# Agent dependencies — minimal subset needed to run the local agent
+# Agent dependencies - minimal subset needed to run the local agent
+# Keep this file ASCII-only for Windows pip installs on legacy code pages.
 # Install with: pip install -r requirements-agent.txt
 
 httpx>=0.27.0
