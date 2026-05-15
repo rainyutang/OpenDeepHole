@@ -204,11 +204,11 @@ export default function FeedbackManager({
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700">
           <div>
             <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-              经验库
+              误报屏蔽规则
             </h3>
             {selectable && (
               <p className="text-xs text-slate-400 mt-0.5">
-                已选 <span className="text-blue-400 font-semibold">{selectedCount}</span> 条经验用于 SKILL
+                已选 <span className="text-blue-400 font-semibold">{selectedCount}</span> 条规则用于 SKILL
               </p>
             )}
           </div>
@@ -406,7 +406,7 @@ export default function FeedbackManager({
             </div>
           ) : entries.length === 0 ? (
             <div className="flex items-center justify-center h-32 text-sm text-slate-500">
-              暂无经验记录
+              暂无规则记录
             </div>
           ) : (
             <div className="divide-y divide-slate-700/50">

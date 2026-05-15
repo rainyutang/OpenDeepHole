@@ -5,6 +5,8 @@
 - **新增** Checker 热更新：后端在刷新列表和创建扫描时重新扫描 `checkers/` 目录，新增 checker 无需重启服务端
 - **新增** 扫描下发时自动将选中的 checker 同步到 Agent，Agent 可直接使用新 checker 执行静态分析和 AI 审计
 - **新增** `checker.yaml` 支持 `visibility: admin/public`，测试阶段 checker 可仅管理员可见，发布后再切换为所有用户可见
+- **优化** 前端将“经验库”入口统一命名为“误报屏蔽规则”，并同步调整相关规则数量文案
+- **优化** 顶部导航改为更直观的中文入口名称，并增加鼠标悬停简介
 - **修复** Windows Agent 安装依赖时 `requirements-agent.txt` 在 GBK/CP936 环境下可能触发编码错误的问题
 - **修复** 同一条漏洞报告多次提交用户反馈时改为覆盖原反馈，避免 SKILL 历史经验中重复注入同一误报
 

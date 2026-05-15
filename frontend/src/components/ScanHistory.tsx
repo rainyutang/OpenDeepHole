@@ -26,6 +26,44 @@ function isRunning(status: ScanItemStatus) {
   return status === "pending" || status === "analyzing" || status === "auditing";
 }
 
+type NavButtonVariant = "default" | "primary";
+
+const NAV_BUTTON_STYLES: Record<NavButtonVariant, string> = {
+  default: "text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600",
+  primary: "text-white bg-blue-600 hover:bg-blue-700",
+};
+
+function NavButton({
+  label,
+  description,
+  onClick,
+  variant = "default",
+}: {
+  label: string;
+  description: string;
+  onClick: () => void;
+  variant?: NavButtonVariant;
+}) {
+  return (
+    <div className="relative group">
+      <button
+        onClick={onClick}
+        aria-label={`${label}：${description}`}
+        className={`px-3 py-2 text-sm font-medium rounded-lg transition-colors whitespace-nowrap ${NAV_BUTTON_STYLES[variant]}`}
+      >
+        {label}
+      </button>
+      <div
+        role="tooltip"
+        className="pointer-events-none absolute right-0 top-full z-30 mt-2 w-64 translate-y-1 rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-xs leading-relaxed text-slate-200 shadow-xl opacity-0 transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:translate-y-0 group-focus-within:opacity-100"
+      >
+        <div className="mb-0.5 font-semibold text-white">{label}</div>
+        {description}
+      </div>
+    </div>
+  );
+}
+
 export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -131,38 +169,34 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
             </span>
             {user.role === "admin" && (
               <>
-                <button
+                <NavButton
+                  label="结果看板"
+                  description="按 SKILL 汇总扫描结果、问题数量和确认情况"
                   onClick={onCheckerDashboard}
-                  className="px-3 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
-                >
-                  Dashboard
-                </button>
-                <button
+                />
+                <NavButton
+                  label="用户管理"
+                  description="管理系统用户账号和权限"
                   onClick={onManageUsers}
-                  className="px-3 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
-                >
-                  Users
-                </button>
+                />
               </>
             )}
-            <button
+            <NavButton
+              label="SKILL概览"
+              description="查看各类 SKILL 的检测范围和使用说明"
               onClick={onCheckerCatalog}
-              className="px-3 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
-            >
-              SKILL
-            </button>
-            <button
+            />
+            <NavButton
+              label="客户端"
+              description="查看已连接客户端，并配置扫描执行参数"
               onClick={onDownloadAgent}
-              className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
-            >
-              Agent
-            </button>
-            <button
+            />
+            <NavButton
+              label="新建扫描"
+              description="选择客户端、代码路径和检测项，创建扫描任务"
               onClick={onNewScan}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-            >
-              + Scan
-            </button>
+              variant="primary"
+            />
             <button
               onClick={onLogout}
               className="px-3 py-2 text-sm font-medium text-slate-400 hover:text-red-400 transition-colors"

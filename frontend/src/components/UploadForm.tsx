@@ -278,16 +278,16 @@ export default function UploadForm({ onBack }: Props) {
           <div className="mt-4 p-3 bg-slate-50 border border-slate-200 rounded-lg">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-semibold text-slate-700">经验库</p>
+                <p className="text-sm font-semibold text-slate-700">误报屏蔽规则</p>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  共 {feedbackCount} 条经验，已选 {selectedFeedbackIds.size} 条用于 SKILL
+                  共 {feedbackCount} 条规则，已选 {selectedFeedbackIds.size} 条用于 SKILL
                 </p>
               </div>
               <button
                 onClick={() => setFeedbackOpen(true)}
                 className="text-sm px-3 py-1.5 font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors"
               >
-                管理经验
+                管理规则
               </button>
             </div>
           </div>
