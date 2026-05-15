@@ -17,7 +17,7 @@ from backend.models import (
     User,
     Vulnerability,
 )
-from backend.registry import get_registry
+from backend.registry import refresh_registry
 from backend.store import get_scan_store
 
 router = APIRouter()
@@ -127,7 +127,7 @@ async def get_checker_dashboard(
 ) -> CheckerDashboardResponse:
     """Return checker/SKILL quality and usage stats for administrators."""
     store = get_scan_store()
-    registry = get_registry()
+    registry = refresh_registry()
     summaries = store.list_scans()
 
     stats: dict[str, _MutableCheckerStats] = {

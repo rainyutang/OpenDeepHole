@@ -133,6 +133,11 @@ function CheckerListItem({
         <span className="shrink-0 text-[11px] font-semibold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded">
           {item.name.toUpperCase()}
         </span>
+        {item.visibility === "admin" && (
+          <span className="shrink-0 text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5">
+            管理员测试
+          </span>
+        )}
       </div>
       <p className="text-xs text-slate-500 line-clamp-2 min-h-8">
         {item.description || "暂无描述"}
@@ -152,6 +157,11 @@ function CheckerIntro({ item }: { item: CheckerCatalogItem }) {
               <span className="text-xs font-semibold text-slate-400 bg-slate-800 px-2 py-0.5 rounded">
                 {item.name.toUpperCase()}
               </span>
+              {item.visibility === "admin" && (
+                <span className="text-xs font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-0.5">
+                  管理员测试
+                </span>
+              )}
             </div>
             <p className="text-sm text-slate-400 max-w-3xl">{item.description || "暂无描述"}</p>
           </div>

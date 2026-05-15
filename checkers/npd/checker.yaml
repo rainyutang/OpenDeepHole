@@ -1,4 +1,5 @@
 name: npd
 label: NPD
 description: Null Pointer Dereference
-enabled: false
+enabled: true
+visibility: admin

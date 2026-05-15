@@ -27,12 +27,14 @@ export interface CheckerInfo {
   name: string;
   label: string;
   description: string;
+  visibility: "public" | "admin";
 }
 
 export interface CheckerCatalogItem {
   name: string;
   label: string;
   description: string;
+  visibility: "public" | "admin";
   introduction: string;
   introduction_source: string;
 }

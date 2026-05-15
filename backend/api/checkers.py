@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends
 
 from backend.auth import get_current_user
 from backend.models import CheckerCatalogItem, CheckerInfo, User
-from backend.registry import CHECKERS_DIR
-from backend.registry import get_registry
+from backend.registry import CHECKER_VISIBILITY_ADMIN, CHECKER_VISIBILITY_PUBLIC, CHECKERS_DIR
+from backend.registry import refresh_registry
 
 router = APIRouter()
 
@@ -16,10 +16,16 @@ router = APIRouter()
 @router.get("/api/checkers", response_model=list[CheckerInfo])
 async def list_checkers(current_user: User = Depends(get_current_user)) -> list[CheckerInfo]:
     """Return all available and enabled checkers."""
-    registry = get_registry()
+    registry = refresh_registry()
     return [
-        CheckerInfo(name=e.name, label=e.label, description=e.description)
+        CheckerInfo(
+            name=e.name,
+            label=e.label,
+            description=e.description,
+            visibility=e.visibility,
+        )
         for e in registry.values()
+        if _is_visible_to_user(e.visibility, current_user)
     ]
 
 
@@ -83,6 +89,7 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
 
         label = meta.get("label", str(name).upper())
         description = meta.get("description", "")
+        visibility = _normalize_visibility(meta.get("visibility", CHECKER_VISIBILITY_PUBLIC))
         introduction, source = _read_checker_intro(
             checker_dir=checker_dir,
             skill_path=checker_dir / "SKILL.md",
@@ -93,6 +100,7 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
                 name=name,
                 label=label,
                 description=description,
+                visibility=visibility,
                 introduction=introduction,
                 introduction_source=source,
             )
@@ -106,4 +114,19 @@ async def list_checker_catalog(
     current_user: User = Depends(get_current_user),
 ) -> list[CheckerCatalogItem]:
     """Return checker/SKILL introductions for the catalog page."""
-    return _discover_catalog_items()
+    items = _discover_catalog_items()
+    return [
+        item for item in items
+        if _is_visible_to_user(item.visibility, current_user)
+    ]
+
+
+def _normalize_visibility(value: object) -> str:
+    visibility = str(value or CHECKER_VISIBILITY_PUBLIC).strip().lower()
+    if visibility not in {CHECKER_VISIBILITY_PUBLIC, CHECKER_VISIBILITY_ADMIN}:
+        return CHECKER_VISIBILITY_PUBLIC
+    return visibility
+
+
+def _is_visible_to_user(visibility: str, user: User) -> bool:
+    return visibility != CHECKER_VISIBILITY_ADMIN or user.role == "admin"

@@ -14,6 +14,7 @@ class ScanTask:
     checkers: list[str]
     scan_name: str
     feedback_entries: list[dict] = field(default_factory=list)
+    checker_packages: list[dict] = field(default_factory=list)
     cancel_event: threading.Event = field(default_factory=threading.Event)
     asyncio_task: Optional[asyncio.Task] = None
 
@@ -29,6 +30,7 @@ class TaskManager:
         checkers: list[str],
         scan_name: str,
         feedback_entries: list[dict] | None = None,
+        checker_packages: list[dict] | None = None,
     ) -> ScanTask:
         task = ScanTask(
             scan_id=scan_id,
@@ -36,6 +38,7 @@ class TaskManager:
             checkers=checkers,
             scan_name=scan_name,
             feedback_entries=feedback_entries or [],
+            checker_packages=checker_packages or [],
         )
         self._tasks[scan_id] = task
         return task

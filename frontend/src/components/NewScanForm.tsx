@@ -218,7 +218,14 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                         className="mt-0.5 w-4 h-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
                       />
                       <div>
-                        <span className="text-sm font-medium text-white">{checker.label}</span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-medium text-white">{checker.label}</span>
+                          {checker.visibility === "admin" && (
+                            <span className="text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5">
+                              管理员测试
+                            </span>
+                          )}
+                        </div>
                         <p className="text-xs text-slate-400 mt-0.5">{checker.description}</p>
                       </div>
                     </label>

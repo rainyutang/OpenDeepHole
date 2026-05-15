@@ -91,6 +91,7 @@ class CheckerInfo(BaseModel):
     name: str
     label: str
     description: str
+    visibility: str = "public"
 
 
 class CheckerCatalogItem(BaseModel):
@@ -98,6 +99,7 @@ class CheckerCatalogItem(BaseModel):
     name: str
     label: str
     description: str
+    visibility: str = "public"
     introduction: str = ""
     introduction_source: str = ""
 

@@ -14,7 +14,9 @@ import yaml
 
 from agent.config import AgentConfig
 from agent.reporter import Reporter
+from backend.checker_sync import unpack_checker_packages
 from backend.models import Candidate, FeedbackEntry, ScanEvent, Vulnerability
+from backend.registry import CHECKERS_DIR_ENV
 
 
 def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
@@ -65,6 +67,7 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
     # Reset registry singleton so it re-discovers checkers
     import backend.registry as _reg
     _reg._registry = None
+    _reg._registry_dir = None
 
 
 async def run_scan(
@@ -76,6 +79,7 @@ async def run_scan(
     scan_id: str,                    # pre-assigned by server
     cancel_event: threading.Event,   # from task_manager
     feedback_entries: list[dict] | None = None,
+    checker_packages: list[dict] | None = None,
     is_resume: bool = False,
 ) -> None:
     """Orchestrate the full local pipeline: index → static analysis → AI audit → report.
@@ -89,8 +93,15 @@ async def run_scan(
 
     mcp_server = None
     workspace: Optional[Path] = None
+    previous_checkers_dir = os.environ.get(CHECKERS_DIR_ENV)
 
     try:
+        if checker_packages:
+            synced_checkers_dir = scan_dir / "checkers"
+            unpacked = unpack_checker_packages(checker_packages, synced_checkers_dir)
+            os.environ[CHECKERS_DIR_ENV] = str(synced_checkers_dir)
+            print(f"[init] Synced {len(unpacked)} checker(s): {unpacked}")
+
         # Setup backend config before any backend imports
         _configure_backend(config, scan_dir)
 
@@ -105,7 +116,7 @@ async def run_scan(
 
         # Load checker registry (discovers from bundled checkers/ dir)
         from backend.registry import get_registry
-        registry = get_registry()
+        registry = get_registry(refresh=True)
 
         if checker_names:
             registry = {k: v for k, v in registry.items() if k in checker_names}
@@ -427,9 +438,18 @@ async def run_scan(
 
     finally:
         os.environ.pop("AGENT_PROJECT_DIR", None)
-        if mcp_server:
-            from agent import mcp_registry
-            mcp_registry.unregister(project_path)
-            mcp_server.stop()
-        if workspace is not None:
-            cleanup_workspace(workspace)
+        try:
+            if mcp_server:
+                from agent import mcp_registry
+                mcp_registry.unregister(project_path)
+                mcp_server.stop()
+            if workspace is not None:
+                cleanup_workspace(workspace)
+        finally:
+            if previous_checkers_dir is None:
+                os.environ.pop(CHECKERS_DIR_ENV, None)
+            else:
+                os.environ[CHECKERS_DIR_ENV] = previous_checkers_dir
+            import backend.registry as _reg
+            _reg._registry = None
+            _reg._registry_dir = None

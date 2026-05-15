@@ -21,7 +21,7 @@ def _scan(
     return ScanStatus(
         scan_id=scan_id,
         project_id="project",
-        scan_items=["npd"],
+        scan_items=["memleak"],
         created_at="2026-01-01T00:00:00+00:00",
         status=status,
         progress=(processed / total) if total else 0.0,
@@ -39,7 +39,7 @@ def _meta(
     user_id: str = "user-1",
 ) -> ScanMeta:
     return ScanMeta(
-        scan_items=["npd"],
+        scan_items=["memleak"],
         created_at="2026-01-01T00:00:00+00:00",
         agent_id=agent_id,
         agent_name=agent_name,

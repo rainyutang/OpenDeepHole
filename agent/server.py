@@ -34,6 +34,7 @@ async def _run(task, is_resume: bool) -> None:
             scan_id=task.scan_id,
             cancel_event=task.cancel_event,
             feedback_entries=task.feedback_entries,
+            checker_packages=task.checker_packages,
             is_resume=is_resume,
         )
     finally:
@@ -46,6 +47,7 @@ async def handle_task(
     checkers: list[str],
     scan_name: str,
     feedback_entries: list[dict] | None = None,
+    checker_packages: list[dict] | None = None,
 ) -> None:
     """Handle a 'task' command — start a new scan."""
     if _task_manager is None:
@@ -63,6 +65,7 @@ async def handle_task(
         checkers=checkers,
         scan_name=scan_name,
         feedback_entries=feedback_entries,
+        checker_packages=checker_packages,
     )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=False))
     print(f"Started task {scan_id}")
@@ -85,6 +88,7 @@ async def handle_resume(
     checkers: Optional[list[str]] = None,
     scan_name: Optional[str] = None,
     feedback_entries: Optional[list[dict]] = None,
+    checker_packages: Optional[list[dict]] = None,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
@@ -101,6 +105,7 @@ async def handle_resume(
             checkers=checkers or [],
             scan_name=scan_name or "",
             feedback_entries=feedback_entries,
+            checker_packages=checker_packages,
         )
     else:
         if project_path:
@@ -111,6 +116,8 @@ async def handle_resume(
             task.scan_name = scan_name
         if feedback_entries is not None:
             task.feedback_entries = feedback_entries
+        if checker_packages is not None:
+            task.checker_packages = checker_packages
 
     if task.asyncio_task and not task.asyncio_task.done():
         task.asyncio_task.cancel()
