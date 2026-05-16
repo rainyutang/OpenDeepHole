@@ -85,6 +85,29 @@ def refresh_skills(
         _link_skills(workspace, project_dir, feedback_entries=feedback_entries)
 
 
+def _merge_feedback_section(original: str, fp_section: str | None) -> str:
+    if not fp_section:
+        return original
+    return (
+        original.rstrip()
+        + "\n\n## 历史用户经验\n\n"
+        + "以下是用户在审计过程中选择注入的经验，"
+        + "分析时应结合这些经验校验结论：\n"
+        + fp_section
+    )
+
+
+def _link_skill_resources(entry, link_dir: Path) -> None:
+    """Symlink checker resource directories into a generated skill directory."""
+    for dir_name in _SKILL_RESOURCE_DIRS:
+        src = entry.directory / dir_name
+        if src.is_dir():
+            link_dest = link_dir / dir_name
+            if link_dest.exists() or link_dest.is_symlink():
+                os.remove(link_dest)
+            link_dest.symlink_to(src.resolve())
+
+
 def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None:
     """Generate opencode.json with MCP server configuration."""
     config = get_config()
@@ -156,18 +179,32 @@ def _link_skills(
                 if prompt_dest.exists():
                     os.remove(prompt_dest)
                 original = entry.prompt_path.read_text(encoding="utf-8")
+                prompt_dest.write_text(
+                    _merge_feedback_section(original, fp_section),
+                    encoding="utf-8",
+                )
                 if fp_section:
-                    merged = (
-                        original.rstrip()
-                        + "\n\n## 历史用户经验\n\n"
-                        + "以下是用户在审计过程中选择注入的经验，"
-                        + "分析时应结合这些经验校验结论：\n"
-                        + fp_section
-                    )
-                    prompt_dest.write_text(merged, encoding="utf-8")
                     logger.debug("Merged FP experience into prompt for checker %s", name)
-                else:
-                    prompt_dest.write_text(original, encoding="utf-8")
+            # API checker can fall back to opencode when the API is unavailable.
+            # If SKILL.md exists, generate it too so opencode can use the same
+            # checker name as the API-mode prompt directory.
+            if entry.skill_path.is_file():
+                skill_dest = link_dir / "SKILL.md"
+                if skill_dest.exists():
+                    os.remove(skill_dest)
+                original = entry.skill_path.read_text(encoding="utf-8")
+                skill_dest.write_text(
+                    _merge_feedback_section(original, fp_section),
+                    encoding="utf-8",
+                )
+                if fp_section:
+                    logger.debug("Merged FP experience into fallback skill for checker %s", name)
+            else:
+                logger.warning(
+                    "SKILL.md not found for API checker %s; opencode fallback is unavailable",
+                    name,
+                )
+            _link_skill_resources(entry, link_dir)
             continue
 
         # opencode 模式：原有 SKILL.md 逻辑
@@ -179,28 +216,15 @@ def _link_skills(
         if skill_dest.exists():
             os.remove(skill_dest)
 
+        original = entry.skill_path.read_text(encoding="utf-8")
+        skill_dest.write_text(
+            _merge_feedback_section(original, fp_section),
+            encoding="utf-8",
+        )
         if fp_section:
-            original = entry.skill_path.read_text(encoding="utf-8")
-            merged = (
-                original.rstrip()
-                + "\n\n## 历史用户经验\n\n"
-                + "以下是用户在审计过程中选择注入的经验，"
-                + "分析时应结合这些经验校验结论：\n"
-                + fp_section
-            )
-            skill_dest.write_text(merged, encoding="utf-8")
             logger.debug("Merged FP experience into skill for checker %s", name)
-        else:
-            shutil.copy2(entry.skill_path, skill_dest)
 
-        # Symlink whitelisted resource directories (references, scripts, assets)
-        for dir_name in _SKILL_RESOURCE_DIRS:
-            src = entry.directory / dir_name
-            if src.is_dir():
-                link_dest = link_dir / dir_name
-                if link_dest.exists() or link_dest.is_symlink():
-                    os.remove(link_dest)
-                link_dest.symlink_to(src.resolve())
+        _link_skill_resources(entry, link_dir)
 
     logger.debug("Linked skills for %d checkers", len(registry))
 

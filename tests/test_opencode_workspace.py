@@ -5,7 +5,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent.fp_reviewer import _cleanup_fp_workspace, _create_fp_workspace
-from backend.opencode.config import cleanup_workspace
+from backend.models import FeedbackEntry
+from backend.opencode.config import cleanup_workspace, create_scan_workspace
+from backend.registry import CheckerEntry
 
 
 class OpencodeWorkspaceTests(unittest.TestCase):
@@ -93,6 +95,66 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             self.assertFalse(fp_dir.exists())
             self.assertTrue((scan_dir / "SKILL.md").is_file())
             self.assertTrue((workspace / "opencode.json").is_file())
+
+    def test_api_checker_workspace_includes_prompt_and_fallback_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            checker_dir = root / "checkers" / "memleak"
+            checker_dir.mkdir(parents=True)
+            prompt_path = checker_dir / "prompt.txt"
+            skill_path = checker_dir / "SKILL.md"
+            prompt_path.write_text("api prompt", encoding="utf-8")
+            skill_path.write_text("fallback skill", encoding="utf-8")
+
+            entry = CheckerEntry(
+                name="memleak",
+                label="MEMLEAK",
+                description="",
+                enabled=True,
+                skill_path=skill_path,
+                directory=checker_dir,
+                mode="api",
+                prompt_path=prompt_path,
+            )
+            feedback = FeedbackEntry(
+                id="fb-1",
+                project_id="project-1",
+                vuln_type="memleak",
+                verdict="false_positive",
+                file="sample.c",
+                line=12,
+                function="leaky",
+                description="candidate",
+                reason="known false positive",
+                created_at="2026-05-16T00:00:00",
+                updated_at="2026-05-16T00:00:00",
+            )
+
+            with patch("backend.opencode.config.get_registry", return_value={"memleak": entry}):
+                create_scan_workspace(
+                    "scan-1",
+                    project_dir=project,
+                    feedback_entries=[feedback],
+                    mcp_port=9123,
+                )
+
+            skill_dir = project / ".opencode" / "skills" / "memleak"
+            prompt = (skill_dir / "PROMPT.md").read_text(encoding="utf-8")
+            skill = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+            config = json.loads((project / "opencode.json").read_text(encoding="utf-8"))
+
+            self.assertIn("api prompt", prompt)
+            self.assertIn("fallback skill", skill)
+            self.assertIn("历史用户经验", prompt)
+            self.assertIn("历史用户经验", skill)
+            self.assertIn("known false positive", prompt)
+            self.assertIn("known false positive", skill)
+            self.assertEqual(
+                config["mcp"]["deephole-code"]["url"],
+                "http://127.0.0.1:9123/mcp",
+            )
 
 
 if __name__ == "__main__":

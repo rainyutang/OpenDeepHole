@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -18,6 +20,114 @@ from backend.logger import get_logger
 from backend.models import Candidate, Vulnerability
 
 logger = get_logger(__name__)
+
+
+class LLMApiUnavailableError(RuntimeError):
+    """Raised when the configured LLM API cannot be used."""
+
+
+_api_health_cache: dict[tuple[str, str, str, float], tuple[bool, str]] = {}
+_api_health_lock = threading.Lock()
+
+
+def _cfg_value(obj, name: str, default):
+    return getattr(obj, name, default)
+
+
+def _api_config_key(llm_cfg) -> tuple[str, str, str, float]:
+    api_key = _cfg_value(llm_cfg, "api_key", "") or ""
+    api_key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest() if api_key else ""
+    timeout = float(_cfg_value(llm_cfg, "timeout", 300) or 300)
+    return (
+        _cfg_value(llm_cfg, "base_url", "") or "",
+        api_key_hash,
+        _cfg_value(llm_cfg, "model", "gpt-4o-mini") or "gpt-4o-mini",
+        timeout,
+    )
+
+
+def _client_kwargs(llm_cfg, *, timeout_override: float | None = None) -> dict:
+    kwargs: dict = {}
+    base_url = _cfg_value(llm_cfg, "base_url", "") or ""
+    api_key = _cfg_value(llm_cfg, "api_key", "") or ""
+    timeout = timeout_override if timeout_override is not None else _cfg_value(llm_cfg, "timeout", 300)
+    if base_url:
+        kwargs["base_url"] = base_url
+    if api_key:
+        kwargs["api_key"] = api_key
+    if timeout:
+        kwargs["timeout"] = timeout
+    return kwargs
+
+
+def _create_openai_client(llm_cfg, *, timeout_override: float | None = None):
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise LLMApiUnavailableError("openai SDK 未安装，无法使用 API 直调模式") from exc
+
+    try:
+        return OpenAI(**_client_kwargs(llm_cfg, timeout_override=timeout_override))
+    except Exception as exc:
+        raise LLMApiUnavailableError(f"LLM API 客户端初始化失败: {exc}") from exc
+
+
+def mark_llm_api_unavailable(reason: str) -> None:
+    """Remember that the current LLM API configuration failed in this process."""
+    llm_cfg = get_config().llm_api
+    with _api_health_lock:
+        _api_health_cache[_api_config_key(llm_cfg)] = (False, reason)
+
+
+def _probe_llm_api(llm_cfg) -> tuple[bool, str]:
+    model = _cfg_value(llm_cfg, "model", "gpt-4o-mini") or "gpt-4o-mini"
+    timeout = float(_cfg_value(llm_cfg, "timeout", 300) or 300)
+    probe_timeout = max(1.0, min(timeout, 10.0))
+
+    try:
+        client = _create_openai_client(llm_cfg, timeout_override=probe_timeout)
+        client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "health check"},
+                {"role": "user", "content": "ok"},
+            ],
+            temperature=0,
+            max_tokens=1,
+        )
+    except LLMApiUnavailableError as exc:
+        return False, str(exc)
+    except Exception as exc:
+        return False, str(exc)
+
+    return True, ""
+
+
+async def ensure_llm_api_available(on_output=None) -> None:
+    """Check that the configured LLM API can answer a minimal request."""
+    llm_cfg = get_config().llm_api
+    key = _api_config_key(llm_cfg)
+
+    with _api_health_lock:
+        cached = _api_health_cache.get(key)
+    if cached is not None:
+        available, reason = cached
+        if available:
+            return
+        raise LLMApiUnavailableError(reason)
+
+    if on_output:
+        on_output("[API] 正在检测 API 配置可用性...")
+
+    available, reason = _probe_llm_api(llm_cfg)
+    with _api_health_lock:
+        _api_health_cache[key] = (available, reason)
+
+    if not available:
+        raise LLMApiUnavailableError(reason)
+
+    if on_output:
+        on_output("[API] API 配置可用")
 
 
 def _emit_initial_api_prompt(on_output, messages: list[dict]) -> None:
@@ -429,12 +539,6 @@ async def run_audit_via_api(
     cancel_event=None,
 ) -> Vulnerability | None:
     """通过 LLM API + function calling 审计单个候选漏洞。"""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        logger.error("openai SDK 未安装，无法使用 API 直调模式")
-        return None
-
     config = get_config()
     llm_cfg = config.llm_api
     result_id = uuid4().hex
@@ -451,12 +555,7 @@ async def run_audit_via_api(
     )
 
     # 构建 OpenAI 客户端
-    client_kwargs = {}
-    if llm_cfg.base_url:
-        client_kwargs["base_url"] = llm_cfg.base_url
-    if llm_cfg.api_key:
-        client_kwargs["api_key"] = llm_cfg.api_key
-    client = OpenAI(**client_kwargs)
+    client = _create_openai_client(llm_cfg)
 
     # 加载 system prompt：优先使用 checker 目录下的 prompt.txt
     system_prompt = SYSTEM_PROMPT
@@ -509,10 +608,14 @@ async def run_audit_via_api(
             else:
                 resp = await llm_task
         except Exception as e:
+            if cancel_event and cancel_event.is_set():
+                return None
             logger.error("LLM API 调用失败: %s", e)
             if on_output:
                 on_output(f"[API] LLM 调用失败: {e}")
-            return None
+            reason = f"LLM API 调用失败: {e}"
+            mark_llm_api_unavailable(reason)
+            raise LLMApiUnavailableError(reason) from e
 
         choice = resp.choices[0]
         message = choice.message
@@ -814,12 +917,6 @@ async def run_batch_audit_via_api(
     cancel_event=None,
 ) -> list[Vulnerability | None]:
     """通过 LLM API + function calling 批量审计同一函数内的多个候选。"""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        logger.error("openai SDK 未安装，无法使用 API 直调模式")
-        return [None] * len(candidates)
-
     config = get_config()
     llm_cfg = config.llm_api
 
@@ -841,12 +938,7 @@ async def run_batch_audit_via_api(
     )
 
     # 构建 OpenAI 客户端
-    client_kwargs = {}
-    if llm_cfg.base_url:
-        client_kwargs["base_url"] = llm_cfg.base_url
-    if llm_cfg.api_key:
-        client_kwargs["api_key"] = llm_cfg.api_key
-    client = OpenAI(**client_kwargs)
+    client = _create_openai_client(llm_cfg)
 
     # 加载 system prompt：优先使用 checker 目录下的 prompt.txt
     system_prompt = SYSTEM_PROMPT
@@ -875,6 +967,7 @@ async def run_batch_audit_via_api(
             llm_task = asyncio.create_task(asyncio.to_thread(
                 _call_llm, client, llm_cfg.model, messages,
                 llm_cfg.temperature, llm_cfg.max_retries, TOOLS_BATCH,
+                cancel_check=cancel_event.is_set if cancel_event else None,
                 stream=llm_cfg.stream,
             ))
             if cancel_event:
@@ -894,10 +987,14 @@ async def run_batch_audit_via_api(
             else:
                 resp = await llm_task
         except Exception as e:
+            if cancel_event and cancel_event.is_set():
+                return [None] * len(candidates)
             logger.error("LLM API 批量调用失败: %s", e)
             if on_output:
                 on_output(f"[API] LLM 调用失败: {e}")
-            return [None] * len(candidates)
+            reason = f"LLM API 批量调用失败: {e}"
+            mark_llm_api_unavailable(reason)
+            raise LLMApiUnavailableError(reason) from e
 
         choice = resp.choices[0]
         message = choice.message

@@ -214,9 +214,9 @@ async def run_scan(
         if selected_feedback:
             await emit("init", f"Loaded {len(selected_feedback)} selected feedback entries")
 
-        # --- Phase 3: Start local MCP (needed by any opencode-mode checker) ---
+        # --- Phase 3: Start local MCP (needed by opencode and API fallback) ---
         mcp_port = None
-        needs_opencode = any(entry.mode == "opencode" for entry in registry.values())
+        needs_opencode = any(entry.mode in {"opencode", "api"} for entry in registry.values())
         if needs_opencode:
             from agent.local_mcp import LocalMCPServer
             from agent import mcp_registry

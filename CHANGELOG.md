@@ -2,6 +2,7 @@
 
 ## 2026-05-16
 
+- **新增** API 模式 checker 在审计前检测 LLM API 可用性，配置不可用或调用失败时自动降级使用 opencode 模式继续扫描
 - **修复** `mode: api` 的 checker 不再受旧版 `llm_api.enabled` 全局开关影响，避免 MEMLEAK 在 API 模式配置下误回退到 opencode
 - **优化** Agent 控制台审计输出不再统一添加 `[opencode]` 前缀，API 直调日志会按 `[API]` 显示真实执行路径
 

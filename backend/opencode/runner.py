@@ -74,16 +74,53 @@ async def run_audit(
     use_api = checker_entry is not None and checker_entry.mode == "api"
 
     if use_api:
-        from backend.opencode.llm_api_runner import run_audit_via_api
-        # 优先使用 workspace 中合并了反馈的 prompt
-        merged_prompt = workspace / ".opencode" / "skills" / candidate.vuln_type / "PROMPT.md"
-        prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
-        return await run_audit_via_api(
-            candidate, project_id,
-            prompt_path=prompt_path,
-            on_output=on_output,
-            cancel_event=cancel_event,
+        from backend.opencode.llm_api_runner import (
+            LLMApiUnavailableError,
+            ensure_llm_api_available,
+            run_audit_via_api,
         )
+        try:
+            await ensure_llm_api_available(on_output=on_output)
+            # 优先使用 workspace 中合并了反馈的 prompt
+            merged_prompt = workspace / ".opencode" / "skills" / candidate.vuln_type / "PROMPT.md"
+            prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
+            return await run_audit_via_api(
+                candidate, project_id,
+                prompt_path=prompt_path,
+                on_output=on_output,
+                cancel_event=cancel_event,
+            )
+        except LLMApiUnavailableError as exc:
+            logger.warning(
+                "LLM API unavailable for checker %s; falling back to opencode: %s",
+                candidate.vuln_type, exc,
+            )
+            if on_output:
+                on_output(f"[API] API 不可用，降级为 opencode: {exc}")
+
+    return await _run_audit_via_opencode(
+        workspace,
+        candidate,
+        project_id,
+        checker_entry,
+        on_output=on_output,
+        cancel_event=cancel_event,
+        timeout=effective_timeout,
+    )
+
+
+async def _run_audit_via_opencode(
+    workspace: Path,
+    candidate: Candidate,
+    project_id: str,
+    checker_entry=None,
+    on_output=None,
+    cancel_event=None,
+    timeout: int | None = None,
+) -> Vulnerability | None:
+    """Run the opencode CLI path regardless of checker mode."""
+    config = get_config()
+    effective_timeout = timeout if timeout is not None else config.opencode.timeout
 
     # Skill directory is .opencode/skills/<name>/ where <name> == vuln_type.
     # Use checker_entry.skill_name if explicitly set, otherwise fall back to
@@ -463,16 +500,29 @@ async def run_audit_batch(
     use_api = checker_entry is not None and checker_entry.mode == "api"
 
     if use_api:
-        from backend.opencode.llm_api_runner import run_batch_audit_via_api
-        # 优先使用 workspace 中合并了反馈的 prompt
-        merged_prompt = workspace / ".opencode" / "skills" / candidates[0].vuln_type / "PROMPT.md"
-        prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
-        return await run_batch_audit_via_api(
-            candidates, project_id,
-            prompt_path=prompt_path,
-            on_output=on_output,
-            cancel_event=cancel_event,
+        from backend.opencode.llm_api_runner import (
+            LLMApiUnavailableError,
+            ensure_llm_api_available,
+            run_batch_audit_via_api,
         )
+        try:
+            await ensure_llm_api_available(on_output=on_output)
+            # 优先使用 workspace 中合并了反馈的 prompt
+            merged_prompt = workspace / ".opencode" / "skills" / candidates[0].vuln_type / "PROMPT.md"
+            prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
+            return await run_batch_audit_via_api(
+                candidates, project_id,
+                prompt_path=prompt_path,
+                on_output=on_output,
+                cancel_event=cancel_event,
+            )
+        except LLMApiUnavailableError as exc:
+            logger.warning(
+                "LLM API unavailable for checker %s batch; falling back to opencode: %s",
+                candidates[0].vuln_type, exc,
+            )
+            if on_output:
+                on_output(f"[API] API 不可用，批量审计降级为 opencode: {exc}")
 
     # opencode CLI 模式：退化为逐个调用
     results = []
@@ -480,8 +530,9 @@ async def run_audit_batch(
         if cancel_event and cancel_event.is_set():
             results.append(None)
             continue
-        vuln = await run_audit(
+        vuln = await _run_audit_via_opencode(
             workspace, candidate, project_id,
+            checker_entry,
             on_output=on_output,
             cancel_event=cancel_event,
             timeout=timeout,
