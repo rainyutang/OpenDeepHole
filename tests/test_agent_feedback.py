@@ -4,6 +4,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent import fp_reviewer
+from agent.scanner import _build_function_source_cache, _attach_function_source
+from backend.models import Candidate, Vulnerability
 
 
 class AgentFeedbackTests(unittest.TestCase):
@@ -22,6 +24,42 @@ class AgentFeedbackTests(unittest.TestCase):
                 self.assertEqual(feedback["npd"], [
                     {"id": "fb-1", "vuln_type": "npd", "reason": "new"}
                 ])
+
+    def test_scanner_snapshots_function_source_for_vulnerability(self) -> None:
+        class FakeDb:
+            def get_functions_by_name(self, name: str):
+                return [
+                    {
+                        "file_path": "src/a.c",
+                        "start_line": 10,
+                        "end_line": 20,
+                        "body": "void parse(void) {\n}",
+                    }
+                ]
+
+        candidate = Candidate(
+            file="src/a.c",
+            line=12,
+            function="parse",
+            description="possible null dereference",
+            vuln_type="npd",
+        )
+        cache = _build_function_source_cache(Path("."), [candidate], FakeDb())
+        vuln = Vulnerability(
+            file=candidate.file,
+            line=candidate.line,
+            function=candidate.function,
+            vuln_type=candidate.vuln_type,
+            severity="medium",
+            description=candidate.description,
+            ai_analysis="analysis",
+            confirmed=True,
+        )
+
+        _attach_function_source(vuln, candidate, cache)
+
+        self.assertEqual(vuln.function_source, "void parse(void) {\n}")
+        self.assertEqual(vuln.function_start_line, 10)
 
 
 if __name__ == "__main__":

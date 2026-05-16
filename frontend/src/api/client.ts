@@ -187,6 +187,8 @@ export async function createFeedback(body: {
   function: string;
   description: string;
   reason?: string;
+  function_source?: string;
+  function_start_line?: number | null;
   source_scan_id?: string;
 }): Promise<FeedbackEntry> {
   const { data } = await api.post<FeedbackEntry>("/api/feedback", body);

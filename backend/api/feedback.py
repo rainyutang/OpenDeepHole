@@ -50,6 +50,8 @@ async def create_feedback(
         function=body.function,
         description=body.description,
         reason=body.reason,
+        function_source=body.function_source,
+        function_start_line=body.function_start_line,
         source_scan_id=body.source_scan_id,
         created_at=now,
         updated_at=now,

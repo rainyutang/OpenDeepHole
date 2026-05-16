@@ -17,6 +17,8 @@ def make_feedback(entry_id: str, verdict: str, reason: str) -> FeedbackEntry:
         function="parse",
         description="possible null dereference",
         reason=reason,
+        function_source="void parse(void) {\n}",
+        function_start_line=40,
         source_scan_id="scan-1",
         created_at="2026-01-01T00:00:00+00:00",
         updated_at="2026-01-01T00:00:00+00:00",
@@ -39,6 +41,8 @@ class FeedbackStoreTests(unittest.TestCase):
             self.assertEqual(updated.id, "first")
             self.assertEqual(updated.verdict, "confirmed")
             self.assertEqual(updated.reason, "new reason")
+            self.assertEqual(updated.function_source, "void parse(void) {\n}")
+            self.assertEqual(updated.function_start_line, 40)
             self.assertEqual(updated.updated_at, "2026-01-02T00:00:00+00:00")
 
             entries = store.list_feedback_by_scan("scan-1")

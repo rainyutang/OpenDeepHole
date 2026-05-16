@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     description         TEXT NOT NULL,
     ai_analysis         TEXT NOT NULL,
     confirmed           INTEGER NOT NULL,
+    function_source     TEXT NOT NULL DEFAULT '',
+    function_start_line INTEGER,
     user_verdict        TEXT,
     user_verdict_reason TEXT,
     UNIQUE(scan_id, idx)
@@ -85,6 +87,8 @@ CREATE TABLE IF NOT EXISTS feedback_entries (
     function        TEXT NOT NULL,
     description     TEXT NOT NULL,
     reason          TEXT NOT NULL DEFAULT '',
+    function_source TEXT NOT NULL DEFAULT '',
+    function_start_line INTEGER,
     source_scan_id  TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
@@ -171,6 +175,25 @@ class SqliteScanStore(ScanStoreBase):
         if "ai_verdict" not in vuln_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN ai_verdict TEXT DEFAULT ''"
+            )
+        if "function_source" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN function_source TEXT DEFAULT ''"
+            )
+        if "function_start_line" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN function_start_line INTEGER"
+            )
+
+        feedback_cur = self._conn.execute("PRAGMA table_info(feedback_entries)")
+        feedback_cols = {r[1] for r in feedback_cur.fetchall()}
+        if "function_source" not in feedback_cols:
+            self._conn.execute(
+                "ALTER TABLE feedback_entries ADD COLUMN function_source TEXT DEFAULT ''"
+            )
+        if "function_start_line" not in feedback_cols:
+            self._conn.execute(
+                "ALTER TABLE feedback_entries ADD COLUMN function_start_line INTEGER"
             )
         # Ensure users table exists
         self._conn.executescript("""\
@@ -476,8 +499,9 @@ class SqliteScanStore(ScanStoreBase):
                 INSERT INTO vulnerabilities
                     (scan_id, idx, file, line, function, vuln_type,
                      severity, description, ai_analysis, confirmed,
-                     ai_verdict, user_verdict, user_verdict_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ai_verdict, user_verdict, user_verdict_reason,
+                     function_source, function_start_line)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -493,6 +517,8 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.ai_verdict,
                     vuln.user_verdict,
                     vuln.user_verdict_reason,
+                    vuln.function_source,
+                    vuln.function_start_line,
                 ),
             )
             self._conn.commit()
@@ -534,6 +560,8 @@ class SqliteScanStore(ScanStoreBase):
                 ai_verdict=r["ai_verdict"] or "",
                 user_verdict=r["user_verdict"],
                 user_verdict_reason=r["user_verdict_reason"],
+                function_source=r["function_source"] or "",
+                function_start_line=r["function_start_line"],
             )
             for r in cur.fetchall()
         ]
@@ -607,13 +635,15 @@ class SqliteScanStore(ScanStoreBase):
                 """\
                 INSERT INTO feedback_entries
                     (id, project_id, vuln_type, verdict, file, line, function,
-                     description, reason, source_scan_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     description, reason, function_source, function_start_line,
+                     source_scan_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry.id, entry.project_id, entry.vuln_type, entry.verdict,
                     entry.file, entry.line, entry.function, entry.description,
-                    entry.reason, entry.source_scan_id,
+                    entry.reason, entry.function_source, entry.function_start_line,
+                    entry.source_scan_id,
                     entry.created_at, entry.updated_at,
                 ),
             )
@@ -655,13 +685,15 @@ class SqliteScanStore(ScanStoreBase):
                     """\
                     INSERT INTO feedback_entries
                         (id, project_id, vuln_type, verdict, file, line, function,
-                         description, reason, source_scan_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         description, reason, function_source, function_start_line,
+                         source_scan_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         entry.id, entry.project_id, entry.vuln_type, entry.verdict,
                         entry.file, entry.line, entry.function, entry.description,
-                        entry.reason, entry.source_scan_id,
+                        entry.reason, entry.function_source, entry.function_start_line,
+                        entry.source_scan_id,
                         entry.created_at, entry.updated_at,
                     ),
                 )
@@ -673,10 +705,19 @@ class SqliteScanStore(ScanStoreBase):
                     UPDATE feedback_entries
                     SET verdict = ?,
                         reason = ?,
+                        function_source = ?,
+                        function_start_line = ?,
                         updated_at = ?
                     WHERE id = ?
                     """,
-                    (entry.verdict, entry.reason, entry.updated_at, kept_id),
+                    (
+                        entry.verdict,
+                        entry.reason,
+                        entry.function_source,
+                        entry.function_start_line,
+                        entry.updated_at,
+                        kept_id,
+                    ),
                 )
                 duplicate_ids = matching_ids[1:]
                 if duplicate_ids:
@@ -777,6 +818,8 @@ class SqliteScanStore(ScanStoreBase):
             function=row["function"],
             description=row["description"],
             reason=row["reason"],
+            function_source=row["function_source"] or "",
+            function_start_line=row["function_start_line"],
             source_scan_id=row["source_scan_id"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],

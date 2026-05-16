@@ -82,6 +82,8 @@ class Vulnerability(BaseModel):
     ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result"
     user_verdict: str | None = None          # "confirmed" | "false_positive" | None
     user_verdict_reason: str | None = None   # 用户填写的理由
+    function_source: str = ""
+    function_start_line: int | None = None
 
 
 # --- API request/response models ---
@@ -170,6 +172,8 @@ class FeedbackEntry(BaseModel):
     function: str
     description: str
     reason: str = ""
+    function_source: str = ""
+    function_start_line: int | None = None
     source_scan_id: str | None = None
     created_at: str
     updated_at: str
@@ -185,6 +189,8 @@ class FeedbackCreateRequest(BaseModel):
     function: str
     description: str
     reason: str = ""
+    function_source: str = ""
+    function_start_line: int | None = None
     source_scan_id: str | None = None
 
 

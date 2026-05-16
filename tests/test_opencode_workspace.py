@@ -66,8 +66,18 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 9123,
                 vuln_type="npd",
                 feedback_entries=[
-                    {"vuln_type": "npd", "verdict": "confirmed", "reason": "npd true-positive rule"},
-                    {"vuln_type": "npd", "verdict": "false_positive", "reason": "npd false-positive rule"},
+                    {
+                        "vuln_type": "npd",
+                        "verdict": "confirmed",
+                        "reason": "npd true-positive rule",
+                        "function_source": "void checked(void) {}",
+                    },
+                    {
+                        "vuln_type": "npd",
+                        "verdict": "false_positive",
+                        "reason": "npd false-positive rule",
+                        "function_source": "void guarded(void) {}",
+                    },
                     {"vuln_type": "oob", "verdict": "false_positive", "reason": "oob rule"},
                     {"vuln_type": "npd", "verdict": "false_positive", "reason": ""},
                 ],
@@ -75,8 +85,12 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
             skill = (workspace / ".opencode" / "skills" / "fp-review" / "SKILL.md").read_text(encoding="utf-8")
             self.assertIn("历史用户经验", skill)
-            self.assertIn("[正报] npd true-positive rule", skill)
-            self.assertIn("[误报] npd false-positive rule", skill)
+            self.assertIn("用户理由：npd true-positive rule", skill)
+            self.assertIn("void checked(void) {}", skill)
+            self.assertIn("用户理由：npd false-positive rule", skill)
+            self.assertIn("void guarded(void) {}", skill)
+            self.assertNotIn("[正报]", skill)
+            self.assertNotIn("[误报]", skill)
             self.assertNotIn("oob rule", skill)
 
     def test_fp_cleanup_only_removes_fp_review_artifacts(self) -> None:
@@ -128,6 +142,8 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 function="leaky",
                 description="candidate",
                 reason="known false positive",
+                function_source="void leaky(void) {}",
+                function_start_line=10,
                 created_at="2026-05-16T00:00:00",
                 updated_at="2026-05-16T00:00:00",
             )
@@ -151,6 +167,10 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             self.assertIn("历史用户经验", skill)
             self.assertIn("known false positive", prompt)
             self.assertIn("known false positive", skill)
+            self.assertIn("void leaky(void) {}", prompt)
+            self.assertIn("void leaky(void) {}", skill)
+            self.assertNotIn("candidate", prompt)
+            self.assertNotIn("candidate", skill)
             self.assertEqual(
                 config["mcp"]["deephole-code"]["url"],
                 "http://127.0.0.1:9123/mcp",

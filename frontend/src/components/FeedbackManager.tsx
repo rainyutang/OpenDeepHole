@@ -50,6 +50,7 @@ export default function FeedbackManager({
     function: "",
     description: "",
     reason: "",
+    function_source: "",
   });
 
   // SKILL preview state
@@ -173,6 +174,7 @@ export default function FeedbackManager({
         function: addForm.function,
         description: addForm.description,
         reason: addForm.reason,
+        function_source: addForm.function_source,
       });
       setEntries((prev) => [entry, ...prev]);
       await onFeedbackCreated?.([entry.id]);
@@ -185,6 +187,7 @@ export default function FeedbackManager({
         function: "",
         description: "",
         reason: "",
+        function_source: "",
       });
     } catch {
       // ignore
@@ -380,6 +383,13 @@ export default function FeedbackManager({
               onChange={(e) => setAddForm((f) => ({ ...f, reason: e.target.value }))}
               placeholder="理由"
               className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 placeholder-slate-500"
+            />
+            <textarea
+              value={addForm.function_source}
+              onChange={(e) => setAddForm((f) => ({ ...f, function_source: e.target.value }))}
+              placeholder="函数源码（可选）"
+              rows={5}
+              className="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 placeholder-slate-500 font-mono resize-y"
             />
             <div className="flex gap-2">
               <button

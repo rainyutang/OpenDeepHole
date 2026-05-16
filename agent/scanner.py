@@ -19,6 +19,85 @@ from backend.models import Candidate, FeedbackEntry, ScanEvent, Vulnerability
 from backend.registry import CHECKERS_DIR_ENV
 
 
+FunctionSourceSnapshot = tuple[str, int | None]
+
+
+def _path_matches_indexed_file(indexed_path: str, candidate_file: str) -> bool:
+    indexed = indexed_path.replace("\\", "/")
+    candidate = candidate_file.replace("\\", "/")
+    return indexed == candidate or indexed.endswith(f"/{candidate}") or candidate.endswith(f"/{indexed}")
+
+
+def _select_function_row(rows, candidate: Candidate):
+    for row in rows:
+        if (
+            _path_matches_indexed_file(row["file_path"], candidate.file)
+            and row["start_line"] <= candidate.line <= row["end_line"]
+        ):
+            return row
+    for row in rows:
+        if row["start_line"] <= candidate.line <= row["end_line"]:
+            return row
+    for row in rows:
+        if _path_matches_indexed_file(row["file_path"], candidate.file):
+            return row
+    return rows[0] if rows else None
+
+
+def _build_function_source_cache(
+    project_path: Path,
+    candidates: list[Candidate],
+    db=None,
+) -> dict[tuple[str, int, str, str], FunctionSourceSnapshot]:
+    """Snapshot function bodies for feedback before the source tree changes."""
+    source_db = db
+    owned_db = None
+    if source_db is None:
+        db_path = project_path / "code_index.db"
+        if not db_path.exists():
+            return {}
+        try:
+            from code_parser import CodeDatabase
+            owned_db = CodeDatabase(db_path)
+            source_db = owned_db
+        except Exception:
+            return {}
+
+    cache: dict[tuple[str, int, str, str], FunctionSourceSnapshot] = {}
+    try:
+        rows_by_function: dict[str, list] = {}
+        for candidate in candidates:
+            rows = rows_by_function.get(candidate.function)
+            if rows is None:
+                rows = source_db.get_functions_by_name(candidate.function)
+                rows_by_function[candidate.function] = rows
+            row = _select_function_row(rows, candidate)
+            if row is None:
+                continue
+            cache[(candidate.file, candidate.line, candidate.function, candidate.vuln_type)] = (
+                row["body"] or "",
+                row["start_line"],
+            )
+    finally:
+        if owned_db is not None:
+            owned_db.close()
+    return cache
+
+
+def _attach_function_source(
+    vuln: Vulnerability,
+    candidate: Candidate,
+    source_cache: dict[tuple[str, int, str, str], FunctionSourceSnapshot],
+) -> Vulnerability:
+    source, start_line = source_cache.get(
+        (candidate.file, candidate.line, candidate.function, candidate.vuln_type),
+        ("", None),
+    )
+    vuln.function_source = source
+    vuln.function_start_line = start_line
+    return vuln
+
+
 def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
     """Write a temporary backend config and reset singletons so all backend
     modules use the agent's settings (LLM API key, scans_dir, etc.)."""
@@ -305,6 +384,8 @@ async def run_scan(
                 encoding="utf-8",
             )
 
+        function_source_cache = _build_function_source_cache(project_path, candidates, db)
+
         if db is not None:
             db.close()
 
@@ -389,6 +470,7 @@ async def run_scan(
                     confirmed=False,
                     ai_verdict="no_result",
                 )
+            _attach_function_source(vuln, candidate, function_source_cache)
 
             vulnerabilities.append(vuln)
             _verdict_labels = {

@@ -345,6 +345,7 @@ def _create_fp_workspace(
 ) -> Path:
     """Ensure project-root opencode config and fp-review SKILL exist."""
     from backend.opencode.config import get_workspace_lock
+    from backend.opencode.feedback_format import format_feedback_experience
 
     workspace = project_path
 
@@ -368,21 +369,17 @@ def _create_fp_workspace(
         skill_src = Path(__file__).parent / "skills" / "fp_review.md"
         content = skill_src.read_text(encoding="utf-8")
 
-        fp_lines: list[str] = []
-        for entry in feedback_entries or []:
-            if vuln_type and entry.get("vuln_type") != vuln_type:
-                continue
-            reason = entry.get("reason")
-            if not reason:
-                continue
-            verdict_label = "正报" if entry.get("verdict") == "confirmed" else "误报"
-            fp_lines.append(f"\n- [{verdict_label}] {reason}\n")
-        if fp_lines:
+        matching_feedback = [
+            entry for entry in feedback_entries or []
+            if not vuln_type or entry.get("vuln_type") == vuln_type
+        ]
+        fp_section = format_feedback_experience(matching_feedback)
+        if fp_section:
             content = content.rstrip() + (
                 "\n\n## 历史用户经验\n\n"
                 "以下是用户在审计过程中选择注入的经验，"
                 "复核时应结合这些经验校验结论：\n"
-                + "".join(fp_lines)
+                + fp_section
             )
 
         (skills_dir / "SKILL.md").write_text(content, encoding="utf-8")

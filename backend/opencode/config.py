@@ -11,6 +11,7 @@ from pathlib import Path
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import FeedbackEntry
+from backend.opencode.feedback_format import format_feedback_experience
 from backend.registry import get_registry
 
 logger = get_logger(__name__)
@@ -157,13 +158,7 @@ def _link_skills(
         # 构建反馈内容（API 和 opencode 模式共用）
         fp_section: str | None = None
         if name in feedback_by_type:
-            lines = []
-            for fb in feedback_by_type[name]:
-                text = fb.reason or fb.description
-                if text:
-                    verdict_label = "正报" if fb.verdict == "confirmed" else "误报"
-                    lines.append(f"\n- [{verdict_label}] {text}\n")
-            fp_section = "".join(lines)
+            fp_section = format_feedback_experience(feedback_by_type[name])
         elif fp_dir:
             fp_file = fp_dir / f"{name}.md"
             if fp_file.is_file():

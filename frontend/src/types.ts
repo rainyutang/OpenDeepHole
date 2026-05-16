@@ -60,6 +60,8 @@ export interface Vulnerability {
   ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "";
   user_verdict?: "confirmed" | "false_positive" | null;
   user_verdict_reason?: string | null;
+  function_source?: string;
+  function_start_line?: number | null;
 }
 
 export interface Candidate {
@@ -112,6 +114,8 @@ export interface FeedbackEntry {
   function: string;
   description: string;
   reason: string;
+  function_source: string;
+  function_start_line: number | null;
   source_scan_id: string | null;
   created_at: string;
   updated_at: string;

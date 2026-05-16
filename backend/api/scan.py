@@ -37,6 +37,7 @@ from backend.models import (
     ScanSummary,
     User,
 )
+from backend.opencode.feedback_format import build_feedback_section
 from backend.store import get_scan_store
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
 
@@ -519,6 +520,8 @@ def _mark_single(scan_id: str, scan: ScanStatus, store, index: int, verdict: str
         function=vuln.function,
         description=vuln.description,
         reason=reason,
+        function_source=vuln.function_source,
+        function_start_line=vuln.function_start_line,
         source_scan_id=scan_id,
         created_at=now,
         updated_at=now,
@@ -782,19 +785,10 @@ async def get_scan_skill(
             seen.add(fb.id)
             unique_fb.append(fb)
 
-    fp_lines = [
-        f"\n- {fb.reason}\n"
-        for fb in unique_fb
-        if fb.vuln_type == vuln_type and fb.reason
-    ]
-    fp_section = ""
-    if fp_lines:
-        fp_section = (
-            "\n\n## 历史用户经验\n\n"
-            "以下是用户在审计过程中选择注入的经验，"
-            "分析时应结合这些经验校验结论：\n"
-            + "".join(fp_lines)
-        )
+    fp_section = build_feedback_section(
+        (fb for fb in unique_fb if fb.vuln_type == vuln_type),
+        "以下是用户在审计过程中选择注入的经验，分析时应结合这些经验校验结论：",
+    )
 
     return {"vuln_type": vuln_type, "content": original.rstrip() + fp_section}
 
@@ -821,24 +815,10 @@ async def get_fp_review_skill(
             seen.add(fb.id)
             unique_fb.append(fb)
 
-    by_type: dict[str, list[FeedbackEntry]] = {}
-    for fb in unique_fb:
-        if fb.reason:
-            by_type.setdefault(fb.vuln_type, []).append(fb)
-    fp_lines: list[str] = []
-    for vuln_type in sorted(by_type):
-        fp_lines.append(f"\n### {vuln_type.upper()}\n")
-        for fb in by_type[vuln_type]:
-            verdict_label = "正报" if fb.verdict == "confirmed" else "误报"
-            fp_lines.append(f"\n- [{verdict_label}] {fb.reason}\n")
-    fp_section = ""
-    if fp_lines:
-        fp_section = (
-            "\n\n## 历史用户经验\n\n"
-            "以下是用户在审计过程中选择注入的经验，"
-            "复核时应结合对应类型的经验校验结论：\n"
-            + "".join(fp_lines)
-        )
+    fp_section = build_feedback_section(
+        unique_fb,
+        "以下是用户在审计过程中选择注入的经验，复核时应结合这些经验校验结论：",
+    )
 
     return {"content": original.rstrip() + fp_section}
 
