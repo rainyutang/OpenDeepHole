@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -27,3 +28,109 @@ def test_resleak_cppcheck_output_uses_utf8_replace(tmp_path: Path) -> None:
 
     with patch("checkers.resleak.analyzer.subprocess.run", side_effect=fake_run):
         assert list(resleak_analyzer._run_cppcheck(tmp_path, "cppcheck")) == []
+
+
+def test_inf_loop_uses_function_name_from_semgrep_message(tmp_path: Path) -> None:
+    output = _semgrep_output(
+        path="missing.c",
+        line=12,
+        message=(
+            "Function=`append`. CWE-835 potential infinite loop: "
+            "loop-progress variable `begin` is advanced by `count`."
+        ),
+        metavars={},
+    )
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/semgrep"),
+        patch("checkers.inf_loop.analyzer.subprocess.run", return_value=output),
+    ):
+        candidates = list(InfLoopAnalyzer().find_candidates(tmp_path))
+
+    assert candidates[0].function == "append"
+
+
+def test_inf_loop_matches_windows_semgrep_path_to_code_database(tmp_path: Path) -> None:
+    project = tmp_path / "srsRAN_Project-main"
+    project.mkdir()
+    reported_path = r"srsRAN_Project-main\external\fmt\include\fmt\base.h"
+    output = _semgrep_output(
+        path=reported_path,
+        line=1812,
+        message="CWE-835 potential infinite loop",
+        metavars={},
+    )
+
+    class FakeDb:
+        def get_all_functions(self):
+            return [
+                {
+                    "file_path": "external/fmt/include/fmt/base.h",
+                    "start_line": 1800,
+                    "end_line": 1820,
+                    "name": "append",
+                }
+            ]
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/semgrep"),
+        patch("checkers.inf_loop.analyzer.subprocess.run", return_value=output),
+    ):
+        candidates = list(InfLoopAnalyzer().find_candidates(project, FakeDb()))
+
+    assert candidates[0].function == "append"
+    assert candidates[0].file == "external/fmt/include/fmt/base.h"
+
+
+def test_inf_loop_resolves_windows_semgrep_path_for_tree_sitter(tmp_path: Path) -> None:
+    project = tmp_path / "srsRAN_Project-main"
+    source = project / "external" / "fmt" / "include" / "fmt" / "base.h"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "void append() {\n"
+        "  int begin = 0;\n"
+        "  while (begin < 10) {\n"
+        "    begin += 1;\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    output = _semgrep_output(
+        path=r"srsRAN_Project-main\external\fmt\include\fmt\base.h",
+        line=3,
+        message="CWE-835 potential infinite loop",
+        metavars={},
+    )
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/semgrep"),
+        patch("checkers.inf_loop.analyzer.subprocess.run", return_value=output),
+    ):
+        candidates = list(InfLoopAnalyzer().find_candidates(project))
+
+    assert candidates[0].function == "append"
+    assert candidates[0].file == "external/fmt/include/fmt/base.h"
+
+
+def _semgrep_output(
+    *,
+    path: str,
+    line: int,
+    message: str,
+    metavars: dict,
+) -> CompletedProcess:
+    payload = {
+        "results": [
+            {
+                "path": path,
+                "start": {"line": line},
+                "check_id": "c-cpp.loop.unchecked-zero-step-add-assign",
+                "extra": {
+                    "severity": "WARNING",
+                    "message": message,
+                    "metavars": metavars,
+                },
+            }
+        ]
+    }
+    return CompletedProcess(["semgrep"], 0, stdout=json.dumps(payload), stderr="")
