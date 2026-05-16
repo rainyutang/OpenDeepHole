@@ -58,7 +58,7 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
               &larr; 返回
             </button>
             <div>
-              <h1 className="text-lg font-bold text-white">Checker 看板</h1>
+              <h1 className="text-lg font-bold text-white">结果看板</h1>
               <p className="text-sm text-slate-400 mt-0.5">
                 按 SKILL 汇总扫描覆盖、问题确认和人工反馈准确率
               </p>

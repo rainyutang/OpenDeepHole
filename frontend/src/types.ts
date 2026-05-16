@@ -34,6 +34,7 @@ export interface CheckerCatalogItem {
   name: string;
   label: string;
   description: string;
+  enabled: boolean;
   visibility: "public" | "admin";
   introduction: string;
   introduction_source: string;

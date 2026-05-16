@@ -49,7 +49,7 @@ export default function CheckerCatalogPage({ onBack }: Props) {
               &larr; 返回
             </button>
             <div>
-              <h1 className="text-lg font-bold text-white">SKILL / Checker</h1>
+              <h1 className="text-lg font-bold text-white">SKILL概览</h1>
               <p className="text-sm text-slate-400 mt-0.5">
                 查看当前可用 SKILL 的检测范围和使用说明
               </p>
@@ -133,6 +133,11 @@ function CheckerListItem({
         <span className="shrink-0 text-[11px] font-semibold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded">
           {item.name.toUpperCase()}
         </span>
+        {item.enabled && (
+          <span className="shrink-0 text-[11px] font-semibold text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded px-1.5 py-0.5">
+            已启用
+          </span>
+        )}
         {item.visibility === "admin" && (
           <span className="shrink-0 text-[11px] font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5">
             管理员测试
@@ -157,6 +162,11 @@ function CheckerIntro({ item }: { item: CheckerCatalogItem }) {
               <span className="text-xs font-semibold text-slate-400 bg-slate-800 px-2 py-0.5 rounded">
                 {item.name.toUpperCase()}
               </span>
+              {item.enabled && (
+                <span className="text-xs font-semibold text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded px-2 py-0.5">
+                  已启用
+                </span>
+              )}
               {item.visibility === "admin" && (
                 <span className="text-xs font-semibold text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-0.5">
                   管理员测试

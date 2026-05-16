@@ -99,6 +99,7 @@ class CheckerCatalogItem(BaseModel):
     name: str
     label: str
     description: str
+    enabled: bool = True
     visibility: str = "public"
     introduction: str = ""
     introduction_source: str = ""

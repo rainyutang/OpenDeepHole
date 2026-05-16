@@ -45,9 +45,9 @@ async def run_audit(
 ) -> Vulnerability | None:
     """Run opencode to analyze a single candidate vulnerability.
 
-    Supports two modes (selected via config):
+    Supports two modes (selected via checker.yaml):
     - opencode CLI mode (default): invokes opencode subprocess with MCP tools
-    - LLM API mode (llm_api.enabled=true): direct API call with function calling
+    - LLM API mode: direct API call with function calling
 
     Args:
         workspace: Path to the opencode workspace (contains opencode.json + skills).
@@ -71,11 +71,7 @@ async def run_audit(
     from backend.registry import get_registry
     registry = get_registry()
     checker_entry = registry.get(candidate.vuln_type)
-    use_api = (
-        config.llm_api.enabled
-        and checker_entry is not None
-        and checker_entry.mode == "api"
-    )
+    use_api = checker_entry is not None and checker_entry.mode == "api"
 
     if use_api:
         from backend.opencode.llm_api_runner import run_audit_via_api
@@ -464,11 +460,7 @@ async def run_audit_batch(
     from backend.registry import get_registry
     registry = get_registry()
     checker_entry = registry.get(candidates[0].vuln_type) if candidates else None
-    use_api = (
-        config.llm_api.enabled
-        and checker_entry is not None
-        and checker_entry.mode == "api"
-    )
+    use_api = checker_entry is not None and checker_entry.mode == "api"
 
     if use_api:
         from backend.opencode.llm_api_runner import run_batch_audit_via_api

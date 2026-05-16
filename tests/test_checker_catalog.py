@@ -29,6 +29,7 @@ class CheckerCatalogTests(unittest.TestCase):
                 )
 
         self.assertEqual(len(response), 1)
+        self.assertTrue(response[0].enabled)
         self.assertEqual(response[0].introduction, "# Scenario intro")
         self.assertEqual(response[0].introduction_source, "SCENARIOS.md")
 
@@ -46,6 +47,7 @@ class CheckerCatalogTests(unittest.TestCase):
             response = _discover_catalog_items(root)
 
         by_name = {item.name: item for item in response}
+        self.assertFalse(by_name["npd"].enabled)
         self.assertEqual(by_name["npd"].introduction, "# Skill only")
         self.assertEqual(by_name["npd"].introduction_source, "SKILL.md")
 

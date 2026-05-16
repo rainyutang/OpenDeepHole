@@ -360,7 +360,7 @@ async def run_scan(
                     workspace,
                     candidate,
                     scan_id,
-                    on_output=lambda line: print(f"  [opencode] {line}", flush=True),
+                    on_output=lambda line: print(f"  {line}", flush=True),
                     cancel_event=cancel_event,
                     timeout=config.opencode.timeout,
                 )

@@ -100,6 +100,7 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
                 name=name,
                 label=label,
                 description=description,
+                enabled=meta.get("enabled", True),
                 visibility=visibility,
                 introduction=introduction,
                 introduction_source=source,

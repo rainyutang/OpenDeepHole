@@ -90,8 +90,8 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-6 py-4">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
-            <p className="text-sm text-slate-400 mt-0.5">C/C++ Source Code Audit Tool</p>
+            <h1 className="text-lg font-bold text-white">新建扫描</h1>
+            <p className="text-sm text-slate-400 mt-0.5">选择客户端、代码路径和检测项，创建扫描任务</p>
           </div>
           <button
             onClick={onBack}
@@ -105,7 +105,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       {/* Content */}
       <div className="flex-1 px-6 py-6 max-w-2xl mx-auto w-full">
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-6">
-          新建扫描
+          扫描配置
         </h2>
 
         {loading ? (

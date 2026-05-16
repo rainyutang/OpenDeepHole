@@ -99,15 +99,15 @@ export default function UserManagement({ onBack, user }: Props) {
               onClick={onBack}
               className="text-sm text-slate-400 hover:text-white transition-colors"
             >
-              &larr; Back
+              &larr; 返回
             </button>
-            <h1 className="text-lg font-bold text-white">User Management</h1>
+            <h1 className="text-lg font-bold text-white">用户管理</h1>
           </div>
           <button
             onClick={() => setShowCreate(true)}
             className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
           >
-            + New User
+            + 新建用户
           </button>
         </div>
       </div>

@@ -299,7 +299,7 @@ export default function AgentDownload({ onBack }: Props) {
             </svg>
             返回
           </button>
-          <h1 className="text-xl font-bold text-white">Agent 管理</h1>
+          <h1 className="text-xl font-bold text-white">客户端</h1>
         </div>
 
         {/* 已连接 Agent */}
