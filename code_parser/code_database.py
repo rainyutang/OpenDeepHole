@@ -205,14 +205,87 @@ class CodeDatabase:
     # Query methods
     # ------------------------------------------------------------------
 
-    def get_functions_by_name(self, name: str) -> list[sqlite3.Row]:
-        """Return all functions matching the given name (exact match)."""
+    @staticmethod
+    def _short_function_name(name: str) -> str:
+        """Return the unqualified function name for C++ qualified names."""
+        return name.rsplit("::", 1)[-1]
+
+    @staticmethod
+    def _path_matches(row_path: str, file_path: str | None) -> bool:
+        if not file_path:
+            return True
+        row_path_norm = row_path.replace("\\", "/")
+        file_path_norm = file_path.replace("\\", "/")
+        return row_path_norm == file_path_norm or row_path_norm.endswith(f"/{file_path_norm}")
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    def _filter_rows_by_file(
+        self,
+        rows: list[sqlite3.Row],
+        file_path: str | None,
+    ) -> list[sqlite3.Row]:
+        if not file_path:
+            return rows
+        return [row for row in rows if self._path_matches(row["file_path"], file_path)]
+
+    def _select_functions_by_name(self, name: str) -> list[sqlite3.Row]:
         return self._conn.execute(
             """SELECT f.*, fi.path as file_path
                FROM functions f JOIN files fi ON f.file_id = fi.file_id
-               WHERE f.name = ?""",
+               WHERE f.name = ?
+               ORDER BY fi.path, f.start_line""",
             (name,),
         ).fetchall()
+
+    def _select_functions_by_short_name(self, short_name: str) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            """SELECT f.*, fi.path as file_path
+               FROM functions f JOIN files fi ON f.file_id = fi.file_id
+               WHERE f.name = ? OR f.name LIKE ? ESCAPE '\\'
+               ORDER BY
+                   CASE WHEN f.name = ? THEN 0 ELSE 1 END,
+                   fi.path,
+                   f.start_line""",
+            (short_name, f"%::{self._escape_like(short_name)}", short_name),
+        ).fetchall()
+
+    def get_functions_by_name(
+        self,
+        name: str,
+        file_path: str | None = None,
+    ) -> list[sqlite3.Row]:
+        """Return functions matching *name*.
+
+        C++ qualified names are matched exactly first.  For old indexes that
+        stored only the short name, fall back only when the stored signature or
+        body still contains the requested qualified name.
+        """
+        exact_rows = self._filter_rows_by_file(
+            self._select_functions_by_name(name),
+            file_path,
+        )
+        if exact_rows:
+            return exact_rows
+
+        if "::" in name:
+            short_name = self._short_function_name(name)
+            candidates = self._filter_rows_by_file(
+                self._select_functions_by_name(short_name),
+                file_path,
+            )
+            return [
+                row for row in candidates
+                if name in (row["signature"] or "") or name in (row["body"] or "")
+            ]
+
+        short_rows = self._filter_rows_by_file(
+            self._select_functions_by_short_name(name),
+            file_path,
+        )
+        return short_rows
 
     def get_all_functions(self) -> list[sqlite3.Row]:
         """Return all functions with their file paths."""

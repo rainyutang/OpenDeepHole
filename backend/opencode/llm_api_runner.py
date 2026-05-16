@@ -226,6 +226,10 @@ TOOLS = [
                         "type": "string",
                         "description": "要查看的函数名",
                     },
+                    "file_path": {
+                        "type": "string",
+                        "description": "可选，函数所在文件路径；用于区分 C++ 同名成员函数",
+                    },
                 },
                 "required": ["function_name"],
             },
@@ -314,6 +318,10 @@ TOOLS_BATCH = [
                         "type": "string",
                         "description": "要查看的函数名",
                     },
+                    "file_path": {
+                        "type": "string",
+                        "description": "可选，函数所在文件路径；用于区分 C++ 同名成员函数",
+                    },
                 },
                 "required": ["function_name"],
             },
@@ -387,12 +395,13 @@ def _tool_view_function(args: dict, project_id: str) -> str:
     func_name = args.get("function_name", "")
     if not func_name:
         return "错误: 缺少 function_name 参数"
+    file_path = args.get("file_path") or None
 
     db = _get_db(project_id)
     if db is None:
         return f"无法加载代码索引"
 
-    rows = db.get_functions_by_name(func_name)
+    rows = db.get_functions_by_name(func_name, file_path=file_path)
     if not rows:
         return f"未找到函数 {func_name} 的定义"
 
@@ -450,6 +459,16 @@ def _tool_submit_result(args: dict, result_id: str, scans_dir: str) -> str:
 # User prompt 构建
 # ---------------------------------------------------------------------------
 
+def _select_function_row_for_candidate(rows: list, line: int):
+    """Pick the indexed function containing the candidate line when possible."""
+    for row in rows:
+        start_line = row["start_line"] or 0
+        end_line = row["end_line"] or 0
+        if start_line <= line <= end_line:
+            return row
+    return rows[0]
+
+
 def _build_user_prompt(candidate: Candidate, project_id: str) -> str:
     """构建发给 LLM 的用户提示，包含函数源码和候选信息。"""
     lines = []
@@ -464,9 +483,9 @@ def _build_user_prompt(candidate: Candidate, project_id: str) -> str:
     # 尝试获取函数源码
     db = _get_db(project_id)
     if db is not None:
-        rows = db.get_functions_by_name(candidate.function)
+        rows = db.get_functions_by_name(candidate.function, file_path=candidate.file)
         if rows:
-            row = rows[0]
+            row = _select_function_row_for_candidate(rows, candidate.line)
             body = row["body"] or ""
             start_line = row["start_line"]
             file_path = row["file_path"]
@@ -841,9 +860,9 @@ def _build_batch_user_prompt(candidates: list[Candidate], project_id: str) -> st
     # 获取函数源码（只取一次）
     db = _get_db(project_id)
     if db is not None:
-        rows = db.get_functions_by_name(func_name)
+        rows = db.get_functions_by_name(func_name, file_path=file_path)
         if rows:
-            row = rows[0]
+            row = _select_function_row_for_candidate(rows, candidates[0].line)
             body = row["body"] or ""
             start_line = row["start_line"]
             fp = row["file_path"]

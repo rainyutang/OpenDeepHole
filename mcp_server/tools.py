@@ -65,25 +65,29 @@ def register_tools(mcp: FastMCP) -> None:
     """在 MCP Server 上注册所有源码查询工具。"""
 
     @mcp.tool()
-    def view_function_code(project_id: str, function_name: str) -> str:
+    def view_function_code(project_id: str, function_name: str, file_path: str = "") -> str:
         """
         根据函数名返回函数体代码。
-        file_path 可选，传入可缩小搜索范围（当前版本暂不使用）。
+        file_path 可选，传入可缩小搜索范围。
 
         参数：
             project_id: 项目标识符（由分析提示中提供）。
             function_name: 要查找的函数名称。
+            file_path: 可选，函数所在文件路径。
 
         返回：
             函数体代码（包含文件路径和行号信息），未找到则返回提示。
         """
-        _mcp_log("▶", "view_function_code", f"function_name={function_name!r}")
+        detail = f"function_name={function_name!r}"
+        if file_path:
+            detail += f", file_path={file_path!r}"
+        _mcp_log("▶", "view_function_code", detail)
         db = _get_db(project_id)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
             _mcp_log("◀", "view_function_code", result)
             return result
-        rows = db.get_functions_by_name(function_name)
+        rows = db.get_functions_by_name(function_name, file_path=file_path or None)
         if not rows:
             result = f"未找到函数 '{function_name}'。"
             _mcp_log("◀", "view_function_code", result)
@@ -178,14 +182,25 @@ def register_tools(mcp: FastMCP) -> None:
             _mcp_log("◀", "find_function_references", result)
             return result
         rows = db.get_call_sites_by_name(function_name)
+        short_name_fallback = False
+        if not rows and "::" in function_name:
+            short_name = function_name.rsplit("::", 1)[-1]
+            rows = db.get_call_sites_by_name(short_name)
+            short_name_fallback = bool(rows)
         if not rows:
             result = f"未找到函数 '{function_name}' 的引用位置。"
             _mcp_log("◀", "find_function_references", result)
             return result
-        result = "\n".join(
+        lines = []
+        if short_name_fallback:
+            lines.append(
+                f"未找到限定名 '{function_name}' 的精确调用记录，以下为短名匹配结果，可能包含其他类或命名空间中的同名调用。"
+            )
+        lines.extend(
             f"{row['caller_name'] or '未知'}  {row['file_path']}:{row['line']}"
             for row in rows
         )
+        result = "\n".join(lines)
         _mcp_log("◀", "find_function_references", f"{len(rows)} reference(s)")
         return result
 

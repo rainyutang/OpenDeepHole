@@ -47,6 +47,43 @@ def _write_code_index(project_dir: Path) -> None:
     db.close()
 
 
+def _write_cpp_code_index(project_dir: Path) -> None:
+    db = CodeDatabase(project_dir / "code_index.db")
+    file_id = db.get_or_create_file("sample.cpp")
+    db.insert_function(
+        name="ru_emu_dpdk_transmitter::send",
+        signature="ru_emu_dpdk_transmitter::send(int mode)",
+        return_type="int",
+        file_id=file_id,
+        start_line=30,
+        end_line=35,
+        is_static=False,
+        linkage="extern",
+        body=(
+            "int ru_emu_dpdk_transmitter::send(int mode) {\n"
+            "    char *p = malloc(8);\n"
+            "    if (mode) return 1;\n"
+            "    free(p);\n"
+            "    return 0;\n"
+            "}"
+        ),
+    )
+    db.insert_function(
+        name="other_transmitter::send",
+        signature="other_transmitter::send(int mode)",
+        return_type="int",
+        file_id=file_id,
+        start_line=40,
+        end_line=42,
+        is_static=False,
+        linkage="extern",
+        body="int other_transmitter::send(int mode) {\n    return mode;\n}",
+    )
+    db.commit()
+    db.checkpoint()
+    db.close()
+
+
 def test_emit_initial_api_prompt_outputs_complete_single_candidate_messages() -> None:
     outputs: list[str] = []
     messages = [
@@ -113,6 +150,26 @@ def test_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypatch) ->
     assert "  20 | void cleanup(char *p) {" in prompt
 
 
+def test_user_prompt_uses_cpp_qualified_function_name(tmp_path, monkeypatch) -> None:
+    _write_cpp_code_index(tmp_path)
+    monkeypatch.setenv("AGENT_PROJECT_DIR", str(tmp_path))
+
+    candidate = Candidate(
+        file="sample.cpp",
+        line=32,
+        function="ru_emu_dpdk_transmitter::send",
+        description="candidate issue",
+        vuln_type="memleak",
+    )
+
+    prompt = llm_api_runner._build_user_prompt(candidate, "scan-id-without-index")
+
+    assert "代码索引中未找到函数" not in prompt
+    assert "## 函数源码 (sample.cpp:30)" in prompt
+    assert "  30 | int ru_emu_dpdk_transmitter::send(int mode) {" in prompt
+    assert "other_transmitter::send" not in prompt
+
+
 def test_batch_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypatch) -> None:
     _write_code_index(tmp_path)
     monkeypatch.setenv("AGENT_PROJECT_DIR", str(tmp_path))
@@ -142,3 +199,32 @@ def test_batch_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypat
     assert "候选漏洞点（共 2 个）" in prompt
     assert "first leak candidate" in prompt
     assert "second leak candidate" in prompt
+
+
+def test_batch_user_prompt_uses_cpp_qualified_function_name(tmp_path, monkeypatch) -> None:
+    _write_cpp_code_index(tmp_path)
+    monkeypatch.setenv("AGENT_PROJECT_DIR", str(tmp_path))
+
+    candidates = [
+        Candidate(
+            file="sample.cpp",
+            line=32,
+            function="ru_emu_dpdk_transmitter::send",
+            description="first leak candidate",
+            vuln_type="memleak",
+        ),
+        Candidate(
+            file="sample.cpp",
+            line=33,
+            function="ru_emu_dpdk_transmitter::send",
+            description="second leak candidate",
+            vuln_type="memleak",
+        ),
+    ]
+
+    prompt = llm_api_runner._build_batch_user_prompt(candidates, "scan-id-without-index")
+
+    assert "代码索引中未找到函数" not in prompt
+    assert "## 函数源码 (sample.cpp:30)" in prompt
+    assert "  30 | int ru_emu_dpdk_transmitter::send(int mode) {" in prompt
+    assert "other_transmitter::send" not in prompt

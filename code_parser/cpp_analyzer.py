@@ -161,6 +161,7 @@ class CppAnalyzer:
             body=body,
         )
         self._func_id_map[name] = func_id
+        self._func_id_map.setdefault(name.rsplit("::", 1)[-1], func_id)
 
         # Extract call sites within this function body
         body_node = node.child_by_field_name("body")
@@ -168,16 +169,32 @@ class CppAnalyzer:
             self._extract_calls(body_node, func_id, file_id)
 
     def _extract_function_name(self, declarator) -> str | None:
-        """Recursively unwrap declarator to find the identifier (function name)."""
-        if declarator.type == "identifier":
+        """Recursively unwrap declarator to find the C/C++ function name."""
+        if declarator.type in (
+            "identifier",
+            "field_identifier",
+            "qualified_identifier",
+            "destructor_name",
+            "operator_name",
+        ):
             return declarator.text.decode("utf-8", errors="replace")
         if declarator.type in ("function_declarator", "pointer_declarator",
-                               "reference_declarator", "abstract_function_declarator"):
+                               "reference_declarator", "parenthesized_declarator",
+                               "abstract_function_declarator"):
             inner = declarator.child_by_field_name("declarator")
             if inner:
                 return self._extract_function_name(inner)
         # Fallback: look for any identifier child
-        id_node = get_child_node_by_type(declarator, ["identifier"])
+        id_node = get_child_node_by_type(
+            declarator,
+            [
+                "qualified_identifier",
+                "field_identifier",
+                "identifier",
+                "destructor_name",
+                "operator_name",
+            ],
+        )
         if id_node:
             return id_node.text.decode("utf-8", errors="replace")
         return None
