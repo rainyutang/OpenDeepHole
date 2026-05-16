@@ -38,6 +38,7 @@ from backend.models import (
     User,
 )
 from backend.opencode.feedback_format import build_feedback_section
+from backend.scan_metrics import calculate_issue_metrics
 from backend.store import get_scan_store
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
 
@@ -276,7 +277,17 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
             s.progress = live.progress
             s.total_candidates = live.total_candidates
             s.processed_candidates = live.processed_candidates
-            s.vulnerability_count = len(live.vulnerabilities)
+            vulnerabilities = live.vulnerabilities
+        else:
+            loaded = store.load_scan(s.scan_id)
+            vulnerabilities = loaded[0].vulnerabilities if loaded is not None else []
+
+        metrics = calculate_issue_metrics(
+            vulnerabilities,
+            _latest_fp_review_result_map(s.scan_id),
+        )
+        s.vulnerability_count = metrics.effective_issue_count
+        s.human_confirmed_count = metrics.human_confirmed_count
         # Populate agent online status
         if s.agent_name:
             s.agent_online = is_agent_name_online(s.agent_name)

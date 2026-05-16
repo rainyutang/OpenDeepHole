@@ -128,7 +128,14 @@ class Analyzer(BaseAnalyzer):
             str(project_path),
         ]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+            )
         except subprocess.TimeoutExpired:
             _log.warning("semgrep timed out for inf_loop scan")
             return

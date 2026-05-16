@@ -125,6 +125,13 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
     }
   };
 
+  const deleteTarget = deleteConfirmId
+    ? scans.find((scan) => scan.scan_id === deleteConfirmId)
+    : null;
+  const deleteTargetName = deleteTarget
+    ? deleteTarget.scan_name || deleteTarget.project_id || deleteTarget.scan_id.slice(0, 8)
+    : deleteConfirmId?.slice(0, 8);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
       {deleteConfirmId && (
@@ -132,7 +139,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
           <div className="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-6 w-80">
             <h3 className="text-base font-semibold text-white mb-2">确认删除</h3>
             <p className="text-sm text-slate-400 mb-5">
-              确定要删除扫描任务 <span className="font-mono text-slate-300">{deleteConfirmId.slice(0, 8)}</span> 吗？此操作无法撤销。
+              确定要删除扫描任务 <span className="font-medium text-slate-300">{deleteTargetName}</span> 吗？此操作无法撤销。
             </p>
             <div className="flex justify-end gap-2">
               <button
@@ -227,10 +234,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-slate-800 border-b border-slate-700">
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">ID</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">项目名称</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">状态</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">进度</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">漏洞数</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">人工确认</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">检查项</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Agent</th>
                   {user.role === "admin" && (
@@ -248,14 +256,15 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                   const canResume = scan.status === "cancelled" || scan.status === "error";
                   const canDelete = !running;
                   const isLoading = actionLoading === scan.scan_id;
+                  const projectName = scan.scan_name || scan.project_id || scan.scan_id.slice(0, 8);
 
                   return (
                     <tr
                       key={scan.scan_id}
                       className="border-b border-slate-700/50 hover:bg-slate-800/50 transition-colors"
                     >
-                      <td className="px-4 py-3 font-mono text-xs text-slate-300">
-                        {scan.scan_id.slice(0, 8)}
+                      <td className="px-4 py-3 text-sm font-medium text-slate-200 max-w-[14rem] truncate" title={projectName}>
+                        {projectName}
                       </td>
                       <td className="px-4 py-3">
                         <span className={`text-xs font-semibold px-2 py-0.5 rounded border ${st.cls}`}>
@@ -280,6 +289,9 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                       </td>
                       <td className="px-4 py-3 text-sm text-slate-300">
                         {scan.vulnerability_count}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-emerald-300">
+                        {scan.human_confirmed_count}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-1">

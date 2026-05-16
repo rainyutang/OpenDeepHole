@@ -324,6 +324,7 @@ class SqliteScanStore(ScanStoreBase):
         return ScanSummary(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
+            scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             status=ScanItemStatus(row["status"]),
             created_at=row["created_at"],
             progress=row["progress"],

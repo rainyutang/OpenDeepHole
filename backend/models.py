@@ -302,12 +302,14 @@ class ScanSummary(BaseModel):
     """扫描列表的摘要信息。"""
     scan_id: str
     project_id: str
+    scan_name: str = ""
     status: ScanItemStatus
     created_at: str
     progress: float
     total_candidates: int
     processed_candidates: int
     vulnerability_count: int
+    human_confirmed_count: int = 0
     scan_items: list[str]
     user_id: str = ""
     username: str = ""

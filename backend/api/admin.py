@@ -15,9 +15,13 @@ from backend.models import (
     FpReviewResult,
     ScanStatus,
     User,
-    Vulnerability,
 )
 from backend.registry import refresh_registry
+from backend.scan_metrics import (
+    accuracy,
+    calculate_issue_metrics,
+    latest_fp_review_result_map,
+)
 from backend.store import get_scan_store
 
 router = APIRouter()
@@ -40,25 +44,6 @@ class _MutableCheckerStats:
     scans: list[CheckerScanDashboardStats] = field(default_factory=list)
 
 
-def _is_llm_issue(vuln: Vulnerability) -> bool:
-    if vuln.ai_verdict:
-        return vuln.ai_verdict == "confirmed"
-    return vuln.confirmed
-
-
-def _accuracy(numerator: int, denominator: int) -> float | None:
-    if denominator <= 0:
-        return None
-    return round(numerator / denominator, 4)
-
-
-def _latest_fp_review_result_map(results: list[FpReviewResult]) -> dict[int, FpReviewResult]:
-    latest: dict[int, FpReviewResult] = {}
-    for result in results:
-        latest[result.vuln_index] = result
-    return latest
-
-
 def _scan_stats_for_checker(
     *,
     scan: ScanStatus,
@@ -69,37 +54,11 @@ def _scan_stats_for_checker(
     project_path: str,
     agent_name: str,
 ) -> CheckerScanDashboardStats:
-    static_issue_count = 0
-    llm_issue_count = 0
-    fp_review_issue_count = 0
-    fp_review_false_positive_count = 0
-    human_confirmed_count = 0
-    human_false_positive_count = 0
-    accuracy_basis_count = 0
-
-    for index, vuln in enumerate(scan.vulnerabilities):
-        if vuln.vuln_type != checker:
-            continue
-
-        static_issue_count += 1
-        llm_issue = _is_llm_issue(vuln)
-        if llm_issue:
-            llm_issue_count += 1
-
-        fp_result = fp_results.get(index)
-        if fp_result is not None:
-            if fp_result.verdict == "tp":
-                fp_review_issue_count += 1
-                accuracy_basis_count += 1
-            elif fp_result.verdict == "fp":
-                fp_review_false_positive_count += 1
-        elif llm_issue:
-            accuracy_basis_count += 1
-
-        if vuln.user_verdict == "confirmed":
-            human_confirmed_count += 1
-        elif vuln.user_verdict == "false_positive":
-            human_false_positive_count += 1
+    metrics = calculate_issue_metrics(
+        scan.vulnerabilities,
+        fp_results,
+        checker=checker,
+    )
 
     return CheckerScanDashboardStats(
         scan_id=scan.scan_id,
@@ -110,14 +69,14 @@ def _scan_stats_for_checker(
         created_at=scan.created_at,
         username=username,
         agent_name=agent_name,
-        static_issue_count=static_issue_count,
-        llm_issue_count=llm_issue_count,
-        fp_review_issue_count=fp_review_issue_count,
-        fp_review_false_positive_count=fp_review_false_positive_count,
-        human_confirmed_count=human_confirmed_count,
-        human_false_positive_count=human_false_positive_count,
-        accuracy_basis_count=accuracy_basis_count,
-        accuracy=_accuracy(human_confirmed_count, accuracy_basis_count),
+        static_issue_count=metrics.static_issue_count,
+        llm_issue_count=metrics.llm_issue_count,
+        fp_review_issue_count=metrics.fp_review_issue_count,
+        fp_review_false_positive_count=metrics.fp_review_false_positive_count,
+        human_confirmed_count=metrics.human_confirmed_count,
+        human_false_positive_count=metrics.human_false_positive_count,
+        accuracy_basis_count=metrics.accuracy_basis_count,
+        accuracy=metrics.accuracy,
     )
 
 
@@ -151,7 +110,7 @@ async def get_checker_dashboard(
         if project_label:
             all_projects.add(project_label)
 
-        fp_results = _latest_fp_review_result_map(
+        fp_results = latest_fp_review_result_map(
             store.list_fp_review_results_by_scan(scan.scan_id)
         )
 
@@ -201,7 +160,7 @@ async def get_checker_dashboard(
             human_confirmed_count=item.human_confirmed_count,
             human_false_positive_count=item.human_false_positive_count,
             accuracy_basis_count=item.accuracy_basis_count,
-            accuracy=_accuracy(item.human_confirmed_count, item.accuracy_basis_count),
+            accuracy=accuracy(item.human_confirmed_count, item.accuracy_basis_count),
             scans=item.scans,
         )
         for item in stats.values()
@@ -229,7 +188,7 @@ async def get_checker_dashboard(
             total_issue_count=llm_issue_count - fp_review_false_positive_count,
             human_confirmed_count=human_confirmed_count,
             accuracy_basis_count=accuracy_basis_count,
-            accuracy=_accuracy(human_confirmed_count, accuracy_basis_count),
+            accuracy=accuracy(human_confirmed_count, accuracy_basis_count),
         ),
         checkers=checkers,
     )

@@ -131,12 +131,14 @@ export interface IndexStatus {
 export interface ScanSummary {
   scan_id: string;
   project_id: string;
+  scan_name: string;
   status: ScanItemStatus;
   created_at: string;
   progress: number;
   total_candidates: number;
   processed_candidates: number;
   vulnerability_count: number;
+  human_confirmed_count: number;
   scan_items: string[];
   user_id?: string;
   username?: string;
