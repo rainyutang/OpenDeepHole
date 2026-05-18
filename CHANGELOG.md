@@ -2,6 +2,7 @@
 
 ## 2026-05-16
 
+- **修复** Agent 最小依赖补充 `semgrep`，并优化 Windows/Linux 启动脚本的依赖检查，避免仅检测 `httpx` 导致 INF_LOOP 所需工具未安装
 - **修复** INF_LOOP 静态分析在 semgrep 已识别函数名时仍可能把审计提示词函数名写成 `unknown` 的问题，并兼容 Windows 风格扫描路径
 - **修复** Windows GBK/CP936 环境下死循环和资源泄露静态分析读取 semgrep/cppcheck 输出时可能因编码不兼容崩溃的问题
 - **优化** 扫描历史页改为显示项目名称，并将漏洞数统一为 LLM 确认减 AI 去误报误报数，同时新增人工确认数量
