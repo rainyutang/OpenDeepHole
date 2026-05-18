@@ -21,9 +21,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import socket
 import sys
 from pathlib import Path
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def _parse_args() -> argparse.Namespace:
@@ -105,13 +117,21 @@ async def _ws_loop(config, task_manager, reporter) -> None:
     name = config.agent_name or socket.gethostname()
     ws_url = config.server_url.replace("http://", "ws://").replace("https://", "wss://")
     ws_url = ws_url.rstrip("/") + "/api/agent/ws"
+    ping_interval = _env_int("OPENDEEPHOLE_WS_PING_INTERVAL", 30)
+    ping_timeout = _env_int("OPENDEEPHOLE_WS_PING_TIMEOUT", 120)
+    heartbeat_interval = _env_int("OPENDEEPHOLE_AGENT_HEARTBEAT_INTERVAL", 30)
+    watchdog_timeout = _env_int("OPENDEEPHOLE_AGENT_WATCHDOG_TIMEOUT", 120)
 
     reconnect_delay = 2
 
     while True:
         try:
             print(f"Connecting to {ws_url} ...")
-            async with websockets.connect(ws_url, ping_interval=30, ping_timeout=10) as ws:
+            async with websockets.connect(
+                ws_url,
+                ping_interval=ping_interval,
+                ping_timeout=ping_timeout,
+            ) as ws:
                 # Handshake
                 hello_msg = {
                     "type": "hello",
@@ -145,13 +165,63 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 print(f"  Connected. Agent ID: {agent_id}")
                 print()
 
-                # Message loop
-                async for raw_msg in ws:
-                    try:
-                        msg = json.loads(raw_msg)
-                        await _handle_command(msg, config, task_manager, reporter)
-                    except Exception as e:
-                        print(f"Error handling command: {e}")
+                loop = asyncio.get_running_loop()
+                last_seen = loop.time()
+                command_queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+                async def _heartbeat() -> None:
+                    while True:
+                        await asyncio.sleep(heartbeat_interval)
+                        await ws.send(json.dumps({"type": "heartbeat"}))
+
+                async def _watchdog() -> None:
+                    nonlocal last_seen
+                    while True:
+                        await asyncio.sleep(max(1, min(heartbeat_interval, 10)))
+                        idle = loop.time() - last_seen
+                        if idle > watchdog_timeout:
+                            print(
+                                f"Connection stale: no server message for {idle:.0f}s; reconnecting..."
+                            )
+                            await ws.close(code=4001, reason="agent heartbeat watchdog timeout")
+                            return
+
+                async def _command_worker() -> None:
+                    while True:
+                        msg = await command_queue.get()
+                        if msg is None:
+                            return
+                        try:
+                            await _handle_command(msg, config, task_manager, reporter)
+                        except Exception as e:
+                            print(f"Error handling command: {e}")
+
+                heartbeat_task = asyncio.create_task(_heartbeat())
+                watchdog_task = asyncio.create_task(_watchdog())
+                worker_task = asyncio.create_task(_command_worker())
+
+                try:
+                    # Message loop
+                    async for raw_msg in ws:
+                        last_seen = loop.time()
+                        try:
+                            msg = json.loads(raw_msg)
+                        except Exception as e:
+                            print(f"Error parsing server message: {e}")
+                            continue
+                        if msg.get("type") == "heartbeat_ack":
+                            continue
+                        await command_queue.put(msg)
+                finally:
+                    heartbeat_task.cancel()
+                    watchdog_task.cancel()
+                    await command_queue.put(None)
+                    worker_task.cancel()
+                    for task in (heartbeat_task, watchdog_task, worker_task):
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
 
         except Exception as e:
             print(f"Connection lost: {e}. Reconnecting in {reconnect_delay}s...")

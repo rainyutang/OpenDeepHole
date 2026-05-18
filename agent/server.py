@@ -171,7 +171,12 @@ async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[
                 from backend.models import FeedbackEntry
                 from backend.opencode.config import refresh_skills
                 selected_feedback = [FeedbackEntry(**entry) for entry in feedback_entries]
-                refresh_skills(task.project_path, task.project_path, selected_feedback)
+                await asyncio.to_thread(
+                    refresh_skills,
+                    task.project_path,
+                    task.project_path,
+                    selected_feedback,
+                )
             except Exception as exc:
                 print(f"Warning: failed to refresh scan skills for feedback update: {exc}")
     from agent.fp_reviewer import set_fp_review_feedback

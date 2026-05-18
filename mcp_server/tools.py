@@ -36,6 +36,9 @@ def _get_db(project_id: str):
         if not db_path.exists():
             return None
         db = CodeDatabase(db_path)
+        if not db.is_index_complete():
+            db.close()
+            return None
         _db_cache[cache_key] = db
         return db
 
@@ -46,6 +49,9 @@ def _get_db(project_id: str):
     if not db_path.exists():
         return None
     db = CodeDatabase(db_path)
+    if not db.is_index_complete():
+        db.close()
+        return None
     _db_cache[project_id] = db
     return db
 

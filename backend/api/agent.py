@@ -23,6 +23,7 @@ Other:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import socket
 import uuid
@@ -61,6 +62,8 @@ _registered_agents: dict[str, AgentInfo] = {}
 
 # Active WebSocket connections keyed by agent_id (WebSocket mode)
 _agent_ws: dict[str, WebSocket] = {}
+_agent_ws_locks: dict[str, asyncio.Lock] = {}
+_agent_disconnect_tasks: dict[str, asyncio.Task] = {}
 
 # Agent configs persisted by agent_name (survives agent reconnects)
 _agent_configs: dict[str, AgentRemoteConfig] = {}
@@ -70,6 +73,51 @@ _scan_index_statuses: dict[str, dict] = {}
 
 _AGENT_DISCONNECT_ERROR = "Agent 断开连接"
 _SERVER_RESTART_ERROR = "Process terminated unexpectedly"
+_WEBSOCKET_AGENT_STALE_SECONDS = 120
+_AGENT_DISCONNECT_GRACE_SECONDS = 120
+
+
+def _touch_agent(agent_id: str) -> None:
+    agent = _registered_agents.get(agent_id)
+    if agent is not None:
+        agent.last_seen = datetime.now(timezone.utc).isoformat()
+
+
+def _is_agent_online(agent: AgentInfo) -> bool:
+    try:
+        last = datetime.fromisoformat(agent.last_seen)
+        fresh = (datetime.now(timezone.utc) - last).total_seconds() < _WEBSOCKET_AGENT_STALE_SECONDS
+    except Exception:
+        fresh = False
+    if agent.agent_id in _agent_ws:
+        return fresh
+    return fresh and agent.port > 0
+
+
+async def _send_agent_json(agent_id: str, payload: dict) -> None:
+    ws = _agent_ws.get(agent_id)
+    if ws is None:
+        raise RuntimeError("Agent WebSocket is not connected")
+    lock = _agent_ws_locks.setdefault(agent_id, asyncio.Lock())
+    async with lock:
+        await ws.send_json(payload)
+
+
+def _schedule_agent_disconnect_cancel(agent_id: str) -> None:
+    old_task = _agent_disconnect_tasks.pop(agent_id, None)
+    if old_task is not None:
+        old_task.cancel()
+
+    async def _delayed_cancel() -> None:
+        try:
+            await asyncio.sleep(_AGENT_DISCONNECT_GRACE_SECONDS)
+            _mark_agent_scans_cancelled(agent_id)
+        except asyncio.CancelledError:
+            return
+        finally:
+            _agent_disconnect_tasks.pop(agent_id, None)
+
+    _agent_disconnect_tasks[agent_id] = asyncio.create_task(_delayed_cancel())
 
 
 def _is_infrastructure_interruption(scan_status: ScanItemStatus, error_message: str | None) -> bool:
@@ -269,6 +317,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
         )
         _registered_agents[agent_id] = agent_info
         _agent_ws[agent_id] = websocket
+        _agent_ws_locks[agent_id] = asyncio.Lock()
 
         _reattach_active_agent_scans(agent_id, agent_info, msg.get("active_scans") or [])
 
@@ -280,7 +329,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 logger.warning("Ignoring invalid config reported by agent %s: %s", name, e)
 
         cfg = _agent_configs.get(name, AgentRemoteConfig())
-        await websocket.send_json({
+        await _send_agent_json(agent_id, {
             "type": "welcome",
             "agent_id": agent_id,
             "config": cfg.model_dump(exclude_defaults=True),
@@ -288,9 +337,12 @@ async def agent_websocket(websocket: WebSocket) -> None:
 
         logger.info("Agent connected via WebSocket: %s (%s) user=%s", agent_id, name, user_id or "(none)")
 
-        # Keep connection alive; agent may send pings or acks
+        # Keep connection alive; agent sends application-level heartbeats.
         while True:
-            await websocket.receive_text()
+            incoming = await websocket.receive_json()
+            _touch_agent(agent_id)
+            if isinstance(incoming, dict) and incoming.get("type") == "heartbeat":
+                await _send_agent_json(agent_id, {"type": "heartbeat_ack"})
 
     except WebSocketDisconnect:
         pass
@@ -298,16 +350,17 @@ async def agent_websocket(websocket: WebSocket) -> None:
         logger.warning("Agent WebSocket error for %s: %s", agent_id, e)
     finally:
         if agent_id:
-            _mark_agent_scans_cancelled(agent_id)
+            _schedule_agent_disconnect_cancel(agent_id)
             _agent_ws.pop(agent_id, None)
+            _agent_ws_locks.pop(agent_id, None)
             _registered_agents.pop(agent_id, None)
             logger.info("Agent disconnected: %s", agent_id)
 
 
 def is_agent_name_online(agent_name: str) -> bool:
     """Check if any registered agent with the given name has an active WebSocket."""
-    for aid, ainfo in _registered_agents.items():
-        if ainfo.name == agent_name and aid in _agent_ws:
+    for ainfo in _registered_agents.values():
+        if ainfo.name == agent_name and _is_agent_online(ainfo):
             return True
     return False
 
@@ -318,11 +371,13 @@ async def send_agent_command(agent_id: str, command: dict) -> bool:
     if ws is None:
         return False
     try:
-        await ws.send_json(command)
+        await _send_agent_json(agent_id, command)
         return True
     except Exception as e:
         logger.warning("Failed to send command to agent %s: %s", agent_id, e)
+        _schedule_agent_disconnect_cancel(agent_id)
         _agent_ws.pop(agent_id, None)
+        _agent_ws_locks.pop(agent_id, None)
         _registered_agents.pop(agent_id, None)
         return False
 
@@ -424,19 +479,11 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
     WebSocket agents: online = WebSocket connection is active.
     Legacy HTTP agents: online = last heartbeat < 90 seconds ago.
     """
-    now = datetime.now(timezone.utc)
     result = []
     for a in _registered_agents.values():
         if current_user.role != "admin" and a.user_id != current_user.user_id:
             continue
-        if a.agent_id in _agent_ws:
-            online = True
-        else:
-            try:
-                last = datetime.fromisoformat(a.last_seen)
-                online = (now - last).total_seconds() < 90
-            except Exception:
-                online = False
+        online = _is_agent_online(a)
         result.append({**a.model_dump(), "online": online})
     return result
 

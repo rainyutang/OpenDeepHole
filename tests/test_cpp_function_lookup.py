@@ -93,3 +93,43 @@ def test_qualified_lookup_supports_old_short_name_index_when_signature_matches(t
         assert "ru_emu_dpdk_transmitter::send" in rows[0]["signature"]
     finally:
         db.close()
+
+
+def test_function_lookup_by_file_and_line_uses_range_index(tmp_path: Path) -> None:
+    db = _index_source(
+        tmp_path,
+        """
+int first(void) {
+    return 1;
+}
+
+int second(void) {
+    return 2;
+}
+""",
+    )
+    try:
+        row = db.get_function_by_location("sample.cpp", 7)
+
+        assert row is not None
+        assert row["name"] == "second"
+        assert "return 2" in row["body"]
+    finally:
+        db.close()
+
+
+def test_code_index_complete_marker_controls_reuse(tmp_path: Path) -> None:
+    db = _index_source(
+        tmp_path,
+        """
+int demo(void) {
+    return 1;
+}
+""",
+    )
+    try:
+        assert not db.is_index_complete()
+        db.mark_index_complete()
+        assert db.is_index_complete()
+    finally:
+        db.close()

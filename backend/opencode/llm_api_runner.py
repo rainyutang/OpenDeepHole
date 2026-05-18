@@ -382,13 +382,21 @@ def _get_db(project_id: str):
         db_path = Path(agent_dir) / "code_index.db"
         if not db_path.exists():
             return None
-        return CodeDatabase(db_path)
+        db = CodeDatabase(db_path)
+        if not db.is_index_complete():
+            db.close()
+            return None
+        return db
 
     config = get_config()
     db_path = Path(config.storage.projects_dir) / project_id / "code_index.db"
     if not db_path.exists():
         return None
-    return CodeDatabase(db_path)
+    db = CodeDatabase(db_path)
+    if not db.is_index_complete():
+        db.close()
+        return None
+    return db
 
 
 def _tool_view_function(args: dict, project_id: str) -> str:
@@ -469,6 +477,37 @@ def _select_function_row_for_candidate(rows: list, line: int):
     return rows[0]
 
 
+def _find_candidate_function_row(db, function_name: str, file_path: str, line: int):
+    """Find candidate function source by name first, then by indexed file range."""
+    rows = db.get_functions_by_name(function_name, file_path=file_path)
+    if rows:
+        return _select_function_row_for_candidate(rows, line)
+    if file_path:
+        return db.get_function_by_location(file_path, line)
+    return None
+
+
+def _append_function_source_section(lines: list[str], row, *, title: str = "函数源码") -> None:
+    lines.append(f"## {title}")
+    if row is None:
+        lines.append("```c")
+        lines.append("")
+        lines.append("```")
+        return
+
+    body = row["body"] or ""
+    start_line = row["start_line"]
+    file_path = row["file_path"]
+    body_lines = body.split("\n")
+    numbered = "\n".join(
+        f"{start_line + i:4d} | {ln}" for i, ln in enumerate(body_lines)
+    )
+    lines[-1] = f"## {title} ({file_path}:{start_line})"
+    lines.append("```c")
+    lines.append(numbered)
+    lines.append("```")
+
+
 def _build_user_prompt(candidate: Candidate, project_id: str) -> str:
     """构建发给 LLM 的用户提示，包含函数源码和候选信息。"""
     lines = []
@@ -483,24 +522,12 @@ def _build_user_prompt(candidate: Candidate, project_id: str) -> str:
     # 尝试获取函数源码
     db = _get_db(project_id)
     if db is not None:
-        rows = db.get_functions_by_name(candidate.function, file_path=candidate.file)
-        if rows:
-            row = _select_function_row_for_candidate(rows, candidate.line)
-            body = row["body"] or ""
-            start_line = row["start_line"]
-            file_path = row["file_path"]
-            body_lines = body.split("\n")
-            numbered = "\n".join(
-                f"{start_line + i:4d} | {ln}" for i, ln in enumerate(body_lines)
-            )
-            lines.append(f"## 函数源码 ({file_path}:{start_line})")
-            lines.append("```c")
-            lines.append(numbered)
-            lines.append("```")
-        else:
-            lines.append(f"## 函数源码\n（代码索引中未找到函数 {candidate.function}）")
+        row = _find_candidate_function_row(
+            db, candidate.function, candidate.file, candidate.line
+        )
+        _append_function_source_section(lines, row)
     else:
-        lines.append("## 函数源码\n（代码索引不可用）")
+        _append_function_source_section(lines, None)
 
     # 内嵌相关函数源码（如释放函数），避免 LLM 需要调用查询工具
     if candidate.related_functions and db is not None:
@@ -860,24 +887,10 @@ def _build_batch_user_prompt(candidates: list[Candidate], project_id: str) -> st
     # 获取函数源码（只取一次）
     db = _get_db(project_id)
     if db is not None:
-        rows = db.get_functions_by_name(func_name, file_path=file_path)
-        if rows:
-            row = _select_function_row_for_candidate(rows, candidates[0].line)
-            body = row["body"] or ""
-            start_line = row["start_line"]
-            fp = row["file_path"]
-            body_lines = body.split("\n")
-            numbered = "\n".join(
-                f"{start_line + i:4d} | {ln}" for i, ln in enumerate(body_lines)
-            )
-            lines.append(f"## 函数源码 ({fp}:{start_line})")
-            lines.append("```c")
-            lines.append(numbered)
-            lines.append("```")
-        else:
-            lines.append(f"## 函数源码\n（代码索引中未找到函数 {func_name}）")
+        row = _find_candidate_function_row(db, func_name, file_path, candidates[0].line)
+        _append_function_source_section(lines, row)
     else:
-        lines.append("## 函数源码\n（代码索引不可用）")
+        _append_function_source_section(lines, None)
 
     lines.append("")
     lines.append(f"## 候选漏洞点（共 {len(candidates)} 个）")

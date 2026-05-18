@@ -43,6 +43,7 @@ def _write_code_index(project_dir: Path) -> None:
         ),
     )
     db.commit()
+    db.mark_index_complete()
     db.checkpoint()
     db.close()
 
@@ -80,6 +81,7 @@ def _write_cpp_code_index(project_dir: Path) -> None:
         body="int other_transmitter::send(int mode) {\n    return mode;\n}",
     )
     db.commit()
+    db.mark_index_complete()
     db.checkpoint()
     db.close()
 
@@ -170,6 +172,46 @@ def test_user_prompt_uses_cpp_qualified_function_name(tmp_path, monkeypatch) -> 
     assert "other_transmitter::send" not in prompt
 
 
+def test_user_prompt_falls_back_to_file_line_when_function_name_misses(tmp_path, monkeypatch) -> None:
+    _write_code_index(tmp_path)
+    monkeypatch.setenv("AGENT_PROJECT_DIR", str(tmp_path))
+
+    candidate = Candidate(
+        file="sample.c",
+        line=13,
+        function="missing_static_name",
+        description="candidate issue",
+        vuln_type="memleak",
+    )
+
+    prompt = llm_api_runner._build_user_prompt(candidate, "scan-id-without-index")
+
+    assert "代码索引中未找到函数" not in prompt
+    assert "代码索引不可用" not in prompt
+    assert "## 函数源码 (sample.c:10)" in prompt
+    assert "  10 | void leaky(int mode) {" in prompt
+
+
+def test_user_prompt_uses_empty_source_when_lookup_fails(tmp_path, monkeypatch) -> None:
+    _write_code_index(tmp_path)
+    monkeypatch.setenv("AGENT_PROJECT_DIR", str(tmp_path))
+
+    candidate = Candidate(
+        file="missing.c",
+        line=99,
+        function="missing_static_name",
+        description="candidate issue",
+        vuln_type="memleak",
+    )
+
+    prompt = llm_api_runner._build_user_prompt(candidate, "scan-id-without-index")
+
+    assert "代码索引中未找到函数" not in prompt
+    assert "代码索引不可用" not in prompt
+    assert "## 函数源码" in prompt
+    assert "void leaky" not in prompt
+
+
 def test_batch_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypatch) -> None:
     _write_code_index(tmp_path)
     monkeypatch.setenv("AGENT_PROJECT_DIR", str(tmp_path))
@@ -228,3 +270,24 @@ def test_batch_user_prompt_uses_cpp_qualified_function_name(tmp_path, monkeypatc
     assert "## 函数源码 (sample.cpp:30)" in prompt
     assert "  30 | int ru_emu_dpdk_transmitter::send(int mode) {" in prompt
     assert "other_transmitter::send" not in prompt
+
+
+def test_batch_user_prompt_falls_back_to_file_line_when_function_name_misses(tmp_path, monkeypatch) -> None:
+    _write_code_index(tmp_path)
+    monkeypatch.setenv("AGENT_PROJECT_DIR", str(tmp_path))
+
+    candidates = [
+        Candidate(
+            file="sample.c",
+            line=13,
+            function="missing_static_name",
+            description="first leak candidate",
+            vuln_type="memleak",
+        )
+    ]
+
+    prompt = llm_api_runner._build_batch_user_prompt(candidates, "scan-id-without-index")
+
+    assert "代码索引中未找到函数" not in prompt
+    assert "## 函数源码 (sample.c:10)" in prompt
+    assert "  10 | void leaky(int mode) {" in prompt

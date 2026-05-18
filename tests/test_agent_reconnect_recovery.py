@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -55,12 +56,75 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         agent_api._scan_owners.clear()
         agent_api._registered_agents.clear()
         agent_api._agent_ws.clear()
+        agent_api._agent_ws_locks.clear()
+        agent_api._agent_disconnect_tasks.clear()
 
     def tearDown(self) -> None:
         agent_api._running_scans.clear()
         agent_api._scan_owners.clear()
         agent_api._registered_agents.clear()
         agent_api._agent_ws.clear()
+        agent_api._agent_ws_locks.clear()
+        agent_api._agent_disconnect_tasks.clear()
+
+    def test_agent_websocket_heartbeat_gets_ack(self) -> None:
+        class FakeClient:
+            host = "127.0.0.1"
+
+        class FakeWebSocket:
+            client = FakeClient()
+
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+                self.messages = [
+                    {"type": "hello", "name": "agent-1", "active_scans": []},
+                    {"type": "heartbeat"},
+                ]
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive_json(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                raise agent_api.WebSocketDisconnect()
+
+            async def send_json(self, payload: dict) -> None:
+                self.sent.append(payload)
+
+            async def close(self, code: int = 1000) -> None:
+                return None
+
+        ws = FakeWebSocket()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                asyncio.run(agent_api.agent_websocket(ws))
+
+        self.assertEqual(ws.sent[0]["type"], "welcome")
+        self.assertIn({"type": "heartbeat_ack"}, ws.sent)
+
+    def test_websocket_agent_online_requires_fresh_last_seen(self) -> None:
+        fresh = datetime.now(timezone.utc).isoformat()
+        stale = (
+            datetime.now(timezone.utc)
+            - timedelta(seconds=agent_api._WEBSOCKET_AGENT_STALE_SECONDS + 1)
+        ).isoformat()
+        agent_api._agent_ws["fresh"] = object()
+        agent_api._agent_ws["stale"] = object()
+
+        self.assertTrue(agent_api._is_agent_online(AgentInfo(
+            agent_id="fresh",
+            name="agent-1",
+            ip="127.0.0.1",
+            last_seen=fresh,
+        )))
+        self.assertFalse(agent_api._is_agent_online(AgentInfo(
+            agent_id="stale",
+            name="agent-1",
+            ip="127.0.0.1",
+            last_seen=stale,
+        )))
 
     def test_startup_recovery_leaves_agent_owned_running_scans_alone(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

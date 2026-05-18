@@ -1,6 +1,7 @@
 """Upload API — handles source code zip file uploads."""
 
 import json
+import os
 import shutil
 import uuid
 import zipfile
@@ -18,16 +19,37 @@ logger = get_logger(__name__)
 CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB chunks
 
 
+def _remove_sqlite_files(path: Path) -> None:
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            path.with_name(path.name + suffix).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _replace_sqlite_db(temp_path: Path, final_path: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        try:
+            final_path.with_name(final_path.name + suffix).unlink(missing_ok=True)
+        except OSError:
+            pass
+    os.replace(temp_path, final_path)
+    _remove_sqlite_files(temp_path)
+
+
 def _parse_project(project_id: str, project_dir: Path) -> None:
     """Background task: parse C/C++ source and populate code_index.db."""
     from code_parser import CodeDatabase, CppAnalyzer
 
     status_path = project_dir / "parse_status.json"
     db_path = project_dir / "code_index.db"
+    temp_db_path = project_dir / f"code_index.{project_id}.tmp.db"
+    db = None
 
     status_path.write_text(json.dumps({"status": "parsing", "parsed_files": 0, "total_files": 0}))
     try:
-        db = CodeDatabase(db_path)
+        _remove_sqlite_files(temp_db_path)
+        db = CodeDatabase(temp_db_path)
         analyzer = CppAnalyzer(db)
 
         def _on_progress(current: int, total: int) -> None:
@@ -38,11 +60,19 @@ def _parse_project(project_id: str, project_dir: Path) -> None:
             }))
 
         analyzer.analyze_directory(project_dir, on_progress=_on_progress)
+        db.mark_index_complete()
+        db.checkpoint()
         db.close()
+        _replace_sqlite_db(temp_db_path, db_path)
         status_path.write_text(json.dumps({"status": "done"}))
         logger.info("Project %s: code index built at %s", project_id, db_path)
     except Exception as exc:
         logger.exception("Project %s: code indexing failed", project_id)
+        try:
+            db.close()
+        except Exception:
+            pass
+        _remove_sqlite_files(temp_db_path)
         status_path.write_text(json.dumps({"status": "error", "error": str(exc)}))
 
 

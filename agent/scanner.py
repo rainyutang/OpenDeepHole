@@ -73,6 +73,8 @@ def _build_function_source_cache(
                 rows_by_function[candidate.function] = rows
             row = _select_function_row(rows, candidate)
             if row is None:
+                row = source_db.get_function_by_location(candidate.file, candidate.line)
+            if row is None:
                 continue
             cache[(candidate.file, candidate.line, candidate.function, candidate.vuln_type)] = (
                 row["body"] or "",
@@ -96,6 +98,25 @@ def _attach_function_source(
     vuln.function_source = source
     vuln.function_start_line = start_line
     return vuln
+
+
+def _remove_sqlite_files(path: Path) -> None:
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            path.with_name(path.name + suffix).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _replace_sqlite_db(temp_path: Path, final_path: Path) -> None:
+    """Atomically publish a fully checkpointed SQLite DB."""
+    for suffix in ("-wal", "-shm"):
+        try:
+            final_path.with_name(final_path.name + suffix).unlink(missing_ok=True)
+        except OSError:
+            pass
+    os.replace(temp_path, final_path)
+    _remove_sqlite_files(temp_path)
 
 
 def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
@@ -219,37 +240,43 @@ async def run_scan(
         # Only need the DB open if static analysis will run (no cached candidates yet)
         need_db_open = not candidates_cache_path.exists()
 
-        def _db_has_data(path: Path) -> bool:
-            """Return True only if the DB file contains indexed functions."""
+        def _db_is_complete(path: Path) -> bool:
+            """Return True only if the DB was fully built."""
             from code_parser import CodeDatabase
+            _d = None
             try:
                 _d = CodeDatabase(path)
-                count = _d._conn.execute("SELECT COUNT(*) FROM functions").fetchone()[0]
-                _d.close()
-                return count > 0
+                return _d.is_index_complete()
             except Exception:
                 return False
+            finally:
+                if _d is not None:
+                    try:
+                        _d.close()
+                    except Exception:
+                        pass
 
         do_index = True  # set False when a valid existing DB is found
 
         if db_path.exists():
-            # DB already in project dir — validate it has data before trusting it
-            if not need_db_open or _db_has_data(db_path):
+            # DB already in project dir — validate it completed before trusting it
+            if _db_is_complete(db_path):
                 await emit("init", "跳过代码索引（使用已有 code_index.db）")
                 if need_db_open:
                     from code_parser import CodeDatabase
                     db = CodeDatabase(db_path)
                 do_index = False
             else:
-                # Empty/corrupt DB → delete and re-index
-                db_path.unlink(missing_ok=True)
-                await emit("init", "已有代码索引为空（需重建），重新索引...")
+                await emit("init", "已有代码索引不完整（需重建），重新索引...")
 
         if do_index:
             await emit("init", "Indexing source code (tree-sitter)...")
             await reporter.send_index_status(scan_id, "parsing", 0, 0)
             from code_parser import CodeDatabase, CppAnalyzer
-            db = CodeDatabase(db_path)
+            temp_db_path = db_path.with_name(f"{db_path.name}.{scan_id}.tmp")
+            _remove_sqlite_files(temp_db_path)
+            index_db = CodeDatabase(temp_db_path)
+            db = index_db
             analyzer = CppAnalyzer(db)
             loop = asyncio.get_running_loop()
 
@@ -269,16 +296,27 @@ async def run_scan(
                 )
                 print()  # newline after progress
 
-            await loop.run_in_executor(None, _do_index)
+            try:
+                await loop.run_in_executor(None, _do_index)
+            except Exception:
+                index_db.close()
+                _remove_sqlite_files(temp_db_path)
+                db = None
+                raise
             if cancel_event.is_set():
-                db.close()
-                db_path.unlink(missing_ok=True)
+                index_db.close()
+                _remove_sqlite_files(temp_db_path)
+                db = None
                 await emit("init", "Code indexing stopped by user")
                 await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
                 return
             await emit("init", "Code indexing complete")
             # Flush WAL so the DB file is self-contained
-            db.checkpoint()
+            index_db.mark_index_complete()
+            index_db.checkpoint()
+            index_db.close()
+            _replace_sqlite_db(temp_db_path, db_path)
+            db = CodeDatabase(db_path)
             await emit("init", f"代码索引已保存（路径: {db_path}）")
             await reporter.send_index_status(scan_id, "done", 0, 0)
 
@@ -300,17 +338,18 @@ async def run_scan(
             from agent.local_mcp import LocalMCPServer
             from agent import mcp_registry
             mcp_server = LocalMCPServer()
-            mcp_port = mcp_server.start()
+            mcp_port = await asyncio.to_thread(mcp_server.start)
             mcp_registry.register(project_path, mcp_port, scan_id)
             await emit("mcp_ready", f"Local MCP server ready on port {mcp_port}")
 
         # --- Phase 4: Create workspace (links SKILLs, merges feedback) ---
         from backend.opencode.config import create_scan_workspace, cleanup_workspace
-        workspace = create_scan_workspace(
+        workspace = await asyncio.to_thread(
+            create_scan_workspace,
             scan_id,
-            project_dir=project_path,
-            feedback_entries=selected_feedback,
-            mcp_port=mcp_port,
+            project_path,
+            selected_feedback,
+            mcp_port,
         )
         await emit("init", "Analysis workspace ready")
 
@@ -384,7 +423,12 @@ async def run_scan(
                 encoding="utf-8",
             )
 
-        function_source_cache = _build_function_source_cache(project_path, candidates, db)
+        function_source_cache = await asyncio.to_thread(
+            _build_function_source_cache,
+            project_path,
+            candidates,
+            db,
+        )
 
         if db is not None:
             db.close()
@@ -524,9 +568,9 @@ async def run_scan(
             if mcp_server:
                 from agent import mcp_registry
                 mcp_registry.unregister(project_path)
-                mcp_server.stop()
+                await asyncio.to_thread(mcp_server.stop)
             if workspace is not None:
-                cleanup_workspace(workspace)
+                await asyncio.to_thread(cleanup_workspace, workspace)
         finally:
             if previous_checkers_dir is None:
                 os.environ.pop(CHECKERS_DIR_ENV, None)

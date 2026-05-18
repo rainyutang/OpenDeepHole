@@ -6,10 +6,13 @@ is created at the path supplied to the constructor.
 """
 
 import sqlite3
+import time
 from pathlib import Path
 
 
 class CodeDatabase:
+    COMPLETE_STATUS = "complete"
+
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = str(db_path)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -85,6 +88,22 @@ class CodeDatabase:
                 context        TEXT,
                 access_type    TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS index_metadata (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_functions_name
+                ON functions(name);
+            CREATE INDEX IF NOT EXISTS idx_functions_file_range
+                ON functions(file_id, start_line, end_line);
+            CREATE INDEX IF NOT EXISTS idx_function_calls_callee
+                ON function_calls(callee_name);
+            CREATE INDEX IF NOT EXISTS idx_structs_name
+                ON structs(name);
+            CREATE INDEX IF NOT EXISTS idx_global_variables_name
+                ON global_variables(name);
         """)
         self._conn.commit()
 
@@ -95,6 +114,33 @@ class CodeDatabase:
     def commit(self) -> None:
         """Commit the current transaction. Call after processing each file."""
         self._conn.commit()
+
+    def set_metadata(self, key: str, value: str) -> None:
+        """Set a code-index metadata value."""
+        self._conn.execute(
+            """INSERT INTO index_metadata (key, value)
+               VALUES (?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (key, value),
+        )
+
+    def get_metadata(self, key: str) -> str | None:
+        """Return a code-index metadata value."""
+        row = self._conn.execute(
+            "SELECT value FROM index_metadata WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return row["value"] if row else None
+
+    def mark_index_complete(self) -> None:
+        """Mark the DB as a complete, reusable code index."""
+        self.set_metadata("status", self.COMPLETE_STATUS)
+        self.set_metadata("completed_at", str(int(time.time())))
+        self.commit()
+
+    def is_index_complete(self) -> bool:
+        """Return True when this DB was fully built and checkpointed."""
+        return self.get_metadata("status") == self.COMPLETE_STATUS
 
     # ------------------------------------------------------------------
     # Insertion helpers  (no auto-commit — caller controls transactions)
@@ -286,6 +332,43 @@ class CodeDatabase:
             file_path,
         )
         return short_rows
+
+    def get_function_by_location(
+        self,
+        file_path: str,
+        line: int,
+    ) -> sqlite3.Row | None:
+        """Return the indexed function containing *file_path:line*.
+
+        Exact file-path lookup is attempted first so SQLite can use the
+        file/range indexes.  A suffix fallback handles absolute-vs-relative
+        path differences from static analyzer output.
+        """
+        rows = self._conn.execute(
+            """SELECT f.*, fi.path as file_path
+               FROM functions f JOIN files fi ON f.file_id = fi.file_id
+               WHERE fi.path = ?
+                 AND f.start_line <= ?
+                 AND f.end_line >= ?
+               ORDER BY (f.end_line - f.start_line), fi.path
+               LIMIT 1""",
+            (file_path.replace("\\", "/"), line, line),
+        ).fetchall()
+        if rows:
+            return rows[0]
+
+        candidates = self._conn.execute(
+            """SELECT f.*, fi.path as file_path
+               FROM functions f JOIN files fi ON f.file_id = fi.file_id
+               WHERE f.start_line <= ?
+                 AND f.end_line >= ?
+               ORDER BY (f.end_line - f.start_line), fi.path""",
+            (line, line),
+        ).fetchall()
+        for row in candidates:
+            if self._path_matches(row["file_path"], file_path):
+                return row
+        return None
 
     def get_all_functions(self) -> list[sqlite3.Row]:
         """Return all functions with their file paths."""
