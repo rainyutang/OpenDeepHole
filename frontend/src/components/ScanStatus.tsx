@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getScanStatus, stopScan, getReportUrl, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getIndexStatus, getFpReviewSkill } from "../api/client";
+import { getScanStatus, stopScan, downloadScanReport, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, getFpReview, getIndexStatus, getFpReviewSkill } from "../api/client";
 import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo } from "../types";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
@@ -33,6 +33,7 @@ interface Props {
 export default function ScanStatus({ scanId, onBack }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [downloadingReport, setDownloadingReport] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [lastSeenEvents, setLastSeenEvents] = useState(0);
   const logRef = useRef<HTMLDivElement>(null);
@@ -172,6 +173,27 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       await stopScan(scanId);
     } catch {
       setStopping(false);
+    }
+  };
+
+  const handleDownloadReport = async () => {
+    if (!scan) return;
+    setDownloadingReport(true);
+    try {
+      const blob = await downloadScanReport(scan.scan_id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `report-${scan.scan_id}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "未知错误";
+      alert(`下载 CSV 失败：${msg}`);
+    } finally {
+      setDownloadingReport(false);
     }
   };
 
@@ -365,13 +387,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               );
             })()}
             {isDone && (
-              <a
-                href={getReportUrl(scan.scan_id)}
-                download
-                className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+              <button
+                onClick={handleDownloadReport}
+                disabled={downloadingReport}
+                className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed rounded-lg transition-colors"
               >
-                下载 CSV
-              </a>
+                {downloadingReport ? "下载中..." : "下载 CSV"}
+              </button>
             )}
             {isRunning && (
               <button

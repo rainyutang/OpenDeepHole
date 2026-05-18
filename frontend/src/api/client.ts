@@ -136,8 +136,9 @@ export async function stopScan(scanId: string): Promise<void> {
   await api.post(`/api/scan/${scanId}/stop`);
 }
 
-export function getReportUrl(scanId: string): string {
-  return `/api/scan/${scanId}/report`;
+export async function downloadScanReport(scanId: string): Promise<Blob> {
+  const { data } = await api.get<Blob>(`/api/scan/${scanId}/report`, { responseType: "blob" });
+  return data;
 }
 
 export async function markVulnerability(
