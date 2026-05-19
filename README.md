@@ -97,16 +97,16 @@ opencode:
 
 代码索引依赖 Universal Ctags 和 cscope。缺少任一命令时 Agent 会先尝试通过启动脚本自动安装；安装失败时会停止并提示处理方式，不会回退到旧索引方式。
 
-Windows 推荐使用 MSYS2。`run_agent.bat` 会在缺少工具时优先执行 `winget install -i MSYS2.MSYS2`，然后通过 MSYS2 `pacman` 安装 Universal Ctags 和 cscope，并把默认 MSYS2 工具目录加入当前启动脚本的 `PATH`。如果需要手动提前安装，可执行：
+Windows 推荐使用 MSYS2。`run_agent.bat` 会在缺少工具时优先执行 `winget install -i MSYS2.MSYS2`，然后通过 MSYS2 `pacman` 安装 `ctags` 和 `cscope`，并把 `C:\msys64\usr\bin` 加入当前启动脚本的 `PATH`。如果需要手动提前安装，可执行：
 
 ```powershell
 winget install -i MSYS2.MSYS2
 ```
 
-然后打开 MSYS2 UCRT64 运行：
+然后打开 MSYS2 运行：
 
 ```bash
-pacman -Sy --needed --noconfirm mingw-w64-ucrt-x86_64-ctags cscope
+pacman -S --needed --noconfirm ctags cscope
 ```
 
 Linux / macOS 可用系统包管理器安装：

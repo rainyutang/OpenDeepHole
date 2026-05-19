@@ -28,11 +28,17 @@ add_default_msys2_paths() {
             if [ -d /ucrt64/bin ]; then
                 export PATH="/ucrt64/bin:$PATH"
             fi
+            if [ -d /mingw64/bin ]; then
+                export PATH="/mingw64/bin:$PATH"
+            fi
             if [ -d /usr/bin ]; then
                 export PATH="/usr/bin:$PATH"
             fi
             if [ -d /c/msys64/ucrt64/bin ]; then
                 export PATH="/c/msys64/ucrt64/bin:$PATH"
+            fi
+            if [ -d /c/msys64/mingw64/bin ]; then
+                export PATH="/c/msys64/mingw64/bin:$PATH"
             fi
             if [ -d /c/msys64/usr/bin ]; then
                 export PATH="/c/msys64/usr/bin:$PATH"
@@ -47,8 +53,8 @@ print_source_tool_install_help() {
         MINGW*|MSYS*|CYGWIN*)
             echo "Windows recommended method: install MSYS2 with winget, then use pacman." >&2
             echo "   winget install -i MSYS2.MSYS2" >&2
-            echo "   pacman -Sy --needed --noconfirm mingw-w64-ucrt-x86_64-ctags cscope" >&2
-            echo "If needed, add C:\\msys64\\ucrt64\\bin and C:\\msys64\\usr\\bin to PATH." >&2
+            echo "   pacman -S --needed --noconfirm ctags cscope" >&2
+            echo "If needed, add C:\\msys64\\usr\\bin to PATH." >&2
             ;;
         Darwin)
             echo "Install with Homebrew:" >&2
@@ -84,7 +90,7 @@ install_msys2_source_tools() {
             fi
 
             echo "Installing Universal Ctags and cscope with MSYS2 pacman..." >&2
-            pacman -Sy --needed --noconfirm mingw-w64-ucrt-x86_64-ctags cscope
+            pacman -S --needed --noconfirm ctags cscope
             add_default_msys2_paths
             ;;
         *)
