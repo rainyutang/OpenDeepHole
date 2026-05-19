@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 _log = get_logger(__name__)
 
 _RULE_FILE = Path(__file__).parent / "c_cpp_loop_no_progress_semgrep_with_func.yaml"
+_SEMGREP_TIMEOUT_SECONDS = 15 * 60
 _SEV_LABEL = {"ERROR": "高风险", "WARNING": "中风险"}
 _CPP_LANGUAGE = Language(tree_sitter_cpp.language())
 _MESSAGE_FUNCTION_RE = re.compile(r"Function=`([^`]+)`")
@@ -206,6 +208,70 @@ def _func_from_message(message: str) -> str:
     return _clean_func_name(match.group(1))
 
 
+def _decode_output(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def _read_semgrep_json(output_path: Path, fallback: object) -> str:
+    try:
+        if output_path.is_file():
+            text = output_path.read_text(encoding="utf-8", errors="replace")
+            if text.strip():
+                return text
+    except OSError:
+        pass
+    return _decode_output(fallback)
+
+
+def _run_semgrep(project_path: Path) -> tuple[int | None, str, str] | None:
+    with tempfile.TemporaryDirectory(prefix="opendeephole-inf-loop-semgrep-") as tmp:
+        output_path = Path(tmp) / "semgrep.json"
+        cmd = [
+            "semgrep",
+            "--config", str(_RULE_FILE),
+            "--json",
+            f"--json-output={output_path}",
+            "--no-git-ignore",
+            str(project_path),
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_SEMGREP_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = _read_semgrep_json(
+                output_path,
+                getattr(exc, "stdout", None) or getattr(exc, "output", None),
+            )
+            if stdout.strip():
+                _log.warning(
+                    "semgrep timed out after %s seconds for inf_loop scan; "
+                    "using partial JSON output",
+                    _SEMGREP_TIMEOUT_SECONDS,
+                )
+                return None, stdout, _decode_output(getattr(exc, "stderr", None))
+            _log.warning(
+                "semgrep timed out after %s seconds for inf_loop scan and produced no JSON output",
+                _SEMGREP_TIMEOUT_SECONDS,
+            )
+            return None
+        except Exception as exc:
+            _log.warning(f"semgrep failed to run: {exc}")
+            return None
+
+        stdout = _read_semgrep_json(output_path, proc.stdout)
+        return proc.returncode, stdout, proc.stderr
+
+
 # ------------------------------------------------------------------ #
 #  Analyzer
 # ------------------------------------------------------------------ #
@@ -226,38 +292,20 @@ class Analyzer(BaseAnalyzer):
 
         _src_cache.clear()
 
-        cmd = [
-            "semgrep",
-            "--config", str(_RULE_FILE),
-            "--json",
-            "--no-git-ignore",
-            str(project_path),
-        ]
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=300,
-            )
-        except subprocess.TimeoutExpired:
-            _log.warning("semgrep timed out for inf_loop scan")
+        result = _run_semgrep(project_path)
+        if result is None:
             return
-        except Exception as exc:
-            _log.warning(f"semgrep failed to run: {exc}")
-            return
+        returncode, stdout, stderr = result
 
         # semgrep: rc=0 无发现，rc=1 有发现，rc>1 工具报错
-        if proc.returncode > 1:
+        if returncode is not None and returncode > 1:
             _log.warning(
-                f"semgrep exited with rc={proc.returncode}: {proc.stderr[:300]}"
+                f"semgrep exited with rc={returncode}: {stderr[:300]}"
             )
             return
 
         try:
-            data = json.loads(proc.stdout)
+            data = json.loads(stdout)
         except json.JSONDecodeError as exc:
             _log.warning(f"semgrep output JSON parse error: {exc}")
             return

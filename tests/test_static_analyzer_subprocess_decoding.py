@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
 from checkers.inf_loop.analyzer import Analyzer as InfLoopAnalyzer
@@ -11,6 +11,7 @@ def test_inf_loop_semgrep_output_uses_utf8_replace(tmp_path: Path) -> None:
     def fake_run(cmd, **kwargs):
         assert kwargs["encoding"] == "utf-8"
         assert kwargs["errors"] == "replace"
+        assert kwargs["timeout"] == 900
         return CompletedProcess(cmd, 0, stdout='{"results":[]}', stderr="")
 
     with (
@@ -18,6 +19,31 @@ def test_inf_loop_semgrep_output_uses_utf8_replace(tmp_path: Path) -> None:
         patch("checkers.inf_loop.analyzer.subprocess.run", side_effect=fake_run),
     ):
         assert list(InfLoopAnalyzer().find_candidates(tmp_path)) == []
+
+
+def test_inf_loop_uses_semgrep_json_file_after_timeout(tmp_path: Path) -> None:
+    output = _semgrep_output(
+        path="missing.c",
+        line=12,
+        message=(
+            "Function=`append`. CWE-835 potential infinite loop: "
+            "loop-progress variable `begin` is advanced by `count`."
+        ),
+        metavars={},
+    )
+
+    def fake_run(cmd, **kwargs):
+        output_arg = next(arg for arg in cmd if arg.startswith("--json-output="))
+        Path(output_arg.split("=", 1)[1]).write_text(output.stdout, encoding="utf-8")
+        raise TimeoutExpired(cmd, kwargs["timeout"], output="", stderr="still running")
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/semgrep"),
+        patch("checkers.inf_loop.analyzer.subprocess.run", side_effect=fake_run),
+    ):
+        candidates = list(InfLoopAnalyzer().find_candidates(tmp_path))
+
+    assert candidates[0].function == "append"
 
 
 def test_resleak_cppcheck_output_uses_utf8_replace(tmp_path: Path) -> None:
