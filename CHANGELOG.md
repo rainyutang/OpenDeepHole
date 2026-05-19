@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-05-19
+
+- **重构** 代码索引从 tree-sitter 迁移为 Universal Ctags + cscope：函数、结构体/类和全局变量定义由 ctags 建索引，函数调用引用由 cscope 查询
+- **优化** C++ 源码查询继续优先使用完整限定名，并为结构体/类短名查询兼容命名空间或类作用域中的限定名
+- **修复** 旧版 tree-sitter `code_index.db` 不再被误判为可复用索引，缺少 `ctags` 或 `cscope` 时会明确失败并提示安装
+
 ## 2026-05-18
 
 - **新增** 本地 checker 测试命令 `tools/checker_test.py`，可在不启动后端的情况下校验 checker 元数据、Analyzer、代码索引和候选点输出，并支持可选 AI 审计

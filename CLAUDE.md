@@ -153,9 +153,11 @@ The `code_parser/` package is used by both the agent (for local scanning) and th
 
 **`code_parser/` package:**
 - `CodeDatabase` — SQLite wrapper; tables: files, functions, structs, function_calls, global_variables, global_variable_references
-- `CppAnalyzer` — tree-sitter C++ parser; call `analyze_directory(path)` to populate a DB
+- `CppAnalyzer` — Universal Ctags + cscope C/C++ indexer; call `analyze_directory(path)` to populate a DB
 - `code_utils.py` — tree-sitter node traversal helpers
 - `code_struct.py` — dataclasses for parsed structures
+
+Indexing requires `ctags` from Universal Ctags and `cscope` on PATH. Missing tools are treated as hard indexing errors, not as a fallback to tree-sitter.
 
 The agent indexes on-demand (Phase 1 of the pipeline). The MCP Server loads `CodeDatabase` per-call using `project_id`.
 

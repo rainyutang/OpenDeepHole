@@ -814,7 +814,18 @@ Setup
 
 2. Install Python 3.10+ if not already installed
 
-3. Run the agent daemon:
+3. Install system code-index tools:
+
+   Linux:
+     apt install universal-ctags cscope
+
+   macOS:
+     brew install universal-ctags cscope
+
+   Windows:
+     Install Universal Ctags and cscope, then add both commands to PATH.
+
+4. Run the agent daemon:
 
    Linux/macOS:
      chmod +x run_agent.sh

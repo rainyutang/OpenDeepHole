@@ -44,4 +44,22 @@ if errorlevel 1 (
     exit /b 1
 )
 
+where ctags >nul 2>nul
+if errorlevel 1 (
+    echo ctags command not found. Install Universal Ctags before running scans.
+    exit /b 1
+)
+
+ctags --version 2>nul | findstr /C:"Universal Ctags" >nul
+if errorlevel 1 (
+    echo ctags must be Universal Ctags. Install Universal Ctags before running scans.
+    exit /b 1
+)
+
+where cscope >nul 2>nul
+if errorlevel 1 (
+    echo cscope command not found. Install cscope before running scans.
+    exit /b 1
+)
+
 %PYTHON_CMD% -m agent.main %*

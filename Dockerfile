@@ -13,6 +13,8 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    universal-ctags \
+    cscope \
     && rm -rf /var/lib/apt/lists/*
 
 # Install opencode

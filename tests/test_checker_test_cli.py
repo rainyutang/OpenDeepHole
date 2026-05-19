@@ -3,8 +3,46 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from backend.models import Vulnerability
 from tools import checker_test
+
+
+@pytest.fixture(autouse=True)
+def _mock_code_indexer(monkeypatch) -> None:
+    def fake_analyze_directory(self, project_path: Path, on_progress=None, cancel_check=None):
+        file_id = self.db.get_or_create_file("sample.c")
+        self.db.insert_function(
+            name="safe",
+            signature="safe(void)",
+            return_type="int",
+            file_id=file_id,
+            start_line=1,
+            end_line=1,
+            is_static=False,
+            linkage="extern",
+            body="int safe(void) { return 0; }",
+        )
+        self.db.insert_function(
+            name="local_vuln",
+            signature="local_vuln(void)",
+            return_type="int",
+            file_id=file_id,
+            start_line=2,
+            end_line=2,
+            is_static=False,
+            linkage="extern",
+            body="int local_vuln(void) { return 1; }",
+        )
+        self.db.commit()
+        if on_progress:
+            on_progress(1, 1)
+
+    monkeypatch.setattr(
+        "code_parser.cpp_analyzer.CppAnalyzer.analyze_directory",
+        fake_analyze_directory,
+    )
 
 
 def test_checker_test_cli_runs_static_analysis(tmp_path: Path, capsys) -> None:

@@ -1,35 +1,30 @@
-"""C/C++ source code analyzer using tree-sitter.
+"""C/C++ source code analyzer backed by Universal Ctags and cscope.
 
-Parses C/C++ source files and populates a CodeDatabase with:
-- Function definitions (with bodies and internal call sites)
-- Struct/class definitions
-- Global variable declarations
-- Global variable references (g_xxx naming convention + explicit globals)
+Universal Ctags provides source definitions for functions, structs/classes,
+typedef structs, and global variables.  cscope provides function reference
+locations.  The public ``CppAnalyzer`` name is kept so existing scan, upload,
+MCP, and checker-test paths can use the same entry point.
 """
 
+from __future__ import annotations
+
+import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
+from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import tree_sitter_cpp
-from tree_sitter import Language, Parser
-
 from .code_database import CodeDatabase
-from .code_utils import (
-    find_nodes_by_type,
-    get_child_field_text,
-    get_child_field_text_by_type,
-    get_child_node_by_type,
-    get_child_nodes_by_type,
-)
 
-CPP_LANGUAGE = Language(tree_sitter_cpp.language())
+INDEXER_VERSION = CodeDatabase.INDEXER_VERSION
 
-# File extensions to scan
 _C_CPP_EXTS = {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"}
 
-# Directories to skip during indexing (vendor, build, VCS, etc.)
 _SKIP_DIRS = {
     ".git", ".svn", ".hg",
     "node_modules", "vendor", "third_party", "3rdparty", "thirdparty",
@@ -39,16 +34,40 @@ _SKIP_DIRS = {
     "__pycache__", ".venv", "venv",
 }
 
-# Batch commit interval (number of files per commit)
-_COMMIT_BATCH = 50
+_FUNCTION_KINDS = {"function", "func", "f", "method"}
+_STRUCT_KINDS = {"struct", "class", "union", "s", "c", "u"}
+_TYPEDEF_KINDS = {"typedef", "t"}
+_GLOBAL_VAR_KINDS = {"variable", "externvar", "var", "v", "x"}
+
+
+class CodeIndexToolError(RuntimeError):
+    """Raised when ctags/cscope are missing or unusable."""
+
+
+@dataclass(frozen=True)
+class _IndexedFunction:
+    function_id: int
+    name: str
+    short_name: str
+    file_path: str
+    start_line: int
+    end_line: int
+
+
+@dataclass(frozen=True)
+class _CscopeCall:
+    file_path: str
+    caller_name: str
+    line: int
+    text: str
 
 
 class CppAnalyzer:
     def __init__(self, db: CodeDatabase) -> None:
         self.db = db
-        self._parser = Parser(CPP_LANGUAGE)
-        # name → function_id mapping (populated per-file)
-        self._func_id_map: dict[str, int] = {}
+        self._functions: list[_IndexedFunction] = []
+        self._functions_by_name: dict[str, list[_IndexedFunction]] = defaultdict(list)
+        self._functions_by_short: dict[str, list[_IndexedFunction]] = defaultdict(list)
 
     # ------------------------------------------------------------------
     # Public API
@@ -60,313 +79,551 @@ class CppAnalyzer:
         on_progress: Callable[[int, int], None] | None = None,
         cancel_check: Callable[[], bool] | None = None,
     ) -> None:
-        """Parse all C/C++ files under *directory* and populate the DB.
-
-        Uses os.walk with directory pruning to skip vendor/build/VCS dirs.
-        Commits in batches for better performance on large repos.
-        If *cancel_check* returns True, indexing stops early.
-        """
-        # Collect all C/C++ files in one pass, pruning irrelevant dirs
-        files: list[Path] = []
-        for dirpath, dirnames, filenames in os.walk(directory):
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
-            for fname in filenames:
-                if Path(fname).suffix in _C_CPP_EXTS:
-                    files.append(Path(dirpath) / fname)
-
+        """Index all C/C++ files under *directory* using ctags and cscope."""
+        project_root = Path(directory).resolve()
+        files = self._collect_source_files(project_root)
         total = len(files)
+
+        if not files:
+            if on_progress:
+                on_progress(0, 0)
+            self.db.set_metadata("indexer", INDEXER_VERSION)
+            self.db.commit()
+            return
+
+        self._ensure_tools_available()
+
+        source_cache: dict[str, list[str]] = {}
         for idx, filepath in enumerate(files):
             if cancel_check and cancel_check():
-                break
-
-            try:
-                rel_path = str(filepath.relative_to(directory))
-                source = filepath.read_bytes()
-                self.analyze_file(rel_path, source)
-            except Exception:
-                pass  # skip unparseable files
-
-            # Batch commit
-            if (idx + 1) % _COMMIT_BATCH == 0 or idx == total - 1:
-                self.db.commit()
-
-            # Progress callback (every 10 files or last file)
+                return
+            rel_path = self._relative_path(project_root, filepath)
+            self.db.get_or_create_file(rel_path)
+            source_cache[rel_path] = filepath.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
             if on_progress and (idx % 10 == 0 or idx == total - 1):
                 on_progress(idx + 1, total)
 
-    def analyze_file(self, rel_path: str, source: bytes) -> None:
-        """Parse a single file and write results to DB."""
-        file_id = self.db.get_or_create_file(rel_path)
-        tree = self._parser.parse(source)
-        root = tree.root_node
-        lines = source.decode("utf-8", errors="replace").splitlines()
-
-        self._extract_functions(root, source, rel_path, file_id)
-        self._extract_structs(root, source, file_id)
-        self._extract_global_variables(root, source, lines, file_id)
-
-    # ------------------------------------------------------------------
-    # Function extraction
-    # ------------------------------------------------------------------
-
-    def _extract_functions(
-        self, root, source: bytes, rel_path: str, file_id: int
-    ) -> None:
-        func_nodes = find_nodes_by_type(root, "function_definition")
-        for node in func_nodes:
-            try:
-                self._process_function(node, source, rel_path, file_id)
-            except Exception:
-                pass
-
-    def _process_function(self, node, source: bytes, rel_path: str, file_id: int) -> None:
-        # Return type
-        return_type_node = node.child_by_field_name("type")
-        return_type = return_type_node.text.decode("utf-8", errors="replace") if return_type_node else ""
-
-        # Declarator → function name + signature
-        declarator = node.child_by_field_name("declarator")
-        if not declarator:
+        ctags_entries = self._run_ctags_json(project_root, files)
+        if cancel_check and cancel_check():
             return
 
-        name = self._extract_function_name(declarator)
+        self._index_ctags_entries(project_root, source_cache, ctags_entries)
+        self.db.commit()
+
+        if cancel_check and cancel_check():
+            return
+        self._index_cscope_calls(project_root, files, cancel_check=cancel_check)
+        self._index_global_variable_references(source_cache)
+
+        self.db.set_metadata("indexer", INDEXER_VERSION)
+        self.db.commit()
+
+    def analyze_file(self, rel_path: str, source: bytes) -> None:
+        """Index a single in-memory file.
+
+        This compatibility path still uses ctags/cscope.  Callers that need
+        deterministic unit tests should monkeypatch the runner methods instead
+        of depending on tree-sitter behavior.
+        """
+        with tempfile.TemporaryDirectory(prefix="odh-index-file-") as tmp:
+            root = Path(tmp)
+            target = root / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source)
+            self.analyze_directory(root)
+
+    # ------------------------------------------------------------------
+    # Tool execution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ensure_tools_available() -> None:
+        missing = [tool for tool in ("ctags", "cscope") if shutil.which(tool) is None]
+        if missing:
+            raise CodeIndexToolError(
+                "代码索引依赖缺失: "
+                + ", ".join(missing)
+                + "。请安装 Universal Ctags 和 cscope 后重新扫描。"
+            )
+
+        version = subprocess.run(
+            ["ctags", "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if version.returncode != 0 or "Universal Ctags" not in version.stdout:
+            raise CodeIndexToolError(
+                "ctags 必须是 Universal Ctags，当前 ctags 不支持所需的 JSON 输出。"
+            )
+
+        cscope_version = subprocess.run(
+            ["cscope", "-V"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if cscope_version.returncode != 0:
+            raise CodeIndexToolError("cscope 不可用，请安装 cscope 后重新扫描。")
+
+    def _run_ctags_json(self, project_root: Path, files: list[Path]) -> list[dict]:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fp:
+            list_path = Path(fp.name)
+            for path in files:
+                fp.write(self._relative_path(project_root, path) + "\n")
+
+        try:
+            cmd = [
+                "ctags",
+                "--output-format=json",
+                "--fields=+n+e+S+K+Z+s+t",
+                "--languages=C,C++",
+                "-f",
+                "-",
+                "-L",
+                str(list_path),
+            ]
+            proc = subprocess.run(
+                cmd,
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        finally:
+            list_path.unlink(missing_ok=True)
+
+        if proc.returncode != 0:
+            raise CodeIndexToolError(
+                "ctags 代码索引失败: " + (proc.stderr.strip() or proc.stdout.strip())
+            )
+
+        entries: list[dict] = []
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("_type", "tag") == "tag":
+                entries.append(payload)
+        return entries
+
+    def _index_cscope_calls(
+        self,
+        project_root: Path,
+        files: list[Path],
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> None:
+        if not self._functions:
+            return
+
+        with tempfile.TemporaryDirectory(prefix="odh-cscope-") as tmp:
+            cscope_db = self._build_cscope_database(project_root, files, Path(tmp))
+            symbols = sorted(
+                {func.short_name for func in self._functions if func.short_name}
+                | {func.name for func in self._functions if "::" in func.name}
+            )
+            seen: set[tuple[str, str, int, int | None]] = set()
+            for symbol in symbols:
+                if cancel_check and cancel_check():
+                    return
+                for call in self._query_cscope_callers(cscope_db, symbol, project_root):
+                    callee_name = symbol
+                    caller = self._select_caller_function(call)
+                    file_id = self.db.get_or_create_file(call.file_path)
+                    col = max(call.text.find(self._short_name(symbol)), 0)
+                    key = (callee_name, call.file_path, call.line, caller.function_id if caller else None)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    callee_id = self._select_callee_id(callee_name)
+                    self.db.insert_function_call(
+                        caller_function_id=caller.function_id if caller else None,
+                        callee_name=callee_name,
+                        file_id=file_id,
+                        line=call.line,
+                        column=col,
+                        callee_function_id=callee_id,
+                    )
+
+    def _build_cscope_database(
+        self,
+        project_root: Path,
+        files: list[Path],
+        temp_dir: Path,
+    ) -> Path:
+        files_list = temp_dir / "cscope.files"
+        db_path = temp_dir / "cscope.out"
+        files_list.write_text(
+            "\n".join(self._relative_path(project_root, path) for path in files) + "\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [
+                "cscope",
+                "-b",
+                "-q",
+                "-k",
+                "-i",
+                str(files_list),
+                "-f",
+                str(db_path),
+            ],
+            cwd=project_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise CodeIndexToolError(
+                "cscope 调用关系索引失败: " + (proc.stderr.strip() or proc.stdout.strip())
+            )
+        return db_path
+
+    def _query_cscope_callers(
+        self,
+        cscope_db: Path,
+        symbol: str,
+        project_root: Path,
+    ) -> list[_CscopeCall]:
+        proc = subprocess.run(
+            ["cscope", "-d", "-L", "-3", symbol, "-f", str(cscope_db)],
+            cwd=project_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode not in (0, 1):
+            raise CodeIndexToolError(
+                "cscope 引用查询失败: " + (proc.stderr.strip() or proc.stdout.strip())
+            )
+
+        calls: list[_CscopeCall] = []
+        for line in proc.stdout.splitlines():
+            parts = line.split(maxsplit=3)
+            if len(parts) < 4:
+                continue
+            file_path, caller_name, line_no, text = parts
+            try:
+                line_int = int(line_no)
+            except ValueError:
+                continue
+            calls.append(
+                _CscopeCall(
+                    file_path=file_path.replace("\\", "/"),
+                    caller_name=caller_name,
+                    line=line_int,
+                    text=text,
+                )
+            )
+        return calls
+
+    # ------------------------------------------------------------------
+    # Ctags indexing
+    # ------------------------------------------------------------------
+
+    def _index_ctags_entries(
+        self,
+        project_root: Path,
+        source_cache: dict[str, list[str]],
+        entries: list[dict],
+    ) -> None:
+        for entry in entries:
+            kind = self._kind(entry)
+            rel_path = self._entry_path(project_root, entry)
+            if not rel_path or rel_path not in source_cache:
+                continue
+            lines = source_cache[rel_path]
+
+            if kind in _FUNCTION_KINDS:
+                self._insert_function_entry(entry, rel_path, lines)
+            elif kind in _STRUCT_KINDS:
+                self._insert_struct_entry(entry, rel_path, lines)
+            elif kind in _TYPEDEF_KINDS and self._typedef_is_struct(entry, lines):
+                self._insert_struct_entry(entry, rel_path, lines)
+            elif kind in _GLOBAL_VAR_KINDS:
+                self._insert_global_variable_entry(entry, rel_path, lines)
+
+    def _insert_function_entry(self, entry: dict, rel_path: str, lines: list[str]) -> None:
+        name = self._qualified_name(entry)
         if not name:
             return
+        start_line = self._entry_line(entry)
+        if start_line <= 0:
+            return
+        end_line = self._entry_end(entry)
+        if end_line < start_line:
+            end_line = self._find_block_end(lines, start_line)
+        body = self._slice_lines(lines, start_line, end_line)
+        if "{" not in body:
+            return
 
-        signature = declarator.text.decode("utf-8", errors="replace")
-
-        # Static / linkage
-        is_static = False
-        linkage = "extern"
-        for child in node.children:
-            if child.type == "storage_class_specifier":
-                text = child.text.decode("utf-8", errors="replace")
-                if text == "static":
-                    is_static = True
-                    linkage = "static"
-
-        start_line = node.start_point[0] + 1
-        end_line = node.end_point[0] + 1
-        body = node.text.decode("utf-8", errors="replace")
-
-        func_id = self.db.insert_function(
+        file_id = self.db.get_or_create_file(rel_path)
+        signature = entry.get("signature") or self._first_line(body).strip()
+        is_static = self._is_file_scope(entry, body)
+        function_id = self.db.insert_function(
             name=name,
             signature=signature,
-            return_type=return_type,
+            return_type=self._return_type(entry),
             file_id=file_id,
             start_line=start_line,
             end_line=end_line,
             is_static=is_static,
-            linkage=linkage,
+            linkage="static" if is_static else "extern",
             body=body,
         )
-        self._func_id_map[name] = func_id
-        self._func_id_map.setdefault(name.rsplit("::", 1)[-1], func_id)
-
-        # Extract call sites within this function body
-        body_node = node.child_by_field_name("body")
-        if body_node:
-            self._extract_calls(body_node, func_id, file_id)
-
-    def _extract_function_name(self, declarator) -> str | None:
-        """Recursively unwrap declarator to find the C/C++ function name."""
-        if declarator.type in (
-            "identifier",
-            "field_identifier",
-            "qualified_identifier",
-            "destructor_name",
-            "operator_name",
-        ):
-            return declarator.text.decode("utf-8", errors="replace")
-        if declarator.type in ("function_declarator", "pointer_declarator",
-                               "reference_declarator", "parenthesized_declarator",
-                               "abstract_function_declarator"):
-            inner = declarator.child_by_field_name("declarator")
-            if inner:
-                return self._extract_function_name(inner)
-        # Fallback: look for any identifier child
-        id_node = get_child_node_by_type(
-            declarator,
-            [
-                "qualified_identifier",
-                "field_identifier",
-                "identifier",
-                "destructor_name",
-                "operator_name",
-            ],
+        record = _IndexedFunction(
+            function_id=function_id,
+            name=name,
+            short_name=self._short_name(name),
+            file_path=rel_path,
+            start_line=start_line,
+            end_line=end_line,
         )
-        if id_node:
-            return id_node.text.decode("utf-8", errors="replace")
-        return None
+        self._functions.append(record)
+        self._functions_by_name[name].append(record)
+        self._functions_by_short[record.short_name].append(record)
 
-    # ------------------------------------------------------------------
-    # Call site extraction
-    # ------------------------------------------------------------------
-
-    def _extract_calls(self, body_node, caller_func_id: int, file_id: int) -> None:
-        call_nodes = find_nodes_by_type(body_node, "call_expression")
-        for call_node in call_nodes:
-            try:
-                func_node = call_node.child_by_field_name("function")
-                if not func_node:
-                    continue
-                callee_name = func_node.text.decode("utf-8", errors="replace").strip()
-                # Strip pointer/member access qualifiers
-                callee_name = callee_name.split("->")[-1].split(".")[-1].split("::")[-1]
-                line = call_node.start_point[0] + 1
-                col = call_node.start_point[1]
-                callee_id = self._func_id_map.get(callee_name)
-                self.db.insert_function_call(
-                    caller_function_id=caller_func_id,
-                    callee_name=callee_name,
-                    file_id=file_id,
-                    line=line,
-                    column=col,
-                    callee_function_id=callee_id,
-                )
-            except Exception:
-                pass
-
-    # ------------------------------------------------------------------
-    # Struct extraction
-    # ------------------------------------------------------------------
-
-    def _extract_structs(self, root, source: bytes, file_id: int) -> None:
-        for node_type in ("struct_specifier", "class_specifier"):
-            for node in find_nodes_by_type(root, node_type):
-                try:
-                    name_node = node.child_by_field_name("name")
-                    definition = node.text.decode("utf-8", errors="replace")
-
-                    if name_node:
-                        # 普通具名 struct：struct Foo { ... }
-                        name = name_node.text.decode("utf-8", errors="replace")
-                    else:
-                        # 匿名 struct，尝试从外层 type_definition 获取 typedef 名
-                        # typedef struct { ... } Node;
-                        # AST: type_definition → struct_specifier + type_declarator(type_identifier)
-                        name = self._typedef_name_for(node)
-                        if not name:
-                            continue
-                        # 用整个 type_definition 作为 definition（包含 typedef 关键字）
-                        if node.parent and node.parent.type == "type_definition":
-                            definition = node.parent.text.decode("utf-8", errors="replace")
-
-                    self.db.insert_struct(
-                        name=name,
-                        file_id=file_id,
-                        start_line=node.start_point[0] + 1,
-                        end_line=node.end_point[0] + 1,
-                        definition=definition,
-                    )
-                except Exception:
-                    pass
-
-    def _typedef_name_for(self, struct_node) -> str | None:
-        """从 type_definition 父节点中提取 typedef 名（type_identifier）。"""
-        parent = struct_node.parent
-        if parent is None or parent.type != "type_definition":
-            return None
-        for child in parent.children:
-            if child.type == "type_identifier":
-                return child.text.decode("utf-8", errors="replace")
-        # 也可能包在 pointer_declarator 里：typedef struct{} *NodePtr;
-        for child in parent.children:
-            if child.type in ("pointer_declarator", "abstract_pointer_declarator"):
-                id_node = get_child_node_by_type(child, ["type_identifier", "identifier"])
-                if id_node:
-                    return id_node.text.decode("utf-8", errors="replace")
-        return None
-
-    # ------------------------------------------------------------------
-    # Global variable extraction
-    # ------------------------------------------------------------------
-
-    def _extract_global_variables(
-        self, root, source: bytes, lines: list[str], file_id: int
-    ) -> None:
-        """Extract top-level declarations that look like global variables."""
-        for node in root.children:
-            if node.type != "declaration":
-                continue
-            try:
-                self._process_global_declaration(node, source, lines, file_id)
-            except Exception:
-                pass
-
-    def _process_global_declaration(
-        self, node, source: bytes, lines: list[str], file_id: int
-    ) -> None:
-        is_extern = False
-        is_static = False
-        for child in node.children:
-            if child.type == "storage_class_specifier":
-                t = child.text.decode("utf-8", errors="replace")
-                if t == "extern":
-                    is_extern = True
-                if t == "static":
-                    is_static = True
-
-        # Find all declarators (there may be multiple, e.g. int a, b;)
-        declarators = get_child_nodes_by_type(
-            node,
-            ["init_declarator", "identifier", "pointer_declarator",
-             "array_declarator", "function_declarator"],
-        )
-        if not declarators:
+    def _insert_struct_entry(self, entry: dict, rel_path: str, lines: list[str]) -> None:
+        name = self._qualified_name(entry)
+        if not name:
             return
+        start_line = self._entry_line(entry)
+        if start_line <= 0:
+            return
+        end_line = self._entry_end(entry)
+        if end_line < start_line:
+            end_line = self._find_definition_end(lines, start_line)
+        definition = self._slice_lines(lines, start_line, end_line)
+        file_id = self.db.get_or_create_file(rel_path)
+        self.db.insert_struct(
+            name=name,
+            file_id=file_id,
+            start_line=start_line,
+            end_line=end_line,
+            definition=definition,
+        )
 
-        definition = node.text.decode("utf-8", errors="replace")
+    def _insert_global_variable_entry(self, entry: dict, rel_path: str, lines: list[str]) -> None:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            return
+        start_line = self._entry_line(entry)
+        if start_line <= 0:
+            return
+        end_line = self._entry_end(entry)
+        if end_line < start_line:
+            end_line = self._find_statement_end(lines, start_line)
+        definition = self._slice_lines(lines, start_line, end_line)
+        if "(" in self._first_line(definition):
+            return
+        file_id = self.db.get_or_create_file(rel_path)
+        is_static = self._is_file_scope(entry, definition)
+        self.db.insert_global_variable(
+            name=name,
+            file_id=file_id,
+            start_line=start_line,
+            end_line=end_line,
+            is_extern=self._first_line(definition).lstrip().startswith("extern "),
+            is_static=is_static,
+            definition=definition,
+        )
 
-        for decl in declarators:
-            name_node = get_child_node_by_type(decl, ["identifier"])
-            if not name_node:
-                if decl.type == "identifier":
-                    name_node = decl
-                else:
-                    continue
-            name = name_node.text.decode("utf-8", errors="replace")
+    def _index_global_variable_references(self, source_cache: dict[str, list[str]]) -> None:
+        rows = [row for row in self.db.get_all_global_variables() if row["name"].startswith("g_")]
+        for row in rows:
+            name = row["name"]
+            pattern = re.compile(r"\b" + re.escape(name) + r"\b")
+            for rel_path, lines in source_cache.items():
+                file_id = self.db.get_or_create_file(rel_path)
+                for line_no, line_text in enumerate(lines, start=1):
+                    if not pattern.search(line_text):
+                        continue
+                    function = self._select_function_by_location(rel_path, line_no)
+                    self.db.insert_global_variable_reference(
+                        global_var_id=row["global_var_id"],
+                        variable_name=name,
+                        file_id=file_id,
+                        function_id=function.function_id if function else None,
+                        line=line_no,
+                        column=max(line_text.find(name), 0),
+                        context=line_text.strip(),
+                        access_type=self._global_access_type(name, line_text),
+                    )
 
-            # Skip function declarations (they have a function_declarator child)
-            if any(c.type == "function_declarator" for c in decl.children):
-                continue
+    # ------------------------------------------------------------------
+    # Selection helpers
+    # ------------------------------------------------------------------
 
-            gvar_id = self.db.insert_global_variable(
-                name=name,
-                file_id=file_id,
-                start_line=node.start_point[0] + 1,
-                end_line=node.end_point[0] + 1,
-                is_extern=is_extern,
-                is_static=is_static,
-                definition=definition,
-            )
+    def _select_caller_function(self, call: _CscopeCall) -> _IndexedFunction | None:
+        by_location = self._select_function_by_location(call.file_path, call.line)
+        if by_location:
+            return by_location
 
-            # Find references to this global (g_xxx pattern)
-            if name.startswith("g_"):
-                self._find_global_references(name, gvar_id, file_id, lines)
+        candidates = self._functions_by_name.get(call.caller_name) or self._functions_by_short.get(call.caller_name)
+        for candidate in candidates or []:
+            if candidate.file_path == call.file_path:
+                return candidate
+        return candidates[0] if candidates else None
 
-    def _find_global_references(
-        self,
-        var_name: str,
-        gvar_id: int,
-        file_id: int,
-        lines: list[str],
-    ) -> None:
-        """Scan all functions in DB for references to var_name."""
-        pattern = re.compile(r"\b" + re.escape(var_name) + r"\b")
-        for i, line_text in enumerate(lines, start=1):
-            if pattern.search(line_text):
-                col = line_text.find(var_name)
-                access_type = "write" if re.search(
-                    r"\b" + re.escape(var_name) + r"\s*(?:\[.*?\]\s*)?=(?!=)", line_text
-                ) else "read"
-                self.db.insert_global_variable_reference(
-                    global_var_id=gvar_id,
-                    variable_name=var_name,
-                    file_id=file_id,
-                    function_id=None,  # resolved separately if needed
-                    line=i,
-                    column=col,
-                    context=line_text.strip(),
-                    access_type=access_type,
-                )
+    def _select_function_by_location(self, rel_path: str, line: int) -> _IndexedFunction | None:
+        for func in self._functions:
+            if func.file_path == rel_path and func.start_line <= line <= func.end_line:
+                return func
+        return None
+
+    def _select_callee_id(self, callee_name: str) -> int | None:
+        candidates = self._functions_by_name.get(callee_name)
+        if not candidates:
+            candidates = self._functions_by_short.get(self._short_name(callee_name))
+        if candidates and len(candidates) == 1:
+            return candidates[0].function_id
+        return None
+
+    # ------------------------------------------------------------------
+    # Source helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _collect_source_files(directory: Path) -> list[Path]:
+        files: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(directory):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            for fname in filenames:
+                path = Path(dirpath) / fname
+                if path.suffix in _C_CPP_EXTS:
+                    files.append(path)
+        return sorted(files)
+
+    @staticmethod
+    def _relative_path(project_root: Path, filepath: Path) -> str:
+        return str(filepath.resolve().relative_to(project_root)).replace("\\", "/")
+
+    @staticmethod
+    def _slice_lines(lines: list[str], start_line: int, end_line: int) -> str:
+        if not lines:
+            return ""
+        start = max(start_line - 1, 0)
+        end = min(max(end_line, start_line), len(lines))
+        return "\n".join(lines[start:end])
+
+    @staticmethod
+    def _first_line(text: str) -> str:
+        return text.splitlines()[0] if text else ""
+
+    @staticmethod
+    def _find_statement_end(lines: list[str], start_line: int) -> int:
+        for idx in range(max(start_line - 1, 0), len(lines)):
+            if ";" in lines[idx]:
+                return idx + 1
+        return start_line
+
+    @classmethod
+    def _find_definition_end(cls, lines: list[str], start_line: int) -> int:
+        block_end = cls._find_block_end(lines, start_line)
+        if block_end != start_line:
+            return block_end
+        return cls._find_statement_end(lines, start_line)
+
+    @staticmethod
+    def _find_block_end(lines: list[str], start_line: int) -> int:
+        depth = 0
+        seen_open = False
+        for idx in range(max(start_line - 1, 0), len(lines)):
+            line = lines[idx]
+            pos = 0
+            while pos < len(line):
+                ch = line[pos]
+                if ch == "{":
+                    depth += 1
+                    seen_open = True
+                elif ch == "}":
+                    depth -= 1
+                    if seen_open and depth <= 0:
+                        return idx + 1
+                pos += 1
+        return start_line
+
+    # ------------------------------------------------------------------
+    # Ctags field helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _kind(entry: dict) -> str:
+        return str(entry.get("kind") or "").lower()
+
+    @classmethod
+    def _qualified_name(cls, entry: dict) -> str:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            return ""
+        scope = str(entry.get("scope") or "").strip()
+        if scope and "::" not in name:
+            return f"{scope}::{name}"
+        return name
+
+    @staticmethod
+    def _short_name(name: str) -> str:
+        return name.rsplit("::", 1)[-1]
+
+    def _entry_path(self, project_root: Path, entry: dict) -> str:
+        raw = str(entry.get("path") or "")
+        if not raw:
+            return ""
+        path = Path(raw)
+        if path.is_absolute():
+            try:
+                return str(path.resolve().relative_to(project_root)).replace("\\", "/")
+            except ValueError:
+                return ""
+        return raw.replace("\\", "/")
+
+    @staticmethod
+    def _entry_line(entry: dict) -> int:
+        try:
+            return int(entry.get("line") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _entry_end(entry: dict) -> int:
+        try:
+            return int(entry.get("end") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _return_type(entry: dict) -> str:
+        typeref = str(entry.get("typeref") or "")
+        if ":" in typeref:
+            return typeref.split(":", 1)[1]
+        return typeref
+
+    @staticmethod
+    def _is_file_scope(entry: dict, definition: str) -> bool:
+        extras = entry.get("extras") or []
+        if isinstance(extras, str):
+            extras = [extras]
+        return "fileScope" in extras or CppAnalyzer._first_line(definition).lstrip().startswith("static ")
+
+    @staticmethod
+    def _typedef_is_struct(entry: dict, lines: list[str]) -> bool:
+        typeref = str(entry.get("typeref") or "").lower()
+        start_line = CppAnalyzer._entry_line(entry)
+        end_line = CppAnalyzer._entry_end(entry)
+        if end_line < start_line:
+            end_line = CppAnalyzer._find_definition_end(lines, start_line)
+        definition = CppAnalyzer._slice_lines(lines, start_line, end_line).lower()
+        return any(token in typeref or token in definition for token in ("struct", "class", "union"))
+
+    @staticmethod
+    def _global_access_type(name: str, line_text: str) -> str:
+        assignment = re.compile(
+            r"\b" + re.escape(name) + r"\s*(?:\[.*?\]\s*)?=(?!=)"
+        )
+        return "write" if assignment.search(line_text) else "read"

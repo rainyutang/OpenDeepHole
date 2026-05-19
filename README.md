@@ -93,7 +93,21 @@ opencode:
 
 > 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
 
-**第 3 步：启动 Agent 守护进程**
+**第 3 步：安装系统代码索引工具**
+
+代码索引依赖 Universal Ctags 和 cscope。缺少任一命令时 Agent 会直接停止并提示安装，不会回退到旧索引方式。
+
+```bash
+# Debian / Ubuntu
+sudo apt install universal-ctags cscope
+
+# macOS
+brew install universal-ctags cscope
+```
+
+Windows 环境请安装 Universal Ctags 和 cscope，并确保 `ctags`、`cscope` 都在 `PATH` 中。
+
+**第 4 步：启动 Agent 守护进程**
 
 ```bash
 # Linux / macOS
@@ -280,7 +294,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-cand
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --audit --audit-limit 1 --config agent.yaml
 ```
 
-本地测试命令不依赖后端、Web UI 或在线 Agent。默认会在被测项目目录下重建 `code_index.db`，与 Agent 扫描时的索引位置一致；如只想把索引写到临时位置，可加 `--index-db /tmp/mycheck-code_index.db`。
+本地测试命令不依赖后端、Web UI 或在线 Agent。默认会在被测项目目录下重建 `code_index.db`，与 Agent 扫描时的索引位置一致；如只想把索引写到临时位置，可加 `--index-db /tmp/mycheck-code_index.db`。代码索引同样需要本机已安装 Universal Ctags 和 cscope。
 
 开发阶段即使 `checker.yaml` 中设置了 `enabled: false`，本地测试命令也会临时启用该 checker 进行自测，并输出提示；线上扫描入口仍会遵循 `enabled` 和 `visibility` 配置。`--audit` 会实际调用模型或 opencode，请先确认 `agent.yaml` 配置可用，并用 `--audit-limit` 控制成本。
 
@@ -297,7 +311,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --audit --aud
 | `db.get_function_body(name)` | 获取第一个匹配函数的函数体 | 返回 `str \| None` |
 | `db.get_calls_from_function(function_id)` | 查询指定函数发出的所有调用 | call_id, caller_function_id, callee_name, callee_function_id, line, column, file_path |
 | `db.get_call_sites_by_name(callee_name)` | 查询指定函数名的所有被调用点 | 同上 + caller_name |
-| `db.get_structs_by_name(name)` | 按名称查询结构体/类定义 | struct_id, name, start_line, end_line, definition, file_path |
+| `db.get_structs_by_name(name)` | 按名称查询结构体/类定义，短名可匹配 C++ 限定名 | struct_id, name, start_line, end_line, definition, file_path |
 | `db.get_global_variables_by_name(name)` | 按名称查询全局变量 | global_var_id, name, start_line, end_line, is_extern, is_static, definition, file_path |
 | `db.get_global_variable_reference_by_name(name)` | 查询全局变量的所有引用点 | reference_id, variable_name, function_id, line, column, context, access_type, file_path, function_name |
 

@@ -37,4 +37,19 @@ if ! command -v semgrep >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! command -v ctags >/dev/null 2>&1; then
+    echo "ctags command not found. Install Universal Ctags before running scans." >&2
+    exit 1
+fi
+
+if ! ctags --version 2>/dev/null | grep -q "Universal Ctags"; then
+    echo "ctags must be Universal Ctags. Install Universal Ctags before running scans." >&2
+    exit 1
+fi
+
+if ! command -v cscope >/dev/null 2>&1; then
+    echo "cscope command not found. Install cscope before running scans." >&2
+    exit 1
+fi
+
 "$PYTHON_CMD" -m agent.main "$@"

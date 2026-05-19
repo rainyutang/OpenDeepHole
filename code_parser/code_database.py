@@ -12,6 +12,7 @@ from pathlib import Path
 
 class CodeDatabase:
     COMPLETE_STATUS = "complete"
+    INDEXER_VERSION = "ctags-cscope-v1"
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = str(db_path)
@@ -135,12 +136,16 @@ class CodeDatabase:
     def mark_index_complete(self) -> None:
         """Mark the DB as a complete, reusable code index."""
         self.set_metadata("status", self.COMPLETE_STATUS)
+        self.set_metadata("indexer", self.INDEXER_VERSION)
         self.set_metadata("completed_at", str(int(time.time())))
         self.commit()
 
     def is_index_complete(self) -> bool:
         """Return True when this DB was fully built and checkpointed."""
-        return self.get_metadata("status") == self.COMPLETE_STATUS
+        return (
+            self.get_metadata("status") == self.COMPLETE_STATUS
+            and self.get_metadata("indexer") == self.INDEXER_VERSION
+        )
 
     # ------------------------------------------------------------------
     # Insertion helpers  (no auto-commit — caller controls transactions)
@@ -408,11 +413,21 @@ class CodeDatabase:
 
     def get_structs_by_name(self, name: str) -> list[sqlite3.Row]:
         """Return all structs matching the given name."""
+        rows = self._conn.execute(
+            """SELECT s.*, fi.path as file_path
+               FROM structs s JOIN files fi ON s.file_id = fi.file_id
+               WHERE s.name = ?
+               ORDER BY fi.path, s.start_line""",
+            (name,),
+        ).fetchall()
+        if rows or "::" in name:
+            return rows
         return self._conn.execute(
             """SELECT s.*, fi.path as file_path
                FROM structs s JOIN files fi ON s.file_id = fi.file_id
-               WHERE s.name = ?""",
-            (name,),
+               WHERE s.name LIKE ? ESCAPE '\\'
+               ORDER BY fi.path, s.start_line""",
+            (f"%::{self._escape_like(name)}",),
         ).fetchall()
 
     def get_global_variables_by_name(self, name: str) -> list[sqlite3.Row]:
@@ -422,6 +437,14 @@ class CodeDatabase:
                FROM global_variables gv JOIN files fi ON gv.file_id = fi.file_id
                WHERE gv.name = ?""",
             (name,),
+        ).fetchall()
+
+    def get_all_global_variables(self) -> list[sqlite3.Row]:
+        """Return all global variables with their file paths."""
+        return self._conn.execute(
+            """SELECT gv.*, fi.path as file_path
+               FROM global_variables gv JOIN files fi ON gv.file_id = fi.file_id
+               ORDER BY fi.path, gv.start_line"""
         ).fetchall()
 
     def get_global_variable_reference_by_name(self, variable_name: str) -> list[sqlite3.Row]:

@@ -38,7 +38,7 @@ def _replace_sqlite_db(temp_path: Path, final_path: Path) -> None:
 
 
 def _parse_project(project_id: str, project_dir: Path) -> None:
-    """Background task: parse C/C++ source and populate code_index.db."""
+    """Background task: index C/C++ source and populate code_index.db."""
     from code_parser import CodeDatabase, CppAnalyzer
 
     status_path = project_dir / "parse_status.json"
