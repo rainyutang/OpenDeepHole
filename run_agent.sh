@@ -45,12 +45,10 @@ print_source_tool_install_help() {
     echo "Required source indexing tools are missing." >&2
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MINGW*|MSYS*|CYGWIN*)
-            echo "Recommended Windows install method: MSYS2 UCRT64." >&2
-            echo "1. Install MSYS2 from https://www.msys2.org/" >&2
-            echo "2. Open \"MSYS2 UCRT64\" and run:" >&2
-            echo "   pacman -Syu" >&2
-            echo "   pacman -S --needed mingw-w64-ucrt-x86_64-ctags cscope" >&2
-            echo "3. If needed, add C:\\msys64\\ucrt64\\bin and C:\\msys64\\usr\\bin to PATH." >&2
+            echo "Windows recommended method: install MSYS2 with winget, then use pacman." >&2
+            echo "   winget install -i MSYS2.MSYS2" >&2
+            echo "   pacman -Sy --needed --noconfirm mingw-w64-ucrt-x86_64-ctags cscope" >&2
+            echo "If needed, add C:\\msys64\\ucrt64\\bin and C:\\msys64\\usr\\bin to PATH." >&2
             ;;
         Darwin)
             echo "Install with Homebrew:" >&2
@@ -68,16 +66,51 @@ print_source_tool_install_help() {
     esac
 }
 
+install_msys2_source_tools() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MINGW*|MSYS*|CYGWIN*)
+            add_default_msys2_paths
+            if ! command -v pacman >/dev/null 2>&1; then
+                if command -v winget >/dev/null 2>&1; then
+                    echo "Installing MSYS2 with winget..." >&2
+                    winget install -i MSYS2.MSYS2
+                    add_default_msys2_paths
+                fi
+            fi
+
+            if ! command -v pacman >/dev/null 2>&1; then
+                print_source_tool_install_help
+                return 1
+            fi
+
+            echo "Installing Universal Ctags and cscope with MSYS2 pacman..." >&2
+            pacman -Sy --needed --noconfirm mingw-w64-ucrt-x86_64-ctags cscope
+            add_default_msys2_paths
+            ;;
+        *)
+            print_source_tool_install_help
+            return 1
+            ;;
+    esac
+}
+
 check_source_index_tools() {
+    if ! command -v ctags >/dev/null 2>&1 || ! command -v cscope >/dev/null 2>&1; then
+        install_msys2_source_tools || return 1
+    fi
+
     if ! command -v ctags >/dev/null 2>&1 || ! command -v cscope >/dev/null 2>&1; then
         print_source_tool_install_help
         return 1
     fi
 
     if ! ctags --version 2>/dev/null | grep -q "Universal Ctags"; then
-        echo "ctags must be Universal Ctags." >&2
-        print_source_tool_install_help
-        return 1
+        install_msys2_source_tools || return 1
+        if ! ctags --version 2>/dev/null | grep -q "Universal Ctags"; then
+            echo "ctags must be Universal Ctags." >&2
+            print_source_tool_install_help
+            return 1
+        fi
     fi
 }
 

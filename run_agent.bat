@@ -61,14 +61,39 @@ exit /b 0
 
 :PRINT_MSYS2_SOURCE_TOOL_HELP
 echo Required source indexing tools are missing.
-echo Recommended Windows install method: MSYS2 UCRT64.
-echo 1. Install MSYS2 from https://www.msys2.org/
-echo 2. Open "MSYS2 UCRT64" from the Start menu and run:
-echo    pacman -Syu
-echo    pacman -S --needed mingw-w64-ucrt-x86_64-ctags cscope
-echo 3. If you run this .bat from cmd or PowerShell, add these directories to PATH:
+echo This script can install MSYS2 automatically when winget is available:
+echo    winget install -i MSYS2.MSYS2
+echo Then it installs the source indexing tools with MSYS2 pacman:
+echo    pacman -Sy --needed --noconfirm mingw-w64-ucrt-x86_64-ctags cscope
+echo If automatic install fails, install MSYS2 from https://www.msys2.org/
+echo and add these directories to PATH:
 echo    C:\msys64\ucrt64\bin
 echo    C:\msys64\usr\bin
+exit /b 0
+
+:INSTALL_MSYS2_SOURCE_TOOLS
+call :ADD_DEFAULT_MSYS2_PATHS
+if not exist "C:\msys64\usr\bin\bash.exe" (
+    where winget >nul 2>nul
+    if errorlevel 1 (
+        echo winget command not found. Cannot install MSYS2 automatically.
+        call :PRINT_MSYS2_SOURCE_TOOL_HELP
+        exit /b 1
+    )
+    echo Installing MSYS2 with winget...
+    winget install -i MSYS2.MSYS2 || exit /b 1
+    call :ADD_DEFAULT_MSYS2_PATHS
+)
+
+if not exist "C:\msys64\usr\bin\bash.exe" (
+    echo MSYS2 was not found at C:\msys64 after installation.
+    call :PRINT_MSYS2_SOURCE_TOOL_HELP
+    exit /b 1
+)
+
+echo Installing Universal Ctags and cscope with MSYS2 pacman...
+"C:\msys64\usr\bin\bash.exe" -lc "pacman -Sy --needed --noconfirm mingw-w64-ucrt-x86_64-ctags cscope" || exit /b 1
+call :ADD_DEFAULT_MSYS2_PATHS
 exit /b 0
 
 :CHECK_SOURCE_INDEX_TOOLS
@@ -80,14 +105,28 @@ where cscope >nul 2>nul
 if errorlevel 1 set "SOURCE_TOOL_MISSING=1"
 
 if defined SOURCE_TOOL_MISSING (
-    call :PRINT_MSYS2_SOURCE_TOOL_HELP
-    exit /b 1
+    call :INSTALL_MSYS2_SOURCE_TOOLS
+    if errorlevel 1 exit /b 1
+    set "SOURCE_TOOL_MISSING="
+    where ctags >nul 2>nul
+    if errorlevel 1 set "SOURCE_TOOL_MISSING=1"
+    where cscope >nul 2>nul
+    if errorlevel 1 set "SOURCE_TOOL_MISSING=1"
+    if defined SOURCE_TOOL_MISSING (
+        call :PRINT_MSYS2_SOURCE_TOOL_HELP
+        exit /b 1
+    )
 )
 
 ctags --version 2>nul | findstr /C:"Universal Ctags" >nul
 if errorlevel 1 (
-    echo ctags must be Universal Ctags.
-    call :PRINT_MSYS2_SOURCE_TOOL_HELP
-    exit /b 1
+    call :INSTALL_MSYS2_SOURCE_TOOLS
+    if errorlevel 1 exit /b 1
+    ctags --version 2>nul | findstr /C:"Universal Ctags" >nul
+    if errorlevel 1 (
+        echo ctags must be Universal Ctags.
+        call :PRINT_MSYS2_SOURCE_TOOL_HELP
+        exit /b 1
+    )
 )
 exit /b 0
