@@ -3,6 +3,7 @@
 ## 2026-05-19
 
 - **新增** Agent 扫描前自更新运行时代码：服务端 Agent 代码变更后，在线 Agent 会在启动扫描前下载最新 runtime 并重启继续执行，无需用户重新下载；`run_agent` 脚本变更仍需重新下载 Agent
+- **修复** Agent runtime 更新包改为按创建扫描时的同一份内容快照生成 hash 并下载，避免新建扫描时报 `Agent runtime update content hash mismatch`
 - **新增** Agent 配置页支持校验当前表单中的 LLM API 配置，校验请求在 Agent 所在机器上执行，便于确认 API 地址、Key 和模型是否可用
 - **优化** 在线修改 Agent 配置会推送到运行中的 Agent，扫描从下一个候选点开始重新加载 LLM API、opencode 和代理配置
 - **新增** 新建扫描支持分别配置“项目总路径”和“代码扫描路径”：代码索引与 opencode 使用项目总路径，静态分析仅扫描指定子目录，并统一候选路径以保证 MCP 源码查询可命中全量索引

@@ -5,4 +5,4 @@ description: >
   包括成员目标使用父对象大小、偏移目标仍使用完整缓冲区大小、指针 sizeof 误用等高风险场景。
 enabled: true
 mode: opencode
-visibility: admin
+visibility: public

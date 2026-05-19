@@ -38,9 +38,15 @@ def _iter_runtime_files(root: Path):
         dir_path = root / dir_name
         if not dir_path.is_dir():
             continue
-        for file_path in sorted(dir_path.rglob("*")):
+        # Sort by POSIX arcname to ensure consistent ordering across platforms
+        # (Windows Path sorting is case-insensitive, Linux is case-sensitive).
+        entries = []
+        for file_path in dir_path.rglob("*"):
             if file_path.is_file() and not _should_skip(file_path):
-                yield file_path.relative_to(root).as_posix(), file_path
+                arcname = file_path.relative_to(root).as_posix()
+                entries.append((arcname, file_path))
+        entries.sort(key=lambda e: e[0])
+        yield from entries
     for filename in RUNTIME_ROOT_FILES:
         file_path = root / filename
         if file_path.is_file():
@@ -104,6 +110,10 @@ def load_pending_commands(*, clear: bool) -> list[dict[str, Any]]:
             PENDING_COMMANDS_FILE.unlink()
         except OSError:
             pass
+    # Strip stale agent_runtime_update — tokens are one-time and server-side
+    # in-memory, so they are always invalid after agent restart.
+    for cmd in result:
+        cmd.pop("agent_runtime_update", None)
     return result
 
 
@@ -116,8 +126,13 @@ async def ensure_runtime_updated(update: dict[str, Any] | None, command: dict[st
     if not expected_hash or expected_hash == compute_runtime_hash():
         return False
 
+    try:
+        archive = await _download_update(update)
+    except Exception as e:
+        print(f"Warning: runtime update download failed ({e}), continuing with current runtime")
+        return False
+
     save_pending_command(command)
-    archive = await _download_update(update)
     _install_update_archive(archive, expected_hash)
     _install_requirements_if_needed()
     _restart_process()

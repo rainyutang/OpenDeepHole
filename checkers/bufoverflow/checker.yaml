@@ -6,4 +6,4 @@ description: >
   变长尾部成员索引/拷贝/指针运算未做完整边界校验等模式。
 enabled: true
 mode: opencode
-visibility: admin
+visibility: public

@@ -31,6 +31,7 @@ import socket
 import time
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -71,8 +72,17 @@ _agent_disconnect_tasks: dict[str, asyncio.Task] = {}
 # Agent configs persisted by agent_name (survives agent reconnects)
 _agent_configs: dict[str, AgentRemoteConfig] = {}
 
+
+@dataclass(frozen=True)
+class _RuntimeDownload:
+    runtime_hash: str
+    archive_sha256: str
+    data: bytes
+    expires_at: float
+
+
 # Short-lived tokens used by online agents to fetch runtime update archives.
-_runtime_download_tokens: dict[str, tuple[str, float]] = {}
+_runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _config_test_waiters: dict[str, asyncio.Future] = {}
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
@@ -90,6 +100,17 @@ _RUNNING_SCAN_STATUSES = (
     ScanItemStatus.ANALYZING,
     ScanItemStatus.AUDITING,
 )
+
+
+def _purge_expired_runtime_downloads() -> None:
+    now = time.time()
+    expired = [
+        token
+        for token, download in _runtime_download_tokens.items()
+        if download.expires_at <= now
+    ]
+    for token in expired:
+        _runtime_download_tokens.pop(token, None)
 
 
 def _touch_agent(agent_id: str) -> None:
@@ -885,9 +906,15 @@ def _iter_agent_runtime_files():
         dir_path = _PROJECT_ROOT / dir_name
         if not dir_path.is_dir():
             continue
-        for file_path in sorted(dir_path.rglob("*")):
+        # Sort by POSIX arcname to ensure consistent ordering across platforms
+        # (Windows Path sorting is case-insensitive, Linux is case-sensitive).
+        entries = []
+        for file_path in dir_path.rglob("*"):
             if file_path.is_file() and not _should_skip_agent_file(file_path):
-                yield file_path.relative_to(_PROJECT_ROOT).as_posix(), file_path
+                arcname = file_path.relative_to(_PROJECT_ROOT).as_posix()
+                entries.append((arcname, file_path))
+        entries.sort(key=lambda e: e[0])
+        yield from entries
     for filename in _AGENT_RUNTIME_ROOT_FILES:
         file_path = _PROJECT_ROOT / filename
         if file_path.is_file():
@@ -904,28 +931,54 @@ def _agent_runtime_hash() -> str:
     return digest.hexdigest()
 
 
+def _agent_runtime_hash_for_files(files: list[tuple[str, bytes]]) -> str:
+    digest = hashlib.sha256()
+    for arcname, content in files:
+        digest.update(arcname.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _read_agent_runtime_files() -> list[tuple[str, bytes]]:
+    return [(arcname, file_path.read_bytes()) for arcname, file_path in _iter_agent_runtime_files()]
+
+
 def _build_agent_runtime_zip() -> bytes:
+    return _build_agent_runtime_zip_from_files(_read_agent_runtime_files())
+
+
+def _build_agent_runtime_zip_from_files(files: list[tuple[str, bytes]]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for arcname, file_path in _iter_agent_runtime_files():
-            zf.write(file_path, arcname)
+        for arcname, content in files:
+            zf.writestr(arcname, content)
     return buf.getvalue()
 
 
-def create_agent_runtime_update_payload(server_url: str) -> dict:
-    data = _build_agent_runtime_zip()
-    runtime_hash = _agent_runtime_hash()
-    token = secrets.token_urlsafe(32)
-    _runtime_download_tokens[token] = (
-        runtime_hash,
-        time.time() + _RUNTIME_DOWNLOAD_TOKEN_TTL_SECONDS,
+def _build_agent_runtime_download() -> _RuntimeDownload:
+    files = _read_agent_runtime_files()
+    data = _build_agent_runtime_zip_from_files(files)
+    return _RuntimeDownload(
+        runtime_hash=_agent_runtime_hash_for_files(files),
+        archive_sha256=hashlib.sha256(data).hexdigest(),
+        data=data,
+        expires_at=time.time() + _RUNTIME_DOWNLOAD_TOKEN_TTL_SECONDS,
     )
+
+
+def create_agent_runtime_update_payload(server_url: str) -> dict:
+    _purge_expired_runtime_downloads()
+    download = _build_agent_runtime_download()
+    token = secrets.token_urlsafe(32)
+    _runtime_download_tokens[token] = download
     return {
-        "hash": runtime_hash,
-        "archive_sha256": hashlib.sha256(data).hexdigest(),
+        "hash": download.runtime_hash,
+        "archive_sha256": download.archive_sha256,
         "download_url": f"{server_url.rstrip('/')}/api/agent/runtime/download",
         "token": token,
-        "expires_at": int(time.time() + _RUNTIME_DOWNLOAD_TOKEN_TTL_SECONDS),
+        "expires_at": int(download.expires_at),
     }
 
 
@@ -1045,19 +1098,16 @@ async def agent_runtime_manifest() -> dict:
 @router.get("/runtime/download")
 async def agent_runtime_download(request: Request) -> Response:
     """Serve a short-lived Agent runtime update archive."""
+    _purge_expired_runtime_downloads()
     token = request.headers.get("X-Agent-Update-Token") or request.query_params.get("token") or ""
-    token_info = _runtime_download_tokens.pop(token, None)
-    if token_info is None:
+    download = _runtime_download_tokens.pop(token, None)
+    if download is None:
         raise HTTPException(status_code=403, detail="Invalid or expired runtime update token")
-    expected_hash, expires_at = token_info
-    if time.time() > expires_at:
+    if time.time() > download.expires_at:
         raise HTTPException(status_code=403, detail="Runtime update token expired")
 
-    data = _build_agent_runtime_zip()
-    if _agent_runtime_hash() != expected_hash:
-        raise HTTPException(status_code=409, detail="Agent runtime changed; request a new scan command")
     return Response(
-        content=data,
+        content=download.data,
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="opendeephole-agent-runtime.zip"'},
     )

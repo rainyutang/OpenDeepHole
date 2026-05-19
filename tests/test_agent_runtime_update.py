@@ -57,6 +57,24 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 zf.extractall(root)
             self.assertEqual(compute_runtime_hash(root), agent_api._agent_runtime_hash())
 
+    def test_runtime_download_serves_payload_snapshot(self) -> None:
+        agent_api._runtime_download_tokens.clear()
+        snapshot_files = [("agent/main.py", b"snapshot")]
+
+        with patch("backend.api.agent._read_agent_runtime_files", return_value=snapshot_files):
+            payload = agent_api.create_agent_runtime_update_payload("http://server.example")
+
+        request = _FakeRequest(payload["token"])
+        response = asyncio.run(agent_api.agent_runtime_download(request))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with zipfile.ZipFile(_bytes_path(response.body)) as zf:
+                self.assertEqual(zf.read("agent/main.py"), b"snapshot")
+                zf.extractall(root)
+            self.assertEqual(compute_runtime_hash(root), payload["hash"])
+        self.assertEqual(agent_api._runtime_download_tokens, {})
+
     def test_config_test_does_not_mutate_live_config(self) -> None:
         import agent.server as agent_server
 
@@ -88,6 +106,12 @@ def _bytes_path(data: bytes):
     import io
 
     return io.BytesIO(data)
+
+
+class _FakeRequest:
+    def __init__(self, token: str) -> None:
+        self.headers = {}
+        self.query_params = {"token": token}
 
 
 if __name__ == "__main__":
