@@ -33,6 +33,7 @@ _SKIP_DIRS = {
     "out", "output", "_build", ".build",
     "__pycache__", ".venv", "venv",
 }
+_SKIP_DIR_PREFIXES = (".opendeephole-index-",)
 
 _FUNCTION_KINDS = {"function", "func", "f", "method"}
 _STRUCT_KINDS = {"struct", "class", "union", "s", "c", "u"}
@@ -105,16 +106,23 @@ class CppAnalyzer:
             if on_progress and (idx % 10 == 0 or idx == total - 1):
                 on_progress(idx + 1, total)
 
-        ctags_entries = self._run_ctags_json(project_root, files)
-        if cancel_check and cancel_check():
-            return
+        with self._project_temp_dir(project_root) as tmp:
+            work_dir = Path(tmp)
+            ctags_entries = self._run_ctags_json(project_root, files, work_dir)
+            if cancel_check and cancel_check():
+                return
 
-        self._index_ctags_entries(project_root, source_cache, ctags_entries)
-        self.db.commit()
+            self._index_ctags_entries(project_root, source_cache, ctags_entries)
+            self.db.commit()
 
-        if cancel_check and cancel_check():
-            return
-        self._index_cscope_calls(project_root, files, cancel_check=cancel_check)
+            if cancel_check and cancel_check():
+                return
+            self._index_cscope_calls(
+                project_root,
+                files,
+                work_dir,
+                cancel_check=cancel_check,
+            )
         self._index_global_variable_references(source_cache)
 
         self.db.set_metadata("indexer", INDEXER_VERSION)
@@ -168,32 +176,48 @@ class CppAnalyzer:
         if cscope_version.returncode != 0:
             raise CodeIndexToolError("cscope 不可用，请安装 cscope 后重新扫描。")
 
-    def _run_ctags_json(self, project_root: Path, files: list[Path]) -> list[dict]:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fp:
-            list_path = Path(fp.name)
-            for path in files:
-                fp.write(self._relative_path(project_root, path) + "\n")
-
+    @staticmethod
+    def _project_temp_dir(project_root: Path) -> tempfile.TemporaryDirectory:
         try:
-            cmd = [
-                "ctags",
-                "--output-format=json",
-                "--fields=+n+e+S+K+Z+s+t",
-                "--languages=C,C++",
-                "-f",
-                "-",
-                "-L",
-                str(list_path),
-            ]
-            proc = subprocess.run(
-                cmd,
-                cwd=project_root,
-                text=True,
-                capture_output=True,
-                check=False,
+            return tempfile.TemporaryDirectory(
+                prefix=".opendeephole-index-",
+                dir=project_root,
             )
-        finally:
-            list_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise CodeIndexToolError(
+                "无法在源码目录创建代码索引中间目录，请确认源码目录可写: "
+                + str(exc)
+            ) from exc
+
+    def _run_ctags_json(
+        self,
+        project_root: Path,
+        files: list[Path],
+        work_dir: Path,
+    ) -> list[dict]:
+        list_path = work_dir / "ctags.files"
+        list_path.write_text(
+            "\n".join(self._relative_path(project_root, path) for path in files) + "\n",
+            encoding="utf-8",
+        )
+
+        cmd = [
+            "ctags",
+            "--output-format=json",
+            "--fields=+n+e+S+K+Z+s+t",
+            "--languages=C,C++",
+            "-f",
+            "-",
+            "-L",
+            self._relative_path(project_root, list_path),
+        ]
+        proc = subprocess.run(
+            cmd,
+            cwd=project_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
         if proc.returncode != 0:
             raise CodeIndexToolError(
@@ -216,40 +240,40 @@ class CppAnalyzer:
         self,
         project_root: Path,
         files: list[Path],
+        work_dir: Path,
         *,
         cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         if not self._functions:
             return
 
-        with tempfile.TemporaryDirectory(prefix="odh-cscope-") as tmp:
-            cscope_db = self._build_cscope_database(project_root, files, Path(tmp))
-            symbols = sorted(
-                {func.short_name for func in self._functions if func.short_name}
-                | {func.name for func in self._functions if "::" in func.name}
-            )
-            seen: set[tuple[str, str, int, int | None]] = set()
-            for symbol in symbols:
-                if cancel_check and cancel_check():
-                    return
-                for call in self._query_cscope_callers(cscope_db, symbol, project_root):
-                    callee_name = symbol
-                    caller = self._select_caller_function(call)
-                    file_id = self.db.get_or_create_file(call.file_path)
-                    col = max(call.text.find(self._short_name(symbol)), 0)
-                    key = (callee_name, call.file_path, call.line, caller.function_id if caller else None)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    callee_id = self._select_callee_id(callee_name)
-                    self.db.insert_function_call(
-                        caller_function_id=caller.function_id if caller else None,
-                        callee_name=callee_name,
-                        file_id=file_id,
-                        line=call.line,
-                        column=col,
-                        callee_function_id=callee_id,
-                    )
+        cscope_db = self._build_cscope_database(project_root, files, work_dir)
+        symbols = sorted(
+            {func.short_name for func in self._functions if func.short_name}
+            | {func.name for func in self._functions if "::" in func.name}
+        )
+        seen: set[tuple[str, str, int, int | None]] = set()
+        for symbol in symbols:
+            if cancel_check and cancel_check():
+                return
+            for call in self._query_cscope_callers(cscope_db, symbol, project_root):
+                callee_name = symbol
+                caller = self._select_caller_function(call)
+                file_id = self.db.get_or_create_file(call.file_path)
+                col = max(call.text.find(self._short_name(symbol)), 0)
+                key = (callee_name, call.file_path, call.line, caller.function_id if caller else None)
+                if key in seen:
+                    continue
+                seen.add(key)
+                callee_id = self._select_callee_id(callee_name)
+                self.db.insert_function_call(
+                    caller_function_id=caller.function_id if caller else None,
+                    callee_name=callee_name,
+                    file_id=file_id,
+                    line=call.line,
+                    column=col,
+                    callee_function_id=callee_id,
+                )
 
     def _build_cscope_database(
         self,
@@ -270,9 +294,9 @@ class CppAnalyzer:
                 "-q",
                 "-k",
                 "-i",
-                str(files_list),
+                self._relative_path(project_root, files_list),
                 "-f",
-                str(db_path),
+                self._relative_path(project_root, db_path),
             ],
             cwd=project_root,
             text=True,
@@ -292,7 +316,15 @@ class CppAnalyzer:
         project_root: Path,
     ) -> list[_CscopeCall]:
         proc = subprocess.run(
-            ["cscope", "-d", "-L", "-3", symbol, "-f", str(cscope_db)],
+            [
+                "cscope",
+                "-d",
+                "-L",
+                "-3",
+                symbol,
+                "-f",
+                self._relative_path(project_root, cscope_db),
+            ],
             cwd=project_root,
             text=True,
             capture_output=True,
@@ -493,7 +525,12 @@ class CppAnalyzer:
     def _collect_source_files(directory: Path) -> list[Path]:
         files: list[Path] = []
         for dirpath, dirnames, filenames in os.walk(directory):
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in _SKIP_DIRS
+                and not d.startswith(_SKIP_DIR_PREFIXES)
+            ]
             for fname in filenames:
                 path = Path(dirpath) / fname
                 if path.suffix in _C_CPP_EXTS:

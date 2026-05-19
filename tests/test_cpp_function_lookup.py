@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 from code_parser import CodeDatabase
@@ -15,7 +16,7 @@ def _index_source(
     db = CodeDatabase(tmp_path / "code_index.db")
     analyzer = CppAnalyzer(db)
     analyzer._ensure_tools_available = lambda: None
-    analyzer._run_ctags_json = lambda _root, _files: entries
+    analyzer._run_ctags_json = lambda _root, _files, _work_dir: entries
     analyzer._build_cscope_database = lambda _root, _files, temp_dir: temp_dir / "cscope.out"
     analyzer._query_cscope_callers = (
         lambda _db_path, symbol, _root: (cscope_calls or {}).get(symbol, [])
@@ -254,6 +255,77 @@ struct Header {
         assert "int len" in rows[0]["definition"]
     finally:
         db.close()
+
+
+def test_ctags_file_list_uses_project_work_dir_relative_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "sample.cpp").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        assert kwargs["cwd"] == tmp_path
+        list_arg = cmd[cmd.index("-L") + 1]
+        assert not Path(list_arg).is_absolute()
+        assert ":" not in list_arg
+        assert "\\" not in list_arg
+        list_path = tmp_path / list_arg
+        assert list_path.parent.name.startswith(".opendeephole-index-")
+        assert list_path.read_text(encoding="utf-8") == "sample.cpp\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    db = CodeDatabase(tmp_path / "code_index.db")
+    analyzer = CppAnalyzer(db)
+    analyzer._ensure_tools_available = lambda: None
+    analyzer._index_cscope_calls = lambda *_args, **_kwargs: None
+    try:
+        analyzer.analyze_directory(tmp_path)
+    finally:
+        db.close()
+
+    assert captured
+    assert not any(
+        path.name.startswith(".opendeephole-index-")
+        for path in tmp_path.iterdir()
+    )
+
+
+def test_cscope_uses_project_work_dir_relative_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "sample.cpp"
+    source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    work_dir = tmp_path / ".opendeephole-index-test"
+    work_dir.mkdir()
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        assert kwargs["cwd"] == tmp_path
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    db = CodeDatabase(tmp_path / "code_index.db")
+    try:
+        analyzer = CppAnalyzer(db)
+        db_path = analyzer._build_cscope_database(tmp_path, [source], work_dir)
+    finally:
+        db.close()
+
+    assert db_path == work_dir / "cscope.out"
+    assert captured
+    cmd = captured[0]
+    files_arg = cmd[cmd.index("-i") + 1]
+    db_arg = cmd[cmd.index("-f") + 1]
+    assert files_arg == ".opendeephole-index-test/cscope.files"
+    assert db_arg == ".opendeephole-index-test/cscope.out"
+    assert ":" not in files_arg + db_arg
+    assert "\\" not in files_arg + db_arg
+    assert (work_dir / "cscope.files").read_text(encoding="utf-8") == "sample.cpp\n"
 
 
 def test_function_reference_index_uses_cscope_callers(tmp_path: Path) -> None:
