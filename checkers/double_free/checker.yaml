@@ -7,4 +7,4 @@ description: >
   new/delete/malloc/free 配对错位等模式。
 enabled: true
 mode: opencode
-visibility: admin
+visibility: public

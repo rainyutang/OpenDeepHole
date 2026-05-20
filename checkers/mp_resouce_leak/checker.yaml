@@ -7,4 +7,4 @@ description: >
   临时变量转交多层成员后未释放等 5 类场景。
 enabled: true
 mode: opencode
-visibility: admin
+visibility: public

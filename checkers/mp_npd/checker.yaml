@@ -6,4 +6,4 @@ description: >
   多层指针作为函数参数前未判空等 3 类典型场景。
 enabled: true
 mode: opencode
-visibility: admin
+visibility: public
