@@ -13,6 +13,7 @@
 - **修复** semgrep checker 统一改为非交互式启动，关闭 stdin、metrics 和版本检查，并统一读取 `--json-output` 产物，避免 Agent 终端关闭后 semgrep 才继续执行或超时后丢失已产出的扫描结果
 - **修复** Agent 扫描详情页索引进度轮询改用 scan_id 查询 Agent 专用接口，避免 Windows 项目路径被拼入 `/api/project/.../index-status` 后因盘符和斜杠触发 404
 - **修复** Agent runtime 自更新不再把 `checkers/` 纳入重启判断，并为 runtime 更新包增加快照 manifest 校验，确保下载 zip 的文件集合、逐文件 hash 与服务端发布 hash 来自同一份快照，避免新建扫描时报 `Agent runtime update content hash mismatch`
+- **修复** Windows Agent 启动脚本改为先检测 `python3`、再检测 `python`，两者都不可用时明确报错退出，避免缺少 Python 命令时继续执行后续步骤
 
 ## 2026-05-19
 

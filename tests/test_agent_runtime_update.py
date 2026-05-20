@@ -52,6 +52,22 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertNotIn("pacman -S --needed", text)
             self.assertNotIn("INSTALL_MSYS2", text)
 
+    def test_windows_launcher_detects_python_without_py_launcher(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        batch_text = (root / "run_agent.bat").read_text(encoding="utf-8")
+
+        self.assertIn('set "PYTHON_CMD="', batch_text)
+        self.assertIn("where.exe /q python3", batch_text)
+        self.assertIn("where.exe /q python", batch_text)
+        self.assertLess(
+            batch_text.index("where.exe /q python3"),
+            batch_text.index("where.exe /q python >nul"),
+        )
+        self.assertNotIn("PYTHON_CMD=py -3", batch_text)
+        self.assertIn("[ERROR] Python was not found", batch_text)
+        self.assertIn("%PYTHON_CMD% -m pip install -r requirements-agent.txt", batch_text)
+        self.assertIn("%PYTHON_CMD% -m agent.main %*", batch_text)
+
     def test_runtime_hash_matches_archive_contents(self) -> None:
         data = agent_api._build_agent_runtime_zip()
         with tempfile.TemporaryDirectory() as tmp:

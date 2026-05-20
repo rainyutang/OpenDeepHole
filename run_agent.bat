@@ -16,12 +16,26 @@ cd /d "%~dp0"
 set "BUNDLED_CTAGS_DIR=%~dp0ctags-p6.2.20260517.0-x64"
 if exist "%BUNDLED_CTAGS_DIR%\ctags.exe" set "PATH=%BUNDLED_CTAGS_DIR%;%PATH%"
 
-where python3 >nul 2>nul
-if %errorlevel%==0 (
+set "PYTHON_CMD="
+
+where.exe /q python3 >nul 2>&1
+if not errorlevel 1 (
     set "PYTHON_CMD=python3"
-) else (
-    set "PYTHON_CMD=python"
+    goto :PYTHON_FOUND
 )
+
+where.exe /q python >nul 2>&1
+if not errorlevel 1 (
+    set "PYTHON_CMD=python"
+    goto :PYTHON_FOUND
+)
+
+echo [ERROR] Python was not found. Install Python 3 or add it to PATH.
+pause
+exit /b 1
+
+:PYTHON_FOUND
+echo [INFO] Using Python command: %PYTHON_CMD%
 
 for /f "delims=" %%I in ('%PYTHON_CMD% -c "import sysconfig; print(sysconfig.get_path('scripts') or '')" 2^>nul') do set "PYTHON_SCRIPTS=%%I"
 if defined PYTHON_SCRIPTS set "PATH=%PYTHON_SCRIPTS%;%PATH%"
