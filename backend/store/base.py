@@ -193,6 +193,8 @@ class ScanStoreBase(ABC):
         *,
         status: str | None = None,
         processed: int | None = None,
+        current_vuln_index: int | None = None,
+        clear_current_vuln_index: bool = False,
         error_message: str | None = None,
     ) -> None:
         """Update status/progress on an FP review job."""

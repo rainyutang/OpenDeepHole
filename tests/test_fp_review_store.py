@@ -41,6 +41,21 @@ class FpReviewStoreTests(unittest.TestCase):
             self.assertEqual(results[1].severity, "high")
             self.assertEqual(results[1].vulnerability_report, "# report\n\ncall chain")
 
+    def test_tracks_current_fp_review_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.create_fp_review_job("review", "scan-1", 2, "2026-01-01T00:00:00+00:00")
+
+            store.update_fp_review_job("review", status="running", current_vuln_index=7)
+            running = store.get_fp_review_job("review")
+            self.assertIsNotNone(running)
+            self.assertEqual(running.current_vuln_index, 7)
+
+            store.update_fp_review_job("review", status="complete", clear_current_vuln_index=True)
+            complete = store.get_fp_review_job("review")
+            self.assertIsNotNone(complete)
+            self.assertIsNone(complete.current_vuln_index)
+
     def test_migrates_fp_review_severity_and_report_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "scan.db"
@@ -78,6 +93,34 @@ class FpReviewStoreTests(unittest.TestCase):
 
             results = migrated.list_fp_review_results_by_scan("scan-1")
             self.assertEqual(results[0].severity, "medium")
+
+    def test_migrates_fp_review_job_current_target_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "scan.db"
+            store = SqliteScanStore(db_path)
+            store._conn.execute("DROP TABLE fp_review_jobs")
+            store._conn.execute(
+                """\
+                CREATE TABLE fp_review_jobs (
+                    review_id     TEXT PRIMARY KEY,
+                    scan_id       TEXT NOT NULL,
+                    status        TEXT NOT NULL DEFAULT 'pending',
+                    created_at    TEXT NOT NULL,
+                    total         INTEGER DEFAULT 0,
+                    processed     INTEGER DEFAULT 0,
+                    error_message TEXT
+                )
+                """
+            )
+            store._conn.commit()
+            store._conn.close()
+
+            migrated = SqliteScanStore(db_path)
+            migrated.create_fp_review_job("review", "scan-1", 1, "2026-01-01T00:00:00+00:00")
+            migrated.update_fp_review_job("review", current_vuln_index=3)
+            job = migrated.get_fp_review_job("review")
+            self.assertIsNotNone(job)
+            self.assertEqual(job.current_vuln_index, 3)
 
 
 if __name__ == "__main__":

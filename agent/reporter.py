@@ -224,6 +224,23 @@ class Reporter:
         except Exception as e:
             print(f"Warning: failed to push FP review result: {e}")
 
+    async def push_fp_progress(self, scan_id: str, review_id: str, vuln_index: int) -> None:
+        """Report the vulnerability currently being reviewed."""
+        if self.dry_run:
+            print(f"  [fp_review] Reviewing vuln[{vuln_index}]")
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/scan/{scan_id}/fp_review/progress",
+                json={
+                    "review_id": review_id,
+                    "vuln_index": vuln_index,
+                },
+                timeout=10.0,
+            )
+        except Exception as e:
+            print(f"Warning: failed to push FP review progress: {e}")
+
     async def finish_fp_review(
         self,
         scan_id: str,

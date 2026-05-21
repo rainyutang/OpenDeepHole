@@ -410,6 +410,7 @@ class FpReviewJob(BaseModel):
     created_at: str
     total: int = 0
     processed: int = 0
+    current_vuln_index: int | None = None
     results: list[FpReviewResult] = []
     error_message: str | None = None
 
@@ -427,6 +428,12 @@ class AgentFpReviewResult(BaseModel):
     severity: str = "low"
     reason: str
     vulnerability_report: str = ""
+
+
+class AgentFpReviewProgress(BaseModel):
+    """Sent by the agent when it starts reviewing a vulnerability."""
+    review_id: str
+    vuln_index: int
 
 
 class AgentFpReviewFinish(BaseModel):

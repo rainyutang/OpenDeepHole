@@ -137,11 +137,19 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     }
   };
 
-  // Load existing FP review on scan load
+  // Load existing FP review when opening a scan, even if the scan is still running.
   useEffect(() => {
-    if (!scan || !isDone) return;
-    getFpReview(scanId).then(setFpReview).catch(() => {});
-  }, [isDone, scanId]);
+    let active = true;
+    setFpReview(null);
+    getFpReview(scanId)
+      .then((job) => {
+        if (active) setFpReview(job);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [scanId]);
 
   // Poll indexing progress while scan is waiting for code index
   useEffect(() => {
@@ -283,6 +291,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const agentDisconnectError = isAgentDisconnectError(scan.error_message);
   const staleAgentDisconnectError = scan.status === "cancelled" && agentDisconnectError && !!scan.agent_online;
   const visibleErrorMessage = staleAgentDisconnectError ? null : scan.error_message;
+  const currentFpReviewIndex = fpReview?.current_vuln_index ?? null;
+  const currentFpReviewTarget =
+    currentFpReviewIndex !== null && currentFpReviewIndex >= 0
+      ? scan.vulnerabilities[currentFpReviewIndex]
+      : undefined;
+  const isFpReviewing = fpReview?.status === "running" || fpReview?.status === "pending";
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
@@ -502,6 +516,22 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               </div>
             )}
 
+            {fpReview && isFpReviewing && (
+              <div className="text-xs text-amber-300 flex items-center gap-2 min-w-0">
+                <span className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse shrink-0" />
+                <span className="shrink-0">
+                  AI复核: {fpReview.processed}/{fpReview.total}
+                </span>
+                {currentFpReviewTarget ? (
+                  <span className="font-mono truncate text-amber-200">
+                    {currentFpReviewTarget.file}:{currentFpReviewTarget.line} {currentFpReviewTarget.function}
+                  </span>
+                ) : (
+                  <span className="text-amber-400/70">等待当前目标...</span>
+                )}
+              </div>
+            )}
+
             {/* LLM 审计进度条 */}
             {(scan.status === "auditing" || isDone) && (
               <div>
@@ -565,6 +595,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             totalCandidates={scan.total_candidates}
             processedCandidates={scan.processed_candidates}
             fpReview={fpReview}
+            currentFpReviewIndex={currentFpReviewIndex}
             onFeedbackCreated={addSelectedFeedbackIds}
             onVulnMarked={() => {
               if (skillOpen && skillType) {

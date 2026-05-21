@@ -203,6 +203,7 @@ export interface FpReviewJob {
   created_at: string;
   total: number;
   processed: number;
+  current_vuln_index: number | null;
   results: FpReviewResult[];
   error_message: string | null;
 }

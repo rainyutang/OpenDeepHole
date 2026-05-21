@@ -167,8 +167,8 @@ async def run_fp_review(
         cfg = get_config()
         fp_cli = effective_fp_review_cli_config(config)
 
-        for vuln in vulnerabilities:
-            idx = vuln["index"]
+        for position, vuln in enumerate(vulnerabilities):
+            vuln_index = int(vuln["index"])
             result_id = uuid4().hex
             _create_fp_workspace(
                 project,
@@ -198,9 +198,10 @@ async def run_fp_review(
 
             await emit(
                 "fp_review",
-                f"[{idx + 1}] Reviewing {vuln['vuln_type'].upper()} "
+                f"[{position + 1}] Reviewing {vuln['vuln_type'].upper()} "
                 f"at {vuln['file']}:{vuln['line']} ({vuln['function']})",
             )
+            await reporter.push_fp_progress(scan_id, review_id, vuln_index)
 
             verdict = "tp"
             severity = "low"
@@ -242,22 +243,22 @@ async def run_fp_review(
                     )
                     await emit(
                         "fp_review",
-                        f"[{idx + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
+                        f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
                     )
                 else:
-                    await emit("fp_review", f"[{idx + 1}] No result returned — keeping as TP")
+                    await emit("fp_review", f"[{position + 1}] No result returned — keeping as TP")
 
             except asyncio.CancelledError:
-                await emit("fp_review", f"FP review cancelled after reviewing {idx} items")
+                await emit("fp_review", f"FP review cancelled after reviewing {position} items")
                 await reporter.finish_fp_review(scan_id, review_id, "error", "Cancelled")
                 return
             except Exception as exc:
-                await emit("fp_review", f"[{idx + 1}] Review error: {exc}")
+                await emit("fp_review", f"[{position + 1}] Review error: {exc}")
 
             await reporter.push_fp_result(
                 scan_id,
                 review_id,
-                idx,
+                vuln_index,
                 verdict,
                 severity,
                 reason,

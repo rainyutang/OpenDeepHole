@@ -22,6 +22,7 @@ from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
     AgentFpReviewFinish,
+    AgentFpReviewProgress,
     AgentFpReviewResult,
     BatchMarkRequest,
     CreateScanRequest,
@@ -90,6 +91,7 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
         created_at=job.created_at,
         total=job.total,
         processed=job.processed,
+        current_vuln_index=job.current_vuln_index,
         results=latest_results,
         error_message=job.error_message,
     )
@@ -727,6 +729,18 @@ async def get_fp_review(
     return _merge_latest_fp_review_results(job, scan_id)
 
 
+@router.post("/api/scan/{scan_id}/fp_review/progress")
+async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) -> dict:
+    """Agent reports which vulnerability is currently being reviewed."""
+    store = get_scan_store()
+    job = store.get_fp_review_job(body.review_id)
+    if job is None or job.scan_id != scan_id:
+        raise HTTPException(status_code=404, detail="FP review not found")
+    store.update_fp_review_job(body.review_id, current_vuln_index=body.vuln_index)
+    logger.debug("FP review progress for %s: vuln[%d]", scan_id, body.vuln_index)
+    return {"ok": True}
+
+
 @router.post("/api/scan/{scan_id}/fp_review/result")
 async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dict:
     """Agent pushes a single FP review result."""
@@ -758,6 +772,7 @@ async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dic
     store.update_fp_review_job(
         body.review_id,
         status=body.status,
+        clear_current_vuln_index=True,
         error_message=body.error_message,
     )
     logger.info("FP review %s finished with status %s", body.review_id, body.status)
