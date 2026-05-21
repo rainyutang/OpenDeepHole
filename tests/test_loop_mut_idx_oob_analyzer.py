@@ -30,9 +30,12 @@ def test_loop_mut_idx_oob_skips_when_semgrep_missing(tmp_path: Path) -> None:
 
 def test_loop_mut_idx_oob_rule_yaml_is_valid() -> None:
     data = yaml.safe_load(RULE_FILE.read_text(encoding="utf-8"))
-    assert len(data["rules"]) == 2
-    assert data["rules"][0]["id"].endswith(".direct")
-    assert data["rules"][1]["id"].endswith(".taint")
+    assert len(data["rules"]) == 4
+    rule_ids = {rule["id"] for rule in data["rules"]}
+    assert "c.loop-mutated-index-array-access.broad" in rule_ids
+    assert "c.loop-mutated-index-pointer-access.broad" in rule_ids
+    assert "c.loop-mutated-index-memory-call.broad" in rule_ids
+    assert "c.loop-mutated-index-derived-pointer-sink.broad" in rule_ids
 
 
 def test_loop_mut_idx_oob_semgrep_runner_arguments(tmp_path: Path) -> None:
@@ -58,7 +61,7 @@ def test_loop_mut_idx_oob_direct_result_uses_json_file_and_code_db(tmp_path: Pat
     file_output = _semgrep_output(
         path=str(tmp_path / "sample.c"),
         line=8,
-        check_id="c.loop-mutated-index-memory-access-without-obvious-bound-check.direct",
+        check_id="c.loop-mutated-index-array-access.broad",
         message="Possible unchecked loop index memory access.",
         metavars={
             "$IDX": {"abstract_content": "idx"},
@@ -66,6 +69,7 @@ def test_loop_mut_idx_oob_direct_result_uses_json_file_and_code_db(tmp_path: Pat
             "$STEP": {"abstract_content": "step"},
             "$BASE": {"abstract_content": "dst"},
         },
+        metadata={"source_kind": "array", "recall": "high"},
         lines="dst[idx] = src[idx];",
     )
 
@@ -86,20 +90,21 @@ def test_loop_mut_idx_oob_direct_result_uses_json_file_and_code_db(tmp_path: Pat
     assert candidate.line == 8
     assert candidate.function == "copy_loop"
     assert candidate.vuln_type == "loop_mut_idx_oob"
-    assert "direct-memory-access" in candidate.description
+    assert "array" in candidate.description
     assert "循环变化索引: idx" in candidate.description
     assert "循环条件: remain > 0" in candidate.description
     assert "内存访问: dst[idx]" in candidate.description
+    assert "宽召回" in candidate.description
     assert "匹配代码" in candidate.description
 
 
-def test_loop_mut_idx_oob_taint_result_and_dedup(tmp_path: Path) -> None:
+def test_loop_mut_idx_oob_derived_pointer_result_and_dedup(tmp_path: Path) -> None:
     payload = {
         "results": [
             _match(
                 path=str(tmp_path / "derived.c"),
                 line=17,
-                check_id="c.loop-mutated-index-derived-pointer-used-in-memory-sink.taint",
+                check_id="c.loop-mutated-index-derived-pointer-sink.broad",
                 message="Possible unchecked loop-index-derived pointer reaches memory sink.",
                 metavars={
                     "$IDX": {"abstract_content": "idx"},
@@ -107,12 +112,13 @@ def test_loop_mut_idx_oob_taint_result_and_dedup(tmp_path: Path) -> None:
                     "$BASE": {"abstract_content": "base"},
                     "$P": {"abstract_content": "tmp"},
                 },
+                metadata={"source_kind": "derived-pointer", "recall": "high"},
                 lines="*tmp = 0;",
             ),
             _match(
                 path=str(tmp_path / "derived.c"),
                 line=17,
-                check_id="c.loop-mutated-index-derived-pointer-used-in-memory-sink.taint",
+                check_id="c.loop-mutated-index-derived-pointer-sink.broad",
                 message="Possible unchecked loop-index-derived pointer reaches memory sink.",
                 metavars={
                     "$IDX": {"abstract_content": "idx"},
@@ -120,6 +126,7 @@ def test_loop_mut_idx_oob_taint_result_and_dedup(tmp_path: Path) -> None:
                     "$BASE": {"abstract_content": "base"},
                     "$P": {"abstract_content": "tmp"},
                 },
+                metadata={"source_kind": "derived-pointer", "recall": "high"},
                 lines="*tmp = 0;",
             ),
         ],
@@ -136,7 +143,7 @@ def test_loop_mut_idx_oob_taint_result_and_dedup(tmp_path: Path) -> None:
 
     assert len(candidates) == 1
     assert candidates[0].function == "derived_loop"
-    assert "taint-derived-pointer" in candidates[0].description
+    assert "derived-pointer" in candidates[0].description
     assert "循环条件: remain" in candidates[0].description
 
 
@@ -144,9 +151,10 @@ def test_loop_mut_idx_oob_timeout_uses_partial_json(tmp_path: Path) -> None:
     output = _semgrep_output(
         path=str(tmp_path / "sample.c"),
         line=8,
-        check_id="c.loop-mutated-index-memory-access-without-obvious-bound-check.direct",
+        check_id="c.loop-mutated-index-array-access.broad",
         message="Possible unchecked loop index memory access.",
         metavars={"$IDX": {"abstract_content": "idx"}, "$COND": {"abstract_content": "remain"}},
+        metadata={"source_kind": "array", "recall": "high"},
     )
 
     def fake_run(cmd, **kwargs):
@@ -191,6 +199,7 @@ def _semgrep_output(
     check_id: str,
     message: str,
     metavars: dict,
+    metadata: dict | None = None,
     lines: str = "",
 ) -> CompletedProcess:
     payload = {
@@ -201,6 +210,7 @@ def _semgrep_output(
                 check_id=check_id,
                 message=message,
                 metavars=metavars,
+                metadata=metadata,
                 lines=lines,
             )
         ]
@@ -215,6 +225,7 @@ def _match(
     check_id: str,
     message: str,
     metavars: dict,
+    metadata: dict | None = None,
     lines: str = "",
 ) -> dict:
     return {
@@ -226,6 +237,6 @@ def _match(
             "message": message,
             "metavars": metavars,
             "lines": lines,
-            "metadata": {"llm_audit": True},
+            "metadata": metadata or {"llm_audit": True},
         },
     }

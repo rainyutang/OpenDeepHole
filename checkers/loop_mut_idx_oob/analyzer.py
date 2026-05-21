@@ -79,11 +79,18 @@ def _best_effort_memory_expr(metavars: dict, matched_lines: str) -> str:
     return matched_lines.splitlines()[0].strip() if matched_lines else ""
 
 
-def _rule_source(check_id: str) -> str:
-    if check_id.endswith(".taint"):
-        return "taint-derived-pointer"
-    if check_id.endswith(".direct"):
-        return "direct-memory-access"
+def _rule_source(check_id: str, metadata: dict) -> str:
+    source_kind = _clean_text(metadata.get("source_kind"))
+    if source_kind:
+        return source_kind
+    if "array-access" in check_id:
+        return "array"
+    if "pointer-access" in check_id:
+        return "pointer"
+    if "memory-call" in check_id:
+        return "memory-call"
+    if "derived-pointer" in check_id:
+        return "derived-pointer"
     return check_id.rsplit(".", 1)[-1] if check_id else "unknown"
 
 
@@ -131,6 +138,7 @@ class Analyzer(BaseAnalyzer):
             severity: str = extra.get("severity", "WARNING")
             message: str = _clean_text(extra.get("message"))
             metavars: dict = extra.get("metavars", {}) or {}
+            metadata: dict = extra.get("metadata", {}) or {}
 
             raw_lines = _clean_text(extra.get("lines"))
             matched_lines = "" if "requires login" in raw_lines else raw_lines
@@ -141,7 +149,7 @@ class Analyzer(BaseAnalyzer):
             step_expr = _mv(metavars, "$STEP")
             bound_expr = _mv(metavars, "$BOUND")
             memory_expr = _best_effort_memory_expr(metavars, matched_lines)
-            source = _rule_source(check_id)
+            source = _rule_source(check_id, metadata)
 
             dedup_key = (rel_path, start_line, source, idx_expr, memory_expr)
             if dedup_key in seen:
@@ -175,6 +183,8 @@ class Analyzer(BaseAnalyzer):
                 details.append(f"局部边界表达式: {bound_expr}")
             if memory_expr:
                 details.append(f"内存访问: {memory_expr}")
+            if metadata.get("recall") == "high":
+                details.append("规则策略: 宽召回，需 LLM 严格确认真实边界和可达性")
             if details:
                 parts.append("\n".join(details))
             if matched_lines:

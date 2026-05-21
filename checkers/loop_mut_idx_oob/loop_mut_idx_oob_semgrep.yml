@@ -1,29 +1,27 @@
 rules:
-  - id: c.loop-mutated-index-memory-access-without-obvious-bound-check.direct
+  - id: c.loop-mutated-index-array-access.broad
     languages:
       - c
       - cpp
     severity: WARNING
     message: >
-      Possible unchecked loop index memory access: index variable `$IDX` is
-      modified in a loop whose condition is `$COND`, and `$IDX` is used in a
-      memory access expression. The loop condition does not appear to directly
-      constrain `$IDX`, and no obvious local bound check was found.
+      Broad candidate: loop-updated index `$IDX` is used in an array access
+      while the loop condition `$COND` does not directly constrain `$IDX` and
+      no obvious local guard was found.
     metadata:
       category: security
-      confidence: medium
-      precision: medium-high
-      recall: medium-low
+      confidence: medium-low
+      precision: medium-low
+      recall: high
       llm_audit: true
+      source_kind: array
       cwe:
         - "CWE-129: Improper Validation of Array Index"
         - "CWE-125: Out-of-bounds Read"
         - "CWE-787: Out-of-bounds Write"
       audit_focus: >
-        Check whether `$IDX` is bounded by the real capacity of the accessed
-        object before memory access. Pay special attention to loops controlled
-        by byteNum/contentLen/len/remain/size while `$IDX` is used as memory
-        offset or array index.
+        This rule intentionally favors recall. Confirm only if `$IDX` can
+        exceed the real capacity of `$BASE` on a reachable path.
     patterns:
       - pattern-either:
           - pattern-inside: |
@@ -87,18 +85,6 @@ rules:
                 ...
               }
           - pattern-inside: |
-              for (...; $COND; ..., $IDX = $IDX + $STEP, ...) {
-                ...
-              }
-          - pattern-inside: |
-              for (...; $COND; ..., $IDX = $STEP + $IDX, ...) {
-                ...
-              }
-          - pattern-inside: |
-              for (...; $COND; ..., $IDX = $IDX - $STEP, ...) {
-                ...
-              }
-          - pattern-inside: |
               for (...; $COND; ...) {
                 ...
                 $IDX++;
@@ -240,24 +226,6 @@ rules:
               do {
                 ...
                 $IDX -= $STEP;
-                ...
-              } while ($COND);
-          - pattern-inside: |
-              do {
-                ...
-                $IDX = $IDX + $STEP;
-                ...
-              } while ($COND);
-          - pattern-inside: |
-              do {
-                ...
-                $IDX = $STEP + $IDX;
-                ...
-              } while ($COND);
-          - pattern-inside: |
-              do {
-                ...
-                $IDX = $IDX - $STEP;
                 ...
               } while ($COND);
       - pattern-either:
@@ -265,34 +233,6 @@ rules:
           - pattern: $BASE[$IDX + $OFF]
           - pattern: $BASE[$IDX - $OFF]
           - pattern: $BASE[$OFF + $IDX]
-          - pattern: '*($PTR + $IDX)'
-          - pattern: '*($IDX + $PTR)'
-          - pattern: '*($PTR - $IDX)'
-          - pattern: '*($PTR + $IDX + $OFF)'
-          - pattern: '*($PTR + $OFF + $IDX)'
-          - pattern: '*($IDX + $PTR + $OFF)'
-          - pattern: '*($PTR = $BASE + $IDX)'
-          - pattern: '*($PTR = $IDX + $BASE)'
-          - pattern: '*($PTR = $BASE - $IDX)'
-          - pattern: ($PTR + $IDX)->$FIELD
-          - pattern: ($IDX + $PTR)->$FIELD
-          - pattern: ($PTR - $IDX)->$FIELD
-          - pattern: (*($PTR + $IDX)).$FIELD
-          - pattern: (*($IDX + $PTR)).$FIELD
-          - pattern: (*($PTR - $IDX)).$FIELD
-          - patterns:
-              - pattern-either:
-                  - pattern: $MEMFUNC(..., $PTR + $IDX, ...)
-                  - pattern: $MEMFUNC(..., $IDX + $PTR, ...)
-                  - pattern: $MEMFUNC(..., $PTR - $IDX, ...)
-                  - pattern: $MEMFUNC(..., $PTR + $IDX + $OFF, ...)
-                  - pattern: $MEMFUNC(..., $PTR + $OFF + $IDX, ...)
-                  - pattern: $MEMFUNC(..., &$BASE[$IDX], ...)
-                  - pattern: $MEMFUNC(..., &$BASE[$IDX + $OFF], ...)
-                  - pattern: $MEMFUNC(..., &$BASE[$IDX - $OFF], ...)
-              - metavariable-regex:
-                  metavariable: $MEMFUNC
-                  regex: ^(memcpy_s|memmove_s|memset_s|memcpy_sp|memmove_sp|memset_sp|strncpy_s|strcpy_s|strcat_s|sprintf_s|snprintf_s|vsnprintf_s|memcpy|memmove|memset|strncpy|strcpy|strcat|sprintf|snprintf|vsnprintf)$
       - metavariable-regex:
           metavariable: $IDX
           regex: ^[A-Za-z_][A-Za-z0-9_]*$
@@ -316,27 +256,7 @@ rules:
             ...
           }
       - pattern-not-inside: |
-          if (($IDX < $BOUND)) {
-            ...
-          }
-      - pattern-not-inside: |
-          if (($IDX <= $BOUND)) {
-            ...
-          }
-      - pattern-not-inside: |
-          if (($BOUND > $IDX)) {
-            ...
-          }
-      - pattern-not-inside: |
-          if (($BOUND >= $IDX)) {
-            ...
-          }
-      - pattern-not-inside: |
           if ($IDX >= 0 && $IDX < $BOUND) {
-            ...
-          }
-      - pattern-not-inside: |
-          if ($IDX >= 0 && $IDX <= $BOUND) {
             ...
           }
       - pattern-not-inside: |
@@ -344,211 +264,381 @@ rules:
             ...
           }
       - pattern-not-inside: |
-          if (0 <= $IDX && $IDX <= $BOUND) {
-            ...
-          }
-      - pattern-not-inside: |
-          if (($IDX >= 0) && ($IDX < $BOUND)) {
-            ...
-          }
-      - pattern-not-inside: |
-          if (($IDX >= 0) && ($IDX <= $BOUND)) {
-            ...
-          }
-      - pattern-not-inside: |
-          if ($IDX >= $BOUND) {
-            ...
-            break;
-          }
-          ...
-      - pattern-not-inside: |
-          if ($IDX >= $BOUND) {
-            ...
-            return ...;
-          }
-          ...
-      - pattern-not-inside: |
-          if ($IDX >= $BOUND) {
-            ...
-            goto $LABEL;
-          }
-          ...
-      - pattern-not-inside: |
-          if ($IDX > $BOUND) {
-            ...
-            break;
-          }
-          ...
-      - pattern-not-inside: |
-          if ($IDX > $BOUND) {
-            ...
-            return ...;
-          }
-          ...
-      - pattern-not-inside: |
-          if ($IDX > $BOUND) {
-            ...
-            goto $LABEL;
-          }
+          if ($IDX >= $BOUND) return ...;
           ...
       - pattern-not-inside: |
           if ($IDX >= $BOUND) break;
           ...
       - pattern-not-inside: |
-          if ($IDX >= $BOUND) return ...;
-          ...
-      - pattern-not-inside: |
           if ($IDX >= $BOUND) goto $LABEL;
-          ...
-      - pattern-not-inside: |
-          if ($IDX > $BOUND) break;
-          ...
-      - pattern-not-inside: |
-          if ($IDX > $BOUND) return ...;
-          ...
-      - pattern-not-inside: |
-          if ($IDX > $BOUND) goto $LABEL;
           ...
       - pattern-not-inside: |
           assert($IDX < $BOUND);
           ...
       - pattern-not-inside: |
-          assert($IDX <= $BOUND);
-          ...
-      - pattern-not-inside: |
-          VOS_ASSERT($IDX < $BOUND);
-          ...
-      - pattern-not-inside: |
-          VOS_ASSERT($IDX <= $BOUND);
-          ...
-      - pattern-not-inside: |
-          R_EXPECT($IDX < $BOUND, ...);
-          ...
-      - pattern-not-inside: |
-          R_EXPECT($IDX <= $BOUND, ...);
-          ...
-      - pattern-not-inside: |
-          RETURN_IF($IDX >= $BOUND, ...);
-          ...
-      - pattern-not-inside: |
-          RETURN_IF($IDX > $BOUND, ...);
+          CHECK_RET($IDX < $BOUND, ...);
           ...
       - pattern-not-inside: |
           RETURN_IF_FAIL($IDX < $BOUND, ...);
           ...
-      - pattern-not-inside: |
-          CHECK_RET($IDX < $BOUND, ...);
-          ...
-      - pattern-not-inside: |
-          CHECK_RET($IDX <= $BOUND, ...);
-          ...
 
-  - id: c.loop-mutated-index-derived-pointer-used-in-memory-sink.taint
-    mode: taint
+  - id: c.loop-mutated-index-pointer-access.broad
     languages:
       - c
       - cpp
     severity: WARNING
     message: >
-      Possible unchecked loop-index-derived pointer reaches memory sink.
-      A pointer/value derived from loop index `$IDX` is used in a memory access
-      sink while loop condition `$COND` does not appear to directly constrain
-      `$IDX`.
+      Broad candidate: loop-updated index `$IDX` participates in pointer
+      arithmetic used for a memory access while loop condition `$COND` does not
+      directly constrain `$IDX`.
     metadata:
       category: security
       confidence: medium-low
-      precision: medium
-      recall: medium
+      precision: medium-low
+      recall: high
       llm_audit: true
-      note: >
-        This rule is a supplement for indirect cases such as tmp = base + idx;
-        *tmp or memcpy_s(tmp, ...). It may be noisier than the direct rule.
-    pattern-sources:
-      - patterns:
-          - pattern-either:
-              - pattern-inside: |
-                  for (...; $COND; $IDX++) {
-                    ...
-                  }
-              - pattern-inside: |
-                  for (...; $COND; ++$IDX) {
-                    ...
-                  }
-              - pattern-inside: |
-                  for (...; $COND; $IDX += $STEP) {
-                    ...
-                  }
-              - pattern-inside: |
-                  for (...; $COND; ..., $IDX++, ...) {
-                    ...
-                  }
-              - pattern-inside: |
-                  for (...; $COND; ..., ++$IDX, ...) {
-                    ...
-                  }
-              - pattern-inside: |
-                  for (...; $COND; ..., $IDX += $STEP, ...) {
-                    ...
-                  }
-              - pattern-inside: |
-                  for (...; $COND; ...) {
-                    ...
-                    $IDX++;
-                    ...
-                  }
-              - pattern-inside: |
-                  for (...; $COND; ...) {
-                    ...
-                    ++$IDX;
-                    ...
-                  }
-              - pattern-inside: |
-                  for (...; $COND; ...) {
-                    ...
-                    $IDX += $STEP;
-                    ...
-                  }
-              - pattern-inside: |
-                  while ($COND) {
-                    ...
-                    $IDX++;
-                    ...
-                  }
-              - pattern-inside: |
-                  while ($COND) {
-                    ...
-                    ++$IDX;
-                    ...
-                  }
-              - pattern-inside: |
-                  while ($COND) {
-                    ...
-                    $IDX += $STEP;
-                    ...
-                  }
-          - pattern-either:
-              - pattern: $BASE + $IDX
-              - pattern: $IDX + $BASE
-              - pattern: $BASE - $IDX
-              - pattern: '&$BASE[$IDX]'
-              - pattern: '&$BASE[$IDX + $OFF]'
-              - pattern: '&$BASE[$IDX - $OFF]'
-          - metavariable-regex:
-              metavariable: $IDX
-              regex: ^[A-Za-z_][A-Za-z0-9_]*$
-          - metavariable-comparison:
-              metavariable: $COND
-              comparison: not re.match("(^|[\\s\\S]*[^A-Za-z0-9_])" + str($IDX) + "([^A-Za-z0-9_]|$)[\\s\\S]*", str($COND))
-    pattern-sinks:
-      - pattern: '*$P'
-      - pattern: $P->$FIELD
-      - patterns:
-          - pattern: $MEMFUNC($P, ...)
-          - metavariable-regex:
-              metavariable: $MEMFUNC
-              regex: ^(memcpy_s|memmove_s|memset_s|memcpy_sp|memmove_sp|memset_sp|strncpy_s|strcpy_s|strcat_s|sprintf_s|snprintf_s|vsnprintf_s|memcpy|memmove|memset|strncpy|strcpy|strcat|sprintf|snprintf|vsnprintf)$
-      - patterns:
-          - pattern: $MEMFUNC(..., $P, ...)
-          - metavariable-regex:
-              metavariable: $MEMFUNC
-              regex: ^(memcpy_s|memmove_s|memset_s|memcpy_sp|memmove_sp|memset_sp|strncpy_s|strcpy_s|strcat_s|sprintf_s|snprintf_s|vsnprintf_s|memcpy|memmove|memset|strncpy|strcpy|strcat|sprintf|snprintf|vsnprintf)$
+      source_kind: pointer
+      cwe:
+        - "CWE-125: Out-of-bounds Read"
+        - "CWE-787: Out-of-bounds Write"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              for (...; $COND; $IDX++) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ++$IDX) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; $IDX--) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; --$IDX) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; $IDX += $STEP) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; $IDX -= $STEP) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ..., $IDX++, ...) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ..., ++$IDX, ...) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ..., $IDX += $STEP, ...) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ...) {
+                ...
+                $IDX++;
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ...) {
+                ...
+                ++$IDX;
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ...) {
+                ...
+                $IDX += $STEP;
+                ...
+              }
+          - pattern-inside: |
+              while ($COND) {
+                ...
+                $IDX++;
+                ...
+              }
+          - pattern-inside: |
+              while ($COND) {
+                ...
+                ++$IDX;
+                ...
+              }
+          - pattern-inside: |
+              while ($COND) {
+                ...
+                $IDX += $STEP;
+                ...
+              }
+          - pattern-inside: |
+              do {
+                ...
+                $IDX++;
+                ...
+              } while ($COND);
+          - pattern-inside: |
+              do {
+                ...
+                ++$IDX;
+                ...
+              } while ($COND);
+      - pattern-either:
+          - pattern: '*($PTR + $IDX)'
+          - pattern: '*($IDX + $PTR)'
+          - pattern: '*($PTR - $IDX)'
+          - pattern: '*($PTR + $IDX + $OFF)'
+          - pattern: '*($PTR + $OFF + $IDX)'
+          - pattern: ($PTR + $IDX)->$FIELD
+          - pattern: ($IDX + $PTR)->$FIELD
+          - pattern: ($PTR - $IDX)->$FIELD
+          - pattern: (*($PTR + $IDX)).$FIELD
+          - pattern: (*($IDX + $PTR)).$FIELD
+      - metavariable-regex:
+          metavariable: $IDX
+          regex: ^[A-Za-z_][A-Za-z0-9_]*$
+      - metavariable-comparison:
+          metavariable: $COND
+          comparison: not re.match("(^|[\\s\\S]*[^A-Za-z0-9_])" + str($IDX) + "([^A-Za-z0-9_]|$)[\\s\\S]*", str($COND))
+      - pattern-not-inside: |
+          if ($IDX < $BOUND) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($IDX >= $BOUND) return ...;
+          ...
+      - pattern-not-inside: |
+          CHECK_RET($IDX < $BOUND, ...);
+          ...
+
+  - id: c.loop-mutated-index-memory-call.broad
+    languages:
+      - c
+      - cpp
+    severity: WARNING
+    message: >
+      Broad candidate: loop-updated index `$IDX` is used in a memory/string
+      function argument while loop condition `$COND` does not directly
+      constrain `$IDX`.
+    metadata:
+      category: security
+      confidence: medium-low
+      precision: medium-low
+      recall: high
+      llm_audit: true
+      source_kind: memory-call
+      cwe:
+        - "CWE-125: Out-of-bounds Read"
+        - "CWE-787: Out-of-bounds Write"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              for (...; $COND; $IDX++) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ++$IDX) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; $IDX += $STEP) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ..., $IDX++, ...) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ..., ++$IDX, ...) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ..., $IDX += $STEP, ...) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ...) {
+                ...
+                $IDX++;
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ...) {
+                ...
+                ++$IDX;
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ...) {
+                ...
+                $IDX += $STEP;
+                ...
+              }
+          - pattern-inside: |
+              while ($COND) {
+                ...
+                $IDX++;
+                ...
+              }
+          - pattern-inside: |
+              while ($COND) {
+                ...
+                ++$IDX;
+                ...
+              }
+          - pattern-inside: |
+              while ($COND) {
+                ...
+                $IDX += $STEP;
+                ...
+              }
+      - pattern-either:
+          - pattern: $MEMFUNC(..., $PTR + $IDX, ...)
+          - pattern: $MEMFUNC(..., $IDX + $PTR, ...)
+          - pattern: $MEMFUNC(..., $PTR - $IDX, ...)
+          - pattern: $MEMFUNC(..., $PTR + $IDX + $OFF, ...)
+          - pattern: $MEMFUNC(..., $PTR + $OFF + $IDX, ...)
+          - pattern: $MEMFUNC(..., &$BASE[$IDX], ...)
+          - pattern: $MEMFUNC(..., &$BASE[$IDX + $OFF], ...)
+          - pattern: $MEMFUNC(..., &$BASE[$IDX - $OFF], ...)
+      - metavariable-regex:
+          metavariable: $MEMFUNC
+          regex: ^(memcpy_s|memmove_s|memset_s|memcpy_sp|memmove_sp|memset_sp|strncpy_s|strcpy_s|strcat_s|sprintf_s|snprintf_s|vsnprintf_s|memcpy|memmove|memset|strncpy|strcpy|strcat|sprintf|snprintf|vsnprintf)$
+      - metavariable-regex:
+          metavariable: $IDX
+          regex: ^[A-Za-z_][A-Za-z0-9_]*$
+      - metavariable-comparison:
+          metavariable: $COND
+          comparison: not re.match("(^|[\\s\\S]*[^A-Za-z0-9_])" + str($IDX) + "([^A-Za-z0-9_]|$)[\\s\\S]*", str($COND))
+      - pattern-not-inside: |
+          if ($IDX < $BOUND) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($IDX >= $BOUND) return ...;
+          ...
+      - pattern-not-inside: |
+          CHECK_RET($IDX < $BOUND, ...);
+          ...
+
+  - id: c.loop-mutated-index-derived-pointer-sink.broad
+    languages:
+      - c
+      - cpp
+    severity: WARNING
+    message: >
+      Broad candidate: a pointer derived from loop-updated index `$IDX` reaches
+      a local memory sink while loop condition `$COND` does not directly
+      constrain `$IDX`.
+    metadata:
+      category: security
+      confidence: low
+      precision: low
+      recall: high
+      llm_audit: true
+      source_kind: derived-pointer
+      cwe:
+        - "CWE-125: Out-of-bounds Read"
+        - "CWE-787: Out-of-bounds Write"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              for (...; $COND; $IDX++) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ++$IDX) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; $IDX += $STEP) {
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ...) {
+                ...
+                $IDX++;
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ...) {
+                ...
+                ++$IDX;
+                ...
+              }
+          - pattern-inside: |
+              for (...; $COND; ...) {
+                ...
+                $IDX += $STEP;
+                ...
+              }
+          - pattern-inside: |
+              while ($COND) {
+                ...
+                $IDX++;
+                ...
+              }
+          - pattern-inside: |
+              while ($COND) {
+                ...
+                ++$IDX;
+                ...
+              }
+      - pattern-either:
+          - pattern: |
+              $TMP = $BASE + $IDX;
+              ...
+              *$TMP = ...
+          - pattern: |
+              $TYPE *$TMP = $BASE + $IDX;
+              ...
+              *$TMP = ...
+          - pattern: |
+              $TMP = $IDX + $BASE;
+              ...
+              *$TMP = ...
+          - pattern: |
+              $TYPE *$TMP = $IDX + $BASE;
+              ...
+              *$TMP = ...
+          - pattern: |
+              $TMP = &$BASE[$IDX];
+              ...
+              *$TMP = ...
+          - pattern: |
+              $TYPE *$TMP = &$BASE[$IDX];
+              ...
+              *$TMP = ...
+          - pattern: |
+              $TMP = $BASE + $IDX;
+              ...
+              $MEMFUNC(..., $TMP, ...)
+          - pattern: |
+              $TYPE *$TMP = $BASE + $IDX;
+              ...
+              $MEMFUNC(..., $TMP, ...)
+          - pattern: |
+              $TMP = &$BASE[$IDX];
+              ...
+              $MEMFUNC(..., $TMP, ...)
+          - pattern: |
+              $TYPE *$TMP = &$BASE[$IDX];
+              ...
+              $MEMFUNC(..., $TMP, ...)
+      - metavariable-regex:
+          metavariable: $IDX
+          regex: ^[A-Za-z_][A-Za-z0-9_]*$
+      - metavariable-comparison:
+          metavariable: $COND
+          comparison: not re.match("(^|[\\s\\S]*[^A-Za-z0-9_])" + str($IDX) + "([^A-Za-z0-9_]|$)[\\s\\S]*", str($COND))
+      - pattern-not-inside: |
+          if ($IDX < $BOUND) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($IDX >= $BOUND) return ...;
+          ...
