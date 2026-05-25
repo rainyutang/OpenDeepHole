@@ -28,6 +28,9 @@ export interface CheckerInfo {
   label: string;
   description: string;
   visibility: "public" | "admin";
+  category: string;
+  category_label: string;
+  modified_at: string;
 }
 
 export interface CheckerCatalogItem {
@@ -36,6 +39,9 @@ export interface CheckerCatalogItem {
   description: string;
   enabled: boolean;
   visibility: "public" | "admin";
+  category: string;
+  category_label: string;
+  modified_at: string;
   introduction: string;
   introduction_source: string;
 }

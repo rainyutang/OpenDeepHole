@@ -96,6 +96,9 @@ class CheckerInfo(BaseModel):
     label: str
     description: str
     visibility: str = "public"
+    category: str = "illegal_memory_use"
+    category_label: str = "非法内存使用"
+    modified_at: str = ""
 
 
 class CheckerCatalogItem(BaseModel):
@@ -105,6 +108,9 @@ class CheckerCatalogItem(BaseModel):
     description: str
     enabled: bool = True
     visibility: str = "public"
+    category: str = "illegal_memory_use"
+    category_label: str = "非法内存使用"
+    modified_at: str = ""
     introduction: str = ""
     introduction_source: str = ""
 

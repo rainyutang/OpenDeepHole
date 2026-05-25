@@ -6,3 +6,5 @@ description: >
 enabled: true
 mode: opencode
 visibility: public
+category: out_of_bounds
+modified_at: "2026-05-21T19:49:17+08:00"

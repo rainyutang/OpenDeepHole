@@ -3,3 +3,5 @@ label: OOB
 description: Out-of-Bounds Access
 enabled: false
 skill_name: oob-audit
+category: out_of_bounds
+modified_at: "2026-05-19T19:06:14+08:00"

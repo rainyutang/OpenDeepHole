@@ -7,3 +7,5 @@ description: >
 enabled: true
 mode: opencode
 visibility: public
+category: illegal_memory_use
+modified_at: "2026-05-20T14:44:32+08:00"

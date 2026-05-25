@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends
 from backend.auth import get_current_user
 from backend.models import CheckerCatalogItem, CheckerInfo, User
 from backend.registry import CHECKER_VISIBILITY_ADMIN, CHECKER_VISIBILITY_PUBLIC, CHECKERS_DIR
+from backend.registry import checker_category_label, checker_modified_sort_key, normalize_checker_category
 from backend.registry import refresh_registry
 
 router = APIRouter()
@@ -17,16 +18,21 @@ router = APIRouter()
 async def list_checkers(current_user: User = Depends(get_current_user)) -> list[CheckerInfo]:
     """Return all available and enabled checkers."""
     registry = refresh_registry()
-    return [
+    items = [
         CheckerInfo(
             name=e.name,
             label=e.label,
             description=e.description,
             visibility=e.visibility,
+            category=e.category,
+            category_label=e.category_label,
+            modified_at=e.modified_at,
         )
         for e in registry.values()
         if _is_visible_to_user(e.visibility, current_user)
     ]
+    items.sort(key=lambda item: checker_modified_sort_key(item.modified_at), reverse=True)
+    return items
 
 
 def _read_checker_intro(checker_dir: Path, skill_path: Path, description: str) -> tuple[str, str]:
@@ -90,6 +96,7 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
         label = meta.get("label", str(name).upper())
         description = meta.get("description", "")
         visibility = _normalize_visibility(meta.get("visibility", CHECKER_VISIBILITY_PUBLIC))
+        category = normalize_checker_category(meta.get("category"))
         introduction, source = _read_checker_intro(
             checker_dir=checker_dir,
             skill_path=checker_dir / "SKILL.md",
@@ -102,11 +109,15 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
                 description=description,
                 enabled=meta.get("enabled", True),
                 visibility=visibility,
+                category=category,
+                category_label=checker_category_label(category),
+                modified_at=str(meta.get("modified_at") or "").strip(),
                 introduction=introduction,
                 introduction_source=source,
             )
         )
 
+    items.sort(key=lambda item: checker_modified_sort_key(item.modified_at), reverse=True)
     return items
 
 

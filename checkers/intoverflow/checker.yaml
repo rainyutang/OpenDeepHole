@@ -2,3 +2,5 @@ name: intoverflow
 label: INTOVFL
 description: 整数翻转/溢出（缺少边界校验导致的整数翻转）
 enabled: true
+category: out_of_bounds
+modified_at: "2026-05-25T09:40:22+08:00"

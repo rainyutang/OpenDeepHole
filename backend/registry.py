@@ -6,6 +6,7 @@ import os
 import sys
 import types
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -19,6 +20,17 @@ CHECKERS_DIR = Path(__file__).resolve().parent.parent / "checkers"
 CHECKERS_DIR_ENV = "OPENDEEPHOLE_CHECKERS_DIR"
 CHECKER_VISIBILITY_PUBLIC = "public"
 CHECKER_VISIBILITY_ADMIN = "admin"
+CHECKER_CATEGORY_RESOURCE_LEAK = "resource_leak"
+CHECKER_CATEGORY_INFINITE_LOOP = "infinite_loop"
+CHECKER_CATEGORY_ILLEGAL_MEMORY_USE = "illegal_memory_use"
+CHECKER_CATEGORY_OUT_OF_BOUNDS = "out_of_bounds"
+CHECKER_CATEGORY_DEFAULT = CHECKER_CATEGORY_ILLEGAL_MEMORY_USE
+CHECKER_CATEGORY_LABELS = {
+    CHECKER_CATEGORY_RESOURCE_LEAK: "资源泄露",
+    CHECKER_CATEGORY_INFINITE_LOOP: "死循环",
+    CHECKER_CATEGORY_ILLEGAL_MEMORY_USE: "非法内存使用",
+    CHECKER_CATEGORY_OUT_OF_BOUNDS: "读写越界",
+}
 
 
 @dataclass
@@ -36,6 +48,9 @@ class CheckerEntry:
     prompt_path: Path | None = None  # prompt.txt for API mode
     skill_name: str | None = None    # custom skill name (default: {name}-analysis)
     visibility: str = CHECKER_VISIBILITY_PUBLIC  # "public" | "admin"
+    category: str = CHECKER_CATEGORY_DEFAULT
+    category_label: str = CHECKER_CATEGORY_LABELS[CHECKER_CATEGORY_DEFAULT]
+    modified_at: str = ""
 
 
 _registry: dict[str, CheckerEntry] | None = None
@@ -126,6 +141,7 @@ def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
             raise FileNotFoundError(f"SKILL.md not found in {checker_dir}")
 
     analyzer = _load_analyzer(checker_dir, name)
+    category = normalize_checker_category(meta.get("category"))
 
     return CheckerEntry(
         name=name,
@@ -140,6 +156,9 @@ def _load_checker(checker_dir: Path, yaml_path: Path) -> CheckerEntry:
         prompt_path=prompt_path,
         skill_name=meta.get("skill_name"),
         visibility=_normalize_visibility(meta.get("visibility", CHECKER_VISIBILITY_PUBLIC)),
+        category=category,
+        category_label=checker_category_label(category),
+        modified_at=str(meta.get("modified_at") or "").strip(),
     )
 
 
@@ -149,6 +168,35 @@ def _normalize_visibility(value: object) -> str:
         logger.warning("Unknown checker visibility %r, falling back to public", value)
         return CHECKER_VISIBILITY_PUBLIC
     return visibility
+
+
+def normalize_checker_category(value: object) -> str:
+    """Return a supported checker category, defaulting to illegal memory use."""
+    category = str(value or CHECKER_CATEGORY_DEFAULT).strip().lower()
+    if category not in CHECKER_CATEGORY_LABELS:
+        logger.warning("Unknown checker category %r, falling back to %s", value, CHECKER_CATEGORY_DEFAULT)
+        return CHECKER_CATEGORY_DEFAULT
+    return category
+
+
+def checker_category_label(value: object) -> str:
+    """Return the display label for a checker category."""
+    return CHECKER_CATEGORY_LABELS[normalize_checker_category(value)]
+
+
+def checker_modified_sort_key(modified_at: str) -> datetime:
+    """Parse a checker modified timestamp for newest-first sorting."""
+    value = str(modified_at or "").strip()
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        logger.warning("Invalid checker modified_at %r, sorting last", modified_at)
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _load_analyzer(checker_dir: Path, checker_name: str) -> BaseAnalyzer | None:

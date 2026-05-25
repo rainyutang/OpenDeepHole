@@ -32,8 +32,14 @@ class CheckerHotReloadTests(unittest.TestCase):
     def test_admin_visibility_is_hidden_from_regular_users(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self._write_checker(root, "public_check")
-            self._write_checker(root, "admin_check", visibility="admin")
+            self._write_checker(root, "public_check", modified_at="2026-05-18T12:00:00+08:00")
+            self._write_checker(
+                root,
+                "admin_check",
+                visibility="admin",
+                category="infinite_loop",
+                modified_at="2026-05-20T12:00:00+08:00",
+            )
             user = User(user_id="u1", username="alice", role="user")
             admin = User(user_id="u2", username="root", role="admin")
 
@@ -42,7 +48,10 @@ class CheckerHotReloadTests(unittest.TestCase):
                 admin_items = asyncio.run(list_checkers(current_user=admin))
 
         self.assertEqual([item.name for item in user_items], ["public_check"])
-        self.assertEqual({item.name for item in admin_items}, {"public_check", "admin_check"})
+        self.assertEqual([item.name for item in admin_items], ["admin_check", "public_check"])
+        self.assertEqual(admin_items[0].category, "infinite_loop")
+        self.assertEqual(admin_items[0].category_label, "死循环")
+        self.assertEqual(admin_items[0].modified_at, "2026-05-20T12:00:00+08:00")
 
     def test_regular_user_cannot_select_admin_only_checker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,6 +102,8 @@ class CheckerHotReloadTests(unittest.TestCase):
         name: str,
         *,
         visibility: str = "public",
+        category: str = "illegal_memory_use",
+        modified_at: str = "2026-05-19T12:00:00+08:00",
         with_analyzer: bool = False,
     ) -> None:
         checker_dir = root / name
@@ -105,6 +116,8 @@ class CheckerHotReloadTests(unittest.TestCase):
                     f"description: {name} checker",
                     "enabled: true",
                     f"visibility: {visibility}",
+                    f"category: {category}",
+                    f'modified_at: "{modified_at}"',
                 ]
             )
             + "\n",

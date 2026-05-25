@@ -144,6 +144,14 @@ function CheckerListItem({
           </span>
         )}
       </div>
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
+        <span className="font-semibold text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5">
+          {item.category_label || "非法内存使用"}
+        </span>
+        <span className="text-slate-500">
+          最后修改：{formatModifiedAt(item.modified_at)}
+        </span>
+      </div>
       <p className="text-xs text-slate-500 line-clamp-2 min-h-8">
         {item.description || "暂无描述"}
       </p>
@@ -172,12 +180,20 @@ function CheckerIntro({ item }: { item: CheckerCatalogItem }) {
                   管理员测试
                 </span>
               )}
+              <span className="text-xs font-semibold text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-2 py-0.5">
+                {item.category_label || "非法内存使用"}
+              </span>
             </div>
             <p className="text-sm text-slate-400 max-w-3xl">{item.description || "暂无描述"}</p>
           </div>
-          <span className="text-xs text-slate-400 bg-slate-800 border border-slate-700 rounded px-2 py-1">
-            {item.introduction_source || "checker.yaml"}
-          </span>
+          <div className="flex flex-col items-start sm:items-end gap-2 text-xs text-slate-400">
+            <span className="bg-slate-800 border border-slate-700 rounded px-2 py-1">
+              最后修改：{formatModifiedAt(item.modified_at)}
+            </span>
+            <span className="bg-slate-800 border border-slate-700 rounded px-2 py-1">
+              {item.introduction_source || "checker.yaml"}
+            </span>
+          </div>
         </div>
       </div>
       <div className="p-5">
@@ -185,6 +201,13 @@ function CheckerIntro({ item }: { item: CheckerCatalogItem }) {
       </div>
     </div>
   );
+}
+
+function formatModifiedAt(value: string): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
 }
 
 function MarkdownContent({ content }: { content: string }) {

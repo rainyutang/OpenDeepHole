@@ -4,3 +4,5 @@ description: 异常分支内存泄漏检测（错误路径未释放 / 循环 con
 enabled: true
 single_pass: true
 mode: api
+category: resource_leak
+modified_at: "2026-05-19T19:06:14+08:00"

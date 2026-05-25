@@ -244,6 +244,12 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                               管理员测试
                             </span>
                           )}
+                          <span className="text-[11px] font-semibold text-cyan-200 bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-0.5">
+                            {checker.category_label || "非法内存使用"}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-1">
+                          最后修改：{formatModifiedAt(checker.modified_at)}
                         </div>
                         <p className="text-xs text-slate-400 mt-0.5">{checker.description}</p>
                       </div>
@@ -289,4 +295,11 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       </div>
     </div>
   );
+}
+
+function formatModifiedAt(value: string): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
 }
