@@ -34,9 +34,18 @@ const NAV_BUTTON_STYLES: Record<NavButtonVariant, string> = {
 };
 
 const ALL_FILTER = "__all__";
+const UNCONFIGURED_PRODUCT_FILTER = "__unconfigured__";
 
 function projectName(scan: ScanSummary) {
   return scan.scan_name || scan.project_id || scan.scan_id.slice(0, 8);
+}
+
+function productFilterValue(scan: ScanSummary) {
+  return scan.product || UNCONFIGURED_PRODUCT_FILTER;
+}
+
+function productFilterLabel(value: string) {
+  return value === UNCONFIGURED_PRODUCT_FILTER ? "未配置" : value;
 }
 
 function uniqueOptions(values: string[]) {
@@ -196,6 +205,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [productSavingId, setProductSavingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [productFilter, setProductFilter] = useState(ALL_FILTER);
   const [projectFilter, setProjectFilter] = useState(ALL_FILTER);
   const [creatorFilter, setCreatorFilter] = useState(ALL_FILTER);
   const [openFilter, setOpenFilter] = useState<string | null>(null);
@@ -282,6 +292,14 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
     [scans],
   );
 
+  const productOptions = useMemo(
+    () => uniqueOptions(scans.map(productFilterValue)).map((value) => ({
+      value,
+      label: productFilterLabel(value),
+    })),
+    [scans],
+  );
+
   const creatorOptions = useMemo(
     () => uniqueOptions(scans.map((scan) => scan.username || "-")).map((value) => ({ value, label: value })),
     [scans],
@@ -290,6 +308,9 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
   const filteredScans = useMemo(
     () =>
       scans.filter((scan) => {
+        if (productFilter !== ALL_FILTER && productFilterValue(scan) !== productFilter) {
+          return false;
+        }
         if (projectFilter !== ALL_FILTER && projectName(scan) !== projectFilter) {
           return false;
         }
@@ -298,7 +319,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
         }
         return true;
       }),
-    [creatorFilter, projectFilter, scans],
+    [creatorFilter, productFilter, projectFilter, scans],
   );
 
   return (
@@ -403,7 +424,17 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-slate-800 border-b border-slate-700">
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">产品</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                    <HeaderFilter
+                      id="product"
+                      label="产品"
+                      value={productFilter}
+                      options={productOptions}
+                      open={openFilter === "product"}
+                      onOpenChange={setOpenFilter}
+                      onChange={setProductFilter}
+                    />
+                  </th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
                     <HeaderFilter
                       id="project"
