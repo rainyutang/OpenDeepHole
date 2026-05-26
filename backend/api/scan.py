@@ -1125,7 +1125,7 @@ async def _run_scan(
         store.update_scan_progress(scan_id, status=ScanItemStatus.ANALYZING)
 
         from backend.opencode.config import create_scan_workspace
-        from backend.opencode.runner import run_audit, run_audit_batch
+        from backend.opencode.runner import run_audit, run_audit_batch, run_project_audit
 
         workspace = create_scan_workspace(scan_id, project_dir=project_dir, feedback_entries=feedback_entries)
         _scan_workspaces[scan_id] = workspace
@@ -1148,7 +1148,23 @@ async def _run_scan(
 
                     entry = registry[checker_name]
                     if not entry.analyzer:
-                        emit("static_analysis", f"{entry.label}: 无静态分析器，跳过")
+                        if entry.mode == "opencode":
+                            candidate = Candidate(
+                                file=".",
+                                line=1,
+                                function="__project__",
+                                description=f"Project-level audit for {entry.label}",
+                                vuln_type=entry.name,
+                            )
+                            cand_key = (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
+                            if cand_key not in processed_keys:
+                                scan.total_candidates += 1
+                                store.update_scan_progress(scan_id, total_candidates=scan.total_candidates)
+                                await candidate_queue.put(candidate)
+                                emit("static_analysis", f"{entry.label}: 生成项目级候选")
+                            await candidate_queue.put(_CHECKER_DONE)
+                        else:
+                            emit("static_analysis", f"{entry.label}: 无静态分析器，跳过")
                         continue
 
                     emit("static_analysis", f"正在运行 {entry.label} 分析...")
@@ -1283,15 +1299,59 @@ async def _run_scan(
                             if line.strip():
                                 emit("opencode_output", line, candidate_index=idx)
 
-                        vuln = await run_audit(
-                            workspace, candidate, project_id,
-                            on_output=on_output,
-                            cancel_event=cancel_event,
-                            project_dir=project_dir,
-                        )
+                        if candidate.function == "__project__":
+                            project_vulns = await run_project_audit(
+                                workspace, candidate, project_id,
+                                on_output=on_output,
+                                cancel_event=cancel_event,
+                                project_dir=project_dir,
+                            )
+                        else:
+                            project_vulns = None
+                            vuln = await run_audit(
+                                workspace, candidate, project_id,
+                                on_output=on_output,
+                                cancel_event=cancel_event,
+                                project_dir=project_dir,
+                            )
 
                         if cancel_event.is_set():
                             break
+
+                        if candidate.function == "__project__":
+                            if not project_vulns:
+                                project_vulns = [
+                                    Vulnerability(
+                                        file=candidate.file,
+                                        line=candidate.line,
+                                        function=candidate.function,
+                                        vuln_type=candidate.vuln_type,
+                                        severity="unknown",
+                                        description=candidate.description,
+                                        ai_analysis="No analysis result (AI did not complete analysis)",
+                                        confirmed=False,
+                                        ai_verdict="no_result",
+                                    )
+                                ]
+                            for project_vuln in project_vulns:
+                                scan.vulnerabilities.append(project_vuln)
+                                store.add_vulnerability(scan_id, project_vuln)
+                            confirmed_project = sum(1 for v in project_vulns if v.confirmed)
+                            emit(
+                                "auditing",
+                                f"[候选 {i + 1}] Result: {confirmed_project} confirmed / {len(project_vulns)} submitted",
+                                candidate_index=i,
+                            )
+                            cand_key = (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
+                            scan.processed_candidates = i + 1
+                            scan.progress = (i + 1) / max(scan.total_candidates, 1)
+                            store.add_processed_key(scan_id, cand_key)
+                            store.update_scan_progress(
+                                scan_id,
+                                processed_candidates=scan.processed_candidates,
+                                progress=scan.progress,
+                            )
+                            continue
 
                         if vuln is None:
                             vuln = Vulnerability(

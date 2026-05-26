@@ -20,10 +20,34 @@ from backend.registry import CHECKERS_DIR_ENV
 
 
 FunctionSourceSnapshot = tuple[str, int | None]
+PROJECT_LEVEL_FUNCTION = "__project__"
 
 
 def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
     return (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
+
+
+def is_project_level_candidate(candidate: Candidate) -> bool:
+    return candidate.function == PROJECT_LEVEL_FUNCTION
+
+
+def build_project_level_candidate(
+    entry,
+    project_root: Path,
+    scan_root: Path,
+) -> Candidate:
+    """Create one synthetic candidate for a SKILL-only checker."""
+    if scan_root == project_root:
+        file_path = "."
+    else:
+        file_path = scan_root.relative_to(project_root).as_posix()
+    return Candidate(
+        file=file_path,
+        line=1,
+        function=PROJECT_LEVEL_FUNCTION,
+        description=f"Project-level audit for {entry.label}",
+        vuln_type=entry.name,
+    )
 
 
 def _order_candidates_for_audit(
@@ -567,6 +591,7 @@ async def run_scan(
                 """Run all static analyzers in a thread so the event loop stays free."""
                 result: list[Candidate] = []
                 analyzer_entries = [(n, e) for n, e in registry.items() if e.analyzer]
+                project_level_entries = [(n, e) for n, e in registry.items() if e.mode == "opencode" and not e.analyzer]
                 for idx, (_name, entry) in enumerate(analyzer_entries, 1):
                     if cancel_event.is_set():
                         return result, True
@@ -597,6 +622,11 @@ async def run_scan(
 
                     count = len(result) - count_before
                     print(f"\n  [static] [{idx}/{len(analyzer_entries)}] {entry.label}: {count} candidate(s)", flush=True)
+                for _name, entry in project_level_entries:
+                    if cancel_event.is_set():
+                        return result, True
+                    result.append(build_project_level_candidate(entry, project_path, code_scan_path))
+                    print(f"  [static] {entry.label}: generated project-level candidate", flush=True)
                 return result, False
 
             candidates, static_cancelled = await loop.run_in_executor(None, _run_static_analysis)
@@ -679,18 +709,31 @@ async def run_scan(
             )
 
             vuln: Optional[Vulnerability] = None
+            project_vulns: list[Vulnerability] | None = None
             try:
                 _configure_backend(config, scan_dir)
-                from backend.opencode.runner import run_audit
-                vuln = await run_audit(
-                    workspace,
-                    candidate,
-                    scan_id,
-                    on_output=lambda line: print(f"  {line}", flush=True),
-                    cancel_event=cancel_event,
-                    timeout=config.opencode.timeout,
-                    project_dir=project_path,
-                )
+                if is_project_level_candidate(candidate):
+                    from backend.opencode.runner import run_project_audit
+                    project_vulns = await run_project_audit(
+                        workspace,
+                        candidate,
+                        scan_id,
+                        on_output=lambda line: print(f"  {line}", flush=True),
+                        cancel_event=cancel_event,
+                        timeout=config.opencode.timeout,
+                        project_dir=project_path,
+                    )
+                else:
+                    from backend.opencode.runner import run_audit
+                    vuln = await run_audit(
+                        workspace,
+                        candidate,
+                        scan_id,
+                        on_output=lambda line: print(f"  {line}", flush=True),
+                        cancel_event=cancel_event,
+                        timeout=config.opencode.timeout,
+                        project_dir=project_path,
+                    )
             except Exception as exc:
                 await emit("auditing", f"[{global_index + 1}] Analysis error: {exc}", candidate_index=global_index)
 
@@ -704,7 +747,36 @@ async def run_scan(
                 cancelled = True
                 break
 
-            if vuln is None:
+            if is_project_level_candidate(candidate):
+                project_vulns = project_vulns or [
+                    Vulnerability(
+                        file=candidate.file,
+                        line=candidate.line,
+                        function=candidate.function,
+                        vuln_type=candidate.vuln_type,
+                        severity="unknown",
+                        description=candidate.description,
+                        ai_analysis="No analysis result returned",
+                        confirmed=False,
+                        ai_verdict="no_result",
+                    )
+                ]
+                for project_vuln in project_vulns:
+                    _attach_function_source(project_vuln, candidate, function_source_cache)
+                    vulnerabilities.append(project_vuln)
+                    await reporter.report_vulnerability(scan_id, project_vuln)
+                confirmed_project = sum(1 for v in project_vulns if v.confirmed)
+                await emit(
+                    "auditing",
+                    f"[{global_index + 1}] Result: {confirmed_project} confirmed / {len(project_vulns)} submitted",
+                    candidate_index=global_index,
+                )
+                await reporter.report_processed_key(
+                    scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+                )
+                continue
+
+            if vuln is None and not is_project_level_candidate(candidate):
                 vuln = Vulnerability(
                     file=candidate.file,
                     line=candidate.line,

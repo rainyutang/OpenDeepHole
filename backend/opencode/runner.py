@@ -234,6 +234,106 @@ async def _run_audit_via_opencode(
     return None  # should not reach here
 
 
+async def run_project_audit(
+    workspace: Path,
+    candidate: Candidate,
+    project_id: str,
+    on_output=None,
+    cancel_event=None,
+    timeout: int | None = None,
+    project_dir: Path | None = None,
+) -> list[Vulnerability]:
+    """Run a SKILL-only checker once and collect all submitted results."""
+    config = get_config()
+    if config.opencode.mock:
+        return [_mock_result(candidate)]
+
+    effective_timeout = timeout if timeout is not None else config.opencode.timeout
+    tool = _normalize_tool(config.opencode)
+    from backend.registry import get_registry
+    checker_entry = get_registry().get(candidate.vuln_type)
+    skill_name = (
+        checker_entry.skill_name
+        if checker_entry and checker_entry.skill_name
+        else candidate.vuln_type
+    )
+    max_retries = config.opencode.max_retries
+
+    for attempt in range(1, max_retries + 2):
+        result_id = f"result-{uuid4().hex}"
+        prompt = (
+            f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
+            f"project_id 为 `{project_id}`。"
+            f"这是项目级审计任务，不是单个候选点复核。"
+            f"每发现一个真实问题，都必须使用此 result_id `{result_id}` 调用一次 submit_result MCP 工具，"
+            f"并在 submit_result 参数中填写真实的 file、line、function。"
+            f"如果没有发现真实问题，也必须使用此 result_id 调用一次 submit_result，confirmed=false，"
+            f"file=`{candidate.file}`，line={candidate.line}，function=`{candidate.function}`。"
+            f"**重要：你必须直接完成所有分析工作，禁止使用子 Agent（sub-agent）或委托任何子任务。"
+            f"所有 MCP 工具调用（包括 submit_result）必须由你自己直接执行。**"
+        ).replace("\n", " ")
+        log_path = workspace / f"opencode_{result_id}.log"
+
+        if on_output:
+            on_output(f"[{tool}] 初始提示词:\n{prompt}")
+
+        logger.info(
+            "Running %s project audit: %s (%s) result_id=%s timeout=%ds attempt=%d/%d",
+            tool, candidate.file, candidate.vuln_type, result_id,
+            effective_timeout, attempt, max_retries + 1,
+        )
+
+        try:
+            await _invoke_opencode(
+                workspace, prompt, effective_timeout,
+                log_path=log_path, on_line=on_output, cancel_event=cancel_event,
+                project_dir=project_dir,
+            )
+        except asyncio.TimeoutError:
+            logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
+            results = _read_results(result_id, candidate)
+            if results:
+                return results
+            return [
+                Vulnerability(
+                    file=candidate.file,
+                    line=candidate.line,
+                    function=candidate.function,
+                    vuln_type=candidate.vuln_type,
+                    severity="unknown",
+                    description=candidate.description,
+                    ai_analysis="Analysis timed out",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                )
+            ]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("%s project audit failed for %s (attempt %d)", tool, candidate.vuln_type, attempt)
+            if attempt <= max_retries:
+                if on_output:
+                    on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
+                continue
+            return []
+
+        results = _read_results(result_id, candidate)
+        if results:
+            return results
+        if attempt <= max_retries:
+            logger.warning(
+                "%s project audit did not call submit_result for %s (attempt %d), retrying...",
+                tool, candidate.vuln_type, attempt,
+            )
+            if on_output:
+                on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
+            continue
+        logger.warning("%s project audit did not call submit_result for %s after %d attempts", tool, candidate.vuln_type, attempt)
+        return []
+
+    return []
+
+
 def _cfg_value(config_obj, key: str, default=None):
     if isinstance(config_obj, dict):
         return config_obj.get(key, default)
@@ -657,8 +757,40 @@ async def _invoke_opencode(
         raise RuntimeError(f"{tool} exited with code {proc.returncode}")
 
 
-def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
-    """Read the result file written by the submit_result MCP tool."""
+def _result_payloads(data) -> list[dict]:
+    if isinstance(data, dict) and isinstance(data.get("results"), list):
+        return [item for item in data["results"] if isinstance(item, dict)]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
+def _vulnerability_from_payload(data: dict, candidate: Candidate) -> Vulnerability:
+    confirmed = data.get("confirmed", False)
+    file_value = str(data.get("file") or candidate.file)
+    function_value = str(data.get("function") or candidate.function)
+    try:
+        line_value = int(data.get("line") or candidate.line)
+    except (TypeError, ValueError):
+        line_value = candidate.line
+    if line_value < 1:
+        line_value = candidate.line
+    return Vulnerability(
+        file=file_value,
+        line=line_value,
+        function=function_value,
+        vuln_type=candidate.vuln_type,
+        severity=data.get("severity", "unknown"),
+        description=data.get("description", candidate.description),
+        ai_analysis=data.get("ai_analysis", ""),
+        confirmed=confirmed,
+        ai_verdict="confirmed" if confirmed else "not_confirmed",
+    )
+
+
+def _read_result_file(result_id: str, candidate: Candidate):
     config = get_config()
     result_path = Path(config.storage.scans_dir) / f"{result_id}.json"
 
@@ -670,7 +802,7 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
         return None
 
     try:
-        data = json.loads(result_path.read_text(encoding="utf-8"))
+        return json.loads(result_path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.error(
             "Failed to parse result file for result_id=%s path=%s: %s",
@@ -678,18 +810,21 @@ def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
         )
         return None
 
-    confirmed = data.get("confirmed", False)
-    return Vulnerability(
-        file=candidate.file,
-        line=candidate.line,
-        function=candidate.function,
-        vuln_type=candidate.vuln_type,
-        severity=data.get("severity", "unknown"),
-        description=data.get("description", candidate.description),
-        ai_analysis=data.get("ai_analysis", ""),
-        confirmed=confirmed,
-        ai_verdict="confirmed" if confirmed else "not_confirmed",
-    )
+
+def _read_results(result_id: str, candidate: Candidate) -> list[Vulnerability]:
+    """Read all result payloads written for a project-level audit."""
+    data = _read_result_file(result_id, candidate)
+    if data is None:
+        return []
+    return [_vulnerability_from_payload(item, candidate) for item in _result_payloads(data)]
+
+
+def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
+    """Read one result file written by the submit_result MCP tool."""
+    results = _read_results(result_id, candidate)
+    if not results:
+        return None
+    return results[-1]
 
 
 async def run_audit_batch(
