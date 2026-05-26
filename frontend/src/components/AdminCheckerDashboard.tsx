@@ -374,12 +374,12 @@ function ScanRow({
       </td>
       <td className="px-4 py-3 text-blue-300">{scan.ticket_submitted_count}</td>
       <td className="px-4 py-3">
-        <span className={scan.accuracy === null ? "text-xs text-slate-500" : "text-xs font-semibold text-emerald-300"}>
+        <span className={hasAccuracy(scan.accuracy) ? "text-xs font-semibold text-emerald-300" : "text-xs text-slate-500"}>
           {formatAccuracy(scan.accuracy)}
         </span>
       </td>
       <td className="px-4 py-3">
-        <span className={scan.ticket_accuracy === null ? "text-xs text-slate-500" : "text-xs font-semibold text-blue-300"}>
+        <span className={hasAccuracy(scan.ticket_accuracy) ? "text-xs font-semibold text-blue-300" : "text-xs text-slate-500"}>
           {formatAccuracy(scan.ticket_accuracy)}
         </span>
       </td>
@@ -422,8 +422,12 @@ function Th({ children, className = "" }: { children: ReactNode; className?: str
   );
 }
 
-function formatAccuracy(value: number | null) {
-  if (value === null) return "-";
+function hasAccuracy(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function formatAccuracy(value: number | null | undefined) {
+  if (!hasAccuracy(value)) return "-";
   return `${Math.round(value * 100)}%`;
 }
 
