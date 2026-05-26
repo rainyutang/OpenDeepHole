@@ -1,0 +1,655 @@
+##############################################################################
+# NPD-FuncRet semgrep 规则
+#
+# 检测：函数返回值/参数赋值给指针后，未判空即解引用。
+#
+# 判空排除策略（两层）：
+#   1. semgrep 规则层：排除标准判空模式 + 高频自定义空指针字面量
+#   2. analyzer.py 后处理层：排除自定义判空函数/宏（见 _NULL_CHECK_FUNCS）
+#
+# 自定义空指针字面量和判空函数统一在 analyzer.py 中维护，
+# 此处仅列出高频使用的 VOS_NULL_PTR 以减少初始匹配量。
+##############################################################################
+
+rules:
+  # ================================================================
+  # A. 返回值赋值 → 箭头解引用（$P->$F）
+  # ================================================================
+  - id: ccpp.npd-funcret.retval-assign-arrow-deref
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Pointer `$P` assigned from function call is dereferenced
+      via `$P->$F` without null check.
+    metadata:
+      cwe: ["CWE-476"]
+      category: security
+      assign_type: return_value
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: |
+              $P = $CALL(...);
+              ...
+              $P->$F;
+          - pattern: |
+              $P = ($TYPE *)$CALL(...);
+              ...
+              $P->$F;
+          - pattern: |
+              $P = ($TYPE)$CALL(...);
+              ...
+              $P->$F;
+          - pattern: |
+              $TYPE *$P = $CALL(...);
+              ...
+              $P->$F;
+          - pattern: |
+              $TYPE *$P = ($TYPE2 *)$CALL(...);
+              ...
+              $P->$F;
+      # --- 排除：标准判空 ---
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == NULL) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (NULL == $P) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == nullptr) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (!$P) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == NULL) return ...;
+          ...
+          $P->$F;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (!$P) return ...;
+          ...
+          $P->$F;
+      # --- 排除：自定义空指针字面量 VOS_NULL_PTR ---
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == VOS_NULL_PTR) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (VOS_NULL_PTR == $P) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == VOS_NULL_PTR) return ...;
+          ...
+          $P->$F;
+      # --- 排除：解引用在判空块内 ---
+      - pattern-not-inside: |
+          if ($P != NULL) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (NULL != $P) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P != VOS_NULL_PTR) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (VOS_NULL_PTR != $P) {
+            ...
+          }
+
+  # ================================================================
+  # B. 返回值赋值 → 指针解引用（*$P）
+  # ================================================================
+  - id: ccpp.npd-funcret.retval-assign-star-deref
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Pointer `$P` assigned from function call is dereferenced
+      via `*$P` without null check.
+    metadata:
+      cwe: ["CWE-476"]
+      category: security
+      assign_type: return_value
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: |
+              $P = $CALL(...);
+              ...
+              *$P;
+          - pattern: |
+              $P = ($TYPE *)$CALL(...);
+              ...
+              *$P;
+          - pattern: |
+              $P = ($TYPE)$CALL(...);
+              ...
+              *$P;
+          - pattern: |
+              $TYPE *$P = $CALL(...);
+              ...
+              *$P;
+          - pattern: |
+              $TYPE *$P = ($TYPE2 *)$CALL(...);
+              ...
+              *$P;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == NULL) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (NULL == $P) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == nullptr) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (!$P) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == NULL) return ...;
+          ...
+          *$P;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (!$P) return ...;
+          ...
+          *$P;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == VOS_NULL_PTR) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (VOS_NULL_PTR == $P) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == VOS_NULL_PTR) return ...;
+          ...
+          *$P;
+      - pattern-not-inside: |
+          if ($P != NULL) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (NULL != $P) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P != VOS_NULL_PTR) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (VOS_NULL_PTR != $P) {
+            ...
+          }
+
+  # ================================================================
+  # C. 返回值赋值 → 下标解引用（$P[$I]）
+  # ================================================================
+  - id: ccpp.npd-funcret.retval-assign-subscript-deref
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Pointer `$P` assigned from function call is dereferenced
+      via `$P[$I]` without null check.
+    metadata:
+      cwe: ["CWE-476"]
+      category: security
+      assign_type: return_value
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern-either:
+          - pattern: |
+              $P = $CALL(...);
+              ...
+              $P[$I];
+          - pattern: |
+              $P = ($TYPE *)$CALL(...);
+              ...
+              $P[$I];
+          - pattern: |
+              $P = ($TYPE)$CALL(...);
+              ...
+              $P[$I];
+          - pattern: |
+              $TYPE *$P = $CALL(...);
+              ...
+              $P[$I];
+          - pattern: |
+              $TYPE *$P = ($TYPE2 *)$CALL(...);
+              ...
+              $P[$I];
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == NULL) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (NULL == $P) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == nullptr) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (!$P) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == NULL) return ...;
+          ...
+          $P[$I];
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (!$P) return ...;
+          ...
+          $P[$I];
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == VOS_NULL_PTR) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if (VOS_NULL_PTR == $P) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $P = $CALL(...);
+          ...
+          if ($P == VOS_NULL_PTR) return ...;
+          ...
+          $P[$I];
+      - pattern-not-inside: |
+          if ($P != NULL) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (NULL != $P) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P != VOS_NULL_PTR) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (VOS_NULL_PTR != $P) {
+            ...
+          }
+
+  # ================================================================
+  # D. 参数赋值（传指针的指针）→ 箭头解引用
+  # ================================================================
+  - id: ccpp.npd-funcret.param-assign-arrow-deref
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Pointer `$P` assigned via output parameter `&$P` in
+      `$CALL(...)` is dereferenced via `$P->$F` without null check.
+    metadata:
+      cwe: ["CWE-476"]
+      category: security
+      assign_type: param_output
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern: |
+          $CALL(..., &$P, ...);
+          ...
+          $P->$F;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == NULL) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (NULL == $P) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == nullptr) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (!$P) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == NULL) return ...;
+          ...
+          $P->$F;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (!$P) return ...;
+          ...
+          $P->$F;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == VOS_NULL_PTR) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (VOS_NULL_PTR == $P) { ... }
+          ...
+          $P->$F;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == VOS_NULL_PTR) return ...;
+          ...
+          $P->$F;
+      - pattern-not-inside: |
+          if ($P != NULL) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P != VOS_NULL_PTR) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (VOS_NULL_PTR != $P) {
+            ...
+          }
+
+  # ================================================================
+  # E. 参数赋值（传指针的指针）→ 指针解引用（*$P）
+  # ================================================================
+  - id: ccpp.npd-funcret.param-assign-star-deref
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Pointer `$P` assigned via output parameter `&$P` in
+      `$CALL(...)` is dereferenced via `*$P` without null check.
+    metadata:
+      cwe: ["CWE-476"]
+      category: security
+      assign_type: param_output
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern: |
+          $CALL(..., &$P, ...);
+          ...
+          *$P;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == NULL) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (NULL == $P) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (!$P) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == NULL) return ...;
+          ...
+          *$P;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (!$P) return ...;
+          ...
+          *$P;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == VOS_NULL_PTR) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (VOS_NULL_PTR == $P) { ... }
+          ...
+          *$P;
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == VOS_NULL_PTR) return ...;
+          ...
+          *$P;
+      - pattern-not-inside: |
+          if ($P != NULL) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P != VOS_NULL_PTR) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (VOS_NULL_PTR != $P) {
+            ...
+          }
+
+  # ================================================================
+  # F. 参数赋值（传指针的指针）→ 下标解引用（$P[$I]）
+  # ================================================================
+  - id: ccpp.npd-funcret.param-assign-subscript-deref
+    languages: [c, cpp]
+    severity: WARNING
+    message: >
+      Function=`$FUNC`. Pointer `$P` assigned via output parameter `&$P` in
+      `$CALL(...)` is dereferenced via `$P[$I]` without null check.
+    metadata:
+      cwe: ["CWE-476"]
+      category: security
+      assign_type: param_output
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $RET $FUNC(...) {
+                ...
+              }
+          - pattern-inside: |
+              $RET $QUAL::$FUNC(...) {
+                ...
+              }
+      - pattern: |
+          $CALL(..., &$P, ...);
+          ...
+          $P[$I];
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == NULL) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (NULL == $P) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (!$P) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == NULL) return ...;
+          ...
+          $P[$I];
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (!$P) return ...;
+          ...
+          $P[$I];
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == VOS_NULL_PTR) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if (VOS_NULL_PTR == $P) { ... }
+          ...
+          $P[$I];
+      - pattern-not: |
+          $CALL(..., &$P, ...);
+          ...
+          if ($P == VOS_NULL_PTR) return ...;
+          ...
+          $P[$I];
+      - pattern-not-inside: |
+          if ($P != NULL) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P) {
+            ...
+          }
+      - pattern-not-inside: |
+          if ($P != VOS_NULL_PTR) {
+            ...
+          }
+      - pattern-not-inside: |
+          if (VOS_NULL_PTR != $P) {
+            ...
+          }
