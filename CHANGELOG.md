@@ -2,6 +2,7 @@
 
 ## 2026-05-26
 
+- **新增** `skill_only_project_audit` 管理员测试 checker，仅包含 `SKILL.md`，用于验证无 `analysis.py` 的项目级 opencode 审计和多结果提交链路
 - **新增** 无 `analysis.py` 的 opencode checker 会自动生成项目级候选并直接运行 `SKILL.md`，支持同一次审计通过 MCP 多次提交真实函数和行号级结果
 - **新增** SKILL 元数据支持「认证绕过」和「其他」两个漏洞维度，后续 checker 可通过 `checker.yaml` 的 `category` 字段归类展示
 - **优化** AI 去误报复核改为优先处理未产生有效复核结果的报告，再处理已有复核结论的报告；二次复核无结果时不再覆盖旧结论
