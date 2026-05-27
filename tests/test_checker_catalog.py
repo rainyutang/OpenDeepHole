@@ -21,7 +21,7 @@ class CheckerCatalogTests(unittest.TestCase):
             skill_path.write_text("# Skill intro\n", encoding="utf-8")
             (checker_dir / "SCENARIOS.md").write_text("# Scenario intro\n", encoding="utf-8")
 
-            with patch("backend.api.checkers.CHECKERS_DIR", Path(tmp)):
+            with patch("backend.registry.CHECKERS_DIR", Path(tmp)):
                 response = asyncio.run(
                     list_checker_catalog(
                         current_user=User(user_id="u1", username="alice", role="user")

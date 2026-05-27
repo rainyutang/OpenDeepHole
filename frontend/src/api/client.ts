@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, TokenResponse, User } from "../types";
+import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, TokenResponse, User } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -90,6 +90,32 @@ export async function getCheckers(): Promise<CheckerInfo[]> {
 
 export async function getCheckerCatalog(): Promise<CheckerCatalogItem[]> {
   const { data } = await api.get<CheckerCatalogItem[]>("/api/checkers/catalog");
+  return data;
+}
+
+export async function createSkill(body: {
+  agent_id: string;
+  name: string;
+  description: string;
+  input: string;
+}): Promise<SkillCreateJob> {
+  const { data } = await api.post<SkillCreateJob>("/api/skills/create", body);
+  return data;
+}
+
+export async function getSkillCreateJob(jobId: string): Promise<SkillCreateJob> {
+  const { data } = await api.get<SkillCreateJob>(`/api/skills/create/${jobId}`);
+  return data;
+}
+
+export async function importSkill(jobId: string, body: {
+  skill_md: string;
+  scenarios_md?: string;
+}): Promise<{ ok: boolean; name: string }> {
+  const { data } = await api.post<{ ok: boolean; name: string }>(
+    `/api/skills/create/${jobId}/import`,
+    body,
+  );
   return data;
 }
 

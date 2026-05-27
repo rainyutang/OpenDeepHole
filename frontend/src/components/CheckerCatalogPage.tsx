@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getCheckerCatalog } from "../api/client";
-import type { CheckerCatalogItem } from "../types";
+import { createSkill, getAgents, getCheckerCatalog, getSkillCreateJob, importSkill } from "../api/client";
+import type { AgentInfo, CheckerCatalogItem, SkillCreateJob } from "../types";
 
 interface Props {
   onBack: () => void;
 }
 
 export default function CheckerCatalogPage({ onBack }: Props) {
+  const [mode, setMode] = useState<"catalog" | "create">("catalog");
   const [items, setItems] = useState<CheckerCatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -37,6 +39,21 @@ export default function CheckerCatalogPage({ onBack }: Props) {
     return items.find((item) => item.name === activeChecker) ?? null;
   }, [items, activeChecker]);
 
+  const handleImported = async (name: string) => {
+    setMode("catalog");
+    setActiveChecker(name);
+    await refresh();
+  };
+
+  if (mode === "create") {
+    return (
+      <SkillCreatePage
+        onBack={() => setMode("catalog")}
+        onImported={handleImported}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       <div className="bg-slate-900/90 border-b border-slate-800 px-6 py-4">
@@ -49,18 +66,26 @@ export default function CheckerCatalogPage({ onBack }: Props) {
               &larr; 返回
             </button>
             <div>
-              <h1 className="text-lg font-bold text-white">SKILL概览</h1>
+              <h1 className="text-lg font-bold text-white">SKILL市场</h1>
               <p className="text-sm text-slate-400 mt-0.5">
                 查看当前可用 SKILL 的检测范围和使用说明
               </p>
             </div>
           </div>
-          <button
-            onClick={refresh}
-            className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
-          >
-            刷新
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setMode("create")}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg border border-blue-500/60 transition-colors"
+            >
+              在线创建
+            </button>
+            <button
+              onClick={refresh}
+              className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
+            >
+              刷新
+            </button>
+          </div>
         </div>
       </div>
 
@@ -108,6 +133,327 @@ export default function CheckerCatalogPage({ onBack }: Props) {
       </div>
     </div>
   );
+}
+
+function SkillCreatePage({
+  onBack,
+  onImported,
+}: {
+  onBack: () => void;
+  onImported: (name: string) => Promise<void>;
+}) {
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [agentId, setAgentId] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [input, setInput] = useState("");
+  const [job, setJob] = useState<SkillCreateJob | null>(null);
+  const [skillMd, setSkillMd] = useState("");
+  const [scenariosMd, setScenariosMd] = useState("");
+  const [loadingAgents, setLoadingAgents] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState("");
+
+  const dirty = !!(name || description || input || skillMd || scenariosMd || job);
+  const creating = job?.status === "pending" || job?.status === "running";
+
+  useEffect(() => {
+    let alive = true;
+    getAgents()
+      .then((list) => {
+        if (!alive) return;
+        setAgents(list);
+        const online = list.find((agent) => agent.online);
+        if (online) setAgentId(online.agent_id);
+      })
+      .catch(() => {
+        if (alive) setError("加载 Agent 列表失败");
+      })
+      .finally(() => {
+        if (alive) setLoadingAgents(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!job || (job.status !== "pending" && job.status !== "running")) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await getSkillCreateJob(job.job_id);
+        setJob(next);
+        if (next.draft) {
+          setSkillMd((current) => current || next.draft?.skill_md || "");
+          setScenariosMd((current) => current || next.draft?.scenarios_md || "");
+        }
+      } catch (err: any) {
+        setError(err.response?.data?.detail || "刷新创建进度失败");
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [job?.job_id, job?.status]);
+
+  const handleBack = () => {
+    if (dirty && !window.confirm("输入将被清空，是否确认返回？")) return;
+    onBack();
+  };
+
+  const handleReset = () => {
+    setName("");
+    setDescription("");
+    setInput("");
+    setJob(null);
+    setSkillMd("");
+    setScenariosMd("");
+    setError("");
+  };
+
+  const handleSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError("");
+    if (!agentId) {
+      setError("请选择 Agent");
+      return;
+    }
+    if (!name.trim() || !description.trim() || !input.trim()) {
+      setError("名称、描述和输入不能为空");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const next = await createSkill({
+        agent_id: agentId,
+        name: name.trim(),
+        description: description.trim(),
+        input: input.trim(),
+      });
+      setJob(next);
+      if (next.draft) {
+        setSkillMd(next.draft.skill_md || "");
+        setScenariosMd(next.draft.scenarios_md || "");
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.detail || "创建 SKILL 失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleImport = async () => {
+    if (!job) return;
+    setImporting(true);
+    setError("");
+    try {
+      const result = await importSkill(job.job_id, {
+        skill_md: skillMd,
+        scenarios_md: scenariosMd,
+      });
+      await onImported(result.name);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || "导入 SKILL 市场失败");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+      <div className="bg-slate-900/90 border-b border-slate-800 px-6 py-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <button
+              onClick={handleBack}
+              className="text-sm text-slate-400 hover:text-white transition-colors"
+            >
+              &larr; 返回
+            </button>
+            <div>
+              <h1 className="text-lg font-bold text-white">新增SKILL</h1>
+              <p className="text-sm text-slate-400 mt-0.5">
+                选择 Agent 在线生成纯 SKILL 项目级检查项
+              </p>
+            </div>
+          </div>
+          <StatusPill status={job?.status || "idle"} />
+        </div>
+      </div>
+
+      <div className="flex-1 px-6 py-6">
+        <div className="max-w-6xl mx-auto grid grid-cols-1 xl:grid-cols-[28rem_1fr] gap-5">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <Panel title="基础信息">
+              <label className="block text-sm font-medium text-slate-300 mb-2">名称</label>
+              <input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                disabled={creating}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                placeholder="例如：认证绕过配置审计"
+              />
+
+              <label className="block text-sm font-medium text-slate-300 mt-4 mb-2">描述</label>
+              <input
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                disabled={creating}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                placeholder="一句话说明这个 SKILL 要检查什么"
+              />
+
+              <label className="block text-sm font-medium text-slate-300 mt-4 mb-2">输入</label>
+              <textarea
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                disabled={creating}
+                rows={8}
+                className="w-full resize-y bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm leading-6 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                placeholder="写清楚适用场景、判断标准、误报排除条件、期望输出等"
+              />
+            </Panel>
+
+            <Panel title="Agent">
+              {loadingAgents ? (
+                <div className="text-sm text-slate-500">加载中...</div>
+              ) : agents.length === 0 ? (
+                <div className="text-sm text-slate-500">暂无 Agent 连接</div>
+              ) : (
+                <div className="space-y-2">
+                  {agents.map((agent) => (
+                    <label
+                      key={agent.agent_id}
+                      className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                        agentId === agent.agent_id
+                          ? "border-blue-500 bg-blue-500/10"
+                          : "border-slate-700 hover:border-slate-600"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="skill-agent"
+                        className="sr-only"
+                        checked={agentId === agent.agent_id}
+                        disabled={creating}
+                        onChange={() => setAgentId(agent.agent_id)}
+                      />
+                      <span className={`w-2 h-2 rounded-full ${agent.online ? "bg-green-400" : "bg-slate-500"}`} />
+                      <span className="min-w-0 flex-1 text-sm text-white truncate">{agent.name}</span>
+                      <span className="text-xs text-slate-500">{agent.online ? "在线" : "离线"}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </Panel>
+
+            {error && (
+              <div className="border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-4 py-3 text-sm">
+                {error}
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                type="submit"
+                disabled={submitting || creating}
+                className="flex-1 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+              >
+                {submitting || creating ? "进行中..." : "确定"}
+              </button>
+              <button
+                type="button"
+                onClick={handleReset}
+                disabled={creating}
+                className="px-6 py-2.5 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded-lg border border-slate-700 transition-colors"
+              >
+                重置
+              </button>
+            </div>
+          </form>
+
+          <div className="min-w-0 space-y-4">
+            <Panel title="创建进度">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-sm font-medium text-white">{statusText(job?.status || "idle")}</div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    {job?.error_message || job?.draft?.summary || "提交后会显示 Agent 创建进度"}
+                  </div>
+                </div>
+                {creating && (
+                  <div className="w-5 h-5 border-2 border-slate-600 border-t-blue-400 rounded-full animate-spin" />
+                )}
+              </div>
+            </Panel>
+
+            {job?.status === "completed" && (
+              <Panel title="生成草稿">
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
+                  SKILL.md
+                </label>
+                <textarea
+                  value={skillMd}
+                  onChange={(event) => setSkillMd(event.target.value)}
+                  rows={18}
+                  className="w-full resize-y font-mono bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs leading-5 text-slate-200 focus:outline-none focus:border-blue-500"
+                />
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mt-4 mb-2">
+                  SCENARIOS.md
+                </label>
+                <textarea
+                  value={scenariosMd}
+                  onChange={(event) => setScenariosMd(event.target.value)}
+                  rows={7}
+                  className="w-full resize-y font-mono bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs leading-5 text-slate-200 focus:outline-none focus:border-blue-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleImport}
+                  disabled={importing || !skillMd.trim()}
+                  className="mt-4 w-full py-2.5 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+                >
+                  {importing ? "导入中..." : "导入SKILL市场"}
+                </button>
+              </Panel>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Panel({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="border border-slate-800 bg-slate-900/70 rounded-lg p-5">
+      <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function StatusPill({ status }: { status: string }) {
+  const cls = status === "completed"
+    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+    : status === "error"
+      ? "border-red-500/30 bg-red-500/10 text-red-300"
+      : status === "running" || status === "pending"
+        ? "border-blue-500/30 bg-blue-500/10 text-blue-300"
+        : "border-slate-700 bg-slate-800 text-slate-400";
+  return (
+    <span className={`text-xs font-semibold rounded px-2 py-1 border ${cls}`}>
+      {statusText(status)}
+    </span>
+  );
+}
+
+function statusText(status: string): string {
+  if (status === "pending") return "等待中";
+  if (status === "running") return "进行中";
+  if (status === "completed") return "已完成";
+  if (status === "error") return "失败";
+  return "未开始";
 }
 
 function CheckerListItem({

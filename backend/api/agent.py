@@ -423,6 +423,11 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 if waiter is not None and not waiter.done():
                     waiter.set_result(incoming)
                 continue
+            if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":
+                from backend.api.skills import handle_skill_create_result
+
+                handle_skill_create_result(incoming)
+                continue
 
     except WebSocketDisconnect:
         pass

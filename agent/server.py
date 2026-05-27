@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
+import shutil
 import threading
 from pathlib import Path
 from typing import Optional
@@ -261,3 +264,129 @@ async def handle_config_test(request_id: str, remote_config: dict) -> dict:
         "ok": ok,
         "message": "API 配置可用" if ok else reason,
     }
+
+
+async def handle_skill_create(
+    request_id: str,
+    name: str,
+    description: str,
+    user_input: str,
+) -> dict:
+    """Create a pure project-level SKILL draft by invoking the configured AI CLI."""
+    try:
+        draft = await _run_skill_creator(request_id, name, description, user_input)
+        return {
+            "type": "skill_create_result",
+            "request_id": request_id,
+            "ok": True,
+            "draft": draft,
+        }
+    except Exception as exc:
+        return {
+            "type": "skill_create_result",
+            "request_id": request_id,
+            "ok": False,
+            "message": str(exc),
+        }
+
+
+async def _run_skill_creator(
+    request_id: str,
+    name: str,
+    description: str,
+    user_input: str,
+) -> dict:
+    if _config is None:
+        raise RuntimeError("Agent config is not initialized")
+
+    from agent.scanner import _configure_backend
+    from backend.opencode.runner import _invoke_opencode
+
+    workspace = Path.home() / ".opendeephole" / "skill_create" / request_id
+    if workspace.exists():
+        shutil.rmtree(workspace, ignore_errors=True)
+    skills_dir = workspace / ".opencode" / "skills" / "skill-creator"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    creator_source = Path(__file__).resolve().parent / "skills" / "skill_creator.md"
+    if not creator_source.is_file():
+        raise RuntimeError("Bundled skill-creator instructions are missing")
+    (skills_dir / "SKILL.md").write_text(creator_source.read_text(encoding="utf-8"), encoding="utf-8")
+    (workspace / "opencode.json").write_text(
+        json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "skills": {"paths": [str((workspace / ".opencode" / "skills").resolve())]},
+                "permission": {
+                    "read": {"*": "allow"},
+                    "list": {"*": "allow"},
+                    "glob": {"*": "allow"},
+                    "grep": {"*": "allow"},
+                    "external_directory": {"*": "allow"},
+                    "edit": {"*": "deny"},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    _configure_backend(_config, workspace)
+    prompt = _skill_creator_prompt(name, description, user_input)
+    lines: list[str] = []
+
+    def on_output(line: str) -> None:
+        if line:
+            print(f"[skill_create] {line}", flush=True)
+            lines.append(line)
+
+    await _invoke_opencode(
+        workspace,
+        prompt,
+        timeout=_config.opencode.timeout,
+        on_line=on_output,
+        project_dir=workspace,
+    )
+    return _parse_skill_creator_output("\n".join(lines))
+
+
+def _skill_creator_prompt(name: str, description: str, user_input: str) -> str:
+    return (
+        "使用 `skill-creator` 技能，为 OpenDeepHole 创建一个纯 SKILL 项目级审计检查项草稿。"
+        "不要创建 analyzer.py、脚本或资源文件。"
+        "只输出一个 JSON 对象，不要输出 Markdown 代码围栏之外的解释。"
+        "JSON 字段必须包含："
+        "`skill_md`（完整 SKILL.md 内容，包含 YAML frontmatter 和项目级审计要求）、"
+        "`scenarios_md`（面向用户的适用场景说明，可为空字符串）、"
+        "`summary`（一句话说明）。"
+        "SKILL 必须要求审计者在扫描时主动阅读代码，发现每个真实问题都调用 submit_result；"
+        "未发现问题也必须调用一次 submit_result 并设置 confirmed=false。"
+        f"\n名称：{name}"
+        f"\n描述：{description}"
+        f"\n用户输入：{user_input}"
+    )
+
+
+def _parse_skill_creator_output(output: str) -> dict:
+    candidates = []
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", output, flags=re.DOTALL)
+    candidates.extend(fenced)
+    start = output.find("{")
+    end = output.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(output[start:end + 1])
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        skill_md = str(data.get("skill_md") or "").strip()
+        if skill_md:
+            return {
+                "skill_md": skill_md,
+                "scenarios_md": str(data.get("scenarios_md") or "").strip(),
+                "summary": str(data.get("summary") or "").strip(),
+            }
+    raise RuntimeError("Agent did not return a valid SKILL draft")

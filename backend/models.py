@@ -115,6 +115,44 @@ class CheckerCatalogItem(BaseModel):
     introduction_source: str = ""
 
 
+class SkillDraft(BaseModel):
+    skill_md: str = ""
+    scenarios_md: str = ""
+    summary: str = ""
+
+
+class SkillCreateRequest(BaseModel):
+    agent_id: str
+    name: str
+    description: str
+    input: str
+
+
+class SkillCreateJob(BaseModel):
+    job_id: str
+    status: str
+    name: str
+    description: str
+    input: str = ""
+    agent_id: str = ""
+    agent_name: str = ""
+    user_id: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    error_message: str = ""
+    draft: SkillDraft | None = None
+
+
+class SkillImportRequest(BaseModel):
+    skill_md: str
+    scenarios_md: str = ""
+
+
+class SkillImportResponse(BaseModel):
+    ok: bool = True
+    name: str
+
+
 class UploadResponse(BaseModel):
     project_id: str
 

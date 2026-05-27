@@ -344,7 +344,7 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
     # Reset registry singleton so it re-discovers checkers
     import backend.registry as _reg
     _reg._registry = None
-    _reg._registry_dir = None
+    _reg._registry_dirs = None
 
 
 async def run_scan(
@@ -852,4 +852,4 @@ async def run_scan(
                 os.environ[CHECKERS_DIR_ENV] = previous_checkers_dir
             import backend.registry as _reg
             _reg._registry = None
-            _reg._registry_dir = None
+            _reg._registry_dirs = None

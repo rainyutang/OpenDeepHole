@@ -58,7 +58,7 @@ class CheckerEntry:
 
 
 _registry: dict[str, CheckerEntry] | None = None
-_registry_dir: Path | None = None
+_registry_dirs: tuple[Path, ...] | None = None
 
 
 def current_checkers_dir() -> Path:
@@ -69,19 +69,55 @@ def current_checkers_dir() -> Path:
     return CHECKERS_DIR
 
 
+def current_checker_dirs() -> list[Path]:
+    """Return checker roots for the current process context."""
+    override = os.environ.get(CHECKERS_DIR_ENV)
+    if override:
+        return [Path(override)]
+    roots = [CHECKERS_DIR]
+    try:
+        from backend.config import get_config
+        user_skills_dir = Path(get_config().storage.user_skills_dir)
+        if user_skills_dir != CHECKERS_DIR:
+            roots.append(user_skills_dir)
+    except Exception:
+        logger.debug("User skill directory is not available yet", exc_info=True)
+    return roots
+
+
 def get_registry(checkers_dir: Path | None = None, *, refresh: bool = False) -> dict[str, CheckerEntry]:
     """Get the checker registry singleton, optionally forcing a rescan."""
-    global _registry, _registry_dir
-    target_dir = (checkers_dir or current_checkers_dir()).resolve()
-    if refresh or _registry is None or _registry_dir != target_dir:
-        _registry = discover_checkers(target_dir)
-        _registry_dir = target_dir
+    global _registry, _registry_dirs
+    target_dirs = (checkers_dir.resolve(),) if checkers_dir else tuple(
+        root.resolve() for root in current_checker_dirs()
+    )
+    if refresh or _registry is None or _registry_dirs != target_dirs:
+        _registry = discover_checkers_from_dirs(target_dirs)
+        _registry_dirs = target_dirs
     return _registry
 
 
 def refresh_registry(checkers_dir: Path | None = None) -> dict[str, CheckerEntry]:
     """Rescan the checker directory and replace the cached registry."""
     return get_registry(checkers_dir=checkers_dir, refresh=True)
+
+
+def discover_checkers_from_dirs(checkers_dirs: tuple[Path, ...] | list[Path]) -> dict[str, CheckerEntry]:
+    """Scan checker roots and merge entries by checker name."""
+    registry: dict[str, CheckerEntry] = {}
+    for checkers_dir in checkers_dirs:
+        for name, entry in discover_checkers(checkers_dir).items():
+            if name in registry:
+                logger.warning(
+                    "Duplicate checker %s in %s; keeping first definition from %s",
+                    name,
+                    entry.directory,
+                    registry[name].directory,
+                )
+                continue
+            registry[name] = entry
+    logger.info("Merged %d checkers from %d root(s)", len(registry), len(checkers_dirs))
+    return registry
 
 
 def discover_checkers(checkers_dir: Path) -> dict[str, CheckerEntry]:

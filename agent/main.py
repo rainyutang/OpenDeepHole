@@ -121,6 +121,13 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             request_id=msg.get("request_id", ""),
             remote_config=msg.get("config") or {},
         )
+    elif cmd_type == "skill_create":
+        return await agent_server.handle_skill_create(
+            request_id=msg.get("request_id", ""),
+            name=msg.get("name", ""),
+            description=msg.get("description", ""),
+            user_input=msg.get("input", ""),
+        )
     else:
         print(f"Unknown command type: {cmd_type!r}")
     return None

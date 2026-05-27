@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.api.checkers import list_checkers
@@ -80,6 +81,25 @@ class CheckerHotReloadTests(unittest.TestCase):
         self.assertIn("relcheck", synced_registry)
         self.assertIsNotNone(synced_registry["relcheck"].analyzer)
         self.assertEqual(getattr(synced_registry["relcheck"].analyzer, "marker", ""), "relative-ok")
+
+    def test_refresh_registry_discovers_user_skill_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            builtins_root = root / "builtins"
+            user_root = root / "user_skills"
+            self._write_checker(builtins_root, "builtin_check")
+            self._write_checker(user_root, "user_skill", category="other")
+
+            cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(user_root)))
+            with (
+                patch("backend.registry.CHECKERS_DIR", builtins_root),
+                patch("backend.config.get_config", return_value=cfg),
+            ):
+                registry = refresh_registry()
+
+        self.assertIn("builtin_check", registry)
+        self.assertIn("user_skill", registry)
+        self.assertEqual(registry["user_skill"].category, "other")
 
     def test_unpack_rejects_path_traversal(self) -> None:
         data = io.BytesIO()

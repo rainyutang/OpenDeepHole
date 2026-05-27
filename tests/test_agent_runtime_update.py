@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import agent.updater as updater
+import agent.server as agent_server
 from agent.config import AgentConfig
 from agent.updater import compute_runtime_hash
 from backend.api import agent as agent_api
@@ -191,8 +192,6 @@ class AgentRuntimePackageTests(unittest.TestCase):
                     )
 
     def test_config_test_does_not_mutate_live_config(self) -> None:
-        import agent.server as agent_server
-
         live_config = AgentConfig()
         live_config.llm_api.api_key = "live-key"
         agent_server._config = live_config
@@ -215,6 +214,18 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(live_config.llm_api.api_key, "live-key")
+
+    def test_skill_creator_output_parser_accepts_fenced_json(self) -> None:
+        parsed = agent_server._parse_skill_creator_output(
+            "```json\n"
+            '{"skill_md":"---\\nname: demo\\ndescription: demo\\n---\\n\\n# Demo",'
+            '"scenarios_md":"# 场景","summary":"ok"}'
+            "\n```"
+        )
+
+        self.assertIn("# Demo", parsed["skill_md"])
+        self.assertEqual(parsed["scenarios_md"], "# 场景")
+        self.assertEqual(parsed["summary"], "ok")
 
 
 def _bytes_path(data: bytes):

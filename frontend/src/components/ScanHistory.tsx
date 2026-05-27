@@ -379,7 +379,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
               </>
             )}
             <NavButton
-              label="SKILL概览"
+              label="SKILL市场"
               description="查看各类 SKILL 的检测范围和使用说明"
               onClick={onCheckerCatalog}
             />

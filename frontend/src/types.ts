@@ -46,6 +46,27 @@ export interface CheckerCatalogItem {
   introduction_source: string;
 }
 
+export interface SkillDraft {
+  skill_md: string;
+  scenarios_md: string;
+  summary: string;
+}
+
+export interface SkillCreateJob {
+  job_id: string;
+  status: "pending" | "running" | "completed" | "error";
+  name: string;
+  description: string;
+  input: string;
+  agent_id: string;
+  agent_name: string;
+  user_id: string;
+  created_at: string;
+  updated_at: string;
+  error_message: string;
+  draft: SkillDraft | null;
+}
+
 export interface UploadResponse {
   project_id: string;
 }
