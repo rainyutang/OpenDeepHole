@@ -128,6 +128,48 @@ class SkillMarketTests(unittest.TestCase):
         self.assertIn("SKILL.md", by_path)
         self.assertIn("name: deephole-skill-creator", by_path["SKILL.md"])
 
+    def test_create_skill_uses_task_update_bridge_for_old_agent_runtime(self) -> None:
+        agent = AgentInfo(
+            agent_id="agent-1",
+            name="builder",
+            ip="127.0.0.1",
+            last_seen="2026-05-27T00:00:00+00:00",
+            user_id="user-1",
+            runtime_hash="old-runtime",
+        )
+        sender = AsyncMock(return_value=True)
+
+        with (
+            patch.dict(agent_api._registered_agents, {"agent-1": agent}, clear=True),
+            patch.dict(agent_api._agent_ws, {"agent-1": object()}, clear=True),
+            patch("backend.api.agent.create_agent_runtime_update_payload", return_value={"hash": "new-runtime"}),
+            patch("backend.api.agent.send_agent_command", new=sender),
+        ):
+            job = asyncio.run(
+                skills.create_skill(
+                    SimpleNamespace(base_url="http://server.example/"),
+                    SkillCreateRequest(
+                        agent_id="agent-1",
+                        name="Custom Audit",
+                        description="custom audit description",
+                        input="create a custom audit skill",
+                    ),
+                    current_user=User(user_id="user-1", username="alice", role="user"),
+                )
+            )
+
+        self.assertEqual(job.status, "running")
+        payload = sender.await_args.args[1]
+        self.assertEqual(payload["type"], "task")
+        self.assertTrue(payload["runtime_update_only"])
+        self.assertEqual(payload["agent_runtime_update"], {"hash": "new-runtime"})
+        self.assertEqual(payload["post_update_command"]["type"], "skill_create")
+        self.assertEqual(payload["post_update_command"]["request_id"], job.job_id)
+        self.assertEqual(
+            payload["post_update_command"]["deephole_skill_creator_package"]["name"],
+            "deephole-skill-creator",
+        )
+
     def test_create_skill_fails_when_system_skill_creator_is_missing(self) -> None:
         agent = AgentInfo(
             agent_id="agent-1",

@@ -60,6 +60,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
     if cmd_type == "task":
         from agent.updater import ensure_runtime_updated
         await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        if msg.get("runtime_update_only"):
+            post_update_command = msg.get("post_update_command")
+            if isinstance(post_update_command, dict):
+                return await _handle_command(post_update_command, config, task_manager, reporter)
+            return None
         await agent_server.handle_task(
             scan_id=msg["scan_id"],
             project_path=msg["project_path"],

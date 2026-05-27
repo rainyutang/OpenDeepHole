@@ -6,9 +6,10 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import agent.updater as updater
+import agent.main as agent_main
 import agent.server as agent_server
 from agent.config import AgentConfig
 from agent.updater import compute_runtime_hash
@@ -284,6 +285,37 @@ class AgentRuntimePackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(RuntimeError, "package hash mismatch"):
                 agent_server._write_skill_creator_package(package, Path(tmp))
+
+    def test_runtime_update_only_task_runs_post_update_skill_create(self) -> None:
+        update = AsyncMock(return_value=False)
+        handler = AsyncMock(return_value={"ok": True})
+
+        with (
+            patch("agent.updater.ensure_runtime_updated", new=update),
+            patch("agent.server.handle_skill_create", new=handler),
+        ):
+            result = asyncio.run(agent_main._handle_command(
+                {
+                    "type": "task",
+                    "runtime_update_only": True,
+                    "agent_runtime_update": {"hash": "new-runtime"},
+                    "post_update_command": {
+                        "type": "skill_create",
+                        "request_id": "job-1",
+                        "name": "Name",
+                        "description": "Description",
+                        "input": "Input",
+                        "deephole_skill_creator_package": {"name": "deephole-skill-creator"},
+                    },
+                },
+                None,
+                None,
+                None,
+            ))
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(update.await_count, 2)
+        handler.assert_awaited_once()
 
 
 def _bytes_path(data: bytes):

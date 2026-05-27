@@ -387,6 +387,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             port=0,
             last_seen=now,
             user_id=user_id,
+            runtime_hash=str(msg.get("runtime_hash") or ""),
         )
         _registered_agents[agent_id] = agent_info
         _agent_ws[agent_id] = websocket

@@ -110,6 +110,24 @@ def _skill_creator_package() -> dict:
     }
 
 
+def _skill_create_command(
+    job_id: str,
+    name: str,
+    description: str,
+    user_input: str,
+    skill_creator_package: dict,
+) -> dict:
+    return {
+        "type": "skill_create",
+        "request_id": job_id,
+        "name": name,
+        "description": description,
+        "input": user_input,
+        "deephole_skill_creator_package": skill_creator_package,
+        "skill_creator_package": skill_creator_package,
+    }
+
+
 @router.post("/api/skills/create", response_model=SkillCreateJob)
 async def create_skill(
     request: Request,
@@ -159,16 +177,19 @@ async def create_skill(
     )
     _jobs[job_id] = job
 
-    ok = await send_agent_command(body.agent_id, {
-        "type": "skill_create",
-        "request_id": job_id,
-        "name": name,
-        "description": description,
-        "input": user_input,
-        "deephole_skill_creator_package": skill_creator_package,
-        "skill_creator_package": skill_creator_package,
-        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
-    })
+    runtime_update = create_agent_runtime_update_payload(_server_url_from_request(request))
+    command = _skill_create_command(job_id, name, description, user_input, skill_creator_package)
+    if agent.runtime_hash and agent.runtime_hash != str(runtime_update.get("hash") or ""):
+        command = {
+            "type": "task",
+            "runtime_update_only": True,
+            "post_update_command": command,
+            "agent_runtime_update": runtime_update,
+        }
+    else:
+        command["agent_runtime_update"] = runtime_update
+
+    ok = await send_agent_command(body.agent_id, command)
     if not ok:
         _jobs.pop(job_id, None)
         raise HTTPException(status_code=502, detail="Agent not connected")

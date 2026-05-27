@@ -114,6 +114,50 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         self.assertEqual(ws.sent[0]["type"], "welcome")
         self.assertIn({"type": "heartbeat_ack"}, ws.sent)
 
+    def test_agent_websocket_stores_reported_runtime_hash(self) -> None:
+        class FakeClient:
+            host = "127.0.0.1"
+
+        class FakeWebSocket:
+            client = FakeClient()
+
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+                self.captured_runtime_hash = ""
+                self.messages = [
+                    {
+                        "type": "hello",
+                        "name": "agent-1",
+                        "runtime_hash": "old-runtime",
+                        "active_scans": [],
+                    },
+                ]
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive_json(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                agents = list(agent_api._registered_agents.values())
+                if agents:
+                    self.captured_runtime_hash = agents[0].runtime_hash
+                raise agent_api.WebSocketDisconnect()
+
+            async def send_json(self, payload: dict) -> None:
+                self.sent.append(payload)
+
+            async def close(self, code: int = 1000) -> None:
+                return None
+
+        ws = FakeWebSocket()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                asyncio.run(agent_api.agent_websocket(ws))
+
+        self.assertEqual(ws.captured_runtime_hash, "old-runtime")
+
     def test_websocket_agent_online_requires_fresh_last_seen(self) -> None:
         fresh = datetime.now(timezone.utc).isoformat()
         stale = (

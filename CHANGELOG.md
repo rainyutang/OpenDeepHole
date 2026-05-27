@@ -7,6 +7,7 @@
 - **新增** Agent 支持 `skill_create` 命令，在 Agent 侧调用 opencode 执行 `deephole-skill-creator` 技能生成 `SKILL.md` 与场景说明草稿并回传服务端
 - **优化** 新增 SKILL 页面基础信息区域更宽，描述字段改为多行输入，便于填写更完整的检查说明
 - **优化** `deephole-skill-creator` 改为服务端系统 SKILL，并在创建 SKILL 任务时随命令下发到 Agent；创建任务会像扫描任务一样先判断并同步 Agent runtime 更新
+- **修复** 旧 Agent 不认识 `skill_create` 命令时，创建 SKILL 会先通过扫描任务更新通道完成 Agent 自更新，再继续执行创建任务，避免提示 Unknown command type
 
 ## 2026-05-26
 

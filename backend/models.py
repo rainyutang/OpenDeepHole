@@ -308,6 +308,7 @@ class AgentInfo(BaseModel):
     port: int = 0
     last_seen: str
     user_id: str = ""
+    runtime_hash: str = ""
 
 
 class AgentLLMApiConfig(BaseModel):
