@@ -526,7 +526,15 @@ def _build_cli_env(workspace: Path, tool: str, base_env: dict[str, str] | None =
 
 def _select_cli_cwd(workspace: Path, tool: str, project_dir: Path | None = None) -> Path:
     if tool in {"nga", "opencode"} and project_dir:
-        return project_dir
+        runtime_dir = project_dir / ".opendeephole" / "opencode"
+        try:
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            return runtime_dir
+        except Exception as exc:
+            logger.warning(
+                "Failed to create %s runtime directory %s; using workspace %s: %s",
+                tool, runtime_dir, workspace, exc,
+            )
     return workspace
 
 

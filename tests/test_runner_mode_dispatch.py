@@ -78,9 +78,27 @@ def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(t
     (workspace / "opencode.json").write_text(json.dumps(config_payload), encoding="utf-8")
     env = _build_cli_env(workspace, "opencode", base_env={})
 
-    assert _select_cli_cwd(workspace, "opencode", project) == project
+    assert _build_cli_command("opencode", "opencode", workspace, "hello", "", project)[:4] == [
+        "opencode",
+        "run",
+        "--dir",
+        str(project),
+    ]
+    assert _select_cli_cwd(workspace, "opencode", project) == project / ".opendeephole" / "opencode"
+    assert (project / ".opendeephole" / "opencode").is_dir()
     assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == config_payload
     assert env["NODE_TLS_REJECT_UNAUTHORIZED"] == "0"
+
+
+def test_project_runtime_cwd_falls_back_to_workspace_when_unavailable(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project_file = tmp_path / "project"
+    workspace.mkdir()
+    project_file.write_text("not a directory", encoding="utf-8")
+
+    assert _select_cli_cwd(workspace, "opencode", project_file) == workspace
+    assert _select_cli_cwd(workspace, "nga", project_file) == workspace
+    assert _select_cli_cwd(workspace, "claude", project_file) == workspace
 
 
 class _FakeStdout:
