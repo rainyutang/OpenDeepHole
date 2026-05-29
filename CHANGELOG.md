@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-05-29
+
+- **优化** AI 去误报复核改为 generator-discriminator 双阶段：先按“默认安全”先验证真实代码缺陷和可利用链，再由对抗复核专门寻找不可利用理由；只有可利用链经反驳后仍成立才保留 high
+- **优化** AI 去误报 high 结果的 Markdown 漏洞报告固定包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence，章节缺失会自动降级为 medium
+- **新增** 扫描详情页结果表支持按 AI 去误报复核严重性筛选，可单独过滤 high、medium、low 或无复核结果
+
 ## 2026-05-28
 
 - **新增** 用户创建 SKILL 改为服务端模板化生成，不再调用 Agent/opencode 创建草稿；`SKILL.md` 与 `SCENARIOS.md` 可编辑内容由用户维护，MCP 使用、报告保存和写权限约束由后端固定拼接
