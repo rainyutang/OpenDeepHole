@@ -1,17 +1,13 @@
 import asyncio
 import base64
-import hashlib
-import io
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
-from backend.api import agent as agent_api
 from backend.api import skills
-from backend.models import AgentInfo, SkillCreateJob, SkillCreateRequest, SkillImportRequest, User
+from backend.models import SkillCreateJob, SkillCreateRequest, SkillImportFile, SkillImportRequest, User
 from backend.registry import refresh_registry
 
 
@@ -48,6 +44,13 @@ class SkillMarketTests(unittest.TestCase):
                         SkillImportRequest(
                             skill_md="# Custom Audit\n\n审计目标代码并调用 submit_result。",
                             scenarios_md="# 适用场景\n\n自定义审计。",
+                            timeout_seconds=2400,
+                            files=[
+                                SkillImportFile(
+                                    path="references/policy.md",
+                                    content_b64=base64.b64encode(b"policy").decode("ascii"),
+                                )
+                            ],
                         ),
                         current_user=User(user_id="user-1", username="alice", role="user"),
                     )
@@ -60,8 +63,13 @@ class SkillMarketTests(unittest.TestCase):
             self.assertTrue((checker_dir / "checker.yaml").is_file())
             self.assertTrue((checker_dir / "SKILL.md").is_file())
             self.assertTrue((checker_dir / "SCENARIOS.md").is_file())
+            self.assertEqual((checker_dir / "references" / "policy.md").read_text(encoding="utf-8"), "policy")
+            skill_text = (checker_dir / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("## 系统固定运行规则", skill_text)
             self.assertIn("custom_audit", registry)
             self.assertEqual(registry["custom_audit"].mode, "opencode")
+            self.assertEqual(registry["custom_audit"].result_mode, "markdown_reports")
+            self.assertEqual(registry["custom_audit"].timeout_seconds, 2400)
             self.assertIsNone(registry["custom_audit"].analyzer)
 
     def test_import_rejects_incomplete_job(self) -> None:
@@ -85,121 +93,60 @@ class SkillMarketTests(unittest.TestCase):
 
         self.assertEqual(getattr(ctx.exception, "status_code", None), 400)
 
-    def test_create_skill_dispatches_skill_creator_package(self) -> None:
-        agent = AgentInfo(
-            agent_id="agent-1",
-            name="builder",
-            ip="127.0.0.1",
-            last_seen="2026-05-27T00:00:00+00:00",
-            user_id="user-1",
-        )
-        sender = AsyncMock(return_value=True)
-
-        with (
-            patch.dict(agent_api._registered_agents, {"agent-1": agent}, clear=True),
-            patch.dict(agent_api._agent_ws, {"agent-1": object()}, clear=True),
-            patch("backend.api.agent.create_agent_runtime_update_payload", return_value={"hash": "runtime"}),
-            patch("backend.api.agent.send_agent_command", new=sender),
-        ):
-            job = asyncio.run(
-                skills.create_skill(
-                    SimpleNamespace(base_url="http://server.example/"),
-                    SkillCreateRequest(
-                        agent_id="agent-1",
-                        name="Custom Audit",
-                        description="custom audit description",
-                        input="create a custom audit skill",
-                    ),
-                    current_user=User(user_id="user-1", username="alice", role="user"),
-                )
+    def test_create_skill_returns_template_draft_without_agent(self) -> None:
+        job = asyncio.run(
+            skills.create_skill(
+                SimpleNamespace(base_url="http://server.example/"),
+                SkillCreateRequest(
+                    name="Custom Audit",
+                    description="custom audit description",
+                    input="create a custom audit skill",
+                    timeout_seconds=1200,
+                ),
+                current_user=User(user_id="user-1", username="alice", role="user"),
             )
-
-        self.assertEqual(job.status, "running")
-        payload = sender.await_args.args[1]
-        self.assertEqual(payload["type"], "skill_create")
-        self.assertEqual(payload["agent_runtime_update"], {"hash": "runtime"})
-        package = payload["deephole_skill_creator_package"]
-        self.assertIs(payload["skill_creator_package"], package)
-        self.assertEqual(package["name"], "deephole-skill-creator")
-        archive = base64.b64decode(package["archive_b64"].encode("ascii"), validate=True)
-        self.assertEqual(hashlib.sha256(archive).hexdigest(), package["sha256"])
-        with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-            by_path = {name: zf.read(name).decode("utf-8") for name in zf.namelist()}
-        self.assertIn("SKILL.md", by_path)
-        self.assertIn("name: deephole-skill-creator", by_path["SKILL.md"])
-
-    def test_create_skill_uses_task_update_bridge_for_old_agent_runtime(self) -> None:
-        agent = AgentInfo(
-            agent_id="agent-1",
-            name="builder",
-            ip="127.0.0.1",
-            last_seen="2026-05-27T00:00:00+00:00",
-            user_id="user-1",
-            runtime_hash="old-runtime",
-        )
-        sender = AsyncMock(return_value=True)
-
-        with (
-            patch.dict(agent_api._registered_agents, {"agent-1": agent}, clear=True),
-            patch.dict(agent_api._agent_ws, {"agent-1": object()}, clear=True),
-            patch("backend.api.agent.create_agent_runtime_update_payload", return_value={"hash": "new-runtime"}),
-            patch("backend.api.agent.send_agent_command", new=sender),
-        ):
-            job = asyncio.run(
-                skills.create_skill(
-                    SimpleNamespace(base_url="http://server.example/"),
-                    SkillCreateRequest(
-                        agent_id="agent-1",
-                        name="Custom Audit",
-                        description="custom audit description",
-                        input="create a custom audit skill",
-                    ),
-                    current_user=User(user_id="user-1", username="alice", role="user"),
-                )
-            )
-
-        self.assertEqual(job.status, "running")
-        payload = sender.await_args.args[1]
-        self.assertEqual(payload["type"], "task")
-        self.assertTrue(payload["runtime_update_only"])
-        self.assertEqual(payload["agent_runtime_update"], {"hash": "new-runtime"})
-        self.assertEqual(payload["post_update_command"]["type"], "skill_create")
-        self.assertEqual(payload["post_update_command"]["request_id"], job.job_id)
-        self.assertEqual(
-            payload["post_update_command"]["deephole_skill_creator_package"]["name"],
-            "deephole-skill-creator",
         )
 
-    def test_create_skill_fails_when_system_skill_creator_is_missing(self) -> None:
-        agent = AgentInfo(
-            agent_id="agent-1",
-            name="builder",
-            ip="127.0.0.1",
-            last_seen="2026-05-27T00:00:00+00:00",
-            user_id="user-1",
-        )
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.agent_id, "")
+        self.assertIsNotNone(job.draft)
+        self.assertIn("## 审计目标", job.draft.skill_md)
+        self.assertIn("## 适用场景", job.draft.scenarios_md)
 
+    def test_import_rejects_unsafe_resource_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            user_skills_dir = Path(tmp) / "user_skills"
+            cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(user_skills_dir)))
+            skills._jobs["job-3"] = SkillCreateJob(
+                job_id="job-3",
+                status="completed",
+                name="Unsafe Skill",
+                description="description",
+                user_id="user-1",
+            )
             with (
-                patch.dict(agent_api._registered_agents, {"agent-1": agent}, clear=True),
-                patch.dict(agent_api._agent_ws, {"agent-1": object()}, clear=True),
-                patch("backend.api.skills._SYSTEM_SKILLS_DIR", Path(tmp)),
+                patch("backend.api.skills.get_config", return_value=cfg),
+                patch("backend.config.get_config", return_value=cfg),
+                patch("backend.registry.CHECKERS_DIR", Path(tmp) / "builtins"),
             ):
                 with self.assertRaises(Exception) as ctx:
                     asyncio.run(
-                        skills.create_skill(
-                            SimpleNamespace(base_url="http://server.example/"),
-                            SkillCreateRequest(
-                                agent_id="agent-1",
-                                name="Custom Audit",
-                                description="custom audit description",
-                                input="create a custom audit skill",
+                        skills.import_skill(
+                            "job-3",
+                            SkillImportRequest(
+                                skill_md="# Draft",
+                                files=[
+                                    SkillImportFile(
+                                        path="../SKILL.md",
+                                        content_b64=base64.b64encode(b"bad").decode("ascii"),
+                                    )
+                                ],
                             ),
                             current_user=User(user_id="user-1", username="alice", role="user"),
                         )
                     )
 
-        self.assertEqual(getattr(ctx.exception, "status_code", None), 500)
+            self.assertEqual(getattr(ctx.exception, "status_code", None), 400)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,8 @@ async def list_checkers(current_user: User = Depends(get_current_user)) -> list[
             category_label=e.category_label,
             modified_at=e.modified_at,
             user_created=e.user_created,
+            result_mode=e.result_mode,
+            timeout_seconds=e.timeout_seconds,
         )
         for e in registry.values()
         if _is_visible_to_user(e.visibility, current_user)
@@ -121,6 +123,8 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
                     introduction=introduction,
                     introduction_source=source,
                     user_created=is_user_dir,
+                    result_mode=_normalize_result_mode(meta.get("result_mode")),
+                    timeout_seconds=_normalize_timeout_seconds(meta.get("timeout_seconds")),
                 )
             )
 
@@ -145,6 +149,23 @@ def _normalize_visibility(value: object) -> str:
     if visibility not in {CHECKER_VISIBILITY_PUBLIC, CHECKER_VISIBILITY_ADMIN}:
         return CHECKER_VISIBILITY_PUBLIC
     return visibility
+
+
+def _normalize_result_mode(value: object) -> str:
+    result_mode = str(value or "vulnerabilities").strip().lower()
+    if result_mode not in {"vulnerabilities", "markdown_reports"}:
+        return "vulnerabilities"
+    return result_mode
+
+
+def _normalize_timeout_seconds(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        return None
+    return timeout if timeout > 0 else None
 
 
 def _is_visible_to_user(visibility: str, user: User) -> bool:

@@ -2,6 +2,10 @@
 
 ## 2026-05-28
 
+- **新增** 用户创建 SKILL 改为服务端模板化生成，不再调用 Agent/opencode 创建草稿；`SKILL.md` 与 `SCENARIOS.md` 可编辑内容由用户维护，MCP 使用、报告保存和写权限约束由后端固定拼接
+- **新增** 用户创建 SKILL 支持 `references/`、`scripts/`、`assets/` 资源上传，并支持创建时配置独立运行超时，扫描时不再复用全局 opencode 超时
+- **新增** 用户创建 SKILL 支持 Markdown 报告型输出：运行时只开放临时报告目录写权限，Agent 完成后读取 `.md` 报告并同步到服务端，扫描详情页提供独立 SKILL 报告入口和进度提示
+- **优化** 新建扫描页将系统内置 checker 与用户新建 SKILL 分成两列展示，便于区分结构化漏洞扫描和报告型用户扫描
 - **新增** 外部逆向平台集成扫描接口和 `tools/external_platform_scan.py` 脚本，支持硬编码集成 token 创建扫描、按 Agent 名称下发脚本内置 LLM/opencode 配置、自动运行当前启用且公开的 checker，并返回无需登录的扫描结果链接和进度 API
 - **新增** 扫描详情页支持带 `scan_access_token` 的公开访问入口，访问者可像普通用户进入扫描详情一样查看进度、停止扫描、下载报告、确认问题、维护反馈和触发 AI 去误报
 - **修复** `opencode`/`nga` 扫描时工具自身生成的 `opencode_result-*.log` 落到目标项目根目录的问题，改为将 CLI 运行目录收敛到项目内 `.opendeephole/opencode/`，同时保留 `--dir` 指向真实项目根目录

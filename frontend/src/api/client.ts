@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, TokenResponse, User } from "../types";
+import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -120,10 +120,11 @@ export async function getCheckerCatalog(): Promise<CheckerCatalogItem[]> {
 }
 
 export async function createSkill(body: {
-  agent_id: string;
+  agent_id?: string;
   name: string;
   description: string;
   input: string;
+  timeout_seconds: number;
 }): Promise<SkillCreateJob> {
   const { data } = await api.post<SkillCreateJob>("/api/skills/create", body);
   return data;
@@ -137,12 +138,33 @@ export async function getSkillCreateJob(jobId: string): Promise<SkillCreateJob> 
 export async function importSkill(jobId: string, body: {
   skill_md: string;
   scenarios_md?: string;
+  timeout_seconds: number;
+  files?: SkillImportFile[];
 }): Promise<{ ok: boolean; name: string }> {
   const { data } = await api.post<{ ok: boolean; name: string }>(
     `/api/skills/create/${jobId}/import`,
     body,
   );
   return data;
+}
+
+export async function getSkillReports(
+  scanId: string,
+  checkerName?: string,
+): Promise<SkillReport[]> {
+  const params = checkerName ? { checker_name: checkerName } : undefined;
+  if (isPublicScan(scanId)) {
+    const { data } = await api.get<{ reports: SkillReport[] }>(
+      publicScanPath("/skill-reports"),
+      { params: { ...publicParams(), ...(params ?? {}) } },
+    );
+    return data.reports;
+  }
+  const { data } = await api.get<{ reports: SkillReport[] }>(
+    `/api/scan/${scanId}/skill-reports`,
+    { params },
+  );
+  return data.reports;
 }
 
 export async function getAgents(): Promise<AgentInfo[]> {

@@ -309,6 +309,15 @@ async def get_public_scan_skill(
     return await scan_api.get_scan_skill(scan_id, vuln_type, current_user)
 
 
+@router.get("/api/public/scans/{scan_id}/skill-reports")
+async def get_public_scan_skill_reports(
+    scan_id: str,
+    checker_name: str | None = None,
+    current_user: User = Depends(_public_user_dependency),
+) -> dict:
+    return await scan_api.get_scan_skill_reports(scan_id, checker_name, current_user)
+
+
 @router.get("/api/public/scans/{scan_id}/fp-review/skill")
 async def get_public_fp_review_skill(
     scan_id: str,

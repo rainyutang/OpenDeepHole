@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { createSkill, getAgents, getCheckerCatalog, getSkillCreateJob, importSkill } from "../api/client";
-import type { AgentInfo, CheckerCatalogItem, SkillCreateJob } from "../types";
+import { createSkill, getCheckerCatalog, importSkill } from "../api/client";
+import type { CheckerCatalogItem, SkillCreateJob, SkillImportFile } from "../types";
 
 interface Props {
   onBack: () => void;
@@ -159,58 +159,20 @@ function SkillCreatePage({
   onBack: () => void;
   onImported: (name: string) => Promise<void>;
 }) {
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [agentId, setAgentId] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [input, setInput] = useState("");
+  const [timeoutSeconds, setTimeoutSeconds] = useState(1200);
   const [job, setJob] = useState<SkillCreateJob | null>(null);
   const [skillMd, setSkillMd] = useState("");
   const [scenariosMd, setScenariosMd] = useState("");
-  const [loadingAgents, setLoadingAgents] = useState(true);
+  const [uploadDir, setUploadDir] = useState<"references" | "scripts" | "assets">("references");
+  const [files, setFiles] = useState<SkillImportFile[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState("");
 
-  const dirty = !!(name || description || input || skillMd || scenariosMd || job);
-  const creating = job?.status === "pending" || job?.status === "running";
-
-  useEffect(() => {
-    let alive = true;
-    getAgents()
-      .then((list) => {
-        if (!alive) return;
-        setAgents(list);
-        const online = list.find((agent) => agent.online);
-        if (online) setAgentId(online.agent_id);
-      })
-      .catch(() => {
-        if (alive) setError("加载 Agent 列表失败");
-      })
-      .finally(() => {
-        if (alive) setLoadingAgents(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!job || (job.status !== "pending" && job.status !== "running")) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await getSkillCreateJob(job.job_id);
-        setJob(next);
-        if (next.draft) {
-          setSkillMd((current) => current || next.draft?.skill_md || "");
-          setScenariosMd((current) => current || next.draft?.scenarios_md || "");
-        }
-      } catch (err: any) {
-        setError(err.response?.data?.detail || "刷新创建进度失败");
-      }
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [job?.job_id, job?.status]);
+  const dirty = !!(name || description || input || skillMd || scenariosMd || job || files.length);
 
   const handleBack = () => {
     if (dirty && !window.confirm("输入将被清空，是否确认返回？")) return;
@@ -221,19 +183,17 @@ function SkillCreatePage({
     setName("");
     setDescription("");
     setInput("");
+    setTimeoutSeconds(1200);
     setJob(null);
     setSkillMd("");
     setScenariosMd("");
+    setFiles([]);
     setError("");
   };
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setError("");
-    if (!agentId) {
-      setError("请选择 Agent");
-      return;
-    }
     if (!name.trim() || !description.trim() || !input.trim()) {
       setError("名称、描述和输入不能为空");
       return;
@@ -242,10 +202,10 @@ function SkillCreatePage({
     setSubmitting(true);
     try {
       const next = await createSkill({
-        agent_id: agentId,
         name: name.trim(),
         description: description.trim(),
         input: input.trim(),
+        timeout_seconds: timeoutSeconds,
       });
       setJob(next);
       if (next.draft) {
@@ -259,6 +219,16 @@ function SkillCreatePage({
     }
   };
 
+  const handleFiles = async (selected: FileList | null) => {
+    if (!selected || selected.length === 0) return;
+    const nextFiles: SkillImportFile[] = [];
+    for (const file of Array.from(selected)) {
+      const content_b64 = await fileToBase64(file);
+      nextFiles.push({ path: `${uploadDir}/${file.name}`, content_b64 });
+    }
+    setFiles((current) => [...current, ...nextFiles]);
+  };
+
   const handleImport = async () => {
     if (!job) return;
     setImporting(true);
@@ -267,6 +237,8 @@ function SkillCreatePage({
       const result = await importSkill(job.job_id, {
         skill_md: skillMd,
         scenarios_md: scenariosMd,
+        timeout_seconds: timeoutSeconds,
+        files,
       });
       await onImported(result.name);
     } catch (err: any) {
@@ -290,7 +262,7 @@ function SkillCreatePage({
             <div>
               <h1 className="text-lg font-bold text-white">新增SKILL</h1>
               <p className="text-sm text-slate-400 mt-0.5">
-                选择 Agent 在线生成纯 SKILL 项目级检查项
+                直接生成可编辑模板，系统固定运行规则会在导入时强制拼接
               </p>
             </div>
           </div>
@@ -306,7 +278,6 @@ function SkillCreatePage({
               <input
                 value={name}
                 onChange={(event) => setName(event.target.value)}
-                disabled={creating}
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
                 placeholder="例如：认证绕过配置审计"
               />
@@ -315,7 +286,6 @@ function SkillCreatePage({
               <textarea
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
-                disabled={creating}
                 rows={3}
                 className="w-full resize-y bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm leading-6 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
                 placeholder="说明这个 SKILL 要检查什么、适用对象和主要价值"
@@ -325,41 +295,56 @@ function SkillCreatePage({
               <textarea
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                disabled={creating}
                 rows={8}
                 className="w-full resize-y bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm leading-6 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
                 placeholder="写清楚适用场景、判断标准、误报排除条件、期望输出等"
               />
+
+              <label className="block text-sm font-medium text-slate-300 mt-4 mb-2">单次运行超时（秒）</label>
+              <input
+                type="number"
+                min={60}
+                max={86400}
+                value={timeoutSeconds}
+                onChange={(event) => setTimeoutSeconds(Number(event.target.value))}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+              />
             </Panel>
 
-            <Panel title="Agent">
-              {loadingAgents ? (
-                <div className="text-sm text-slate-500">加载中...</div>
-              ) : agents.length === 0 ? (
-                <div className="text-sm text-slate-500">暂无 Agent 连接</div>
-              ) : (
-                <div className="space-y-2">
-                  {agents.map((agent) => (
-                    <label
-                      key={agent.agent_id}
-                      className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                        agentId === agent.agent_id
-                          ? "border-blue-500 bg-blue-500/10"
-                          : "border-slate-700 hover:border-slate-600"
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="skill-agent"
-                        className="sr-only"
-                        checked={agentId === agent.agent_id}
-                        disabled={creating}
-                        onChange={() => setAgentId(agent.agent_id)}
-                      />
-                      <span className={`w-2 h-2 rounded-full ${agent.online ? "bg-green-400" : "bg-slate-500"}`} />
-                      <span className="min-w-0 flex-1 text-sm text-white truncate">{agent.name}</span>
-                      <span className="text-xs text-slate-500">{agent.online ? "在线" : "离线"}</span>
-                    </label>
+            <Panel title="上传资料">
+              <div className="flex flex-wrap items-center gap-3">
+                <select
+                  value={uploadDir}
+                  onChange={(event) => setUploadDir(event.target.value as "references" | "scripts" | "assets")}
+                  className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                >
+                  <option value="references">references/</option>
+                  <option value="scripts">scripts/</option>
+                  <option value="assets">assets/</option>
+                </select>
+                <input
+                  type="file"
+                  multiple
+                  onChange={(event) => {
+                    handleFiles(event.target.files);
+                    event.currentTarget.value = "";
+                  }}
+                  className="block text-sm text-slate-400 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-800 file:px-3 file:py-2 file:text-sm file:font-medium file:text-slate-200 hover:file:bg-slate-700"
+                />
+              </div>
+              {files.length > 0 && (
+                <div className="mt-3 space-y-1">
+                  {files.map((file, index) => (
+                    <div key={`${file.path}-${index}`} className="flex items-center justify-between gap-3 rounded border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-400">
+                      <span className="min-w-0 truncate font-mono">{file.path}</span>
+                      <button
+                        type="button"
+                        onClick={() => setFiles((current) => current.filter((_, i) => i !== index))}
+                        className="shrink-0 text-slate-500 hover:text-red-300"
+                      >
+                        移除
+                      </button>
+                    </div>
                   ))}
                 </div>
               )}
@@ -374,15 +359,14 @@ function SkillCreatePage({
             <div className="flex gap-3">
               <button
                 type="submit"
-                disabled={submitting || creating}
+                disabled={submitting}
                 className="flex-1 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
               >
-                {submitting || creating ? "进行中..." : "确定"}
+                {submitting ? "生成中..." : "生成草稿"}
               </button>
               <button
                 type="button"
                 onClick={handleReset}
-                disabled={creating}
                 className="px-6 py-2.5 text-sm font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded-lg border border-slate-700 transition-colors"
               >
                 重置
@@ -391,17 +375,18 @@ function SkillCreatePage({
           </form>
 
           <div className="min-w-0 space-y-4">
-            <Panel title="创建进度">
+            <Panel title="系统固定规则">
+              <FixedSkillRules />
+            </Panel>
+
+            <Panel title="创建状态">
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <div className="text-sm font-medium text-white">{statusText(job?.status || "idle")}</div>
                   <div className="text-xs text-slate-500 mt-1">
-                    {job?.error_message || job?.draft?.summary || "提交后会显示 Agent 创建进度"}
+                    {job?.error_message || job?.draft?.summary || "生成草稿后可继续编辑再导入市场"}
                   </div>
                 </div>
-                {creating && (
-                  <div className="w-5 h-5 border-2 border-slate-600 border-t-blue-400 rounded-full animate-spin" />
-                )}
               </div>
             </Panel>
 
@@ -449,6 +434,31 @@ function Panel({ title, children }: { title: string; children: ReactNode }) {
       {children}
     </section>
   );
+}
+
+function FixedSkillRules() {
+  return (
+    <div className="space-y-3 text-sm leading-6 text-slate-300">
+      <p>MCP 工具使用、Markdown 报告保存方式、写权限约束会由后端固定拼接到最终 SKILL.md。</p>
+      <ul className="list-disc space-y-1 pl-5 text-xs text-slate-400">
+        <li>可调用 view_function_code、view_struct_code、view_global_variable_definition。</li>
+        <li>运行提示词会提供 REPORT_DIR，报告只能写入该目录。</li>
+        <li>项目代码和上传资料保持只读，仅临时报告目录可写。</li>
+      </ul>
+    </div>
+  );
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.includes(",") ? result.split(",", 2)[1] : result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 function StatusPill({ status }: { status: string }) {

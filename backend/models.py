@@ -100,6 +100,8 @@ class CheckerInfo(BaseModel):
     category_label: str = "非法内存使用"
     modified_at: str = ""
     user_created: bool = False
+    result_mode: str = "vulnerabilities"
+    timeout_seconds: int | None = None
 
 
 class CheckerCatalogItem(BaseModel):
@@ -115,6 +117,8 @@ class CheckerCatalogItem(BaseModel):
     introduction: str = ""
     introduction_source: str = ""
     user_created: bool = False
+    result_mode: str = "vulnerabilities"
+    timeout_seconds: int | None = None
 
 
 class SkillDraft(BaseModel):
@@ -124,10 +128,11 @@ class SkillDraft(BaseModel):
 
 
 class SkillCreateRequest(BaseModel):
-    agent_id: str
+    agent_id: str = ""
     name: str
     description: str
     input: str
+    timeout_seconds: int = 1200
 
 
 class SkillCreateJob(BaseModel):
@@ -145,9 +150,16 @@ class SkillCreateJob(BaseModel):
     draft: SkillDraft | None = None
 
 
+class SkillImportFile(BaseModel):
+    path: str
+    content_b64: str
+
+
 class SkillImportRequest(BaseModel):
     skill_md: str
     scenarios_md: str = ""
+    timeout_seconds: int = 1200
+    files: list[SkillImportFile] = []
 
 
 class SkillImportResponse(BaseModel):
@@ -258,6 +270,16 @@ class FeedbackUpdateRequest(BaseModel):
     ticket_id: str | None = None
 
 
+class SkillReport(BaseModel):
+    id: int | None = None
+    scan_id: str = ""
+    checker_name: str
+    filename: str
+    title: str = ""
+    content: str
+    created_at: str = ""
+
+
 class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
@@ -269,6 +291,7 @@ class ScanStatus(BaseModel):
     total_candidates: int
     processed_candidates: int
     vulnerabilities: list[Vulnerability]
+    skill_reports: list[SkillReport] = []
     events: list[ScanEvent] = []
     current_candidate: Candidate | None = None
     error_message: str | None = None

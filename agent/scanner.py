@@ -712,17 +712,55 @@ async def run_scan(
             project_vulns: list[Vulnerability] | None = None
             try:
                 _configure_backend(config, scan_dir)
+                checker_entry = registry.get(candidate.vuln_type)
+                candidate_timeout = (
+                    checker_entry.timeout_seconds
+                    if checker_entry is not None and checker_entry.timeout_seconds
+                    else config.opencode.timeout
+                )
                 if is_project_level_candidate(candidate):
-                    from backend.opencode.runner import run_project_audit
-                    project_vulns = await run_project_audit(
-                        workspace,
-                        candidate,
-                        scan_id,
-                        on_output=lambda line: print(f"  {line}", flush=True),
-                        cancel_event=cancel_event,
-                        timeout=config.opencode.timeout,
-                        project_dir=project_path,
-                    )
+                    if checker_entry is not None and checker_entry.result_mode == "markdown_reports":
+                        from backend.opencode.runner import run_project_report_audit
+                        report_dir = scan_dir / "skill_report_workspace" / candidate.vuln_type / "reports"
+                        reports = await run_project_report_audit(
+                            workspace,
+                            candidate,
+                            scan_id,
+                            report_dir,
+                            on_output=lambda line: print(f"  {line}", flush=True),
+                            cancel_event=cancel_event,
+                            timeout=candidate_timeout,
+                            project_dir=project_path,
+                        )
+                        if cancel_event.is_set():
+                            await emit(
+                                "auditing",
+                                f"Scan stopped during report-mode SKILL {global_index + 1}",
+                                candidate_index=global_index,
+                            )
+                            cancelled = True
+                            break
+                        await reporter.replace_skill_reports(scan_id, candidate.vuln_type, reports)
+                        await emit(
+                            "auditing",
+                            f"[{global_index + 1}] Markdown reports synced: {len(reports)}",
+                            candidate_index=global_index,
+                        )
+                        await reporter.report_processed_key(
+                            scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+                        )
+                        continue
+                    else:
+                        from backend.opencode.runner import run_project_audit
+                        project_vulns = await run_project_audit(
+                            workspace,
+                            candidate,
+                            scan_id,
+                            on_output=lambda line: print(f"  {line}", flush=True),
+                            cancel_event=cancel_event,
+                            timeout=candidate_timeout,
+                            project_dir=project_path,
+                        )
                 else:
                     from backend.opencode.runner import run_audit
                     vuln = await run_audit(
@@ -731,7 +769,7 @@ async def run_scan(
                         scan_id,
                         on_output=lambda line: print(f"  {line}", flush=True),
                         cancel_event=cancel_event,
-                        timeout=config.opencode.timeout,
+                        timeout=candidate_timeout,
                         project_dir=project_path,
                     )
             except Exception as exc:

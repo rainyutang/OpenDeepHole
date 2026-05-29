@@ -56,6 +56,8 @@ class CheckerEntry:
     category_label: str = CHECKER_CATEGORY_LABELS[CHECKER_CATEGORY_DEFAULT]
     modified_at: str = ""
     user_created: bool = False
+    result_mode: str = "vulnerabilities"  # "vulnerabilities" | "markdown_reports"
+    timeout_seconds: int | None = None
 
 
 _registry: dict[str, CheckerEntry] | None = None
@@ -202,6 +204,8 @@ def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = Fa
         category_label=checker_category_label(category),
         modified_at=str(meta.get("modified_at") or "").strip(),
         user_created=user_created,
+        result_mode=_normalize_result_mode(meta.get("result_mode")),
+        timeout_seconds=_normalize_timeout_seconds(meta.get("timeout_seconds")),
     )
 
 
@@ -211,6 +215,28 @@ def _normalize_visibility(value: object) -> str:
         logger.warning("Unknown checker visibility %r, falling back to public", value)
         return CHECKER_VISIBILITY_PUBLIC
     return visibility
+
+
+def _normalize_result_mode(value: object) -> str:
+    result_mode = str(value or "vulnerabilities").strip().lower()
+    if result_mode not in {"vulnerabilities", "markdown_reports"}:
+        logger.warning("Unknown checker result_mode %r, falling back to vulnerabilities", value)
+        return "vulnerabilities"
+    return result_mode
+
+
+def _normalize_timeout_seconds(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid checker timeout_seconds %r, ignoring", value)
+        return None
+    if timeout <= 0:
+        logger.warning("Invalid checker timeout_seconds %r, ignoring", value)
+        return None
+    return timeout
 
 
 def normalize_checker_category(value: object) -> str:

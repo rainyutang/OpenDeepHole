@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import re
 import base64
-import hashlib
-import io
+import binascii
+import re
 import uuid
-import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,10 +27,11 @@ from backend.registry import CHECKER_CATEGORY_OTHER, CHECKER_VISIBILITY_PUBLIC, 
 router = APIRouter()
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_SYSTEM_SKILLS_DIR = _PROJECT_ROOT / "backend" / "system_skills"
-_SKILL_CREATOR_NAME = "deephole-skill-creator"
 _jobs: dict[str, SkillCreateJob] = {}
 _JOB_STATUSES = {"pending", "running", "completed", "error"}
+_ALLOWED_RESOURCE_DIRS = {"references", "scripts", "assets"}
+_MIN_TIMEOUT_SECONDS = 60
+_MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 
 
 def _now() -> str:
@@ -70,8 +69,40 @@ def _strip_frontmatter(content: str) -> str:
     return parts[2].lstrip()
 
 
+def _fixed_skill_rules() -> str:
+    return """## 系统固定运行规则
+
+以下规则由 OpenDeepHole 固定注入，用户不能修改。
+
+### 可用 MCP 工具
+
+- `view_function_code(project_id, function_name, file_path="")`: 查看指定函数源码。
+- `view_struct_code(project_id, struct_name)`: 查看结构体、类或联合体定义。
+- `view_global_variable_definition(project_id, global_variable_name)`: 查看全局变量定义。
+
+### Markdown 报告保存规则
+
+- 本 SKILL 只输出 Markdown 报告，不调用 `submit_result`，不生成结构化漏洞结果。
+- 运行提示词会提供 `REPORT_DIR`，所有报告必须写入该目录。
+- 每个报告必须是独立 `.md` 文件，文件名只能表达报告主题，不要包含路径穿越字符。
+- 可以生成多个报告；未发现问题时也应生成一个 Markdown 报告说明检查范围和结论。
+
+### 写权限约束
+
+- 代码仓、上传资料和其它目录均为只读。
+- 只有 `REPORT_DIR` 具备写权限。
+- 不得修改项目源码、配置文件、上传资料或 OpenDeepHole 运行文件。
+"""
+
+
 def _skill_md_with_frontmatter(skill_id: str, description: str, content: str) -> str:
     body = _strip_frontmatter(content)
+    fixed = _fixed_skill_rules()
+    marker = "## 系统固定运行规则"
+    marker_index = body.find(marker)
+    if marker_index >= 0:
+        body = body[:marker_index].rstrip()
+    body = body.rstrip() + "\n\n" + fixed
     frontmatter = yaml.safe_dump(
         {"name": skill_id, "description": description},
         allow_unicode=True,
@@ -85,47 +116,102 @@ def _find_existing_checker(skill_id: str) -> bool:
     return skill_id in registry or (_user_skills_dir() / skill_id).exists()
 
 
-def _skill_creator_package() -> dict:
-    skill_dir = _SYSTEM_SKILLS_DIR / _SKILL_CREATOR_NAME
-    skill_file = skill_dir / "SKILL.md"
-    if not skill_file.is_file():
-        raise HTTPException(status_code=500, detail="系统 deephole-skill-creator SKILL 缺失")
-
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for file_path in sorted(skill_dir.rglob("*")):
-            if not file_path.is_file():
-                continue
-            rel_path = file_path.relative_to(skill_dir)
-            if rel_path.is_absolute() or ".." in rel_path.parts:
-                raise HTTPException(status_code=500, detail="系统 deephole-skill-creator SKILL 路径非法")
-            zf.write(file_path, rel_path.as_posix())
-
-    data = archive.getvalue()
-
-    return {
-        "name": _SKILL_CREATOR_NAME,
-        "sha256": hashlib.sha256(data).hexdigest(),
-        "archive_b64": base64.b64encode(data).decode("ascii"),
-    }
+def _normalize_timeout(value: int) -> int:
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="运行超时必须为整数秒")
+    if timeout < _MIN_TIMEOUT_SECONDS or timeout > _MAX_TIMEOUT_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"运行超时必须在 {_MIN_TIMEOUT_SECONDS} 到 {_MAX_TIMEOUT_SECONDS} 秒之间",
+        )
+    return timeout
 
 
-def _skill_create_command(
-    job_id: str,
-    name: str,
-    description: str,
-    user_input: str,
-    skill_creator_package: dict,
-) -> dict:
-    return {
-        "type": "skill_create",
-        "request_id": job_id,
-        "name": name,
-        "description": description,
-        "input": user_input,
-        "deephole_skill_creator_package": skill_creator_package,
-        "skill_creator_package": skill_creator_package,
-    }
+def _skill_draft(name: str, description: str, user_input: str) -> SkillDraft:
+    skill_md = f"""# {name}
+
+## 审计目标
+
+{user_input or description}
+
+## 确认标准
+
+- 能指出具体文件、函数和关键代码位置。
+- 能说明问题触发路径、缺失保护和安全影响。
+- 结论需要基于实际代码证据，不要只依据命名或猜测。
+
+## 误报排除条件
+
+- 已有权限、边界、状态或错误处理保护覆盖该路径。
+- 代码位于测试、mock、stub 或不可达路径中。
+- 只有风格、可维护性或理论风险，缺少可触发安全影响。
+
+## 重点代码范围
+
+- 入口函数、协议解析、认证授权、资源生命周期、内存读写和错误处理路径。
+- 优先阅读与审计目标直接相关的文件和函数。
+
+## 报告输出要求
+
+- 报告使用 Markdown。
+- 每个报告包含：标题、结论、影响、证据、触发条件、误报排除说明、修复建议。
+- 多个独立问题可以输出多个 Markdown 文件。
+"""
+    scenarios_md = f"""# {name}
+
+## 适用场景
+
+- {description}
+- 需要对项目代码做专项人工智能辅助审计时使用。
+
+## 不适用场景
+
+- 需要结构化漏洞列表、逐候选点复核或自动误报复核的场景。
+
+## 使用建议
+
+- 扫描前确认代码扫描路径覆盖目标模块。
+- 可在 `references/` 中上传审计规范，在 `scripts/` 中上传只读辅助脚本说明或示例。
+"""
+    return SkillDraft(
+        skill_md=skill_md.strip() + "\n",
+        scenarios_md=scenarios_md.strip() + "\n",
+        summary="已基于固定模板生成可编辑草稿",
+    )
+
+
+def _safe_resource_path(value: str) -> Path:
+    normalized = value.replace("\\", "/").strip().lstrip("/")
+    rel = Path(normalized)
+    if (
+        not normalized
+        or rel.is_absolute()
+        or ".." in rel.parts
+        or len(rel.parts) < 2
+        or rel.parts[0] not in _ALLOWED_RESOURCE_DIRS
+    ):
+        raise HTTPException(status_code=400, detail=f"上传文件路径非法: {value}")
+    if rel.name in {"checker.yaml", "SKILL.md", "SCENARIOS.md"}:
+        raise HTTPException(status_code=400, detail=f"不允许覆盖系统文件: {value}")
+    return rel
+
+
+def _write_resource_files(checker_dir: Path, files: list) -> None:
+    for item in files:
+        rel = _safe_resource_path(item.path)
+        try:
+            data = base64.b64decode(item.content_b64.encode("ascii"), validate=True)
+        except (binascii.Error, UnicodeEncodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"上传文件不是合法 base64: {item.path}") from exc
+        dest = (checker_dir / rel).resolve()
+        try:
+            dest.relative_to(checker_dir.resolve())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"上传文件路径非法: {item.path}") from exc
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
 
 
 @router.post("/api/skills/create", response_model=SkillCreateJob)
@@ -134,14 +220,7 @@ async def create_skill(
     body: SkillCreateRequest,
     current_user: User = Depends(get_current_user),
 ) -> SkillCreateJob:
-    """Start an Agent-backed SKILL creation job."""
-    from backend.api.agent import (
-        _registered_agents,
-        _agent_ws,
-        create_agent_runtime_update_payload,
-        send_agent_command,
-    )
-
+    """Create a template-based SKILL draft synchronously."""
     name = body.name.strip()
     description = body.description.strip()
     user_input = body.input.strip()
@@ -151,55 +230,25 @@ async def create_skill(
         raise HTTPException(status_code=400, detail="描述不能为空")
     if not user_input:
         raise HTTPException(status_code=400, detail="输入不能为空")
-
-    agent = _registered_agents.get(body.agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if current_user.role != "admin" and agent.user_id != current_user.user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    if body.agent_id not in _agent_ws:
-        raise HTTPException(status_code=400, detail="Agent is offline")
-    skill_creator_package = _skill_creator_package()
+    _normalize_timeout(body.timeout_seconds)
 
     now = _now()
     job_id = uuid.uuid4().hex
     job = SkillCreateJob(
         job_id=job_id,
-        status="pending",
+        status="completed",
         name=name,
         description=description,
         input=user_input,
-        agent_id=body.agent_id,
-        agent_name=agent.name,
+        agent_id="",
+        agent_name="",
         user_id=current_user.user_id,
         created_at=now,
         updated_at=now,
+        draft=_skill_draft(name, description, user_input),
     )
     _jobs[job_id] = job
-
-    runtime_update = create_agent_runtime_update_payload(_server_url_from_request(request))
-    command = _skill_create_command(job_id, name, description, user_input, skill_creator_package)
-    if agent.runtime_hash and agent.runtime_hash != str(runtime_update.get("hash") or ""):
-        command = {
-            "type": "task",
-            "runtime_update_only": True,
-            "post_update_command": command,
-            "agent_runtime_update": runtime_update,
-        }
-    else:
-        command["agent_runtime_update"] = runtime_update
-
-    ok = await send_agent_command(body.agent_id, command)
-    if not ok:
-        _jobs.pop(job_id, None)
-        raise HTTPException(status_code=502, detail="Agent not connected")
-
-    current = _jobs.get(job_id, job)
-    if current.status == "pending":
-        current.status = "running"
-        current.updated_at = _now()
-        _jobs[job_id] = current
-    return current
+    return job
 
 
 @router.get("/api/skills/create/{job_id}", response_model=SkillCreateJob)
@@ -234,6 +283,7 @@ async def import_skill(
     skill_md = body.skill_md.strip()
     if not skill_md:
         raise HTTPException(status_code=400, detail="SKILL 内容不能为空")
+    timeout_seconds = _normalize_timeout(body.timeout_seconds)
 
     skill_id = _skill_slug(job.name, job_id)
     if _find_existing_checker(skill_id):
@@ -249,6 +299,8 @@ async def import_skill(
             "description": job.description,
             "enabled": True,
             "mode": "opencode",
+            "result_mode": "markdown_reports",
+            "timeout_seconds": timeout_seconds,
             "visibility": CHECKER_VISIBILITY_PUBLIC,
             "category": CHECKER_CATEGORY_OTHER,
             "modified_at": modified_at,
@@ -264,6 +316,7 @@ async def import_skill(
         scenarios_md = body.scenarios_md.strip()
         if scenarios_md:
             (checker_dir / "SCENARIOS.md").write_text(scenarios_md + "\n", encoding="utf-8")
+        _write_resource_files(checker_dir, body.files)
     except Exception:
         import shutil
 

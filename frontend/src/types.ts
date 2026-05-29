@@ -32,6 +32,8 @@ export interface CheckerInfo {
   category_label: string;
   modified_at: string;
   user_created: boolean;
+  result_mode: string;
+  timeout_seconds?: number | null;
 }
 
 export interface CheckerCatalogItem {
@@ -46,6 +48,8 @@ export interface CheckerCatalogItem {
   introduction: string;
   introduction_source: string;
   user_created: boolean;
+  result_mode: string;
+  timeout_seconds?: number | null;
 }
 
 export interface SkillDraft {
@@ -67,6 +71,11 @@ export interface SkillCreateJob {
   updated_at: string;
   error_message: string;
   draft: SkillDraft | null;
+}
+
+export interface SkillImportFile {
+  path: string;
+  content_b64: string;
 }
 
 export interface UploadResponse {
@@ -95,6 +104,16 @@ export interface Vulnerability {
   function_start_line?: number | null;
 }
 
+export interface SkillReport {
+  id?: number | null;
+  scan_id: string;
+  checker_name: string;
+  filename: string;
+  title: string;
+  content: string;
+  created_at: string;
+}
+
 export interface Candidate {
   file: string;
   line: number;
@@ -121,6 +140,7 @@ export interface ScanStatus {
   total_candidates: number;
   processed_candidates: number;
   vulnerabilities: Vulnerability[];
+  skill_reports: SkillReport[];
   events: ScanEvent[];
   current_candidate: Candidate | null;
   error_message: string | null;

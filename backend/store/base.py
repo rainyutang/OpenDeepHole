@@ -19,6 +19,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     ScanSummary,
+    SkillReport,
     UserInDB,
     Vulnerability,
 )
@@ -97,6 +98,16 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def get_vulnerabilities(self, scan_id: str) -> list[Vulnerability]:
         """Return all vulnerabilities for a scan, ordered by index."""
+
+    # -- Skill reports --
+
+    @abstractmethod
+    def replace_skill_reports(self, scan_id: str, checker_name: str, reports: list[SkillReport]) -> None:
+        """Replace Markdown reports for one checker in one scan."""
+
+    @abstractmethod
+    def list_skill_reports(self, scan_id: str, checker_name: str | None = None) -> list[SkillReport]:
+        """Return Markdown reports for a scan, optionally filtered by checker."""
 
     # -- Events --
 

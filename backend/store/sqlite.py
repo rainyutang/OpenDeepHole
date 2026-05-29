@@ -18,6 +18,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     ScanSummary,
+    SkillReport,
     UserInDB,
     Vulnerability,
 )
@@ -80,6 +81,19 @@ CREATE TABLE IF NOT EXISTS processed_keys (
     vuln_type TEXT NOT NULL,
     PRIMARY KEY(scan_id, file, line, function, vuln_type)
 );
+
+CREATE TABLE IF NOT EXISTS skill_reports (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id      TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+    checker_name TEXT NOT NULL,
+    filename     TEXT NOT NULL,
+    title        TEXT NOT NULL DEFAULT '',
+    content      TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    UNIQUE(scan_id, checker_name, filename)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_reports_scan ON skill_reports(scan_id);
 
 CREATE TABLE IF NOT EXISTS feedback_entries (
     id              TEXT PRIMARY KEY,
@@ -228,6 +242,17 @@ class SqliteScanStore(ScanStoreBase):
             )
         # Ensure users table exists
         self._conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS skill_reports (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id      TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                checker_name TEXT NOT NULL,
+                filename     TEXT NOT NULL,
+                title        TEXT NOT NULL DEFAULT '',
+                content      TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                UNIQUE(scan_id, checker_name, filename)
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_reports_scan ON skill_reports(scan_id);
             CREATE TABLE IF NOT EXISTS users (
                 user_id       TEXT PRIMARY KEY,
                 username      TEXT NOT NULL UNIQUE,
@@ -297,6 +322,7 @@ class SqliteScanStore(ScanStoreBase):
             total_candidates=row["total_candidates"],
             processed_candidates=row["processed_candidates"],
             vulnerabilities=self.get_vulnerabilities(row["scan_id"]),
+            skill_reports=self.list_skill_reports(row["scan_id"]),
             events=self.get_events(row["scan_id"]),
             current_candidate=current,
             error_message=row["error_message"],
@@ -652,6 +678,65 @@ class SqliteScanStore(ScanStoreBase):
                 ticket_id=r["ticket_id"] or "",
                 function_source=r["function_source"] or "",
                 function_start_line=r["function_start_line"],
+            )
+            for r in cur.fetchall()
+        ]
+
+    # -- Skill reports --
+
+    def replace_skill_reports(self, scan_id: str, checker_name: str, reports: list[SkillReport]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM skill_reports WHERE scan_id = ? AND checker_name = ?",
+                (scan_id, checker_name),
+            )
+            for report in reports:
+                self._conn.execute(
+                    """\
+                    INSERT INTO skill_reports
+                        (scan_id, checker_name, filename, title, content, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_id,
+                        checker_name,
+                        report.filename,
+                        report.title,
+                        report.content,
+                        report.created_at,
+                    ),
+                )
+            self._conn.commit()
+
+    def list_skill_reports(self, scan_id: str, checker_name: str | None = None) -> list[SkillReport]:
+        self._conn.row_factory = sqlite3.Row
+        if checker_name:
+            cur = self._conn.execute(
+                """\
+                SELECT * FROM skill_reports
+                WHERE scan_id = ? AND checker_name = ?
+                ORDER BY checker_name, filename, id
+                """,
+                (scan_id, checker_name),
+            )
+        else:
+            cur = self._conn.execute(
+                """\
+                SELECT * FROM skill_reports
+                WHERE scan_id = ?
+                ORDER BY checker_name, filename, id
+                """,
+                (scan_id,),
+            )
+        return [
+            SkillReport(
+                id=r["id"],
+                scan_id=r["scan_id"],
+                checker_name=r["checker_name"],
+                filename=r["filename"],
+                title=r["title"],
+                content=r["content"],
+                created_at=r["created_at"],
             )
             for r in cur.fetchall()
         ]

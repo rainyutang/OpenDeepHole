@@ -21,6 +21,8 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [scanName, setScanName] = useState<string>("");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
+  const builtinCheckers = checkers.filter((checker) => !checker.user_created);
+  const userCheckers = checkers.filter((checker) => checker.user_created);
 
   useEffect(() => {
     const load = async () => {
@@ -113,7 +115,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       </div>
 
       {/* Content */}
-      <div className="flex-1 px-6 py-6 max-w-2xl mx-auto w-full">
+      <div className="flex-1 px-6 py-6 max-w-5xl mx-auto w-full">
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-6">
           扫描配置
         </h2>
@@ -251,22 +253,25 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               {checkers.length === 0 ? (
                 <p className="text-sm text-slate-500">无可用检查项</p>
               ) : (
-                <div className="space-y-2">
-                  {checkers.filter((c) => !c.user_created).map((checker) => (
-                    <CheckerOption key={checker.name} checker={checker} selected={selectedCheckers.has(checker.name)} onToggle={() => toggleChecker(checker.name)} />
-                  ))}
-                  {checkers.some((c) => c.user_created) && (
-                    <>
-                      <div className="flex items-center gap-3 py-2">
-                        <div className="flex-1 border-t border-slate-600" />
-                        <span className="text-xs font-semibold text-slate-500 whitespace-nowrap">用户创建</span>
-                        <div className="flex-1 border-t border-slate-600" />
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">系统内置</div>
+                    {builtinCheckers.map((checker) => (
+                      <CheckerOption key={checker.name} checker={checker} selected={selectedCheckers.has(checker.name)} onToggle={() => toggleChecker(checker.name)} />
+                    ))}
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">用户新建</div>
+                    {userCheckers.length === 0 ? (
+                      <div className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-6 text-center text-sm text-slate-500">
+                        暂无用户新建 SKILL
                       </div>
-                      {checkers.filter((c) => c.user_created).map((checker) => (
+                    ) : (
+                      userCheckers.map((checker) => (
                         <CheckerOption key={checker.name} checker={checker} selected={selectedCheckers.has(checker.name)} onToggle={() => toggleChecker(checker.name)} />
-                      ))}
-                    </>
-                  )}
+                      ))
+                    )}
+                  </div>
                 </div>
               )}
             </div>
