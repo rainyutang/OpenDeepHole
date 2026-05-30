@@ -118,6 +118,47 @@ class CheckerCatalogTests(unittest.TestCase):
         self.assertEqual(by_name["other_check"].category, "other")
         self.assertEqual(by_name["other_check"].category_label, "其他")
 
+    def test_catalog_shows_user_skill_creator_and_delete_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            builtins = Path(tmp) / "builtins"
+            user_skills = Path(tmp) / "user_skills"
+            builtins.mkdir()
+            self._write_checker(builtins, "builtin")
+            owned = user_skills / "owned_skill"
+            owned.mkdir(parents=True)
+            (owned / "checker.yaml").write_text(
+                "\n".join([
+                    "name: owned_skill",
+                    "label: Owned Skill",
+                    "description: description",
+                    "enabled: true",
+                    "created_by_user_id: user-1",
+                    "created_by_username: alice",
+                ])
+                + "\n",
+                encoding="utf-8",
+            )
+            (owned / "SKILL.md").write_text("# Owned\n", encoding="utf-8")
+            cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(user_skills)))
+
+            with (
+                patch("backend.registry.CHECKERS_DIR", builtins),
+                patch("backend.api.checkers.CHECKERS_DIR", builtins),
+                patch("backend.config.get_config", return_value=cfg),
+            ):
+                response = asyncio.run(
+                    list_checker_catalog(
+                        current_user=User(user_id="user-1", username="alice", role="user")
+                    )
+                )
+
+        by_name = {item.name: item for item in response}
+        self.assertFalse(by_name["builtin"].user_created)
+        self.assertFalse(by_name["builtin"].can_delete)
+        self.assertTrue(by_name["owned_skill"].user_created)
+        self.assertEqual(by_name["owned_skill"].creator_username, "alice")
+        self.assertTrue(by_name["owned_skill"].can_delete)
+
     def test_catalog_falls_back_to_description_when_intro_files_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -29,6 +29,9 @@ async def list_checkers(current_user: User = Depends(get_current_user)) -> list[
             category_label=e.category_label,
             modified_at=e.modified_at,
             user_created=e.user_created,
+            created_by_user_id=e.created_by_user_id,
+            creator_username=e.created_by_username,
+            can_delete=_can_delete_user_skill(e.user_created, e.created_by_user_id, current_user),
             result_mode=e.result_mode,
             timeout_seconds=e.timeout_seconds,
         )
@@ -123,6 +126,8 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
                     introduction=introduction,
                     introduction_source=source,
                     user_created=is_user_dir,
+                    created_by_user_id=str(meta.get("created_by_user_id") or "").strip(),
+                    creator_username=str(meta.get("created_by_username") or "").strip(),
                     result_mode=_normalize_result_mode(meta.get("result_mode")),
                     timeout_seconds=_normalize_timeout_seconds(meta.get("timeout_seconds")),
                 )
@@ -139,9 +144,20 @@ async def list_checker_catalog(
     """Return checker/SKILL introductions for the catalog page."""
     items = _discover_catalog_items()
     return [
-        item for item in items
+        item.model_copy(update={
+            "can_delete": _can_delete_user_skill(item.user_created, item.created_by_user_id, current_user)
+        })
+        for item in items
         if _is_visible_to_user(item.visibility, current_user)
     ]
+
+
+def _can_delete_user_skill(user_created: bool, owner_id: str, user: User) -> bool:
+    if not user_created:
+        return False
+    if user.role == "admin":
+        return True
+    return bool(owner_id) and owner_id == user.user_id
 
 
 def _normalize_visibility(value: object) -> str:

@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, stopScan, downloadScanReport, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getAgentIndexStatus, getFpReviewSkill, getSkillReports } from "../api/client";
+import { getScanStatus, stopScan, downloadScanReport, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getSkillReports, retryIncompleteScan } from "../api/client";
 import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport } from "../types";
+import { useScanSSE } from "../hooks/useScanSSE";
+import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 
@@ -35,6 +37,7 @@ interface Props {
 export default function ScanStatus({ scanId, onBack }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [retryingIncomplete, setRetryingIncomplete] = useState(false);
   const [downloadingReport, setDownloadingReport] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [lastSeenEvents, setLastSeenEvents] = useState(0);
@@ -72,65 +75,107 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     getCheckers().then(setCheckers).catch(() => {});
   }, []);
 
+  // Initial full-state hydration on mount
   useEffect(() => {
-    let timer: ReturnType<typeof setInterval>;
-
-    const poll = async () => {
-      try {
-        const data = await getScanStatus(scanId);
+    getScanStatus(scanId)
+      .then((data) => {
         setScan(data);
-        // Initialize selectedFeedbackIds from scan data on first load
         if (selectedFeedbackIds === null && data.feedback_ids) {
           setSelectedFeedbackIds(new Set(data.feedback_ids));
         }
-        const isRecoverableDisconnect =
-          data.status === "cancelled" && isAgentDisconnectError(data.error_message) && !data.agent_online;
-        if (
-          (data.status === "complete" || data.status === "error" || data.status === "cancelled") &&
-          !isRecoverableDisconnect
-        ) {
-          clearInterval(timer);
-        }
-      } catch (err: unknown) {
-        if (
-          err &&
-          typeof err === "object" &&
-          "response" in err &&
-          (err as { response: { status: number } }).response?.status === 404
-        ) {
-          clearInterval(timer);
-          setScan((prev) =>
-            prev
-              ? { ...prev, status: "error", error_message: "扫描状态丢失（后端已重启），请重新开始扫描。" }
-              : null
-          );
-        }
-      }
-    };
-
-    poll();
-    timer = setInterval(poll, 2000);
-    return () => clearInterval(timer);
+      })
+      .catch(() => {});
+    getFpReview(scanId)
+      .then(setFpReview)
+      .catch(() => {});
   }, [scanId]);
 
-  // Poll for FP review status when a review is running.
-  // Tolerate transient errors — only stop polling on terminal status.
-  useEffect(() => {
-    if (!fpReview || fpReview.status === "complete" || fpReview.status === "error" || fpReview.status === "cancelled") return;
-    const timer = setInterval(async () => {
-      try {
-        const job = await getFpReview(scanId);
-        setFpReview(job);
-        if (job.status === "complete" || job.status === "error" || job.status === "cancelled") {
-          clearInterval(timer);
-        }
-      } catch {
-        // Transient error (network hiccup, server busy) — keep polling.
-        // The interval will retry on the next tick.
-      }
-    }, 2000);
-    return () => clearInterval(timer);
-  }, [fpReview?.status, scanId]);
+  // SSE event handlers — update state incrementally
+  const sseHandlers = useMemo<ScanSSEHandlers>(() => ({
+    onScanStatus: (data) => {
+      setScan((prev) => {
+        if (!prev) return prev;
+        const patch: Partial<ScanStatusType> = {};
+        if (data.status != null) patch.status = data.status as ScanItemStatus;
+        if (data.progress != null) patch.progress = data.progress;
+        if (data.total_candidates != null) patch.total_candidates = data.total_candidates;
+        if (data.processed_candidates != null) patch.processed_candidates = data.processed_candidates;
+        return { ...prev, ...patch };
+      });
+    },
+    onScanVulnerability: (data) => {
+      setScan((prev) => {
+        if (!prev) return prev;
+        const vulns = [...prev.vulnerabilities];
+        vulns[data.index] = data.vulnerability;
+        return { ...prev, vulnerabilities: vulns };
+      });
+    },
+    onScanEvent: (data) => {
+      setScan((prev) => {
+        if (!prev) return prev;
+        const events = [...prev.events, data.event].slice(-MAX_LOG_LINES);
+        return { ...prev, events };
+      });
+    },
+    onScanFinish: (data) => {
+      setScan((prev) =>
+        prev ? { ...prev, status: data.status as ScanItemStatus, error_message: data.error_message } : prev,
+      );
+    },
+    onFpReviewStarted: (data) => {
+      setFpReview({
+        review_id: data.review_id,
+        scan_id: scanId,
+        status: data.status,
+        total: data.total,
+        processed: 0,
+        current_vuln_index: null,
+        results: [],
+        error_message: null,
+        created_at: new Date().toISOString(),
+      });
+    },
+    onFpReviewProgress: (data) => {
+      setFpReview((prev) =>
+        prev
+          ? { ...prev, processed: data.processed, current_vuln_index: data.vuln_index, total: data.total }
+          : prev,
+      );
+    },
+    onFpReviewResult: (data) => {
+      setFpReview((prev) => {
+        if (!prev) return prev;
+        const newResult = {
+          vuln_index: data.vuln_index,
+          verdict: data.verdict,
+          severity: data.severity,
+          reason: data.reason,
+          vulnerability_report: "",
+          created_at: new Date().toISOString(),
+        };
+        return { ...prev, results: [...prev.results, newResult] };
+      });
+    },
+    onFpReviewFinish: (data) => {
+      setFpReview((prev) =>
+        prev
+          ? { ...prev, status: data.status, error_message: data.error_message, current_vuln_index: null }
+          : prev,
+      );
+    },
+    onIndexStatus: (data) => {
+      setIndexStatus(data);
+    },
+  }), [scanId]);
+
+  const sseStateSetters = useMemo<SSEStateSetters>(() => ({
+    setScan,
+    setFpReview,
+    setIndexStatus,
+  }), []);
+
+  useScanSSE(scanId, sseHandlers, sseStateSetters);
 
   const handleFpReview = async () => {
     setFpReviewLoading(true);
@@ -164,62 +209,28 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     }
   };
 
-  // Load existing FP review when opening a scan, and keep polling periodically
-  // so we pick up reviews that start after the page loads (e.g. triggered from
-  // another tab, or if the initial load got a 404 before the job was created).
-  useEffect(() => {
-    let active = true;
-    setFpReview(null);
-
-    const refreshFpReview = async () => {
-      try {
-        const job = await getFpReview(scanId);
-        if (active) setFpReview(job);
-      } catch {
-        // 404 = no review yet, or transient error — keep trying
-      }
-    };
-
-    refreshFpReview();
-    // Poll every 5s as a background safety net. The faster 2s dedicated poll
-    // takes over once fpReview is set to a running state.
-    const timer = setInterval(refreshFpReview, 5000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [scanId]);
-
-  // Poll indexing progress while scan is waiting for code index
-  useEffect(() => {
-    if (!scan) return;
-    if (scan.status !== "pending" && scan.status !== "analyzing") return;
-    if (scan.static_total_files > 0) return;
-    if (indexStatus?.status === "done" || indexStatus?.status === "error") return;
-
-    let timer: ReturnType<typeof setInterval>;
-    const poll = async () => {
-      try {
-        const status = await getAgentIndexStatus(scanId);
-        setIndexStatus(status);
-        if (status.status === "done" || status.status === "error") {
-          clearInterval(timer);
-        }
-      } catch {
-        // ignore
-      }
-    };
-    poll();
-    timer = setInterval(poll, 2000);
-    return () => clearInterval(timer);
-  }, [scan?.status, scan?.static_total_files, scanId, indexStatus?.status]);
-
   const handleStop = async () => {
     setStopping(true);
     try {
       await stopScan(scanId);
     } catch {
       setStopping(false);
+    }
+  };
+
+  const handleRetryIncomplete = async () => {
+    setRetryingIncomplete(true);
+    try {
+      await retryIncompleteScan(scanId);
+      const next = await getScanStatus(scanId);
+      setScan(next);
+    } catch (err: unknown) {
+      const msg = err && typeof err === "object" && "response" in err
+        ? (err as { response: { data: { detail: string } } }).response?.data?.detail
+        : "续扫失败";
+      alert(`续扫未完成候选失败：${msg || "未知错误"}`);
+    } finally {
+      setRetryingIncomplete(false);
     }
   };
 
@@ -356,6 +367,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const hasReportModeSkill = reportCheckers.length > 0 || (scan.skill_reports?.length ?? 0) > 0;
   const displayedReports = reports.length > 0 ? reports : (scan.skill_reports ?? []);
   const activeReport = displayedReports[activeReportIndex] ?? displayedReports[0];
+  const retryableCount = scan.vulnerabilities.filter(
+    (v) => !v.user_verdict && (v.ai_verdict === "timeout" || v.ai_verdict === "no_result"),
+  ).length || scan.retryable_candidates_count || 0;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
@@ -488,6 +502,20 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 </>
               );
             })()}
+            {isDone && (
+              <>
+                {retryableCount > 0 && (
+                  <button
+                    onClick={handleRetryIncomplete}
+                    disabled={retryingIncomplete || !scan.agent_online}
+                    title={!scan.agent_online ? "Agent 离线，无法续扫" : `续扫 ${retryableCount} 个未完成候选`}
+                    className="px-3 py-1.5 text-sm font-medium text-amber-300 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {retryingIncomplete ? "启动中..." : `续扫未完成 ${retryableCount}`}
+                  </button>
+                )}
+              </>
+            )}
             {isDone && (
               <button
                 onClick={handleDownloadReport}

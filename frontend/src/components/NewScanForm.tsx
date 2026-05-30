@@ -344,6 +344,11 @@ function CheckerOption({ checker, selected, onToggle }: { checker: CheckerInfo; 
         </div>
         <div className="text-[11px] text-slate-500 mt-1">
           最后修改：{formatModifiedAt(checker.modified_at)}
+          {checker.user_created && (
+            <span className="ml-2">
+              创建者：{checker.creator_username || "-"}
+            </span>
+          )}
         </div>
         <p className="text-xs text-slate-400 mt-0.5">{checker.description}</p>
       </div>

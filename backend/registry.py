@@ -56,6 +56,8 @@ class CheckerEntry:
     category_label: str = CHECKER_CATEGORY_LABELS[CHECKER_CATEGORY_DEFAULT]
     modified_at: str = ""
     user_created: bool = False
+    created_by_user_id: str = ""
+    created_by_username: str = ""
     result_mode: str = "vulnerabilities"  # "vulnerabilities" | "markdown_reports"
     timeout_seconds: int | None = None
 
@@ -204,6 +206,8 @@ def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = Fa
         category_label=checker_category_label(category),
         modified_at=str(meta.get("modified_at") or "").strip(),
         user_created=user_created,
+        created_by_user_id=str(meta.get("created_by_user_id") or "").strip(),
+        created_by_username=str(meta.get("created_by_username") or "").strip(),
         result_mode=_normalize_result_mode(meta.get("result_mode")),
         timeout_seconds=_normalize_timeout_seconds(meta.get("timeout_seconds")),
     )

@@ -84,6 +84,10 @@ class ScanStoreBase(ABC):
         """Append a vulnerability result. Returns the assigned index."""
 
     @abstractmethod
+    def upsert_incomplete_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
+        """Replace a matching timeout/no-result vulnerability, or append a new result."""
+
+    @abstractmethod
     def update_vulnerability(
         self,
         scan_id: str,
@@ -132,6 +136,12 @@ class ScanStoreBase(ABC):
         self, scan_id: str
     ) -> set[tuple[str, int, str, str]]:
         """Return the set of already-processed candidate keys."""
+
+    @abstractmethod
+    def remove_processed_keys(
+        self, scan_id: str, keys: list[tuple[str, int, str, str]]
+    ) -> None:
+        """Remove processed candidate keys so a retry can process them again."""
 
     # -- Feedback entries --
 

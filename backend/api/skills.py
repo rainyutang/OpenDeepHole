@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ _JOB_STATUSES = {"pending", "running", "completed", "error"}
 _ALLOWED_RESOURCE_DIRS = {"references", "scripts", "assets"}
 _MIN_TIMEOUT_SECONDS = 60
 _MAX_TIMEOUT_SECONDS = 24 * 60 * 60
+_SKILL_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
 def _now() -> str:
@@ -49,6 +51,18 @@ def _skill_slug(value: str, fallback: str) -> str:
     if not re.match(r"^[a-zA-Z_]", slug):
         slug = f"skill_{slug}"
     return slug[:64]
+
+
+def _validate_skill_id(value: str) -> str:
+    skill_id = value.strip()
+    if not skill_id:
+        raise HTTPException(status_code=400, detail="SKILL 标识不能为空")
+    if not _SKILL_ID_RE.fullmatch(skill_id):
+        raise HTTPException(
+            status_code=400,
+            detail="SKILL 标识只能包含字母、数字、下划线，且必须以字母或下划线开头，最长 64 个字符",
+        )
+    return skill_id
 
 
 def _user_skills_dir() -> Path:
@@ -114,6 +128,34 @@ def _skill_md_with_frontmatter(skill_id: str, description: str, content: str) ->
 def _find_existing_checker(skill_id: str) -> bool:
     registry = refresh_registry()
     return skill_id in registry or (_user_skills_dir() / skill_id).exists()
+
+
+def _user_skill_dir(skill_id: str) -> Path:
+    skill_id = _validate_skill_id(skill_id)
+    root = _user_skills_dir().resolve()
+    path = (root / skill_id).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="SKILL 标识非法") from exc
+    return path
+
+
+def _read_checker_yaml(checker_dir: Path) -> dict:
+    yaml_path = checker_dir / "checker.yaml"
+    if not yaml_path.is_file():
+        raise HTTPException(status_code=404, detail="SKILL not found")
+    try:
+        return yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise HTTPException(status_code=400, detail="SKILL 元数据不可读取") from exc
+
+
+def _can_delete_user_skill(meta: dict, current_user: User) -> bool:
+    if current_user.role == "admin":
+        return True
+    owner_id = str(meta.get("created_by_user_id") or "").strip()
+    return bool(owner_id) and owner_id == current_user.user_id
 
 
 def _normalize_timeout(value: int) -> int:
@@ -221,6 +263,7 @@ async def create_skill(
     current_user: User = Depends(get_current_user),
 ) -> SkillCreateJob:
     """Create a template-based SKILL draft synchronously."""
+    skill_id = _validate_skill_id(body.skill_id)
     name = body.name.strip()
     description = body.description.strip()
     user_input = body.input.strip()
@@ -230,6 +273,8 @@ async def create_skill(
         raise HTTPException(status_code=400, detail="描述不能为空")
     if not user_input:
         raise HTTPException(status_code=400, detail="输入不能为空")
+    if _find_existing_checker(skill_id):
+        raise HTTPException(status_code=409, detail=f"SKILL 已存在: {skill_id}")
     _normalize_timeout(body.timeout_seconds)
 
     now = _now()
@@ -237,6 +282,7 @@ async def create_skill(
     job = SkillCreateJob(
         job_id=job_id,
         status="completed",
+        skill_id=skill_id,
         name=name,
         description=description,
         input=user_input,
@@ -285,11 +331,11 @@ async def import_skill(
         raise HTTPException(status_code=400, detail="SKILL 内容不能为空")
     timeout_seconds = _normalize_timeout(body.timeout_seconds)
 
-    skill_id = _skill_slug(job.name, job_id)
+    skill_id = _validate_skill_id(job.skill_id)
     if _find_existing_checker(skill_id):
         raise HTTPException(status_code=409, detail=f"SKILL 已存在: {skill_id}")
 
-    checker_dir = _user_skills_dir() / skill_id
+    checker_dir = _user_skill_dir(skill_id)
     checker_dir.mkdir(parents=True, exist_ok=False)
     try:
         modified_at = _market_time()
@@ -304,6 +350,8 @@ async def import_skill(
             "visibility": CHECKER_VISIBILITY_PUBLIC,
             "category": CHECKER_CATEGORY_OTHER,
             "modified_at": modified_at,
+            "created_by_user_id": current_user.user_id,
+            "created_by_username": current_user.username,
         }
         (checker_dir / "checker.yaml").write_text(
             yaml.safe_dump(checker_yaml, allow_unicode=True, sort_keys=False),
@@ -325,6 +373,25 @@ async def import_skill(
 
     refresh_registry()
     return SkillImportResponse(ok=True, name=skill_id)
+
+
+@router.delete("/api/skills/{skill_id}")
+async def delete_skill(
+    skill_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Delete a user-created SKILL from the user SKILL directory."""
+    checker_dir = _user_skill_dir(skill_id)
+    if not checker_dir.is_dir():
+        raise HTTPException(status_code=404, detail="SKILL not found")
+    meta = _read_checker_yaml(checker_dir)
+    if str(meta.get("name") or "").strip() != skill_id:
+        raise HTTPException(status_code=400, detail="SKILL 元数据与目录不匹配")
+    if not _can_delete_user_skill(meta, current_user):
+        raise HTTPException(status_code=403, detail="Access denied")
+    shutil.rmtree(checker_dir)
+    refresh_registry()
+    return {"ok": True}
 
 
 def handle_skill_create_result(payload: dict) -> None:

@@ -32,6 +32,9 @@ export interface CheckerInfo {
   category_label: string;
   modified_at: string;
   user_created: boolean;
+  created_by_user_id: string;
+  creator_username: string;
+  can_delete: boolean;
   result_mode: string;
   timeout_seconds?: number | null;
 }
@@ -48,6 +51,9 @@ export interface CheckerCatalogItem {
   introduction: string;
   introduction_source: string;
   user_created: boolean;
+  created_by_user_id: string;
+  creator_username: string;
+  can_delete: boolean;
   result_mode: string;
   timeout_seconds?: number | null;
 }
@@ -61,6 +67,7 @@ export interface SkillDraft {
 export interface SkillCreateJob {
   job_id: string;
   status: "pending" | "running" | "completed" | "error";
+  skill_id: string;
   name: string;
   description: string;
   input: string;
@@ -145,6 +152,7 @@ export interface ScanStatus {
   current_candidate: Candidate | null;
   error_message: string | null;
   feedback_ids: string[];
+  retryable_candidates_count: number;
 
   // 静态分析进度
   static_total_files: number;
@@ -194,6 +202,7 @@ export interface ScanSummary {
   processed_candidates: number;
   vulnerability_count: number;
   human_confirmed_count: number;
+  retryable_candidates_count: number;
   scan_items: string[];
   user_id?: string;
   username?: string;

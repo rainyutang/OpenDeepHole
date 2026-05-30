@@ -12,9 +12,10 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response, StreamingResponse
 
 from backend.checker_sync import build_checker_packages
 from backend.auth import get_current_user
@@ -25,6 +26,7 @@ from backend.models import (
     AgentFpReviewProgress,
     AgentFpReviewResult,
     BatchMarkRequest,
+    Candidate,
     CreateScanRequest,
     FeedbackEntry,
     FpReviewJob,
@@ -213,6 +215,36 @@ def _checker_packages_for(names: list[str]) -> list[dict[str, str]]:
     return build_checker_packages(registry, names)
 
 
+_RETRYABLE_AI_VERDICTS = {"timeout", "no_result"}
+
+
+def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
+    return (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
+
+
+def _retry_incomplete_candidates(scan: ScanStatus) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    for vuln in scan.vulnerabilities:
+        if vuln.user_verdict:
+            continue
+        if (vuln.ai_verdict or "") not in _RETRYABLE_AI_VERDICTS:
+            continue
+        candidates.append(
+            Candidate(
+                file=vuln.file,
+                line=vuln.line,
+                function=vuln.function,
+                description=vuln.description,
+                vuln_type=vuln.vuln_type,
+            )
+        )
+    return candidates
+
+
+def _retry_incomplete_count(scan: ScanStatus) -> int:
+    return len(_retry_incomplete_candidates(scan))
+
+
 async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str]) -> None:
     """Best-effort update of the selected feedback entries on the owning agent."""
     loaded = get_scan_store().load_scan(scan_id)
@@ -381,6 +413,7 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
             s.total_candidates = scan_for_status.total_candidates
             s.processed_candidates = scan_for_status.processed_candidates
             s.agent_online = scan_for_status.agent_online
+            s.retryable_candidates_count = _retry_incomplete_count(scan_for_status)
 
         metrics = calculate_issue_metrics(
             vulnerabilities,
@@ -417,7 +450,9 @@ async def get_scan_status(
             raise HTTPException(status_code=404, detail="Scan not found")
         scan = result[0]
         scan.agent_name = result[1].agent_name
-    return reconcile_offline_agent_scan_state(scan_id, scan)
+    scan = reconcile_offline_agent_scan_state(scan_id, scan)
+    scan.retryable_candidates_count = _retry_incomplete_count(scan)
+    return scan
 
 
 @router.put("/api/scan/{scan_id}/product")
@@ -566,6 +601,113 @@ async def resume_scan(
         raise HTTPException(status_code=502, detail="Agent not connected")
 
     logger.info("Resumed scan %s via agent %s", scan_id, agent_id)
+    return ScanStartResponse(scan_id=scan_id)
+
+
+@router.post("/api/scan/{scan_id}/retry-incomplete", response_model=ScanStartResponse)
+async def retry_incomplete_scan(
+    scan_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> ScanStartResponse:
+    """Retry completed timeout/no-result candidates in the original scan."""
+    _check_scan_owner(scan_id, current_user)
+    from backend.api.agent import _registered_agents
+
+    if scan_id in _running_scans:
+        raise HTTPException(status_code=400, detail="Scan is already running")
+
+    store = get_scan_store()
+    result = store.load_scan(scan_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    scan, meta = result
+    if scan.status in (ScanItemStatus.PENDING, ScanItemStatus.ANALYZING, ScanItemStatus.AUDITING):
+        raise HTTPException(status_code=400, detail="Scan is already running")
+
+    retry_candidates = _retry_incomplete_candidates(scan)
+    if not retry_candidates:
+        raise HTTPException(status_code=400, detail="没有可续扫的超时或无结果候选")
+
+    agent_id = meta.agent_id
+    agent = _registered_agents.get(agent_id) if agent_id else None
+    if agent is None and meta.agent_name:
+        from backend.api.agent import _agent_ws
+        for aid, ainfo in _registered_agents.items():
+            if ainfo.name == meta.agent_name and aid in _agent_ws:
+                if current_user.role == "admin" or ainfo.user_id == current_user.user_id:
+                    agent = ainfo
+                    agent_id = aid
+                    break
+
+    if agent is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
+        )
+
+    if agent_id != meta.agent_id:
+        meta.agent_id = agent_id
+        meta.agent_name = agent.name
+        store.update_scan_agent(scan_id, agent_id, agent.name)
+
+    total_candidates = scan.total_candidates or len(scan.vulnerabilities)
+    processed_offset = max(total_candidates - len(retry_candidates), 0)
+    progress = processed_offset / total_candidates if total_candidates > 0 else 0.0
+    retry_keys = [_candidate_key(candidate) for candidate in retry_candidates]
+
+    scan.status = ScanItemStatus.PENDING
+    scan.error_message = None
+    scan.current_candidate = None
+    scan.agent_name = agent.name
+    scan.agent_online = True
+    scan.processed_candidates = processed_offset
+    scan.progress = progress
+    store.update_scan_progress(
+        scan_id,
+        status=ScanItemStatus.PENDING,
+        processed_candidates=processed_offset,
+        progress=progress,
+        error_message="",
+        clear_current_candidate=True,
+    )
+    store.remove_processed_keys(scan_id, retry_keys)
+
+    _running_scans[scan_id] = scan
+    _scan_owners[scan_id] = current_user.user_id
+
+    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
+    feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
+    ok = await send_agent_command(agent_id, {
+        "type": "resume",
+        "scan_id": scan_id,
+        "project_path": meta.project_path,
+        "code_scan_path": meta.code_scan_path or meta.project_path,
+        "checkers": meta.scan_items,
+        "scan_name": meta.scan_name,
+        "feedback_entries": feedback_entries,
+        "checker_packages": _checker_packages_for(meta.scan_items),
+        "retry_candidates": [candidate.model_dump() for candidate in retry_candidates],
+        "retry_total_candidates": total_candidates,
+        "retry_processed_offset": processed_offset,
+        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
+    })
+    if not ok:
+        for key in retry_keys:
+            store.add_processed_key(scan_id, key)
+        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
+        scan.status = ScanItemStatus.ERROR
+        _running_scans.pop(scan_id, None)
+        logger.error("Failed to retry incomplete scan %s: agent %s not connected", scan_id, agent_id)
+        raise HTTPException(status_code=502, detail="Agent not connected")
+
+    logger.info(
+        "Retrying %d incomplete candidate(s) for scan %s via agent %s",
+        len(retry_candidates),
+        scan_id,
+        agent_id,
+    )
     return ScanStartResponse(scan_id=scan_id)
 
 
@@ -830,6 +972,10 @@ async def trigger_fp_review(
         raise HTTPException(status_code=502, detail="Agent not connected")
 
     store.update_fp_review_job(review_id, status="running")
+    from backend.sse import publish
+    publish(scan_id, "fp_review_started", {
+        "review_id": review_id, "status": "running", "total": len(confirmed),
+    })
     logger.info("FP review %s triggered for scan %s (%d candidates)", review_id, scan_id, len(confirmed))
     return {"ok": True, "review_id": review_id}
 
@@ -888,6 +1034,61 @@ async def get_fp_review(
     return _merge_latest_fp_review_results(job, scan_id)
 
 
+@router.get("/api/scan/{scan_id}/events")
+async def scan_events_sse(scan_id: str, token: str = Query(...)) -> StreamingResponse:
+    """SSE stream for real-time scan and FP review status updates.
+
+    The browser EventSource API does not support custom headers, so the
+    JWT is passed as a query parameter.
+    """
+    from backend.auth import decode_token
+    from backend.sse import subscribe, unsubscribe, format_sse, SSE_KEEPALIVE
+    import jwt as _jwt
+
+    try:
+        payload = decode_token(token)
+    except _jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user_id = payload.get("sub", "")
+    role = payload.get("role", "")
+    if role != "admin":
+        store = get_scan_store()
+        result = store.load_scan(scan_id)
+        if result is not None:
+            _, meta = result
+            if meta.user_id != user_id:
+                raise HTTPException(status_code=403, detail="Access denied")
+        elif scan_id not in _scan_owners or _scan_owners[scan_id] != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        queue = subscribe(scan_id)
+        try:
+            yield format_sse("connected", {"scan_id": scan_id})
+            while True:
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=30)
+                    yield format_sse(msg["event"], msg["data"])
+                except asyncio.TimeoutError:
+                    yield SSE_KEEPALIVE
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            unsubscribe(scan_id, queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/api/scan/{scan_id}/fp_review/progress")
 async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) -> dict:
     """Agent reports which vulnerability is currently being reviewed."""
@@ -907,6 +1108,11 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
         current_vuln_index=body.vuln_index,
         processed=body.processed,
     )
+    from backend.sse import publish
+    publish(scan_id, "fp_review_progress", {
+        "review_id": body.review_id, "vuln_index": body.vuln_index,
+        "processed": body.processed, "total": job.total,
+    })
     logger.debug("FP review progress for %s: vuln[%d]", scan_id, body.vuln_index)
     return {"ok": True}
 
@@ -936,6 +1142,11 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         created_at=now,
     )
     store.add_fp_review_result(body.review_id, result)
+    from backend.sse import publish
+    publish(scan_id, "fp_review_result", {
+        "review_id": body.review_id, "vuln_index": body.vuln_index,
+        "verdict": body.verdict, "severity": severity, "reason": body.reason,
+    })
     logger.debug("FP review result for %s vuln[%d]: %s", scan_id, body.vuln_index, body.verdict)
     return {"ok": True}
 
@@ -955,6 +1166,11 @@ async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dic
         clear_current_vuln_index=True,
         error_message=body.error_message,
     )
+    from backend.sse import publish
+    publish(scan_id, "fp_review_finish", {
+        "review_id": body.review_id, "status": body.status,
+        "error_message": body.error_message,
+    })
     logger.info("FP review %s finished with status %s", body.review_id, body.status)
     return {"ok": True}
 

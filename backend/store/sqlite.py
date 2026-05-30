@@ -621,6 +621,98 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
             return next_idx
 
+    def upsert_incomplete_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
+        """Replace an existing timeout/no-result row for this candidate, else append."""
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            cur = self._conn.execute(
+                """\
+                SELECT idx
+                FROM vulnerabilities
+                WHERE scan_id = ?
+                  AND file = ?
+                  AND line = ?
+                  AND function = ?
+                  AND vuln_type = ?
+                  AND COALESCE(user_verdict, '') = ''
+                  AND COALESCE(ai_verdict, '') IN ('timeout', 'no_result')
+                ORDER BY idx ASC
+                LIMIT 1
+                """,
+                (scan_id, vuln.file, vuln.line, vuln.function, vuln.vuln_type),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                idx = int(row["idx"])
+                self._conn.execute(
+                    """\
+                    UPDATE vulnerabilities
+                    SET severity = ?,
+                        description = ?,
+                        ai_analysis = ?,
+                        confirmed = ?,
+                        ai_verdict = ?,
+                        user_verdict = NULL,
+                        user_verdict_reason = NULL,
+                        ticket_submitted = 0,
+                        ticket_id = '',
+                        function_source = ?,
+                        function_start_line = ?
+                    WHERE scan_id = ? AND idx = ?
+                    """,
+                    (
+                        vuln.severity,
+                        vuln.description,
+                        vuln.ai_analysis,
+                        1 if vuln.confirmed else 0,
+                        vuln.ai_verdict,
+                        vuln.function_source,
+                        vuln.function_start_line,
+                        scan_id,
+                        idx,
+                    ),
+                )
+                self._conn.commit()
+                return idx
+
+            cur = self._conn.execute(
+                "SELECT COALESCE(MAX(idx), -1) FROM vulnerabilities WHERE scan_id = ?",
+                (scan_id,),
+            )
+            next_idx = cur.fetchone()[0] + 1
+            self._conn.execute(
+                """\
+                INSERT INTO vulnerabilities
+                    (scan_id, idx, file, line, function, vuln_type,
+                     severity, description, ai_analysis, confirmed,
+                     ai_verdict, user_verdict, user_verdict_reason,
+                     ticket_submitted, ticket_id,
+                     function_source, function_start_line)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    next_idx,
+                    vuln.file,
+                    vuln.line,
+                    vuln.function,
+                    vuln.vuln_type,
+                    vuln.severity,
+                    vuln.description,
+                    vuln.ai_analysis,
+                    1 if vuln.confirmed else 0,
+                    vuln.ai_verdict,
+                    vuln.user_verdict,
+                    vuln.user_verdict_reason,
+                    1 if vuln.ticket_submitted else 0,
+                    vuln.ticket_id if vuln.ticket_submitted else "",
+                    vuln.function_source,
+                    vuln.function_start_line,
+                ),
+            )
+            self._conn.commit()
+            return next_idx
+
     def update_vulnerability(
         self,
         scan_id: str,
@@ -801,6 +893,21 @@ class SqliteScanStore(ScanStoreBase):
             (scan_id,),
         )
         return {(r[0], r[1], r[2], r[3]) for r in cur.fetchall()}
+
+    def remove_processed_keys(
+        self, scan_id: str, keys: list[tuple[str, int, str, str]]
+    ) -> None:
+        if not keys:
+            return
+        with self._lock:
+            self._conn.executemany(
+                """\
+                DELETE FROM processed_keys
+                WHERE scan_id = ? AND file = ? AND line = ? AND function = ? AND vuln_type = ?
+                """,
+                [(scan_id, *key) for key in keys],
+            )
+            self._conn.commit()
 
     # -- Feedback entries --
 

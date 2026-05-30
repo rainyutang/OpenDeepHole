@@ -409,3 +409,40 @@ async def delete_public_feedback(
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
     return await feedback_api.delete_feedback(feedback_id, current_user)
+
+
+@router.get("/api/public/scans/{scan_id}/events")
+async def public_scan_events_sse(scan_id: str, token: str = Query("")) -> Response:
+    """SSE stream for public scan real-time status updates."""
+    import asyncio
+    from typing import AsyncGenerator
+
+    from fastapi.responses import StreamingResponse
+
+    from backend.sse import subscribe, unsubscribe, format_sse, SSE_KEEPALIVE
+
+    _public_user_for_scan(scan_id, token)
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        queue = subscribe(scan_id)
+        try:
+            yield format_sse("connected", {"scan_id": scan_id})
+            while True:
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=30)
+                    yield format_sse(msg["event"], msg["data"])
+                except asyncio.TimeoutError:
+                    yield SSE_KEEPALIVE
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            unsubscribe(scan_id, queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

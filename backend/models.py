@@ -100,6 +100,9 @@ class CheckerInfo(BaseModel):
     category_label: str = "非法内存使用"
     modified_at: str = ""
     user_created: bool = False
+    created_by_user_id: str = ""
+    creator_username: str = ""
+    can_delete: bool = False
     result_mode: str = "vulnerabilities"
     timeout_seconds: int | None = None
 
@@ -117,6 +120,9 @@ class CheckerCatalogItem(BaseModel):
     introduction: str = ""
     introduction_source: str = ""
     user_created: bool = False
+    created_by_user_id: str = ""
+    creator_username: str = ""
+    can_delete: bool = False
     result_mode: str = "vulnerabilities"
     timeout_seconds: int | None = None
 
@@ -129,6 +135,7 @@ class SkillDraft(BaseModel):
 
 class SkillCreateRequest(BaseModel):
     agent_id: str = ""
+    skill_id: str
     name: str
     description: str
     input: str
@@ -138,6 +145,7 @@ class SkillCreateRequest(BaseModel):
 class SkillCreateJob(BaseModel):
     job_id: str
     status: str
+    skill_id: str = ""
     name: str
     description: str
     input: str = ""
@@ -296,6 +304,7 @@ class ScanStatus(BaseModel):
     current_candidate: Candidate | None = None
     error_message: str | None = None
     feedback_ids: list[str] = []
+    retryable_candidates_count: int = 0
 
     # 静态分析进度（按文件计）
     static_total_files: int = 0
@@ -409,6 +418,7 @@ class ScanSummary(BaseModel):
     processed_candidates: int
     vulnerability_count: int
     human_confirmed_count: int = 0
+    retryable_candidates_count: int = 0
     scan_items: list[str]
     user_id: str = ""
     username: str = ""

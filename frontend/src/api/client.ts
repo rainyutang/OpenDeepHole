@@ -121,6 +121,7 @@ export async function getCheckerCatalog(): Promise<CheckerCatalogItem[]> {
 
 export async function createSkill(body: {
   agent_id?: string;
+  skill_id: string;
   name: string;
   description: string;
   input: string;
@@ -128,6 +129,10 @@ export async function createSkill(body: {
 }): Promise<SkillCreateJob> {
   const { data } = await api.post<SkillCreateJob>("/api/skills/create", body);
   return data;
+}
+
+export async function deleteSkill(skillId: string): Promise<void> {
+  await api.delete(`/api/skills/${skillId}`);
 }
 
 export async function getSkillCreateJob(jobId: string): Promise<SkillCreateJob> {
@@ -425,6 +430,11 @@ export async function resumeScan(scanId: string): Promise<ScanStartResponse> {
   return data;
 }
 
+export async function retryIncompleteScan(scanId: string): Promise<ScanStartResponse> {
+  const { data } = await api.post<ScanStartResponse>(`/api/scan/${scanId}/retry-incomplete`);
+  return data;
+}
+
 export async function deleteScan(scanId: string): Promise<void> {
   await api.delete(`/api/scan/${scanId}`);
 }
@@ -452,6 +462,15 @@ export async function testAgentConfig(agentId: string, config: AgentRemoteConfig
 }
 
 // --- FP Review ---
+
+export function scanSSEUrl(scanId: string): string {
+  const base = window.location.origin;
+  if (isPublicScan(scanId) && publicScanAccess) {
+    return `${base}/api/public/scans/${scanId}/events?token=${encodeURIComponent(publicScanAccess.token)}`;
+  }
+  const token = localStorage.getItem("auth_token") || "";
+  return `${base}/api/scan/${scanId}/events?token=${encodeURIComponent(token)}`;
+}
 
 export async function triggerFpReview(scanId: string): Promise<{ ok: boolean; review_id: string }> {
   if (isPublicScan(scanId)) {

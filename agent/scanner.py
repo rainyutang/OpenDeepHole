@@ -359,6 +359,9 @@ async def run_scan(
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
     is_resume: bool = False,
+    retry_candidates: list[dict] | None = None,
+    retry_total_candidates: int | None = None,
+    retry_processed_offset: int = 0,
 ) -> None:
     """Orchestrate the full local pipeline: index → static analysis → AI audit → report.
 
@@ -419,7 +422,8 @@ async def run_scan(
         db = None
         db_path = index_store.db_path(project_path)
         # Only need the DB open if static analysis will run (no cached candidates yet)
-        need_db_open = not candidates_cache_path.exists()
+        retry_mode = retry_candidates is not None
+        need_db_open = not candidates_cache_path.exists() and not retry_mode
 
         def _db_is_complete(path: Path) -> bool:
             """Return True only if the DB was fully built."""
@@ -569,7 +573,23 @@ async def run_scan(
         # (written by a previous run of this scan_id).  DB existence alone does
         # NOT skip this phase.
         candidates: list[Candidate] = []
-        if candidates_cache_path.exists():
+        if retry_mode:
+            candidates = [
+                _normalize_candidate_for_project(Candidate(**d), project_path, code_scan_path)
+                for d in (retry_candidates or [])
+            ]
+            candidates = [
+                c for c in candidates
+                if _candidate_in_scan_scope(c, project_path, code_scan_path)
+            ]
+            total = retry_total_candidates or len(candidates)
+            await reporter.send_static_progress(scan_id, 0, 0, done=True)
+            await emit(
+                "static_analysis",
+                f"续扫 {len(candidates)} 个未完成候选点",
+                candidate_index=total,
+            )
+        elif candidates_cache_path.exists():
             await emit("static_analysis", "从缓存加载静态分析结果...")
             cached = json.loads(candidates_cache_path.read_text(encoding="utf-8"))
             candidates = [
@@ -668,7 +688,7 @@ async def run_scan(
 
         # --- Phase 6: Load already-processed keys (resume support) ---
         processed_keys: set[tuple[str, int, str, str]] = set()
-        if is_resume:
+        if is_resume and not retry_mode:
             processed_keys = await reporter.get_processed_keys(scan_id)
             if processed_keys:
                 await emit("init", f"Resume: skipping {len(processed_keys)} already-processed candidates")
@@ -679,10 +699,11 @@ async def run_scan(
             if _candidate_key(c) not in processed_keys
         ]
         remaining = _order_candidates_for_audit(remaining, checker_names or list(registry.keys()))
-        already_done = total - len(remaining)
+        already_done = retry_processed_offset if retry_mode else total - len(remaining)
 
         # --- Phase 7: AI audit ---
         vulnerabilities: list[Vulnerability] = []
+        processed_this_run = 0
         await emit("auditing", f"Starting AI audit of {len(remaining)} candidate(s)...")
         if remaining:
             await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
@@ -749,6 +770,7 @@ async def run_scan(
                         await reporter.report_processed_key(
                             scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
                         )
+                        processed_this_run += 1
                         continue
                     else:
                         from backend.opencode.runner import run_project_audit
@@ -812,6 +834,7 @@ async def run_scan(
                 await reporter.report_processed_key(
                     scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
                 )
+                processed_this_run += 1
                 continue
 
             if vuln is None and not is_project_level_candidate(candidate):
@@ -845,11 +868,12 @@ async def run_scan(
             await reporter.report_processed_key(
                 scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
             )
+            processed_this_run += 1
 
         # --- Phase 8: Report results ---
         if cancelled:
             await reporter.finish_scan(
-                scan_id, [], "cancelled", total, already_done + len(vulnerabilities)
+                scan_id, [], "cancelled", total, already_done + processed_this_run
             )
             # Do NOT delete scan_dir on cancel — needed for resume
             return

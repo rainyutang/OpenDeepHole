@@ -672,6 +672,15 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
     if progress_kwargs:
         store.update_scan_progress(scan_id, **progress_kwargs)
 
+    from backend.sse import publish
+    publish(scan_id, "scan_status", {
+        "status": scan.status if scan else None,
+        "progress": scan.progress if scan else None,
+        "total_candidates": scan.total_candidates if scan else None,
+        "processed_candidates": scan.processed_candidates if scan else None,
+    })
+    publish(scan_id, "scan_event", {"event": event.model_dump()})
+
     return {"ok": True}
 
 
@@ -679,11 +688,20 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
 async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
     """Agent pushes a single vulnerability result immediately after auditing it."""
     store = get_scan_store()
-    store.add_vulnerability(scan_id, vuln)
+    vuln_index = store.upsert_incomplete_vulnerability(scan_id, vuln)
 
     scan = _ensure_running_scan(scan_id)
     if scan is not None:
-        scan.vulnerabilities.append(vuln)
+        if vuln_index < len(scan.vulnerabilities):
+            scan.vulnerabilities[vuln_index] = vuln
+        else:
+            scan.vulnerabilities.append(vuln)
+
+    from backend.sse import publish
+    publish(scan_id, "scan_vulnerability", {
+        "index": vuln_index,
+        "vulnerability": vuln.model_dump(),
+    })
 
     logger.debug(
         "Vulnerability reported for scan %s: %s %s:%d confirmed=%s",
@@ -786,6 +804,12 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish) -> dict:
         _running_scans.pop(scan_id, None)
         _scan_owners.pop(scan_id, None)
 
+    from backend.sse import publish
+    publish(scan_id, "scan_finish", {
+        "status": body.status,
+        "error_message": body.error_message,
+    })
+
     confirmed = sum(1 for v in body.vulnerabilities if v.confirmed)
     logger.info(
         "Agent finished scan %s: %s — %d confirmed / %d candidates",
@@ -865,6 +889,9 @@ async def agent_push_index_status(scan_id: str, body: _IndexStatusBody) -> dict:
     if scan is not None:
         scan.static_total_files = body.total_files
         scan.static_scanned_files = body.parsed_files
+
+    from backend.sse import publish
+    publish(scan_id, "index_status", body.model_dump())
 
     return {"ok": True}
 

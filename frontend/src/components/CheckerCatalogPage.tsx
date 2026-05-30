@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { createSkill, getCheckerCatalog, importSkill } from "../api/client";
+import { createSkill, deleteSkill, getCheckerCatalog, importSkill } from "../api/client";
 import type { CheckerCatalogItem, SkillCreateJob, SkillImportFile } from "../types";
 
 interface Props {
@@ -15,6 +15,7 @@ export default function CheckerCatalogPage({ onBack }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeChecker, setActiveChecker] = useState<string | null>(null);
+  const [deletingSkill, setDeletingSkill] = useState<string | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -22,7 +23,11 @@ export default function CheckerCatalogPage({ onBack }: Props) {
     try {
       const next = await getCheckerCatalog();
       setItems(next);
-      setActiveChecker((current) => current ?? next[0]?.name ?? null);
+      setActiveChecker((current) => (
+        current && next.some((item) => item.name === current)
+          ? current
+          : next[0]?.name ?? null
+      ));
     } catch (err: any) {
       setError(err.response?.data?.detail || "加载 SKILL 列表失败");
     } finally {
@@ -43,6 +48,22 @@ export default function CheckerCatalogPage({ onBack }: Props) {
     setMode("catalog");
     setActiveChecker(name);
     await refresh();
+  };
+
+  const handleDelete = async (item: CheckerCatalogItem) => {
+    if (!item.can_delete) return;
+    if (!window.confirm(`确定删除 SKILL「${item.label}」吗？此操作无法撤销。`)) return;
+    setDeletingSkill(item.name);
+    setError("");
+    try {
+      await deleteSkill(item.name);
+      setActiveChecker(null);
+      await refresh();
+    } catch (err: any) {
+      setError(err.response?.data?.detail || "删除 SKILL 失败");
+    } finally {
+      setDeletingSkill(null);
+    }
   };
 
   if (mode === "create") {
@@ -138,7 +159,11 @@ export default function CheckerCatalogPage({ onBack }: Props) {
 
             <div className="min-w-0">
               {selected ? (
-                <CheckerIntro item={selected} />
+                <CheckerIntro
+                  item={selected}
+                  deleting={deletingSkill === selected.name}
+                  onDelete={() => handleDelete(selected)}
+                />
               ) : (
                 <div className="border border-slate-800 rounded-lg p-8 text-center text-slate-500">
                   暂无可展示的 SKILL
@@ -160,6 +185,7 @@ function SkillCreatePage({
   onImported: (name: string) => Promise<void>;
 }) {
   const [name, setName] = useState("");
+  const [skillId, setSkillId] = useState("");
   const [description, setDescription] = useState("");
   const [input, setInput] = useState("");
   const [timeoutSeconds, setTimeoutSeconds] = useState(1200);
@@ -172,7 +198,7 @@ function SkillCreatePage({
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState("");
 
-  const dirty = !!(name || description || input || skillMd || scenariosMd || job || files.length);
+  const dirty = !!(skillId || name || description || input || skillMd || scenariosMd || job || files.length);
 
   const handleBack = () => {
     if (dirty && !window.confirm("输入将被清空，是否确认返回？")) return;
@@ -181,6 +207,7 @@ function SkillCreatePage({
 
   const handleReset = () => {
     setName("");
+    setSkillId("");
     setDescription("");
     setInput("");
     setTimeoutSeconds(1200);
@@ -194,14 +221,15 @@ function SkillCreatePage({
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setError("");
-    if (!name.trim() || !description.trim() || !input.trim()) {
-      setError("名称、描述和输入不能为空");
+    if (!skillId.trim() || !name.trim() || !description.trim() || !input.trim()) {
+      setError("标识、名称、描述和输入不能为空");
       return;
     }
 
     setSubmitting(true);
     try {
       const next = await createSkill({
+        skill_id: skillId.trim(),
         name: name.trim(),
         description: description.trim(),
         input: input.trim(),
@@ -274,7 +302,15 @@ function SkillCreatePage({
         <div className="max-w-7xl mx-auto grid grid-cols-1 xl:grid-cols-[34rem_1fr] gap-5">
           <form onSubmit={handleSubmit} className="space-y-4">
             <Panel title="基础信息">
-              <label className="block text-sm font-medium text-slate-300 mb-2">名称</label>
+              <label className="block text-sm font-medium text-slate-300 mb-2">标识</label>
+              <input
+                value={skillId}
+                onChange={(event) => setSkillId(event.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 font-mono text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                placeholder="例如：auth_bypass_audit"
+              />
+
+              <label className="block text-sm font-medium text-slate-300 mt-4 mb-2">名称</label>
               <input
                 value={name}
                 onChange={(event) => setName(event.target.value)}
@@ -530,6 +566,11 @@ function CheckerListItem({
         <span className="text-slate-500">
           最后修改：{formatModifiedAt(item.modified_at)}
         </span>
+        {item.user_created && (
+          <span className="text-slate-500">
+            创建者：{item.creator_username || "-"}
+          </span>
+        )}
       </div>
       <p className="text-xs text-slate-500 line-clamp-2 min-h-8">
         {item.description || "暂无描述"}
@@ -538,7 +579,15 @@ function CheckerListItem({
   );
 }
 
-function CheckerIntro({ item }: { item: CheckerCatalogItem }) {
+function CheckerIntro({
+  item,
+  deleting,
+  onDelete,
+}: {
+  item: CheckerCatalogItem;
+  deleting: boolean;
+  onDelete: () => void;
+}) {
   return (
     <div className="border border-slate-800 bg-slate-900/70 rounded-lg overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-800">
@@ -571,12 +620,26 @@ function CheckerIntro({ item }: { item: CheckerCatalogItem }) {
             <p className="text-sm text-slate-400 max-w-3xl">{item.description || "暂无描述"}</p>
           </div>
           <div className="flex flex-col items-start sm:items-end gap-2 text-xs text-slate-400">
+            {item.user_created && (
+              <span className="bg-slate-800 border border-slate-700 rounded px-2 py-1">
+                创建者：{item.creator_username || "-"}
+              </span>
+            )}
             <span className="bg-slate-800 border border-slate-700 rounded px-2 py-1">
               最后修改：{formatModifiedAt(item.modified_at)}
             </span>
             <span className="bg-slate-800 border border-slate-700 rounded px-2 py-1">
               {item.introduction_source || "checker.yaml"}
             </span>
+            {item.can_delete && (
+              <button
+                onClick={onDelete}
+                disabled={deleting}
+                className="rounded border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {deleting ? "删除中..." : "删除"}
+              </button>
+            )}
           </div>
         </div>
       </div>

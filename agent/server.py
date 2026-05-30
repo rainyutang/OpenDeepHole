@@ -49,6 +49,9 @@ async def _run(task, is_resume: bool) -> None:
             feedback_entries=task.feedback_entries,
             checker_packages=task.checker_packages,
             is_resume=is_resume,
+            retry_candidates=task.retry_candidates,
+            retry_total_candidates=task.retry_total_candidates,
+            retry_processed_offset=task.retry_processed_offset,
         )
     finally:
         _task_manager.remove(task.scan_id)
@@ -105,6 +108,9 @@ async def handle_resume(
     scan_name: Optional[str] = None,
     feedback_entries: Optional[list[dict]] = None,
     checker_packages: Optional[list[dict]] = None,
+    retry_candidates: Optional[list[dict]] = None,
+    retry_total_candidates: Optional[int] = None,
+    retry_processed_offset: int = 0,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
@@ -123,6 +129,9 @@ async def handle_resume(
             scan_name=scan_name or "",
             feedback_entries=feedback_entries,
             checker_packages=checker_packages,
+            retry_candidates=retry_candidates,
+            retry_total_candidates=retry_total_candidates,
+            retry_processed_offset=retry_processed_offset,
         )
     else:
         if project_path:
@@ -139,6 +148,9 @@ async def handle_resume(
             task.feedback_entries = feedback_entries
         if checker_packages is not None:
             task.checker_packages = checker_packages
+        task.retry_candidates = retry_candidates
+        task.retry_total_candidates = retry_total_candidates
+        task.retry_processed_offset = retry_processed_offset
 
     if task.asyncio_task and not task.asyncio_task.done():
         task.asyncio_task.cancel()
