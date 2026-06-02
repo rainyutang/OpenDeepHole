@@ -331,6 +331,9 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --min-candida
 # 输出 JSON，便于在脚本或 CI 中断言
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --json
 
+# 直接写入格式化 UTF-8 JSON 文件，中文 description 不会被转义成 \uXXXX
+PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --json-output /tmp/mycheck-candidates.json
+
 # 精确断言候选点数量
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-candidates 3
 
@@ -338,7 +341,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-cand
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --audit --audit-limit 1 --config agent.yaml
 ```
 
-本地测试命令不依赖后端、Web UI 或在线 Agent。默认会在被测项目目录下重建 `code_index.db`，与 Agent 扫描时的索引位置一致；如只想把索引写到临时位置，可加 `--index-db /tmp/mycheck-code_index.db`。代码索引同样需要本机已安装 Universal Ctags。
+本地测试命令不依赖后端、Web UI 或在线 Agent。默认会在被测项目目录下重建 `code_index.db`，与 Agent 扫描时的索引位置一致；如只想把索引写到临时位置，可加 `--index-db /tmp/mycheck-code_index.db`。`--json-output` 会直接生成缩进格式化的 UTF-8 JSON，避免后续 `json.tool` 把中文转义。代码索引同样需要本机已安装 Universal Ctags。
 
 开发阶段即使 `checker.yaml` 中设置了 `enabled: false`，本地测试命令也会临时启用该 checker 进行自测，并输出提示；线上扫描入口仍会遵循 `enabled` 和 `visibility` 配置。`--audit` 会实际调用模型或 opencode，请先确认 `agent.yaml` 配置可用，并用 `--audit-limit` 控制成本。
 
