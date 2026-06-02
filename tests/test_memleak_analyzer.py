@@ -2,6 +2,8 @@ from pathlib import Path
 
 from checkers.memleak.analyzer import Analyzer
 
+MEMLEAK_CASES_DIR = Path(__file__).parent / "test_data" / "memleak_cases"
+
 
 def _write_source(tmp_path: Path, content: str) -> None:
     (tmp_path / "sample.c").write_text(content, encoding="utf-8")
@@ -68,3 +70,20 @@ void second(int flag) {
     assert len(candidates) == 2
     assert [candidate.function for candidate in candidates] == ["first", "second"]
     assert all("发现 1 个疑似内存泄漏点" in c.description for c in candidates)
+
+
+def test_memleak_path_sensitive_cases_use_single_auditable_c_file() -> None:
+    candidates = list(Analyzer().find_candidates(MEMLEAK_CASES_DIR))
+
+    by_function = {candidate.function: candidate for candidate in candidates}
+
+    assert set(by_function) == {
+        "report_return_leak",
+        "report_branch_leak",
+        "report_continue_leak",
+        "report_partial_multi",
+    }
+    assert "异常分支" in by_function["report_return_leak"].description
+    assert "异常分支" in by_function["report_branch_leak"].description
+    assert "循环中 continue 前未释放" in by_function["report_continue_leak"].description
+    assert "q" in by_function["report_partial_multi"].description

@@ -59,7 +59,7 @@ checkers/<name>/
 | `npd` | 空指针解引用 (NPD) | opencode | 有（tree-sitter AST 分析） |
 | `oob` | 数组/缓冲区越界 (OOB) | opencode | 有 |
 | `safe_mem_oob` | 安全内存函数越界 (SAFE_MEM_OOB) | opencode | 有（semgrep 高风险规则） |
-| `memleak` | 异常分支内存泄漏 (MEMLEAK) | api | 有（自定义解析器） |
+| `memleak` | 异常分支内存泄漏 (MEMLEAK) | opencode | 有（tree-sitter 路径分析） |
 | `intoverflow` | 整数翻转/溢出 (INTOVFL) | opencode | 有（多阶段追踪） |
 | `sensitive_clear` | 敏感信息未清零 (SENSITIVE_CLEAR) | opencode | 有 |
 | `resleak` | 全类型资源泄露 (RESLEAK) | opencode | 有 |
@@ -459,7 +459,7 @@ def find_candidates(self, project_path: Path, db=None) -> list[Candidate]:
 - Generator 模式适合耗时较长的分析器，可让 LLM 提前开始处理已发现的候选项
 - `on_file_progress` 回调用于前端进度条显示，建议在循环中定期调用
 - `description` 字段尽可能详细，它会作为 prompt 的一部分传递给 AI
-- `mode: api` 的 checker 使用 `prompt.txt` 而非 `SKILL.md`，适用于无需 MCP 工具的场景
+- `mode: api` 的 checker 使用 `prompt.txt` 而非 `SKILL.md`，适用于无需 MCP 工具的场景；需要 MCP 辅助复核的 checker 应使用 `mode: opencode`
 - 返回空列表是合法的，表示未找到候选点
 
 ### 服务端 config.yaml
