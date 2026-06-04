@@ -41,6 +41,21 @@ class FpReviewStoreTests(unittest.TestCase):
             self.assertEqual(results[1].severity, "high")
             self.assertEqual(results[1].vulnerability_report, "# report\n\ncall chain")
 
+    def test_get_fp_review_by_scan_breaks_created_at_ties_by_insert_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            timestamp = "2026-01-01T00:00:00+00:00"
+            store.create_fp_review_job("old", "scan-1", 1, timestamp)
+            store.update_fp_review_job("old", status="complete")
+            store.create_fp_review_job("new", "scan-1", 2, timestamp)
+            store.update_fp_review_job("new", status="running")
+
+            job = store.get_fp_review_by_scan("scan-1")
+
+            self.assertIsNotNone(job)
+            self.assertEqual(job.review_id, "new")
+            self.assertEqual(job.status, FpReviewStatus.RUNNING)
+
     def test_upserts_stage_outputs_and_attaches_to_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")

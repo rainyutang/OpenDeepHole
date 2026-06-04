@@ -236,6 +236,9 @@ class FpReviewOrderTests(unittest.TestCase):
                 )
 
             self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "running")
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["processed"], 0)
             runtime_update.assert_called_once_with("http://server.example")
             command = send.await_args.args[1]
             self.assertEqual(command["type"], "fp_review")

@@ -109,7 +109,29 @@ async function refreshFullState(
   }
   try {
     const job = await getFpReview(scanId);
-    setFpReview(job);
+    // Merge with existing state to preserve in-progress stage_outputs
+    // that arrived via SSE but are not yet part of a completed result.
+    setFpReview((prev) => {
+      if (!prev) return job;
+      if (prev.review_id !== job.review_id) return job;
+      const mergedResults = job.results.map((r) => {
+        const existing = prev.results.find((p) => p.vuln_index === r.vuln_index);
+        if (existing) {
+          return {
+            ...r,
+            stage_outputs: { ...(existing.stage_outputs ?? {}), ...(r.stage_outputs ?? {}) },
+          };
+        }
+        return r;
+      });
+      // Keep entries that only exist locally (in-progress, not yet in DB).
+      const inProgressOnly = prev.results.filter(
+        (p) =>
+          !job.results.some((r) => r.vuln_index === p.vuln_index) &&
+          Object.keys(p.stage_outputs ?? {}).length > 0,
+      );
+      return { ...job, results: [...mergedResults, ...inProgressOnly] };
+    });
   } catch {
     // 404 = no review yet
   }

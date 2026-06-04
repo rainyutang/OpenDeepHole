@@ -142,15 +142,20 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       });
     },
     onFpReviewProgress: (data) => {
-      setFpReview((prev) =>
-        prev
-          ? { ...prev, processed: data.processed, current_vuln_index: data.vuln_index, total: data.total }
-          : prev,
-      );
+      setFpReview((prev) => {
+        if (!prev || prev.review_id !== data.review_id) return prev;
+        return {
+          ...prev,
+          status: "running",
+          processed: data.processed,
+          current_vuln_index: data.vuln_index,
+          total: data.total,
+        };
+      });
     },
     onFpReviewStageOutput: (data) => {
       setFpReview((prev) => {
-        if (!prev) return prev;
+        if (!prev || prev.review_id !== data.review_id) return prev;
         const results = [...prev.results];
         const existingIndex = results.findIndex((result) => result.vuln_index === data.vuln_index);
         if (existingIndex >= 0) {
@@ -173,12 +178,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             created_at: new Date().toISOString(),
           });
         }
-        return { ...prev, results };
+        return { ...prev, status: "running", results };
       });
     },
     onFpReviewResult: (data) => {
       setFpReview((prev) => {
-        if (!prev) return prev;
+        if (!prev || prev.review_id !== data.review_id) return prev;
         const existing = prev.results.find((result) => result.vuln_index === data.vuln_index);
         const newResult = {
           vuln_index: data.vuln_index,
@@ -194,6 +199,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         };
         return {
           ...prev,
+          status: "running",
           results: [
             ...prev.results.filter((result) => result.vuln_index !== data.vuln_index),
             newResult,
@@ -202,11 +208,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       });
     },
     onFpReviewFinish: (data) => {
-      setFpReview((prev) =>
-        prev
-          ? { ...prev, status: data.status, error_message: data.error_message, current_vuln_index: null }
-          : prev,
-      );
+      setFpReview((prev) => {
+        if (!prev || prev.review_id !== data.review_id) return prev;
+        return { ...prev, status: data.status, error_message: data.error_message, current_vuln_index: null };
+      });
     },
     onIndexStatus: (data) => {
       setIndexStatus(data);
@@ -224,9 +229,18 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const handleFpReview = async () => {
     setFpReviewLoading(true);
     try {
-      await triggerFpReview(scanId);
-      const job = await getFpReview(scanId);
-      setFpReview(job);
+      const started = await triggerFpReview(scanId);
+      setFpReview({
+        review_id: started.review_id,
+        scan_id: scanId,
+        status: started.status ?? "running",
+        total: started.total ?? 0,
+        processed: started.processed ?? 0,
+        current_vuln_index: null,
+        results: [],
+        error_message: null,
+        created_at: new Date().toISOString(),
+      });
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail

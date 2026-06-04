@@ -1345,7 +1345,13 @@ class SqliteScanStore(ScanStoreBase):
         with self._lock:
             self._conn.row_factory = sqlite3.Row
             cur = self._conn.execute(
-                "SELECT * FROM fp_review_jobs WHERE scan_id = ? ORDER BY created_at DESC LIMIT 1",
+                """\
+                SELECT *
+                FROM fp_review_jobs
+                WHERE scan_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
                 (scan_id,),
             )
             row = cur.fetchone()

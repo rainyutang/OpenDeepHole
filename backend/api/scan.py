@@ -1100,7 +1100,13 @@ async def trigger_fp_review(
         "review_id": review_id, "status": "running", "total": len(confirmed),
     })
     logger.info("FP review %s triggered for scan %s (%d candidates)", review_id, scan_id, len(confirmed))
-    return {"ok": True, "review_id": review_id}
+    return {
+        "ok": True,
+        "review_id": review_id,
+        "status": "running",
+        "total": len(confirmed),
+        "processed": 0,
+    }
 
 
 @router.post("/api/scan/{scan_id}/fp_review/stop")

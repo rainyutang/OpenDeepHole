@@ -504,7 +504,13 @@ export function scanSSEUrl(scanId: string): string {
   return `${base}/api/scan/${scanId}/events?token=${encodeURIComponent(token)}`;
 }
 
-export async function triggerFpReview(scanId: string): Promise<{ ok: boolean; review_id: string }> {
+export async function triggerFpReview(scanId: string): Promise<{
+  ok: boolean;
+  review_id: string;
+  status?: FpReviewJob["status"];
+  total?: number;
+  processed?: number;
+}> {
   if (isPublicScan(scanId)) {
     const { data } = await api.post(publicScanPath("/fp_review"), null, { params: publicParams() });
     return data;
