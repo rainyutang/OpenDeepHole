@@ -118,7 +118,7 @@ def test_runtime_writable_paths_include_windows_slash_variants() -> None:
     config = _with_writable_paths({}, [path])
     edit = config["permission"]["edit"]
 
-    assert edit["*"] == "deny"
+    assert "*" not in edit
     assert edit["C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1/**"] == "allow"
     assert edit[r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1/**"] == "allow"
 

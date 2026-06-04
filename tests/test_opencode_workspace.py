@@ -35,7 +35,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         config = build_opencode_config("http://127.0.0.1:9123/mcp", writable_paths=[str(path)])
         edit = config["permission"]["edit"]
 
-        self.assertEqual(edit["*"], "deny")
+        self.assertNotIn("*", edit)
         self.assertEqual(edit["C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1/**"], "allow")
         self.assertEqual(edit[r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1/**"], "allow")
 

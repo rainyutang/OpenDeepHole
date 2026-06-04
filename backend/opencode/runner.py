@@ -536,7 +536,7 @@ def _with_writable_paths(config: dict, writable_paths: list[Path] | None) -> dic
 
     next_config = json.loads(json.dumps(config))
     permission = next_config.setdefault("permission", {})
-    edit = {"*": "deny"}
+    edit = {}
     for path in writable_paths:
         raw = str(path)
         try:
