@@ -50,6 +50,24 @@ class _FpStageResult:
     markdown: str = ""
 
 
+class _FpStageFailure(RuntimeError):
+    def __init__(
+        self,
+        *,
+        stage: str,
+        result_id: str,
+        artifact_path: Path,
+        log_path: Path,
+        reason: str,
+    ) -> None:
+        super().__init__(reason)
+        self.stage = stage
+        self.result_id = result_id
+        self.artifact_path = artifact_path
+        self.log_path = log_path
+        self.reason = reason
+
+
 def load_local_feedback() -> dict:
     """Load the local FP feedback file (keyed by vuln_type)."""
     try:
@@ -190,6 +208,15 @@ async def run_fp_review(
         from backend.models import Candidate
 
         fp_cli = effective_fp_review_cli_config(config)
+        await emit(
+            "fp_review",
+            "FP review CLI: "
+            f"tool={getattr(fp_cli, 'tool', '') or 'opencode'} "
+            f"executable={getattr(fp_cli, 'executable', '') or '(default)'} "
+            f"model={getattr(fp_cli, 'model', '') or '(default)'} "
+            f"timeout={getattr(fp_cli, 'timeout', '')} "
+            f"max_retries={getattr(fp_cli, 'max_retries', '')}",
+        )
 
         for position, vuln in enumerate(vulnerabilities):
             if cancel_event is not None and cancel_event.is_set():
@@ -223,6 +250,10 @@ async def run_fp_review(
                 )
                 artifact_dir = review_dir / "artifacts" / str(vuln_index)
                 artifact_dir.mkdir(parents=True, exist_ok=True)
+                # Write ai_analysis to file so the prompt references a path
+                # instead of inlining the (potentially very long) analysis text.
+                ai_analysis_path = artifact_dir / "original-ai-analysis.txt"
+                ai_analysis_path.write_text(vuln.get("ai_analysis", ""), encoding="utf-8")
                 stage_outputs: dict[str, str] = {}
 
                 prove_bug = await _run_fp_review_stage(
@@ -240,6 +271,7 @@ async def run_fp_review(
                     cli_config=fp_cli,
                     project=project,
                     candidate=fake_candidate,
+                    ai_analysis_path=ai_analysis_path,
                 )
                 if cancel_event is not None and cancel_event.is_set():
                     await emit("fp_review", f"FP review cancelled after reviewing {position} items")
@@ -266,6 +298,7 @@ async def run_fp_review(
                     project=project,
                     candidate=fake_candidate,
                     prove_bug=prove_bug,
+                    ai_analysis_path=ai_analysis_path,
                 )
                 if cancel_event is not None and cancel_event.is_set():
                     await emit("fp_review", f"FP review cancelled after reviewing {position} items")
@@ -295,6 +328,7 @@ async def run_fp_review(
                     candidate=fake_candidate,
                     prove_bug=prove_bug,
                     prove_fp=prove_fp,
+                    ai_analysis_path=ai_analysis_path,
                 )
                 if cancel_event is not None and cancel_event.is_set():
                     await emit("fp_review", f"FP review cancelled after reviewing {position} items")
@@ -327,6 +361,16 @@ async def run_fp_review(
                 await emit("fp_review", f"FP review cancelled after reviewing {position} items")
                 await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
                 return
+            except _FpStageFailure as exc:
+                markdown = _stage_failure_markdown(exc)
+                await reporter.push_fp_stage_output(
+                    scan_id,
+                    review_id,
+                    vuln_index,
+                    exc.stage,
+                    markdown,
+                )
+                await emit("fp_review", f"[{position + 1}] {exc.stage} failed: {exc.reason}")
             except Exception as exc:
                 await emit("fp_review", f"[{position + 1}] Review error: {exc}")
 
@@ -391,49 +435,93 @@ async def _run_fp_review_stage(
     candidate,
     prove_bug: _FpStageResult | None = None,
     prove_fp: _FpStageResult | None = None,
+    ai_analysis_path: Path | None = None,
 ) -> _FpStageResult | None:
     from backend.opencode.runner import _invoke_opencode, _read_result
 
-    result_id = uuid4().hex
-    prompt = _build_fp_review_prompt(
-        stage=stage,
-        vuln=vuln,
-        project_id_for_prompt=project_id_for_prompt,
-        result_id=result_id,
-        review_id=review_id,
-        vuln_index=vuln_index,
-        output_markdown_path=output_markdown_path,
-        input_markdown_paths=input_markdown_paths or [],
-        prove_bug=prove_bug,
-        prove_fp=prove_fp,
-    )
-    log_path = review_dir / f"fp_{stage}_{result_id}.log"
+    max_retries = max(0, int(getattr(cli_config, "max_retries", 0) or 0))
+    last_failure: _FpStageFailure | None = None
 
-    await _invoke_opencode(
-        workspace,
-        prompt,
-        timeout,
-        log_path=log_path,
-        on_line=lambda line: print(f"  [fp_{stage}] {line}", flush=True),
-        cancel_event=cancel_event,
-        cli_config=cli_config,
-        project_dir=project,
-        writable_paths=[artifact_dir],
-    )
-    markdown = _read_stage_markdown(output_markdown_path)
-    result = _read_result(result_id, candidate)
-    if result is None:
-        return _FpStageResult(
+    for attempt in range(1, max_retries + 2):
+        result_id = uuid4().hex
+        prompt = _build_fp_review_prompt(
+            stage=stage,
+            vuln=vuln,
+            project_id_for_prompt=project_id_for_prompt,
             result_id=result_id,
-            result=None,
-            payload=_read_fp_result_payload(result_id),
-            markdown=markdown,
+            review_id=review_id,
+            vuln_index=vuln_index,
+            output_markdown_path=output_markdown_path,
+            input_markdown_paths=input_markdown_paths or [],
+            prove_bug=prove_bug,
+            prove_fp=prove_fp,
+            ai_analysis_path=ai_analysis_path,
         )
-    return _FpStageResult(
-        result_id=result_id,
-        result=result,
-        payload=_read_fp_result_payload(result_id),
-        markdown=markdown,
+        log_path = review_dir / f"fp_{stage}_{result_id}.log"
+
+        try:
+            try:
+                if output_markdown_path.exists():
+                    output_markdown_path.unlink()
+            except OSError:
+                pass
+            await _invoke_opencode(
+                workspace,
+                prompt,
+                timeout,
+                log_path=log_path,
+                on_line=lambda line: print(f"  [fp_{stage}] {line}", flush=True),
+                cancel_event=cancel_event,
+                cli_config=cli_config,
+                project_dir=project,
+                writable_paths=[artifact_dir],
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_failure = _FpStageFailure(
+                stage=stage,
+                result_id=result_id,
+                artifact_path=output_markdown_path,
+                log_path=log_path,
+                reason=f"CLI invocation failed on attempt {attempt}/{max_retries + 1}: {exc}",
+            )
+            continue
+
+        markdown = _read_stage_markdown(output_markdown_path)
+        result = _read_result(result_id, candidate)
+        missing: list[str] = []
+        if not markdown.strip():
+            missing.append("Markdown artifact")
+        if result is None:
+            missing.append("submit_result")
+        if not missing:
+            return _FpStageResult(
+                result_id=result_id,
+                result=result,
+                payload=_read_fp_result_payload(result_id),
+                markdown=markdown,
+            )
+
+        last_failure = _FpStageFailure(
+            stage=stage,
+            result_id=result_id,
+            artifact_path=output_markdown_path,
+            log_path=log_path,
+            reason=(
+                f"Missing {' and '.join(missing)} on attempt "
+                f"{attempt}/{max_retries + 1}"
+            ),
+        )
+
+    if last_failure is not None:
+        raise last_failure
+    raise _FpStageFailure(
+        stage=stage,
+        result_id="",
+        artifact_path=output_markdown_path,
+        log_path=review_dir,
+        reason="Stage did not run",
     )
 
 
@@ -449,9 +537,15 @@ def _build_fp_review_prompt(
     input_markdown_paths: list[Path] | None = None,
     prove_bug: _FpStageResult | None = None,
     prove_fp: _FpStageResult | None = None,
+    ai_analysis_path: Path | None = None,
 ) -> str:
     output_path = str(output_markdown_path.resolve()) if output_markdown_path else ""
     input_paths = [str(path.resolve()) for path in input_markdown_paths or []]
+    ai_analysis_ref = (
+        f"原始 AI 分析保存在文件 `{ai_analysis_path.resolve()}` 中，请自行读取。"
+        if ai_analysis_path
+        else f"原始 AI 分析：{vuln['ai_analysis']} "
+    )
     if stage == "prove_bug":
         prompt = (
             f"使用 `prove-bug` 技能，作为正方论证位于 "
@@ -460,7 +554,7 @@ def _build_fp_review_prompt(
             f"project_id 为 `{project_id_for_prompt}`。"
             f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
             f"原始描述：{vuln['description']} "
-            f"原始 AI 分析：{vuln['ai_analysis']} "
+            f"{ai_analysis_ref}"
             f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
             f"你的 result_id 是 `{result_id}`。"
             f"分析完成后，你**必须**使用此 result_id 调用 submit_result MCP 工具提交阶段结论。"
@@ -482,7 +576,7 @@ def _build_fp_review_prompt(
             f"project_id 为 `{project_id_for_prompt}`。"
             f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
             f"原始描述：{vuln['description']} "
-            f"原始 AI 分析：{vuln['ai_analysis']} "
+            f"{ai_analysis_ref}"
             f"正方阶段结构化摘要：{bug_summary} "
             f"你必须先读取正方 Markdown 文件 `{prove_bug_path}`，再进行反方论证。"
             f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
@@ -506,7 +600,7 @@ def _build_fp_review_prompt(
             f"project_id 为 `{project_id_for_prompt}`。"
             f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
             f"原始描述：{vuln['description']} "
-            f"原始 AI 分析：{vuln['ai_analysis']} "
+            f"{ai_analysis_ref}"
             f"正方阶段结构化摘要：{bug_summary} "
             f"反方阶段结构化摘要：{fp_summary} "
             f"你必须读取正方 Markdown 文件 `{bug_path}` 和反方 Markdown 文件 `{fp_path}`。"
@@ -663,6 +757,23 @@ def _stage_markdown_or_placeholder(stage: str, stage_result: _FpStageResult | No
         "本阶段未生成 Markdown 输出。\n\n"
         "## 状态\n\n"
         "阶段进程已结束，但未在指定 artifact 文件中写入内容。\n"
+    )
+
+
+def _stage_failure_markdown(exc: _FpStageFailure) -> str:
+    label = _FP_STAGE_LABELS.get(exc.stage, exc.stage)
+    return (
+        f"# {label}\n\n"
+        "本阶段未生成有效 Markdown 输出。\n\n"
+        "## 状态\n\n"
+        "阶段执行失败，后续依赖该 artifact 的 FP 复核阶段已跳过。\n\n"
+        "## 失败原因\n\n"
+        f"{exc.reason}\n\n"
+        "## 调试信息\n\n"
+        f"- stage: `{exc.stage}`\n"
+        f"- result_id: `{exc.result_id}`\n"
+        f"- artifact: `{exc.artifact_path}`\n"
+        f"- log: `{exc.log_path}`\n"
     )
 
 

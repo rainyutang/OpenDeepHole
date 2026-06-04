@@ -14,8 +14,11 @@ from backend.opencode.llm_api_runner import LLMApiUnavailableError
 from backend.opencode.runner import (
     _build_cli_command,
     _build_cli_env,
+    _cleanup_prompt_file,
+    _prompt_file_message,
     _prepare_cli_workspace,
     _select_cli_cwd,
+    _write_prompt_file,
     _terminate_process_tree,
     _wait_for_stream_exit_after_termination,
     run_audit,
@@ -52,6 +55,18 @@ def test_cli_command_builders_use_selected_tool(tmp_path: Path) -> None:
     assert nga[:3] == ["nga", "run", "--dir"]
     assert isolated_nga[:4] == ["nga", "run", "--dir", str(project_dir)]
     assert "--model" in nga
+
+
+def test_long_prompt_file_reference_is_passed_as_message(tmp_path: Path) -> None:
+    prompt_path = _write_prompt_file(tmp_path, "x" * 9000)
+    message = _prompt_file_message(prompt_path)
+    cmd = _build_cli_command("opencode", "opencode", tmp_path, message, "", project_dir=tmp_path)
+
+    assert prompt_path.read_text(encoding="utf-8") == "x" * 9000
+    assert cmd[-1] == message
+    assert str(prompt_path) in message
+    _cleanup_prompt_file(prompt_path)
+    assert not prompt_path.exists()
 
 
 def test_prepare_cli_workspace_creates_claude_and_gemini_skill_configs(tmp_path: Path) -> None:

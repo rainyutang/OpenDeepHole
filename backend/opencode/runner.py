@@ -713,6 +713,29 @@ def _build_cli_command(
     raise ValueError(f"Unsupported AI CLI tool: {tool}")
 
 
+def _write_prompt_file(runtime_dir: Path, prompt: str) -> Path:
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    path = runtime_dir / f"opencode_prompt_{uuid4().hex}.txt"
+    path.write_text(prompt, encoding="utf-8")
+    return path
+
+
+def _prompt_file_message(prompt_path: Path) -> str:
+    return (
+        "请读取并严格执行以下提示文件中的完整任务说明；不要只回复文件内容，"
+        f"必须按文件内要求完成分析、写入指定 artifact 并调用 MCP 工具：`{prompt_path.resolve()}`。"
+    )
+
+
+def _cleanup_prompt_file(prompt_file: Path | None) -> None:
+    if prompt_file is None:
+        return
+    try:
+        prompt_file.unlink()
+    except OSError:
+        pass
+
+
 def _build_cli_env(
     workspace: Path,
     tool: str,
@@ -839,11 +862,23 @@ async def _invoke_opencode(
     tool = _normalize_tool(cli_config)
     executable = _resolve_cli_executable(cli_config)
     model = str(_cfg_value(cli_config, "model", "") or "")
-    cmd = _build_cli_command(tool, executable, workspace, prompt, model, project_dir=project_dir)
+    cwd = _select_cli_cwd(workspace, tool, project_dir)
+    prompt_file: Path | None = None
+    # When the prompt is very long, pass a short file-reference message instead
+    # of the full command-line argument to avoid hitting the Windows
+    # CreateProcess 32767-character limit ([WinError 206]).
+    _PROMPT_CLI_LIMIT = 8000
+    prompt_arg = prompt
+    if len(prompt) > _PROMPT_CLI_LIMIT:
+        prompt_file = _write_prompt_file(cwd, prompt)
+        prompt_arg = _prompt_file_message(prompt_file)
+    cmd = _build_cli_command(
+        tool, executable, workspace, prompt_arg, model,
+        project_dir=project_dir,
+    )
 
     logger.debug("%s command: %s", tool, " ".join(shlex.quote(part) for part in cmd))
 
-    cwd = _select_cli_cwd(workspace, tool, project_dir)
     config_workspace = _prepare_cli_workspace(
         workspace,
         tool,
@@ -868,6 +903,7 @@ async def _invoke_opencode(
         proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -963,11 +999,15 @@ async def _invoke_opencode(
             timeout=timeout,
             started=started,
         )
+        _cleanup_prompt_file(prompt_file)
         if timed_out:
             raise asyncio.TimeoutError()
         return
 
-    await stream_future  # wait for thread to exit cleanly
+    try:
+        await stream_future  # wait for thread to exit cleanly
+    finally:
+        _cleanup_prompt_file(prompt_file)
 
     proc = proc_holder[0]
     if proc and proc.returncode not in (0, None):

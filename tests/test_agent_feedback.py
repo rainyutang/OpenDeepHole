@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import re
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -35,6 +36,12 @@ Crash.
 ## Evidence
 Checked `entry` and `parse`.
 """
+
+
+def _write_stage_artifact_from_prompt(prompt: str, content: str = "# Stage\n\nanalysis") -> None:
+    matches = re.findall(r"`([^`]+\.md)`", prompt)
+    if matches:
+        Path(matches[-1]).write_text(content, encoding="utf-8")
 
 
 class AgentFeedbackTests(unittest.TestCase):
@@ -109,6 +116,7 @@ class AgentFeedbackTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.results: list[tuple] = []
                 self.progress: list[tuple[int, int | None]] = []
+                self.stage_outputs: list[tuple[str, str]] = []
                 self.finished: tuple[str, str | None] | None = None
 
             async def send_event(self, scan_id, event) -> None:
@@ -131,7 +139,7 @@ class AgentFeedbackTests(unittest.TestCase):
 	                self.results.append((vuln_index, verdict, reason))
 
             async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown) -> None:
-                return None
+                self.stage_outputs.append((stage, markdown))
 
             async def finish_fp_review(self, scan_id, review_id, status, error_message=None) -> None:
                 self.finished = (status, error_message)
@@ -139,6 +147,12 @@ class AgentFeedbackTests(unittest.TestCase):
         async def _run() -> FakeReporter:
             reporter = FakeReporter()
             config = AgentConfig(opencode=OpenCodeConfig(timeout=1, max_retries=0))
+            invoke = AsyncMock()
+
+            async def invoke_side_effect(workspace, prompt, timeout, **kwargs):
+                _write_stage_artifact_from_prompt(prompt)
+
+            invoke.side_effect = invoke_side_effect
             with tempfile.TemporaryDirectory() as tmp:
                 workspace = Path(tmp) / "workspace"
                 with (
@@ -147,7 +161,7 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
                     patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
-                    patch("backend.opencode.runner._invoke_opencode", new=AsyncMock()),
+                    patch("backend.opencode.runner._invoke_opencode", new=invoke),
                     patch("backend.opencode.runner._read_result", return_value=None),
                 ):
                     await fp_reviewer.run_fp_review(
@@ -174,6 +188,9 @@ class AgentFeedbackTests(unittest.TestCase):
 
         reporter = asyncio.run(_run())
         self.assertEqual(reporter.results, [])
+        self.assertEqual(len(reporter.stage_outputs), 1)
+        self.assertEqual(reporter.stage_outputs[0][0], "prove_bug")
+        self.assertIn("Missing submit_result", reporter.stage_outputs[0][1])
         self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
         self.assertEqual(reporter.finished, ("complete", None))
 
@@ -223,6 +240,11 @@ class AgentFeedbackTests(unittest.TestCase):
                 confirmed=True,
             )
             invoke = AsyncMock()
+
+            async def invoke_side_effect(workspace, prompt, timeout, **kwargs):
+                _write_stage_artifact_from_prompt(prompt)
+
+            invoke.side_effect = invoke_side_effect
             with tempfile.TemporaryDirectory() as tmp:
                 workspace = Path(tmp) / "workspace"
                 with (
@@ -232,7 +254,7 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
-                    patch("backend.opencode.runner._read_result", side_effect=[prove_bug_result, None, None]),
+                    patch("backend.opencode.runner._read_result", side_effect=[prove_bug_result, prove_bug_result, None]),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -308,6 +330,11 @@ class AgentFeedbackTests(unittest.TestCase):
                 confirmed=False,
             )
             invoke = AsyncMock()
+
+            async def invoke_side_effect(workspace, prompt, timeout, **kwargs):
+                _write_stage_artifact_from_prompt(prompt)
+
+            invoke.side_effect = invoke_side_effect
             with tempfile.TemporaryDirectory() as tmp:
                 workspace = Path(tmp) / "workspace"
                 with (
