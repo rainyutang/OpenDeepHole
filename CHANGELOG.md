@@ -2,6 +2,7 @@
 
 ## 2026-06-02
 
+- **新增** 启用 `sensitive_clear` 检查项，敏感信息未清零规则进入扫描选择与运行时 registry
 - **修复** AI 去误报三阶段复核在长 prompt 场景下可能把空任务传给 CLI，导致阶段进程结束但未写入指定 Markdown artifact；长 prompt 现在改为文件引用方式传递
 - **修复** AI 去误报阶段缺失 Markdown artifact 或 `submit_result` 时不再继续推进后续阶段，会按 `fp_review_cli.max_retries` 重试并在页面展示明确失败原因和 artifact/log 路径
 - **修复** Windows Agent 上 OpenCode 写入 FP 复核 artifact 时因 `C:\...` 与 `C:/...` 路径分隔符不一致被权限规则误拒绝的问题
