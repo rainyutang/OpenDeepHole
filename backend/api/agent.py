@@ -660,6 +660,9 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
         if scan.status in (ScanItemStatus.PENDING, ScanItemStatus.ANALYZING):
             scan.status = ScanItemStatus.AUDITING
             progress_kwargs["status"] = ScanItemStatus.AUDITING
+        if not scan.static_analysis_done:
+            scan.static_analysis_done = True
+            progress_kwargs["static_analysis_done"] = True
         if event.candidate_index is not None:
             processed = event.candidate_index + 1
             if processed > scan.processed_candidates:
@@ -678,6 +681,9 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
         "progress": scan.progress if scan else None,
         "total_candidates": scan.total_candidates if scan else None,
         "processed_candidates": scan.processed_candidates if scan else None,
+        "static_total_files": scan.static_total_files if scan else None,
+        "static_scanned_files": scan.static_scanned_files if scan else None,
+        "static_analysis_done": scan.static_analysis_done if scan else None,
     })
     publish(scan_id, "scan_event", {"event": event.model_dump()})
 
@@ -911,18 +917,34 @@ class _StaticProgressBody(BaseModel):
 async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) -> dict:
     """Agent pushes static analysis progress (function/file counts)."""
     scan = _ensure_running_scan(scan_id)
+    status = None
     if scan is not None:
         scan.static_total_files = body.total
         scan.static_scanned_files = body.scanned
         scan.static_analysis_done = body.done
+        if body.done and scan.status in (ScanItemStatus.PENDING, ScanItemStatus.ANALYZING):
+            scan.status = ScanItemStatus.AUDITING
+            status = ScanItemStatus.AUDITING
 
     store = get_scan_store()
     store.update_scan_progress(
         scan_id,
+        status=status,
         static_total_files=body.total,
         static_scanned_files=body.scanned,
         static_analysis_done=body.done,
     )
+    if scan is not None:
+        from backend.sse import publish
+        publish(scan_id, "scan_status", {
+            "status": scan.status,
+            "progress": scan.progress,
+            "total_candidates": scan.total_candidates,
+            "processed_candidates": scan.processed_candidates,
+            "static_total_files": scan.static_total_files,
+            "static_scanned_files": scan.static_scanned_files,
+            "static_analysis_done": scan.static_analysis_done,
+        })
     return {"ok": True}
 
 

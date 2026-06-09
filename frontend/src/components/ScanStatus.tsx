@@ -105,6 +105,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         if (data.progress != null) patch.progress = data.progress;
         if (data.total_candidates != null) patch.total_candidates = data.total_candidates;
         if (data.processed_candidates != null) patch.processed_candidates = data.processed_candidates;
+        if (data.static_total_files != null) patch.static_total_files = data.static_total_files;
+        if (data.static_scanned_files != null) patch.static_scanned_files = data.static_scanned_files;
+        if (data.static_analysis_done != null) patch.static_analysis_done = data.static_analysis_done;
         return { ...prev, ...patch };
       });
     },

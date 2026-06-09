@@ -18,6 +18,9 @@ interface ScanStatusEvent {
   progress: number | null;
   total_candidates: number | null;
   processed_candidates: number | null;
+  static_total_files?: number | null;
+  static_scanned_files?: number | null;
+  static_analysis_done?: boolean | null;
 }
 
 interface ScanVulnerabilityEvent {

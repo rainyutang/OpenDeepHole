@@ -325,6 +325,71 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.total_candidates, 7)
             self.assertEqual(stored.status, ScanItemStatus.ANALYZING)
 
+    def test_auditing_event_marks_static_analysis_done_if_done_push_was_missed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.ANALYZING, total=3)
+            scan.static_total_files = 128
+            scan.static_scanned_files = 128
+            scan.static_analysis_done = False
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = scan
+
+            published: list[tuple[str, str, dict]] = []
+            event = ScanEvent.create("auditing", "[1/3] NPD a.c:1 — f", candidate_index=0)
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+            ):
+                asyncio.run(agent_api.agent_scan_event("scan-1", event))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.AUDITING)
+            self.assertTrue(stored.static_analysis_done)
+            status_events = [data for _scan_id, event_type, data in published if event_type == "scan_status"]
+            self.assertTrue(status_events)
+            self.assertTrue(status_events[-1]["static_analysis_done"])
+
+    def test_static_progress_done_moves_scan_to_auditing_and_publishes_static_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.ANALYZING)
+            scan.static_total_files = 128
+            scan.static_scanned_files = 128
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = scan
+
+            published: list[tuple[str, str, dict]] = []
+            body = agent_api._StaticProgressBody(scanned=0, total=0, done=True)
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+            ):
+                asyncio.run(agent_api.agent_push_static_progress("scan-1", body))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.AUDITING)
+            self.assertTrue(stored.static_analysis_done)
+            status_events = [data for _scan_id, event_type, data in published if event_type == "scan_status"]
+            self.assertTrue(status_events)
+            self.assertEqual(status_events[-1]["status"], ScanItemStatus.AUDITING)
+            self.assertTrue(status_events[-1]["static_analysis_done"])
+
+    def test_late_static_progress_done_does_not_reopen_completed_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.COMPLETE, total=2, processed=2)
+            scan.static_analysis_done = False
+            store.save_scan(scan, _meta())
+
+            body = agent_api._StaticProgressBody(scanned=0, total=0, done=True)
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                asyncio.run(agent_api.agent_push_static_progress("scan-1", body))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.COMPLETE)
+            self.assertTrue(stored.static_analysis_done)
+
     def test_processed_report_updates_progress_from_processed_key_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
