@@ -11,7 +11,7 @@ description: 分析单个 C/C++ 函数中的变量是否承载敏感信息，以
 
 ## 敏感信息范围
 
-重点关注但不限于：
+敏感信息范围仅包括以下几类；不在以下范围内的信息不作为本规则问题：
 
 - 认证凭据：password、passwd、passphrase、PIN、OTP、token、JWT、session id、cookie、ticket、credential、auth secret 等。
 - 密钥材料：对称密钥、非对称私钥、密钥片段、派生密钥结果、中间密钥材料、KDF/HKDF/PBKDF 输入输出、TLS/SSL secret 等。
