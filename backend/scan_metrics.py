@@ -3,10 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol, Sequence
 
-from backend.models import FpReviewResult, Vulnerability
+from backend.models import FpReviewResult
 
 FP_REVIEW_NO_RESULT_REASON = "Review incomplete"
+
+
+class VulnLike(Protocol):
+    """Minimal vulnerability fields needed for issue counting."""
+
+    vuln_type: str
+    ai_verdict: str | None
+    confirmed: bool
+    user_verdict: str | None
+
+
+@dataclass(frozen=True)
+class VulnStat:
+    """Lightweight per-vulnerability stats row (no large TEXT columns)."""
+
+    vuln_type: str
+    ai_verdict: str | None
+    confirmed: bool
+    user_verdict: str | None
 
 
 @dataclass(frozen=True)
@@ -22,7 +42,7 @@ class ScanIssueMetrics:
     accuracy: float | None = None
 
 
-def is_llm_issue(vuln: Vulnerability) -> bool:
+def is_llm_issue(vuln: VulnLike) -> bool:
     if vuln.ai_verdict:
         return vuln.ai_verdict == "confirmed"
     return vuln.confirmed
@@ -53,7 +73,7 @@ def is_effective_fp_review_result(result: FpReviewResult) -> bool:
 
 
 def calculate_issue_metrics(
-    vulnerabilities: list[Vulnerability],
+    vulnerabilities: Sequence[VulnLike],
     fp_results: dict[int, FpReviewResult],
     *,
     checker: str | None = None,

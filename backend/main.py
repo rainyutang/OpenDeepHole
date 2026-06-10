@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 import uuid
@@ -68,6 +69,9 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# 大响应（扫描详情可达数 MB）压缩传输；text/event-stream 由 Starlette 自动豁免
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # API routes
 app.include_router(auth.router)

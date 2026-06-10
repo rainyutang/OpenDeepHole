@@ -184,17 +184,18 @@ def _agent_disconnect_grace_elapsed() -> bool:
     ).total_seconds() >= _AGENT_DISCONNECT_GRACE_SECONDS
 
 
-def reconcile_offline_agent_scan_state(scan_id: str, scan: ScanStatus) -> ScanStatus:
-    """Cancel a running scan once its owning agent is offline past the grace period."""
-    if not scan.agent_name:
-        return scan
+def _cancel_scan_if_agent_offline(
+    scan_id: str, agent_name: str, status: ScanItemStatus
+) -> tuple[bool, bool]:
+    """Cancel a running scan once its owning agent is offline past the grace period.
 
-    agent_online = is_agent_name_online(scan.agent_name)
-    scan.agent_online = agent_online
-    if agent_online or scan.status not in _RUNNING_SCAN_STATUSES:
-        return scan
+    Returns ``(agent_online, cancelled)``.
+    """
+    agent_online = is_agent_name_online(agent_name)
+    if agent_online or status not in _RUNNING_SCAN_STATUSES:
+        return agent_online, False
     if not _agent_disconnect_grace_elapsed():
-        return scan
+        return agent_online, False
 
     store = get_scan_store()
     store.update_scan_progress(
@@ -204,13 +205,40 @@ def reconcile_offline_agent_scan_state(scan_id: str, scan: ScanStatus) -> ScanSt
         clear_current_candidate=True,
     )
     store.mark_fp_reviews_for_scan_error(scan_id, AGENT_DISCONNECT_ERROR)
-    scan.status = ScanItemStatus.CANCELLED
-    scan.error_message = AGENT_DISCONNECT_ERROR
-    scan.current_candidate = None
     _running_scans.pop(scan_id, None)
     _scan_owners.pop(scan_id, None)
-    logger.info("Scan %s cancelled because agent %s is offline", scan_id, scan.agent_name)
+    logger.info("Scan %s cancelled because agent %s is offline", scan_id, agent_name)
+    return agent_online, True
+
+
+def reconcile_offline_agent_scan_state(scan_id: str, scan: ScanStatus) -> ScanStatus:
+    """Cancel a running scan once its owning agent is offline past the grace period."""
+    if not scan.agent_name:
+        return scan
+
+    agent_online, cancelled = _cancel_scan_if_agent_offline(
+        scan_id, scan.agent_name, scan.status
+    )
+    scan.agent_online = agent_online
+    if cancelled:
+        scan.status = ScanItemStatus.CANCELLED
+        scan.error_message = AGENT_DISCONNECT_ERROR
+        scan.current_candidate = None
     return scan
+
+
+def reconcile_offline_agent_summary_state(summary: ScanSummary) -> ScanSummary:
+    """Summary-level variant of reconcile that avoids loading the full ScanStatus."""
+    if not summary.agent_name:
+        return summary
+
+    agent_online, cancelled = _cancel_scan_if_agent_offline(
+        summary.scan_id, summary.agent_name, summary.status
+    )
+    summary.agent_online = agent_online
+    if cancelled:
+        summary.status = ScanItemStatus.CANCELLED
+    return summary
 
 
 def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: list) -> None:

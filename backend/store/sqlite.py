@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from backend.scan_metrics import VulnStat
 from backend.models import (
     Candidate,
     FeedbackEntry,
@@ -179,6 +180,9 @@ CREATE TABLE IF NOT EXISTS fp_review_stage_outputs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fp_review_scan ON fp_review_jobs(scan_id);
+CREATE INDEX IF NOT EXISTS idx_vulnerabilities_scan ON vulnerabilities(scan_id);
+CREATE INDEX IF NOT EXISTS idx_events_scan ON events(scan_id);
+CREATE INDEX IF NOT EXISTS idx_fp_review_results_review ON fp_review_results(review_id);
 
 CREATE TABLE IF NOT EXISTS users (
     user_id       TEXT PRIMARY KEY,
@@ -357,6 +361,10 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE fp_review_results ADD COLUMN stage_outputs TEXT NOT NULL DEFAULT '{}'"
             )
+        # user_id 列由上方 ALTER 迁移产生，索引只能建在迁移之后
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scans_user ON scans(user_id)"
+        )
         self._conn.commit()
 
     # -- helpers --
@@ -459,6 +467,14 @@ class SqliteScanStore(ScanStoreBase):
         if row is None:
             return None
         return self._row_to_scan_status(row), self._row_to_meta(row)
+
+    def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
+        self._conn.row_factory = sqlite3.Row
+        cur = self._conn.execute(
+            "SELECT * FROM scans WHERE scan_id = ?", (scan_id,)
+        )
+        row = cur.fetchone()
+        return None if row is None else self._row_to_meta(row)
 
     def _row_to_scan_summary(self, row: sqlite3.Row) -> ScanSummary:
         return ScanSummary(
@@ -898,6 +914,33 @@ class SqliteScanStore(ScanStoreBase):
             )
             for r in cur.fetchall()
         ]
+
+    def get_vuln_stats_by_scans(self, scan_ids: list[str]) -> dict[str, list[VulnStat]]:
+        out: dict[str, list[VulnStat]] = {sid: [] for sid in scan_ids}
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            for i in range(0, len(scan_ids), 500):  # SQLite 绑定变量数上限保护
+                chunk = scan_ids[i:i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                cur = self._conn.execute(
+                    f"""\
+                    SELECT scan_id, vuln_type, ai_verdict, confirmed, user_verdict
+                    FROM vulnerabilities
+                    WHERE scan_id IN ({placeholders})
+                    ORDER BY scan_id, idx
+                    """,
+                    chunk,
+                )
+                for r in cur.fetchall():
+                    out[r["scan_id"]].append(
+                        VulnStat(
+                            vuln_type=r["vuln_type"],
+                            ai_verdict=r["ai_verdict"] or "",
+                            confirmed=bool(r["confirmed"]),
+                            user_verdict=r["user_verdict"],
+                        )
+                    )
+        return out
 
     # -- Skill reports --
 
@@ -1401,6 +1444,35 @@ class SqliteScanStore(ScanStoreBase):
                 (scan_id,),
             )
             return [self._row_to_fp_review_result(r) for r in cur.fetchall()]
+
+    def list_fp_review_verdicts_by_scans(self, scan_ids: list[str]) -> dict[str, list[FpReviewResult]]:
+        out: dict[str, list[FpReviewResult]] = {sid: [] for sid in scan_ids}
+        with self._lock:
+            self._conn.row_factory = sqlite3.Row
+            for i in range(0, len(scan_ids), 500):  # SQLite 绑定变量数上限保护
+                chunk = scan_ids[i:i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                cur = self._conn.execute(
+                    f"""\
+                    SELECT j.scan_id, r.vuln_index, r.verdict, r.severity, r.reason, r.created_at
+                    FROM fp_review_results r
+                    JOIN fp_review_jobs j ON j.review_id = r.review_id
+                    WHERE j.scan_id IN ({placeholders})
+                    ORDER BY j.created_at ASC, r.created_at ASC, r.id ASC
+                    """,
+                    chunk,
+                )
+                for r in cur.fetchall():
+                    out[r["scan_id"]].append(
+                        FpReviewResult(
+                            vuln_index=r["vuln_index"],
+                            verdict=r["verdict"],
+                            severity=r["severity"],
+                            reason=r["reason"],
+                            created_at=r["created_at"],
+                        )
+                    )
+        return out
 
     def upsert_fp_review_stage_output(
         self,

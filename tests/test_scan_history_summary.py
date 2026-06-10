@@ -12,6 +12,7 @@ from backend.models import (
     User,
     Vulnerability,
 )
+from backend.scan_metrics import VulnStat
 
 
 class FakeScanStore:
@@ -30,6 +31,20 @@ class FakeScanStore:
             return None
         return self.scan, self.meta
 
+    def get_vuln_stats_by_scans(self, scan_ids: list[str]) -> dict[str, list[VulnStat]]:
+        out: dict[str, list[VulnStat]] = {sid: [] for sid in scan_ids}
+        if self.scan.scan_id in out:
+            out[self.scan.scan_id] = [
+                VulnStat(
+                    vuln_type=v.vuln_type,
+                    ai_verdict=v.ai_verdict,
+                    confirmed=v.confirmed,
+                    user_verdict=v.user_verdict,
+                )
+                for v in self.scan.vulnerabilities
+            ]
+        return out
+
     def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
         if scan_id != self.scan.scan_id:
             return []
@@ -41,6 +56,9 @@ class FakeScanStore:
                 created_at="2026-01-01T00:00:00+00:00",
             ),
         ]
+
+    def list_fp_review_verdicts_by_scans(self, scan_ids: list[str]) -> dict[str, list[FpReviewResult]]:
+        return {sid: self.list_fp_review_results_by_scan(sid) for sid in scan_ids}
 
     def _summary(self) -> ScanSummary:
         return ScanSummary(
@@ -56,6 +74,7 @@ class FakeScanStore:
             vulnerability_count=len(self.scan.vulnerabilities),
             scan_items=self.meta.scan_items,
             username="alice",
+            agent_name=self.meta.agent_name,
         )
 
 

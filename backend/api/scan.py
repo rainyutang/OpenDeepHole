@@ -47,7 +47,11 @@ from backend.models import (
     User,
 )
 from backend.opencode.feedback_format import build_feedback_section
-from backend.scan_metrics import calculate_issue_metrics, is_effective_fp_review_result
+from backend.scan_metrics import (
+    calculate_issue_metrics,
+    is_effective_fp_review_result,
+    latest_fp_review_result_map,
+)
 from backend.store import get_scan_store
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
 
@@ -102,11 +106,9 @@ def _check_scan_owner(scan_id: str, user: User) -> None:
     if scan_id in _scan_owners and _scan_owners[scan_id] == user.user_id:
         return
     store = get_scan_store()
-    result = store.load_scan(scan_id)
-    if result is not None:
-        _, meta = result
-        if meta.user_id == user.user_id:
-            return
+    meta = store.get_scan_meta(scan_id)
+    if meta is not None and meta.user_id == user.user_id:
+        return
     raise HTTPException(status_code=403, detail="Access denied")
 
 
@@ -167,10 +169,10 @@ def _scan_feedback_ids(scan_id: str) -> list[str]:
     scan = _running_scans.get(scan_id)
     if scan is not None:
         return scan.feedback_ids
-    loaded = get_scan_store().load_scan(scan_id)
-    if loaded is None:
+    meta = get_scan_store().get_scan_meta(scan_id)
+    if meta is None:
         return []
-    return loaded[1].feedback_ids
+    return meta.feedback_ids
 
 
 def _selected_feedback_entries(scan_id: str, feedback_ids: list[str] | None = None) -> list[FeedbackEntry]:
@@ -233,12 +235,17 @@ def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
     return (candidate.file, candidate.line, candidate.function, candidate.vuln_type)
 
 
+def _is_retryable_vuln(vuln) -> bool:
+    return (
+        not _has_final_user_verdict(vuln)
+        and (vuln.ai_verdict or "") in _RETRYABLE_AI_VERDICTS
+    )
+
+
 def _retry_incomplete_candidates(scan: ScanStatus) -> list[Candidate]:
     candidates: list[Candidate] = []
     for vuln in scan.vulnerabilities:
-        if _has_final_user_verdict(vuln):
-            continue
-        if (vuln.ai_verdict or "") not in _RETRYABLE_AI_VERDICTS:
+        if not _is_retryable_vuln(vuln):
             continue
         candidates.append(
             Candidate(
@@ -258,10 +265,9 @@ def _retry_incomplete_count(scan: ScanStatus) -> int:
 
 async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str]) -> None:
     """Best-effort update of the selected feedback entries on the owning agent."""
-    loaded = get_scan_store().load_scan(scan_id)
-    if loaded is None:
+    meta = get_scan_store().get_scan_meta(scan_id)
+    if meta is None:
         return
-    _, meta = loaded
     agent_id = _resolve_scan_agent_id(meta)
     if agent_id is None:
         return
@@ -391,44 +397,43 @@ async def create_scan(
 @router.get("/api/scans", response_model=list[ScanSummary])
 async def list_scans(current_user: User = Depends(get_current_user)) -> list[ScanSummary]:
     """List scans visible to the current user (admin sees all)."""
-    from backend.api.agent import reconcile_offline_agent_scan_state
+    from backend.api.agent import (
+        reconcile_offline_agent_scan_state,
+        reconcile_offline_agent_summary_state,
+    )
 
     store = get_scan_store()
     if current_user.role == "admin":
         summaries = store.list_scans()
     else:
         summaries = store.list_scans_by_user(current_user.user_id)
+
+    stored_ids = [s.scan_id for s in summaries if s.scan_id not in _running_scans]
+    vuln_stats = store.get_vuln_stats_by_scans(stored_ids)
+    fp_verdicts = store.list_fp_review_verdicts_by_scans([s.scan_id for s in summaries])
+
     for s in summaries:
-        scan_for_status = None
         if s.scan_id in _running_scans:
             live = _running_scans[s.scan_id]
             live.agent_name = s.agent_name or live.agent_name
-            scan_for_status = live
             vulnerabilities = live.vulnerabilities
+            live = reconcile_offline_agent_scan_state(s.scan_id, live)
+            s.status = live.status
+            s.progress = live.progress
+            s.total_candidates = live.total_candidates
+            s.processed_candidates = live.processed_candidates
+            s.agent_online = live.agent_online
         else:
-            loaded = store.load_scan(s.scan_id)
-            if loaded is not None:
-                scan_for_status = loaded[0]
-                scan_for_status.agent_name = loaded[1].agent_name
-                vulnerabilities = scan_for_status.vulnerabilities
-            else:
-                vulnerabilities = []
-
-        if scan_for_status is not None:
-            scan_for_status = reconcile_offline_agent_scan_state(
-                s.scan_id,
-                scan_for_status,
-            )
-            s.status = scan_for_status.status
-            s.progress = scan_for_status.progress
-            s.total_candidates = scan_for_status.total_candidates
-            s.processed_candidates = scan_for_status.processed_candidates
-            s.agent_online = scan_for_status.agent_online
-            s.retryable_candidates_count = _retry_incomplete_count(scan_for_status)
+            # status/progress 等字段与 load_scan 同源于 scans 表同一行，直接用 summary 值
+            s = reconcile_offline_agent_summary_state(s)
+            vulnerabilities = vuln_stats.get(s.scan_id, [])
+        s.retryable_candidates_count = sum(
+            1 for v in vulnerabilities if _is_retryable_vuln(v)
+        )
 
         metrics = calculate_issue_metrics(
             vulnerabilities,
-            _latest_fp_review_result_map(s.scan_id),
+            latest_fp_review_result_map(fp_verdicts.get(s.scan_id, [])),
         )
         s.vulnerability_count = metrics.effective_issue_count
         s.human_confirmed_count = metrics.human_confirmed_count
@@ -476,7 +481,7 @@ async def update_scan_product(
     _check_scan_owner(scan_id, current_user)
     product = _validate_product(body.product)
     store = get_scan_store()
-    if store.load_scan(scan_id) is None:
+    if store.get_scan_meta(scan_id) is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     if scan_id in _running_scans:
         _running_scans[scan_id].product = product
@@ -496,8 +501,8 @@ async def stop_scan(
     store = get_scan_store()
 
     # Resolve agent_id BEFORE popping from memory
-    result = store.load_scan(scan_id)
-    agent_id = result[1].agent_id if result else ""
+    meta = store.get_scan_meta(scan_id)
+    agent_id = meta.agent_id if meta else ""
 
     # Immediately mark as CANCELLED in DB and in-memory
     store.update_scan_progress(
@@ -857,9 +862,8 @@ def _mark_single(
 
     # Push feedback update to the agent that ran this scan (best-effort)
     try:
-        scan_result = store.load_scan(scan_id)
-        if scan_result is not None:
-            smeta = scan_result[1]
+        smeta = store.get_scan_meta(scan_id)
+        if smeta is not None:
             from backend.api.agent import _registered_agents, _agent_ws, send_agent_command
             import asyncio
             target_id = smeta.agent_id
@@ -1049,10 +1053,9 @@ async def trigger_fp_review(
     if not confirmed:
         raise HTTPException(status_code=400, detail="No confirmed vulnerabilities to review")
 
-    result = store.load_scan(scan_id)
-    if result is None:
+    meta = store.get_scan_meta(scan_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
-    meta = result[1]
 
     if not meta.agent_id and not meta.agent_name:
         raise HTTPException(status_code=400, detail="No agent associated with this scan")
@@ -1126,10 +1129,9 @@ async def stop_fp_review(
     if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
         return {"ok": True, "review_id": job.review_id}
 
-    loaded = store.load_scan(scan_id)
-    if loaded is None:
+    meta = store.get_scan_meta(scan_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
-    _, meta = loaded
 
     store.update_fp_review_job(
         job.review_id,
@@ -1186,9 +1188,8 @@ async def scan_events_sse(scan_id: str, token: str = Query(...)) -> StreamingRes
     role = payload.get("role", "")
     if role != "admin":
         store = get_scan_store()
-        result = store.load_scan(scan_id)
-        if result is not None:
-            _, meta = result
+        meta = store.get_scan_meta(scan_id)
+        if meta is not None:
             if meta.user_id != user_id:
                 raise HTTPException(status_code=403, detail="Access denied")
         elif scan_id not in _scan_owners or _scan_owners[scan_id] != user_id:

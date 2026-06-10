@@ -119,6 +119,9 @@ class AgentFeedbackTests(unittest.TestCase):
                 self.stage_outputs: list[tuple[str, str]] = []
                 self.finished: tuple[str, str | None] | None = None
 
+            async def publish_opencode_pool_until(self, scan_id, stop_event, **kwargs) -> None:
+                return None
+
             async def send_event(self, scan_id, event) -> None:
                 return None
 
@@ -200,6 +203,9 @@ class AgentFeedbackTests(unittest.TestCase):
                 self.results: list[tuple] = []
                 self.progress: list[tuple[int, int | None]] = []
                 self.finished: tuple[str, str | None] | None = None
+
+            async def publish_opencode_pool_until(self, scan_id, stop_event, **kwargs) -> None:
+                return None
 
             async def send_event(self, scan_id, event) -> None:
                 return None
@@ -290,6 +296,9 @@ class AgentFeedbackTests(unittest.TestCase):
                 self.results: list[tuple] = []
                 self.progress: list[tuple[int, int | None]] = []
                 self.finished: tuple[str, str | None] | None = None
+
+            async def publish_opencode_pool_until(self, scan_id, stop_event, **kwargs) -> None:
+                return None
 
             async def send_event(self, scan_id, event) -> None:
                 return None

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from backend.scan_metrics import VulnStat
 from backend.models import (
     Candidate,
     FeedbackEntry,
@@ -39,6 +40,10 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def load_scan(self, scan_id: str) -> tuple[ScanStatus, ScanMeta] | None:
         """Load a single scan's full state. Returns *None* if not found."""
+
+    @abstractmethod
+    def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
+        """Load only a scan's metadata (no vulnerabilities/reports/events)."""
 
     @abstractmethod
     def update_scan_product(self, scan_id: str, product: str) -> None:
@@ -112,6 +117,10 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def get_vulnerabilities(self, scan_id: str) -> list[Vulnerability]:
         """Return all vulnerabilities for a scan, ordered by index."""
+
+    @abstractmethod
+    def get_vuln_stats_by_scans(self, scan_ids: list[str]) -> dict[str, list[VulnStat]]:
+        """Return lightweight per-vulnerability stats grouped by scan, ordered by index."""
 
     # -- Skill reports --
 
@@ -233,6 +242,10 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
         """Return all FP review results for a scan, oldest first."""
+
+    @abstractmethod
+    def list_fp_review_verdicts_by_scans(self, scan_ids: list[str]) -> dict[str, list[FpReviewResult]]:
+        """Return FP review results grouped by scan, oldest first, without heavy report fields."""
 
     @abstractmethod
     def upsert_fp_review_stage_output(
