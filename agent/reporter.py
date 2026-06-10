@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Optional
 
 import httpx
 
 from backend.models import FeedbackEntry, ScanEvent, Vulnerability
+
+
+OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 15.0
+
+
+def _snapshot_signature(snapshot: dict) -> str:
+    """Return a stable signature for deciding whether a pool snapshot changed."""
+    return json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 class Reporter:
@@ -206,37 +215,61 @@ class Reporter:
         except Exception:
             pass
 
-    async def push_opencode_pool_status(self, scan_id: str, snapshot: dict) -> None:
+    async def push_opencode_pool_status(self, scan_id: str, snapshot: dict) -> bool:
         """Push the latest OpenCode model-pool status snapshot."""
         if self.dry_run:
-            return
+            return True
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/opencode-pool",
                 json=snapshot,
                 timeout=5.0,
             )
+            return True
         except Exception:
-            pass
+            return False
 
     async def publish_opencode_pool_until(
         self,
         scan_id: str,
         stop_event: asyncio.Event,
         interval_seconds: float = 1.0,
+        unchanged_heartbeat_seconds: float = OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS,
     ) -> None:
-        """Periodically publish model-pool stats until *stop_event* is set."""
+        """Publish model-pool stats until *stop_event* is set.
+
+        The model pool is polled frequently so running/queued transitions are
+        reflected quickly, but identical snapshots are not posted every poll.
+        """
         from backend.opencode.model_pool import model_pool_snapshot
+
+        last_signature: str | None = None
+        last_sent_at = 0.0
+
+        async def publish_if_needed(*, force: bool = False) -> None:
+            nonlocal last_signature, last_sent_at
+            snapshot = model_pool_snapshot(scan_id)
+            signature = _snapshot_signature(snapshot)
+            now = time.monotonic()
+            if (
+                not force
+                and signature == last_signature
+                and now - last_sent_at < unchanged_heartbeat_seconds
+            ):
+                return
+            if await self.push_opencode_pool_status(scan_id, snapshot):
+                last_signature = signature
+                last_sent_at = now
 
         try:
             while not stop_event.is_set():
-                await self.push_opencode_pool_status(scan_id, model_pool_snapshot(scan_id))
+                await publish_if_needed()
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
                 except asyncio.TimeoutError:
                     pass
         finally:
-            await self.push_opencode_pool_status(scan_id, model_pool_snapshot(scan_id))
+            await publish_if_needed(force=True)
 
     async def get_processed_keys(self, scan_id: str) -> set[tuple[str, int, str, str]]:
         """Fetch already-processed candidate keys for resume (skip these on restart)."""
