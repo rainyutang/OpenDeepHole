@@ -428,21 +428,23 @@ def _read_sensitive_clear_audit_result(result_id: str, candidate: Candidate) -> 
     description = str(payload.get("description") or "")
     file_path = str(payload.get("file") or metadata.get("file") or candidate.file)
     line = _safe_int(payload.get("line"), _safe_int(metadata.get("start_line"), candidate.line))
-    vulnerabilities: list[Vulnerability] = []
-    if confirmed:
-        vulnerabilities.append(
-            Vulnerability(
-                file=file_path,
-                line=line,
-                function=function_name,
-                vuln_type=candidate.vuln_type,
-                severity=severity or "high",
-                description=description or f"{function_name} 中存在敏感信息生命周期结束后未清零问题",
-                ai_analysis=markdown,
-                confirmed=True,
-                ai_verdict="confirmed",
-            )
+    vulnerabilities = [
+        Vulnerability(
+            file=file_path,
+            line=line,
+            function=function_name,
+            vuln_type=candidate.vuln_type,
+            severity=severity or ("high" if confirmed else "low"),
+            description=description or (
+                f"{function_name} 中存在敏感信息生命周期结束后未清零问题"
+                if confirmed
+                else f"{function_name} 未确认敏感信息生命周期结束后未清零问题"
+            ),
+            ai_analysis=markdown,
+            confirmed=confirmed,
+            ai_verdict="confirmed" if confirmed else "not_confirmed",
         )
+    ]
 
     return SensitiveClearAuditResult(vulnerabilities=vulnerabilities, reports=[], complete=True)
 
@@ -460,7 +462,7 @@ async def run_sensitive_clear_audit(
     config = get_config()
     if config.opencode.mock:
         return SensitiveClearAuditResult(
-            vulnerabilities=[],
+            vulnerabilities=[_mock_result(candidate)],
             reports=[],
             complete=True,
         )

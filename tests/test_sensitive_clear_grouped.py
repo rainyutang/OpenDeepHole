@@ -180,7 +180,10 @@ class SensitiveClearFunctionTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertTrue(result.complete)
-        self.assertEqual(result.vulnerabilities, [])
+        self.assertEqual(len(result.vulnerabilities), 1)
+        self.assertFalse(result.vulnerabilities[0].confirmed)
+        self.assertEqual(result.vulnerabilities[0].ai_verdict, "not_confirmed")
+        self.assertIn("confirmed=false", result.vulnerabilities[0].ai_analysis)
         self.assertEqual(result.reports, [])
 
     def test_sensitive_clear_result_rejects_multiple_submit_results(self) -> None:
