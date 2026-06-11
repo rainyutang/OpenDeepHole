@@ -368,6 +368,7 @@ class Reporter:
         review_id: str,
         vuln_index: int,
         processed: int | None = None,
+        active_indices: list[int] | None = None,
     ) -> None:
         """Report the vulnerability currently being reviewed."""
         if self.dry_run:
@@ -380,6 +381,8 @@ class Reporter:
             }
             if processed is not None:
                 payload["processed"] = processed
+            if active_indices is not None:
+                payload["active_indices"] = active_indices
             await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/progress",
                 json=payload,

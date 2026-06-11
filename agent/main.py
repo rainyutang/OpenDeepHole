@@ -182,6 +182,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "config": remote_config_dict(config),
                     "runtime_hash": compute_runtime_hash(),
                     "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),
+                    "active_fp_reviews": agent_server.active_fp_review_snapshots(),
                 }
                 if config.owner_token:
                     hello_msg["owner_token"] = config.owner_token

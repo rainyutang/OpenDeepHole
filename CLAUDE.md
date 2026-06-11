@@ -74,6 +74,15 @@ Each scan runs the full pipeline locally on the agent machine:
 **Resume support**: scan dir at `~/.opendeephole/scans/<scan_id>/` is preserved on cancel/error.  
 **Index storage**: `code_index.db` is stored directly in the project directory (`<project_path>/code_index.db`). Re-scanning the same project reuses the existing index.
 
+## Agent — FP Review Pipeline (`agent/fp_reviewer.py`)
+
+Three-stage debate per vulnerability: `prove_bug` → `prove_fp` → `final_judge`, each a CLI call that must write a Markdown artifact **and** call `submit_result` (missing either → retry per `fp_review_cli.max_retries`, then stage failure; retry prompts re-emphasize the contract).
+
+- **Early exit**: if `prove_bug` submits `confirmed=false`, the review pushes a final `fp` result with prove_bug's reasoning and skips the other two stages. Only confirmed-by-prove_bug candidates go through the full debate, where `final_judge` decides.
+- **Concurrency**: review workers are sized from `total_model_capacity()`; the agent reports the full set of in-progress vuln indices (`active_indices`) with each progress push. Backend stores it in `fp_review_jobs.current_vuln_indices` (JSON) and the frontend highlights all of them.
+- **Reconnect resilience**: agent hello includes `active_fp_reviews`; backend `_reattach_active_fp_reviews()` re-points the scan at the new agent_id and recovers jobs error-marked by the disconnect grace task. The progress/result/stage-output endpoints also auto-recover disconnect-errored jobs to running.
+- **Persistence**: stage Markdown is stored in `fp_review_stage_outputs`; `GET /api/scan/{id}/fp_review` merges it into results (placeholder entries with empty `reason` for vulns without a final verdict), so reloads keep showing in-progress/failed stage output. The frontend shows "复核失败" when a job has finished but a vuln has no final verdict.
+
 ## Plugin Architecture (Checkers)
 
 Vulnerability types are **plugin-based**. Each checker is a self-contained directory under `checkers/`:
@@ -151,6 +160,7 @@ tail -f logs/opendeephole.log
 - `vuln_type` is a plain string (not enum) matching the checker directory name
 - CLI config workspaces are created per scan/review under the task directory; `opencode`/`nga` receive config through `OPENCODE_CONFIG_CONTENT` while `--dir` still points at the real project root
 - Agent configs (LLM API key, model, etc.) are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and on UI save
+- Model-pool scheduling (`backend/opencode/model_pool.py`): concurrency is limited per model by `max_concurrency` only — there is no cross-scan global gate, so concurrent scans/FP reviews never starve each other's idle models. A queued task switches to any other capability-eligible free model if its queue-target model stays busy; `prefer_high` is a soft preference. Scan and FP-review worker counts are sized from `total_model_capacity()` (sum of eligible enabled models' `max_concurrency`); `opencode_concurrency` is the single-model concurrency when no `models` list is configured
 - **Always update both README.md and CLAUDE.md when making structural or architectural changes**
 
 ## Code Parser (Shared Indexer)

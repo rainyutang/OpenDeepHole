@@ -146,11 +146,42 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
 
 
 def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJob:
-    """Attach scan-wide latest per-vulnerability results to the current job."""
-    latest_results = sorted(
-        _latest_fp_review_result_map(scan_id).values(),
-        key=lambda result: result.vuln_index,
-    )
+    """Attach scan-wide latest per-vulnerability results to the current job.
+
+    Stage outputs pushed by the current job are merged in even when no final
+    result exists yet (failed or in-progress reviews), so a page reload still
+    shows the per-stage Markdown instead of dropping the entry entirely.
+    """
+    store = get_scan_store()
+    latest_map = _latest_fp_review_result_map(scan_id)
+    stage_outputs_map: dict[int, dict[str, str]] = {}
+    stage_updated_at: dict[int, str] = {}
+    for output in store.list_fp_review_stage_outputs_by_review(job.review_id):
+        stage_outputs_map.setdefault(output.vuln_index, {})[output.stage] = output.markdown
+        stage_updated_at[output.vuln_index] = output.updated_at
+
+    merged: list[FpReviewResult] = []
+    for vuln_index, result in latest_map.items():
+        current_stages = stage_outputs_map.pop(vuln_index, None)
+        if current_stages:
+            result = result.model_copy(
+                update={"stage_outputs": {**result.stage_outputs, **current_stages}}
+            )
+        merged.append(result)
+    for vuln_index, stages in stage_outputs_map.items():
+        # No final verdict for this vulnerability in any job — expose a
+        # placeholder entry (same shape the SSE stage_output handler builds).
+        merged.append(FpReviewResult(
+            vuln_index=vuln_index,
+            verdict="tp",
+            severity="low",
+            reason="",
+            vulnerability_report="",
+            stage_outputs=stages,
+            created_at=stage_updated_at.get(vuln_index, job.created_at),
+        ))
+    merged.sort(key=lambda result: result.vuln_index)
+
     return FpReviewJob(
         review_id=job.review_id,
         scan_id=job.scan_id,
@@ -159,7 +190,8 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
         total=job.total,
         processed=job.processed,
         current_vuln_index=job.current_vuln_index,
-        results=latest_results,
+        current_vuln_indices=job.current_vuln_indices,
+        results=merged,
         error_message=job.error_message,
     )
 
@@ -1236,11 +1268,13 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
     store.update_fp_review_job(
         body.review_id,
         current_vuln_index=body.vuln_index,
+        current_vuln_indices=body.active_indices,
         processed=body.processed,
     )
     from backend.sse import publish
     publish(scan_id, "fp_review_progress", {
         "review_id": body.review_id, "vuln_index": body.vuln_index,
+        "active_indices": body.active_indices,
         "processed": body.processed, "total": job.total,
     })
     logger.debug("FP review progress for %s: vuln[%d]", scan_id, body.vuln_index)
@@ -1295,6 +1329,9 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
+    if job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
+        store.update_fp_review_job(body.review_id, status="running", error_message="")
+        logger.info("FP review %s auto-recovered from agent disconnect", body.review_id)
     if body.stage not in {"prove_bug", "prove_fp", "final_judge"}:
         raise HTTPException(status_code=400, detail="Invalid FP review stage")
     now = datetime.now(timezone.utc).isoformat()

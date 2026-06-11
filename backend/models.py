@@ -598,6 +598,7 @@ class FpReviewJob(BaseModel):
     total: int = 0
     processed: int = 0
     current_vuln_index: int | None = None
+    current_vuln_indices: list[int] = []
     results: list[FpReviewResult] = []
     error_message: str | None = None
 
@@ -631,6 +632,7 @@ class AgentFpReviewProgress(BaseModel):
     review_id: str
     vuln_index: int
     processed: int | None = None
+    active_indices: list[int] | None = None  # all vuln indices being reviewed concurrently
 
 
 class AgentFpReviewFinish(BaseModel):

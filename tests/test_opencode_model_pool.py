@@ -1,12 +1,26 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+import backend.opencode.model_pool as model_pool_module
 from backend.opencode.model_pool import (
     acquire_model_lease,
     model_options,
     model_pool_snapshot,
     release_model_lease,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_model_pool():
+    """Each test runs in its own event loop via asyncio.run(), but the pool's
+    Condition binds to the first loop that waits on it — recreate it per test."""
+    model_pool_module._condition = asyncio.Condition()
+    model_pool_module._running_by_model.clear()
+    model_pool_module._global_running = 0
+    model_pool_module._last_used.clear()
+    yield
 
 
 def test_model_options_falls_back_to_default_model() -> None:
@@ -96,10 +110,12 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
         )
         scope = "test-scope-model-pool-stats"
 
+        # Both leases require "high", so only "deep" (max_concurrency=1) is
+        # eligible and the second one must queue behind the first.
         first = await acquire_model_lease(
             cfg,
             global_concurrency=1,
-            required_capability="any",
+            required_capability="high",
             stats_scope_id=scope,
         )
         second = None
@@ -107,7 +123,7 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
             acquire_model_lease(
                 cfg,
                 global_concurrency=1,
-                required_capability="any",
+                required_capability="high",
                 stats_scope_id=scope,
             )
         )
@@ -125,19 +141,124 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
             await release_model_lease(second, outcome="timeout", duration_seconds=4.0)
             second = None
 
+            third = await acquire_model_lease(
+                cfg,
+                global_concurrency=1,
+                required_capability="any",
+                stats_scope_id=scope,
+            )
+            assert third is not None
+            assert third.option.id == "fast"
+            await release_model_lease(third, outcome="success", duration_seconds=2.0)
+
             snapshot = model_pool_snapshot(scope)
             by_id = {item["id"]: item for item in snapshot["models"]}
             assert snapshot["global_queued"] == 0
             assert by_id["fast"]["total"] == 1
             assert by_id["fast"]["success"] == 1
             assert by_id["fast"]["avg_duration_seconds"] == 2.0
-            assert by_id["deep"]["total"] == 1
+            assert by_id["deep"]["total"] == 2
+            assert by_id["deep"]["success"] == 1
             assert by_id["deep"]["timeout"] == 1
-            assert by_id["deep"]["avg_duration_seconds"] == 4.0
+            assert by_id["deep"]["avg_duration_seconds"] == 3.0
         finally:
             if not second_task.done():
                 second_task.cancel()
             await release_model_lease(first)
             await release_model_lease(second)
+
+    asyncio.run(run())
+
+
+def test_no_global_gate_across_models() -> None:
+    """One busy model must not block another idle, eligible model — even with
+    a low opencode_concurrency setting (the original cross-scan starvation bug)."""
+
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "deep", "model": "deep-model", "capability": "high", "weight": 1, "max_concurrency": 1},
+                {"id": "fast", "model": "fast-model", "capability": "medium", "weight": 1, "max_concurrency": 1},
+            ],
+        )
+
+        # Simulates an FP review holding the high model in one scan scope...
+        fp_lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="high",
+            prefer_high=True,
+            stats_scope_id="scope-fp",
+        )
+        try:
+            assert fp_lease is not None
+            assert fp_lease.option.id == "deep"
+            # ...while a normal scan in another scope must immediately get the
+            # idle medium model instead of queueing behind a global limit.
+            scan_lease = await asyncio.wait_for(
+                acquire_model_lease(
+                    cfg,
+                    global_concurrency=1,
+                    required_capability="any",
+                    stats_scope_id="scope-scan",
+                ),
+                timeout=1,
+            )
+            assert scan_lease is not None
+            assert scan_lease.option.id == "fast"
+            await release_model_lease(scan_lease, outcome="success", duration_seconds=0.1)
+        finally:
+            await release_model_lease(fp_lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_queued_task_falls_back_to_other_free_model() -> None:
+    """A task queued behind one model must run as soon as any other eligible
+    model frees up, instead of waiting for its original queue target."""
+
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "a", "model": "model-a", "capability": "high", "weight": 1, "max_concurrency": 1},
+                {"id": "b", "model": "model-b", "capability": "high", "weight": 1, "max_concurrency": 1},
+            ],
+        )
+        scope = "test-scope-queue-fallback"
+
+        lease_a = await acquire_model_lease(
+            cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+        )
+        lease_b = await acquire_model_lease(
+            cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+        )
+        assert lease_a is not None and lease_b is not None
+        held = {lease_a.option.id: lease_a, lease_b.option.id: lease_b}
+        assert set(held) == {"a", "b"}
+
+        third_task = asyncio.create_task(
+            acquire_model_lease(
+                cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+            snapshot = model_pool_snapshot(scope)
+            queued_ids = [item["id"] for item in snapshot["models"] if item["queued"]]
+            assert len(queued_ids) == 1
+            queued_id = queued_ids[0]
+            other_id = "b" if queued_id == "a" else "a"
+
+            # Free the model the third task is NOT queued on.
+            await release_model_lease(held.pop(other_id), outcome="success", duration_seconds=0.1)
+            third = await asyncio.wait_for(third_task, timeout=1)
+            assert third is not None
+            assert third.option.id == other_id
+            await release_model_lease(third, outcome="success", duration_seconds=0.1)
+        finally:
+            if not third_task.done():
+                third_task.cancel()
+            for lease in held.values():
+                await release_model_lease(lease, outcome="success", duration_seconds=0.1)
 
     asyncio.run(run())

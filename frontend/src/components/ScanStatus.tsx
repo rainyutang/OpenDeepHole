@@ -154,6 +154,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           status: "running",
           processed: data.processed,
           current_vuln_index: data.vuln_index,
+          current_vuln_indices: data.active_indices ?? [data.vuln_index],
           total: data.total,
         };
       });
@@ -426,12 +427,20 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const agentDisconnectError = isAgentDisconnectError(scan.error_message);
   const staleAgentDisconnectError = scan.status === "cancelled" && agentDisconnectError && !!scan.agent_online;
   const visibleErrorMessage = staleAgentDisconnectError ? null : scan.error_message;
-  const currentFpReviewIndex = fpReview?.current_vuln_index ?? null;
-  const currentFpReviewTarget =
-    currentFpReviewIndex !== null && currentFpReviewIndex >= 0
-      ? scan.vulnerabilities[currentFpReviewIndex]
-      : undefined;
   const isFpReviewing = fpReview?.status === "running" || fpReview?.status === "pending";
+  const currentFpReviewIndices = useMemo(() => {
+    if (!isFpReviewing) return new Set<number>();
+    const indices = fpReview?.current_vuln_indices?.length
+      ? fpReview.current_vuln_indices
+      : fpReview?.current_vuln_index != null
+      ? [fpReview.current_vuln_index]
+      : [];
+    return new Set(indices.filter((i) => i >= 0));
+  }, [isFpReviewing, fpReview?.current_vuln_indices, fpReview?.current_vuln_index]);
+  const currentFpReviewTargets = [...currentFpReviewIndices]
+    .sort((a, b) => a - b)
+    .map((i) => scan.vulnerabilities[i])
+    .filter(Boolean);
   const reportCheckers = checkers.filter(
     (checker) => scan.scan_items.includes(checker.name) && checker.result_mode === "markdown_reports",
   );
@@ -721,9 +730,14 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 <span className="shrink-0">
                   AI复核: {fpReview.processed}/{fpReview.total}
                 </span>
-                {currentFpReviewTarget ? (
+                {currentFpReviewTargets.length > 0 ? (
                   <span className="font-mono truncate text-amber-200">
-                    {currentFpReviewTarget.file}:{currentFpReviewTarget.line} {currentFpReviewTarget.function}
+                    {currentFpReviewTargets.length > 1 && (
+                      <span className="text-amber-400/80 mr-1">并行 {currentFpReviewTargets.length} 项:</span>
+                    )}
+                    {currentFpReviewTargets
+                      .map((t) => `${t.file}:${t.line} ${t.function}`)
+                      .join("  |  ")}
                   </span>
                 ) : (
                   <span className="text-amber-400/70">等待当前目标...</span>
@@ -808,7 +822,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             totalCandidates={scan.total_candidates}
             processedCandidates={scan.processed_candidates}
             fpReview={fpReview}
-            currentFpReviewIndex={currentFpReviewIndex}
+            currentFpReviewIndices={currentFpReviewIndices}
+            fpReviewRunning={isFpReviewing}
             onFeedbackCreated={addSelectedFeedbackIds}
             onFeedbackRemoved={removeSelectedFeedbackIds}
             onVulnMarked={() => {

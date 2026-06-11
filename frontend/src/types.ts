@@ -325,6 +325,7 @@ export interface FpReviewJob {
   total: number;
   processed: number;
   current_vuln_index: number | null;
+  current_vuln_indices?: number[];
   results: FpReviewResult[];
   error_message: string | null;
 }

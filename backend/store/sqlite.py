@@ -320,6 +320,7 @@ class SqliteScanStore(ScanStoreBase):
                 total         INTEGER DEFAULT 0,
                 processed     INTEGER DEFAULT 0,
                 current_vuln_index INTEGER,
+                current_vuln_indices TEXT NOT NULL DEFAULT '[]',
                 error_message TEXT
             );
             CREATE TABLE IF NOT EXISTS fp_review_results (
@@ -350,6 +351,10 @@ class SqliteScanStore(ScanStoreBase):
         if "current_vuln_index" not in fp_job_cols:
             self._conn.execute(
                 "ALTER TABLE fp_review_jobs ADD COLUMN current_vuln_index INTEGER"
+            )
+        if "current_vuln_indices" not in fp_job_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_jobs ADD COLUMN current_vuln_indices TEXT NOT NULL DEFAULT '[]'"
             )
         fp_cur = self._conn.execute("PRAGMA table_info(fp_review_results)")
         fp_cols = {r[1] for r in fp_cur.fetchall()}
@@ -1515,6 +1520,11 @@ class SqliteScanStore(ScanStoreBase):
             self._row_to_fp_review_result(r)
             for r in cur.fetchall()
         ]
+        raw_indices = row["current_vuln_indices"] if "current_vuln_indices" in row.keys() else "[]"
+        try:
+            current_vuln_indices = [int(i) for i in json.loads(raw_indices or "[]")]
+        except (ValueError, TypeError):
+            current_vuln_indices = []
         return FpReviewJob(
             review_id=review_id,
             scan_id=row["scan_id"],
@@ -1523,6 +1533,7 @@ class SqliteScanStore(ScanStoreBase):
             total=row["total"],
             processed=row["processed"],
             current_vuln_index=row["current_vuln_index"],
+            current_vuln_indices=current_vuln_indices,
             results=results,
             error_message=row["error_message"],
         )
@@ -1559,6 +1570,7 @@ class SqliteScanStore(ScanStoreBase):
         status: str | None = None,
         processed: int | None = None,
         current_vuln_index: int | None = None,
+        current_vuln_indices: list[int] | None = None,
         clear_current_vuln_index: bool = False,
         error_message: str | None = None,
     ) -> None:
@@ -1572,9 +1584,14 @@ class SqliteScanStore(ScanStoreBase):
             params.append(processed)
         if clear_current_vuln_index:
             updates.append("current_vuln_index = NULL")
-        elif current_vuln_index is not None:
-            updates.append("current_vuln_index = ?")
-            params.append(current_vuln_index)
+            updates.append("current_vuln_indices = '[]'")
+        else:
+            if current_vuln_index is not None:
+                updates.append("current_vuln_index = ?")
+                params.append(current_vuln_index)
+            if current_vuln_indices is not None:
+                updates.append("current_vuln_indices = ?")
+                params.append(json.dumps(current_vuln_indices))
         if error_message is not None:
             updates.append("error_message = ?")
             params.append(error_message)

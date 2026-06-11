@@ -224,11 +224,18 @@ async def run_fp_review(
         )
 
         processed_reviews = 0
+        active_indices: set[int] = set()
         progress_lock = asyncio.Lock()
         review_queue: asyncio.Queue[tuple[int, dict]] = asyncio.Queue()
         for item in enumerate(vulnerabilities):
             review_queue.put_nowait(item)
-        review_concurrency = max(1, min(config.opencode_concurrency, len(vulnerabilities) or 1))
+        from backend.opencode.model_pool import total_model_capacity
+        review_capacity = total_model_capacity(
+            fp_cli,
+            global_concurrency=config.opencode_concurrency,
+            required_capability="high",
+        )
+        review_concurrency = max(1, min(review_capacity, len(vulnerabilities) or 1))
 
         async def review_one(position: int, vuln: dict) -> None:
             nonlocal processed_reviews
@@ -240,7 +247,10 @@ async def run_fp_review(
                 f"at {vuln['file']}:{vuln['line']} ({vuln['function']})",
             )
             async with progress_lock:
-                await reporter.push_fp_progress(scan_id, review_id, vuln_index, processed_reviews)
+                active_indices.add(vuln_index)
+                await reporter.push_fp_progress(
+                    scan_id, review_id, vuln_index, processed_reviews, sorted(active_indices)
+                )
             result_submitted = False
 
             try:
@@ -289,79 +299,99 @@ async def run_fp_review(
                 stage_outputs["prove_bug"] = _stage_markdown_or_placeholder("prove_bug", prove_bug)
                 await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_bug", stage_outputs["prove_bug"])
 
-                prove_fp = await _run_fp_review_stage(
-                    stage="prove_fp",
-                    scan_id=scan_id,
-                    workspace=vuln_workspace,
-                    review_dir=review_dir,
-                    review_id=review_id,
-                    vuln_index=vuln_index,
-                    artifact_dir=artifact_dir,
-                    output_markdown_path=artifact_dir / "prove-fp.md",
-                    input_markdown_paths=[artifact_dir / "prove-bug.md"],
-                    vuln=vuln,
-                    project_id_for_prompt=project_id_for_prompt,
-                    timeout=fp_cli.timeout,
-                    cancel_event=cancel_event,
-                    cli_config=fp_cli,
-                    project=project,
-                    candidate=fake_candidate,
-                    prove_bug=prove_bug,
-                    ai_analysis_path=ai_analysis_path,
-                )
-                if cancel_event is not None and cancel_event.is_set():
-                    return
-                stage_outputs["prove_fp"] = _stage_markdown_or_placeholder("prove_fp", prove_fp)
-                await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_fp", stage_outputs["prove_fp"])
-
-                final_judge = await _run_fp_review_stage(
-                    stage="final_judge",
-                    scan_id=scan_id,
-                    workspace=vuln_workspace,
-                    review_dir=review_dir,
-                    review_id=review_id,
-                    vuln_index=vuln_index,
-                    artifact_dir=artifact_dir,
-                    output_markdown_path=artifact_dir / "final-judge.md",
-                    input_markdown_paths=[
-                        artifact_dir / "prove-bug.md",
-                        artifact_dir / "prove-fp.md",
-                    ],
-                    vuln=vuln,
-                    project_id_for_prompt=project_id_for_prompt,
-                    timeout=fp_cli.timeout,
-                    cancel_event=cancel_event,
-                    cli_config=fp_cli,
-                    project=project,
-                    candidate=fake_candidate,
-                    prove_bug=prove_bug,
-                    prove_fp=prove_fp,
-                    ai_analysis_path=ai_analysis_path,
-                )
-                if cancel_event is not None and cancel_event.is_set():
-                    return
-                stage_outputs["final_judge"] = _stage_markdown_or_placeholder("final_judge", final_judge)
-                await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "final_judge", stage_outputs["final_judge"])
-
-                if final_judge is None or final_judge.result is None:
-                    await emit("fp_review", f"[{position + 1}] Final-judge returned no result — preserving any previous review result")
-                else:
-                    verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(final_judge)
+                if prove_bug is not None and prove_bug.result is not None and not prove_bug.result.confirmed:
+                    # 正方论证已判定非问题：正式早退，直接记录误报结果，
+                    # 跳过反方论证与最终裁决两个阶段。
+                    reason = _stage_reason(prove_bug) or "正方论证未能证明该候选是真实问题。"
                     await reporter.push_fp_result(
                         scan_id,
                         review_id,
                         vuln_index,
-                        verdict,
-                        severity,
+                        "fp",
+                        "low",
                         reason,
-                        vulnerability_report,
+                        "",
                         stage_outputs=stage_outputs,
                     )
                     result_submitted = True
                     await emit(
                         "fp_review",
-                        f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
+                        f"[{position + 1}] FALSE POSITIVE（正方未证明问题，提前判定误报）severity=low",
                     )
+                else:
+                    prove_fp = await _run_fp_review_stage(
+                        stage="prove_fp",
+                        scan_id=scan_id,
+                        workspace=vuln_workspace,
+                        review_dir=review_dir,
+                        review_id=review_id,
+                        vuln_index=vuln_index,
+                        artifact_dir=artifact_dir,
+                        output_markdown_path=artifact_dir / "prove-fp.md",
+                        input_markdown_paths=[artifact_dir / "prove-bug.md"],
+                        vuln=vuln,
+                        project_id_for_prompt=project_id_for_prompt,
+                        timeout=fp_cli.timeout,
+                        cancel_event=cancel_event,
+                        cli_config=fp_cli,
+                        project=project,
+                        candidate=fake_candidate,
+                        prove_bug=prove_bug,
+                        ai_analysis_path=ai_analysis_path,
+                    )
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
+                    stage_outputs["prove_fp"] = _stage_markdown_or_placeholder("prove_fp", prove_fp)
+                    await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "prove_fp", stage_outputs["prove_fp"])
+
+                    final_judge = await _run_fp_review_stage(
+                        stage="final_judge",
+                        scan_id=scan_id,
+                        workspace=vuln_workspace,
+                        review_dir=review_dir,
+                        review_id=review_id,
+                        vuln_index=vuln_index,
+                        artifact_dir=artifact_dir,
+                        output_markdown_path=artifact_dir / "final-judge.md",
+                        input_markdown_paths=[
+                            artifact_dir / "prove-bug.md",
+                            artifact_dir / "prove-fp.md",
+                        ],
+                        vuln=vuln,
+                        project_id_for_prompt=project_id_for_prompt,
+                        timeout=fp_cli.timeout,
+                        cancel_event=cancel_event,
+                        cli_config=fp_cli,
+                        project=project,
+                        candidate=fake_candidate,
+                        prove_bug=prove_bug,
+                        prove_fp=prove_fp,
+                        ai_analysis_path=ai_analysis_path,
+                    )
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
+                    stage_outputs["final_judge"] = _stage_markdown_or_placeholder("final_judge", final_judge)
+                    await reporter.push_fp_stage_output(scan_id, review_id, vuln_index, "final_judge", stage_outputs["final_judge"])
+
+                    if final_judge is None or final_judge.result is None:
+                        await emit("fp_review", f"[{position + 1}] Final-judge returned no result — preserving any previous review result")
+                    else:
+                        verdict, severity, reason, vulnerability_report = _finalize_fp_review_result(final_judge)
+                        await reporter.push_fp_result(
+                            scan_id,
+                            review_id,
+                            vuln_index,
+                            verdict,
+                            severity,
+                            reason,
+                            vulnerability_report,
+                            stage_outputs=stage_outputs,
+                        )
+                        result_submitted = True
+                        await emit(
+                            "fp_review",
+                            f"[{position + 1}] {'TRUE POSITIVE' if verdict == 'tp' else 'FALSE POSITIVE'} severity={severity}",
+                        )
 
             except asyncio.CancelledError:
                 raise
@@ -380,7 +410,10 @@ async def run_fp_review(
 
             async with progress_lock:
                 processed_reviews += 1
-                await reporter.push_fp_progress(scan_id, review_id, vuln_index, processed_reviews)
+                active_indices.discard(vuln_index)
+                await reporter.push_fp_progress(
+                    scan_id, review_id, vuln_index, processed_reviews, sorted(active_indices)
+                )
                 if not result_submitted:
                     await emit("fp_review", f"[{position + 1}] No FP review result saved")
 
@@ -481,6 +514,12 @@ async def _run_fp_review_stage(
             prove_fp=prove_fp,
             ai_analysis_path=ai_analysis_path,
         )
+        if attempt > 1:
+            prompt += (
+                "上一次尝试未写入 Markdown 工件或未调用 submit_result。"
+                "即使结论是非问题（confirmed=false），也必须把论证写入指定 Markdown 路径，"
+                "并使用给定 result_id 调用 submit_result 提交结论。"
+            )
         log_path = review_dir / f"fp_{stage}_{result_id}.log"
 
         try:

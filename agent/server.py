@@ -20,6 +20,16 @@ _task_manager = None  # TaskManager
 _agent_id: Optional[str] = None  # Assigned by server on WebSocket connect
 _fp_review_tasks: dict[str, asyncio.Task] = {}
 _fp_review_cancel_events: dict[str, threading.Event] = {}
+_fp_review_scan_ids: dict[str, str] = {}
+
+
+def active_fp_review_snapshots() -> list[dict]:
+    """Snapshot of FP reviews still running in this agent (for hello reattach)."""
+    return [
+        {"scan_id": scan_id, "review_id": review_id}
+        for review_id, scan_id in _fp_review_scan_ids.items()
+        if review_id in _fp_review_tasks
+    ]
 _SKILL_CREATOR_NAME = "deephole-skill-creator"
 
 
@@ -180,6 +190,7 @@ async def handle_fp_review(
 
     cancel_event = threading.Event()
     _fp_review_cancel_events[review_id] = cancel_event
+    _fp_review_scan_ids[review_id] = scan_id
 
     async def _run_review() -> None:
         from agent.fp_reviewer import run_fp_review
@@ -199,6 +210,7 @@ async def handle_fp_review(
         finally:
             _fp_review_tasks.pop(review_id, None)
             _fp_review_cancel_events.pop(review_id, None)
+            _fp_review_scan_ids.pop(review_id, None)
 
     _fp_review_tasks[review_id] = asyncio.create_task(_run_review())
     print(f"Started FP review {review_id} for scan {scan_id}")

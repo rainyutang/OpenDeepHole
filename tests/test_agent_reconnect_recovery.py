@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.models import (
+    AgentFpReviewStageOutput,
     AgentInfo,
     AgentScanFinish,
     FpReviewStatus,
@@ -627,6 +628,116 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.status, ScanItemStatus.CANCELLED)
             self.assertEqual(stored.total_candidates, 8)
             self.assertEqual(stored.processed_candidates, 4)
+
+    def test_active_fp_review_hello_reattaches_disconnect_errored_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(_scan("scan-1", ScanItemStatus.COMPLETE, total=5, processed=5), _meta())
+            store.create_fp_review_job("review-1", "scan-1", 3, "2026-01-01T00:00:00+00:00")
+            store.update_fp_review_job(
+                "review-1", status="error", error_message="Agent 断开连接"
+            )
+            info = AgentInfo(
+                agent_id="agent-new",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                agent_api._reattach_active_fp_reviews(
+                    "agent-new",
+                    info,
+                    [{"scan_id": "scan-1", "review_id": "review-1"}],
+                )
+
+            review = store.get_fp_review_job("review-1")
+            self.assertIsNotNone(review)
+            self.assertEqual(review.status, FpReviewStatus.RUNNING)
+            self.assertEqual(review.error_message, "")
+            meta = store.load_scan("scan-1")[1]
+            self.assertEqual(meta.agent_id, "agent-new")
+
+            # The old connection's delayed disconnect-cancel must not kill the
+            # review once the scan points at the new agent_id.
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                agent_api._mark_agent_scans_cancelled("agent-old")
+            review = store.get_fp_review_job("review-1")
+            self.assertEqual(review.status, FpReviewStatus.RUNNING)
+
+    def test_active_fp_review_hello_ignores_user_cancelled_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(_scan("scan-1", ScanItemStatus.COMPLETE, total=5, processed=5), _meta())
+            store.create_fp_review_job("review-1", "scan-1", 3, "2026-01-01T00:00:00+00:00")
+            store.update_fp_review_job(
+                "review-1", status="cancelled", error_message="用户手动停止"
+            )
+            info = AgentInfo(
+                agent_id="agent-new",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+
+            with patch("backend.api.agent.get_scan_store", return_value=store):
+                agent_api._reattach_active_fp_reviews(
+                    "agent-new",
+                    info,
+                    [{"scan_id": "scan-1", "review_id": "review-1"}],
+                )
+
+            review = store.get_fp_review_job("review-1")
+            self.assertEqual(review.status, FpReviewStatus.CANCELLED)
+            meta = store.load_scan("scan-1")[1]
+            self.assertEqual(meta.agent_id, "agent-old")
+
+    def test_stage_output_post_auto_recovers_disconnect_errored_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(_scan("scan-1", ScanItemStatus.COMPLETE, total=5, processed=5), _meta())
+            store.create_fp_review_job("review-1", "scan-1", 3, "2026-01-01T00:00:00+00:00")
+            store.update_fp_review_job(
+                "review-1", status="error", error_message="Agent 断开连接"
+            )
+
+            with patch("backend.api.scan.get_scan_store", return_value=store):
+                asyncio.run(scan_api.agent_fp_review_stage_output(
+                    "scan-1",
+                    AgentFpReviewStageOutput(
+                        review_id="review-1",
+                        vuln_index=2,
+                        stage="prove_bug",
+                        markdown="# Prove Bug\n\n正方论证",
+                    ),
+                ))
+
+            review = store.get_fp_review_job("review-1")
+            self.assertEqual(review.status, FpReviewStatus.RUNNING)
+            self.assertEqual(review.error_message, "")
+            outputs = store.list_fp_review_stage_outputs_by_review("review-1")
+            self.assertEqual(len(outputs), 1)
+            self.assertEqual(outputs[0].stage, "prove_bug")
+
+    def test_fp_review_merge_keeps_stage_outputs_without_final_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.create_fp_review_job("review-1", "scan-1", 2, "2026-01-01T00:00:00+00:00")
+            store.update_fp_review_job("review-1", status="running")
+            store.upsert_fp_review_stage_output(
+                "review-1", 3, "prove_bug", "# Prove Bug", "2026-01-01T00:01:00+00:00"
+            )
+            job = store.get_fp_review_job("review-1")
+
+            with patch("backend.api.scan.get_scan_store", return_value=store):
+                merged = scan_api._merge_latest_fp_review_results(job, "scan-1")
+
+            entries = [r for r in merged.results if r.vuln_index == 3]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0].reason, "")
+            self.assertEqual(entries[0].stage_outputs, {"prove_bug": "# Prove Bug"})
 
 
 if __name__ == "__main__":

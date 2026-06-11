@@ -101,6 +101,24 @@ class FpReviewStoreTests(unittest.TestCase):
             self.assertIsNotNone(complete)
             self.assertIsNone(complete.current_vuln_index)
 
+    def test_tracks_current_fp_review_indices(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.create_fp_review_job("review", "scan-1", 4, "2026-01-01T00:00:00+00:00")
+
+            store.update_fp_review_job(
+                "review", status="running", current_vuln_index=2, current_vuln_indices=[2, 5]
+            )
+            running = store.get_fp_review_job("review")
+            self.assertIsNotNone(running)
+            self.assertEqual(running.current_vuln_indices, [2, 5])
+
+            store.update_fp_review_job("review", status="complete", clear_current_vuln_index=True)
+            complete = store.get_fp_review_job("review")
+            self.assertIsNotNone(complete)
+            self.assertIsNone(complete.current_vuln_index)
+            self.assertEqual(complete.current_vuln_indices, [])
+
     def test_can_mark_fp_review_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")
@@ -182,10 +200,11 @@ class FpReviewStoreTests(unittest.TestCase):
 
             migrated = SqliteScanStore(db_path)
             migrated.create_fp_review_job("review", "scan-1", 1, "2026-01-01T00:00:00+00:00")
-            migrated.update_fp_review_job("review", current_vuln_index=3)
+            migrated.update_fp_review_job("review", current_vuln_index=3, current_vuln_indices=[3, 6])
             job = migrated.get_fp_review_job("review")
             self.assertIsNotNone(job)
             self.assertEqual(job.current_vuln_index, 3)
+            self.assertEqual(job.current_vuln_indices, [3, 6])
 
 
 if __name__ == "__main__":

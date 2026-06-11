@@ -35,7 +35,7 @@
 
 **源码不离开本地**：Agent 只上报漏洞分析结论，不上传源码文件。  
 **误报反馈闭环**：用户在 Web UI 标记正报或误报后，选中的经验会注入 SKILL 中减少重复误判；也可将问题标为“待分析”作为人工待处理状态，该状态不进入经验库且仍可继续 AI 去误报复核；已标记问题也可以取消标记，取消后会移除该标记生成的经验并重新进入 AI 去误报候选。
-**三阶段 AI 去误报**：FP 复核按 `prove-bug`、`prove-fp`、`final-judge` 顺序运行，各阶段通过本地 Markdown artifact 文件交接；阶段结束后页面即可通过按钮查看该阶段论证，最终结论由 `final-judge` 提交。若阶段未写入 artifact 或未提交结构化结果，Agent 会按配置重试并展示明确失败原因，不再把空 artifact 当作正常输出。
+**三阶段 AI 去误报**：FP 复核按 `prove-bug`、`prove-fp`、`final-judge` 顺序运行，各阶段通过本地 Markdown artifact 文件交接；`prove-bug` 判定非问题（confirmed=false）时正式早退，直接记录"可能误报"结果，不再运行后两个阶段。阶段结束后页面即可通过按钮查看该阶段论证；正方判定为问题时最终结论由 `final-judge` 提交。若阶段未写入 artifact 或未提交结构化结果，Agent 会按配置重试并展示明确失败原因，复核结束后该候选显示"复核失败"。复核按模型池容量并发执行并同时高亮所有进行中的行；Agent 断线重连后复核任务自动重新挂接，不会被误判为已停止。
 
 ## 快速开始
 
@@ -110,7 +110,9 @@ opencode:
       max_concurrency: 1
       enabled: true
 
-# OpenCode/兼容 CLI 全局并发数，同时受单模型 max_concurrency 限制
+# OpenCode/兼容 CLI 并发数：未配置 models 时为单模型并发上限；
+# 配置 models 后并发完全由各模型 max_concurrency 决定（总并发 = 各启用模型之和），
+# 多个扫描/去误报任务共享模型池，按模型各自限流，互不阻塞
 opencode_concurrency: 3
 
 # AI 去误报 CLI 配置可选；不配置则继承上面的审计工具和模型
@@ -206,8 +208,10 @@ Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 5. “待分析”只保存为漏洞人工状态，不生成经验库反馈、不注入 SKILL，也不会阻止该问题继续进入 AI 去误报或续扫候选
 6. 已人工标记的问题可单条或批量取消标记；取消后会删除该标记生成的反馈、从本次扫描的 `feedback_ids` 中移除，并在下次 AI 去误报时重新复核
 7. AI 去误报复核会依次运行 `prove-bug`、`prove-fp`、`final-judge` 三个阶段；各阶段将 Markdown 写入本次复核的 artifact 目录，后续阶段按文件路径读取，避免把完整论证塞进 prompt
-8. 每个阶段结束后，扫描详情页会实时展示对应 Markdown；最终漏洞/误报结论和问题报告只采用 `final-judge` 的 `submit_result`
-9. 阶段产物必须同时包含非空 Markdown artifact 和 `submit_result`；缺失时会按 `fp_review_cli.max_retries` 重试，仍失败则停止该候选的后续 FP 复核阶段并保留已有有效结论
+8. **正方早退**：`prove-bug` 提交 `confirmed=false`（非问题）时正式早退，直接以正方理由记录"可能误报"最终结果并推送前端，跳过 `prove-fp` 和 `final-judge`；只有正方判定为真实问题时才进入后两个阶段，此时最终结论采用 `final-judge` 的 `submit_result`
+9. 每个阶段结束后，扫描详情页会实时展示对应 Markdown；复核按模型池容量并发执行，所有正在复核的行同时高亮
+10. 阶段产物必须同时包含非空 Markdown artifact 和 `submit_result`；缺失时会按 `fp_review_cli.max_retries` 重试（重试 prompt 会强调即使非问题也必须写工件并提交），仍失败则停止该候选的后续 FP 复核阶段并保留已有有效结论，前端在复核结束后显示"复核失败"而非一直"复核中"；阶段输出会持久化，页面刷新后仍可查看
+11. **断线续挂**：Agent WebSocket 重连时会在 hello 中上报仍在运行的 FP 复核任务，后端重新挂接并恢复 running 状态；progress/result/stage-output 上报也会自动把因断连误标为 error 的复核任务恢复为 running
 
 ## 插件式 Checker 架构
 
@@ -562,7 +566,8 @@ opencode:
   max_retries: 2
   models: []     # 可配置多个模型，字段同上方快速开始示例
 
-# OpenCode/兼容 CLI 全局并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用
+# OpenCode/兼容 CLI 并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
+# 未配置 models 时为单模型并发上限；配置 models 后并发由各模型 max_concurrency 决定
 opencode_concurrency: 1
 
 # AI 去误报 CLI 配置（可选；不配置则继承上面的审计工具和模型）

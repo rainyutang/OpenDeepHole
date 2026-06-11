@@ -110,6 +110,31 @@ def configured_global_concurrency(config: Any) -> int:
     return _safe_int(_cfg_value(config, "opencode_concurrency", 1), 1, 1)
 
 
+def total_model_capacity(
+    cli_config: Any,
+    *,
+    global_concurrency: int,
+    required_capability: str = "any",
+) -> int:
+    """Sum of max_concurrency across enabled models satisfying the requirement.
+
+    This is the number of CLI invocations that can actually run in parallel,
+    so callers should size their worker pools from it instead of the global
+    concurrency setting alone.
+    """
+    required = normalize_requirement(required_capability)
+    options = model_options(cli_config, global_concurrency=global_concurrency)
+    eligible = [
+        option for option in options
+        if capability_satisfies(option.capability, required)
+    ]
+    if not eligible:
+        # Mirror acquire_model_lease(): an over-restrictive requirement falls
+        # back to all enabled models rather than deadlocking.
+        eligible = options
+    return max(1, sum(option.max_concurrency for option in eligible))
+
+
 def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOption]:
     raw_models = _cfg_value(cli_config, "models", None) or []
     options: list[ModelOption] = []
@@ -167,26 +192,30 @@ def _eligible_options(
     options: list[ModelOption],
     *,
     required_capability: str,
-    prefer_high: bool,
 ) -> list[ModelOption]:
-    eligible = [
+    return [
         option for option in options
         if capability_satisfies(option.capability, required_capability)
     ]
-    if prefer_high:
-        high = [option for option in eligible if option.capability == "high"]
-        if high:
-            return high
-    return eligible
 
 
-def _choose_available(options: list[ModelOption]) -> ModelOption | None:
+def _choose_available(
+    options: list[ModelOption],
+    *,
+    prefer_high: bool = False,
+) -> ModelOption | None:
     available = [
         option for option in options
         if _running_by_model.get(option.id, 0) < option.max_concurrency
     ]
     if not available:
         return None
+    if prefer_high:
+        # Soft preference: pick a high-capability model when one has free
+        # capacity, but never leave other eligible models idle waiting for one.
+        high = [option for option in available if option.capability == "high"]
+        if high:
+            available = high
     return min(
         available,
         key=lambda option: (
@@ -257,11 +286,7 @@ async def acquire_model_lease(
 ) -> ModelLease | None:
     required = normalize_requirement(required_capability)
     options = model_options(cli_config, global_concurrency=global_concurrency)
-    eligible = _eligible_options(
-        options,
-        required_capability=required,
-        prefer_high=prefer_high,
-    )
+    eligible = _eligible_options(options, required_capability=required)
     if not eligible:
         # Configuration is too restrictive. Fall back to all enabled models so
         # the audit can still run, but scheduling will make the mismatch visible.
@@ -285,14 +310,18 @@ async def acquire_model_lease(
                     _decrement_queued_locked(stats_scope_id, queued_model_id)
             return None
         async with _condition:
+            # Concurrency is governed per model by max_concurrency; there is no
+            # shared global gate, so one scan saturating its preferred model can
+            # never starve another scan's idle-but-eligible models.
             option = None
-            if _global_running < global_concurrency:
-                assignable = eligible
-                if queued_model_id:
-                    assigned = [candidate for candidate in eligible if candidate.id == queued_model_id]
-                    if assigned:
-                        assignable = assigned
-                option = _choose_available(assignable)
+            if queued_model_id:
+                assigned = [candidate for candidate in eligible if candidate.id == queued_model_id]
+                if assigned:
+                    option = _choose_available(assigned, prefer_high=prefer_high)
+            if option is None:
+                # Queued-target model is busy: take any other eligible model
+                # with free capacity instead of idling behind the pinned one.
+                option = _choose_available(eligible, prefer_high=prefer_high)
             if option is not None:
                 _global_running += 1
                 _running_by_model[option.id] = _running_by_model.get(option.id, 0) + 1

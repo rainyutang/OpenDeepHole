@@ -47,6 +47,7 @@ from backend.models import (
     AgentInfo,
     AgentRemoteConfig,
     AgentScanFinish,
+    FpReviewStatus,
     OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
@@ -305,6 +306,68 @@ def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: 
         logger.info("Reattached active scan %s from agent %s", scan_id, agent_id)
 
 
+def _reattach_active_fp_reviews(agent_id: str, agent: AgentInfo, active_fp_reviews: list) -> None:
+    """Restore server-side running state for FP reviews still running in this agent.
+
+    Re-pointing the scan at the new agent_id also keeps the old connection's
+    delayed disconnect-cancel from marking the surviving FP review as error.
+    """
+    if not active_fp_reviews:
+        return
+
+    store = get_scan_store()
+    for item in active_fp_reviews:
+        if not isinstance(item, dict):
+            continue
+        scan_id = str(item.get("scan_id") or "")
+        review_id = str(item.get("review_id") or "")
+        if not scan_id or not review_id:
+            continue
+
+        job = store.get_fp_review_job(review_id)
+        if job is None or job.scan_id != scan_id:
+            logger.warning("Agent %s reported unknown active FP review %s", agent_id, review_id)
+            continue
+
+        meta = store.get_scan_meta(scan_id)
+        if meta is None:
+            continue
+        if meta.agent_name and meta.agent_name != agent.name:
+            logger.warning(
+                "Ignoring active FP review %s from agent %s: stored agent_name=%s",
+                review_id,
+                agent.name,
+                meta.agent_name,
+            )
+            continue
+        if meta.user_id and agent.user_id and meta.user_id != agent.user_id:
+            logger.warning(
+                "Ignoring active FP review %s from agent %s: owner mismatch",
+                review_id,
+                agent.name,
+            )
+            continue
+
+        from backend.api.scan import _is_agent_disconnect_error
+
+        if job.status in (FpReviewStatus.PENDING, FpReviewStatus.RUNNING):
+            pass
+        elif job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
+            store.update_fp_review_job(review_id, status="running", error_message="")
+        else:
+            logger.info(
+                "Ignoring active FP review %s from agent %s: status=%s error=%r",
+                review_id,
+                agent.name,
+                job.status.value,
+                job.error_message,
+            )
+            continue
+
+        store.update_scan_agent(scan_id, agent_id, agent.name)
+        logger.info("Reattached active FP review %s from agent %s", review_id, agent_id)
+
+
 def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
     """Load a recoverable scan into memory when events arrive after restart."""
     scan = _running_scans.get(scan_id)
@@ -424,6 +487,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
         _agent_ws_locks[agent_id] = asyncio.Lock()
 
         _reattach_active_agent_scans(agent_id, agent_info, msg.get("active_scans") or [])
+        _reattach_active_fp_reviews(agent_id, agent_info, msg.get("active_fp_reviews") or [])
 
         reported_config = msg.get("config")
         if reported_config and name not in _agent_configs:

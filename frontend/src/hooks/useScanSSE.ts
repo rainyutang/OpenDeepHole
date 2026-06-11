@@ -47,6 +47,7 @@ interface FpReviewStartedEvent {
 interface FpReviewProgressEvent {
   review_id: string;
   vuln_index: number;
+  active_indices?: number[] | null;
   processed: number;
   total: number;
 }

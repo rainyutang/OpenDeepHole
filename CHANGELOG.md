@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-06-11
+
+- **优化** AI 去误报新增正方早退：`prove-bug` 阶段提交 `confirmed=false`（非问题）时直接以正方理由记录"可能误报"最终结果并推送前端，跳过 `prove-fp` 和 `final-judge` 两个阶段；此前该场景下模型常不写 artifact 也不提交结论，导致阶段失败后既无后续阶段也无任何复核结果
+- **优化** AI 去误报阶段重试时在 prompt 中强调即使结论为非问题也必须写入 Markdown artifact 并调用 `submit_result`，`prove-bug` SKILL 同步加固该要求
+- **修复** AI 去误报并发复核时扫描详情页不高亮正在复核的行：进度上报改为携带完整的进行中索引集合（`active_indices`），后端持久化到 `fp_review_jobs.current_vuln_indices`（旧库自动迁移），前端同时高亮所有正在复核的行并在顶部面板展示并行目标
+- **修复** Agent WebSocket 重连后后端误判 AI 去误报已停止：Agent hello 新增 `active_fp_reviews` 上报，后端重新挂接仍在运行的复核任务（更新扫描 agent_id、恢复因断连误标 error 的任务为 running），旧连接的延迟取消不再误杀存活复核；`stage-output` 上报端点补齐与 progress/result 一致的断连自动恢复
+- **修复** 页面刷新后无最终结论条目的"复核中"状态和阶段输出消失：`GET /fp_review` 现在会合并 `fp_review_stage_outputs` 中的阶段 Markdown，无最终结论的漏洞以占位条目返回
+- **优化** 复核结束后仍无最终结论的条目前端显示"复核失败"徽章，不再永远停留在"复核中"
+
 ## 2026-06-10
 
 - **新增** OpenCode/兼容 CLI 统一模型池调度：Agent 配置支持 `opencode_concurrency` 和 `opencode.models[]`/`fp_review_cli.models[]`，可按模型能力、权重和单模型并发做负载分配；未配置模型池时保持原有单模型行为

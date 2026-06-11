@@ -125,7 +125,7 @@ class AgentFeedbackTests(unittest.TestCase):
             async def send_event(self, scan_id, event) -> None:
                 return None
 
-            async def push_fp_progress(self, scan_id, review_id, vuln_index, processed=None) -> None:
+            async def push_fp_progress(self, scan_id, review_id, vuln_index, processed=None, active_indices=None) -> None:
                 self.progress.append((vuln_index, processed))
 
             async def push_fp_result(
@@ -210,7 +210,7 @@ class AgentFeedbackTests(unittest.TestCase):
             async def send_event(self, scan_id, event) -> None:
                 return None
 
-            async def push_fp_progress(self, scan_id, review_id, vuln_index, processed=None) -> None:
+            async def push_fp_progress(self, scan_id, review_id, vuln_index, processed=None, active_indices=None) -> None:
                 self.progress.append((vuln_index, processed))
 
             async def push_fp_result(
@@ -290,7 +290,7 @@ class AgentFeedbackTests(unittest.TestCase):
         self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
         self.assertEqual(reporter.finished, ("complete", None))
 
-    def test_fp_review_runs_all_stages_when_prove_bug_reports_fp(self) -> None:
+    def test_fp_review_early_exits_when_prove_bug_reports_fp(self) -> None:
         class FakeReporter:
             def __init__(self) -> None:
                 self.results: list[tuple] = []
@@ -303,7 +303,7 @@ class AgentFeedbackTests(unittest.TestCase):
             async def send_event(self, scan_id, event) -> None:
                 return None
 
-            async def push_fp_progress(self, scan_id, review_id, vuln_index, processed=None) -> None:
+            async def push_fp_progress(self, scan_id, review_id, vuln_index, processed=None, active_indices=None) -> None:
                 self.progress.append((vuln_index, processed))
 
             async def push_fp_result(
@@ -378,7 +378,9 @@ class AgentFeedbackTests(unittest.TestCase):
         import asyncio
 
         reporter, invoke = asyncio.run(_run())
-        self.assertEqual(invoke.await_count, 3)
+        # 正方论证 confirmed=false 时正式早退：只跑 prove_bug 一个阶段，
+        # 直接以正方理由记录误报结果。
+        self.assertEqual(invoke.await_count, 1)
         self.assertEqual(reporter.results[0][0:3], (3, "fp", "low"))
         self.assertEqual(reporter.results[0][4], "")
         self.assertIn("NOT_PROVEN", reporter.results[0][3])
