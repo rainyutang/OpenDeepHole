@@ -229,16 +229,20 @@ def _choose_available(
 
 
 def _choose_queue_target(options: list[ModelOption], stats: dict[str, ModelRuntimeStats]) -> ModelOption:
+    def _queued(option: ModelOption) -> int:
+        item = stats.get(option.id)
+        return item.queued if item is not None else 0
+
+    # Normalize load by effective throughput (weight * max_concurrency) so the
+    # queue lands on the model expected to free a slot soonest, instead of
+    # deterministically pinning the smallest-concurrency model at saturation.
     return min(
         options,
         key=lambda option: (
-            (
-                (stats.get(option.id).queued if option.id in stats else 0)
-                + _running_by_model.get(option.id, 0)
-            ) / option.weight,
-            stats.get(option.id).queued if option.id in stats else 0,
-            _running_by_model.get(option.id, 0),
-            -option.weight,
+            (_queued(option) + _running_by_model.get(option.id, 0))
+            / (option.weight * option.max_concurrency),
+            _queued(option),
+            -(option.weight * option.max_concurrency),
             option.id,
         ),
     )
@@ -294,14 +298,6 @@ async def acquire_model_lease(
 
     global _global_running
     queued_model_id = ""
-    if stats_scope_id:
-        async with _condition:
-            stats = _ensure_scope_models_locked(stats_scope_id, options)
-            queued_option = _choose_queue_target(eligible, stats)
-            queued_model_id = queued_option.id
-            stats[queued_model_id].queued += 1
-            stats[queued_model_id].last_status = "queued"
-            _scope_updated_at[stats_scope_id] = _now_iso()
 
     while True:
         if cancel_event is not None and cancel_event.is_set():
@@ -334,7 +330,6 @@ async def acquire_model_lease(
                     item = stats[option.id]
                     item.running += 1
                     item.total += 1
-                    item.last_status = "running"
                     item.last_started_at = _now_iso()
                     _scope_updated_at[stats_scope_id] = item.last_started_at
                 return ModelLease(
@@ -344,6 +339,15 @@ async def acquire_model_lease(
                     stats_scope_id=stats_scope_id,
                     started_at=started_at,
                 )
+            # No model has free capacity: count this task as queued (once per
+            # acquire) before waiting, so snapshots only ever report tasks
+            # that are genuinely waiting.
+            if stats_scope_id and not queued_model_id:
+                stats = _ensure_scope_models_locked(stats_scope_id, options)
+                queued_option = _choose_queue_target(eligible, stats)
+                queued_model_id = queued_option.id
+                stats[queued_model_id].queued += 1
+                _scope_updated_at[stats_scope_id] = _now_iso()
             try:
                 await asyncio.wait_for(_condition.wait(), timeout=0.2)
             except asyncio.TimeoutError:
@@ -387,6 +391,15 @@ def _completed_count(item: ModelRuntimeStats) -> int:
 
 def _stats_item_snapshot(item: ModelRuntimeStats) -> dict[str, Any]:
     completed = _completed_count(item)
+    # Display status is derived from live counters; item.last_status itself
+    # only ever holds the most recent outcome (written on release), so a
+    # stale "queued"/"running" can never stick to an idle model.
+    if item.running > 0:
+        display_status = "running"
+    elif item.queued > 0:
+        display_status = "queued"
+    else:
+        display_status = item.last_status
     return {
         "id": item.id,
         "model": item.model,
@@ -401,7 +414,7 @@ def _stats_item_snapshot(item: ModelRuntimeStats) -> dict[str, Any]:
         "timeout": item.timeout,
         "cancelled": item.cancelled,
         "avg_duration_seconds": item.total_duration_seconds / completed if completed else 0.0,
-        "last_status": item.last_status,
+        "last_status": display_status,
         "last_started_at": item.last_started_at,
         "last_finished_at": item.last_finished_at,
     }

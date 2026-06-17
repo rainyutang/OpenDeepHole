@@ -536,6 +536,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                         </select>
                       </td>
                       <td className="px-4 py-3 text-sm font-medium text-slate-200 max-w-[14rem] truncate" title={displayProjectName}>
+                        {scan.mode === "deep_mining" && (
+                          <span className="mr-2 align-middle text-[11px] font-semibold text-purple-300 bg-purple-500/10 border border-purple-500/30 rounded px-1.5 py-0.5">
+                            深度挖掘
+                          </span>
+                        )}
                         {displayProjectName}
                       </td>
                       <td className="px-4 py-3">

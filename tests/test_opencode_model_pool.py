@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,8 @@ def _reset_model_pool():
     model_pool_module._running_by_model.clear()
     model_pool_module._global_running = 0
     model_pool_module._last_used.clear()
+    model_pool_module._stats_by_scope.clear()
+    model_pool_module._scope_updated_at.clear()
     yield
 
 
@@ -260,5 +263,195 @@ def test_queued_task_falls_back_to_other_free_model() -> None:
                 third_task.cancel()
             for lease in held.values():
                 await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_immediate_acquire_does_not_create_queue_stats() -> None:
+    """When a model is free, acquiring must not produce any queued count and
+    must not stamp other models with a stale "queued" status."""
+
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "a", "model": "model-a", "capability": "high", "weight": 1, "max_concurrency": 1},
+                {"id": "b", "model": "model-b", "capability": "high", "weight": 1, "max_concurrency": 1},
+            ],
+        )
+        scope = "test-scope-immediate"
+
+        lease = await acquire_model_lease(
+            cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+        )
+        assert lease is not None
+
+        snapshot = model_pool_snapshot(scope)
+        by_id = {item["id"]: item for item in snapshot["models"]}
+        assert snapshot["global_queued"] == 0
+        assert all(item["queued"] == 0 for item in by_id.values())
+        assert by_id[lease.option.id]["last_status"] == "running"
+        other_id = "b" if lease.option.id == "a" else "a"
+        assert by_id[other_id]["last_status"] == ""
+
+        await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+        snapshot = model_pool_snapshot(scope)
+        by_id = {item["id"]: item for item in snapshot["models"]}
+        assert by_id[lease.option.id]["last_status"] == "success"
+
+    asyncio.run(run())
+
+
+def test_fallback_clears_queue_target_status() -> None:
+    """Regression for the dashboard bug: after a queued task falls back to a
+    different model, the original queue target must not stay "queued"."""
+
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "a", "model": "model-a", "capability": "high", "weight": 1, "max_concurrency": 1},
+                {"id": "b", "model": "model-b", "capability": "high", "weight": 1, "max_concurrency": 1},
+            ],
+        )
+        scope = "test-scope-fallback-status"
+
+        lease_a = await acquire_model_lease(
+            cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+        )
+        lease_b = await acquire_model_lease(
+            cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+        )
+        assert lease_a is not None and lease_b is not None
+        held = {lease_a.option.id: lease_a, lease_b.option.id: lease_b}
+
+        third_task = asyncio.create_task(
+            acquire_model_lease(
+                cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+            snapshot = model_pool_snapshot(scope)
+            queued_ids = [item["id"] for item in snapshot["models"] if item["queued"]]
+            assert len(queued_ids) == 1
+            target_id = queued_ids[0]
+            other_id = "b" if target_id == "a" else "a"
+
+            # Free the non-target model so the third task falls back to it.
+            await release_model_lease(held.pop(other_id), outcome="success", duration_seconds=0.1)
+            third = await asyncio.wait_for(third_task, timeout=1)
+            assert third is not None
+            assert third.option.id == other_id
+
+            # The original queue target still has its own lease running and
+            # nothing queued — it must show "running", not a stale "queued".
+            snapshot = model_pool_snapshot(scope)
+            by_id = {item["id"]: item for item in snapshot["models"]}
+            assert by_id[target_id]["queued"] == 0
+            assert by_id[target_id]["last_status"] == "running"
+
+            await release_model_lease(third, outcome="success", duration_seconds=0.1)
+            await release_model_lease(held.pop(target_id), outcome="failure", duration_seconds=0.1)
+
+            snapshot = model_pool_snapshot(scope)
+            by_id = {item["id"]: item for item in snapshot["models"]}
+            assert by_id[target_id]["last_status"] == "failure"
+            assert by_id[other_id]["last_status"] == "success"
+        finally:
+            if not third_task.done():
+                third_task.cancel()
+            for lease in held.values():
+                await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_snapshot_status_derivation_priority() -> None:
+    """Snapshot status is derived: running > queued > last outcome."""
+
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "solo", "model": "solo-model", "capability": "high", "weight": 1, "max_concurrency": 1},
+            ],
+        )
+        scope = "test-scope-derivation"
+
+        lease = await acquire_model_lease(
+            cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+        )
+        assert lease is not None
+        by_id = {item["id"]: item for item in model_pool_snapshot(scope)["models"]}
+        assert by_id["solo"]["last_status"] == "running"
+
+        waiter = asyncio.create_task(
+            acquire_model_lease(
+                cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+            # running > queued: the model is busy and has a waiter.
+            by_id = {item["id"]: item for item in model_pool_snapshot(scope)["models"]}
+            assert by_id["solo"]["queued"] == 1
+            assert by_id["solo"]["last_status"] == "running"
+
+            await release_model_lease(lease, outcome="timeout", duration_seconds=0.1)
+            second = await asyncio.wait_for(waiter, timeout=1)
+            assert second is not None
+            await release_model_lease(second, outcome="success", duration_seconds=0.1)
+
+            # Idle: falls back to the most recent outcome.
+            by_id = {item["id"]: item for item in model_pool_snapshot(scope)["models"]}
+            assert by_id["solo"]["last_status"] == "success"
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+
+    asyncio.run(run())
+
+
+def test_cancelled_waiter_decrements_queue() -> None:
+    """A waiter cancelled via cancel_event must remove its queued count."""
+
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "solo", "model": "solo-model", "capability": "high", "weight": 1, "max_concurrency": 1},
+            ],
+        )
+        scope = "test-scope-cancel-queue"
+        cancel_event = threading.Event()
+
+        lease = await acquire_model_lease(
+            cfg, global_concurrency=1, required_capability="any", stats_scope_id=scope
+        )
+        assert lease is not None
+        waiter = asyncio.create_task(
+            acquire_model_lease(
+                cfg,
+                global_concurrency=1,
+                required_capability="any",
+                cancel_event=cancel_event,
+                stats_scope_id=scope,
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+            by_id = {item["id"]: item for item in model_pool_snapshot(scope)["models"]}
+            assert by_id["solo"]["queued"] == 1
+
+            cancel_event.set()
+            cancelled = await asyncio.wait_for(waiter, timeout=1)
+            assert cancelled is None
+
+            snapshot = model_pool_snapshot(scope)
+            by_id = {item["id"]: item for item in snapshot["models"]}
+            assert snapshot["global_queued"] == 0
+            assert by_id["solo"]["queued"] == 0
+            assert by_id["solo"]["last_status"] == "running"  # original lease still held
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+            await release_model_lease(lease, outcome="success", duration_seconds=0.1)
 
     asyncio.run(run())

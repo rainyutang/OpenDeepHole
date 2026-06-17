@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
+import type { AgentConfigTestResult, AgentInfo, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, IndexStatus, MiningAgentRun, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
 
 const api = axios.create({ baseURL: "/" });
 
@@ -217,6 +217,29 @@ export async function createScan(body: {
   feedback_ids?: string[];
 }): Promise<ScanStartResponse> {
   const { data } = await api.post<ScanStartResponse>("/api/scan", body);
+  return data;
+}
+
+export async function createMineScan(body: {
+  agent_id: string;
+  project_path: string;
+  code_scan_path?: string;
+  scan_name: string;
+  product?: string;
+  call_budget?: number;
+  documents?: { name: string; content_b64: string }[];
+}): Promise<ScanStartResponse> {
+  const { data } = await api.post<ScanStartResponse>("/api/mine", body);
+  return data;
+}
+
+export async function listAgentRuns(scanId: string): Promise<MiningAgentRun[]> {
+  const { data } = await api.get<MiningAgentRun[]>(`/api/scan/${scanId}/agent-runs`);
+  return data;
+}
+
+export async function getAgentRun(scanId: string, runId: string): Promise<MiningAgentRun> {
+  const { data } = await api.get<MiningAgentRun>(`/api/scan/${scanId}/agent-run/${runId}`);
   return data;
 }
 

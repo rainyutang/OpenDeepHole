@@ -22,11 +22,25 @@ interface ScanStatusEvent {
   static_scanned_files?: number | null;
   static_analysis_done?: boolean | null;
   opencode_pool?: ScanStatus["opencode_pool"];
+  deep_mining_status?: ScanStatus["deep_mining_status"];
 }
 
 interface ScanVulnerabilityEvent {
   index: number;
   vulnerability: Vulnerability;
+}
+
+interface AgentRunEvent {
+  run_id: string;
+  kind: string;
+  function: string;
+  file: string;
+  line: number;
+  vuln_type: string;
+  status: string;
+  started_at: string;
+  updated_at: string;
+  finished_at: string;
 }
 
 interface ScanEventPayload {
@@ -90,6 +104,7 @@ export interface ScanSSEHandlers {
   onFpReviewResult?: (data: FpReviewResultEvent) => void;
   onFpReviewFinish?: (data: FpReviewFinishEvent) => void;
   onIndexStatus?: (data: IndexStatus) => void;
+  onAgentRun?: (data: AgentRunEvent) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -194,6 +209,7 @@ export function useScanSSE(
     handle<FpReviewResultEvent>("fp_review_result", (d) => handlersRef.current.onFpReviewResult?.(d));
     handle<FpReviewFinishEvent>("fp_review_finish", (d) => handlersRef.current.onFpReviewFinish?.(d));
     handle<IndexStatus>("index_status", (d) => handlersRef.current.onIndexStatus?.(d));
+    handle<AgentRunEvent>("agent_run", (d) => handlersRef.current.onAgentRun?.(d));
 
     es.onopen = () => {
       setConnected(true);

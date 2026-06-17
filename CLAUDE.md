@@ -83,6 +83,37 @@ Three-stage debate per vulnerability: `prove_bug` → `prove_fp` → `final_judg
 - **Reconnect resilience**: agent hello includes `active_fp_reviews`; backend `_reattach_active_fp_reviews()` re-points the scan at the new agent_id and recovers jobs error-marked by the disconnect grace task. The progress/result/stage-output endpoints also auto-recover disconnect-errored jobs to running.
 - **Persistence**: stage Markdown is stored in `fp_review_stage_outputs`; `GET /api/scan/{id}/fp_review` merges it into results (placeholder entries with empty `reason` for vulns without a final verdict), so reloads keep showing in-progress/failed stage output. The frontend shows "复核失败" when a job has finished but a vuln has no final verdict.
 
+## Agent — Deep Mining Pipeline (`agent/miner.py`)
+
+A **second, independent scan mode** (`mode="deep_mining"`) running in parallel to the checker-based candidate scan. It does **not** use checkers, `Candidate`, or `run_audit`. It is a task-driven multi-agent engine: LLM agents drive the audit and consult code facts, while the orchestrator keeps even large repos thorough.
+
+```
+Independent creation:  POST /api/mine (optional uploaded documents) → WS command {"type":"mine", ...}
+                       agent/main.py dispatch → agent/server.py:handle_mine → agent/miner.py:run_mine
+Pipeline (run_mine):
+  1. Index whole project_path (cross-function nav) + write uploaded docs to scan_dir/documents/
+  2. Start LocalMCP + build mine_workspace (threat/analyze/verify SKILLs)
+  3. Threat agent: analyzes the TEST CODE PATH (code_scan_path, not whole repo) + docs → entry functions
+  4. Scheduler loop (concurrency = total_model_capacity), per entry an analyze agent:
+       analyze → findings (reported immediately as ai_verdict="pending_verify") + spawn verify tasks
+                 new attack surface → spawn analyze tasks (dedup, no depth limit)
+       verify  → submit_result → updates the finding in place (confirmed / not_confirmed)
+  5. Coverage backfill: covered = read functions ∩ test functions; while uncovered & budget left → analyze them
+  6. Dual stop gate: coverage complete OR Agent call budget exhausted; finish_scan
+```
+
+- **Coverage**: MCP `view_function_code` records read functions per `project_id` (`record_read`/`get_read_functions` in `mcp_server/tools.py`, same process as the miner); coverage = `|read ∩ test_funcs| / |test_funcs|` where test functions are those under `code_scan_path`.
+- **Findings before verification**: analyze submits problems immediately (`pending_verify`); verify re-reports the same `file/line/function/vuln_type` and `upsert_incomplete_vulnerability` (whose updatable set includes `pending_verify`) updates the row in place to confirmed/not_confirmed.
+- **MCP tools** (`mcp_server/tools.py`): `find_entry_points`, `find_callers`, `find_callees`, `submit_entry_points` (threat), `submit_analysis` (analyze: findings + spawn), and `submit_result` (verify). Code-graph tools read `code_index.db` via `AGENT_PROJECT_DIR`.
+- **SKILLs** live in `skills/mining/{threat,analyze,verify}/SKILL.md` (deliberately **not** under `checkers/`); `agent/miner.py` copies them into the per-scan `mine_workspace`.
+- **Anti-laziness**: bounded per-agent scope (one function/problem), structured artifact contract (missing artifact → retry once), call budget, and coverage measured (not assumed).
+- **Documents**: uploaded at creation (`CreateMineRequest.documents`, base64), shipped over the `mine` WS command, written to `scan_dir/documents/`, read by the threat agent.
+- **Agent runs (live + final output)**: each agent invocation is a `MiningAgentRun` (run_id, kind, target, status, streamed `output`, `final_output`); the miner streams via `on_line` and flushes changed runs (`_publish_agent_runs_until`) to `POST /api/agent/scan/{id}/agent-run` → `mining_agent_runs` table + SSE `agent_run`. Fetch via `GET /api/scan/{id}/agent-runs` (summaries) and `/agent-run/{run_id}` (full output).
+- **Stop/cancel**: mine tasks register in the agent `TaskManager`, so `POST /api/scan/{id}/stop` cancels them. `call_budget` (default 200) comes from the create request (no depth limit anymore).
+- **Scan record**: the `scans.mode` column (auto-migrated) distinguishes `checker` vs `deep_mining`; results reuse the `Vulnerability` table.
+- **Live status**: `DeepMiningStatus` snapshot (phase, running/queued tasks, budget, function coverage, finding counts incl. pending) mirrors the `opencode_pool` chain → `POST /api/agent/scan/{id}/deep-mining-status` → `scans.deep_mining_status` column + SSE.
+- **Detail page**: `ScanStatus.tsx` probes `scan.mode` and routes `deep_mining` to `DeepMiningView.tsx` (tabs 概览/Agent 任务/发现/日志 — live tasks, coverage/budget, clickable per-agent output drawer, findings via `MiningFindingsList.tsx`), leaving the checker UI untouched.
+
 ## Plugin Architecture (Checkers)
 
 Vulnerability types are **plugin-based**. Each checker is a self-contained directory under `checkers/`:
@@ -160,7 +191,7 @@ tail -f logs/opendeephole.log
 - `vuln_type` is a plain string (not enum) matching the checker directory name
 - CLI config workspaces are created per scan/review under the task directory; `opencode`/`nga` receive config through `OPENCODE_CONFIG_CONTENT` while `--dir` still points at the real project root
 - Agent configs (LLM API key, model, etc.) are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and on UI save
-- Model-pool scheduling (`backend/opencode/model_pool.py`): concurrency is limited per model by `max_concurrency` only — there is no cross-scan global gate, so concurrent scans/FP reviews never starve each other's idle models. A queued task switches to any other capability-eligible free model if its queue-target model stays busy; `prefer_high` is a soft preference. Scan and FP-review worker counts are sized from `total_model_capacity()` (sum of eligible enabled models' `max_concurrency`); `opencode_concurrency` is the single-model concurrency when no `models` list is configured
+- Model-pool scheduling (`backend/opencode/model_pool.py`): concurrency is limited per model by `max_concurrency` only — there is no cross-scan global gate, so concurrent scans/FP reviews never starve each other's idle models. A task only counts as queued when no eligible model has free capacity; the queue target is chosen by `(queued+running)/(weight*max_concurrency)` (expected soonest free slot), and a queued task switches to any other capability-eligible free model if its queue-target model stays busy; `prefer_high` is a soft preference. Snapshot `last_status` is derived per model: `running` if running>0, else `queued` if queued>0, else the last release outcome — `ModelRuntimeStats.last_status` itself only stores outcomes. Scan and FP-review worker counts are sized from `total_model_capacity()` (sum of eligible enabled models' `max_concurrency`); `opencode_concurrency` is the single-model concurrency when no `models` list is configured
 - **Always update both README.md and CLAUDE.md when making structural or architectural changes**
 
 ## Code Parser (Shared Indexer)
@@ -202,8 +233,9 @@ backend/
 
 agent/
   main.py         — Entry point; WebSocket client loop with auto-reconnect
-  server.py       — Command handlers: handle_task(), handle_stop(), handle_resume()
+  server.py       — Command handlers: handle_task(), handle_stop(), handle_resume(), handle_mine()
   scanner.py      — Full local scan pipeline (index → static → AI → report)
+  miner.py        — Deep-mining engine (independent scan mode): multi-agent threat→analyze→verify + coverage
   reporter.py     — HTTP client: pushes events/results to backend
   task_manager.py — In-memory task registry with cancel_event per scan
   index_store.py  — Manages code_index.db in project directory
@@ -211,6 +243,7 @@ agent/
   config.py       — AgentConfig, load_config(), apply_remote_config()
 
 checkers/         — Plugin directories (npd, oob, safe_mem_oob, uaf, intoverflow, memleak)
+skills/mining/    — Deep-mining SKILLs (threat, analyze, verify) — NOT checkers; loaded by agent/miner.py
 code_parser/      — Shared C/C++ indexer (ctags + tree-sitter + SQLite)
 mcp_server/       — MCP Server (tools.py, server.py)
 frontend/         — React + TypeScript + Vite + Tailwind CSS

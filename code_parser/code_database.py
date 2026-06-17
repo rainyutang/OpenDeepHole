@@ -464,6 +464,13 @@ class CodeDatabase:
             (function_id,),
         ).fetchall()
 
+    def get_distinct_callee_names(self) -> set[str]:
+        """Return the set of all function names that are called somewhere."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT callee_name FROM function_calls WHERE callee_name IS NOT NULL"
+        ).fetchall()
+        return {r["callee_name"] for r in rows if r["callee_name"]}
+
     def get_call_sites_by_name(self, callee_name: str) -> list[sqlite3.Row]:
         """Return all call sites where callee_name is called."""
         return self._conn.execute(

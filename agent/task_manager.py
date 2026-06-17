@@ -19,6 +19,9 @@ class ScanTask:
     retry_candidates: list[dict] | None = None
     retry_total_candidates: int | None = None
     retry_processed_offset: int = 0
+    mode: str = "checker"          # "checker" | "deep_mining"
+    call_budget: int = 0           # deep_mining: Agent 总调用上限（0=默认）
+    documents: list[dict] = field(default_factory=list)  # deep_mining: 上传的参考文档
     cancel_event: threading.Event = field(default_factory=threading.Event)
     asyncio_task: Optional[asyncio.Task] = None
 

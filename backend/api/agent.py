@@ -48,6 +48,8 @@ from backend.models import (
     AgentRemoteConfig,
     AgentScanFinish,
     FpReviewStatus,
+    DeepMiningStatus,
+    MiningAgentRun,
     OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
@@ -1076,6 +1078,47 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
     return {"ok": True}
 
 
+@router.post("/scan/{scan_id}/deep-mining-status")
+async def agent_push_deep_mining_status(scan_id: str, body: DeepMiningStatus) -> dict:
+    """Agent pushes the latest deep-mining live status for one scan."""
+    store = get_scan_store()
+    store.update_deep_mining_status(scan_id, body)
+
+    scan = _ensure_running_scan(scan_id)
+    if scan is not None:
+        scan.deep_mining_status = body
+
+    from backend.sse import publish
+    publish(scan_id, "scan_status", {
+        "status": scan.status if scan else None,
+        "deep_mining_status": body.model_dump(),
+    })
+    return {"ok": True}
+
+
+@router.post("/scan/{scan_id}/agent-run")
+async def agent_push_agent_run(scan_id: str, body: MiningAgentRun) -> dict:
+    """Agent pushes one mining agent-run record (live output + final result)."""
+    store = get_scan_store()
+    store.upsert_mining_agent_run(scan_id, body)
+
+    from backend.sse import publish
+    # SSE 只发摘要，避免大体积 output；前端按需拉取详情
+    publish(scan_id, "agent_run", {
+        "run_id": body.run_id,
+        "kind": body.kind,
+        "function": body.function,
+        "file": body.file,
+        "line": body.line,
+        "vuln_type": body.vuln_type,
+        "status": body.status,
+        "started_at": body.started_at,
+        "updated_at": body.updated_at,
+        "finished_at": body.finished_at,
+    })
+    return {"ok": True}
+
+
 @router.get("/scan/{scan_id}/index-status")
 async def agent_get_index_status(scan_id: str) -> dict:
     """Return the current code-indexing progress for an agent scan."""
@@ -1108,8 +1151,8 @@ async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
 # Agent package download
 # ---------------------------------------------------------------------------
 
-_AGENT_DIRS = ["agent", "checkers", "code_parser", "mcp_server", "backend"]
-_AGENT_RUNTIME_DIRS = ["agent", "code_parser", "mcp_server", "backend"]
+_AGENT_DIRS = ["agent", "checkers", "code_parser", "mcp_server", "backend", "skills"]
+_AGENT_RUNTIME_DIRS = ["agent", "code_parser", "mcp_server", "backend", "skills"]
 _AGENT_TOOL_DIRS = ["ctags-p6.2.20260517.0-x64"]
 _AGENT_RUNTIME_ROOT_FILES = ["requirements-agent.txt"]
 _AGENT_ROOT_FILES = [

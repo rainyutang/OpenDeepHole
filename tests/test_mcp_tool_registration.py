@@ -24,3 +24,21 @@ def test_reference_lookup_helpers_are_not_registered_as_mcp_tools() -> None:
     assert "submit_result" in mcp.tools
     assert "find_function_references" not in mcp.tools
     assert "find_global_variable_references" not in mcp.tools
+
+
+def test_deep_mining_tools_are_registered() -> None:
+    mcp = _FakeMCP()
+
+    register_tools(mcp)
+
+    for name in (
+        "find_entry_points",
+        "find_callers",
+        "find_callees",
+        "submit_entry_points",
+        "submit_analysis",
+    ):
+        assert name in mcp.tools, f"missing deep-mining MCP tool: {name}"
+    # 旧的巡查/追踪工具已移除
+    assert "submit_survey" not in mcp.tools
+    assert "submit_trace" not in mcp.tools

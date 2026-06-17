@@ -107,7 +107,7 @@ export interface Vulnerability {
   description: string;
   ai_analysis: string;
   confirmed: boolean;
-  ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "";
+  ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "pending_verify" | "";
   user_verdict?: UserFeedbackVerdict | null;
   user_verdict_reason?: string | null;
   ticket_submitted?: boolean;
@@ -168,10 +168,54 @@ export interface OpenCodePoolStatus {
   updated_at: string;
 }
 
+export interface MiningTask {
+  kind: string;          // threat | analyze | verify
+  function: string;
+  file: string;
+  line: number;
+  vuln_type: string;
+  run_id?: string;
+  started_at?: string;
+}
+
+export interface DeepMiningStatus {
+  scan_id: string;
+  phase: string;         // indexing | threat | mining | coverage | done
+  calls_made: number;
+  call_budget: number;
+  total_functions: number;
+  covered_functions: number;
+  queued_total: number;
+  queued_analyze: number;
+  queued_verify: number;
+  running_tasks: MiningTask[];
+  queued_preview: MiningTask[];
+  findings_total: number;
+  findings_confirmed: number;
+  findings_pending: number;
+  updated_at: string;
+}
+
+export interface MiningAgentRun {
+  run_id: string;
+  kind: string;          // threat | analyze | verify
+  function: string;
+  file: string;
+  line: number;
+  vuln_type: string;
+  status: string;        // running | done | error
+  output: string;
+  final_output: string;
+  started_at: string;
+  updated_at: string;
+  finished_at: string;
+}
+
 export interface ScanStatus {
   scan_id: string;
   project_id: string;
   product: string;
+  mode?: string;
   scan_items: string[];
   created_at: string;
   status: ScanItemStatus;
@@ -186,6 +230,7 @@ export interface ScanStatus {
   feedback_ids: string[];
   retryable_candidates_count: number;
   opencode_pool?: OpenCodePoolStatus | null;
+  deep_mining_status?: DeepMiningStatus | null;
 
   // 静态分析进度
   static_total_files: number;
@@ -228,6 +273,7 @@ export interface ScanSummary {
   project_id: string;
   scan_name: string;
   product: string;
+  mode?: string;
   status: ScanItemStatus;
   created_at: string;
   progress: number;

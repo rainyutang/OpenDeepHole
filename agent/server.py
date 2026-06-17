@@ -99,6 +99,65 @@ async def handle_task(
     print(f"Started task {scan_id}")
 
 
+async def _run_mine(task) -> None:
+    """Run a deep-mining task, refreshing config from server first."""
+    if _reporter is not None and _agent_id is not None:
+        try:
+            from agent.config import apply_network_env, apply_remote_config
+            remote_cfg = await _reporter.fetch_config(_agent_id)
+            if remote_cfg:
+                apply_remote_config(_config, remote_cfg)
+                apply_network_env(_config)
+        except Exception:
+            pass
+
+    from agent.miner import run_mine
+    try:
+        await run_mine(
+            config=_config,
+            project_path=str(task.project_path),
+            code_scan_path=str(task.code_scan_path),
+            reporter=_reporter,
+            scan_name=task.scan_name,
+            scan_id=task.scan_id,
+            cancel_event=task.cancel_event,
+            call_budget=task.call_budget,
+            documents=task.documents,
+        )
+    finally:
+        _task_manager.remove(task.scan_id)
+
+
+async def handle_mine(
+    scan_id: str,
+    project_path: str,
+    code_scan_path: str | None,
+    scan_name: str,
+    call_budget: int = 0,
+    documents: list[dict] | None = None,
+) -> None:
+    """Handle a 'mine' command — start a deep-mining scan."""
+    if _task_manager is None:
+        print(f"Warning: task_manager not initialized, ignoring mine {scan_id}")
+        return
+    if _task_manager.get(scan_id) is not None:
+        print(f"Warning: mine task {scan_id} already exists, ignoring duplicate")
+        return
+
+    task = _task_manager.create(
+        scan_id=scan_id,
+        project_path=project_path,
+        code_scan_path=code_scan_path,
+        checkers=[],
+        scan_name=scan_name,
+    )
+    task.mode = "deep_mining"
+    task.call_budget = call_budget
+    task.documents = documents or []
+    task.asyncio_task = asyncio.create_task(_run_mine(task))
+    print(f"Started deep-mining task {scan_id}")
+
+
 async def handle_stop(scan_id: str) -> None:
     """Handle a 'stop' command — cancel a running scan."""
     if _task_manager is None:

@@ -326,10 +326,57 @@ class OpenCodePoolStatus(BaseModel):
     updated_at: str = ""
 
 
+class MiningTask(BaseModel):
+    """深度挖掘的一个有界任务（威胁分析/挖掘/验证）。"""
+    kind: str = ""          # threat | analyze | verify
+    function: str = ""
+    file: str = ""
+    line: int = 0
+    vuln_type: str = ""
+    run_id: str = ""        # 关联的 Agent 运行记录 id（已开始执行的任务）
+    started_at: str = ""    # 仅进行中(running)任务有
+
+
+class DeepMiningStatus(BaseModel):
+    """深度挖掘扫描的实时状态快照（仿 OpenCodePoolStatus）。"""
+    scan_id: str = ""
+    phase: str = ""                 # indexing | threat | mining | coverage | done
+    calls_made: int = 0
+    call_budget: int = 0
+    total_functions: int = 0        # 测试代码总函数数（覆盖率分母）
+    covered_functions: int = 0      # 已被读取/分析的函数数（覆盖率分子）
+    queued_total: int = 0
+    queued_analyze: int = 0
+    queued_verify: int = 0
+    running_tasks: list[MiningTask] = []
+    queued_preview: list[MiningTask] = []   # 截断至前 ~50 条
+    findings_total: int = 0
+    findings_confirmed: int = 0
+    findings_pending: int = 0       # 待验证
+    updated_at: str = ""
+
+
+class MiningAgentRun(BaseModel):
+    """单个挖掘 Agent 的运行记录（输出可实时查看）。"""
+    run_id: str = ""
+    kind: str = ""          # threat | analyze | verify
+    function: str = ""
+    file: str = ""
+    line: int = 0
+    vuln_type: str = ""
+    status: str = "running"  # running | done | error
+    output: str = ""         # Agent 全量输出（流式累积）
+    final_output: str = ""   # 最终结构化产物（JSON 文本）
+    started_at: str = ""
+    updated_at: str = ""
+    finished_at: str = ""
+
+
 class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
     product: str = ""
+    mode: str = "checker"      # "checker" (静态候选点扫描) | "deep_mining" (多 Agent 深度挖掘)
     scan_items: list[str] = []
     created_at: str = ""
     status: ScanItemStatus
@@ -344,6 +391,7 @@ class ScanStatus(BaseModel):
     feedback_ids: list[str] = []
     retryable_candidates_count: int = 0
     opencode_pool: OpenCodePoolStatus | None = None
+    deep_mining_status: DeepMiningStatus | None = None
 
     # 静态分析进度（按文件计）
     static_total_files: int = 0
@@ -452,10 +500,26 @@ class UpdateScanProductRequest(BaseModel):
     product: str = ""
 
 
+class CreateMineRequest(BaseModel):
+    """Request to create a deep-mining scan via a registered agent.
+
+    深度挖掘是独立于 checker 候选点扫描的扫描方式：不选 checker，由多 Agent
+    引擎从攻击面入口出发自主巡查→追踪→验证。
+    """
+    agent_id: str
+    project_path: str
+    code_scan_path: str = ""
+    scan_name: str = ""
+    product: str = ""
+    call_budget: int = 0          # Agent 总调用上限，0 表示用服务端默认
+    documents: list[dict] = []    # 用户上传的参考文档：[{name, content_b64}]
+
+
 class ScanMeta(BaseModel):
     """扫描元数据，记录扫描配置信息。"""
     scan_items: list[str]
     created_at: str
+    mode: str = "checker"
     feedback_ids: list[str] = []
     agent_id: str = ""
     agent_name: str = ""
@@ -473,6 +537,7 @@ class ScanSummary(BaseModel):
     project_id: str
     scan_name: str = ""
     product: str = ""
+    mode: str = "checker"
     status: ScanItemStatus
     created_at: str
     progress: float

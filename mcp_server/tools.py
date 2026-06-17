@@ -12,6 +12,28 @@ from mcp.server.fastmcp import FastMCP
 # 按 project_id 缓存 DB 连接，MCP Server 是长驻进程，避免每次重新打开
 _db_cache: dict[str, object] = {}
 
+# 深度挖掘覆盖率：记录每个 project_id（=scan_id）本次扫描读过哪些函数
+_read_functions: dict[str, set] = {}
+
+
+def record_read(project_id: str, function_name: str) -> None:
+    """记录某次扫描读取过的函数名（供覆盖率计算）。"""
+    if not project_id or not function_name:
+        return
+    _read_functions.setdefault(project_id, set()).add(function_name)
+
+
+def get_read_functions(project_id: str) -> set:
+    """返回某次扫描已读取的函数名集合（深度挖掘覆盖率用）。"""
+    return set(_read_functions.get(project_id, set()))
+
+
+def clear_read_functions(project_id: str = "") -> None:
+    if project_id:
+        _read_functions.pop(project_id, None)
+    else:
+        _read_functions.clear()
+
 
 def _get_config():
     from backend.config import get_config
@@ -67,6 +89,7 @@ def clear_db_cache():
         except Exception:
             pass
     _db_cache.clear()
+    _read_functions.clear()
 
 
 def _mcp_log(direction: str, tool: str, detail: str) -> None:
@@ -133,6 +156,10 @@ def register_tools(mcp: FastMCP) -> None:
             result = f"未找到函数 '{function_name}'。"
             _mcp_log("◀", "view_function_code", result)
             return result
+        # 记录已读函数（深度挖掘覆盖率）
+        record_read(project_id, function_name)
+        for row in rows:
+            record_read(project_id, row["name"] if "name" in row.keys() else function_name)
         parts = [
             f"// {row['file_path']}:{row['start_line']}-{row['end_line']}\n{row['body']}"
             for row in rows
@@ -274,6 +301,179 @@ def register_tools(mcp: FastMCP) -> None:
         )
         _mcp_log("◀", "find_global_variable_references", f"{len(rows)} reference(s)")
         return result
+
+    # ------------------------------------------------------------------
+    # 深度挖掘（deep_mining）专用工具：调用图导航 + 黑板产物提交
+    # ------------------------------------------------------------------
+
+    _ENTRY_PATTERNS = (
+        "main", "recv", "read", " recv", "ioctl", "parse", "decode", "handle",
+        "dispatch", "process", "request", "callback", "on_", "_cb", "deserialize",
+        "unpack", "input", "load", "import",
+    )
+
+    @mcp.tool()
+    def find_entry_points(project_id: str, name_filter: str = "", limit: int = 200) -> str:
+        """
+        列出疑似外部输入入口函数（攻击面起点）。
+
+        启发式：没有任何内部调用者的函数，或函数名命中入口模式
+        （main/recv/read/ioctl/parse/handle/dispatch/decode 等）。
+
+        参数：
+            project_id: 项目标识符。
+            name_filter: 可选，仅返回函数名包含该子串的入口。
+            limit: 最多返回多少个（默认 200）。
+
+        返回：
+            每行 "函数名  文件路径:起始行"，未找到则返回提示。
+        """
+        _mcp_log("▶", "find_entry_points", f"name_filter={name_filter!r}")
+        db = _get_db(project_id)
+        if db is None:
+            return f"项目 {project_id} 的代码索引不可用。"
+        try:
+            called = db.get_distinct_callee_names()
+            functions = db.get_all_functions()
+        except Exception as exc:
+            return f"读取调用图失败：{exc}"
+        seen: set[tuple] = set()
+        entries: list[str] = []
+        for row in functions:
+            name = row["name"]
+            if not name:
+                continue
+            if name_filter and name_filter not in name:
+                continue
+            lname = name.lower()
+            is_uncalled = name not in called
+            is_pattern = any(p in lname for p in _ENTRY_PATTERNS)
+            if not (is_uncalled or is_pattern):
+                continue
+            key = (name, row["file_path"], row["start_line"])
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(f"{name}  {row['file_path']}:{row['start_line']}")
+            if len(entries) >= limit:
+                break
+        if not entries:
+            return "未识别到入口函数。"
+        result = "\n".join(entries)
+        _mcp_log("◀", "find_entry_points", f"{len(entries)} entries")
+        return result
+
+    @mcp.tool()
+    def find_callers(project_id: str, function_name: str) -> str:
+        """
+        查找某函数在项目中所有被调用的位置（顺数据流上溯）。
+
+        参数：
+            project_id: 项目标识符。
+            function_name: 要查找调用者的函数名。
+
+        返回：
+            每行 "调用者函数名  文件路径:行号"，未找到则返回提示。
+        """
+        return find_function_references(project_id, function_name)
+
+    @mcp.tool()
+    def find_callees(project_id: str, function_name: str, file_path: str = "") -> str:
+        """
+        查找某函数内部调用的所有下游函数（顺数据流下探）。
+
+        参数：
+            project_id: 项目标识符。
+            function_name: 要展开的函数名。
+            file_path: 可选，缩小函数匹配范围。
+
+        返回：
+            每行 "被调用函数名  文件路径:行号"，未找到则返回提示。
+        """
+        _mcp_log("▶", "find_callees", f"function_name={function_name!r}")
+        db = _get_db(project_id)
+        if db is None:
+            return f"项目 {project_id} 的代码索引不可用。"
+        rows = db.get_functions_by_name(function_name, file_path=file_path or None)
+        if not rows:
+            return f"未找到函数 '{function_name}'。"
+        lines: list[str] = []
+        seen: set[tuple] = set()
+        for fn in rows:
+            for call in db.get_calls_from_function(fn["function_id"]):
+                key = (call["callee_name"], call["file_path"], call["line"])
+                if key in seen or not call["callee_name"]:
+                    continue
+                seen.add(key)
+                lines.append(f"{call['callee_name']}  {call['file_path']}:{call['line']}")
+        if not lines:
+            return f"函数 '{function_name}' 未调用其他已索引函数。"
+        result = "\n".join(lines)
+        _mcp_log("◀", "find_callees", f"{len(lines)} callee(s)")
+        return result
+
+    def _parse_json_list(text: str) -> list:
+        text = (text or "").strip()
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, list) else [data]
+        except Exception:
+            return [s.strip() for s in text.split(",") if s.strip()]
+
+    @mcp.tool()
+    def submit_entry_points(task_id: str, entries: str) -> str:
+        """
+        提交威胁分析识别出的入口函数列表。威胁分析完成后**必须**调用。
+
+        参数：
+            task_id: 威胁分析任务标识符（由提示提供，原样传入）。
+            entries: 入口函数 JSON 数组文本，每项含
+                     {function, file, line, reason}（reason=为何是攻击面入口）。
+
+        返回：
+            提交确认消息。
+        """
+        _mcp_log("▶", "submit_entry_points", f"task_id={task_id}")
+        scans_dir = _get_config().storage.scans_dir
+        result_path = Path(scans_dir) / f"{task_id}.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"kind": "threat", "entries": _parse_json_list(entries)}
+        result_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        _mcp_log("◀", "submit_entry_points", f"{len(payload['entries'])} entries → {result_path}")
+        return f"入口函数已提交（task_id={task_id}，{len(payload['entries'])} 个）。"
+
+    @mcp.tool()
+    def submit_analysis(task_id: str, summary: str = "", findings: str = "", spawn: str = "") -> str:
+        """
+        提交一次"挖掘分析"产物。深挖完一个函数后**必须**调用（即使没发现问题）。
+
+        参数：
+            task_id: 挖掘任务标识符（由提示提供，原样传入）。
+            summary: 本次分析的一句话小结。
+            findings: 发现的问题 JSON 数组文本，每项含
+                      {file, line, function, vuln_type, severity, description, ai_analysis}。
+                      无发现则传空数组。
+            spawn: 挖掘中发现的、需要新开挖掘 Agent 的下游攻击面函数名 JSON 数组文本（可空）。
+
+        返回：
+            提交确认消息。
+        """
+        _mcp_log("▶", "submit_analysis", f"task_id={task_id} summary={_preview(summary)}")
+        scans_dir = _get_config().storage.scans_dir
+        result_path = Path(scans_dir) / f"{task_id}.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "kind": "analyze",
+            "summary": summary,
+            "findings": _parse_json_list(findings),
+            "spawn": _parse_json_list(spawn),
+        }
+        result_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        _mcp_log("◀", "submit_analysis",
+                 f"{len(payload['findings'])} finding(s), {len(payload['spawn'])} spawn → {result_path}")
+        return f"分析产物已提交（task_id={task_id}，{len(payload['findings'])} 个问题）。"
 
     @mcp.tool()
     def submit_result(

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { getAgents, getCheckers, getScanProducts, createScan } from "../api/client";
+import { getAgents, getCheckers, getScanProducts, createScan, createMineScan } from "../api/client";
 import type { AgentInfo, CheckerInfo } from "../types";
+
+type ScanMode = "checker" | "deep_mining";
 
 interface Props {
   onScanStarted: (scanId: string) => void;
@@ -20,6 +22,9 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [codeScanPath, setCodeScanPath] = useState<string>("");
   const [scanName, setScanName] = useState<string>("");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
+  const [mode, setMode] = useState<ScanMode>("checker");
+  const [callBudget, setCallBudget] = useState<string>("");
+  const [documents, setDocuments] = useState<{ name: string; content_b64: string }[]>([]);
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
   const builtinCheckers = checkers.filter((checker) => !checker.user_created);
   const userCheckers = checkers.filter((checker) => checker.user_created);
@@ -74,6 +79,28 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
     });
   };
 
+  const handleDocsSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    const encoded = await Promise.all(
+      files.map(
+        (file) =>
+          new Promise<{ name: string; content_b64: string }>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const result = reader.result as string;
+              // data URL: "data:...;base64,XXXX" → 取逗号后的 base64
+              const b64 = result.includes(",") ? result.split(",", 2)[1] : result;
+              resolve({ name: file.name, content_b64: b64 });
+            };
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+          }),
+      ),
+    );
+    setDocuments((prev) => [...prev, ...encoded]);
+    e.target.value = ""; // 允许重复选择同名文件
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -86,21 +113,32 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       setError("请输入项目路径");
       return;
     }
-    if (selectedCheckers.size === 0) {
+    if (mode === "checker" && selectedCheckers.size === 0) {
       setError("请至少选择一个检查项");
       return;
     }
 
     setSubmitting(true);
     try {
-      const resp = await createScan({
-        agent_id: selectedAgent,
-        project_path: projectPath.trim(),
-        code_scan_path: codeScanPath.trim(),
-        scan_name: scanName.trim(),
-        product: selectedProduct,
-        checkers: Array.from(selectedCheckers),
-      });
+      const resp =
+        mode === "deep_mining"
+          ? await createMineScan({
+              agent_id: selectedAgent,
+              project_path: projectPath.trim(),
+              code_scan_path: codeScanPath.trim(),
+              scan_name: scanName.trim(),
+              product: selectedProduct,
+              call_budget: callBudget ? Number(callBudget) : undefined,
+              documents: documents.length ? documents : undefined,
+            })
+          : await createScan({
+              agent_id: selectedAgent,
+              project_path: projectPath.trim(),
+              code_scan_path: codeScanPath.trim(),
+              scan_name: scanName.trim(),
+              product: selectedProduct,
+              checkers: Array.from(selectedCheckers),
+            });
       onScanStarted(resp.scan_id);
     } catch (e: unknown) {
       const msg =
@@ -142,6 +180,41 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-6">
+            {/* Scan mode */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <label className="block text-sm font-medium text-slate-300 mb-3">扫描方式</label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setMode("checker")}
+                  className={`text-left p-3 rounded-lg border transition-colors ${
+                    mode === "checker"
+                      ? "border-blue-500 bg-blue-500/10"
+                      : "border-slate-600 hover:border-slate-500"
+                  }`}
+                >
+                  <div className="text-sm font-medium text-white">候选点扫描</div>
+                  <div className="text-xs text-slate-400 mt-1">
+                    静态分析器找候选点 + AI 逐个审计（按检查项）
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode("deep_mining")}
+                  className={`text-left p-3 rounded-lg border transition-colors ${
+                    mode === "deep_mining"
+                      ? "border-purple-500 bg-purple-500/10"
+                      : "border-slate-600 hover:border-slate-500"
+                  }`}
+                >
+                  <div className="text-sm font-medium text-white">深度挖掘</div>
+                  <div className="text-xs text-slate-400 mt-1">
+                    多 Agent 从攻击面入口巡查→追踪→验证，自主挖掘
+                  </div>
+                </button>
+              </div>
+            </div>
+
             {/* Agent selection */}
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
               <label className="block text-sm font-medium text-slate-300 mb-3">
@@ -261,7 +334,57 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               </select>
             </div>
 
+            {/* Deep-mining parameters */}
+            {mode === "deep_mining" && (
+              <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+                <label className="block text-sm font-medium text-slate-300 mb-3">
+                  深度挖掘参数 <span className="text-slate-500 font-normal">（可选）</span>
+                </label>
+                <div className="mb-4">
+                  <div className="text-xs text-slate-400 mb-1">Agent 调用上限</div>
+                  <input
+                    type="number"
+                    min={1}
+                    value={callBudget}
+                    onChange={(e) => setCallBudget(e.target.value)}
+                    placeholder="默认 200"
+                    className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 transition-colors"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">覆盖率达标或调用次数到达上限时停止。</p>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-400 mb-1">参考文档（威胁分析时会参考）</div>
+                  <input
+                    type="file"
+                    multiple
+                    onChange={handleDocsSelected}
+                    className="block w-full text-sm text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-slate-700 file:text-slate-200 hover:file:bg-slate-600"
+                  />
+                  {documents.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {documents.map((d, i) => (
+                        <li key={i} className="flex items-center justify-between text-xs text-slate-400 bg-slate-900 rounded px-2 py-1">
+                          <span className="truncate">{d.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => setDocuments((prev) => prev.filter((_, j) => j !== i))}
+                            className="text-slate-500 hover:text-red-400 ml-2"
+                          >
+                            移除
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="text-xs text-slate-500 mt-1">
+                    可上传架构文档、威胁模型、接口说明等；威胁分析 Agent 会结合它们识别入口与可信边界。
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Checker selection */}
+            {mode === "checker" && (
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
               <label className="block text-sm font-medium text-slate-300 mb-3">
                 检查项
@@ -319,6 +442,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 </div>
               )}
             </div>
+            )}
 
             {/* Error */}
             {error && (
@@ -339,6 +463,8 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                     <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                     创建中...
                   </span>
+                ) : mode === "deep_mining" ? (
+                  "开始深度挖掘"
                 ) : (
                   "开始扫描"
                 )}

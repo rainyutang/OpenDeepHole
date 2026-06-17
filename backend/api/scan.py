@@ -28,12 +28,14 @@ from backend.models import (
     BatchMarkRequest,
     BatchUnmarkRequest,
     Candidate,
+    CreateMineRequest,
     CreateScanRequest,
     FeedbackEntry,
     FpReviewJob,
     FpReviewResult,
     FpReviewStatus,
     MarkRequest,
+    MiningAgentRun,
     ScanItemStatus,
     ScanMeta,
     ScanProductList,
@@ -418,6 +420,120 @@ async def create_scan(
 ) -> ScanStartResponse:
     """Create a new scan and dispatch it to the specified agent daemon."""
     return await create_agent_scan(body, request, current_user)
+
+
+@router.post("/api/mine", response_model=ScanStartResponse)
+async def create_mine(
+    body: CreateMineRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> ScanStartResponse:
+    """Create a deep-mining scan (multi-agent engine) and dispatch it to an agent.
+
+    深度挖掘是独立于 checker 候选点扫描的扫描方式：不选 checker，由 Agent 端的
+    挖掘引擎（巡查→追踪→验证）自主从攻击面入口出发挖掘漏洞。
+    """
+    from backend.api.agent import (
+        _registered_agents,
+        create_agent_runtime_update_payload,
+        send_agent_command,
+    )
+
+    agent = _registered_agents.get(body.agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Agent '{body.agent_id}' not found or not registered")
+    if current_user.role != "admin" and agent.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Agent does not belong to you")
+
+    project_path = body.project_path.strip()
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path is required")
+    code_scan_path = body.code_scan_path.strip() or project_path
+    scan_name = body.scan_name or project_path.split("/")[-1] or "deep-mining"
+    product = _validate_product(body.product)
+
+    scan_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+
+    scan = ScanStatus(
+        scan_id=scan_id,
+        project_id=scan_name,
+        product=product,
+        mode="deep_mining",
+        scan_items=[],
+        created_at=now,
+        status=ScanItemStatus.PENDING,
+        progress=0.0,
+        total_candidates=0,
+        processed_candidates=0,
+        vulnerabilities=[],
+        agent_name=agent.name,
+        agent_online=True,
+    )
+    meta = ScanMeta(
+        scan_items=[],
+        created_at=now,
+        mode="deep_mining",
+        feedback_ids=[],
+        agent_id=body.agent_id,
+        agent_name=agent.name,
+        project_path=project_path,
+        code_scan_path=code_scan_path,
+        scan_name=scan_name,
+        product=product,
+        user_id=current_user.user_id,
+    )
+
+    store = get_scan_store()
+    store.save_scan(scan, meta)
+    _running_scans[scan_id] = scan
+    _scan_owners[scan_id] = current_user.user_id
+
+    ok = await send_agent_command(body.agent_id, {
+        "type": "mine",
+        "scan_id": scan_id,
+        "project_path": project_path,
+        "code_scan_path": code_scan_path,
+        "scan_name": scan_name,
+        "call_budget": int(body.call_budget or 0),
+        "documents": body.documents or [],
+        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
+    })
+    if not ok:
+        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
+        scan.status = ScanItemStatus.ERROR
+        _running_scans.pop(scan_id, None)
+        raise HTTPException(status_code=502, detail="Agent not connected")
+
+    logger.info(
+        "Created deep-mining scan %s for project '%s', dispatched to agent %s",
+        scan_id, scan_name, body.agent_id,
+    )
+    return ScanStartResponse(scan_id=scan_id)
+
+
+@router.get("/api/scan/{scan_id}/agent-runs", response_model=list[MiningAgentRun])
+async def list_agent_runs(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> list[MiningAgentRun]:
+    """List mining agent-run summaries (no full output) for a deep-mining scan."""
+    _check_scan_owner(scan_id, current_user)
+    return get_scan_store().list_mining_agent_runs(scan_id, include_output=False)
+
+
+@router.get("/api/scan/{scan_id}/agent-run/{run_id}", response_model=MiningAgentRun)
+async def get_agent_run(
+    scan_id: str,
+    run_id: str,
+    current_user: User = Depends(get_current_user),
+) -> MiningAgentRun:
+    """Get one mining agent-run with full streaming output + final result."""
+    _check_scan_owner(scan_id, current_user)
+    run = get_scan_store().get_mining_agent_run(scan_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return run
 
 
 # ---------------------------------------------------------------------------

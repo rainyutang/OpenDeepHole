@@ -215,6 +215,34 @@ class Reporter:
         except Exception:
             pass
 
+    async def push_agent_run(self, scan_id: str, run: dict) -> bool:
+        """Push one mining agent-run record (live output + final result)."""
+        if self.dry_run:
+            return True
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/agent-run",
+                json=run,
+                timeout=10.0,
+            )
+            return True
+        except Exception:
+            return False
+
+    async def push_deep_mining_status(self, scan_id: str, snapshot: dict) -> bool:
+        """Push the latest deep-mining live status snapshot."""
+        if self.dry_run:
+            return True
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/deep-mining-status",
+                json=snapshot,
+                timeout=5.0,
+            )
+            return True
+        except Exception:
+            return False
+
     async def push_opencode_pool_status(self, scan_id: str, snapshot: dict) -> bool:
         """Push the latest OpenCode model-pool status snapshot."""
         if self.dry_run:

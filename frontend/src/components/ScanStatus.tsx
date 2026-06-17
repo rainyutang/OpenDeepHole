@@ -7,6 +7,7 @@ import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
+import DeepMiningView from "./DeepMiningView";
 
 const MAX_LOG_LINES = 500;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
@@ -39,7 +40,34 @@ interface Props {
   onBack: () => void;
 }
 
-export default function ScanStatus({ scanId, onBack }: Props) {
+/**
+ * 详情页入口：先探测扫描 mode，深度挖掘走 DeepMiningView，否则走 checker 视图。
+ * 这样可避免双 SSE 订阅与 hook 顺序问题，且 checker 视图保持原样。
+ */
+export default function ScanStatusEntry({ scanId, onBack }: Props) {
+  const [mode, setMode] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMode(null);
+    getScanStatus(scanId)
+      .then((s) => setMode(s.mode || "checker"))
+      .catch(() => setMode("checker"));
+  }, [scanId]);
+
+  if (mode === null) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+      </div>
+    );
+  }
+  if (mode === "deep_mining") {
+    return <DeepMiningView scanId={scanId} onBack={onBack} />;
+  }
+  return <ScanStatus scanId={scanId} onBack={onBack} />;
+}
+
+function ScanStatus({ scanId, onBack }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [stopping, setStopping] = useState(false);
   const [retryingIncomplete, setRetryingIncomplete] = useState(false);
@@ -110,6 +138,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         if (data.static_scanned_files != null) patch.static_scanned_files = data.static_scanned_files;
         if (data.static_analysis_done != null) patch.static_analysis_done = data.static_analysis_done;
         if (data.opencode_pool !== undefined) patch.opencode_pool = data.opencode_pool;
+        if (data.deep_mining_status !== undefined) patch.deep_mining_status = data.deep_mining_status;
         return { ...prev, ...patch };
       });
     },

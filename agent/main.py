@@ -74,6 +74,17 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             feedback_entries=msg.get("feedback_entries", []),
             checker_packages=msg.get("checker_packages", []),
         )
+    elif cmd_type == "mine":
+        from agent.updater import ensure_runtime_updated
+        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        await agent_server.handle_mine(
+            scan_id=msg["scan_id"],
+            project_path=msg["project_path"],
+            code_scan_path=msg.get("code_scan_path"),
+            scan_name=msg.get("scan_name", ""),
+            call_budget=int(msg.get("call_budget") or 0),
+            documents=msg.get("documents") or [],
+        )
     elif cmd_type == "stop":
         await agent_server.handle_stop(msg["scan_id"])
     elif cmd_type == "resume":

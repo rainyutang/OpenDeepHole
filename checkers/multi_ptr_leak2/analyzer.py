@@ -74,9 +74,19 @@ def _build_keyword_regex(keyword: str) -> re.Pattern[str]:
     )
 
 
-_FREE_FUNC_PATTERNS = [_build_keyword_regex(k) for k in _FREE_KEYWORDS] + [
-    re.compile(r"^put_[A-Za-z0-9_]+$"),
-]
+_KEYWORD_REGEXES = {keyword: _build_keyword_regex(keyword) for keyword in _FREE_KEYWORDS}
+_PUT_PREFIX_RE = re.compile(r"^put_[A-Za-z0-9_]+$")
+_FREE_FUNC_PATTERNS = list(_KEYWORD_REGEXES.values()) + [_PUT_PREFIX_RE]
+
+# 解析前的廉价文本预筛：函数体若不含任一释放语义 token（释放关键字 / `delete`
+# / `put_`），就不可能命中 release site，直接跳过 tree-sitter 解析。
+# 召回安全性：任何 release site 都要求 callee 短名属于 release_func_names
+# （其非标准成员必经 `_is_free_func`，即含关键字）、或标准 free（含 "free"）、
+# 或 method 释放（名字含关键字/前缀）、或 delete_expression（含 "delete"），
+# 因此命中点的函数体一定包含下列某个 token，预筛不会漏报。
+_RELEASE_HINT_RE = re.compile(
+    r"(?i)(?:" + "|".join(_FREE_KEYWORDS + ["delete", "put_"]) + r")"
+)
 _STANDARD_RELEASE_FUNCS = {
     "free",
     "cfree",
@@ -199,10 +209,10 @@ def _matched_release_keyword(name: str) -> str:
         return ""
     if short in _STANDARD_RELEASE_FUNCS:
         return short
-    for keyword in _FREE_KEYWORDS:
-        if _build_keyword_regex(keyword).search(short):
+    for keyword, pattern in _KEYWORD_REGEXES.items():
+        if pattern.search(short):
             return keyword
-    if re.match(r"^put_[A-Za-z0-9_]+$", short):
+    if _PUT_PREFIX_RE.match(short):
         return "put_*"
     return ""
 
@@ -370,30 +380,31 @@ def _collect_structs_from_tree(
     rel_path: str,
 ) -> list[StructInfo]:
     structs: list[StructInfo] = []
-    # 收集"前向 typedef"别名，例如 `typedef struct X X_t;`。这种声明里的
-    # struct_specifier 没有 field_declaration_list，会在主循环里被跳过；
-    # 这里单独抓出来，主循环结束后再合并到对应 StructInfo.aliases。
+    # 单趟遍历同时处理两类节点：
+    #   1) "前向 typedef" 别名（`typedef struct X X_t;`）—— 其 struct_specifier
+    #      没有 field_declaration_list，会被结构体收集分支跳过；这里抓进
+    #      forward_aliases，遍历结束后再合并到对应 StructInfo.aliases。
+    #   2) 带 field_declaration_list 的 struct/class/union 定义。
     forward_aliases: dict[str, set[str]] = {}
     for node in _walk(root):
-        if node.type != "type_definition":
+        if node.type == "type_definition":
+            struct_node = None
+            for child in node.children:
+                if child.type in {"struct_specifier", "class_specifier", "union_specifier"}:
+                    struct_node = child
+                    break
+            if struct_node is None:
+                continue
+            if _first_named_child(struct_node, {"field_declaration_list"}) is not None:
+                continue
+            struct_name = _extract_type_name(struct_node, source)
+            if not struct_name:
+                continue
+            aliases = _typedef_aliases_for_struct(struct_node, source)
+            if aliases:
+                forward_aliases.setdefault(struct_name, set()).update(aliases)
             continue
-        struct_node = None
-        for child in node.children:
-            if child.type in {"struct_specifier", "class_specifier", "union_specifier"}:
-                struct_node = child
-                break
-        if struct_node is None:
-            continue
-        if _first_named_child(struct_node, {"field_declaration_list"}) is not None:
-            continue
-        struct_name = _extract_type_name(struct_node, source)
-        if not struct_name:
-            continue
-        aliases = _typedef_aliases_for_struct(struct_node, source)
-        if aliases:
-            forward_aliases.setdefault(struct_name, set()).update(aliases)
 
-    for node in _walk(root):
         if node.type not in {"struct_specifier", "class_specifier", "union_specifier"}:
             continue
         body = _first_named_child(node, {"field_declaration_list"})
@@ -852,28 +863,64 @@ def _parse_indexed_structs(db: "CodeDatabase", parser: Parser) -> list[StructInf
     return structs
 
 
-def _parse_indexed_functions(db: "CodeDatabase", parser: Parser) -> list[FunctionInfo]:
-    functions: list[FunctionInfo] = []
-    rows = db.get_all_functions()
-    for row in rows:
+def _scope_prefix(db: "CodeDatabase", project_path: Path) -> str | None:
+    """计算 project_path（= code_scan_path）在索引根下的相对前缀（posix）。
+
+    索引里的 file_path 是相对 project_root（整个被索引项目）存的，而 project_root
+    就是 `code_index.db` 所在目录。返回 "" 表示扫描范围即整个项目（不过滤）；返回
+    None 表示无法判定范围（无 db_path / 不在项目内 / 测试 fake db），此时保持旧行为
+    （处理全部）。
+    """
+    db_path = getattr(db, "db_path", None)
+    if not db_path:
+        return None
+    try:
+        project_root = Path(db_path).resolve().parent
+        scan_root = Path(project_path).resolve()
+        prefix = scan_root.relative_to(project_root).as_posix()
+    except (ValueError, OSError):
+        return None
+    return "" if prefix in ("", ".") else prefix
+
+
+def _in_scope(file_path: str, scope_prefix: str | None) -> bool:
+    if not scope_prefix:  # None 或 "" → 不过滤
+        return True
+    normalized = file_path.replace("\\", "/")
+    return normalized == scope_prefix or normalized.startswith(f"{scope_prefix}/")
+
+
+def _iter_indexed_functions(
+    parser: Parser,
+    func_rows: Iterable,
+    scope_prefix: str | None,
+) -> Iterator[FunctionInfo]:
+    """逐函数流式产出 FunctionInfo。
+
+    与旧的"先 parse 全仓装进列表"不同，这里逐行处理并即时 yield：调用方用完一个
+    函数后其 tree-sitter Tree 即可回收，常驻内存从"整仓 N 棵 AST"降到"单函数 1 棵"。
+    同时按 scope_prefix 收敛到扫描范围、解析前用 _RELEASE_HINT_RE 预筛，跳过绝大多数
+    不可能命中的函数。
+    """
+    for row in func_rows:
+        file_path = str(_row_get(row, "file_path", "") or "")
+        if not _in_scope(file_path, scope_prefix):
+            continue
         body = str(_row_get(row, "body", "") or "")
-        if not body:
+        if not body or not _RELEASE_HINT_RE.search(body):
             continue
         source = body.encode("utf-8", "replace")
         try:
             tree = parser.parse(source)
         except Exception:
             continue
-        file_path = str(_row_get(row, "file_path", "") or "")
         start_line = int(_row_get(row, "start_line", 1) or 1)
-        parsed = _collect_functions_from_tree(
+        yield from _collect_functions_from_tree(
             tree.root_node,
             source,
             file_path,
             line_base=start_line - 1,
         )
-        functions.extend(parsed)
-    return functions
 
 
 def _is_complete_index(db: "CodeDatabase") -> bool:
@@ -898,88 +945,113 @@ class Analyzer(BaseAnalyzer):
         db: "CodeDatabase | None" = None,
     ) -> Iterable[Candidate]:
         structs: list[StructInfo] = []
-        functions: list[FunctionInfo] = []
+        # release_func_names 只存 short name，与 _extract_callee_name 返回的
+        # callee 名字空间保持一致；否则 `Class::destroy` 与 `obj->destroy()`
+        # 永远对不上，第一条快速过滤会失效。项目内释放 wrapper 直接从索引的
+        # 函数名列（无需解析函数体）取，覆盖全仓（范围外定义的 wrapper 也可能被
+        # 范围内调用）。
+        release_func_names = set(_STANDARD_RELEASE_FUNCS)
         use_file_fallback = True
+        scope_prefix: str | None = None
+        func_rows: list = []
 
         if db is not None:
             structs.extend(_parse_indexed_structs(db, self._parser))
-            functions.extend(_parse_indexed_functions(db, self._parser))
+            func_rows = list(db.get_all_functions())
+            for row in func_rows:
+                name = str(_row_get(row, "name", "") or "")
+                if name and _is_free_func(name):
+                    release_func_names.add(_short_name(name))
             use_file_fallback = not _is_complete_index(db)
+            scope_prefix = _scope_prefix(db, project_path)
 
         # 完整索引由上游保证覆盖全仓，避免在大仓库上重复 tree-sitter 扫描。
         # 不完整索引或测试 fake DB 仍与磁盘解析结果合并，保持召回优先。
+        file_functions: list[FunctionInfo] = []
         if use_file_fallback:
             file_structs, file_functions = self._parse_project_files(project_path)
             structs.extend(file_structs)
-            functions.extend(file_functions)
+            for func in file_functions:
+                if _is_free_func(func.name):
+                    release_func_names.add(_short_name(func.name))
 
         structs_by_name: dict[str, StructInfo] = {}
         for info in structs:
             for alias in info.aliases:
                 structs_by_name.setdefault(alias, info)
 
-        # release_func_names 只存 short name，与 _extract_callee_name 返回的
-        # callee 名字空间保持一致；否则 `Class::destroy` 与 `obj->destroy()`
-        # 永远对不上，第一条快速过滤会失效。
-        release_func_names = set(_STANDARD_RELEASE_FUNCS)
-        release_func_names.update(
-            _short_name(func.name)
-            for func in functions
-            if _is_free_func(func.name)
-        )
-
         seen: set[tuple[str, int, str, str, str]] = set()
-        for func in functions:
-            sites = _find_release_sites(func, release_func_names, structs_by_name)
-            for site in sites:
-                key = (
-                    func.file,
-                    site.line,
-                    func.name,
-                    site.callee,
-                    site.arg_text,
-                )
-                if key in seen:
-                    continue
-                seen.add(key)
 
-                field_list = ", ".join(
-                    f"{name}: {type_ref.name}*"
-                    for name, type_ref in sorted(site.struct_info.pointer_fields.items())
+        # 索引函数：逐函数流式处理（用完即弃 Tree，常驻内存只剩单函数）。
+        if db is not None:
+            for func in _iter_indexed_functions(self._parser, func_rows, scope_prefix):
+                yield from self._emit_candidates(
+                    func, release_func_names, structs_by_name, seen
                 )
-                matched_keyword = _matched_release_keyword(site.callee)
-                func_start_line = func.line_base + _line(func.node)
 
-                lines = [
-                    "静态过滤命中：释放调用的静态分析实参可解析为含指针成员的结构体对象，"
-                    "需要确认释放实现是否只释放最外层对象而遗漏成员指针。",
-                    f"所在函数: {func.name} ({func.file}:{func_start_line})",
-                    f"调用形式: {site.call_form}",
-                    f"静态分析实参: {site.analysis_target}",
-                ]
-                if site.call_form == "method_call":
-                    lines.append(f"receiver: {site.receiver_text or '(unknown)'}")
-                lines.extend([
-                    f"释放调用命中关键字: {matched_keyword or '(unknown)'}",
-                    f"释放调用: {site.callee}({site.arg_text})",
-                    f"实参类型: {site.arg_type.name}"
-                    f"{'*' if site.arg_type.is_pointer else ''}",
-                    f"结构体: {site.struct_info.name} "
-                    f"({site.struct_info.file}:{site.struct_info.line})",
-                    f"指针成员: {field_list}",
-                    "调用点上下文:",
-                    _line_excerpt(func.source, site.line, line_base=func.line_base),
-                ])
-                description = "\n".join(lines)
+        # 磁盘 fallback 函数（仅索引不完整 / 测试 fake DB 时）。
+        for func in file_functions:
+            yield from self._emit_candidates(
+                func, release_func_names, structs_by_name, seen
+            )
 
-                yield Candidate(
-                    file=func.file,
-                    line=site.line,
-                    function=func.name,
-                    description=description,
-                    vuln_type=self.vuln_type,
-                    related_functions=[site.callee],
-                )
+    def _emit_candidates(
+        self,
+        func: FunctionInfo,
+        release_func_names: set[str],
+        structs_by_name: dict[str, StructInfo],
+        seen: set[tuple[str, int, str, str, str]],
+    ) -> Iterator[Candidate]:
+        sites = _find_release_sites(func, release_func_names, structs_by_name)
+        for site in sites:
+            key = (
+                func.file,
+                site.line,
+                func.name,
+                site.callee,
+                site.arg_text,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+
+            field_list = ", ".join(
+                f"{name}: {type_ref.name}*"
+                for name, type_ref in sorted(site.struct_info.pointer_fields.items())
+            )
+            matched_keyword = _matched_release_keyword(site.callee)
+            func_start_line = func.line_base + _line(func.node)
+
+            lines = [
+                "静态过滤命中：释放调用的静态分析实参可解析为含指针成员的结构体对象，"
+                "需要确认释放实现是否只释放最外层对象而遗漏成员指针。",
+                f"所在函数: {func.name} ({func.file}:{func_start_line})",
+                f"调用形式: {site.call_form}",
+                f"静态分析实参: {site.analysis_target}",
+            ]
+            if site.call_form == "method_call":
+                lines.append(f"receiver: {site.receiver_text or '(unknown)'}")
+            lines.extend([
+                f"释放调用命中关键字: {matched_keyword or '(unknown)'}",
+                f"释放调用: {site.callee}({site.arg_text})",
+                f"实参类型: {site.arg_type.name}"
+                f"{'*' if site.arg_type.is_pointer else ''}",
+                f"结构体: {site.struct_info.name} "
+                f"({site.struct_info.file}:{site.struct_info.line})",
+                f"指针成员: {field_list}",
+                "调用点上下文:",
+                _line_excerpt(func.source, site.line, line_base=func.line_base),
+            ])
+            description = "\n".join(lines)
+
+            yield Candidate(
+                file=func.file,
+                line=site.line,
+                function=func.name,
+                description=description,
+                vuln_type=self.vuln_type,
+                related_functions=[site.callee],
+            )
 
     def _parse_project_files(
         self,

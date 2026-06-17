@@ -1,5 +1,27 @@
 # 更新日志
 
+## 2026-06-16
+
+- **优化** `multi_ptr_leak2`（多层指针外层释放遗漏成员）静态分析阶段过慢且内存占用过高：索引路径此前忽略 `code_scan_path`，对**整仓**每个函数都建 `FunctionInfo` 并长期持有 tree-sitter `Node`（钉住整棵 AST 不回收），导致只扫子目录也按全仓处理、内存随函数数线性膨胀。现改为：① 用 `code_index.db` 所在目录推导索引根，把索引函数按 `code_scan_path` 前缀收敛到扫描范围；② 逐函数流式解析（用完即弃 Tree，常驻内存从「整仓 N 棵 AST」降到「单函数 1 棵」）；③ 解析前用释放关键字/`delete` 文本预筛跳过绝大多数不可能命中的函数；④ 释放 wrapper 名直接取索引 `name` 列（免解析）、`_matched_release_keyword` 改用预编译正则、`_collect_structs_from_tree` 合并两趟遍历。召回语义不变（项目内释放 wrapper 仍全仓识别，跨范围调用不漏报）
+
+## 2026-06-15
+
+- **重构** 深度挖掘流程：由「巡查→追踪→验证」改为「威胁分析→挖掘→验证」。新增**威胁分析 Agent**先扫描**测试代码路径**（`code_scan_path`，非整仓）并参考用户上传的文档识别入口函数；对每个入口起**挖掘 Agent**深挖（发现新攻击面派生新挖掘 Agent，去掉巡查 Agent 与 fan-out 深度限制）；发现的问题立即以"待验证"显示并派生验证任务，验证 Agent 判定"是问题/非问题"后原地更新（`upsert_incomplete_vulnerability` 支持 `pending_verify` 更新）。MCP 工具相应改为 `submit_entry_points`/`submit_analysis`（移除 `submit_survey`/`submit_trace`/`get_function_digest`），SKILL 改为 `skills/mining/{threat,analyze,verify}`
+- **新增** 深度挖掘覆盖率：MCP `view_function_code` 记录本次扫描读过的函数，覆盖率 = 已读函数 ∩ 测试代码函数 / 测试代码函数；所有入口分析完后若仍有未覆盖函数，自动对其继续起挖掘 Agent，直到覆盖完成或调用预算耗尽（双闸停止）
+- **新增** 创建深度挖掘时可上传参考文档（base64 随 `mine` 命令下发到 Agent 的 `scan_dir/documents/`，供威胁分析 Agent 阅读）；创建表单去掉 fan-out 深度、新增文档上传控件
+- **新增** 每个挖掘 Agent 的运行记录可查看（实时 + 最终）：新增 `MiningAgentRun`（流式 `output` + `final_output`），Agent 周期上报至 `POST /api/agent/scan/{id}/agent-run` → `mining_agent_runs` 表 + SSE；详情页新增「Agent 任务」Tab，点击任一 Agent 打开抽屉查看输出（运行中每 2s 轮询实时刷新，完成后显示完整输出与最终产物）
+- **新增** 「深度挖掘」独立扫描方式（`mode=deep_mining`）：独立于现有 checker 候选点扫描，由 Agent 端多 Agent 引擎（`agent/miner.py`）从攻击面入口播种，按「巡查→追踪→验证」自主挖掘漏洞，不走 `Candidate → run_audit` 候选点循环。新增 `POST /api/mine` 接口与 `mine` WebSocket 命令；扫描记录新增 `mode` 列（旧库自动迁移）
+- **新增** 挖掘引擎核心机制：有界 Agent（每个 Agent 只领一个函数/线索/假设）+ 共享黑板产物（函数摘要/线索/数据流）+ 任务队列（动态 fan-out 派生新 Agent，去重 + 调用链深度上限收敛）；双闸停止（攻击面覆盖达标 或 Agent 调用上限），防止大仓上 LLM 偷懒（缺产物即判失败重试）
+- **新增** 深度挖掘专用 MCP 工具：`find_entry_points`（调用图入口识别）、`find_callers`/`find_callees`（调用链导航）、`get_function_digest`、`submit_survey`/`submit_trace`（黑板产物提交）；验证阶段复用既有 `submit_result`
+- **新增** 三个挖掘 SKILL（`skills/mining/{survey,trace,verify}`，独立于 `checkers/`）；前端新建扫描页支持「候选点扫描 / 深度挖掘」方式切换与挖掘参数（调用上限、fan-out 深度），扫描历史展示「深度挖掘」徽章
+- **修复** 深度挖掘在 Agent 上报错「缺少挖掘技能定义 …/skills/mining/survey/SKILL.md」：Agent 下载包与运行时自动更新此前只打包 `agent/code_parser/mcp_server/backend`，未包含 `skills/`；现已将 `skills` 加入 Agent 运行时目录集合（`_AGENT_DIRS`、`_AGENT_RUNTIME_DIRS`、`agent/updater.py` 的 `RUNTIME_DIRS`），挖掘 SKILL 随运行时更新一并下发到 Agent
+- **新增** 深度挖掘专属扫描详情页：详情页按 `scan.mode` 分流，深挖走全新多 Tab 视图（概览/发现/日志），checker 扫描详情页保持不变。概览页实时展示**进行中的任务**（巡查/追踪/验证 + 目标函数 + depth + 已运行时长）、**即将进行的任务**（队列预览 + 按类型计数）、调用预算消耗与攻击面覆盖率进度、发现/确认计数；发现页为挖掘定制（按严重度/类型/判定过滤、展开看分析推理与函数源码、可人工确认/标误报）
+- **新增** 深度挖掘实时状态上报链路（仿 opencode_pool）：`DeepMiningStatus` 快照（进行中/排队任务列表、预算、覆盖率、发现计数）经 Agent 端 `_publish_mining_status_until` 轮询推送 → `POST /api/agent/scan/{id}/deep-mining-status` → 存储 `scans.deep_mining_status` 列（旧库自动迁移）+ SSE 推送前端；`ScanStatus` 新增 `deep_mining_status` 字段
+
+## 2026-06-12
+
+- **修复** 模型看板中某个模型在所有扫描里「最近状态」永远显示"排队"：此前每次获取模型都会先把队列目标模型标记为 `queued`（即使马上能拿到其他空闲模型），任务回退到其他模型执行后该标记永不清除，且队列目标选择不考虑 `max_concurrency`，导致小并发模型被确定性反复选中。现在只有所有可用模型都满载、任务真正等待时才计入排队数；快照「最近状态」改为按实时计数派生（运行中 > 排队 > 最近一次结果）；队列目标选择改为按 `(排队数+运行数)/(weight×max_concurrency)` 挑选预期最快空出槽位的模型
+
 ## 2026-06-11
 
 - **优化** AI 去误报新增正方早退：`prove-bug` 阶段提交 `confirmed=false`（非问题）时直接以正方理由记录"可能误报"最终结果并推送前端，跳过 `prove-fp` 和 `final-judge` 两个阶段；此前该场景下模型常不写 artifact 也不提交结论，导致阶段失败后既无后续阶段也无任何复核结果

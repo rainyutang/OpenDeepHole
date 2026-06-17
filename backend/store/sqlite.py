@@ -15,6 +15,8 @@ from backend.models import (
     FpReviewResult,
     FpReviewStageOutput,
     FpReviewStatus,
+    DeepMiningStatus,
+    MiningAgentRun,
     OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
@@ -50,6 +52,28 @@ def _opencode_pool_status(value: str | None) -> OpenCodePoolStatus | None:
         return OpenCodePoolStatus(**data)
     except Exception:
         return None
+
+
+def _deep_mining_status(value: str | None) -> DeepMiningStatus | None:
+    try:
+        data = json.loads(value or "{}")
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data:
+        return None
+    try:
+        return DeepMiningStatus(**data)
+    except Exception:
+        return None
+
+
+def _row_mode(row) -> str:
+    """Read the scan ``mode`` column, defaulting to 'checker' for old rows."""
+    try:
+        value = row["mode"]
+    except (IndexError, KeyError):
+        return "checker"
+    return value or "checker"
 
 
 _SCHEMA = """\
@@ -185,6 +209,24 @@ CREATE INDEX IF NOT EXISTS idx_vulnerabilities_scan ON vulnerabilities(scan_id);
 CREATE INDEX IF NOT EXISTS idx_events_scan ON events(scan_id);
 CREATE INDEX IF NOT EXISTS idx_fp_review_results_review ON fp_review_results(review_id);
 
+CREATE TABLE IF NOT EXISTS mining_agent_runs (
+    scan_id      TEXT NOT NULL,
+    run_id       TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT '',
+    function     TEXT NOT NULL DEFAULT '',
+    file         TEXT NOT NULL DEFAULT '',
+    line         INTEGER NOT NULL DEFAULT 0,
+    vuln_type    TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'running',
+    output       TEXT NOT NULL DEFAULT '',
+    final_output TEXT NOT NULL DEFAULT '',
+    started_at   TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL DEFAULT '',
+    finished_at  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(scan_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mining_runs_scan ON mining_agent_runs(scan_id);
+
 CREATE TABLE IF NOT EXISTS users (
     user_id       TEXT PRIMARY KEY,
     username      TEXT NOT NULL UNIQUE,
@@ -246,6 +288,10 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN public_access_token TEXT NOT NULL DEFAULT ''")
         if "opencode_pool" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN opencode_pool TEXT NOT NULL DEFAULT '{}'")
+        if "mode" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN mode TEXT NOT NULL DEFAULT 'checker'")
+        if "deep_mining_status" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN deep_mining_status TEXT NOT NULL DEFAULT '{}'")
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
         vuln_cols = {r[1] for r in vuln_cur.fetchall()}
@@ -386,6 +432,7 @@ class SqliteScanStore(ScanStoreBase):
             scan_id=row["scan_id"],
             project_id=row["project_id"],
             product=row["product"] if row["product"] is not None else "",
+            mode=_row_mode(row),
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
             status=ScanItemStatus(row["status"]),
@@ -399,6 +446,10 @@ class SqliteScanStore(ScanStoreBase):
             error_message=row["error_message"],
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
             opencode_pool=_opencode_pool_status(row["opencode_pool"]),
+            deep_mining_status=(
+                _deep_mining_status(row["deep_mining_status"])
+                if "deep_mining_status" in row.keys() else None
+            ),
             static_total_files=row["static_total_files"] or 0,
             static_scanned_files=row["static_scanned_files"] or 0,
             static_analysis_done=bool(row["static_analysis_done"]),
@@ -408,6 +459,7 @@ class SqliteScanStore(ScanStoreBase):
         return ScanMeta(
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
+            mode=_row_mode(row),
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
             agent_name=row["agent_name"] if row["agent_name"] is not None else "",
@@ -436,8 +488,8 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, project_path, code_scan_path, scan_name,
-                     product, public_access_token, opencode_pool)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     product, public_access_token, opencode_pool, mode, deep_mining_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -463,6 +515,8 @@ class SqliteScanStore(ScanStoreBase):
                     meta.product,
                     meta.public_access_token,
                     scan.opencode_pool.model_dump_json() if scan.opencode_pool else "{}",
+                    meta.mode,
+                    scan.deep_mining_status.model_dump_json() if scan.deep_mining_status else "{}",
                 ),
             )
             self._conn.commit()
@@ -489,6 +543,7 @@ class SqliteScanStore(ScanStoreBase):
             project_id=row["project_id"],
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             product=row["product"] if row["product"] is not None else "",
+            mode=_row_mode(row),
             status=ScanItemStatus(row["status"]),
             created_at=row["created_at"],
             progress=row["progress"],
@@ -544,6 +599,65 @@ class SqliteScanStore(ScanStoreBase):
                 (status.model_dump_json(), scan_id),
             )
             self._conn.commit()
+
+    def update_deep_mining_status(self, scan_id: str, status: DeepMiningStatus) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE scans SET deep_mining_status = ? WHERE scan_id = ?",
+                (status.model_dump_json(), scan_id),
+            )
+            self._conn.commit()
+
+    # -- Mining agent runs --
+
+    def upsert_mining_agent_run(self, scan_id: str, run: MiningAgentRun) -> None:
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO mining_agent_runs
+                    (scan_id, run_id, kind, function, file, line, vuln_type,
+                     status, output, final_output, started_at, updated_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scan_id, run_id) DO UPDATE SET
+                    kind=excluded.kind, function=excluded.function, file=excluded.file,
+                    line=excluded.line, vuln_type=excluded.vuln_type, status=excluded.status,
+                    output=excluded.output, final_output=excluded.final_output,
+                    updated_at=excluded.updated_at, finished_at=excluded.finished_at
+                """,
+                (
+                    scan_id, run.run_id, run.kind, run.function, run.file, run.line,
+                    run.vuln_type, run.status, run.output, run.final_output,
+                    run.started_at, run.updated_at, run.finished_at,
+                ),
+            )
+            self._conn.commit()
+
+    def _row_to_agent_run(self, row: sqlite3.Row) -> MiningAgentRun:
+        return MiningAgentRun(
+            run_id=row["run_id"], kind=row["kind"], function=row["function"],
+            file=row["file"], line=row["line"], vuln_type=row["vuln_type"],
+            status=row["status"], output=row["output"], final_output=row["final_output"],
+            started_at=row["started_at"], updated_at=row["updated_at"], finished_at=row["finished_at"],
+        )
+
+    def list_mining_agent_runs(self, scan_id: str, *, include_output: bool = False) -> list[MiningAgentRun]:
+        cols = "*" if include_output else (
+            "scan_id, run_id, kind, function, file, line, vuln_type, status, "
+            "'' AS output, '' AS final_output, started_at, updated_at, finished_at"
+        )
+        cur = self._conn.execute(
+            f"SELECT {cols} FROM mining_agent_runs WHERE scan_id = ? ORDER BY started_at",
+            (scan_id,),
+        )
+        return [self._row_to_agent_run(r) for r in cur.fetchall()]
+
+    def get_mining_agent_run(self, scan_id: str, run_id: str) -> MiningAgentRun | None:
+        cur = self._conn.execute(
+            "SELECT * FROM mining_agent_runs WHERE scan_id = ? AND run_id = ?",
+            (scan_id, run_id),
+        )
+        row = cur.fetchone()
+        return None if row is None else self._row_to_agent_run(row)
 
     def delete_scan(self, scan_id: str) -> bool:
         with self._lock:
@@ -719,7 +833,7 @@ class SqliteScanStore(ScanStoreBase):
                   AND function = ?
                   AND vuln_type = ?
                   AND COALESCE(user_verdict, '') = ''
-                  AND COALESCE(ai_verdict, '') IN ('timeout', 'no_result')
+                  AND COALESCE(ai_verdict, '') IN ('timeout', 'no_result', 'pending_verify')
                 ORDER BY idx ASC
                 LIMIT 1
                 """,
