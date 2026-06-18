@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-06-18
+
+- **优化** `multi_ptr_leak2`（多层指针外层释放遗漏成员）静态分析器（自 `feat/deep-mining` 分支拣选）：索引函数改为逐函数流式处理，单棵 tree-sitter Tree 用完即弃，常驻内存从「整仓 N 棵 AST」降到「单函数 1 棵」；解析前用 `_RELEASE_HINT_RE` 做廉价文本预筛跳过不含释放语义 token 的函数；新增 `scope_prefix` 将处理范围收敛到本次扫描路径；释放 wrapper 名直接从索引函数名列提取无需解析函数体。行为与召回不变，仅性能/内存优化
+
 ## 2026-06-17
 
 - **新增** 漏洞报告 Markdown 导出：对每一个 AI 判定为「是问题」的扫描项，详情页新增「导出 MD」按钮，导出包含元信息、描述、AI 分析以及去误报三阶段（prove_bug / prove_fp / final_judge）报告的 Markdown 文件（`GET /api/scan/{id}/vulnerability/{idx}/report`）
