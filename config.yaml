@@ -20,6 +20,9 @@ opencode:
   mock: false    # set to false when opencode is configured
   models: []     # optional model pool; see README for fields
 
+fp_review:
+  auto_on_complete: true  # 扫描完成且存在已确认漏洞时，自动触发去误报（无需手动点击）
+
 storage:
   projects_dir: "../OpenDeepHoleData/projects"
   scans_dir: "../OpenDeepHoleData/scans"
