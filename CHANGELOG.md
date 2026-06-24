@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-06-24
+
+- **优化** checker 静态阶段按 `code_scan_path` 收敛 DB 函数范围：新增 `CodeDatabase.get_functions_by_path_prefix()` 与公共 `scoped_functions()`，`npd`、`chain_npd`、`oob`、`sensitive_clear` 不再先遍历整库函数后事后丢弃范围外候选；`npd`、`chain_npd` 同步补齐静态进度上报
+- **新增** 静态候选跨规则去重：`checker.yaml` 支持 `family`，默认开启 `static_dedup`，同 `family + file + function` 只保留一个代表候选进入 AI 审计，并通过 `metadata.merged_from` 记录合并来源
+- **优化** OpenCode 初始候选描述改为最小审计问题：只保留函数、变量/表达式和问题类型，静态分析规则、命中路径和工具细节不再写入 `description`
+- **新增** AI 审计同模式批量过滤：默认开启 `pattern_filter`，当同模式代表点被 AI 返回 `not_confirmed` 后，后续同 `vuln_type + subject + scope` 候选自动标记为 `filtered_same_pattern`，不再调用 LLM；timeout/no_result 不触发传播
+- **文档** README/CLAUDE 补充 DB analyzer 范围收敛、checker family、函数级去重、同模式过滤和配置项说明
+
 ## 2026-06-23
 
 - **优化** 清洗所有 checker 送入 AI 的**初始 prompt（候选 description）**，不再体现静态工具痕迹：去掉严重级别/规则名（`[high] xxx`）、规则告警 message、`匹配代码`、`规则策略/复核重点/命中关键字`、`[cppcheck]`/`[锁/线程资源]`/`静态过滤命中` 等表述；各 analyzer 描述统一改为中性问句「函数 X 中变量/表达式 Y 是否存在 Z 问题，请审计确认」，原有变量/表达式/调用线索保留为「相关线索」。涉及 16 个 `checkers/*/analyzer.py`

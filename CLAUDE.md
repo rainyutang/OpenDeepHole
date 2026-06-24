@@ -66,16 +66,20 @@ Each scan runs the full pipeline locally on the agent machine:
 2. Feedback — fetch false-positive history from server (for SKILL enrichment)
 3. MCP      — start LocalMCPServer in-process on a random port (CLI audit mode only)
 4. Workspace — create_scan_workspace() with per-task opencode.json + skill symlinks + merged feedback
-5. Static   — each checker's analyzer.find_candidates() → candidate list (cached for resume)
+5. Static   — each checker's analyzer.find_candidates() → scoped candidate list (cached for resume)
 5.5 Git history — (fresh scans, git repo, git_history.enabled) agent/git_history.py mines security-fix
     patterns from commit history (one LLM call per commit, submit_history_pattern); agent/variant_hunter.py
     then hunts whole-repo same-class sites per pattern (submit_variant_finding) → extra candidates tagged
     metadata.variant_of, merged into the candidate set. Patterns pushed via POST /api/agent/scan/{id}/git_history
-6. AI audit — run_audit() per candidate (selected CLI tool or LLM API direct call); variant_of propagated to Vulnerability
+6. AI audit — run_audit() per deduplicated candidate (selected CLI tool or LLM API direct call);
+    variant_of propagated to Vulnerability; `pattern_filter` can skip candidates whose same-pattern
+    representative was already rejected by AI
 7. Report   — upload vulnerabilities + finish event to server; clean up on completion
 ```
 
 **Git history config** (`git_history` in config.yaml/agent.yaml): `enabled`, `max_commits`, `since`, `paths`, `variant_hunt`. Mined patterns persist server-side in the `git_history_patterns` table and are exposed via `GET /api/scan/{id}/git_history` (frontend "git 历史问题模式" panel).
+
+**Static candidate controls**: DB-backed analyzers should use `scoped_functions(db, project_path)` so `code_scan_path` subdirectory scans do not parse whole-repo functions. `checker.yaml family` groups equivalent checker types for cross-rule dedup; `static_dedup` keeps one candidate per `(family, file, function)` before AI audit. Candidate descriptions should be minimal prompts of the form "function + variable/expression + problem", with static-analysis evidence stored only in metadata when needed. `pattern_filter` is independent and skips later `(vuln_type, subject, scope)` candidates only after AI returns `not_confirmed`.
 
 **Resume support**: scan dir at `~/.opendeephole/scans/<scan_id>/` is preserved on cancel/error.  
 **Index storage**: `code_index.db` is stored directly in the project directory (`<project_path>/code_index.db`). Re-scanning the same project reuses the existing index.
@@ -126,8 +130,10 @@ Backend refreshes checker discovery via `backend/registry.py` when listing check
 - **Must** inherit `backend.analyzers.base.BaseAnalyzer`
 - `vuln_type` string **must** match the `name` field in `checker.yaml`
 - `find_candidates(project_path: Path, db=None) -> list[Candidate]` — `db` is an optional pre-built `CodeDatabase`
-- Import both from base: `from backend.analyzers.base import BaseAnalyzer, Candidate`
+- Import from base: `from backend.analyzers.base import BaseAnalyzer, Candidate, scoped_functions`
 - `Candidate.file` should be relative to project root, `Candidate.description` is passed to AI as context
+- DB-backed analyzers should iterate `scoped_functions(db, project_path)` rather than `db.get_all_functions()`
+- Put the root variable/expression/function into `Candidate.metadata["subject"]` when possible; it drives cross-rule description merging and same-pattern filtering
 - No `analyzer.py` = skip static analysis for that checker (returns 0 candidates)
 
 ## Development Commands

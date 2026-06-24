@@ -400,4 +400,4 @@ class Analyzer(BaseAnalyzer):
                 vuln_type=self.vuln_type,
             )
 
-        print(f"  {self.vuln_type} produced candidates: {produced}", flush=True)
+        print(f"  [static] {self.vuln_type} produced candidates: {produced}", flush=True)

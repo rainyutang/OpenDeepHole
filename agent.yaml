@@ -49,6 +49,14 @@ opencode:
 # OpenCode/兼容 CLI 全局并发数，同时受单模型 max_concurrency 限制。
 opencode_concurrency: 1
 
+# 静态候选跨规则去重：同 family、同函数只保留一个代表候选。
+static_dedup: true
+
+# AI 审计同模式批量过滤：代表点被 AI 否决后，跳过同模式后续候选。
+pattern_filter:
+  enabled: true
+  scope: "directory"  # directory | file | repo
+
 # AI 去误报 CLI 配置（可选）
 # 删除或设为 null 时，默认继承上面的 opencode 工具和模型配置。
 # fp_review_cli:

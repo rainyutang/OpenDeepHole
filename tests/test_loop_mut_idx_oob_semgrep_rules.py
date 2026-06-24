@@ -65,9 +65,9 @@ void memory_call(char *dst, char *src, unsigned remain) {
     candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path))
     descriptions = "\n".join(candidate.description for candidate in candidates)
 
-    assert "array" in descriptions
-    assert "pointer" in descriptions
-    assert "memory-call" in descriptions
+    assert "越界访问问题" in descriptions
+    assert "array" not in descriptions
+    assert "memory-call" not in descriptions
     assert "array_access" not in descriptions
     assert len(candidates) >= 3
 
@@ -105,8 +105,9 @@ void derived_memfunc(char *base, char *src, unsigned remain) {
     candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path))
     descriptions = "\n".join(candidate.description for candidate in candidates)
 
-    assert "derived-pointer" in descriptions
-    assert "local memory sink" in descriptions
+    assert "越界访问问题" in descriptions
+    assert "derived-pointer" not in descriptions
+    assert "local memory sink" not in descriptions
     assert len(candidates) >= 2
 
 

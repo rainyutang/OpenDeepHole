@@ -1,6 +1,7 @@
 name: oob
 label: Out-of-Bounds Access / 数组越界访问
 description: Out-of-Bounds Access
+family: oob
 enabled: false
 skill_name: oob-audit
 category: out_of_bounds

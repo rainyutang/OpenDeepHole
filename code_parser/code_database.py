@@ -423,6 +423,24 @@ class CodeDatabase:
                ORDER BY fi.path, f.start_line""",
         ).fetchall()
 
+    def get_functions_by_path_prefix(self, prefix: str) -> list[sqlite3.Row]:
+        """Return functions whose indexed file path is under *prefix*."""
+        normalized = (prefix or "").replace("\\", "/").strip("/")
+        if not normalized:
+            return self.get_all_functions()
+        pslash = f"{normalized}/"
+        return self._conn.execute(
+            """SELECT f.*, fi.path as file_path
+               FROM functions f JOIN files fi ON f.file_id = fi.file_id
+               WHERE fi.path = :prefix OR substr(fi.path, 1, :plen) = :pslash
+               ORDER BY fi.path, f.start_line""",
+            {
+                "prefix": normalized,
+                "plen": len(pslash),
+                "pslash": pslash,
+            },
+        ).fetchall()
+
     def get_index_stats(self) -> dict[str, int]:
         """Return lightweight row counts for index health reporting."""
         counts: dict[str, int] = {}

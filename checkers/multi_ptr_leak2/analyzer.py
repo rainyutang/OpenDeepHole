@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Iterable, Iterator
 import tree_sitter_cpp
 from tree_sitter import Language, Node, Parser
 
-from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.analyzers.base import BaseAnalyzer, Candidate, in_scope as _in_scope, scope_prefix as _scope_prefix
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
@@ -861,33 +861,6 @@ def _parse_indexed_structs(db: "CodeDatabase", parser: Parser) -> list[StructInf
             info.line = start_line + info.line - 1
             structs.append(info)
     return structs
-
-
-def _scope_prefix(db: "CodeDatabase", project_path: Path) -> str | None:
-    """计算 project_path（= code_scan_path）在索引根下的相对前缀（posix）。
-
-    索引里的 file_path 是相对 project_root（整个被索引项目）存的，而 project_root
-    就是 `code_index.db` 所在目录。返回 "" 表示扫描范围即整个项目（不过滤）；返回
-    None 表示无法判定范围（无 db_path / 不在项目内 / 测试 fake db），此时保持旧行为
-    （处理全部）。
-    """
-    db_path = getattr(db, "db_path", None)
-    if not db_path:
-        return None
-    try:
-        project_root = Path(db_path).resolve().parent
-        scan_root = Path(project_path).resolve()
-        prefix = scan_root.relative_to(project_root).as_posix()
-    except (ValueError, OSError):
-        return None
-    return "" if prefix in ("", ".") else prefix
-
-
-def _in_scope(file_path: str, scope_prefix: str | None) -> bool:
-    if not scope_prefix:  # None 或 "" → 不过滤
-        return True
-    normalized = file_path.replace("\\", "/")
-    return normalized == scope_prefix or normalized.startswith(f"{scope_prefix}/")
 
 
 def _iter_indexed_functions(

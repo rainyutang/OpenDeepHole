@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 import tree_sitter_cpp
 from tree_sitter import Language, Parser
 
-from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.analyzers.base import BaseAnalyzer, Candidate, scoped_functions
 from code_parser.code_utils import (
     find_nodes_by_type,
     get_child_node_by_type,
@@ -69,7 +69,12 @@ class Analyzer(BaseAnalyzer):
             return []
 
         candidates: list[Candidate] = []
-        for func_row in db.get_all_functions():
+        functions = scoped_functions(db, project_path)
+        total = len(functions)
+        for idx, func_row in enumerate(functions):
+            if self.on_file_progress:
+                self.on_file_progress(idx + 1, total)
+
             body: str = func_row["body"] or ""
             if not body:
                 continue
@@ -89,11 +94,14 @@ class Analyzer(BaseAnalyzer):
                         line=deref_line,
                         function=func_name,
                         description=(
-                            f"函数 `{func_name}` 中指针变量 `{var_name}` 是否存在"
-                            f"空指针解引用问题，请审计确认。\n"
-                            f"相关线索：指针变量 `{var_name}` 在该函数中被解引用。"
+                            f"函数 `{func_name}` 中变量/表达式 `{var_name}` "
+                            f"是否存在空指针解引用问题，请审计确认。"
                         ),
                         vuln_type="npd",
+                        metadata={
+                            "subject": var_name,
+                            "problem": "空指针解引用",
+                        },
                     )
                 )
         return candidates

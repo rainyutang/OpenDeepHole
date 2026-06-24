@@ -29,6 +29,9 @@ class AgentConfigTests(unittest.TestCase):
         self.assertIsNone(cfg.fp_review_cli)
         self.assertTrue(cfg.memory_api_discovery.enabled)
         self.assertEqual(cfg.memory_api_discovery.batch_size, 8)
+        self.assertTrue(cfg.static_dedup)
+        self.assertTrue(cfg.pattern_filter.enabled)
+        self.assertEqual(cfg.pattern_filter.scope, "directory")
 
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
         cfg = AgentConfig()
@@ -55,6 +58,8 @@ class AgentConfigTests(unittest.TestCase):
                     "timeout_seconds": 120,
                     "max_candidates": 50,
                 },
+                "static_dedup": False,
+                "pattern_filter": {"enabled": False, "scope": "repo"},
             },
         )
 
@@ -71,6 +76,9 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.memory_api_discovery.batch_size, 5)
         self.assertEqual(cfg.memory_api_discovery.timeout_seconds, 120)
         self.assertEqual(cfg.memory_api_discovery.max_candidates, 50)
+        self.assertFalse(cfg.static_dedup)
+        self.assertFalse(cfg.pattern_filter.enabled)
+        self.assertEqual(cfg.pattern_filter.scope, "repo")
 
     def test_remote_config_dict_exports_managed_fields(self) -> None:
         cfg = AgentConfig()
@@ -92,6 +100,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertIsNone(remote["fp_review_cli"])
         self.assertEqual(remote["memory_api_discovery"]["batch_size"], 8)
         self.assertEqual(remote["memory_api_discovery"]["max_candidates"], 200)
+        self.assertTrue(remote["static_dedup"])
+        self.assertEqual(remote["pattern_filter"], {"enabled": True, "scope": "directory"})
 
     def test_save_config_persists_remote_managed_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -117,6 +127,8 @@ class AgentConfigTests(unittest.TestCase):
                     "opencode": {"tool": "opencode", "executable": "opencode", "timeout": 1200, "max_retries": 2},
                     "fp_review_cli": {"tool": "claude", "executable": "claude", "timeout": 900},
                     "memory_api_discovery": {"enabled": True, "batch_size": 10, "timeout_seconds": 240},
+                    "static_dedup": False,
+                    "pattern_filter": {"enabled": False, "scope": "file"},
                 },
             )
             save_config(cfg)
@@ -137,6 +149,16 @@ class AgentConfigTests(unittest.TestCase):
             self.assertTrue(raw["memory_api_discovery"]["enabled"])
             self.assertEqual(raw["memory_api_discovery"]["batch_size"], 10)
             self.assertEqual(raw["memory_api_discovery"]["timeout_seconds"], 240)
+            self.assertFalse(raw["static_dedup"])
+            self.assertEqual(raw["pattern_filter"], {"enabled": False, "scope": "file"})
+
+    def test_invalid_pattern_filter_scope_falls_back_to_directory(self) -> None:
+        cfg = AgentConfig()
+
+        apply_remote_config(cfg, {"pattern_filter": {"enabled": "false", "scope": "invalid"}})
+
+        self.assertFalse(cfg.pattern_filter.enabled)
+        self.assertEqual(cfg.pattern_filter.scope, "directory")
 
     def test_legacy_executable_infers_tool_and_fp_review_inherits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

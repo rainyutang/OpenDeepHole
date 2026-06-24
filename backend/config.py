@@ -72,6 +72,11 @@ class GitHistoryConfig(BaseModel):
     variant_hunt: bool = True       # 是否对每条历史模式做全仓同类变体排查
 
 
+class PatternFilterConfig(BaseModel):
+    enabled: bool = True
+    scope: str = "directory"        # directory | file | repo
+
+
 class StorageConfig(BaseModel):
     projects_dir: str = str(_DEFAULT_DATA_ROOT / "projects")
     scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
@@ -126,6 +131,8 @@ class AppConfig(BaseModel):
     fp_review: FpReviewConfig = FpReviewConfig()
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
     git_history: GitHistoryConfig = GitHistoryConfig()
+    static_dedup: bool = True
+    pattern_filter: PatternFilterConfig = PatternFilterConfig()
     storage: StorageConfig = StorageConfig()
     scan: ScanConfig = ScanConfig()
     logging: LoggingConfig = LoggingConfig()
