@@ -1,10 +1,30 @@
 import { useEffect, useState } from "react";
 import { getAgents, getAgentConfig, testAgentConfig, updateAgentConfig } from "../api/client";
-import type { AgentInfo, AgentOpenCodeConfig, AgentOpenCodeModelConfig, AgentRemoteConfig } from "../types";
+import type {
+  AgentGitHistoryConfig,
+  AgentInfo,
+  AgentOpenCodeConfig,
+  AgentOpenCodeModelConfig,
+  AgentPatternFilterConfig,
+  AgentRemoteConfig,
+} from "../types";
 
 interface Props {
   onBack: () => void;
 }
+
+const DEFAULT_PATTERN_FILTER: AgentPatternFilterConfig = {
+  enabled: true,
+  scope: "directory",
+};
+
+const DEFAULT_GIT_HISTORY: AgentGitHistoryConfig = {
+  enabled: true,
+  max_commits: 200,
+  since: "",
+  paths: "",
+  variant_hunt: true,
+};
 
 const DEFAULT_CONFIG: AgentRemoteConfig = {
   no_proxy: "10.0.0.0/8",
@@ -33,18 +53,9 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     timeout_seconds: 300,
     max_candidates: 200,
   },
-  git_history: {
-    enabled: true,
-    max_commits: 200,
-    since: "",
-    paths: "",
-    variant_hunt: true,
-  },
+  git_history: DEFAULT_GIT_HISTORY,
   static_dedup: true,
-  pattern_filter: {
-    enabled: true,
-    scope: "directory",
-  },
+  pattern_filter: DEFAULT_PATTERN_FILTER,
 };
 
 const DEFAULT_MODEL: AgentOpenCodeModelConfig = {
@@ -96,9 +107,9 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
     opencode,
     fp_review_cli: fpReviewCli,
     memory_api_discovery: { ...base.memory_api_discovery, ...config.memory_api_discovery },
-    git_history: { ...base.git_history, ...config.git_history },
+    git_history: { ...DEFAULT_GIT_HISTORY, ...config.git_history },
     static_dedup: config.static_dedup ?? base.static_dedup,
-    pattern_filter: { ...base.pattern_filter, ...config.pattern_filter },
+    pattern_filter: { ...DEFAULT_PATTERN_FILTER, ...config.pattern_filter },
     llm_api: { ...base.llm_api, ...config.llm_api },
   };
 }
