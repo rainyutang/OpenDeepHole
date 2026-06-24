@@ -1,10 +1,21 @@
 import { useEffect, useState } from "react";
 import { getAgents, getAgentConfig, testAgentConfig, updateAgentConfig } from "../api/client";
-import type { AgentInfo, AgentOpenCodeConfig, AgentOpenCodeModelConfig, AgentRemoteConfig } from "../types";
+import type {
+  AgentInfo,
+  AgentOpenCodeConfig,
+  AgentOpenCodeModelConfig,
+  AgentPatternFilterConfig,
+  AgentRemoteConfig,
+} from "../types";
 
 interface Props {
   onBack: () => void;
 }
+
+const DEFAULT_PATTERN_FILTER: AgentPatternFilterConfig = {
+  enabled: true,
+  scope: "directory",
+};
 
 const DEFAULT_CONFIG: AgentRemoteConfig = {
   no_proxy: "10.0.0.0/8",
@@ -34,10 +45,7 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     max_candidates: 200,
   },
   static_dedup: true,
-  pattern_filter: {
-    enabled: true,
-    scope: "directory",
-  },
+  pattern_filter: DEFAULT_PATTERN_FILTER,
 };
 
 const DEFAULT_MODEL: AgentOpenCodeModelConfig = {
@@ -90,7 +98,7 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
     fp_review_cli: fpReviewCli,
     memory_api_discovery: { ...base.memory_api_discovery, ...config.memory_api_discovery },
     static_dedup: config.static_dedup ?? base.static_dedup,
-    pattern_filter: { ...base.pattern_filter, ...config.pattern_filter },
+    pattern_filter: { ...DEFAULT_PATTERN_FILTER, ...config.pattern_filter },
     llm_api: { ...base.llm_api, ...config.llm_api },
   };
 }
