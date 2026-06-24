@@ -103,9 +103,13 @@ class SensitiveClearFunctionTests(unittest.TestCase):
         self.assertEqual([candidate.function for candidate in candidates], ["login", "derive"])
         self.assertEqual(candidates[0].metadata["kind"], "sensitive_clear_function")
         self.assertEqual(candidates[0].metadata["suspicious_variables"][0]["name"], "password")
+        self.assertEqual(candidates[0].metadata["subject"], "password")
+        self.assertEqual(candidates[0].metadata["problem"], "敏感信息未清零")
         self.assertEqual(candidates[1].metadata["suspicious_variables"][0]["name"], "seed")
-        self.assertNotIn("password", candidates[0].description)
-        self.assertNotIn("session_key", candidates[1].description)
+        self.assertIn("password", candidates[0].description)
+        self.assertIn("seed", candidates[1].description)
+        self.assertNotIn("char *password", candidates[0].description)
+        self.assertNotIn("unsigned char session_key", candidates[1].description)
 
     def test_sensitive_clear_prompt_only_exposes_function_name_not_variable_names(self) -> None:
         prompt = _sensitive_clear_prompt(

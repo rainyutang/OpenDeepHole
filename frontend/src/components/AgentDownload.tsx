@@ -33,6 +33,11 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
     timeout_seconds: 300,
     max_candidates: 200,
   },
+  static_dedup: true,
+  pattern_filter: {
+    enabled: true,
+    scope: "directory",
+  },
 };
 
 const DEFAULT_MODEL: AgentOpenCodeModelConfig = {
@@ -84,6 +89,8 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
     opencode,
     fp_review_cli: fpReviewCli,
     memory_api_discovery: { ...base.memory_api_discovery, ...config.memory_api_discovery },
+    static_dedup: config.static_dedup ?? base.static_dedup,
+    pattern_filter: { ...base.pattern_filter, ...config.pattern_filter },
     llm_api: { ...base.llm_api, ...config.llm_api },
   };
 }

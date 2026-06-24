@@ -36,6 +36,7 @@
 **源码不离开本地**：Agent 只上报漏洞分析结论，不上传源码文件。  
 **误报反馈闭环**：用户在 Web UI 标记正报或误报后，选中的经验会注入 SKILL 中减少重复误判；也可将问题标为“待分析”作为人工待处理状态，该状态不进入经验库且仍可继续 AI 去误报复核；已标记问题也可以取消标记，取消后会移除该标记生成的经验并重新进入 AI 去误报候选。
 **三阶段 AI 去误报（扫描完成自动触发）**：扫描完成且存在已确认漏洞时**自动发起去误报**，无需手动点击（受 `fp_review.auto_on_complete` 控制，默认开启；仅在该扫描尚无去误报任务时触发，避免重复复核）。扫描详情页顶部「AI去误报」按钮仍保留，可手动重跑或补跑未复核项。FP 复核按 `prove-bug`、`prove-fp`、`final-judge` 顺序运行，各阶段通过本地 Markdown artifact 文件交接；`prove-bug` 判定非问题（confirmed=false）时正式早退，直接记录"可能误报"结果，不再运行后两个阶段。阶段结束后页面即可查看该阶段论证；正方判定为问题时最终结论由 `final-judge` 提交。若阶段未写入 artifact 或未提交结构化结果，Agent 会按配置重试并展示明确失败原因，复核结束后该候选显示"复核失败"。复核按模型池容量并发执行并同时高亮所有进行中的项；Agent 断线重连后复核任务自动重新挂接，不会被误判为已停止。扫描详情页采用**左右主从布局**：左侧精简问题列表（含严重级别/类型筛选），右侧问题详情，描述、AI 分析与去误报各阶段输出均以 Markdown 渲染；页面**默认只显示「问题」**，AI 审计未确认或去误报判为误报的候选默认隐藏，可用「显示全部」开关查看。
+**静态候选收敛与去重**：DB 类 checker 会按本次 `code_scan_path` 在 SQL 层收敛函数范围；静态候选进入 AI 前会按 `family + file + function` 跨规则去重，并只向 OpenCode 提供“函数/变量或表达式/问题类型”的最小审计问题。AI 审计确认某个同模式代表点为非问题后，可通过 `pattern_filter` 自动过滤同 `vuln_type + subject + scope` 的后续候选。
 **漏洞报告导出**：对每一个 AI 判定为「是问题」的扫描项可单独导出 Markdown 报告（含元信息、描述、AI 分析及去误报三阶段论证）；扫描详情页顶部「导出报告」可将本次所有确认为问题的漏洞各自导出为 Markdown 并打包为 zip。对应端点 `GET /api/scan/{id}/vulnerability/{idx}/report`（单项 Markdown）与 `GET /api/scan/{id}/report.zip`（整体 zip）。
 
 ## 快速开始
@@ -234,12 +235,14 @@ label: UAF
 description: "Use-After-Free 检测"
 enabled: true
 visibility: public    # public: 所有用户可见；admin: 仅管理员测试可见
+# family: uaf          # 可选，同类 checker 的跨规则去重家族；未配置时使用 name
 # mode: opencode       # 可选，默认 opencode；设为 api 则使用 prompt.txt + LLM 直接调用
 # skill_name: uaf-audit # 可选，opencode 模式下自定义 skill 名称
 # model_capability: high # 可选，any/low/medium/high；未配置默认 any
 ```
 
 每个 Checker 独立配置 `mode`，同一次扫描中不同 Checker 可使用不同调用方式。
+同一 `family` 的候选会在静态阶段按同文件同函数做跨规则去重，只保留一个代表候选进入 AI 审计。
 新增或修改 `checkers/` 下的 checker 后无需重启后端；后端会在列表刷新和点击开始扫描时重新扫描目录。测试阶段建议设置 `visibility: admin`，只有管理员能看到并启动该 checker；测试完成后改为 `visibility: public` 即可对所有用户开放。
 
 **内置 Checker：**
@@ -316,7 +319,7 @@ mode: "api"
 from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
-from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.analyzers.base import BaseAnalyzer, Candidate, scoped_functions
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
@@ -333,7 +336,7 @@ class Analyzer(BaseAnalyzer):
         if db is None:
             return []
         candidates = []
-        functions = db.get_all_functions()
+        functions = scoped_functions(db, project_path)
         total = len(functions)
         for idx, func in enumerate(functions):
             # 进度回调（可选，用于前端进度条）
@@ -347,8 +350,9 @@ class Analyzer(BaseAnalyzer):
                 file=func["file_path"],
                 line=func["start_line"],
                 function=func["name"],
-                description="检测到可疑模式...",
+                description=f"函数 `{func['name']}` 中变量/表达式 `target` 是否存在 XXX 问题，请审计确认。",
                 vuln_type=self.vuln_type,
+                metadata={"subject": "target", "problem": "XXX"},
             ))
         return candidates
 ```
@@ -360,6 +364,8 @@ class Analyzer(BaseAnalyzer):
 - `vuln_type` **必须**与 `checker.yaml` 中的 `name` 字段一致
 - `find_candidates()` 接收项目根目录路径，返回 `Iterable[Candidate]`（列表或 generator 均可）
 - 可以 `from backend.analyzers.base import BaseAnalyzer, Candidate` 一次性导入所需类
+- 使用 DB 的 analyzer 应优先调用 `scoped_functions(db, project_path)`，让 `code_scan_path` 子目录扫描在 SQL 层收敛函数范围；无法判定范围时会自动退回全量。
+- `Candidate.description` 应尽量只包含必要审计问题（函数、变量/表达式、问题类型），不要写静态分析规则、命中路径或工具细节；`metadata.subject` 用于跨规则合并和同模式过滤。
 
 **扫描前内存 API 缓存：**
 
@@ -399,6 +405,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --audit --aud
 | 方法 | 说明 | 返回字段 |
 |------|------|---------|
 | `db.get_all_functions()` | 获取所有函数（按文件和行号排序） | function_id, name, signature, return_type, start_line, end_line, is_static, linkage, body, file_path |
+| `db.get_functions_by_path_prefix(prefix)` | 获取指定索引相对路径前缀下的函数 | 同上 |
 | `db.get_functions_by_name(name)` | 按名称精确匹配函数 | 同上 |
 | `db.get_function_body(name)` | 获取第一个匹配函数的函数体 | 返回 `str \| None` |
 | `db.get_calls_from_function(function_id)` | 查询指定函数发出的所有调用 | call_id, caller_function_id, callee_name, callee_function_id, line, column, file_path |
@@ -442,7 +449,9 @@ for call in find_nodes_by_type(tree.root_node, "call_expression"):
 *1. 遍历所有函数并分析*
 
 ```python
-for func in db.get_all_functions():
+from backend.analyzers.base import scoped_functions
+
+for func in scoped_functions(db, project_path):
     name = func["name"]
     body = func["body"] or ""
     file_path = func["file_path"]
@@ -472,7 +481,7 @@ from collections.abc import Iterator
 def find_candidates(self, project_path: Path, db=None) -> Iterator[Candidate]:
     if db is None:
         return
-    for func in db.get_all_functions():
+    for func in scoped_functions(db, project_path):
         # ... 分析 ...
         yield Candidate(file=func["file_path"], ...)
 ```
@@ -480,7 +489,7 @@ def find_candidates(self, project_path: Path, db=None) -> Iterator[Candidate]:
 *4. 进度回调*
 
 ```python
-functions = db.get_all_functions()
+functions = scoped_functions(db, project_path)
 total = len(functions)
 for idx, func in enumerate(functions):
     if self.on_file_progress and idx % 20 == 0:  # 每 20 个函数更新一次
@@ -503,10 +512,10 @@ def find_candidates(self, project_path: Path, db=None) -> list[Candidate]:
 
 **实现建议：**
 
-- 推荐使用 `db` 查询而非直接遍历文件系统（性能更好，且与 MCP Server 共享同一索引）
+- 推荐使用 `scoped_functions(db, project_path)` 查询而非直接遍历全量函数或文件系统（性能更好，且与 MCP Server 共享同一索引）
 - Generator 模式适合耗时较长的分析器，可让 LLM 提前开始处理已发现的候选项
 - `on_file_progress` 回调用于前端进度条显示，建议在循环中定期调用
-- `description` 字段尽可能详细，它会作为 prompt 的一部分传递给 AI
+- `description` 字段会作为初始 prompt 的一部分传递给 AI，应保持中性、简短，只描述需要审计确认的问题
 - `mode: api` 的 checker 使用 `prompt.txt` 而非 `SKILL.md`，适用于无需 MCP 工具的场景；需要 MCP 辅助复核的 checker 应使用 `mode: opencode`
 - 返回空列表是合法的，表示未找到候选点
 
@@ -570,6 +579,14 @@ opencode:
 # OpenCode/兼容 CLI 并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
 # 未配置 models 时为单模型并发上限；配置 models 后并发由各模型 max_concurrency 决定
 opencode_concurrency: 1
+
+# 静态候选跨规则去重：同 family、同文件、同函数只保留一个代表候选
+static_dedup: true
+
+# AI 审计同模式批量过滤：代表点被 AI 否决后，跳过同 vuln_type/subject/scope 后续候选
+pattern_filter:
+  enabled: true
+  scope: "directory"  # directory | file | repo
 
 # AI 去误报 CLI 配置（可选；不配置则继承上面的审计工具和模型）
 # fp_review_cli:

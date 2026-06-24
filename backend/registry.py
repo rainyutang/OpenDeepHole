@@ -54,6 +54,7 @@ class CheckerEntry:
     visibility: str = CHECKER_VISIBILITY_PUBLIC  # "public" | "admin"
     category: str = CHECKER_CATEGORY_DEFAULT
     category_label: str = CHECKER_CATEGORY_LABELS[CHECKER_CATEGORY_DEFAULT]
+    family: str = ""
     modified_at: str = ""
     user_created: bool = False
     created_by_user_id: str = ""
@@ -205,6 +206,7 @@ def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = Fa
         visibility=_normalize_visibility(meta.get("visibility", CHECKER_VISIBILITY_PUBLIC)),
         category=category,
         category_label=checker_category_label(category),
+        family=str(meta.get("family") or name).strip() or name,
         modified_at=str(meta.get("modified_at") or "").strip(),
         user_created=user_created,
         created_by_user_id=str(meta.get("created_by_user_id") or "").strip(),

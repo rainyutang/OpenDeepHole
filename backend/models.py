@@ -423,6 +423,11 @@ class AgentMemoryApiDiscoveryConfig(BaseModel):
     max_candidates: int = 200
 
 
+class AgentPatternFilterConfig(BaseModel):
+    enabled: bool = True
+    scope: str = "directory"
+
+
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
     no_proxy: str = "10.0.0.0/8"
@@ -431,6 +436,8 @@ class AgentRemoteConfig(BaseModel):
     opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
     fp_review_cli: AgentOpenCodeConfig | None = None
     memory_api_discovery: AgentMemoryApiDiscoveryConfig = AgentMemoryApiDiscoveryConfig()
+    static_dedup: bool = True
+    pattern_filter: AgentPatternFilterConfig = AgentPatternFilterConfig()
 
 
 class CreateScanRequest(BaseModel):

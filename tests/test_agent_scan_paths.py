@@ -9,8 +9,11 @@ from agent.scanner import (
     _audit_order_summary,
     _candidate_in_scan_scope,
     _candidate_key,
+    _candidate_pattern_key,
+    _dedup_candidates,
     _normalize_candidate_for_project,
     _order_candidates_for_audit,
+    _round_robin_by_pattern,
     _resolve_scan_paths,
     build_project_level_candidate,
     is_project_level_candidate,
@@ -26,6 +29,17 @@ def _candidate(vuln_type: str, line: int) -> Candidate:
         function=f"{vuln_type}_fn_{line}",
         description=f"{vuln_type} candidate {line}",
         vuln_type=vuln_type,
+    )
+
+
+def _subject_candidate(vuln_type: str, line: int, subject: str, *, function: str = "target") -> Candidate:
+    return Candidate(
+        file="src/demo.c",
+        line=line,
+        function=function,
+        description=f"{vuln_type} {subject}",
+        vuln_type=vuln_type,
+        metadata={"subject": subject, "problem": "空指针解引用"},
     )
 
 
@@ -211,6 +225,59 @@ class AgentAuditOrderingTests(unittest.TestCase):
             _audit_order_summary(candidates),
             "npd=1, intoverflow=2, memleak=2",
         )
+
+    def test_dedup_candidates_merges_same_family_same_function(self) -> None:
+        candidates = [
+            _subject_candidate("npd", 10, "ptr"),
+            _subject_candidate("chain_npd", 12, "ctx->session"),
+            _subject_candidate("npd", 20, "other", function="other_fn"),
+        ]
+
+        deduped, removed = _dedup_candidates(
+            candidates,
+            {"npd": "npd", "chain_npd": "npd"},
+            ["npd", "chain_npd"],
+        )
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(deduped), 2)
+        merged = next(c for c in deduped if c.function == "target")
+        self.assertEqual(merged.vuln_type, "chain_npd")
+        self.assertIn("`ctx->session, ptr`", merged.description)
+        self.assertEqual(merged.metadata["subject"], "ctx->session, ptr")
+        self.assertEqual(
+            [(item["vuln_type"], item["subject"]) for item in merged.metadata["merged_from"]],
+            [("chain_npd", "ctx->session"), ("npd", "ptr")],
+        )
+
+    def test_dedup_candidates_keeps_same_family_different_files(self) -> None:
+        left = _subject_candidate("npd", 10, "ptr")
+        right = left.model_copy(update={"file": "src/other.c"})
+
+        deduped, removed = _dedup_candidates([left, right], {"npd": "npd"}, ["npd"])
+
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(deduped), 2)
+
+    def test_pattern_key_without_subject_is_unique_and_non_propagating(self) -> None:
+        candidate = _candidate("npd", 1)
+
+        key, can_propagate = _candidate_pattern_key(candidate, "directory")
+
+        self.assertFalse(can_propagate)
+        self.assertEqual(key, ("unique", candidate.file, candidate.line, candidate.function, candidate.vuln_type))
+
+    def test_round_robin_by_pattern_interleaves_same_pattern_candidates(self) -> None:
+        candidates = [
+            _subject_candidate("npd", 1, "ptr"),
+            _subject_candidate("npd", 2, "ptr"),
+            _subject_candidate("npd", 3, "ctx"),
+            _subject_candidate("npd", 4, "ptr"),
+        ]
+
+        ordered = _round_robin_by_pattern(candidates, "directory")
+
+        self.assertEqual([c.line for c in ordered], [1, 3, 2, 4])
 
 
 class ScanStoreCodeScanPathTests(unittest.TestCase):

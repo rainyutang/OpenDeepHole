@@ -1,6 +1,7 @@
 name: npd
 label: Null Pointer Dereference / 空指针解引用
 description: Null Pointer Dereference
+family: npd
 enabled: true
 visibility: admin
 category: illegal_memory_use

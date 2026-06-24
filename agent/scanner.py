@@ -122,6 +122,157 @@ def _audit_order_summary(candidates: list[Candidate]) -> str:
     return ", ".join(f"{name}={counts[name]}" for name in order)
 
 
+_PROBLEM_LABELS = {
+    "npd": "空指针解引用",
+    "chain_npd": "空指针解引用",
+    "mp_npd": "空指针解引用",
+    "npd_funcret": "空指针解引用",
+    "oob": "越界读写",
+    "safe_mem_oob": "越界读写",
+    "loop_mut_idx_oob": "越界读写",
+    "bufoverflow": "越界读写",
+    "memleak": "资源泄漏",
+    "resleak": "资源泄漏",
+    "multi_ptr_leak2": "资源泄漏",
+    "mp_resouce_leak": "资源泄漏",
+    "intoverflow": "整数溢出",
+    "double_free": "重复释放",
+    "inf_loop": "死循环",
+    "sensitive_clear": "敏感信息未清零",
+}
+
+
+def _candidate_subject(candidate: Candidate) -> str:
+    metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+    subject = metadata.get("subject")
+    if isinstance(subject, (list, tuple, set)):
+        return ", ".join(str(item).strip() for item in subject if str(item).strip())
+    return str(subject or "").strip()
+
+
+def _candidate_problem(candidate: Candidate) -> str:
+    metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+    problem = str(metadata.get("problem") or "").strip()
+    return problem or _PROBLEM_LABELS.get(candidate.vuln_type, candidate.vuln_type)
+
+
+def _minimal_candidate_description(candidate: Candidate, subjects: list[str]) -> str:
+    problem = _candidate_problem(candidate)
+    joined = ", ".join(subjects)
+    if joined:
+        return (
+            f"函数 `{candidate.function}` 中变量/表达式 `{joined}` "
+            f"是否存在{problem}问题，请审计确认。"
+        )
+    return f"函数 `{candidate.function}` 是否存在{problem}问题，请审计确认。"
+
+
+def _dedup_candidates(
+    candidates: list[Candidate],
+    family_of: dict[str, str],
+    checker_names: list[str],
+) -> tuple[list[Candidate], int]:
+    """Deduplicate same-family candidates in the same function."""
+    if len(candidates) <= 1:
+        return list(candidates), 0
+
+    ordered = _order_candidates_for_audit(candidates, checker_names)
+    groups: dict[tuple[str, str, str], list[Candidate]] = {}
+    group_order: list[tuple[str, str, str]] = []
+    for candidate in ordered:
+        family = family_of.get(candidate.vuln_type, candidate.vuln_type)
+        key = (family, candidate.file, candidate.function)
+        if key not in groups:
+            groups[key] = []
+            group_order.append(key)
+        groups[key].append(candidate)
+
+    deduped: list[Candidate] = []
+    removed = 0
+    for key in group_order:
+        group = groups[key]
+        representative = group[0]
+        if len(group) == 1:
+            deduped.append(representative)
+            continue
+
+        removed += len(group) - 1
+        subjects: list[str] = []
+        seen_subjects: set[str] = set()
+        merged_from: list[dict[str, object]] = []
+        for candidate in group:
+            subject = _candidate_subject(candidate)
+            if subject and subject not in seen_subjects:
+                seen_subjects.add(subject)
+                subjects.append(subject)
+            merged_from.append({
+                "vuln_type": candidate.vuln_type,
+                "subject": subject,
+                "file": candidate.file,
+                "line": candidate.line,
+            })
+
+        metadata = dict(representative.metadata or {})
+        metadata["merged_from"] = merged_from
+        if subjects:
+            metadata["subject"] = ", ".join(subjects)
+        deduped.append(
+            representative.model_copy(update={
+                "description": _minimal_candidate_description(representative, subjects),
+                "metadata": metadata,
+            })
+        )
+
+    return deduped, removed
+
+
+def _pattern_scope(candidate: Candidate, scope: str) -> str:
+    normalized = candidate.file.replace("\\", "/")
+    if scope == "repo":
+        return ""
+    if scope == "file":
+        return normalized
+    return os.path.dirname(normalized) or "."
+
+
+def _candidate_pattern_key(
+    candidate: Candidate,
+    scope: str,
+) -> tuple[tuple[object, ...], bool]:
+    subject = _candidate_subject(candidate)
+    if not subject:
+        return ("unique", candidate.file, candidate.line, candidate.function, candidate.vuln_type), False
+    return (candidate.vuln_type, subject, _pattern_scope(candidate, scope)), True
+
+
+def _round_robin_by_pattern(
+    candidates: list[Candidate],
+    scope: str,
+) -> list[Candidate]:
+    if len(candidates) <= 1:
+        return list(candidates)
+    buckets: dict[tuple[object, ...], list[Candidate]] = {}
+    order: list[tuple[object, ...]] = []
+    for candidate in candidates:
+        key, _ = _candidate_pattern_key(candidate, scope)
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(candidate)
+
+    result: list[Candidate] = []
+    while buckets:
+        for key in list(order):
+            bucket = buckets.get(key)
+            if not bucket:
+                continue
+            result.append(bucket.pop(0))
+            if not bucket:
+                buckets.pop(key, None)
+                order.remove(key)
+    return result
+
+
 def _path_matches_indexed_file(indexed_path: str, candidate_file: str) -> bool:
     indexed = indexed_path.replace("\\", "/")
     candidate = candidate_file.replace("\\", "/")
@@ -337,6 +488,11 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
             "timeout_seconds": config.memory_api_discovery.timeout_seconds,
             "max_candidates": config.memory_api_discovery.max_candidates,
         },
+        "static_dedup": config.static_dedup,
+        "pattern_filter": {
+            "enabled": config.pattern_filter.enabled,
+            "scope": config.pattern_filter.scope,
+        },
         # AGENT_PROJECT_DIR tells MCP to find code_index.db in the project dir.
         # Keep result JSON files isolated inside this scan's directory so the
         # MCP submit path and opencode result read path cannot cross scans.
@@ -441,6 +597,11 @@ async def run_scan(
         if not registry:
             raise ValueError("No checkers available or none matched the requested names")
 
+        family_of = {
+            name: (getattr(entry, "family", "") or name)
+            for name, entry in registry.items()
+        }
+        audit_checker_order = checker_names or list(registry.keys())
         await emit("init", f"Loaded {len(registry)} checker(s): {list(registry.keys())}")
 
         candidates_cache_path = scan_dir / "candidates.json"
@@ -738,6 +899,24 @@ async def run_scan(
                 encoding="utf-8",
             )
 
+        if not retry_mode and getattr(config, "static_dedup", True):
+            candidates, removed_count = _dedup_candidates(
+                candidates,
+                family_of,
+                audit_checker_order,
+            )
+            if removed_count:
+                total = len(candidates)
+                candidates_cache_path.write_text(
+                    json.dumps([c.model_dump() for c in candidates], ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                await emit(
+                    "static_analysis",
+                    f"跨规则函数级去重过滤 {removed_count} 个候选后共 {total} 个候选点",
+                    candidate_index=total,
+                )
+
         function_source_cache = await asyncio.to_thread(
             _build_function_source_cache,
             project_path,
@@ -766,7 +945,13 @@ async def run_scan(
             c for c in candidates
             if _candidate_key(c) not in processed_keys
         ]
-        remaining = _order_candidates_for_audit(remaining, checker_names or list(registry.keys()))
+        remaining = _order_candidates_for_audit(remaining, audit_checker_order)
+        pattern_filter_enabled = bool(getattr(config.pattern_filter, "enabled", True))
+        pattern_filter_scope = getattr(config.pattern_filter, "scope", "directory")
+        if pattern_filter_scope not in {"directory", "file", "repo"}:
+            pattern_filter_scope = "directory"
+        if pattern_filter_enabled:
+            remaining = _round_robin_by_pattern(remaining, pattern_filter_scope)
         already_done = retry_processed_offset if retry_mode else total - len(remaining)
 
         # --- Phase 7: AI audit ---
@@ -784,6 +969,7 @@ async def run_scan(
         )
         audit_concurrency = max(1, min(audit_capacity, len(remaining) or 1))
         result_lock = asyncio.Lock()
+        rejected_patterns: set[tuple[object, ...]] = set()
         queue: asyncio.Queue[tuple[int, Candidate]] = asyncio.Queue()
         for item in enumerate(remaining):
             queue.put_nowait(item)
@@ -799,6 +985,43 @@ async def run_scan(
                 f"{candidate.file}:{candidate.line} — {candidate.function}",
                 candidate_index=global_index,
             )
+
+            pattern_key: tuple[object, ...] | None = None
+            pattern_can_propagate = False
+            if pattern_filter_enabled:
+                pattern_key, pattern_can_propagate = _candidate_pattern_key(
+                    candidate,
+                    pattern_filter_scope,
+                )
+                async with result_lock:
+                    pattern_rejected = pattern_key in rejected_patterns
+                if pattern_rejected:
+                    vuln = Vulnerability(
+                        file=candidate.file,
+                        line=candidate.line,
+                        function=candidate.function,
+                        vuln_type=candidate.vuln_type,
+                        severity="unknown",
+                        description=candidate.description,
+                        ai_analysis="同模式代表点已被 AI 审计否决，自动过滤（未调用 LLM）",
+                        confirmed=False,
+                        ai_verdict="filtered_same_pattern",
+                    )
+                    _attach_function_source(vuln, candidate, function_source_cache)
+                    async with result_lock:
+                        vulnerabilities.append(vuln)
+                    await emit(
+                        "auditing",
+                        f"[{global_index + 1}] Result: filtered same pattern",
+                        candidate_index=global_index,
+                    )
+                    await reporter.report_vulnerability(scan_id, vuln)
+                    await reporter.report_processed_key(
+                        scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+                    )
+                    async with result_lock:
+                        processed_this_run += 1
+                    return
 
             vuln: Optional[Vulnerability] = None
             project_vulns: list[Vulnerability] | None = None
@@ -941,12 +1164,21 @@ async def run_scan(
             _attach_function_source(vuln, candidate, function_source_cache)
 
             async with result_lock:
+                if (
+                    pattern_filter_enabled
+                    and pattern_can_propagate
+                    and pattern_key is not None
+                    and not vuln.confirmed
+                    and vuln.ai_verdict == "not_confirmed"
+                ):
+                    rejected_patterns.add(pattern_key)
                 vulnerabilities.append(vuln)
             _verdict_labels = {
                 "confirmed": "CONFIRMED",
                 "not_confirmed": "not confirmed",
                 "timeout": "TIMEOUT",
                 "no_result": "no result",
+                "filtered_same_pattern": "filtered same pattern",
             }
             result_label = _verdict_labels.get(vuln.ai_verdict, "not confirmed")
             await emit("auditing", f"[{global_index + 1}] Result: {result_label}", candidate_index=global_index)

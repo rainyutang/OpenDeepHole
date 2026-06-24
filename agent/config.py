@@ -62,6 +62,12 @@ class MemoryApiDiscoveryConfig:
     max_candidates: int = 200
 
 
+@dataclass
+class PatternFilterConfig:
+    enabled: bool = True
+    scope: str = "directory"  # directory | file | repo
+
+
 def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     """Normalize a CLI config in place while keeping legacy executable values."""
     tool = (config.tool or "").strip().lower()
@@ -118,6 +124,20 @@ def _bounded_int(value: object, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(maximum, parsed))
 
 
+def _bool_value(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
 def _opencode_config_dict(config: OpenCodeConfig) -> dict:
     data = dataclasses.asdict(config)
     data["models"] = [dataclasses.asdict(model) for model in config.models]
@@ -137,6 +157,8 @@ class AgentConfig:
     fp_review_cli: OpenCodeConfig | None = None
     opencode_concurrency: int = 1
     memory_api_discovery: MemoryApiDiscoveryConfig = field(default_factory=MemoryApiDiscoveryConfig)
+    static_dedup: bool = True
+    pattern_filter: PatternFilterConfig = field(default_factory=PatternFilterConfig)
     # Runtime-only: path to the loaded config file (not serialized)
     config_file: Optional[Path] = field(default=None, repr=False, compare=False)
 
@@ -178,6 +200,16 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         for f in dataclasses.fields(config.memory_api_discovery):
             if f.name in section and section[f.name] is not None:
                 setattr(config.memory_api_discovery, f.name, section[f.name])
+    if "static_dedup" in remote and remote["static_dedup"] is not None:
+        config.static_dedup = _bool_value(remote["static_dedup"], True)
+    section = remote.get("pattern_filter") or {}
+    if isinstance(section, dict):
+        for f in dataclasses.fields(config.pattern_filter):
+            if f.name in section and section[f.name] is not None:
+                setattr(config.pattern_filter, f.name, section[f.name])
+        config.pattern_filter.enabled = _bool_value(config.pattern_filter.enabled, True)
+        if config.pattern_filter.scope not in {"directory", "file", "repo"}:
+            config.pattern_filter.scope = "directory"
 
 
 def apply_network_env(config: AgentConfig) -> None:
@@ -207,6 +239,11 @@ def remote_config_dict(config: AgentConfig) -> dict:
             f.name: getattr(config.memory_api_discovery, f.name)
             for f in dataclasses.fields(config.memory_api_discovery)
         },
+        "static_dedup": config.static_dedup,
+        "pattern_filter": {
+            f.name: getattr(config.pattern_filter, f.name)
+            for f in dataclasses.fields(config.pattern_filter)
+        },
     }
 
 
@@ -231,6 +268,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     oc_fields = {f.name for f in dataclasses.fields(OpenCodeConfig)}
     model_fields = {f.name for f in dataclasses.fields(OpenCodeModelConfig)}
     memory_api_fields = {f.name for f in dataclasses.fields(MemoryApiDiscoveryConfig)}
+    pattern_filter_fields = {f.name for f in dataclasses.fields(PatternFilterConfig)}
 
     llm_raw = {k: v for k, v in raw.get("llm_api", {}).items() if k in llm_fields}
     oc_raw = {k: v for k, v in raw.get("opencode", {}).items() if k in oc_fields}
@@ -243,6 +281,10 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     memory_api_raw = {
         k: v for k, v in raw.get("memory_api_discovery", {}).items()
         if k in memory_api_fields
+    }
+    pattern_filter_raw = {
+        k: v for k, v in raw.get("pattern_filter", {}).items()
+        if k in pattern_filter_fields
     }
     if "tool" not in oc_raw and "executable" in oc_raw:
         oc_raw["tool"] = ""
@@ -272,8 +314,13 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         fp_review_cli=normalize_cli_config(fp_cfg) if fp_cfg is not None else None,
         opencode_concurrency=_bounded_int(raw.get("opencode_concurrency", 1), 1, 1, 8),
         memory_api_discovery=MemoryApiDiscoveryConfig(**memory_api_raw),
+        static_dedup=_bool_value(raw.get("static_dedup", True), True),
+        pattern_filter=PatternFilterConfig(**pattern_filter_raw),
         config_file=path,
     )
+    cfg.pattern_filter.enabled = _bool_value(cfg.pattern_filter.enabled, True)
+    if cfg.pattern_filter.scope not in {"directory", "file", "repo"}:
+        cfg.pattern_filter.scope = "directory"
     return cfg
 
 
@@ -303,6 +350,11 @@ def save_config(config: AgentConfig) -> None:
     raw["memory_api_discovery"] = {
         f.name: getattr(config.memory_api_discovery, f.name)
         for f in dataclasses.fields(config.memory_api_discovery)
+    }
+    raw["static_dedup"] = config.static_dedup
+    raw["pattern_filter"] = {
+        f.name: getattr(config.pattern_filter, f.name)
+        for f in dataclasses.fields(config.pattern_filter)
     }
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)

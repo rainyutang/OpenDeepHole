@@ -4,6 +4,12 @@ no_proxy: "10.0.0.0/8"  # 逗号分隔的不走代理地址，如 "localhost,127
 
 opencode_concurrency: 1  # OpenCode/兼容 CLI 全局并发数
 
+static_dedup: true  # 静态候选跨规则去重：同 family、同函数只保留一个代表候选
+
+pattern_filter:
+  enabled: true     # AI 否决代表点后，自动过滤同模式后续候选
+  scope: "directory"  # directory | file | repo
+
 server:
   host: "0.0.0.0"
   port: 8000

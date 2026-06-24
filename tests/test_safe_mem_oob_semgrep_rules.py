@@ -114,11 +114,12 @@ void vformat_s_member_parent(Msg *msg, void *args) {
     candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
     descriptions = "\n".join(candidate.description for candidate in candidates)
 
-    assert "member-non-member-size" in descriptions
-    assert "offset-full-size" in descriptions
-    assert "member-offset-full-member-size" in descriptions
-    assert "pointer-sizeof-dst" in descriptions
-    assert "multidim-array-full-size" in descriptions
+    assert "越界问题" in descriptions
+    assert "member-non-member-size" not in descriptions
+    assert "offset-full-size" not in descriptions
+    assert "member-offset-full-member-size" not in descriptions
+    assert "pointer-sizeof-dst" not in descriptions
+    assert "multidim-array-full-size" not in descriptions
     assert "pointer_param" in descriptions
     assert "offset_cast_parentheses" in descriptions
     assert "member_subarray" in descriptions
@@ -130,13 +131,6 @@ void vformat_s_member_parent(Msg *msg, void *args) {
     assert "identical-size-array-dst" not in descriptions
     assert "identical-size-member-dst" not in descriptions
     assert "identical-size-source-named" not in descriptions
-    assert "strcpy_s" in descriptions
-    assert "strncpy_s" in descriptions
-    assert "wcscpy_s" in descriptions
-    assert "sprintf_s" in descriptions
-    assert "snprintf_s" in descriptions
-    assert "vsprintf_s" in descriptions
-    assert "vsnprintf_s" in descriptions
     assert len(candidates) >= 5
 
 

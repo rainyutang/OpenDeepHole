@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import tree_sitter_cpp
 from tree_sitter import Language, Parser
 
-from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.analyzers.base import BaseAnalyzer, Candidate, scoped_functions
 from code_parser.code_utils import find_nodes_by_type
 
 if TYPE_CHECKING:
@@ -209,7 +209,12 @@ class Analyzer(BaseAnalyzer):
             return []
 
         candidates: list[Candidate] = []
-        for func_row in db.get_all_functions():
+        functions = scoped_functions(db, project_path)
+        total = len(functions)
+        for idx, func_row in enumerate(functions):
+            if self.on_file_progress:
+                self.on_file_progress(idx + 1, total)
+
             body: str = func_row["body"] or ""
             if not body:
                 continue
@@ -229,11 +234,14 @@ class Analyzer(BaseAnalyzer):
                     line=abs_line,
                     function=func_name,
                     description=(
-                        f"函数 `{func_name}` 中链式指针 `{expr_text}` 是否存在"
-                        f"空指针解引用问题，请审计确认。\n"
-                        f"相关线索：链式指针 `{expr_text}` 的中间层在使用前可能未判空。"
+                        f"函数 `{func_name}` 中变量/表达式 `{expr_text}` "
+                        f"是否存在空指针解引用问题，请审计确认。"
                     ),
                     vuln_type=self.vuln_type,
+                    metadata={
+                        "subject": expr_text,
+                        "problem": "空指针解引用",
+                    },
                 )
             )
 

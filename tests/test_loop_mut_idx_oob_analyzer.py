@@ -90,12 +90,12 @@ def test_loop_mut_idx_oob_direct_result_uses_json_file_and_code_db(tmp_path: Pat
     assert candidate.line == 8
     assert candidate.function == "copy_loop"
     assert candidate.vuln_type == "loop_mut_idx_oob"
-    assert "array" in candidate.description
+    assert "越界访问问题" in candidate.description
     assert "循环变化索引: idx" in candidate.description
     assert "循环条件: remain > 0" in candidate.description
     assert "内存访问: dst[idx]" in candidate.description
-    assert "宽召回" in candidate.description
-    assert "匹配代码" in candidate.description
+    assert "宽召回" not in candidate.description
+    assert "匹配代码" not in candidate.description
 
 
 def test_loop_mut_idx_oob_derived_pointer_result_and_dedup(tmp_path: Path) -> None:
@@ -143,7 +143,8 @@ def test_loop_mut_idx_oob_derived_pointer_result_and_dedup(tmp_path: Path) -> No
 
     assert len(candidates) == 1
     assert candidates[0].function == "derived_loop"
-    assert "derived-pointer" in candidates[0].description
+    assert "越界访问问题" in candidates[0].description
+    assert "derived-pointer" not in candidates[0].description
     assert "循环条件: remain" in candidates[0].description
 
 

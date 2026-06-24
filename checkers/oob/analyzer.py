@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.analyzers.base import BaseAnalyzer, Candidate, scoped_functions
 
 if TYPE_CHECKING:
     from code_parser import CodeDatabase
@@ -28,7 +28,7 @@ class Analyzer(BaseAnalyzer):
             return []
 
         candidates: list[Candidate] = []
-        functions = db.get_all_functions()
+        functions = scoped_functions(db, project_path)
 
         total = len(functions)
         for idx, func in enumerate(functions):
@@ -47,8 +47,15 @@ class Analyzer(BaseAnalyzer):
                 file=file_path,
                 line=start_line,
                 function=func_name,
-                description=f"函数 `{func_name}` 是否存在越界读写（OOB）问题，请审计确认。",
+                description=(
+                    f"函数 `{func_name}` 中变量/表达式 `{func_name}` "
+                    f"是否存在越界读写问题，请审计确认。"
+                ),
                 vuln_type=self.vuln_type,
+                metadata={
+                    "subject": func_name,
+                    "problem": "越界读写",
+                },
             ))
 
         return candidates

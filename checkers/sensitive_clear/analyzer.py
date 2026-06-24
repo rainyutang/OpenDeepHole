@@ -1,7 +1,7 @@
 """敏感信息未清零检测 - 函数级静态候选生成器。
 
 本分析器用宽松启发式找出可能承载敏感信息的变量，并按函数生成候选。
-变量名只保存在 metadata 中用于调试，运行时初始提示词不会暴露这些变量名。
+初始提示词只暴露函数名和变量名，不包含声明、匹配关键字等静态分析细节。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 import tree_sitter_cpp
 from tree_sitter import Language, Parser
 
-from backend.analyzers.base import BaseAnalyzer, Candidate
+from backend.analyzers.base import BaseAnalyzer, Candidate, scoped_functions
 from code_parser.code_utils import find_nodes_by_type
 
 CPP_LANGUAGE = Language(tree_sitter_cpp.language())
@@ -241,19 +241,23 @@ def _build_function_candidate(func: dict, variables: list[dict]) -> Candidate:
         }
         for variable in variables
     ]
+    subject = ", ".join(
+        dict.fromkeys(str(variable["name"]) for variable in suspicious_variables if variable.get("name"))
+    )
     return Candidate(
         file=file_path,
         line=start_line,
         function=function_name,
         description=(
-            f"函数 `{function_name}` 中敏感变量 "
-            f"{', '.join('`' + v['name'] + '`' for v in suspicious_variables) or '（疑似敏感变量）'} "
-            f"在生命周期结束后是否存在未清零问题，请审计确认。"
+            f"函数 `{function_name}` 中变量/表达式 `{subject or '疑似敏感变量'}` "
+            f"是否存在敏感信息未清零问题，请审计确认。"
         ),
         vuln_type="sensitive_clear",
         metadata={
             "kind": "sensitive_clear_function",
             "candidate_id": candidate_id,
+            "subject": subject,
+            "problem": "敏感信息未清零",
             "function_name": function_name,
             "file": file_path,
             "start_line": start_line,
@@ -273,7 +277,7 @@ class Analyzer(BaseAnalyzer):
             return []
 
         candidates: list[Candidate] = []
-        functions = db.get_all_functions()
+        functions = scoped_functions(db, project_path)
         total = len(functions)
         for idx, func in enumerate(functions):
             if self.on_file_progress:

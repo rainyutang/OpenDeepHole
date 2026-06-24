@@ -1,6 +1,7 @@
 name: memleak
 label: Error Path Memory Leak / 异常分支内存泄漏
 description: 异常分支内存泄漏检测（错误路径未释放 / 循环 continue 前未释放）
+family: leak
 enabled: true
 mode: opencode
 category: resource_leak

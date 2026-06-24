@@ -292,6 +292,11 @@ export interface AgentMemoryApiDiscoveryConfig {
   max_candidates: number;
 }
 
+export interface AgentPatternFilterConfig {
+  enabled: boolean;
+  scope: "directory" | "file" | "repo" | string;
+}
+
 export interface AgentRemoteConfig {
   no_proxy: string;
   opencode_concurrency: number;
@@ -299,6 +304,8 @@ export interface AgentRemoteConfig {
   opencode: AgentOpenCodeConfig;
   fp_review_cli?: AgentOpenCodeConfig | null;
   memory_api_discovery: AgentMemoryApiDiscoveryConfig;
+  static_dedup?: boolean;
+  pattern_filter?: AgentPatternFilterConfig;
 }
 
 export interface AgentConfigTestResult {

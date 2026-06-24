@@ -59,6 +59,11 @@ class MemoryApiDiscoveryConfig(BaseModel):
     max_candidates: int = 200
 
 
+class PatternFilterConfig(BaseModel):
+    enabled: bool = True
+    scope: str = "directory"        # directory | file | repo
+
+
 class StorageConfig(BaseModel):
     projects_dir: str = str(_DEFAULT_DATA_ROOT / "projects")
     scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
@@ -112,6 +117,8 @@ class AppConfig(BaseModel):
     fp_review_cli: OpenCodeConfig | None = None
     fp_review: FpReviewConfig = FpReviewConfig()
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
+    static_dedup: bool = True
+    pattern_filter: PatternFilterConfig = PatternFilterConfig()
     storage: StorageConfig = StorageConfig()
     scan: ScanConfig = ScanConfig()
     logging: LoggingConfig = LoggingConfig()

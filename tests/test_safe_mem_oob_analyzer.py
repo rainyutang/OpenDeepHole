@@ -68,9 +68,9 @@ def test_safe_mem_oob_prefers_json_output_file(tmp_path: Path) -> None:
     assert candidates[0].line == 8
     assert candidates[0].function == "copy_bad"
     assert candidates[0].vuln_type == "safe_mem_oob"
-    assert "offset-full-size" in candidates[0].description
+    assert "offset-full-size" not in candidates[0].description
     assert "memcpy_s" in candidates[0].description
-    assert "匹配代码" in candidates[0].description
+    assert "匹配代码" not in candidates[0].description
 
 
 def test_safe_mem_oob_uses_semgrep_json_file_after_timeout(tmp_path: Path) -> None:
@@ -184,7 +184,7 @@ def test_safe_mem_oob_describes_pointer_sizeof_dst(tmp_path: Path) -> None:
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 
     assert len(candidates) == 1
-    assert "pointer-sizeof-dst" in candidates[0].description
+    assert "pointer-sizeof-dst" not in candidates[0].description
     assert "dst: dst" in candidates[0].description
     assert "dstsz: sizeof(dst)" in candidates[0].description
     assert "count: len" in candidates[0].description
