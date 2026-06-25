@@ -135,17 +135,18 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       );
     },
     onFpReviewStarted: (data) => {
-      setFpReview({
+      setFpReview((prev) => ({
         review_id: data.review_id,
         scan_id: scanId,
         status: data.status,
         total: data.total,
         processed: 0,
         current_vuln_index: null,
-        results: [],
+        current_vuln_indices: [],
+        results: prev?.results ?? [],
         error_message: null,
         created_at: new Date().toISOString(),
-      });
+      }));
     },
     onFpReviewProgress: (data) => {
       setFpReview((prev) => {
@@ -237,17 +238,18 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     setFpReviewLoading(true);
     try {
       const started = await triggerFpReview(scanId);
-      setFpReview({
+      setFpReview((prev) => ({
         review_id: started.review_id,
         scan_id: scanId,
         status: started.status ?? "running",
         total: started.total ?? 0,
         processed: started.processed ?? 0,
         current_vuln_index: null,
-        results: [],
+        current_vuln_indices: [],
+        results: prev?.results ?? [],
         error_message: null,
         created_at: new Date().toISOString(),
-      });
+      }));
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail

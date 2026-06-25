@@ -33,7 +33,7 @@ class FpReviewOrderTests(unittest.TestCase):
         scan_api._running_scans.clear()
         scan_api._scan_owners.clear()
 
-    def test_unreviewed_findings_are_reviewed_before_existing_results(self) -> None:
+    def test_unreviewed_findings_are_reviewed_without_existing_results(self) -> None:
         scan = ScanStatus(
             scan_id="scan-1",
             project_id="project",
@@ -104,7 +104,63 @@ class FpReviewOrderTests(unittest.TestCase):
 
         ordered = _ordered_fp_review_candidates(scan, latest)
 
-        self.assertEqual([item["index"] for item in ordered], [1, 3, 0])
+        self.assertEqual([item["index"] for item in ordered], [1, 3])
+
+    def test_all_findings_are_rerun_after_every_candidate_has_result(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project",
+            scan_items=["npd"],
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=2,
+            processed_candidates=2,
+            vulnerabilities=[
+                Vulnerability(
+                    file="first.c",
+                    line=1,
+                    function="first",
+                    vuln_type="npd",
+                    severity="high",
+                    description="first",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+                Vulnerability(
+                    file="second.c",
+                    line=2,
+                    function="second",
+                    vuln_type="npd",
+                    severity="high",
+                    description="second",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            ],
+        )
+        latest = latest_fp_review_result_map([
+            FpReviewResult(
+                vuln_index=0,
+                verdict="fp",
+                severity="low",
+                reason="reviewed false positive",
+                created_at="2026-01-01T00:01:00+00:00",
+            ),
+            FpReviewResult(
+                vuln_index=1,
+                verdict="tp",
+                severity="medium",
+                reason="reviewed true positive",
+                created_at="2026-01-01T00:02:00+00:00",
+            ),
+        ])
+
+        ordered = _ordered_fp_review_candidates(scan, latest)
+
+        self.assertEqual([item["index"] for item in ordered], [0, 1])
 
     def test_pending_analysis_does_not_block_incomplete_retry(self) -> None:
         scan = ScanStatus(
@@ -181,16 +237,27 @@ class FpReviewOrderTests(unittest.TestCase):
                 created_at=now,
                 status=ScanItemStatus.COMPLETE,
                 progress=1.0,
-                total_candidates=1,
-                processed_candidates=1,
+                total_candidates=2,
+                processed_candidates=2,
                 vulnerabilities=[
                     Vulnerability(
-                        file="a.c",
+                        file="reviewed.c",
                         line=10,
-                        function="parse",
+                        function="reviewed",
                         vuln_type="npd",
                         severity="high",
-                        description="desc",
+                        description="reviewed",
+                        ai_analysis="analysis",
+                        confirmed=True,
+                        ai_verdict="confirmed",
+                    ),
+                    Vulnerability(
+                        file="unreviewed.c",
+                        line=20,
+                        function="unreviewed",
+                        vuln_type="npd",
+                        severity="high",
+                        description="unreviewed",
                         ai_analysis="analysis",
                         confirmed=True,
                         ai_verdict="confirmed",
@@ -207,6 +274,17 @@ class FpReviewOrderTests(unittest.TestCase):
                 user_id="owner",
             )
             store.save_scan(scan, meta)
+            store.create_fp_review_job("old-review", "scan-1", 1, "2026-01-01T00:00:00+00:00")
+            store.add_fp_review_result(
+                "old-review",
+                FpReviewResult(
+                    vuln_index=0,
+                    verdict="fp",
+                    severity="low",
+                    reason="reviewed false positive",
+                    created_at="2026-01-01T00:01:00+00:00",
+                ),
+            )
             scan_api._running_scans["scan-1"] = scan
             scan_api._scan_owners["scan-1"] = "owner"
             agent_api._registered_agents["agent-1"] = AgentInfo(
@@ -243,6 +321,7 @@ class FpReviewOrderTests(unittest.TestCase):
             command = send.await_args.args[1]
             self.assertEqual(command["type"], "fp_review")
             self.assertEqual(command["agent_runtime_update"], {"hash": "runtime-hash"})
+            self.assertEqual([item["index"] for item in command["vulnerabilities"]], [1])
 
     def test_unmark_removes_generated_feedback_and_readds_fp_review_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

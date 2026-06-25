@@ -125,7 +125,7 @@ def _latest_fp_review_result_map(scan_id: str) -> dict[int, FpReviewResult]:
 
 
 def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int, FpReviewResult]) -> list[dict]:
-    """Return review candidates with unresolved findings first, then already-reviewed findings."""
+    """Return unresolved review candidates, or a full rerun once all have results."""
     unresolved: list[dict] = []
     reviewed: list[dict] = []
     for i, v in enumerate(scan.vulnerabilities):
@@ -144,7 +144,7 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
             reviewed.append(item)
         else:
             unresolved.append(item)
-    return unresolved + reviewed
+    return unresolved if unresolved else reviewed
 
 
 def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJob:
@@ -1205,12 +1205,16 @@ async def _start_fp_review(
     *,
     raise_on_error: bool = True,
 ) -> dict | None:
-    """Start an AI false-positive review for all confirmed vulnerabilities in a scan.
+    """Start an AI false-positive review for confirmed vulnerabilities in a scan.
 
     Shared by the manual trigger endpoint and the auto-trigger on scan completion.
     When ``raise_on_error`` is False, failures are logged and ``None`` is returned
     instead of raising — used by the auto-trigger path so a failed/blocked review
     never breaks scan-finish handling.
+
+    Candidate selection is incremental: if any eligible vulnerability has no
+    effective FP review result, only those unresolved items are reviewed. Once
+    all eligible items have results, a manual trigger starts a full new round.
     """
     from backend.api.agent import (
         create_agent_runtime_update_payload,
