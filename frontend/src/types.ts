@@ -275,6 +275,7 @@ export interface AgentOpenCodeConfig {
 export interface AgentOpenCodeModelConfig {
   id: string;
   model: string;
+  use_default_model?: boolean;
   capability: "low" | "medium" | "high" | string;
   weight: number;
   max_concurrency: number;
@@ -283,6 +284,7 @@ export interface AgentOpenCodeModelConfig {
   executable?: string;
   timeout?: number | null;
   max_retries?: number | null;
+  time_windows?: { start: string; end: string }[];
 }
 
 export interface AgentMemoryApiDiscoveryConfig {
