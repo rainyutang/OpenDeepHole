@@ -9,8 +9,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-# 按 project_id 缓存 DB 连接，MCP Server 是长驻进程，避免每次重新打开
-_db_cache: dict[str, object] = {}
+# 按 DB 路径缓存连接，MCP Server 是长驻进程，避免每次重新打开
+_db_cache: dict[str, tuple[object, tuple[int, int, int, int]]] = {}
 
 
 def _get_config():
@@ -18,50 +18,103 @@ def _get_config():
     return get_config()
 
 
-def _get_db(project_id: str):
-    """返回指定项目的 CodeDatabase，不存在则返回 None。
+def _cache_key_for_path(db_path: Path) -> str:
+    return f"path:{db_path.resolve()}"
 
-    Agent 模式下，AGENT_PROJECT_DIR 环境变量指向本地索引目录，优先于
-    server 模式下的 {projects_dir}/{project_id}/code_index.db 路径。
-    """
+
+def _close_cached_db(cache_key: str) -> None:
+    entry = _db_cache.pop(cache_key, None)
+    if entry is None:
+        return
+    db = entry[0]
+    try:
+        db.close()
+    except Exception:
+        pass
+
+
+def _db_fingerprint(db_path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = db_path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
+def _cached_db_is_usable(entry, db_path: Path) -> bool:
+    fingerprint = _db_fingerprint(db_path)
+    if fingerprint is None or fingerprint != entry[1]:
+        return False
+    db = entry[0]
+    try:
+        return bool(db.is_index_complete())
+    except Exception:
+        return False
+
+
+def _open_complete_db(cache_key: str, db_path: Path):
+    if not db_path.exists():
+        return None
     from code_parser import CodeDatabase
 
-    # Agent mode: resolve DB path from env var (set by agent/local_mcp.py)
-    agent_dir = os.environ.get("AGENT_PROJECT_DIR")
-    if agent_dir:
-        cache_key = f"agent:{agent_dir}"
-        if cache_key in _db_cache:
-            return _db_cache[cache_key]
-        db_path = Path(agent_dir) / "code_index.db"
-        if not db_path.exists():
-            return None
+    db = None
+    try:
         db = CodeDatabase(db_path)
         if not db.is_index_complete():
             db.close()
             return None
-        _db_cache[cache_key] = db
+        fingerprint = _db_fingerprint(db_path)
+        if fingerprint is None:
+            db.close()
+            return None
+        _db_cache[cache_key] = (db, fingerprint)
         return db
-
-    # Server mode: resolve by project_id
-    if project_id in _db_cache:
-        return _db_cache[project_id]
-    db_path = Path(_get_config().storage.projects_dir) / project_id / "code_index.db"
-    if not db_path.exists():
+    except Exception:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
         return None
-    db = CodeDatabase(db_path)
-    if not db.is_index_complete():
-        db.close()
-        return None
-    _db_cache[project_id] = db
-    return db
 
 
-def clear_db_cache():
+def _resolve_db_path(project_id: str, project_dir: Path | None = None) -> Path:
+    if project_dir is not None:
+        return project_dir / "code_index.db"
+
+    agent_dir = os.environ.get("AGENT_PROJECT_DIR")
+    if agent_dir:
+        return Path(agent_dir) / "code_index.db"
+
+    return Path(_get_config().storage.projects_dir) / project_id / "code_index.db"
+
+
+def _get_db(project_id: str, project_dir: Path | None = None):
+    """返回指定项目的 CodeDatabase，不存在则返回 None。
+
+    Agent 模式下，LocalMCPServer 会显式绑定本地索引目录；AGENT_PROJECT_DIR
+    仅作为旧调用路径的兼容兜底。
+    """
+    db_path = _resolve_db_path(project_id, project_dir)
+    cache_key = _cache_key_for_path(db_path)
+    cached = _db_cache.get(cache_key)
+    if cached is not None:
+        if _cached_db_is_usable(cached, db_path):
+            return cached[0]
+        _close_cached_db(cache_key)
+    return _open_complete_db(cache_key, db_path)
+
+
+def clear_db_cache(project_dir: Path | str | None = None):
     """关闭所有缓存的 DB 连接并清空缓存。
 
-    MCP server 停止时调用，防止跨扫描返回失效连接。
+    MCP server 停止时调用，防止跨扫描返回失效连接。传入 project_dir 时
+    只清理该本地 MCP 实例绑定的索引连接，避免影响其他并发扫描。
     """
-    for db in _db_cache.values():
+    if project_dir is not None:
+        _close_cached_db(_cache_key_for_path(Path(project_dir) / "code_index.db"))
+        return
+    for db, _fingerprint in _db_cache.values():
         try:
             db.close()
         except Exception:
@@ -102,8 +155,9 @@ def _append_result_payload(result_path: Path, payload: dict) -> None:
     result_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
-def register_tools(mcp: FastMCP) -> None:
+def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
     """在 MCP Server 上注册所有源码查询工具。"""
+    bound_project_dir = Path(project_dir).resolve() if project_dir is not None else None
 
     @mcp.tool()
     def view_function_code(project_id: str, function_name: str, file_path: str = "") -> str:
@@ -123,7 +177,7 @@ def register_tools(mcp: FastMCP) -> None:
         if file_path:
             detail += f", file_path={file_path!r}"
         _mcp_log("▶", "view_function_code", detail)
-        db = _get_db(project_id)
+        db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
             _mcp_log("◀", "view_function_code", result)
@@ -155,7 +209,7 @@ def register_tools(mcp: FastMCP) -> None:
             结构体定义代码（包含文件路径和行号信息），未找到则返回提示。
         """
         _mcp_log("▶", "view_struct_code", f"struct_name={struct_name!r}")
-        db = _get_db(project_id)
+        db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
             _mcp_log("◀", "view_struct_code", result)
@@ -186,7 +240,7 @@ def register_tools(mcp: FastMCP) -> None:
             全局变量定义代码，未找到则返回提示。
         """
         _mcp_log("▶", "view_global_variable_definition", f"name={global_variable_name!r}")
-        db = _get_db(project_id)
+        db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
             _mcp_log("◀", "view_global_variable_definition", result)
@@ -217,7 +271,7 @@ def register_tools(mcp: FastMCP) -> None:
             每行一个调用位置，格式为 "调用者函数名  文件路径:行号"。
         """
         _mcp_log("▶", "find_function_references", f"function_name={function_name!r}")
-        db = _get_db(project_id)
+        db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
             _mcp_log("◀", "find_function_references", result)
@@ -258,7 +312,7 @@ def register_tools(mcp: FastMCP) -> None:
             每行一个引用，格式为 "引用函数名  文件路径:行号  访问类型  引用代码行"。
         """
         _mcp_log("▶", "find_global_variable_references", f"name={global_variable_name!r}")
-        db = _get_db(project_id)
+        db = _get_db(project_id, bound_project_dir)
         if db is None:
             result = f"项目 {project_id} 的代码索引不可用。"
             _mcp_log("◀", "find_global_variable_references", result)

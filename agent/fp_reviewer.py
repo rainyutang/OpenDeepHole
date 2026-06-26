@@ -139,11 +139,11 @@ async def run_fp_review(
 
     Mode B — No active scan for this project:
       • Start a fresh LocalMCPServer.
-      • Set AGENT_PROJECT_DIR so MCP bypasses project_id and finds the DB directly
-        (via IndexStore or the preserved scan_dir for error/cancelled scans).
+      • Bind LocalMCPServer to the directory that contains code_index.db
+        (project root or the preserved scan_dir for error/cancelled scans).
       • Configure the backend in isolation: scans_dir = review_dir so result
         JSONs are isolated from any other concurrent scan of a different project.
-      • Clean up AGENT_PROJECT_DIR and backend config on exit.
+      • Clean up backend config on exit.
     """
     project = Path(project_path)
     review_dir = Path.home() / ".opendeephole" / "fp_reviews" / review_id
@@ -156,7 +156,6 @@ async def run_fp_review(
 
     own_mcp_server = None         # only set in Mode B
     workspace: Optional[Path] = None
-    _patched_env: bool = False    # whether we changed AGENT_PROJECT_DIR
     _patched_cfg: bool = False    # whether we changed the backend config
     pool_status_stop = asyncio.Event()
     pool_status_task = asyncio.create_task(
@@ -189,10 +188,7 @@ async def run_fp_review(
                     "The project must have been scanned at least once."
                 )
 
-            # AGENT_PROJECT_DIR makes MCP ignore project_id and use this dir directly
-            os.environ["AGENT_PROJECT_DIR"] = str(db_dir)
-            _patched_env = True
-            project_id_for_prompt = scan_id  # content doesn't matter; env var takes priority
+            project_id_for_prompt = scan_id  # DB lookup is bound to this MCP instance.
 
             # Isolate result JSON files in review_dir (scans_dir = review_dir).
             # Safe because no other scan config is active for this project.
@@ -200,7 +196,7 @@ async def run_fp_review(
             _patched_cfg = True
 
             from agent.local_mcp import LocalMCPServer
-            own_mcp_server = LocalMCPServer()
+            own_mcp_server = LocalMCPServer(project_dir=db_dir)
             mcp_port = own_mcp_server.start()
             await emit("fp_review", f"Started own MCP server on port {mcp_port}")
 
@@ -452,8 +448,6 @@ async def run_fp_review(
             _cleanup_fp_workspace(workspace)
         if own_mcp_server is not None:
             own_mcp_server.stop()
-        if _patched_env:
-            os.environ.pop("AGENT_PROJECT_DIR", None)
         if _patched_cfg:
             # Reset the config singleton so the next operation reloads cleanly.
             # Safe here because Mode B only runs when there is no active scan.
@@ -730,7 +724,7 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
         "opencode": opencode_config,
         "opencode_concurrency": config.opencode_concurrency,
         "storage": {
-            # projects_dir is irrelevant in Mode B — AGENT_PROJECT_DIR overrides DB lookup
+            # Source DB lookup is bound to the local MCP instance in Mode B.
             "projects_dir": str(review_dir),
             "scans_dir": str(review_dir),
         },

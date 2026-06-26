@@ -152,6 +152,34 @@ def test_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypatch) ->
     assert "  20 | void cleanup(char *p) {" in prompt
 
 
+def test_user_prompt_project_dir_overrides_agent_project_env(tmp_path, monkeypatch) -> None:
+    env_project = tmp_path / "env-project"
+    explicit_project = tmp_path / "explicit-project"
+    env_project.mkdir()
+    explicit_project.mkdir()
+    _write_code_index(env_project)
+    _write_cpp_code_index(explicit_project)
+    monkeypatch.setenv("AGENT_PROJECT_DIR", str(env_project))
+
+    candidate = Candidate(
+        file="sample.cpp",
+        line=32,
+        function="ru_emu_dpdk_transmitter::send",
+        description="candidate issue",
+        vuln_type="memleak",
+    )
+
+    prompt = llm_api_runner._build_user_prompt(
+        candidate,
+        "scan-id-without-index",
+        project_dir=explicit_project,
+    )
+
+    assert "## 函数源码 (sample.cpp:30)" in prompt
+    assert "ru_emu_dpdk_transmitter::send" in prompt
+    assert "void leaky(int mode)" not in prompt
+
+
 def test_user_prompt_uses_cpp_qualified_function_name(tmp_path, monkeypatch) -> None:
     _write_cpp_code_index(tmp_path)
     monkeypatch.setenv("AGENT_PROJECT_DIR", str(tmp_path))

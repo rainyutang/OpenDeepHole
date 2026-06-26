@@ -382,9 +382,8 @@ async def _run_audits(
     from backend.opencode.runner import run_audit, run_project_audit, run_sensitive_clear_audit
 
     agent_project_dir = _agent_project_dir_for_index(index_db)
-    os.environ["AGENT_PROJECT_DIR"] = str(agent_project_dir)
     scan_id = f"checker-test-{uuid4().hex[:12]}"
-    mcp_server = LocalMCPServer()
+    mcp_server = LocalMCPServer(project_dir=agent_project_dir)
     workspace: Path | None = None
     try:
         port = mcp_server.start()
@@ -435,7 +434,6 @@ async def _run_audits(
         return results
     finally:
         mcp_registry.unregister(project_path)
-        os.environ.pop("AGENT_PROJECT_DIR", None)
         if original_config_path is None:
             os.environ.pop("CONFIG_PATH", None)
         else:

@@ -117,6 +117,7 @@ async def run_audit(
                 prompt_path=prompt_path,
                 on_output=on_output,
                 cancel_event=cancel_event,
+                project_dir=project_dir,
             )
         except LLMApiUnavailableError as exc:
             logger.warning(
@@ -1459,6 +1460,7 @@ async def run_audit_batch(
                 prompt_path=prompt_path,
                 on_output=on_output,
                 cancel_event=cancel_event,
+                project_dir=project_dir,
             )
         except LLMApiUnavailableError as exc:
             logger.warning(

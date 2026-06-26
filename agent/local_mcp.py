@@ -21,8 +21,9 @@ def _find_free_port() -> int:
 class LocalMCPServer:
     """Runs the MCP server in-process on a background daemon thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, project_dir: Path | str | None = None) -> None:
         self.port: int = _find_free_port()
+        self.project_dir = Path(project_dir).resolve() if project_dir is not None else None
         self._server = None
         self._thread: threading.Thread | None = None
 
@@ -33,7 +34,7 @@ class LocalMCPServer:
         from mcp_server.tools import register_tools
 
         mcp = FastMCP("OpenDeepHole Code Tools")
-        register_tools(mcp)
+        register_tools(mcp, project_dir=self.project_dir)
         app = mcp.streamable_http_app()
 
         config = uvicorn.Config(
@@ -57,8 +58,15 @@ class LocalMCPServer:
 
     def stop(self) -> None:
         from mcp_server.tools import clear_db_cache
-        clear_db_cache()
+        clear_db_cache(self.project_dir)
         if self._server:
             self._server.should_exit = True
         if self._thread:
             self._thread.join(timeout=5)
+        self._server = None
+        self._thread = None
+
+    def restart(self) -> int:
+        """Restart the in-process MCP server while keeping the same port."""
+        self.stop()
+        return self.start()
