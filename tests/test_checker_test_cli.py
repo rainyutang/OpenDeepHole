@@ -159,6 +159,9 @@ def test_checker_test_cli_audit_uses_existing_audit_path(tmp_path: Path, monkeyp
     calls: list[tuple[str, int]] = []
 
     class DummyMCPServer:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
         def start(self) -> int:
             return 9999
 
@@ -239,6 +242,9 @@ def test_checker_test_cli_project_audit_returns_multiple_results(tmp_path: Path,
     _write_checker(checkers_dir, "skillonly", with_analyzer=False)
 
     class DummyMCPServer:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
         def start(self) -> int:
             return 9999
 

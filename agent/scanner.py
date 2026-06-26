@@ -497,7 +497,6 @@ def _backend_runtime_sections(config: AgentConfig, scan_dir: Path | None = None)
         "no_proxy": config.no_proxy,
     }
     if scan_dir is not None:
-        # AGENT_PROJECT_DIR tells MCP to find code_index.db in the project dir.
         # Keep result JSON files isolated inside this scan's directory so the
         # MCP submit path and opencode result read path cannot cross scans.
         raw["storage"] = {
@@ -755,9 +754,6 @@ async def run_scan(
             await emit("init", f"代码索引已保存（路径: {db_path}）")
             await reporter.send_index_status(scan_id, "done", 0, 0)
 
-        # Set AGENT_PROJECT_DIR so MCP tools find code_index.db in project dir
-        os.environ["AGENT_PROJECT_DIR"] = str(project_path.resolve())
-
         # --- Phase 2: Use selected feedback for SKILL enrichment ---
         selected_feedback = [
             FeedbackEntry(**entry)
@@ -772,7 +768,7 @@ async def run_scan(
         if needs_opencode:
             from agent.local_mcp import LocalMCPServer
             from agent import mcp_registry
-            mcp_server = LocalMCPServer()
+            mcp_server = LocalMCPServer(project_dir=project_path)
             mcp_port = await asyncio.to_thread(mcp_server.start)
             mcp_registry.register(project_path, mcp_port, scan_id)
             await emit("mcp_ready", f"Local MCP server ready on port {mcp_port}")
@@ -1374,7 +1370,6 @@ async def run_scan(
             _close_db_cache()
         except Exception:
             pass
-        os.environ.pop("AGENT_PROJECT_DIR", None)
         try:
             if workspace is not None:
                 await asyncio.to_thread(cleanup_workspace, workspace)
