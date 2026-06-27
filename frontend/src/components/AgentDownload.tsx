@@ -41,7 +41,7 @@ const DEFAULT_CONFIG: AgentRemoteConfig = {
   },
   fp_review_cli: null,
   memory_api_discovery: {
-    enabled: true,
+    enabled: false,
     batch_size: 8,
     timeout_seconds: 300,
     max_candidates: 200,

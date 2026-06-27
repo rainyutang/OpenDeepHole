@@ -61,6 +61,13 @@ opencode:
 # 实际并发同时受单模型 max_concurrency 和每日使用时间限制。
 opencode_concurrency: 1
 
+# 扫描前内存申请/释放函数识别。默认关闭；需要识别项目自定义 malloc/free 薄封装时开启。
+memory_api_discovery:
+  enabled: false
+  batch_size: 8
+  timeout_seconds: 300
+  max_candidates: 200
+
 # 静态候选跨规则去重：同 family、同函数只保留一个代表候选。
 static_dedup: true
 

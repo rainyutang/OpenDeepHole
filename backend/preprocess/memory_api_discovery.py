@@ -91,7 +91,7 @@ class MemoryApiCandidate:
 
 @dataclass
 class MemoryApiDiscoveryOptions:
-    enabled: bool = True
+    enabled: bool = False
     batch_size: int = 8
     timeout_seconds: int = 1200
     max_candidates: int = 200
@@ -102,7 +102,7 @@ class MemoryApiDiscoveryOptions:
         if section is None:
             return cls()
         return cls(
-            enabled=bool(getattr(section, "enabled", True)),
+            enabled=bool(getattr(section, "enabled", False)),
             batch_size=_bounded_int(getattr(section, "batch_size", 8), 5, 10, 8),
             timeout_seconds=_bounded_int(getattr(section, "timeout_seconds", 1200), 30, 7200, 1200),
             max_candidates=max(0, _safe_int(getattr(section, "max_candidates", 200), 200)),

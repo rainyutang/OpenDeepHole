@@ -62,6 +62,26 @@ def test_existing_artifact_skips_analysis(tmp_path: Path, monkeypatch) -> None:
     assert artifact.exists()
 
 
+def test_default_options_skip_analysis_when_disabled(tmp_path: Path, monkeypatch) -> None:
+    async def fail_batch(**_kwargs):
+        raise AssertionError("opencode batch should not run")
+
+    monkeypatch.setattr(discovery, "_run_memory_api_batch", fail_batch)
+
+    report = asyncio.run(
+        discovery.ensure_memory_api_artifact(
+            project_root=tmp_path,
+            workspace=tmp_path,
+            scan_dir=tmp_path / "scan",
+            db=FakeDb(),
+        )
+    )
+
+    assert report.skipped is True
+    assert "配置已禁用" in report.message
+    assert not (tmp_path / discovery.ARTIFACT_FILENAME).exists()
+
+
 def test_batches_write_intermediate_files_and_merge_artifact(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "macros.h").write_text("#define XFREE(p) free(p)\n", encoding="utf-8")
     batch_sizes: list[int] = []
@@ -94,7 +114,7 @@ def test_batches_write_intermediate_files_and_merge_artifact(tmp_path: Path, mon
             workspace=tmp_path,
             scan_dir=tmp_path / "scan",
             db=FakeDb(),
-            options=discovery.MemoryApiDiscoveryOptions(batch_size=5, max_candidates=0),
+            options=discovery.MemoryApiDiscoveryOptions(enabled=True, batch_size=5, max_candidates=0),
         )
     )
 
@@ -121,7 +141,7 @@ def test_failed_batch_is_recorded_as_unresolved(tmp_path: Path, monkeypatch) -> 
             workspace=tmp_path,
             scan_dir=tmp_path / "scan",
             db=FakeDb(),
-            options=discovery.MemoryApiDiscoveryOptions(batch_size=5, max_candidates=0),
+            options=discovery.MemoryApiDiscoveryOptions(enabled=True, batch_size=5, max_candidates=0),
         )
     )
 

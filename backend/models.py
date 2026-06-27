@@ -432,7 +432,7 @@ class AgentOpenCodeConfig(BaseModel):
 
 
 class AgentMemoryApiDiscoveryConfig(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     batch_size: int = 8
     timeout_seconds: int = 300
     max_candidates: int = 200

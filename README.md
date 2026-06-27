@@ -416,7 +416,17 @@ class Analyzer(BaseAnalyzer):
 
 **扫描前内存 API 缓存：**
 
-扫描在 checker 静态分析开始前会检查项目根目录中的 `memory_api_pairs.json`。如果文件已存在，会直接复用；如果不存在，会先分析项目中的底层堆内存申请/释放函数和宏，批量调用 opencode 判断候选并生成该 JSON 文件，然后再开始后续扫描。该过程只读取 `code_index.db` 和源码，不修改数据库。
+扫描前内存申请/释放函数识别默认关闭。需要识别项目自定义 malloc/free 薄封装时，在 Agent 或服务端配置中开启：
+
+```yaml
+memory_api_discovery:
+  enabled: true
+  batch_size: 8
+  timeout_seconds: 300
+  max_candidates: 200
+```
+
+开启后，扫描在 checker 静态分析开始前会检查项目根目录中的 `memory_api_pairs.json`。如果文件已存在，会直接复用；如果不存在，会先分析项目中的底层堆内存申请/释放函数和宏，批量调用 opencode 判断候选并生成该 JSON 文件，然后再开始后续扫描。该过程只读取 `code_index.db` 和源码，不修改数据库。
 
 内存类 checker 可读取该文件中的 `allocators`、`deallocators` 和 `pairs` 来识别项目自定义的 malloc/free 薄封装；结构体/对象专用 destroy/free、复杂 cleanup/refcount 生命周期函数和文件/socket/mmap 等非堆资源不会作为底层内存 API 保留。
 
@@ -626,6 +636,13 @@ opencode:
 # OpenCode/兼容 CLI 总并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
 # 配置 models 后，该值仍是所有模型合计运行数的硬上限
 opencode_concurrency: 1
+
+# 扫描前内存申请/释放函数识别默认关闭；开启后才会生成 memory_api_pairs.json。
+memory_api_discovery:
+  enabled: false
+  batch_size: 8
+  timeout_seconds: 300
+  max_candidates: 200
 
 # 静态候选跨规则去重：同 family、同文件、同函数只保留一个代表候选
 static_dedup: true

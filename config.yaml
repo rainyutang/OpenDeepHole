@@ -4,6 +4,12 @@ no_proxy: "10.0.0.0/8"  # 逗号分隔的不走代理地址，如 "localhost,127
 
 opencode_concurrency: 1  # OpenCode/兼容 CLI 全局并发数
 
+memory_api_discovery:
+  enabled: false          # 默认不执行扫描前内存申请/释放函数识别
+  batch_size: 8           # 启用后每批提交给 CLI 的候选数量
+  timeout_seconds: 300    # 启用后单批识别超时
+  max_candidates: 200     # 启用后最多识别的候选数量，0 表示不限制
+
 static_dedup: true  # 静态候选跨规则去重：同 family、同函数只保留一个代表候选
 
 pattern_filter:
