@@ -23,6 +23,7 @@
 - **新增** 静态候选跨规则去重：`checker.yaml` 支持 `family`，默认开启 `static_dedup`，同 `family + file + function` 只保留一个代表候选进入 AI 审计，并通过 `metadata.merged_from` 记录合并来源
 - **优化** OpenCode 初始候选描述改为最小审计问题：只保留函数、变量/表达式和问题类型，静态分析规则、命中路径和工具细节不再写入 `description`
 - **新增** AI 审计同模式批量过滤：默认开启 `pattern_filter`，当同模式代表点被 AI 返回 `not_confirmed` 后，后续同 `vuln_type + subject + scope` 候选自动标记为 `filtered_same_pattern`，不再调用 LLM；timeout/no_result 不触发传播
+- **优化** 同模式自动过滤结果的 AI 分析会展示触发过滤的代表点审计条目、位置和原始否决理由，便于在详情页直接追溯是哪一条 AI 审计否决导致过滤
 - **文档** README/CLAUDE 补充 DB analyzer 范围收敛、checker family、函数级去重、同模式过滤和配置项说明
 
 ## 2026-06-23

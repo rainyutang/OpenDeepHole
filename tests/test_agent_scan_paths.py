@@ -12,17 +12,20 @@ from agent.scanner import (
     _candidate_key,
     _candidate_pattern_key,
     _dedup_candidates,
+    _format_same_pattern_filter_analysis,
     _normalize_candidate_for_project,
     _order_candidates_for_audit,
+    _pattern_rejection_info,
     _round_robin_by_pattern,
     _resolve_scan_paths,
+    _should_propagate_pattern_rejection,
     _configure_backend,
     build_project_level_candidate,
     is_project_level_candidate,
     refresh_backend_runtime_config,
 )
 from agent.config import AgentConfig
-from backend.models import Candidate, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus
+from backend.models import Candidate, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus, Vulnerability
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -282,6 +285,78 @@ class AgentAuditOrderingTests(unittest.TestCase):
         ordered = _round_robin_by_pattern(candidates, "directory")
 
         self.assertEqual([c.line for c in ordered], [1, 3, 2, 4])
+
+    def test_same_pattern_filter_analysis_includes_rejection_source_and_reason(self) -> None:
+        representative = _subject_candidate("npd", 21, "ctx->session", function="parse_packet")
+        verdict = Vulnerability(
+            file=representative.file,
+            line=representative.line,
+            function=representative.function,
+            vuln_type=representative.vuln_type,
+            severity="low",
+            description=representative.description,
+            ai_analysis="调用方已经在所有路径检查 ctx->session 非空。",
+            confirmed=False,
+            ai_verdict="not_confirmed",
+        )
+
+        info = _pattern_rejection_info(4, representative, verdict)
+        analysis = _format_same_pattern_filter_analysis(info)
+
+        self.assertIn("同模式代表点已被 AI 审计否决，自动过滤", analysis)
+        self.assertIn("审计队列第 5 条", analysis)
+        self.assertIn("`npd src/demo.c:21 parse_packet`", analysis)
+        self.assertIn("调用方已经在所有路径检查 ctx->session 非空。", analysis)
+
+    def test_pattern_filter_only_propagates_ai_not_confirmed(self) -> None:
+        pattern_key = ("npd", "ptr", "src")
+        base = Vulnerability(
+            file="src/demo.c",
+            line=1,
+            function="target",
+            vuln_type="npd",
+            severity="unknown",
+            description="desc",
+            ai_analysis="analysis",
+            confirmed=False,
+            ai_verdict="not_confirmed",
+        )
+
+        self.assertTrue(
+            _should_propagate_pattern_rejection(
+                pattern_filter_enabled=True,
+                pattern_can_propagate=True,
+                pattern_key=pattern_key,
+                vuln=base,
+            )
+        )
+
+        for verdict in ("timeout", "no_result", "filtered_same_pattern"):
+            self.assertFalse(
+                _should_propagate_pattern_rejection(
+                    pattern_filter_enabled=True,
+                    pattern_can_propagate=True,
+                    pattern_key=pattern_key,
+                    vuln=base.model_copy(update={"ai_verdict": verdict}),
+                )
+            )
+
+        self.assertFalse(
+            _should_propagate_pattern_rejection(
+                pattern_filter_enabled=True,
+                pattern_can_propagate=True,
+                pattern_key=pattern_key,
+                vuln=base.model_copy(update={"confirmed": True, "ai_verdict": "confirmed"}),
+            )
+        )
+        self.assertFalse(
+            _should_propagate_pattern_rejection(
+                pattern_filter_enabled=True,
+                pattern_can_propagate=False,
+                pattern_key=pattern_key,
+                vuln=base,
+            )
+        )
 
 
 class ScanStoreCodeScanPathTests(unittest.TestCase):

@@ -27,6 +27,60 @@ STATIC_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 STATIC_PROGRESS_MIN_PERCENT_DELTA = 1.0
 
 
+@dataclasses.dataclass(frozen=True)
+class _PatternRejectionInfo:
+    audit_index: int
+    file: str
+    line: int
+    function: str
+    vuln_type: str
+    ai_analysis: str
+
+
+def _pattern_rejection_info(
+    audit_index: int,
+    candidate: Candidate,
+    vuln: Vulnerability,
+) -> _PatternRejectionInfo:
+    return _PatternRejectionInfo(
+        audit_index=audit_index,
+        file=candidate.file,
+        line=candidate.line,
+        function=candidate.function,
+        vuln_type=candidate.vuln_type,
+        ai_analysis=vuln.ai_analysis,
+    )
+
+
+def _format_same_pattern_filter_analysis(info: _PatternRejectionInfo) -> str:
+    reason = info.ai_analysis.strip() or "（代表点未返回 AI 分析文本）"
+    source = (
+        f"审计队列第 {info.audit_index + 1} 条，"
+        f"`{info.vuln_type} {info.file}:{info.line} {info.function}`"
+    )
+    return "\n\n".join([
+        "同模式代表点已被 AI 审计否决，自动过滤（未调用 LLM）",
+        f"否决来源：{source}",
+        f"代表点否决理由：\n\n{reason}",
+    ])
+
+
+def _should_propagate_pattern_rejection(
+    *,
+    pattern_filter_enabled: bool,
+    pattern_can_propagate: bool,
+    pattern_key: tuple[object, ...] | None,
+    vuln: Vulnerability,
+) -> bool:
+    return (
+        pattern_filter_enabled
+        and pattern_can_propagate
+        and pattern_key is not None
+        and not vuln.confirmed
+        and vuln.ai_verdict == "not_confirmed"
+    )
+
+
 class _StaticProgressGate:
     """Rate-limit noisy static analyzer callbacks while preserving milestones."""
 
@@ -990,7 +1044,7 @@ async def run_scan(
         cancelled = False
         audit_concurrency = max(1, min(8, len(remaining) or 1))
         result_lock = asyncio.Lock()
-        rejected_patterns: set[tuple[object, ...]] = set()
+        rejected_patterns: dict[tuple[object, ...], _PatternRejectionInfo] = {}
         queue: asyncio.Queue[tuple[int, Candidate]] = asyncio.Queue()
         for item in enumerate(remaining):
             queue.put_nowait(item)
@@ -1015,8 +1069,8 @@ async def run_scan(
                     pattern_filter_scope,
                 )
                 async with result_lock:
-                    pattern_rejected = pattern_key in rejected_patterns
-                if pattern_rejected:
+                    rejection_info = rejected_patterns.get(pattern_key)
+                if rejection_info is not None:
                     vuln = Vulnerability(
                         file=candidate.file,
                         line=candidate.line,
@@ -1024,7 +1078,7 @@ async def run_scan(
                         vuln_type=candidate.vuln_type,
                         severity="unknown",
                         description=candidate.description,
-                        ai_analysis="同模式代表点已被 AI 审计否决，自动过滤（未调用 LLM）",
+                        ai_analysis=_format_same_pattern_filter_analysis(rejection_info),
                         confirmed=False,
                         ai_verdict="filtered_same_pattern",
                     )
@@ -1186,13 +1240,17 @@ async def run_scan(
 
             async with result_lock:
                 if (
-                    pattern_filter_enabled
-                    and pattern_can_propagate
-                    and pattern_key is not None
-                    and not vuln.confirmed
-                    and vuln.ai_verdict == "not_confirmed"
+                    _should_propagate_pattern_rejection(
+                        pattern_filter_enabled=pattern_filter_enabled,
+                        pattern_can_propagate=pattern_can_propagate,
+                        pattern_key=pattern_key,
+                        vuln=vuln,
+                    )
                 ):
-                    rejected_patterns.add(pattern_key)
+                    rejected_patterns.setdefault(
+                        pattern_key,
+                        _pattern_rejection_info(global_index, candidate, vuln),
+                    )
                 vulnerabilities.append(vuln)
             _verdict_labels = {
                 "confirmed": "CONFIRMED",

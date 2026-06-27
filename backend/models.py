@@ -80,7 +80,7 @@ class Vulnerability(BaseModel):
     description: str
     ai_analysis: str
     confirmed: bool
-    ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result"
+    ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result" | "filtered_same_pattern"
     user_verdict: str | None = None          # "confirmed" | "false_positive" | "pending_analysis" | None
     user_verdict_reason: str | None = None   # 用户填写的理由
     ticket_submitted: bool = False           # 是否已提问题单

@@ -107,7 +107,7 @@ export interface Vulnerability {
   description: string;
   ai_analysis: string;
   confirmed: boolean;
-  ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "";
+  ai_verdict?: "confirmed" | "not_confirmed" | "timeout" | "no_result" | "filtered_same_pattern" | "";
   user_verdict?: UserFeedbackVerdict | null;
   user_verdict_reason?: string | null;
   ticket_submitted?: boolean;

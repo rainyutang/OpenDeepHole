@@ -49,7 +49,7 @@
 - **缓存与恢复边界**：合并后的候选会写回本次扫描工作目录的 `candidates.json`，后续函数源码快照、总候选数、断点恢复都以合并后的候选为准；重试未完成候选时不重新做静态同类合并。
 - **同模式 key**：`pattern_filter.enabled: true` 时，AI 审计前为每个候选计算模式 key。只有存在 `metadata.subject` 的候选才可传播过滤；key 为 `(vuln_type, subject, scope)`。`scope` 由配置决定：`directory` 表示同目录（默认），`file` 表示同文件，`repo` 表示全仓。
 - **代表点排除方式**：进入 AI 审计队列前会按模式 key 做轮转排序，尽量先让每种模式都有代表点被审计。某个候选实际调用 AI 后，只有结果为 `confirmed=false` 且 `ai_verdict == "not_confirmed"`，才把该模式加入已否决集合；超时、无结果、异常或确认存在问题都不会传播排除。
-- **后续候选处理**：后续候选开始处理时，如果命中已否决模式，会跳过 LLM 调用，直接上报一条 `confirmed=false`、`ai_verdict="filtered_same_pattern"` 的结果，分析文本标记为“同模式代表点已被 AI 审计否决，自动过滤（未调用 LLM）”，并记录为已处理，保证进度和恢复状态一致。
+- **后续候选处理**：后续候选开始处理时，如果命中已否决模式，会跳过 LLM 调用，直接上报一条 `confirmed=false`、`ai_verdict="filtered_same_pattern"` 的结果。AI 分析文本会标记“同模式代表点已被 AI 审计否决，自动过滤（未调用 LLM）”，并显示触发过滤的审计队列条目、代表点位置和代表点原始否决理由；该候选同时记录为已处理，保证进度和恢复状态一致。
 
 内置 checker 当前的 `subject` 取值如下。只有“写入 `metadata.subject`”列为“是”的 checker，才会在 AI 否决后触发同模式过滤；其他 checker 即使描述里有类似 subject 的文本，也会被视为不可传播的独立候选。
 
