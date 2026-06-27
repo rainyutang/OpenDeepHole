@@ -858,7 +858,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             fpReviewRunning={isFpReviewing}
             onFeedbackCreated={addSelectedFeedbackIds}
             onFeedbackRemoved={removeSelectedFeedbackIds}
-            onVulnMarked={() => {
+            onVulnMarked={(index, patch) => {
+              setScan((prev) => {
+                if (!prev) return prev;
+                const vulnerabilities = [...prev.vulnerabilities];
+                const existing = vulnerabilities[index];
+                if (!existing) return prev;
+                vulnerabilities[index] = { ...existing, ...patch };
+                return { ...prev, vulnerabilities };
+              });
               if (skillOpen && skillType) {
                 if (skillType === "__fp_review__") {
                   getFpReviewSkill(scanId).then(setSkillContent).catch(() => {});
