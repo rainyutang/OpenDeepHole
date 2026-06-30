@@ -261,7 +261,7 @@ def _checker_packages_for(names: list[str]) -> list[dict[str, str]]:
     return build_checker_packages(registry, names)
 
 
-_RETRYABLE_AI_VERDICTS = {"timeout", "no_result"}
+_RETRYABLE_AI_VERDICTS = {"timeout", "no_result", "failed"}
 
 
 def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
@@ -677,7 +677,7 @@ async def retry_incomplete_scan(
 
     retry_candidates = _retry_incomplete_candidates(scan)
     if not retry_candidates:
-        raise HTTPException(status_code=400, detail="没有可续扫的超时或无结果候选")
+        raise HTTPException(status_code=400, detail="没有可重跑的失败或未完成候选")
 
     agent_id = meta.agent_id
     agent = _registered_agents.get(agent_id) if agent_id else None
@@ -807,9 +807,15 @@ async def download_report(
     scan = await get_scan_status(scan_id, current_user)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["file", "line", "function", "vuln_type", "severity", "confirmed", "description", "ai_analysis"])
+    writer.writerow([
+        "file", "line", "function", "vuln_type", "severity", "confirmed",
+        "description", "ai_analysis", "failure_reason",
+    ])
     for v in scan.vulnerabilities:
-        writer.writerow([v.file, v.line, v.function, v.vuln_type, v.severity, v.confirmed, v.description, v.ai_analysis])
+        writer.writerow([
+            v.file, v.line, v.function, v.vuln_type, v.severity, v.confirmed,
+            v.description, v.ai_analysis, v.failure_reason,
+        ])
     return Response(
         content="﻿" + buf.getvalue(),
         media_type="text/csv; charset=utf-8-sig",
@@ -870,6 +876,11 @@ def _vuln_report_markdown(idx, vuln, fp_result: FpReviewResult | None) -> str:
     lines.append("")
     lines.append(vuln.ai_analysis or "（无）")
     lines.append("")
+    if getattr(vuln, "failure_reason", ""):
+        lines.append("## 失败原因")
+        lines.append("")
+        lines.append(vuln.failure_reason)
+        lines.append("")
 
     if fp_result is not None:
         lines.append("## 去误报复核")

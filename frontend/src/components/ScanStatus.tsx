@@ -294,8 +294,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail
-        : "续扫失败";
-      alert(`续扫未完成候选失败：${msg || "未知错误"}`);
+      : "重跑失败";
+      alert(`重跑失败/未完成候选失败：${msg || "未知错误"}`);
     } finally {
       setRetryingIncomplete(false);
     }
@@ -471,7 +471,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const displayedReports = reports.length > 0 ? reports : (scan.skill_reports ?? []);
   const activeReport = displayedReports[activeReportIndex] ?? displayedReports[0];
   const retryableCount = scan.vulnerabilities.filter(
-    (v) => !hasFinalUserVerdict(v) && (v.ai_verdict === "timeout" || v.ai_verdict === "no_result"),
+    (v) => !hasFinalUserVerdict(v) && (
+      v.ai_verdict === "timeout" || v.ai_verdict === "no_result" || v.ai_verdict === "failed"
+    ),
   ).length || scan.retryable_candidates_count || 0;
 
   return (
@@ -623,10 +625,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                   <button
                     onClick={handleRetryIncomplete}
                     disabled={retryingIncomplete || !scan.agent_online}
-                    title={!scan.agent_online ? "Agent 离线，无法续扫" : `续扫 ${retryableCount} 个未完成候选`}
+                    title={!scan.agent_online ? "Agent 离线，无法重跑" : `重跑 ${retryableCount} 个失败/未完成候选`}
                     className="px-3 py-1.5 text-sm font-medium text-amber-300 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
-                    {retryingIncomplete ? "启动中..." : `续扫未完成 ${retryableCount}`}
+                    {retryingIncomplete ? "启动中..." : `重跑失败/未完成 ${retryableCount}`}
                   </button>
                 )}
               </>

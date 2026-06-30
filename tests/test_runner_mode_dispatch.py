@@ -298,6 +298,30 @@ def test_stream_exit_wait_after_termination_is_bounded() -> None:
     asyncio.run(run_check())
 
 
+def test_opencode_checker_without_submitted_result_is_failed_with_output(tmp_path: Path) -> None:
+    candidate = _candidate()
+    config = SimpleNamespace(
+        opencode=SimpleNamespace(mock=False, timeout=1200, max_retries=0),
+        storage=SimpleNamespace(scans_dir=str(tmp_path)),
+    )
+
+    async def invoke(_workspace, _prompt, _timeout, log_path=None, **_kwargs):
+        assert log_path is not None
+        log_path.write_text("opencode said nothing useful", encoding="utf-8")
+
+    with (
+        patch("backend.opencode.runner.get_config", return_value=config),
+        patch("backend.registry.get_registry", return_value={}),
+        patch("backend.opencode.runner._invoke_opencode", new=invoke),
+    ):
+        result = asyncio.run(run_audit(tmp_path, candidate, "scan-1"))
+
+    assert result is not None
+    assert result.confirmed is False
+    assert result.ai_verdict == "failed"
+    assert "opencode said nothing useful" in result.failure_reason
+
+
 def test_api_checker_uses_api_even_when_legacy_global_switch_is_false(tmp_path: Path) -> None:
     candidate = _candidate()
     config = SimpleNamespace(

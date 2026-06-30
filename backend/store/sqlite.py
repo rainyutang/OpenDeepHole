@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     description         TEXT NOT NULL,
     ai_analysis         TEXT NOT NULL,
     confirmed           INTEGER NOT NULL,
+    failure_reason      TEXT NOT NULL DEFAULT '',
     function_source     TEXT NOT NULL DEFAULT '',
     function_start_line INTEGER,
     user_verdict        TEXT,
@@ -286,6 +287,10 @@ class SqliteScanStore(ScanStoreBase):
         if "ai_verdict" not in vuln_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN ai_verdict TEXT DEFAULT ''"
+            )
+        if "failure_reason" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''"
             )
         if "function_source" not in vuln_cols:
             self._conn.execute(
@@ -879,10 +884,10 @@ class SqliteScanStore(ScanStoreBase):
                 INSERT INTO vulnerabilities
                     (scan_id, idx, file, line, function, vuln_type,
                      severity, description, ai_analysis, confirmed,
-                     ai_verdict, user_verdict, user_verdict_reason,
+                     ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -896,6 +901,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.ai_analysis,
                     1 if vuln.confirmed else 0,
                     vuln.ai_verdict,
+                    vuln.failure_reason,
                     vuln.user_verdict,
                     vuln.user_verdict_reason,
                     1 if vuln.ticket_submitted else 0,
@@ -908,7 +914,7 @@ class SqliteScanStore(ScanStoreBase):
             return next_idx
 
     def upsert_incomplete_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
-        """Replace an existing timeout/no-result row for this candidate, else append."""
+        """Replace an existing retryable failure row for this candidate, else append."""
         with self._lock:
             cur = self._conn.execute(
                 """\
@@ -920,7 +926,7 @@ class SqliteScanStore(ScanStoreBase):
                   AND function = ?
                   AND vuln_type = ?
                   AND COALESCE(user_verdict, '') = ''
-                  AND COALESCE(ai_verdict, '') IN ('timeout', 'no_result')
+                  AND COALESCE(ai_verdict, '') IN ('timeout', 'no_result', 'failed')
                 ORDER BY idx ASC
                 LIMIT 1
                 """,
@@ -937,6 +943,7 @@ class SqliteScanStore(ScanStoreBase):
                         ai_analysis = ?,
                         confirmed = ?,
                         ai_verdict = ?,
+                        failure_reason = ?,
                         user_verdict = NULL,
                         user_verdict_reason = NULL,
                         ticket_submitted = 0,
@@ -951,6 +958,7 @@ class SqliteScanStore(ScanStoreBase):
                         vuln.ai_analysis,
                         1 if vuln.confirmed else 0,
                         vuln.ai_verdict,
+                        vuln.failure_reason,
                         vuln.function_source,
                         vuln.function_start_line,
                         scan_id,
@@ -970,10 +978,10 @@ class SqliteScanStore(ScanStoreBase):
                 INSERT INTO vulnerabilities
                     (scan_id, idx, file, line, function, vuln_type,
                      severity, description, ai_analysis, confirmed,
-                     ai_verdict, user_verdict, user_verdict_reason,
+                     ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -987,6 +995,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.ai_analysis,
                     1 if vuln.confirmed else 0,
                     vuln.ai_verdict,
+                    vuln.failure_reason,
                     vuln.user_verdict,
                     vuln.user_verdict_reason,
                     1 if vuln.ticket_submitted else 0,
@@ -1108,6 +1117,7 @@ class SqliteScanStore(ScanStoreBase):
                 ai_analysis=r["ai_analysis"],
                 confirmed=bool(r["confirmed"]),
                 ai_verdict=r["ai_verdict"] or "",
+                failure_reason=r["failure_reason"] or "",
                 user_verdict=r["user_verdict"],
                 user_verdict_reason=r["user_verdict_reason"],
                 ticket_submitted=bool(r["ticket_submitted"]),

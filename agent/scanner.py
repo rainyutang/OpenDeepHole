@@ -1178,6 +1178,34 @@ async def run_scan(
             # HTTP 上报放在锁外，避免并发 worker 在结果上报阶段互相串行；
             # result_lock 只保护共享状态（vulnerabilities / processed_this_run）。
             if markdown_reports is not None:
+                if not markdown_reports:
+                    vuln = Vulnerability(
+                        file=candidate.file,
+                        line=candidate.line,
+                        function=candidate.function,
+                        vuln_type=candidate.vuln_type,
+                        severity="unknown",
+                        description=candidate.description,
+                        ai_analysis="OpenCode completed without producing a Markdown report",
+                        confirmed=False,
+                        ai_verdict="failed",
+                        failure_reason="No Markdown report was produced by the checker.",
+                    )
+                    _attach_function_source(vuln, candidate, function_source_cache)
+                    async with result_lock:
+                        vulnerabilities.append(vuln)
+                    await emit(
+                        "auditing",
+                        f"[{global_index + 1}] Result: failed",
+                        candidate_index=global_index,
+                    )
+                    await reporter.report_vulnerability(scan_id, vuln)
+                    await reporter.report_processed_key(
+                        scan_id, candidate.file, candidate.line, candidate.function, candidate.vuln_type
+                    )
+                    async with result_lock:
+                        processed_this_run += 1
+                    return
                 await reporter.replace_skill_reports(scan_id, candidate.vuln_type, markdown_reports)
                 await emit(
                     "auditing",
@@ -1200,9 +1228,10 @@ async def run_scan(
                         vuln_type=candidate.vuln_type,
                         severity="unknown",
                         description=candidate.description,
-                        ai_analysis="No analysis result returned",
+                        ai_analysis="OpenCode completed without submitting a result",
                         confirmed=False,
-                        ai_verdict="no_result",
+                        ai_verdict="failed",
+                        failure_reason="No result was submitted by the checker.",
                     )
                 ]
                 async with result_lock:
@@ -1232,9 +1261,10 @@ async def run_scan(
                     vuln_type=candidate.vuln_type,
                     severity="unknown",
                     description=candidate.description,
-                    ai_analysis="No analysis result returned",
+                    ai_analysis="OpenCode completed without submitting a result",
                     confirmed=False,
-                    ai_verdict="no_result",
+                    ai_verdict="failed",
+                    failure_reason="No result was submitted by the checker.",
                 )
             _attach_function_source(vuln, candidate, function_source_cache)
 
@@ -1257,6 +1287,7 @@ async def run_scan(
                 "not_confirmed": "not confirmed",
                 "timeout": "TIMEOUT",
                 "no_result": "no result",
+                "failed": "failed",
                 "filtered_same_pattern": "filtered same pattern",
             }
             result_label = _verdict_labels.get(vuln.ai_verdict, "not confirmed")

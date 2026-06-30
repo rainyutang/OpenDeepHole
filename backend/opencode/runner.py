@@ -44,6 +44,37 @@ class SensitiveClearAuditResult:
     reports: list[dict]
     complete: bool
 
+
+def _read_opencode_log(log_path: Path) -> str:
+    try:
+        if log_path.is_file():
+            return log_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _failure_reason(log_path: Path, fallback: str) -> str:
+    output = _read_opencode_log(log_path)
+    if output:
+        return output
+    return fallback
+
+
+def _failed_result(candidate: Candidate, reason: str, *, analysis: str = "OpenCode run failed") -> Vulnerability:
+    return Vulnerability(
+        file=candidate.file,
+        line=candidate.line,
+        function=candidate.function,
+        vuln_type=candidate.vuln_type,
+        severity="unknown",
+        description=candidate.description,
+        ai_analysis=analysis,
+        confirmed=False,
+        ai_verdict="failed",
+        failure_reason=reason,
+    )
+
 # Regex to strip ANSI escape sequences from CLI output
 _ANSI_RE = re.compile(
     r'\x1b\[[0-9;]*[a-zA-Z]'    # CSI sequences: ESC[...X
@@ -216,6 +247,7 @@ async def _run_audit_via_opencode(
                 ai_analysis="Analysis timed out",
                 confirmed=False,
                 ai_verdict="timeout",
+                failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
             )
         except asyncio.CancelledError:
             raise
@@ -227,7 +259,10 @@ async def _run_audit_via_opencode(
                 if on_output:
                     on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
                 continue
-            return None
+            return _failed_result(
+                candidate,
+                _failure_reason(log_path, f"{tool} error: {exc}"),
+            )
 
         # Process completed — check result
         result = _read_result(result_id, candidate)
@@ -245,9 +280,13 @@ async def _run_audit_via_opencode(
             continue
 
         logger.warning("%s did not call submit_result for %s:%d after %d attempts", tool, candidate.file, candidate.line, attempt)
-        return None
+        return _failed_result(
+            candidate,
+            _failure_reason(log_path, f"{tool} completed but did not call submit_result"),
+            analysis="OpenCode completed without submitting a result",
+        )
 
-    return None  # should not reach here
+    return _failed_result(candidate, "OpenCode did not return a result")
 
 
 async def run_project_audit(
@@ -322,6 +361,7 @@ async def run_project_audit(
                     ai_analysis="Analysis timed out",
                     confirmed=False,
                     ai_verdict="timeout",
+                    failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
                 )
             ]
         except asyncio.CancelledError:
@@ -332,7 +372,7 @@ async def run_project_audit(
                 if on_output:
                     on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
                 continue
-            return []
+            return [_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))]
 
         results = _read_results(result_id, candidate)
         if results:
@@ -346,9 +386,15 @@ async def run_project_audit(
                 on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
             continue
         logger.warning("%s project audit did not call submit_result for %s after %d attempts", tool, candidate.vuln_type, attempt)
-        return []
+        return [
+            _failed_result(
+                candidate,
+                _failure_reason(log_path, f"{tool} completed but did not call submit_result"),
+                analysis="OpenCode completed without submitting a result",
+            )
+        ]
 
-    return []
+    return [_failed_result(candidate, "OpenCode did not return a result")]
 
 
 def _sensitive_clear_function(candidate: Candidate) -> dict:
@@ -522,6 +568,7 @@ async def run_sensitive_clear_audit(
                         ai_analysis="Analysis timed out",
                         confirmed=False,
                         ai_verdict="timeout",
+                        failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
                     )
                 ],
                 reports=[],
@@ -535,7 +582,11 @@ async def run_sensitive_clear_audit(
                 if on_output:
                     on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
                 continue
-            return SensitiveClearAuditResult(vulnerabilities=[], reports=[], complete=False)
+            return SensitiveClearAuditResult(
+                vulnerabilities=[_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))],
+                reports=[],
+                complete=False,
+            )
 
         parsed = _read_sensitive_clear_audit_result(result_id, candidate)
         if parsed is not None:
@@ -554,16 +605,21 @@ async def run_sensitive_clear_audit(
                     vuln_type=candidate.vuln_type,
                     severity="unknown",
                     description=candidate.description,
-                    ai_analysis="No complete function-level Markdown result returned",
+                    ai_analysis="OpenCode completed without submitting a complete result",
                     confirmed=False,
-                    ai_verdict="no_result",
+                    ai_verdict="failed",
+                    failure_reason=_failure_reason(log_path, "No complete function-level Markdown result returned"),
                 )
             ],
             reports=[],
             complete=False,
         )
 
-    return SensitiveClearAuditResult(vulnerabilities=[], reports=[], complete=False)
+    return SensitiveClearAuditResult(
+        vulnerabilities=[_failed_result(candidate, "OpenCode did not return a result")],
+        reports=[],
+        complete=False,
+    )
 
 
 def _markdown_title(content: str, fallback: str) -> str:

@@ -331,7 +331,7 @@ class AgentAuditOrderingTests(unittest.TestCase):
             )
         )
 
-        for verdict in ("timeout", "no_result", "filtered_same_pattern"):
+        for verdict in ("timeout", "no_result", "failed", "filtered_same_pattern"):
             self.assertFalse(
                 _should_propagate_pattern_rejection(
                     pattern_filter_enabled=True,
