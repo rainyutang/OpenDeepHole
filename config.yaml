@@ -2,7 +2,7 @@
 
 no_proxy: "10.0.0.0/8"  # 逗号分隔的不走代理地址，如 "localhost,127.0.0.1,10.0.0.0/8"
 
-opencode_concurrency: 1  # OpenCode/兼容 CLI 全局并发数
+opencode_concurrency: 4  # OpenCode/兼容 CLI 全局并发数
 
 static_dedup: true  # 静态候选跨规则去重：同 family、同函数只保留一个代表候选
 

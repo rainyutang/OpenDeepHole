@@ -28,7 +28,6 @@ _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 class OpenCodeServeKey:
     tool: str
     executable: str
-    config_content: str = ""
 
 
 @dataclass(frozen=True)
@@ -196,7 +195,10 @@ class OpenCodeServeManager:
         return f"http://127.0.0.1:{self._port}"
 
     def mark_dirty(self) -> None:
-        self._dirty = True
+        # Serve reads per-request workspace context; config refreshes should not
+        # tear down active sessions. The process is restarted only when the
+        # executable/tool boundary changes or the process exits.
+        self._dirty = False
 
     async def run_prompt(
         self,
@@ -211,21 +213,18 @@ class OpenCodeServeManager:
         on_line=None,
         cancel_event=None,
     ) -> list[str]:
-        key = OpenCodeServeKey(
-            tool=tool,
-            executable=executable,
-            config_content=_read_config_content(config_workspace),
-        )
+        key = OpenCodeServeKey(tool=tool, executable=executable)
         await self._acquire_session(key)
         session_id = ""
         try:
-            params = {"directory": str(directory)}
+            params = _serve_context_params(directory, config_workspace)
             async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
                 created = await client.post("/session", params=params, json={"title": "OpenDeepHole task"})
                 created.raise_for_status()
                 session_id = _session_id(created.json())
                 if on_line:
-                    on_line(f"[{tool} serve] session={session_id} directory={directory}")
+                    workspace_note = f" workspace={config_workspace}" if config_workspace else ""
+                    on_line(f"[{tool} serve] session={session_id} directory={directory}{workspace_note}")
                 payload: dict[str, Any] = {
                     "parts": [{"type": "text", "text": prompt}],
                 }
@@ -265,7 +264,7 @@ class OpenCodeServeManager:
                 return lines
         finally:
             if session_id:
-                await self._delete_session(session_id, Path(directory))
+                await self._delete_session(session_id, params)
             async with self._idle:
                 self._active_sessions = max(0, self._active_sessions - 1)
                 if self._active_sessions == 0:
@@ -280,15 +279,9 @@ class OpenCodeServeManager:
         config_workspace: Path | None = None,
         refresh: bool = False,
     ) -> list[OpenCodeModelInfo]:
-        key = OpenCodeServeKey(
-            tool=tool,
-            executable=executable,
-            config_content=_read_config_content(config_workspace),
-        )
-        if refresh:
-            self.mark_dirty()
+        key = OpenCodeServeKey(tool=tool, executable=executable)
         await self._ensure_started(key)
-        params = {"directory": str(directory)} if directory is not None else None
+        params = _serve_context_params(directory, config_workspace)
         async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
             response = await client.get("/provider", params=params)
             response.raise_for_status()
@@ -355,7 +348,8 @@ class OpenCodeServeManager:
         if self._proc is not None and self._proc.poll() is not None:
             self._proc = None
             self._port = None
-        if self._proc is not None and self._key == key and not self._dirty:
+        if self._proc is not None and self._key == key:
+            self._dirty = False
             return
         await self._wait_until_idle_locked()
         await self._stop_locked()
@@ -372,10 +366,7 @@ class OpenCodeServeManager:
         port = _free_port()
         env = dict(os.environ)
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
-        if key.config_content:
-            env["OPENCODE_CONFIG_CONTENT"] = key.config_content
-        else:
-            env.pop("OPENCODE_CONFIG_CONTENT", None)
+        env.pop("OPENCODE_CONFIG_CONTENT", None)
         env.pop("OPENCODE_SERVER_PASSWORD", None)
         env.pop("OPENCODE_SERVER_USERNAME", None)
         cmd = [
@@ -427,10 +418,10 @@ class OpenCodeServeManager:
         except Exception as exc:
             logger.warning("Failed to abort OpenCode session %s: %s", session_id, exc)
 
-    async def _delete_session(self, session_id: str, directory: Path) -> None:
+    async def _delete_session(self, session_id: str, params: dict[str, str]) -> None:
         try:
             async with httpx.AsyncClient(base_url=self.base_url, timeout=5.0) as client:
-                await client.delete("/session/" + session_id, params={"directory": str(directory)})
+                await client.delete("/session/" + session_id, params=params)
         except Exception:
             pass
 
@@ -454,13 +445,16 @@ class OpenCodeServeManager:
 _manager = OpenCodeServeManager()
 
 
-def _read_config_content(config_workspace: Path | None) -> str:
-    if config_workspace is None:
-        return ""
-    try:
-        return (Path(config_workspace) / "opencode.json").read_text(encoding="utf-8")
-    except OSError:
-        return ""
+def _serve_context_params(
+    directory: Path | None,
+    config_workspace: Path | None = None,
+) -> dict[str, str] | None:
+    params: dict[str, str] = {}
+    if directory is not None:
+        params["directory"] = str(directory)
+    if config_workspace is not None:
+        params["workspace"] = str(config_workspace)
+    return params or None
 
 
 def get_serve_manager() -> OpenCodeServeManager:

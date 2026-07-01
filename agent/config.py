@@ -183,7 +183,7 @@ class AgentConfig:
     llm_api: LLMApiConfig = field(default_factory=LLMApiConfig)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     fp_review_cli: OpenCodeConfig | None = None
-    opencode_concurrency: int = 1
+    opencode_concurrency: int = 4
     memory_api_discovery: MemoryApiDiscoveryConfig = field(default_factory=MemoryApiDiscoveryConfig)
     git_history: GitHistoryConfig = field(default_factory=GitHistoryConfig)
     static_dedup: bool = True
@@ -214,7 +214,7 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         try:
             config.opencode_concurrency = max(1, min(8, int(remote["opencode_concurrency"])))
         except (TypeError, ValueError):
-            config.opencode_concurrency = 1
+            config.opencode_concurrency = 4
     if "fp_review_cli" in remote:
         section = remote.get("fp_review_cli")
         if section is None:
@@ -355,7 +355,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         llm_api=LLMApiConfig(**llm_raw),
         opencode=normalize_cli_config(OpenCodeConfig(**oc_raw)),
         fp_review_cli=normalize_cli_config(fp_cfg) if fp_cfg is not None else None,
-        opencode_concurrency=_bounded_int(raw.get("opencode_concurrency", 1), 1, 1, 8),
+        opencode_concurrency=_bounded_int(raw.get("opencode_concurrency", 4), 4, 1, 8),
         memory_api_discovery=MemoryApiDiscoveryConfig(**memory_api_raw),
         git_history=GitHistoryConfig(**git_history_raw),
         static_dedup=_bool_value(raw.get("static_dedup", True), True),

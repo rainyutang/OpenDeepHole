@@ -33,6 +33,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertTrue(cfg.static_dedup)
         self.assertTrue(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
+        self.assertEqual(cfg.opencode_concurrency, 4)
 
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
         cfg = AgentConfig()
@@ -99,7 +100,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["opencode"]["invocation_mode"], "serve")
         self.assertEqual(remote["opencode"]["timeout"], 1200)
         self.assertEqual(remote["opencode"]["max_retries"], 2)
-        self.assertEqual(remote["opencode_concurrency"], 1)
+        self.assertEqual(remote["opencode_concurrency"], 4)
         self.assertEqual(remote["opencode"]["models"], [])
         self.assertIsNone(remote["fp_review_cli"])
         self.assertEqual(remote["memory_api_discovery"]["batch_size"], 8)
@@ -148,7 +149,7 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["opencode"]["timeout"], 1200)
             self.assertEqual(raw["opencode"]["max_retries"], 2)
             self.assertEqual(raw["opencode"]["models"], [])
-            self.assertEqual(raw["opencode_concurrency"], 1)
+            self.assertEqual(raw["opencode_concurrency"], 4)
             self.assertEqual(raw["fp_review_cli"]["tool"], "claude")
             self.assertEqual(raw["fp_review_cli"]["invocation_mode"], "serve")
             self.assertEqual(raw["fp_review_cli"]["timeout"], 900)
@@ -275,7 +276,7 @@ class AgentConfigTests(unittest.TestCase):
 
             cfg = load_config(path)
 
-            self.assertEqual(cfg.opencode_concurrency, 1)
+            self.assertEqual(cfg.opencode_concurrency, 4)
             self.assertEqual(cfg.opencode.models[0].id, "m1")
             self.assertEqual(cfg.opencode.models[0].capability, "high")
             self.assertEqual(cfg.opencode.models[0].weight, 1)

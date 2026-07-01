@@ -59,7 +59,7 @@ opencode:
 
 # OpenCode/兼容 CLI 总并发数；配置 models 后也是所有模型合计运行数的硬上限。
 # 实际并发同时受单模型 max_concurrency 和每日使用时间限制。
-opencode_concurrency: 1
+opencode_concurrency: 4
 
 # 静态候选跨规则去重：同 family、同函数只保留一个代表候选。
 static_dedup: true

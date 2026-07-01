@@ -136,6 +136,10 @@ def _api_model_label(llm_cfg) -> str:
     return _cfg_value(llm_cfg, "model", "gpt-4o-mini") or "gpt-4o-mini"
 
 
+_API_LOG_TEXT_LIMIT = 20_000
+_API_LOG_ARGS_LIMIT = 12_000
+
+
 def _emit_api_output(on_output, model: str, line: str) -> None:
     if not on_output:
         return
@@ -148,6 +152,49 @@ def _emit_api_output(on_output, model: str, line: str) -> None:
         part if part.startswith(prefix) else f"{prefix} {part}"
         for part in parts
     ))
+
+
+def _cap_log_text(text: object, limit: int = _API_LOG_TEXT_LIMIT) -> str:
+    value = "" if text is None else str(text)
+    if len(value) <= limit:
+        return value
+    remaining = len(value) - limit
+    return f"{value[:limit]}\n[API log truncated: {remaining} chars omitted, total={len(value)}]"
+
+
+def _json_for_log(value: object, limit: int = _API_LOG_ARGS_LIMIT) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        text = str(value)
+    return _cap_log_text(text, limit)
+
+
+def _tool_names_for_log(tools: list | None) -> str:
+    names: list[str] = []
+    for item in tools or []:
+        if isinstance(item, dict) and isinstance(item.get("function"), dict):
+            name = str(item["function"].get("name") or "").strip()
+            if name:
+                names.append(name)
+    return ", ".join(names) or "(none)"
+
+
+def _emit_api_section(
+    on_output,
+    model: str,
+    title: str,
+    body: object = "",
+    *,
+    limit: int = _API_LOG_TEXT_LIMIT,
+) -> None:
+    if not on_output:
+        return
+    body_text = _cap_log_text(body, limit)
+    if body_text:
+        _emit_api_output(on_output, model, f"{title}\n{body_text}")
+    else:
+        _emit_api_output(on_output, model, title)
 
 
 def _client_kwargs(llm_cfg, *, timeout_override: float | None = None) -> dict:
@@ -238,7 +285,7 @@ async def ensure_llm_api_available(on_output=None) -> None:
     _emit_api_output(on_output, model, "[API] API 配置可用")
 
 
-def _emit_initial_api_prompt(on_output, messages: list[dict], model: str) -> None:
+def _emit_initial_api_prompt(on_output, messages: list[dict], model: str = "llm_api") -> None:
     """Print the complete initial prompt sent to the LLM API."""
     if not on_output:
         return
@@ -247,7 +294,7 @@ def _emit_initial_api_prompt(on_output, messages: list[dict], model: str) -> Non
     for message in messages:
         role = message.get("role", "unknown")
         content = message.get("content") or ""
-        sections.append(f"--- {role} ---\n{content}")
+        sections.append(f"--- {role} ---\n{_cap_log_text(content)}")
     _emit_api_output(on_output, model, "\n".join(sections))
 
 
@@ -760,8 +807,10 @@ async def run_audit_via_api(
 
     # 加载 system prompt：优先使用 checker 目录下的 prompt.txt
     system_prompt = SYSTEM_PROMPT
+    prompt_source = "built-in SYSTEM_PROMPT"
     if prompt_path and prompt_path.is_file():
         system_prompt = prompt_path.read_text(encoding="utf-8")
+        prompt_source = str(prompt_path)
 
     # 构建初始消息
     user_prompt = _build_user_prompt(candidate, project_id, project_dir=project_dir)
@@ -771,12 +820,30 @@ async def run_audit_via_api(
     ]
 
     _emit_api_output(on_output, model_label, f"[API] 开始审计 {candidate.file}:{candidate.line}")
+    _emit_api_section(
+        on_output,
+        model_label,
+        "[API] 加载 skill/prompt",
+        (
+            f"source={prompt_source}\n"
+            f"checker={candidate.vuln_type}\n"
+            f"result_id={result_id}\n"
+            f"single_pass={single_pass}\n"
+            f"project_id={project_id}\n"
+            f"project_dir={project_dir or ''}"
+        ),
+    )
     _emit_initial_api_prompt(on_output, messages, model_label)
 
     # 选择工具集：single_pass 模式仅提供 submit_result
     tools = TOOLS_SINGLE_PASS if single_pass else TOOLS
     # single_pass 模式只需 1 轮（LLM 直接返回 submit_result）
     max_rounds = 1 if single_pass else 10
+    _emit_api_output(
+        on_output,
+        model_label,
+        f"[API] 工具集: {_tool_names_for_log(tools)}",
+    )
     submitted = False
 
     for round_idx in range(max_rounds):
@@ -784,6 +851,11 @@ async def run_audit_via_api(
             return None
 
         try:
+            _emit_api_output(
+                on_output,
+                model_label,
+                f"[API] 第 {round_idx + 1}/{max_rounds} 轮请求 messages={len(messages)} stream={llm_cfg.stream}",
+            )
             _cancel_fn = cancel_event.is_set if cancel_event else None
             llm_task = asyncio.create_task(asyncio.to_thread(
                 _call_llm, client, llm_cfg.model, messages,
@@ -818,13 +890,20 @@ async def run_audit_via_api(
 
         choice = resp.choices[0]
         message = choice.message
+        finish_reason = getattr(choice, "finish_reason", "")
+        tool_call_count = len(message.tool_calls or [])
+        _emit_api_output(
+            on_output,
+            model_label,
+            f"[API] 第 {round_idx + 1}/{max_rounds} 轮响应 finish_reason={finish_reason or ''} tool_calls={tool_call_count}",
+        )
 
         # 追加 assistant 消息到历史
         messages.append(message.model_dump(exclude_none=True))
 
         # 始终输出 LLM 的文本内容（分析过程）
         if message.content:
-            _emit_api_output(on_output, model_label, f"[API] {message.content[:200]}")
+            _emit_api_section(on_output, model_label, "[API] LLM 回复", message.content)
 
         # 如果没有 tool_calls，说明 LLM 直接返回了文本
         if not message.tool_calls:
@@ -833,29 +912,43 @@ async def run_audit_via_api(
                 submitted = _try_parse_text_result(
                     message.content, result_id, config.storage.scans_dir
                 )
+                if submitted:
+                    _emit_api_output(on_output, model_label, "[API] 已从文本回复解析并提交结果")
             break
 
         # 处理 tool_calls
         for tool_call in message.tool_calls:
             func_name = tool_call.function.name
+            raw_arguments = tool_call.function.arguments
             try:
-                func_args = json.loads(tool_call.function.arguments)
+                func_args = json.loads(raw_arguments)
             except json.JSONDecodeError:
                 func_args = {}
 
-            _emit_api_output(
+            _emit_api_section(
                 on_output,
                 model_label,
-                f"[API] 调用工具: {func_name}({json.dumps(func_args, ensure_ascii=False)[:100]})",
+                f"[API] 工具调用: {func_name}",
+                (
+                    f"tool_call_id={tool_call.id}\n"
+                    f"arguments={_json_for_log(func_args if func_args else raw_arguments)}"
+                ),
+                limit=_API_LOG_ARGS_LIMIT,
             )
 
             result_text, is_submit = _execute_tool(
                 func_name, func_args, project_id, result_id, project_dir=project_dir,
             )
+            _emit_api_section(
+                on_output,
+                model_label,
+                f"[API] 工具返回: {func_name}",
+                result_text,
+            )
 
             if is_submit:
                 submitted = True
-                _emit_api_output(on_output, model_label, "[API] 结果已提交")
+                _emit_api_output(on_output, model_label, f"[API] 结果已提交 result_id={result_id}")
                 break
 
             # 追加 tool 结果到消息历史
@@ -1138,8 +1231,10 @@ async def run_batch_audit_via_api(
 
     # 加载 system prompt：优先使用 checker 目录下的 prompt.txt
     system_prompt = SYSTEM_PROMPT
+    prompt_source = "built-in SYSTEM_PROMPT"
     if prompt_path and prompt_path.is_file():
         system_prompt = prompt_path.read_text(encoding="utf-8")
+        prompt_source = str(prompt_path)
 
     # 构建消息
     user_prompt = _build_batch_user_prompt(candidates, project_id, project_dir=project_dir)
@@ -1149,7 +1244,24 @@ async def run_batch_audit_via_api(
     ]
 
     _emit_api_output(on_output, model_label, f"[API] 批量审计 {file_path}:{func_name}（{len(candidates)} 个候选）")
+    _emit_api_section(
+        on_output,
+        model_label,
+        "[API] 加载 skill/prompt",
+        (
+            f"source={prompt_source}\n"
+            f"checker={candidates[0].vuln_type if candidates else ''}\n"
+            f"project_id={project_id}\n"
+            f"project_dir={project_dir or ''}\n"
+            f"result_ids={_json_for_log(result_id_map)}"
+        ),
+    )
     _emit_initial_api_prompt(on_output, messages, model_label)
+    _emit_api_output(
+        on_output,
+        model_label,
+        f"[API] 工具集: {_tool_names_for_log(TOOLS_BATCH)}",
+    )
 
     submitted = False
     max_rounds = 10
@@ -1159,6 +1271,11 @@ async def run_batch_audit_via_api(
             return [None] * len(candidates)
 
         try:
+            _emit_api_output(
+                on_output,
+                model_label,
+                f"[API] 第 {round_idx + 1}/{max_rounds} 轮请求 messages={len(messages)} stream={llm_cfg.stream}",
+            )
             llm_task = asyncio.create_task(asyncio.to_thread(
                 _call_llm, client, llm_cfg.model, messages,
                 llm_cfg.temperature, llm_cfg.max_retries, TOOLS_BATCH,
@@ -1192,26 +1309,39 @@ async def run_batch_audit_via_api(
 
         choice = resp.choices[0]
         message = choice.message
+        finish_reason = getattr(choice, "finish_reason", "")
+        tool_call_count = len(message.tool_calls or [])
+        _emit_api_output(
+            on_output,
+            model_label,
+            f"[API] 第 {round_idx + 1}/{max_rounds} 轮响应 finish_reason={finish_reason or ''} tool_calls={tool_call_count}",
+        )
         messages.append(message.model_dump(exclude_none=True))
 
         # 始终输出 LLM 的文本内容（分析过程）
         if message.content:
-            _emit_api_output(on_output, model_label, f"[API] {message.content[:200]}")
+            _emit_api_section(on_output, model_label, "[API] LLM 回复", message.content)
 
         if not message.tool_calls:
             break
 
         for tool_call in message.tool_calls:
             func_name_tc = tool_call.function.name
+            raw_arguments = tool_call.function.arguments
             try:
-                func_args = json.loads(tool_call.function.arguments)
+                func_args = json.loads(raw_arguments)
             except json.JSONDecodeError:
                 func_args = {}
 
-            _emit_api_output(
+            _emit_api_section(
                 on_output,
                 model_label,
-                f"[API] 调用工具: {func_name_tc}({json.dumps(func_args, ensure_ascii=False)[:100]})",
+                f"[API] 工具调用: {func_name_tc}",
+                (
+                    f"tool_call_id={tool_call.id}\n"
+                    f"arguments={_json_for_log(func_args if func_args else raw_arguments)}"
+                ),
+                limit=_API_LOG_ARGS_LIMIT,
             )
 
             result_text, is_submit = _execute_batch_tool(
@@ -1219,10 +1349,16 @@ async def run_batch_audit_via_api(
                 result_id_map, config.storage.scans_dir,
                 project_dir=project_dir,
             )
+            _emit_api_section(
+                on_output,
+                model_label,
+                f"[API] 工具返回: {func_name_tc}",
+                result_text,
+            )
 
             if is_submit:
                 submitted = True
-                _emit_api_output(on_output, model_label, "[API] 批量结果已提交")
+                _emit_api_output(on_output, model_label, f"[API] 批量结果已提交 result_ids={_json_for_log(result_id_map)}")
                 break
 
             messages.append({

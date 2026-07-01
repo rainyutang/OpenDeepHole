@@ -100,7 +100,8 @@ def test_emit_initial_api_prompt_outputs_complete_single_candidate_messages() ->
     assert "[API] 初始提示词" in logged
     assert "--- system ---" in logged
     assert "--- user ---" in logged
-    assert "system prompt\nline 2" in logged
+    assert "system prompt" in logged
+    assert "line 2" in logged
     assert "unique single candidate detail" in logged
 
 
@@ -128,6 +129,31 @@ def test_emit_initial_api_prompt_outputs_complete_batch_messages() -> None:
     assert "first batch candidate detail" in logged
     assert "second batch candidate detail" in logged
     assert "secret-api-key" not in logged
+
+
+def test_api_log_section_keeps_key_content_and_marks_truncation() -> None:
+    outputs: list[str] = []
+    long_text = "A" * (llm_api_runner._API_LOG_TEXT_LIMIT + 5)
+
+    llm_api_runner._emit_api_section(outputs.append, "test-model", "[API] LLM 回复", long_text)
+
+    logged = "\n".join(outputs)
+    assert "[model=test-model] [API] LLM 回复" in logged
+    assert "A" * 200 in logged
+    assert "[API log truncated: 5 chars omitted" in logged
+
+
+def test_api_tool_log_helpers_render_tool_names_and_capped_arguments() -> None:
+    tools = [
+        {"type": "function", "function": {"name": "view_function_code"}},
+        {"type": "function", "function": {"name": "submit_result"}},
+    ]
+    args = {"content": "B" * (llm_api_runner._API_LOG_ARGS_LIMIT + 3)}
+
+    assert llm_api_runner._tool_names_for_log(tools) == "view_function_code, submit_result"
+    logged = llm_api_runner._json_for_log(args)
+    assert '"content"' in logged
+    assert "[API log truncated: " in logged
 
 
 def test_user_prompt_uses_agent_project_dir_code_index(tmp_path, monkeypatch) -> None:

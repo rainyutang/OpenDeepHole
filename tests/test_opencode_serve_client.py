@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from backend.opencode.serve_client import OpenCodeServeManager, _extract_tool_ids
+from backend.opencode.serve_client import OpenCodeServeKey, OpenCodeServeManager, _extract_tool_ids
 
 
 class _FakeResponse:
@@ -102,12 +102,16 @@ def test_run_prompt_sends_all_discovered_tools(monkeypatch, tmp_path: Path) -> N
             item for item in session_client.posts
             if item["path"] == "/session/session-1/message"
         )
-        assert manager._acquire_session.await_args.args[0].config_content == '{"mcp": {}}'
-        assert session_client.posts[0]["params"] == {"directory": str(project)}
-        assert session_client.gets[0]["params"] == {"directory": str(project)}
-        assert message["params"] == {"directory": str(project)}
+        assert manager._acquire_session.await_args.args[0] == OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+        )
+        expected_params = {"directory": str(project), "workspace": str(config_workspace)}
+        assert session_client.posts[0]["params"] == expected_params
+        assert session_client.gets[0]["params"] == expected_params
+        assert message["params"] == expected_params
         cleanup_client = _FakeAsyncClient.instances[1]
-        assert cleanup_client.deletes[0]["params"] == {"directory": str(project)}
+        assert cleanup_client.deletes[0]["params"] == expected_params
         assert message["json"]["tools"] == {
             "read": True,
             "grep": True,
@@ -157,7 +161,7 @@ def test_run_prompt_continues_when_tool_discovery_fails(monkeypatch, tmp_path: P
     asyncio.run(run())
 
 
-def test_list_models_passes_directory_to_provider_requests(monkeypatch, tmp_path: Path) -> None:
+def test_list_models_passes_directory_and_workspace_to_provider_requests(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
         monkeypatch.setattr(
@@ -169,22 +173,50 @@ def test_list_models_passes_directory_to_provider_requests(monkeypatch, tmp_path
         manager._port = 12345
         manager._ensure_started = AsyncMock()
         project = tmp_path / "project"
+        config_workspace = tmp_path / "runtime"
         project.mkdir()
+        config_workspace.mkdir()
 
         assert await manager.list_models(
             tool="opencode",
             executable="opencode",
             directory=project,
+            config_workspace=config_workspace,
         ) == []
 
         client = _FakeAsyncClient.instances[0]
+        expected_params = {"directory": str(project), "workspace": str(config_workspace)}
         assert client.gets[0] == {
             "path": "/provider",
-            "params": {"directory": str(project)},
+            "params": expected_params,
         }
         assert client.gets[1] == {
             "path": "/config/providers",
-            "params": {"directory": str(project)},
+            "params": expected_params,
         }
+
+    asyncio.run(run())
+
+
+def test_dirty_config_does_not_restart_same_serve_process() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = OpenCodeServeKey(tool="opencode", executable="opencode")
+        manager._dirty = True
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+
+        await manager._ensure_started_locked(OpenCodeServeKey(tool="opencode", executable="opencode"))
+
+        manager._stop_locked.assert_not_awaited()
+        manager._start_locked.assert_not_awaited()
+        assert manager._port == 12345
+        assert manager._dirty is False
 
     asyncio.run(run())

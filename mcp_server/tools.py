@@ -122,16 +122,29 @@ def clear_db_cache(project_dir: Path | str | None = None):
     _db_cache.clear()
 
 
+_MCP_LOG_DETAIL_LIMIT = 20_000
+_MCP_LOG_ARGS_LIMIT = 12_000
+
+
 def _mcp_log(direction: str, tool: str, detail: str, caller_model: str = "") -> None:
     model = str(caller_model or "unknown").strip() or "unknown"
-    print(f"  [MCP {direction}] model={model} {tool} | {detail}", flush=True)
+    print(f"  [MCP {direction}] model={model} {tool} | {_preview(detail)}", flush=True)
 
 
-def _preview(text: str, max_chars: int = 120) -> str:
-    text = text.replace("\n", "\\n")
+def _preview(text: object, max_chars: int = _MCP_LOG_DETAIL_LIMIT) -> str:
+    text = "" if text is None else str(text)
     if len(text) <= max_chars:
         return text
-    return f"{text[:max_chars]}… ({len(text)} chars)"
+    remaining = len(text) - max_chars
+    return f"{text[:max_chars]}\n[MCP log truncated: {remaining} chars omitted, total={len(text)}]"
+
+
+def _json_preview(value: object, max_chars: int = _MCP_LOG_ARGS_LIMIT) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        text = str(value)
+    return _preview(text, max_chars)
 
 
 def _append_result_payload(result_path: Path, payload: dict) -> None:
@@ -198,7 +211,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             for row in rows
         ]
         result = "\n\n".join(parts)
-        _mcp_log("◀", "view_function_code", f"{len(rows)} match(es), {len(result)} chars", caller_model)
+        _mcp_log("◀", "view_function_code", f"{len(rows)} match(es), {len(result)} chars\n{result}", caller_model)
         return result
 
     @mcp.tool()
@@ -230,7 +243,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             for row in rows
         ]
         result = "\n\n".join(parts)
-        _mcp_log("◀", "view_struct_code", f"{len(rows)} match(es), {len(result)} chars", caller_model)
+        _mcp_log("◀", "view_struct_code", f"{len(rows)} match(es), {len(result)} chars\n{result}", caller_model)
         return result
 
     @mcp.tool()
@@ -265,7 +278,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             for row in rows
         ]
         result = "\n\n".join(parts)
-        _mcp_log("◀", "view_global_variable_definition", f"{len(rows)} match(es), {len(result)} chars", caller_model)
+        _mcp_log("◀", "view_global_variable_definition", f"{len(rows)} match(es), {len(result)} chars\n{result}", caller_model)
         return result
 
     # Kept for future reuse, but intentionally not registered as an MCP tool.
@@ -306,7 +319,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             for row in rows
         )
         result = "\n".join(lines)
-        _mcp_log("◀", "find_function_references", f"{len(rows)} reference(s)", caller_model)
+        _mcp_log("◀", "find_function_references", f"{len(rows)} reference(s)\n{result}", caller_model)
         return result
 
     # Kept for future reuse, but intentionally not registered as an MCP tool.
@@ -340,7 +353,7 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             f"{row['function_name'] or '未知'}  {row['file_path']}:{row['line']}  [{row['access_type']}]  {row['context']}"
             for row in rows
         )
-        _mcp_log("◀", "find_global_variable_references", f"{len(rows)} reference(s)", caller_model)
+        _mcp_log("◀", "find_global_variable_references", f"{len(rows)} reference(s)\n{result}", caller_model)
         return result
 
     @mcp.tool()
@@ -373,9 +386,17 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log("▶", "submit_result",
-                 f"confirmed={confirmed} severity={severity!r} description={_preview(description)}",
-                 caller_model)
+        _mcp_log("▶", "submit_result", _json_preview({
+            "result_id": result_id,
+            "confirmed": confirmed,
+            "severity": severity,
+            "description": description,
+            "ai_analysis": ai_analysis,
+            "vulnerability_report": vulnerability_report,
+            "file": file,
+            "line": line,
+            "function": function,
+        }), caller_model)
         scans_dir = _get_config().storage.scans_dir
         result_path = Path(scans_dir) / f"{result_id}.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -416,9 +437,14 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log("▶", "submit_history_pattern",
-                 f"security_related={security_related} pattern={_preview(pattern)}",
-                 caller_model)
+        _mcp_log("▶", "submit_history_pattern", _json_preview({
+            "result_id": result_id,
+            "security_related": security_related,
+            "pattern": pattern,
+            "lens_hint": lens_hint,
+            "files": files,
+            "rationale": rationale,
+        }), caller_model)
         scans_dir = _get_config().storage.scans_dir
         result_path = Path(scans_dir) / f"{result_id}.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -460,9 +486,15 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log("▶", "submit_variant_finding",
-                 f"{file}:{line} vuln_type={vuln_type!r} {_preview(description)}",
-                 caller_model)
+        _mcp_log("▶", "submit_variant_finding", _json_preview({
+            "result_id": result_id,
+            "file": file,
+            "line": line,
+            "function": function,
+            "vuln_type": vuln_type,
+            "description": description,
+            "rationale": rationale,
+        }), caller_model)
         scans_dir = _get_config().storage.scans_dir
         result_path = Path(scans_dir) / f"{result_id}.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -505,9 +537,15 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         返回：
             提交成功的确认消息。
         """
-        _mcp_log("▶", "submit_match_result",
-                 f"matched={matched} match_type={match_type!r} ref={_preview(match_reference)}",
-                 caller_model)
+        _mcp_log("▶", "submit_match_result", _json_preview({
+            "result_id": result_id,
+            "matched": matched,
+            "match_type": match_type,
+            "match_reference": match_reference,
+            "description": description,
+            "ai_analysis": ai_analysis,
+            "vulnerability_report": vulnerability_report,
+        }), caller_model)
         scans_dir = _get_config().storage.scans_dir
         result_path = Path(scans_dir) / f"{result_id}.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
