@@ -98,6 +98,57 @@ def _extract_text(value: Any) -> list[str]:
     return lines
 
 
+def _extract_tool_ids(value: Any) -> list[str]:
+    """Return tool ids from the shapes exposed by OpenCode serve versions."""
+    raw_items: Any
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, dict):
+        for key in ("ids", "tools", "all"):
+            items = value.get(key)
+            if isinstance(items, list):
+                raw_items = items
+                break
+        else:
+            raw_items = [
+                key for key, enabled in value.items()
+                if isinstance(key, str) and enabled is not False
+            ]
+    else:
+        raw_items = []
+
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if isinstance(item, str):
+            tool_id = item.strip()
+        elif isinstance(item, dict):
+            tool_id = str(item.get("id") or item.get("name") or "").strip()
+        else:
+            continue
+        if tool_id and tool_id not in seen:
+            ids.append(tool_id)
+            seen.add(tool_id)
+    return ids
+
+
+async def _message_tools_payload(
+    client: httpx.AsyncClient,
+    *,
+    params: dict[str, str],
+    tool: str,
+) -> dict[str, bool]:
+    try:
+        response = await client.get("/experimental/tool/ids", params=params)
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Failed to list %s serve tools; using default tool set: %s", tool, exc)
+        return {}
+
+    tool_ids = _extract_tool_ids(response.json())
+    return {tool_id: True for tool_id in tool_ids}
+
+
 def _provider_models(provider: dict[str, Any]) -> list[OpenCodeModelInfo]:
     provider_id = str(provider.get("id") or provider.get("providerID") or provider.get("name") or "").strip()
     models = provider.get("models") or {}
@@ -172,6 +223,9 @@ class OpenCodeServeManager:
                 payload: dict[str, Any] = {
                     "parts": [{"type": "text", "text": prompt}],
                 }
+                tools = await _message_tools_payload(client, params=params, tool=tool)
+                if tools:
+                    payload["tools"] = tools
                 if model:
                     provider_id, model_id = split_model_id(model)
                     payload["model"] = {"providerID": provider_id, "modelID": model_id}
