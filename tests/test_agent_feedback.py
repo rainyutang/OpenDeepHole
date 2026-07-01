@@ -138,10 +138,11 @@ class AgentFeedbackTests(unittest.TestCase):
 	                reason,
 	                vulnerability_report="",
 	                stage_outputs=None,
+                    **kwargs,
 	            ) -> None:
 	                self.results.append((vuln_index, verdict, reason))
 
-            async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown) -> None:
+            async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown, **kwargs) -> None:
                 self.stage_outputs.append((stage, markdown))
 
             async def finish_fp_review(self, scan_id, review_id, status, error_message=None) -> None:
@@ -223,10 +224,11 @@ class AgentFeedbackTests(unittest.TestCase):
 	                reason,
 	                vulnerability_report="",
 	                stage_outputs=None,
+                    **kwargs,
 	            ) -> None:
 	                self.results.append((vuln_index, verdict, severity, reason, vulnerability_report))
 
-            async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown) -> None:
+            async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown, **kwargs) -> None:
                 return None
 
             async def finish_fp_review(self, scan_id, review_id, status, error_message=None) -> None:
@@ -316,10 +318,11 @@ class AgentFeedbackTests(unittest.TestCase):
 	                reason,
 	                vulnerability_report="",
 	                stage_outputs=None,
+                    **kwargs,
 	            ) -> None:
 	                self.results.append((vuln_index, verdict, severity, reason, vulnerability_report))
 
-            async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown) -> None:
+            async def push_fp_stage_output(self, scan_id, review_id, vuln_index, stage, markdown, **kwargs) -> None:
                 return None
 
             async def finish_fp_review(self, scan_id, review_id, status, error_message=None) -> None:

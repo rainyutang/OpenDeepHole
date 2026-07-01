@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from backend.config import get_config
 from backend.logger import get_logger
-from backend.models import Candidate, Vulnerability
+from backend.models import Candidate, OutputSource, Vulnerability
 from backend.opencode.model_pool import (
     acquire_model_lease,
     configured_global_concurrency,
@@ -194,9 +194,16 @@ async def _run_audit_via_opencode(
         else candidate.vuln_type
     )
     max_retries = config.opencode.max_retries
+    last_source: OutputSource | None = None
 
     for attempt in range(1, max_retries + 2):  # attempt 1 .. max_retries+1
+        attempt_source: OutputSource | None = None
         result_id = f"result-{uuid4().hex}"
+
+        def capture_source(source: OutputSource) -> None:
+            nonlocal attempt_source, last_source
+            attempt_source = source
+            last_source = source
 
         prompt = (
             f"使用 `{skill_name}` 技能，分析位于 "
@@ -229,6 +236,8 @@ async def _run_audit_via_opencode(
                 model_capability=getattr(checker_entry, "model_capability", "any"),
                 stats_scope_id=project_id,
                 task_context=_candidate_task_context(candidate),
+                attempt=attempt,
+                on_invocation_metadata=capture_source,
             )
         except asyncio.TimeoutError:
             # Timeout — no retry; check if result was submitted before kill
@@ -236,7 +245,7 @@ async def _run_audit_via_opencode(
             result = _read_result(result_id, candidate)
             if result is not None:
                 logger.info("Result file found despite timeout — using submitted result")
-                return result
+                return _apply_output_source(result, attempt_source)
             return Vulnerability(
                 file=candidate.file,
                 line=candidate.line,
@@ -248,6 +257,7 @@ async def _run_audit_via_opencode(
                 confirmed=False,
                 ai_verdict="timeout",
                 failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
+                output_source=attempt_source or OutputSource(),
             )
         except asyncio.CancelledError:
             raise
@@ -259,15 +269,15 @@ async def _run_audit_via_opencode(
                 if on_output:
                     on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
                 continue
-            return _failed_result(
+            return _apply_output_source(_failed_result(
                 candidate,
                 _failure_reason(log_path, f"{tool} error: {exc}"),
-            )
+            ), attempt_source)
 
         # Process completed — check result
         result = _read_result(result_id, candidate)
         if result is not None:
-            return result
+            return _apply_output_source(result, attempt_source)
 
         # submit_result was not called — retry if attempts remain
         if attempt <= max_retries:
@@ -280,13 +290,13 @@ async def _run_audit_via_opencode(
             continue
 
         logger.warning("%s did not call submit_result for %s:%d after %d attempts", tool, candidate.file, candidate.line, attempt)
-        return _failed_result(
+        return _apply_output_source(_failed_result(
             candidate,
             _failure_reason(log_path, f"{tool} completed but did not call submit_result"),
             analysis="OpenCode completed without submitting a result",
-        )
+        ), attempt_source)
 
-    return _failed_result(candidate, "OpenCode did not return a result")
+    return _apply_output_source(_failed_result(candidate, "OpenCode did not return a result"), last_source)
 
 
 async def run_project_audit(
@@ -313,9 +323,17 @@ async def run_project_audit(
         else candidate.vuln_type
     )
     max_retries = config.opencode.max_retries
+    last_source: OutputSource | None = None
 
     for attempt in range(1, max_retries + 2):
+        attempt_source: OutputSource | None = None
         result_id = f"result-{uuid4().hex}"
+
+        def capture_source(source: OutputSource) -> None:
+            nonlocal attempt_source, last_source
+            attempt_source = source
+            last_source = source
+
         prompt = (
             f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
             f"project_id 为 `{project_id}`。"
@@ -344,12 +362,14 @@ async def run_project_audit(
                 model_capability=getattr(checker_entry, "model_capability", "any"),
                 stats_scope_id=project_id,
                 task_context=_candidate_task_context(candidate, "project_audit"),
+                attempt=attempt,
+                on_invocation_metadata=capture_source,
             )
         except asyncio.TimeoutError:
             logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
             results = _read_results(result_id, candidate)
             if results:
-                return results
+                return _apply_output_source_to_list(results, attempt_source)
             return [
                 Vulnerability(
                     file=candidate.file,
@@ -362,6 +382,7 @@ async def run_project_audit(
                     confirmed=False,
                     ai_verdict="timeout",
                     failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
+                    output_source=attempt_source or OutputSource(),
                 )
             ]
         except asyncio.CancelledError:
@@ -372,11 +393,14 @@ async def run_project_audit(
                 if on_output:
                     on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
                 continue
-            return [_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))]
+            return _apply_output_source_to_list(
+                [_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))],
+                attempt_source,
+            )
 
         results = _read_results(result_id, candidate)
         if results:
-            return results
+            return _apply_output_source_to_list(results, attempt_source)
         if attempt <= max_retries:
             logger.warning(
                 "%s project audit did not call submit_result for %s (attempt %d), retrying...",
@@ -386,15 +410,15 @@ async def run_project_audit(
                 on_output(f"[retry {attempt}/{max_retries}] No result submitted, retrying...")
             continue
         logger.warning("%s project audit did not call submit_result for %s after %d attempts", tool, candidate.vuln_type, attempt)
-        return [
+        return _apply_output_source_to_list([
             _failed_result(
                 candidate,
                 _failure_reason(log_path, f"{tool} completed but did not call submit_result"),
                 analysis="OpenCode completed without submitting a result",
             )
-        ]
+        ], attempt_source)
 
-    return [_failed_result(candidate, "OpenCode did not return a result")]
+    return _apply_output_source_to_list([_failed_result(candidate, "OpenCode did not return a result")], last_source)
 
 
 def _sensitive_clear_function(candidate: Candidate) -> dict:
@@ -526,9 +550,17 @@ async def run_sensitive_clear_audit(
         else candidate.vuln_type
     )
     max_retries = config.opencode.max_retries
+    last_source: OutputSource | None = None
 
     for attempt in range(1, max_retries + 2):
+        attempt_source: OutputSource | None = None
         result_id = f"result-{uuid4().hex}"
+
+        def capture_source(source: OutputSource) -> None:
+            nonlocal attempt_source, last_source
+            attempt_source = source
+            last_source = source
+
         prompt = _sensitive_clear_prompt(skill_name, candidate, project_id, result_id)
         log_path = workspace / f"opencode_{result_id}.log"
         if on_output:
@@ -550,11 +582,14 @@ async def run_sensitive_clear_audit(
                 model_capability=getattr(checker_entry, "model_capability", "any"),
                 stats_scope_id=project_id,
                 task_context=_candidate_task_context(candidate, "sensitive_clear"),
+                attempt=attempt,
+                on_invocation_metadata=capture_source,
             )
         except asyncio.TimeoutError:
             logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
             parsed = _read_sensitive_clear_audit_result(result_id, candidate)
             if parsed is not None:
+                _apply_output_source_to_list(parsed.vulnerabilities, attempt_source)
                 return parsed
             return SensitiveClearAuditResult(
                 vulnerabilities=[
@@ -569,6 +604,7 @@ async def run_sensitive_clear_audit(
                         confirmed=False,
                         ai_verdict="timeout",
                         failure_reason=_failure_reason(log_path, f"{tool} timed out after {effective_timeout} seconds"),
+                        output_source=attempt_source or OutputSource(),
                     )
                 ],
                 reports=[],
@@ -583,13 +619,17 @@ async def run_sensitive_clear_audit(
                     on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
                 continue
             return SensitiveClearAuditResult(
-                vulnerabilities=[_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))],
+                vulnerabilities=_apply_output_source_to_list(
+                    [_failed_result(candidate, _failure_reason(log_path, f"{tool} error: {exc}"))],
+                    attempt_source,
+                ),
                 reports=[],
                 complete=False,
             )
 
         parsed = _read_sensitive_clear_audit_result(result_id, candidate)
         if parsed is not None:
+            _apply_output_source_to_list(parsed.vulnerabilities, attempt_source)
             return parsed
         if attempt <= max_retries:
             logger.warning("%s sensitive_clear audit produced invalid/incomplete results; retrying", tool)
@@ -609,6 +649,7 @@ async def run_sensitive_clear_audit(
                     confirmed=False,
                     ai_verdict="failed",
                     failure_reason=_failure_reason(log_path, "No complete function-level Markdown result returned"),
+                    output_source=attempt_source or OutputSource(),
                 )
             ],
             reports=[],
@@ -616,7 +657,10 @@ async def run_sensitive_clear_audit(
         )
 
     return SensitiveClearAuditResult(
-        vulnerabilities=[_failed_result(candidate, "OpenCode did not return a result")],
+        vulnerabilities=_apply_output_source_to_list(
+            [_failed_result(candidate, "OpenCode did not return a result")],
+            last_source,
+        ),
         reports=[],
         complete=False,
     )
@@ -630,7 +674,11 @@ def _markdown_title(content: str, fallback: str) -> str:
     return fallback
 
 
-def _collect_markdown_reports(report_dir: Path, checker_name: str) -> list[dict]:
+def _collect_markdown_reports(
+    report_dir: Path,
+    checker_name: str,
+    output_source: OutputSource | None = None,
+) -> list[dict]:
     reports: list[dict] = []
     if not report_dir.is_dir():
         return reports
@@ -651,6 +699,7 @@ def _collect_markdown_reports(report_dir: Path, checker_name: str) -> list[dict]
                 "title": _markdown_title(content, path.stem),
                 "content": content,
                 "created_at": now,
+                "output_source": (output_source or OutputSource()).model_dump(),
             }
         )
     return reports
@@ -690,7 +739,13 @@ async def run_project_report_audit(
     report_dir.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(1, max_retries + 2):
+        attempt_source: OutputSource | None = None
         result_id = f"result-{uuid4().hex}"
+
+        def capture_source(source: OutputSource) -> None:
+            nonlocal attempt_source
+            attempt_source = source
+
         for old_report in report_dir.glob("*.md"):
             try:
                 old_report.unlink()
@@ -730,13 +785,15 @@ async def run_project_report_audit(
                 model_capability=getattr(checker_entry, "model_capability", "any"),
                 stats_scope_id=project_id,
                 task_context=_candidate_task_context(candidate, "report_audit"),
+                attempt=attempt,
+                on_invocation_metadata=capture_source,
             )
         except asyncio.TimeoutError:
             logger.error(
                 "%s report audit timed out for %s (timeout=%ds)",
                 tool, candidate.vuln_type, effective_timeout,
             )
-            return _collect_markdown_reports(report_dir, candidate.vuln_type)
+            return _collect_markdown_reports(report_dir, candidate.vuln_type, attempt_source)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -745,9 +802,9 @@ async def run_project_report_audit(
                 if on_output:
                     on_output(f"[retry {attempt}/{max_retries}] {tool} error: {exc}")
                 continue
-            return _collect_markdown_reports(report_dir, candidate.vuln_type)
+            return _collect_markdown_reports(report_dir, candidate.vuln_type, attempt_source)
 
-        reports = _collect_markdown_reports(report_dir, candidate.vuln_type)
+        reports = _collect_markdown_reports(report_dir, candidate.vuln_type, attempt_source)
         if reports:
             return reports
         if attempt <= max_retries:
@@ -764,6 +821,45 @@ def _cfg_value(config_obj, key: str, default=None):
     if isinstance(config_obj, dict):
         return config_obj.get(key, default)
     return getattr(config_obj, key, default)
+
+
+def _output_source_from_invocation(
+    *,
+    lease,
+    tool: str,
+    model: str,
+    required_capability: str,
+    attempt: int,
+) -> OutputSource:
+    option = lease.option
+    return OutputSource(
+        backend="cli",
+        tool=tool,
+        model_id=option.id,
+        model=model,
+        use_default_model=bool(getattr(option, "use_default_model", False)),
+        capability=option.capability,
+        required_capability=required_capability or "any",
+        task_id=lease.task_id,
+        attempt=attempt,
+        started_at=lease.started_at_iso,
+    )
+
+
+def _apply_output_source(vuln: Vulnerability | None, source: OutputSource | None) -> Vulnerability | None:
+    if vuln is not None and source is not None:
+        vuln.output_source = source
+    return vuln
+
+
+def _apply_output_source_to_list(
+    vulns: list[Vulnerability],
+    source: OutputSource | None,
+) -> list[Vulnerability]:
+    if source is not None:
+        for vuln in vulns:
+            vuln.output_source = source
+    return vulns
 
 
 def _effective_cli_config(cli_config, model_option) -> dict:
@@ -1196,6 +1292,8 @@ async def _invoke_opencode(
     prefer_high_model: bool = False,
     stats_scope_id: str = "",
     task_context: dict | None = None,
+    attempt: int = 0,
+    on_invocation_metadata=None,
 ) -> None:
     """Invoke the configured AI CLI, stream output line-by-line, write to log file.
 
@@ -1235,6 +1333,16 @@ async def _invoke_opencode(
         tool = _normalize_tool(effective_cli_config)
         executable = _resolve_cli_executable(effective_cli_config)
         model = str(_cfg_value(effective_cli_config, "model", "") or "")
+        if on_invocation_metadata:
+            on_invocation_metadata(
+                _output_source_from_invocation(
+                    lease=lease,
+                    tool=tool,
+                    model=model,
+                    required_capability=model_capability,
+                    attempt=attempt,
+                )
+            )
         runtime_namespace = f"{lease.option.id}-{uuid4().hex[:8]}"
         cwd = _select_cli_cwd(workspace, tool, project_dir, runtime_namespace=runtime_namespace)
         if on_line:

@@ -70,6 +70,23 @@ class Candidate(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class OutputSource(BaseModel):
+    """Metadata describing which runtime produced an AI-visible output."""
+    agent_id: str = ""
+    agent_name: str = ""
+    agent_session_id: str = ""
+    backend: str = ""              # "cli" | "api" | "system"
+    tool: str = ""
+    model_id: str = ""
+    model: str = ""
+    use_default_model: bool = False
+    capability: str = ""
+    required_capability: str = ""
+    task_id: str = ""
+    attempt: int = 0
+    started_at: str = ""
+
+
 class Vulnerability(BaseModel):
     """A confirmed or assessed vulnerability after AI analysis."""
     file: str
@@ -88,6 +105,7 @@ class Vulnerability(BaseModel):
     ticket_id: str = ""                      # 问题单号
     function_source: str = ""
     function_start_line: int | None = None
+    output_source: OutputSource = Field(default_factory=OutputSource)
 
 
 # --- API request/response models ---
@@ -298,6 +316,7 @@ class SkillReport(BaseModel):
     title: str = ""
     content: str
     created_at: str = ""
+    output_source: OutputSource = Field(default_factory=OutputSource)
 
 
 class OpenCodePoolModelStats(BaseModel):
@@ -599,6 +618,8 @@ class FpReviewResult(BaseModel):
     reason: str               # AI reasoning
     vulnerability_report: str = ""  # Markdown report for confirmed issues
     stage_outputs: dict[str, str] = {}
+    stage_output_sources: dict[str, OutputSource] = Field(default_factory=dict)
+    output_source: OutputSource = Field(default_factory=OutputSource)
     created_at: str
 
 
@@ -608,6 +629,7 @@ class FpReviewStageOutput(BaseModel):
     vuln_index: int
     stage: str
     markdown: str
+    output_source: OutputSource = Field(default_factory=OutputSource)
     created_at: str
     updated_at: str
 
@@ -640,6 +662,8 @@ class AgentFpReviewResult(BaseModel):
     reason: str
     vulnerability_report: str = ""
     stage_outputs: dict[str, str] = {}
+    stage_output_sources: dict[str, OutputSource] = Field(default_factory=dict)
+    output_source: OutputSource = Field(default_factory=OutputSource)
 
 
 class AgentFpReviewStageOutput(BaseModel):
@@ -648,6 +672,7 @@ class AgentFpReviewStageOutput(BaseModel):
     vuln_index: int
     stage: str
     markdown: str
+    output_source: OutputSource = Field(default_factory=OutputSource)
 
 
 class AgentFpReviewProgress(BaseModel):

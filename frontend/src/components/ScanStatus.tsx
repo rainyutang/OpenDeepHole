@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getSkillReports, retryIncompleteScan } from "../api/client";
-import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus } from "../types";
+import type { FpReviewJob, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OutputSource } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
@@ -18,6 +18,21 @@ const PHASES = [
   { key: "auditing", label: "AI 审计" },
   { key: "complete", label: "完成" },
 ] as const;
+
+function hasOutputSource(source?: OutputSource | null): boolean {
+  return Boolean(source && (source.agent_name || source.agent_id || source.model || source.model_id || source.tool));
+}
+
+function formatOutputSource(source?: OutputSource | null): string {
+  if (!hasOutputSource(source)) return "";
+  const agent = source?.agent_name || source?.agent_id || "未知 Agent";
+  const tool = source?.tool || source?.backend || "AI";
+  const model = source?.use_default_model
+    ? "CLI 默认模型"
+    : (source?.model || source?.model_id || "默认模型");
+  const modelId = source?.model_id && source.model_id !== model ? `${source.model_id} / ${model}` : model;
+  return `${agent} · ${tool} · ${modelId}`;
+}
 
 function statusToPhaseIndex(status: ScanItemStatus): number {
   if (status === "pending") return 0;
@@ -174,6 +189,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               ...(existing.stage_outputs ?? {}),
               [data.stage]: data.markdown,
             },
+            stage_output_sources: {
+              ...(existing.stage_output_sources ?? {}),
+              [data.stage]: data.output_source ?? {},
+            },
           };
         } else {
           results.push({
@@ -183,6 +202,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             reason: "",
             vulnerability_report: "",
             stage_outputs: { [data.stage]: data.markdown },
+            stage_output_sources: { [data.stage]: data.output_source ?? {} },
             created_at: new Date().toISOString(),
           });
         }
@@ -203,6 +223,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             ...(existing?.stage_outputs ?? {}),
             ...(data.stage_outputs ?? {}),
           },
+          stage_output_sources: {
+            ...(existing?.stage_output_sources ?? {}),
+            ...(data.stage_output_sources ?? {}),
+          },
+          output_source: data.output_source,
           created_at: new Date().toISOString(),
         };
         return {
@@ -1105,6 +1130,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                       >
                         <div className="text-xs font-semibold text-slate-200 truncate">{report.title || report.filename}</div>
                         <div className="mt-1 text-[11px] text-slate-500 font-mono truncate">{report.checker_name}/{report.filename}</div>
+                        {hasOutputSource(report.output_source) && (
+                          <div className="mt-1 text-[11px] text-cyan-300 truncate">{formatOutputSource(report.output_source)}</div>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -1112,7 +1140,21 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               </div>
               <div className="min-w-0 flex-1 overflow-y-auto p-5">
                 {activeReport ? (
-                  <MarkdownContent content={activeReport.content} />
+                  <>
+                    {hasOutputSource(activeReport.output_source) && (
+                      <div
+                        className="mb-3 rounded border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-200"
+                        title={[
+                          activeReport.output_source?.agent_id ? `Agent ID: ${activeReport.output_source.agent_id}` : "",
+                          activeReport.output_source?.agent_session_id ? `Session: ${activeReport.output_source.agent_session_id}` : "",
+                          activeReport.output_source?.task_id ? `Task: ${activeReport.output_source.task_id}` : "",
+                        ].filter(Boolean).join("\n")}
+                      >
+                        输出来源：{formatOutputSource(activeReport.output_source)}
+                      </div>
+                    )}
+                    <MarkdownContent content={activeReport.content} />
+                  </>
                 ) : (
                   <div className="text-sm text-slate-500">选择左侧报告查看内容</div>
                 )}

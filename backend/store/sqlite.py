@@ -18,6 +18,7 @@ from backend.models import (
     FpReviewStatus,
     OpenCodePoolModelStats,
     OpenCodePoolStatus,
+    OutputSource,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -39,6 +40,36 @@ def _json_dict(value: str | None) -> dict[str, str]:
     if not isinstance(data, dict):
         return {}
     return {str(k): str(v) for k, v in data.items()}
+
+
+def _output_source(value: str | None) -> OutputSource:
+    try:
+        data = json.loads(value or "{}")
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    try:
+        return OutputSource(**data)
+    except Exception:
+        return OutputSource()
+
+
+def _output_source_map(value: str | None) -> dict[str, OutputSource]:
+    try:
+        data = json.loads(value or "{}")
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, OutputSource] = {}
+    for key, raw in data.items():
+        if isinstance(raw, dict):
+            try:
+                out[str(key)] = OutputSource(**raw)
+            except Exception:
+                out[str(key)] = OutputSource()
+    return out
 
 
 def _opencode_pool_status(value: str | None) -> OpenCodePoolStatus | None:
@@ -92,6 +123,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     user_verdict_reason TEXT,
     ticket_submitted    INTEGER NOT NULL DEFAULT 0,
     ticket_id           TEXT NOT NULL DEFAULT '',
+    output_source       TEXT NOT NULL DEFAULT '{}',
     UNIQUE(scan_id, idx)
 );
 
@@ -121,6 +153,7 @@ CREATE TABLE IF NOT EXISTS skill_reports (
     title        TEXT NOT NULL DEFAULT '',
     content      TEXT NOT NULL,
     created_at   TEXT NOT NULL,
+    output_source TEXT NOT NULL DEFAULT '{}',
     UNIQUE(scan_id, checker_name, filename)
 );
 
@@ -169,6 +202,8 @@ CREATE TABLE IF NOT EXISTS fp_review_results (
     reason      TEXT NOT NULL,
     vulnerability_report TEXT NOT NULL DEFAULT '',
     stage_outputs TEXT NOT NULL DEFAULT '{}',
+    stage_output_sources TEXT NOT NULL DEFAULT '{}',
+    output_source TEXT NOT NULL DEFAULT '{}',
     created_at  TEXT NOT NULL,
     UNIQUE(review_id, vuln_index)
 );
@@ -178,6 +213,7 @@ CREATE TABLE IF NOT EXISTS fp_review_stage_outputs (
     vuln_index  INTEGER NOT NULL,
     stage       TEXT NOT NULL,
     markdown    TEXT NOT NULL DEFAULT '',
+    output_source TEXT NOT NULL DEFAULT '{}',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     PRIMARY KEY(review_id, vuln_index, stage)
@@ -308,6 +344,17 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN ticket_id TEXT NOT NULL DEFAULT ''"
             )
+        if "output_source" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN output_source TEXT NOT NULL DEFAULT '{}'"
+            )
+
+        report_cur = self._conn.execute("PRAGMA table_info(skill_reports)")
+        report_cols = {r[1] for r in report_cur.fetchall()}
+        if "output_source" not in report_cols:
+            self._conn.execute(
+                "ALTER TABLE skill_reports ADD COLUMN output_source TEXT NOT NULL DEFAULT '{}'"
+            )
 
         feedback_cur = self._conn.execute("PRAGMA table_info(feedback_entries)")
         feedback_cols = {r[1] for r in feedback_cur.fetchall()}
@@ -371,6 +418,8 @@ class SqliteScanStore(ScanStoreBase):
                 reason      TEXT NOT NULL,
                 vulnerability_report TEXT NOT NULL DEFAULT '',
                 stage_outputs TEXT NOT NULL DEFAULT '{}',
+                stage_output_sources TEXT NOT NULL DEFAULT '{}',
+                output_source TEXT NOT NULL DEFAULT '{}',
                 created_at  TEXT NOT NULL,
                 UNIQUE(review_id, vuln_index)
             );
@@ -379,6 +428,7 @@ class SqliteScanStore(ScanStoreBase):
                 vuln_index  INTEGER NOT NULL,
                 stage       TEXT NOT NULL,
                 markdown    TEXT NOT NULL DEFAULT '',
+                output_source TEXT NOT NULL DEFAULT '{}',
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL,
                 PRIMARY KEY(review_id, vuln_index, stage)
@@ -408,6 +458,20 @@ class SqliteScanStore(ScanStoreBase):
         if "stage_outputs" not in fp_cols:
             self._conn.execute(
                 "ALTER TABLE fp_review_results ADD COLUMN stage_outputs TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "stage_output_sources" not in fp_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_results ADD COLUMN stage_output_sources TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "output_source" not in fp_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_results ADD COLUMN output_source TEXT NOT NULL DEFAULT '{}'"
+            )
+        fp_stage_cur = self._conn.execute("PRAGMA table_info(fp_review_stage_outputs)")
+        fp_stage_cols = {r[1] for r in fp_stage_cur.fetchall()}
+        if "output_source" not in fp_stage_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_stage_outputs ADD COLUMN output_source TEXT NOT NULL DEFAULT '{}'"
             )
         # user_id 列由上方 ALTER 迁移产生，索引只能建在迁移之后
         self._conn.execute(
@@ -886,8 +950,8 @@ class SqliteScanStore(ScanStoreBase):
                      severity, description, ai_analysis, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
-                     function_source, function_start_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     function_source, function_start_line, output_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -908,6 +972,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.ticket_id if vuln.ticket_submitted else "",
                     vuln.function_source,
                     vuln.function_start_line,
+                    vuln.output_source.model_dump_json(),
                 ),
             )
             self._conn.commit()
@@ -949,7 +1014,8 @@ class SqliteScanStore(ScanStoreBase):
                         ticket_submitted = 0,
                         ticket_id = '',
                         function_source = ?,
-                        function_start_line = ?
+                        function_start_line = ?,
+                        output_source = ?
                     WHERE scan_id = ? AND idx = ?
                     """,
                     (
@@ -961,6 +1027,7 @@ class SqliteScanStore(ScanStoreBase):
                         vuln.failure_reason,
                         vuln.function_source,
                         vuln.function_start_line,
+                        vuln.output_source.model_dump_json(),
                         scan_id,
                         idx,
                     ),
@@ -980,8 +1047,8 @@ class SqliteScanStore(ScanStoreBase):
                      severity, description, ai_analysis, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
-                     function_source, function_start_line)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     function_source, function_start_line, output_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -1002,6 +1069,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.ticket_id if vuln.ticket_submitted else "",
                     vuln.function_source,
                     vuln.function_start_line,
+                    vuln.output_source.model_dump_json(),
                 ),
             )
             self._conn.commit()
@@ -1124,6 +1192,7 @@ class SqliteScanStore(ScanStoreBase):
                 ticket_id=r["ticket_id"] or "",
                 function_source=r["function_source"] or "",
                 function_start_line=r["function_start_line"],
+                output_source=_output_source(r["output_source"] if "output_source" in r.keys() else "{}"),
             )
             for r in cur.fetchall()
         ]
@@ -1166,8 +1235,8 @@ class SqliteScanStore(ScanStoreBase):
                 self._conn.execute(
                     """\
                     INSERT INTO skill_reports
-                        (scan_id, checker_name, filename, title, content, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (scan_id, checker_name, filename, title, content, created_at, output_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         scan_id,
@@ -1176,6 +1245,7 @@ class SqliteScanStore(ScanStoreBase):
                         report.title,
                         report.content,
                         report.created_at,
+                        report.output_source.model_dump_json(),
                     ),
                 )
             self._conn.commit()
@@ -1208,6 +1278,7 @@ class SqliteScanStore(ScanStoreBase):
                 title=r["title"],
                 content=r["content"],
                 created_at=r["created_at"],
+                output_source=_output_source(r["output_source"] if "output_source" in r.keys() else "{}"),
             )
             for r in cur.fetchall()
         ]
@@ -1683,18 +1754,21 @@ class SqliteScanStore(ScanStoreBase):
         stage: str,
         markdown: str,
         timestamp: str,
+        output_source: OutputSource | None = None,
     ) -> None:
+        source = output_source or OutputSource()
         with self._lock:
             self._conn.execute(
                 """\
                 INSERT INTO fp_review_stage_outputs
-                    (review_id, vuln_index, stage, markdown, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (review_id, vuln_index, stage, markdown, output_source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(review_id, vuln_index, stage) DO UPDATE SET
                     markdown = excluded.markdown,
+                    output_source = excluded.output_source,
                     updated_at = excluded.updated_at
                 """,
-                (review_id, vuln_index, stage, markdown, timestamp, timestamp),
+                (review_id, vuln_index, stage, markdown, source.model_dump_json(), timestamp, timestamp),
             )
             self._conn.commit()
 
@@ -1715,6 +1789,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln_index=r["vuln_index"],
                     stage=r["stage"],
                     markdown=r["markdown"] or "",
+                    output_source=_output_source(r["output_source"] if "output_source" in r.keys() else "{}"),
                     created_at=r["created_at"],
                     updated_at=r["updated_at"],
                 )
@@ -1751,8 +1826,11 @@ class SqliteScanStore(ScanStoreBase):
 
     def _row_to_fp_review_result(self, row: sqlite3.Row) -> FpReviewResult:
         stage_outputs = _json_dict(row["stage_outputs"] if "stage_outputs" in row.keys() else "{}")
+        stage_output_sources = _output_source_map(row["stage_output_sources"] if "stage_output_sources" in row.keys() else "{}")
         if not stage_outputs:
             stage_outputs = self._stage_outputs_for_result(row["review_id"], row["vuln_index"])
+        if not stage_output_sources:
+            stage_output_sources = self._stage_output_sources_for_result(row["review_id"], row["vuln_index"])
         return FpReviewResult(
             vuln_index=row["vuln_index"],
             verdict=row["verdict"],
@@ -1760,6 +1838,8 @@ class SqliteScanStore(ScanStoreBase):
             reason=row["reason"],
             vulnerability_report=row["vulnerability_report"] or "",
             stage_outputs=stage_outputs,
+            stage_output_sources=stage_output_sources,
+            output_source=_output_source(row["output_source"] if "output_source" in row.keys() else "{}"),
             created_at=row["created_at"],
         )
 
@@ -1773,6 +1853,17 @@ class SqliteScanStore(ScanStoreBase):
             (review_id, vuln_index),
         )
         return {str(r["stage"]): str(r["markdown"] or "") for r in cur.fetchall()}
+
+    def _stage_output_sources_for_result(self, review_id: str, vuln_index: int) -> dict[str, OutputSource]:
+        cur = self._conn.execute(
+            """\
+            SELECT stage, output_source
+            FROM fp_review_stage_outputs
+            WHERE review_id = ? AND vuln_index = ?
+            """,
+            (review_id, vuln_index),
+        )
+        return {str(r["stage"]): _output_source(r["output_source"]) for r in cur.fetchall()}
 
     def update_fp_review_job(
         self,
@@ -1821,8 +1912,9 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 """\
                 INSERT OR REPLACE INTO fp_review_results
-                    (review_id, vuln_index, verdict, severity, reason, vulnerability_report, stage_outputs, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (review_id, vuln_index, verdict, severity, reason, vulnerability_report,
+                     stage_outputs, stage_output_sources, output_source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     review_id,
@@ -1832,6 +1924,11 @@ class SqliteScanStore(ScanStoreBase):
                     result.reason,
                     result.vulnerability_report,
                     json.dumps(result.stage_outputs, ensure_ascii=False),
+                    json.dumps(
+                        {key: value.model_dump() for key, value in result.stage_output_sources.items()},
+                        ensure_ascii=False,
+                    ),
+                    result.output_source.model_dump_json(),
                     result.created_at,
                 ),
             )

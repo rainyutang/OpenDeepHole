@@ -4,6 +4,7 @@ import type {
   FpReviewJob,
   FpReviewStatus,
   IndexStatus,
+  OutputSource,
   ScanEvent,
   ScanStatus,
   Vulnerability,
@@ -60,6 +61,8 @@ interface FpReviewResultEvent {
   reason: string;
   vulnerability_report?: string;
   stage_outputs?: Record<string, string>;
+  stage_output_sources?: Record<string, OutputSource>;
+  output_source?: OutputSource;
 }
 
 interface FpReviewStageOutputEvent {
@@ -67,6 +70,7 @@ interface FpReviewStageOutputEvent {
   vuln_index: number;
   stage: string;
   markdown: string;
+  output_source?: OutputSource;
 }
 
 interface FpReviewFinishEvent {
@@ -125,6 +129,7 @@ async function refreshFullState(
           return {
             ...r,
             stage_outputs: { ...(existing.stage_outputs ?? {}), ...(r.stage_outputs ?? {}) },
+            stage_output_sources: { ...(existing.stage_output_sources ?? {}), ...(r.stage_output_sources ?? {}) },
           };
         }
         return r;
