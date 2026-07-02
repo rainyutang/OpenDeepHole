@@ -101,6 +101,16 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             vulnerabilities=msg.get("vulnerabilities", []),
             feedback_entries=msg.get("feedback_entries", []),
         )
+    elif cmd_type == "vulnerability_validation":
+        from agent.updater import ensure_runtime_updated
+        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        await agent_server.handle_vulnerability_validation(
+            scan_id=msg["scan_id"],
+            vuln_index=int(msg["vuln_index"]),
+            project_path=msg.get("project_path", ""),
+            vulnerability=msg.get("vulnerability") or {},
+            report_markdown=msg.get("report_markdown", ""),
+        )
     elif cmd_type == "fp_review_stop":
         await agent_server.handle_fp_review_stop(
             scan_id=msg["scan_id"],

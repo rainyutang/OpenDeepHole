@@ -21,6 +21,7 @@ _agent_id: Optional[str] = None  # Assigned by server on WebSocket connect
 _fp_review_tasks: dict[str, asyncio.Task] = {}
 _fp_review_cancel_events: dict[str, threading.Event] = {}
 _fp_review_scan_ids: dict[str, str] = {}
+_validation_tasks: dict[tuple[str, int], asyncio.Task] = {}
 
 
 def active_fp_review_snapshots() -> list[dict]:
@@ -229,6 +230,60 @@ async def handle_fp_review_stop(scan_id: str, review_id: str) -> None:
         print(f"Cancelling FP review task {review_id} for scan {scan_id}")
         return
     print(f"Warning: FP review {review_id} not found for stop")
+
+
+async def handle_vulnerability_validation(
+    scan_id: str,
+    vuln_index: int,
+    project_path: str,
+    vulnerability: dict,
+    report_markdown: str,
+) -> None:
+    """Handle a 'vulnerability_validation' command — run local validator script."""
+    if _config is None or _reporter is None:
+        print(f"Warning: agent not fully initialized, ignoring validation {scan_id}#{vuln_index}")
+        return
+    task_key = (scan_id, vuln_index)
+    existing = _validation_tasks.get(task_key)
+    if existing is not None and not existing.done():
+        print(f"Warning: validation {scan_id}#{vuln_index} already running, ignoring duplicate")
+        return
+
+    cancel_event = threading.Event()
+
+    async def _run_validation() -> None:
+        from agent.config import apply_network_env, apply_remote_config
+        from agent.vulnerability_validation import run_vulnerability_validation
+        from backend.models import Vulnerability
+
+        if _reporter is not None and _agent_id is not None:
+            try:
+                remote_cfg = await _reporter.fetch_config(_agent_id)
+                if remote_cfg:
+                    apply_remote_config(_config, remote_cfg)
+                    apply_network_env(_config)
+            except Exception:
+                pass
+        try:
+            work_root = Path.home() / ".opendeephole" / "vulnerability_validation" / "runs" / scan_id
+            await run_vulnerability_validation(
+                config=_config,
+                reporter=_reporter,
+                scan_id=scan_id,
+                vuln_index=vuln_index,
+                vulnerability=Vulnerability(**vulnerability),
+                report_markdown=report_markdown,
+                scan_dir=work_root,
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            print(f"[validation] Unhandled error in validation {scan_id}#{vuln_index}: {exc}")
+        finally:
+            _validation_tasks.pop(task_key, None)
+
+    _validation_tasks[task_key] = asyncio.create_task(_run_validation())
+    path_hint = f" ({project_path})" if project_path else ""
+    print(f"Started vulnerability validation {scan_id}#{vuln_index}{path_hint}")
 
 
 async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[dict]) -> None:

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, retryIncompleteScan } from "../api/client";
+import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, retryIncompleteScan, triggerVulnerabilityValidation } from "../api/client";
 import type { Candidate, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, Vulnerability, OutputSource, VulnerabilityValidation } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
@@ -161,6 +161,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
   const [fpReviewLoading, setFpReviewLoading] = useState(false);
   const [fpReviewStopping, setFpReviewStopping] = useState(false);
+  const [launchingValidations, setLaunchingValidations] = useState<Set<number>>(new Set());
 
   // Code indexing progress
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
@@ -219,6 +220,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       });
     },
     onVulnerabilityValidation: (data) => {
+      setLaunchingValidations((prev) => {
+        if (!prev.has(data.validation.vuln_index)) return prev;
+        const next = new Set(prev);
+        next.delete(data.validation.vuln_index);
+        return next;
+      });
       setScan((prev) => {
         if (!prev) return prev;
         const validations = [...(prev.validations ?? [])];
@@ -377,6 +384,22 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       alert(`AI去误报失败：${msg || "未知错误"}`);
     } finally {
       setFpReviewLoading(false);
+    }
+  };
+
+  const handleTriggerValidation = async (index: number) => {
+    setLaunchingValidations((prev) => new Set(prev).add(index));
+    try {
+      await triggerVulnerabilityValidation(scanId, index);
+    } catch (err: unknown) {
+      const response = (err as { response?: { data?: { detail?: string } } }).response;
+      const msg = response?.data?.detail || (err instanceof Error ? err.message : "未知错误");
+      alert(`启动漏洞验证失败：${msg}`);
+      setLaunchingValidations((prev) => {
+        const next = new Set(prev);
+        next.delete(index);
+        return next;
+      });
     }
   };
 
@@ -617,6 +640,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       fpReview={fpReview}
       currentFpReviewIndices={currentFpReviewIndices}
       fpReviewRunning={isFpReviewing}
+      validations={scan.validations ?? []}
+      validatingIndices={launchingValidations}
+      agentOnline={!!scan.agent_online}
+      onTriggerValidation={handleTriggerValidation}
       onFeedbackCreated={addSelectedFeedbackIds}
       onFeedbackRemoved={removeSelectedFeedbackIds}
       onVulnMarked={() => {
@@ -1587,15 +1614,37 @@ function ValidationPanel({
   validations: VulnerabilityValidation[];
   events: ScanEvent[];
 }) {
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const confirmed = vulnerabilities
     .map((vuln, index) => ({ vuln, index }))
     .filter(({ vuln }) => isAiConfirmed(vuln));
   const validationByIndex = new Map(validations.map((item) => [item.vuln_index, item]));
-  const runningCount = validations.filter((item) => item.running).length;
-  const completedCount = validations.filter((item) => isValidationComplete(item.status)).length;
-  const failedCount = validations.filter((item) => isValidationFailed(item.status)).length;
+  const items = confirmed
+    .map(({ vuln, index }) => ({ vuln, index, validation: validationByIndex.get(index) }))
+    .sort((a, b) => {
+      const aRank = validationSortRank(a.validation);
+      const bRank = validationSortRank(b.validation);
+      if (aRank !== bRank) return aRank - bRank;
+      return a.index - b.index;
+    });
+  const itemValidations = items.map((item) => item.validation).filter((item): item is VulnerabilityValidation => Boolean(item));
+  const waitingCount = items.filter((item) => !item.validation || item.validation.status === "queued" || item.validation.status === "pending").length;
+  const runningCount = itemValidations.filter((item) => item.running || item.status === "running").length;
+  const completedCount = itemValidations.filter((item) => isValidationComplete(item.status)).length;
+  const failedCount = itemValidations.filter((item) => isValidationFailed(item.status)).length;
   const status = runningCount > 0 ? "验证中" : completedCount > 0 ? "已验证" : confirmed.length > 0 ? "等待" : "无目标";
   const tone: TaskTone = runningCount > 0 ? "blue" : failedCount > 0 ? "red" : completedCount > 0 ? "green" : "slate";
+  const selected = selectedIndex === null ? null : items.find((item) => item.index === selectedIndex) ?? null;
+
+  useEffect(() => {
+    if (items.length === 0) {
+      if (selectedIndex !== null) setSelectedIndex(null);
+      return;
+    }
+    if (selectedIndex === null || !items.some((item) => item.index === selectedIndex)) {
+      setSelectedIndex(items[0].index);
+    }
+  }, [items, selectedIndex]);
 
   return (
     <TaskPanel
@@ -1604,8 +1653,9 @@ function ValidationPanel({
       tone={tone}
       summary="对漏洞挖掘阶段确认的问题调用 Agent 本地验证脚本，展示验证过程和脚本返回结果。"
     >
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
         <MiniMetric label="确认问题" value={confirmed.length} tone="red" />
+        <MiniMetric label="等待验证" value={waitingCount} />
         <MiniMetric label="验证中" value={runningCount} tone="blue" />
         <MiniMetric label="已完成" value={completedCount} tone="green" />
         <MiniMetric label="异常/超时" value={failedCount} tone="amber" />
@@ -1613,15 +1663,62 @@ function ValidationPanel({
       {confirmed.length === 0 ? (
         <EmptyState text="当前还没有漏洞挖掘阶段确认的问题。" />
       ) : (
-        <div className="space-y-3">
-          {confirmed.map(({ vuln, index }) => (
-            <ValidationCard
-              key={`${index}-${vuln.file}-${vuln.line}`}
-              index={index}
-              vulnerability={vuln}
-              validation={validationByIndex.get(index)}
-            />
-          ))}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,22rem)_1fr]">
+          <div className="flex flex-col rounded-xl border border-slate-700 bg-slate-900/40">
+            <div className="max-h-[70vh] flex-1 overflow-y-auto">
+              <ul className="divide-y divide-slate-800">
+                {items.map(({ vuln, index, validation }) => {
+                  const active = selectedIndex === index;
+                  const statusText = validation?.status || "pending";
+                  const itemTone = validationTone(validation);
+                  const fileName = vuln.file.split("/").pop() || vuln.file;
+                  return (
+                    <li key={`${index}-${vuln.file}-${vuln.line}`}>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedIndex(index)}
+                        className={`w-full px-3 py-2.5 text-left transition-colors ${
+                          active ? "bg-blue-500/15" : "hover:bg-slate-800/60"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="truncate font-mono text-xs text-slate-200" title={`${vuln.file}:${vuln.line}`}>
+                            {fileName}:{vuln.line}
+                          </span>
+                          {validation?.running && <span className="ml-auto h-3 w-3 shrink-0 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />}
+                        </div>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] font-semibold uppercase text-slate-400 bg-slate-700/50 px-1.5 py-0.5 rounded">
+                            {vuln.vuln_type}
+                          </span>
+                          <StatusPill label={validationStatusLabel(statusText)} tone={itemTone} />
+                        </div>
+                        {vuln.function && (
+                          <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={vuln.function}>
+                            {vuln.function}
+                          </div>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </div>
+
+          <div className="min-h-[20rem] rounded-xl border border-slate-700 bg-slate-900/40">
+            {selected ? (
+              <ValidationDetail
+                index={selected.index}
+                vulnerability={selected.vuln}
+                validation={selected.validation}
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
+                从左侧选择一个问题查看验证详情
+              </div>
+            )}
+          </div>
         </div>
       )}
       <EventList events={events} empty="暂无验证任务日志" />
@@ -1629,7 +1726,7 @@ function ValidationPanel({
   );
 }
 
-function ValidationCard({
+function ValidationDetail({
   index,
   vulnerability,
   validation,
@@ -1639,33 +1736,43 @@ function ValidationCard({
   validation?: VulnerabilityValidation;
 }) {
   const status = validation?.status || "pending";
-  const tone: TaskTone = validation?.running ? "blue" : isValidationFailed(status) ? "red" : isValidationComplete(status) ? "green" : "slate";
+  const tone = validationTone(validation);
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-xs text-slate-500">#{index}</span>
-            <span className="text-sm font-semibold text-slate-100">{vulnerability.vuln_type}</span>
-            <span className="text-xs text-slate-500">{vulnerability.severity}</span>
+    <div className="max-h-[70vh] overflow-y-auto p-4">
+      <div className="border-b border-slate-800 pb-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-xs text-slate-500">#{index}</span>
+              <span className="text-sm font-semibold text-slate-100">{vulnerability.vuln_type}</span>
+              <span className="text-xs text-slate-500">{vulnerability.severity}</span>
+            </div>
+            <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerability.file}:{vulnerability.line}</div>
+            <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerability.function}</div>
           </div>
-          <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerability.file}:{vulnerability.line}</div>
-          <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerability.function}</div>
-        </div>
-        <div className="flex items-center gap-2">
-          {validation?.running && <span className="h-3 w-3 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />}
-          <StatusPill label={validationStatusLabel(status)} tone={tone} />
+          <div className="flex items-center gap-2">
+            {validation?.running && <span className="h-3 w-3 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />}
+            <StatusPill label={validationStatusLabel(status)} tone={tone} />
+          </div>
         </div>
       </div>
-      {validation ? (
-        <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-3">
-          <ValidationBlock title="中间产出" content={validation.intermediate_output} />
-          <ValidationBlock title="验证代码" content={validation.validation_code} />
-          <ValidationBlock title="验证输出" content={validation.validation_output} />
+      <div className="mt-4 space-y-4">
+        <div className="min-w-0">
+          <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">漏洞摘要</h4>
+          <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
+            <MarkdownContent content={vulnerability.description || "（无描述）"} />
+          </div>
         </div>
-      ) : (
-        <div className="mt-3 rounded border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs text-slate-500">等待验证脚本启动</div>
-      )}
+        {validation ? (
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+            <ValidationBlock title="中间产出" content={validation.intermediate_output} />
+            <ValidationBlock title="验证代码" content={validation.validation_code} />
+            <ValidationBlock title="验证输出" content={validation.validation_output} />
+          </div>
+        ) : (
+          <div className="rounded border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs text-slate-500">等待验证脚本启动</div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1684,6 +1791,7 @@ function ValidationBlock({ title, content }: { title: string; content: string })
 function validationStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     pending: "等待",
+    queued: "等待",
     running: "验证中",
     verified: "已验证",
     success: "已验证",
@@ -1694,6 +1802,23 @@ function validationStatusLabel(status: string): string {
     skipped: "跳过",
   };
   return labels[status] ?? status;
+}
+
+function validationTone(validation?: VulnerabilityValidation): TaskTone {
+  const status = validation?.status || "pending";
+  if (validation?.running || status === "queued" || status === "running") return "blue";
+  if (isValidationFailed(status)) return "red";
+  if (isValidationComplete(status)) return "green";
+  return "slate";
+}
+
+function validationSortRank(validation?: VulnerabilityValidation): number {
+  if (!validation) return 1;
+  if (validation.running || validation.status === "running") return 0;
+  if (validation.status === "queued" || validation.status === "pending") return 1;
+  if (isValidationFailed(validation.status)) return 2;
+  if (isValidationComplete(validation.status)) return 3;
+  return 4;
 }
 
 function isValidationComplete(status: string): boolean {

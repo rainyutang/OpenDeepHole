@@ -47,6 +47,7 @@ from backend.models import (
     UnmarkRequest,
     UpdateScanProductRequest,
     User,
+    VulnerabilityValidation,
 )
 from backend.opencode.feedback_format import build_feedback_section
 from backend.scan_metrics import (
@@ -241,6 +242,33 @@ def _resolve_scan_agent_id(meta: ScanMeta) -> str | None:
 
 def _server_url_from_request(request: Request) -> str:
     return str(request.base_url).rstrip("/")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _publish_validation(scan_id: str, validation: VulnerabilityValidation) -> None:
+    from backend.sse import publish
+
+    publish(scan_id, "vulnerability_validation", {
+        "validation": validation.model_dump(),
+    })
+
+
+def _update_running_validation(scan_id: str, validation: VulnerabilityValidation) -> None:
+    scan = _running_scans.get(scan_id)
+    if scan is None:
+        return
+    existing = next(
+        (idx for idx, item in enumerate(scan.validations) if item.vuln_index == validation.vuln_index),
+        None,
+    )
+    if existing is None:
+        scan.validations.append(validation)
+        scan.validations.sort(key=lambda item: item.vuln_index)
+    else:
+        scan.validations[existing] = validation
 
 
 def _validated_checker_names(checkers: list[str], user: User) -> list[str]:
@@ -964,6 +992,98 @@ async def download_vulnerability_report(
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+async def _trigger_vulnerability_validation(
+    scan_id: str,
+    idx: int,
+    server_url: str,
+) -> dict:
+    """Start Agent-side local validation for one AI-confirmed vulnerability."""
+    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
+
+    store = get_scan_store()
+    loaded = store.load_scan(scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    scan, meta = loaded
+
+    if idx < 0 or idx >= len(scan.vulnerabilities):
+        raise HTTPException(status_code=404, detail="Vulnerability index out of range")
+    vuln = scan.vulnerabilities[idx]
+    if not (vuln.confirmed or vuln.ai_verdict == "confirmed"):
+        raise HTTPException(status_code=400, detail="Only AI-confirmed vulnerabilities can be validated")
+
+    existing = next((item for item in scan.validations if item.vuln_index == idx), None)
+    if existing is not None and existing.running:
+        raise HTTPException(status_code=409, detail="Validation already running")
+
+    if not meta.agent_id and not meta.agent_name:
+        raise HTTPException(status_code=400, detail="No agent associated with this scan")
+    agent_id = _resolve_scan_agent_id(meta)
+    if agent_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
+        )
+    if agent_id != meta.agent_id:
+        store.update_scan_agent(scan_id, agent_id, meta.agent_name)
+
+    now = _now_iso()
+    validation = store.upsert_vulnerability_validation(
+        scan_id,
+        VulnerabilityValidation(
+            scan_id=scan_id,
+            vuln_index=idx,
+            status="queued",
+            running=True,
+            intermediate_output="验证任务已提交到 Agent，等待本地脚本启动。",
+            started_at=now,
+            updated_at=now,
+        ),
+    )
+    _publish_validation(scan_id, validation)
+    _update_running_validation(scan_id, validation)
+
+    fp_map = _scan_fp_result_map(scan_id)
+    ok = await send_agent_command(agent_id, {
+        "type": "vulnerability_validation",
+        "scan_id": scan_id,
+        "vuln_index": idx,
+        "project_path": meta.project_path,
+        "vulnerability": vuln.model_dump(),
+        "report_markdown": _vuln_report_markdown(idx, vuln, fp_map.get(idx)),
+        "agent_runtime_update": create_agent_runtime_update_payload(server_url),
+    })
+    if not ok:
+        failed = store.upsert_vulnerability_validation(
+            scan_id,
+            validation.model_copy(update={
+                "status": "error",
+                "running": False,
+                "validation_output": "Agent not connected",
+                "finished_at": _now_iso(),
+                "updated_at": _now_iso(),
+            }),
+        )
+        _publish_validation(scan_id, failed)
+        _update_running_validation(scan_id, failed)
+        raise HTTPException(status_code=502, detail="Agent not connected")
+
+    logger.info("Manual vulnerability validation triggered for scan %s idx %d via agent %s", scan_id, idx, agent_id)
+    return {"ok": True, "vuln_index": idx}
+
+
+@router.post("/api/scan/{scan_id}/vulnerability/{idx}/validation")
+async def trigger_vulnerability_validation(
+    scan_id: str,
+    idx: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Manually start Agent-side local validation for one confirmed vulnerability."""
+    _check_scan_owner(scan_id, current_user)
+    return await _trigger_vulnerability_validation(scan_id, idx, _server_url_from_request(request))
 
 
 @router.get("/api/scan/{scan_id}/report.zip")
