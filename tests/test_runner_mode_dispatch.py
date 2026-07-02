@@ -19,6 +19,7 @@ from backend.opencode.runner import (
     _invoke_opencode,
     _prompt_file_message,
     _prepare_cli_workspace,
+    _run_audit_via_opencode,
     _serve_runtime_namespace,
     _select_cli_cwd,
     _with_writable_paths,
@@ -381,6 +382,37 @@ def test_stream_exit_wait_after_termination_is_bounded() -> None:
         future.cancel()
 
     asyncio.run(run_check())
+
+
+def test_run_audit_via_opencode_returns_failed_result_after_exhausted_errors(tmp_path: Path) -> None:
+    async def run() -> None:
+        candidate = _candidate()
+        cfg = SimpleNamespace(
+            opencode=SimpleNamespace(
+                tool="opencode",
+                executable="opencode",
+                invocation_mode="serve",
+                model="",
+                timeout=30,
+                max_retries=0,
+                models=[],
+            ),
+            opencode_concurrency=1,
+        )
+
+        with (
+            patch("backend.opencode.runner.get_config", return_value=cfg),
+            patch("backend.opencode.runner._invoke_opencode", new=AsyncMock(side_effect=RuntimeError("boom"))),
+        ):
+            result = await _run_audit_via_opencode(tmp_path, candidate, "scan-1")
+
+        assert result is not None
+        assert result.ai_verdict == "failed"
+        assert result.confirmed is False
+        assert "boom" in result.failure_reason
+        assert result.file == candidate.file
+
+    asyncio.run(run())
 
 
 def test_api_checker_uses_api_even_when_legacy_global_switch_is_false(tmp_path: Path) -> None:

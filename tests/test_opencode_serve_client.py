@@ -275,6 +275,15 @@ def test_serve_port_accepts_env_override(monkeypatch) -> None:
     assert _serve_port() == 4100
 
 
+def test_pid_is_running_uses_windows_fallback(monkeypatch) -> None:
+    from backend.opencode import serve_client
+
+    monkeypatch.setattr("backend.opencode.serve_client.sys.platform", "win32")
+    monkeypatch.setattr("backend.opencode.serve_client._windows_pid_is_running", lambda pid: False)
+
+    assert serve_client._pid_is_running(12345) is False
+
+
 def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         class FakeProc:

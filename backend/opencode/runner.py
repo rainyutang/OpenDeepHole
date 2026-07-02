@@ -833,6 +833,39 @@ def _apply_output_source_to_list(
     return vulns
 
 
+def _failed_result(
+    candidate: Candidate,
+    reason: str,
+    *,
+    analysis: str | None = None,
+) -> Vulnerability:
+    return Vulnerability(
+        file=candidate.file,
+        line=candidate.line,
+        function=candidate.function,
+        vuln_type=candidate.vuln_type,
+        severity="unknown",
+        description=candidate.description,
+        ai_analysis=analysis or reason,
+        confirmed=False,
+        ai_verdict="failed",
+        failure_reason=reason,
+    )
+
+
+def _failure_reason(log_path: Path | None, fallback: str) -> str:
+    if log_path is not None:
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            text = ""
+        if text:
+            if len(text) > 4000:
+                text = text[-4000:]
+            return f"{fallback}\n\nLast output:\n{text}"
+    return fallback
+
+
 def _effective_cli_config(cli_config, model_option) -> dict:
     data = {
         "tool": _cfg_value(cli_config, "tool", ""),
