@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 
 from code_parser import CodeDatabase
@@ -48,6 +49,23 @@ def test_reference_lookup_helpers_are_not_registered_as_mcp_tools() -> None:
     assert "find_global_variable_references" not in mcp.tools
 
 
+def test_registered_mcp_tools_do_not_expose_caller_model() -> None:
+    mcp = _FakeMCP()
+
+    register_tools(mcp)
+
+    for name in (
+        "view_function_code",
+        "view_struct_code",
+        "view_global_variable_definition",
+        "submit_result",
+        "submit_history_pattern",
+        "submit_variant_finding",
+        "submit_match_result",
+    ):
+        assert "caller_model" not in inspect.signature(mcp.tools[name]).parameters
+
+
 def test_bound_project_dir_isolated_from_agent_project_env(tmp_path, monkeypatch) -> None:
     project_a = tmp_path / "project-a"
     project_b = tmp_path / "project-b"
@@ -67,7 +85,7 @@ def test_bound_project_dir_isolated_from_agent_project_env(tmp_path, monkeypatch
     clear_db_cache()
 
 
-def test_mcp_tool_log_includes_caller_model(tmp_path, capsys) -> None:
+def test_mcp_tool_log_summarizes_source_lookup(tmp_path, capsys) -> None:
     project = tmp_path / "project"
     project.mkdir()
     _write_code_index(project, "int target(void) { return 1; }")
@@ -75,22 +93,18 @@ def test_mcp_tool_log_includes_caller_model(tmp_path, capsys) -> None:
     mcp = _FakeMCP()
     register_tools(mcp, project_dir=project)
 
-    result = mcp.tools["view_function_code"](
-        "scan-a",
-        "target",
-        caller_model="anthropic/claude-sonnet",
-    )
+    result = mcp.tools["view_function_code"]("scan-a", "target")
 
     assert "return 1" in result
     output = capsys.readouterr().out
-    assert "[MCP ▶] model=anthropic/claude-sonnet view_function_code" in output
-    assert "[MCP ◀] model=anthropic/claude-sonnet view_function_code" in output
+    assert "[MCP ▶] view_function_code" in output
+    assert "[MCP ◀] view_function_code" in output
     assert "1 match(es)" in output
     assert "return 1" not in output
     clear_db_cache()
 
 
-def test_mcp_tool_log_defaults_unknown_model(tmp_path, capsys) -> None:
+def test_mcp_tool_log_has_no_model_placeholder(tmp_path, capsys) -> None:
     project = tmp_path / "project"
     project.mkdir()
     _write_code_index(project, "int target(void) { return 1; }")
@@ -101,8 +115,9 @@ def test_mcp_tool_log_defaults_unknown_model(tmp_path, capsys) -> None:
     mcp.tools["view_function_code"]("scan-a", "target")
 
     output = capsys.readouterr().out
-    assert "[MCP ▶] model=unknown view_function_code" in output
-    assert "[MCP ◀] model=unknown view_function_code" in output
+    assert "[MCP ▶] view_function_code" in output
+    assert "[MCP ◀] view_function_code" in output
+    assert "model=" not in output
     clear_db_cache()
 
 
@@ -124,13 +139,12 @@ def test_mcp_submit_log_summarizes_long_fields(tmp_path, monkeypatch, capsys) ->
         "desc",
         "line 1\n" + "A" * 500,
         vulnerability_report="report\n" + "B" * 500,
-        caller_model="model-a",
     )
 
     output = capsys.readouterr().out
     assert output.count("submit_result") == 2
-    assert "[MCP ▶] model=model-a submit_result" in output
-    assert "[MCP ◀] model=model-a submit_result" in output
+    assert "[MCP ▶] submit_result" in output
+    assert "[MCP ◀] submit_result" in output
     assert "<chars=" in output
     assert "[truncated" in output
     assert "AAAAA" in output

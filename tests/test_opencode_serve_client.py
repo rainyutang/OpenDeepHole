@@ -41,6 +41,7 @@ class _FakeStreamContext:
 class _FakeAsyncClient:
     instances: list["_FakeAsyncClient"] = []
     event_lines: list[str] = []
+    tool_ids: list[str] | Exception = ["read", "grep", "mcp__deephole-code__view_function_code"]
 
     def __init__(self, *args, **kwargs) -> None:
         self.posts: list[dict] = []
@@ -57,6 +58,10 @@ class _FakeAsyncClient:
 
     async def get(self, path: str, **kwargs):
         self.gets.append({"path": path, **kwargs})
+        if path == "/experimental/tool/ids":
+            if isinstance(self.tool_ids, Exception):
+                return _FakeResponse([], error=self.tool_ids)
+            return _FakeResponse(self.tool_ids)
         return _FakeResponse({})
 
     async def post(self, path: str, **kwargs):
@@ -81,6 +86,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
     async def run() -> None:
         _FakeAsyncClient.instances = []
         _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["read", "grep", "mcp__deephole-code__view_function_code"]
         monkeypatch.setattr(
             "backend.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
@@ -127,8 +133,16 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
         assert message["params"] == expected_params
         assert message["headers"] == expected_headers
         assert message["json"]["agent"] == "build"
-        assert "tools" not in message["json"]
-        assert session_client.gets == []
+        assert message["json"]["tools"] == {
+            "read": True,
+            "grep": True,
+            "mcp__deephole-code__view_function_code": True,
+        }
+        assert session_client.gets == [{
+            "path": "/experimental/tool/ids",
+            "params": expected_params,
+            "headers": expected_headers,
+        }]
         assert all(not client.deletes for client in _FakeAsyncClient.instances)
         assert message["json"]["model"] == {
             "providerID": "anthropic",
@@ -138,10 +152,11 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
-def test_run_prompt_omits_tools_field_without_tool_discovery(monkeypatch, tmp_path: Path) -> None:
+def test_run_prompt_omits_tools_field_when_tool_discovery_fails(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
         _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = RuntimeError("tool endpoint unavailable")
         monkeypatch.setattr(
             "backend.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
@@ -152,6 +167,7 @@ def test_run_prompt_omits_tools_field_without_tool_discovery(monkeypatch, tmp_pa
         manager._acquire_session = AsyncMock()
         project = tmp_path / "project"
         project.mkdir()
+        output: list[str] = []
 
         lines = await manager.run_prompt(
             tool="opencode",
@@ -160,6 +176,7 @@ def test_run_prompt_omits_tools_field_without_tool_discovery(monkeypatch, tmp_pa
             prompt="hello",
             model="",
             timeout=30,
+            on_line=output.append,
         )
 
         assert lines == ["done"]
@@ -169,7 +186,12 @@ def test_run_prompt_omits_tools_field_without_tool_discovery(monkeypatch, tmp_pa
             if item["path"] == "/session/session-1/message"
         )
         assert "tools" not in message["json"]
-        assert session_client.gets == []
+        assert session_client.gets == [{
+            "path": "/experimental/tool/ids",
+            "params": {"directory": str(project)},
+            "headers": {"x-opencode-directory": str(project)},
+        }]
+        assert "tool discovery unavailable" in "\n".join(output)
 
     asyncio.run(run())
 
@@ -178,6 +200,7 @@ def test_list_models_uses_project_directory_context(monkeypatch, tmp_path: Path)
     async def run() -> None:
         _FakeAsyncClient.instances = []
         _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["read", "mcp__deephole-code__view_function_code"]
         monkeypatch.setattr(
             "backend.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
@@ -253,6 +276,7 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
         assert lines == ["done"]
         logged = "\n".join(output)
         assert "middle output" in logged
+        assert "session=session-1" in logged
         assert "name=read" in logged
         assert "src/main.c" in logged
         assert "text_chars=18" in logged

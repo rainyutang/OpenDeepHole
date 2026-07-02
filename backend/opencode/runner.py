@@ -1179,14 +1179,6 @@ def _invocation_model_label(option, model: str) -> str:
     return "default"
 
 
-def _with_caller_model_instruction(prompt: str, model_label: str) -> str:
-    return (
-        prompt.rstrip()
-        + "\n\n运行时日志要求：调用任何 MCP 工具时，必须传入 "
-        + f"`caller_model` 参数，值固定为 `{model_label}`。"
-    )
-
-
 def _with_project_root_instruction(prompt: str, project_dir: Path | None) -> str:
     if project_dir is None:
         return prompt
@@ -1404,7 +1396,6 @@ async def _invoke_opencode(
         model = str(_cfg_value(effective_cli_config, "model", "") or "")
         model_label = _invocation_model_label(lease.option, model)
         prompt = _with_project_root_instruction(prompt, project_dir)
-        prompt = _with_caller_model_instruction(prompt, model_label)
         emit_line = _model_line_emitter(on_line, model_label)
         if on_invocation_metadata:
             on_invocation_metadata(

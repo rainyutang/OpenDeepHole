@@ -222,8 +222,7 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         )
         assert "真实项目根目录" in kwargs["prompt"]
         assert str(project.resolve()) in kwargs["prompt"]
-        assert "caller_model" in kwargs["prompt"]
-        assert "anthropic/claude-sonnet" in kwargs["prompt"]
+        assert "caller_model" not in kwargs["prompt"]
         assert output_lines
         assert all(line.startswith("[model=anthropic/claude-sonnet]") for line in output_lines)
         release.assert_awaited_once()

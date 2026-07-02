@@ -307,6 +307,20 @@ def _tool_content_summary(value: object) -> str:
     return f"content_items={len(value)} text_chars={text_chars} files={files}"
 
 
+def _tool_ids_from_response(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    tool_ids: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        tool_id = str(item or "").strip()
+        if not tool_id or tool_id in seen:
+            continue
+        seen.add(tool_id)
+        tool_ids.append(tool_id)
+    return tool_ids
+
+
 class _BufferedEventEmitter:
     def __init__(self, on_line, prefix: str) -> None:
         self._on_line = on_line
@@ -377,17 +391,17 @@ def _handle_serve_event(event: object, state: _ServeEventState) -> None:
         state.emitted_text = state.reasoning.flush() or state.emitted_text
     elif event_type == "session.next.tool.called":
         state.on_line(
-            f"[{state.tool} serve tool] call name={props.get('tool') or ''} "
+            f"[{state.tool} serve tool] session={state.session_id} call name={props.get('tool') or ''} "
             f"id={props.get('callID') or ''} input={_json_one_line(props.get('input') or {})}"
         )
     elif event_type == "session.next.tool.success":
         state.on_line(
-            f"[{state.tool} serve tool] success id={props.get('callID') or ''} "
+            f"[{state.tool} serve tool] session={state.session_id} success id={props.get('callID') or ''} "
             f"{_tool_content_summary(props.get('content'))}"
         )
     elif event_type == "session.next.tool.failed":
         state.on_line(
-            f"[{state.tool} serve tool] failed id={props.get('callID') or ''} "
+            f"[{state.tool} serve tool] session={state.session_id} failed id={props.get('callID') or ''} "
             f"error={_one_line_preview(props.get('error') or '')}"
         )
     elif event_type == "message.part.delta" and not state.seen_next_event:
@@ -516,6 +530,9 @@ class OpenCodeServeManager:
                     "agent": agent,
                     "parts": [{"type": "text", "text": prompt}],
                 }
+                tool_ids = await self._list_tool_ids(client, params, headers, on_line=on_line, tool=tool)
+                if tool_ids:
+                    payload["tools"] = {tool_id: True for tool_id in tool_ids}
                 if model:
                     provider_id, model_id = split_model_id(model)
                     payload["model"] = {"providerID": provider_id, "modelID": model_id}
@@ -562,6 +579,27 @@ class OpenCodeServeManager:
                 self._active_sessions = max(0, self._active_sessions - 1)
                 if self._active_sessions == 0:
                     self._idle.notify_all()
+
+    async def _list_tool_ids(
+        self,
+        client: httpx.AsyncClient,
+        params: dict[str, str],
+        headers: dict[str, str],
+        *,
+        on_line=None,
+        tool: str = "opencode",
+    ) -> list[str]:
+        try:
+            response = await client.get("/experimental/tool/ids", params=params, headers=headers)
+            response.raise_for_status()
+        except Exception as exc:
+            if on_line:
+                on_line(f"[{tool} serve] tool discovery unavailable: {_one_line_preview(exc)}")
+            return []
+        tool_ids = _tool_ids_from_response(response.json())
+        if on_line:
+            on_line(f"[{tool} serve] tools={len(tool_ids)}")
+        return tool_ids
 
     async def list_models(
         self,

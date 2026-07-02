@@ -3,7 +3,8 @@
 ## 2026-07-02
 
 - **修复** OpenCode/nga serve 模式改为以真实项目目录创建和发送 session，请求同时携带 `directory` 查询参数和 `x-opencode-directory` 头，正常完成后不再删除 session，保证可通过 `opencode session list` 查看历史
-- **修复** serve 消息发送不再显式传入 `tools`，由 OpenCode 根据启动配置和 agent 默认能力暴露内置工具与 MCP 工具；当前任务的 MCP URL、SKILL 路径和权限配置通过 `OPENCODE_CONFIG_CONTENT` 注入 serve 启动环境
+- **修复** serve 消息发送前恢复从 `/experimental/tool/ids` 读取当前可用工具并显式传入 `tools`，确保内置源码读取工具和已配置 MCP 工具对 OpenCode/nga 可见；当前任务的 MCP URL、SKILL 路径和权限配置通过 `OPENCODE_CONFIG_CONTENT` 注入 serve 启动环境
+- **优化** MCP 工具不再暴露或要求模型填写 `caller_model` 参数，模型/任务归属由 OpenCode 调用侧的模型池租约、session 日志和输出来源元数据记录
 - **优化** serve 进程复用身份纳入配置内容哈希，MCP/SKILL 配置变化时会等待活跃 session 结束后重启，避免继续使用旧 MCP 端口或旧运行配置
 
 ## 2026-07-01
