@@ -326,6 +326,25 @@ def test_pid_is_running_uses_windows_fallback(monkeypatch) -> None:
     assert serve_client._pid_is_running(12345) is False
 
 
+def test_terminate_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
+    from backend.opencode import serve_client
+
+    running = {"alive": True}
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        running["alive"] = False
+
+    monkeypatch.setattr("backend.opencode.serve_client.sys.platform", "win32")
+    monkeypatch.setattr("backend.opencode.serve_client._pid_is_running", lambda pid: running["alive"])
+    monkeypatch.setattr("backend.opencode.serve_client.subprocess.run", fake_run)
+
+    serve_client._terminate_process_tree(12345)
+
+    assert commands == [["taskkill", "/PID", "12345", "/T", "/F"]]
+
+
 def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         class FakeProc:
@@ -404,7 +423,7 @@ def test_start_locked_stops_previous_agent_owned_marker(monkeypatch, tmp_path: P
         monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
         monkeypatch.setattr("backend.opencode.serve_client._pid_is_running", lambda pid: pid == 11111)
         monkeypatch.setattr("backend.opencode.serve_client._marker_matches_serve_process", lambda marker: True)
-        monkeypatch.setattr("backend.opencode.serve_client._terminate_pid", lambda pid: terminated.append(pid))
+        monkeypatch.setattr("backend.opencode.serve_client._terminate_process_tree", lambda pid: terminated.append(pid))
         monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: False)
         monkeypatch.setattr("backend.opencode.serve_client.asyncio.to_thread", fake_to_thread)
         monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", lambda *args, **kwargs: FakeProc())
@@ -417,6 +436,86 @@ def test_start_locked_stops_previous_agent_owned_marker(monkeypatch, tmp_path: P
         assert terminated == [11111]
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
         assert marker["pid"] == 22222
+
+    asyncio.run(run())
+
+
+def test_stop_locked_terminates_process_tree_and_removes_marker(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        class FakeProc:
+            pid = 33333
+
+            def __init__(self) -> None:
+                self.wait_calls: list[float] = []
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout):
+                self.wait_calls.append(timeout)
+
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "pid": 33333,
+                "port": 4096,
+                "tool": "opencode",
+                "executable": "opencode",
+            }),
+            encoding="utf-8",
+        )
+        terminated: list[int] = []
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        def fake_terminate(pid, timeout=5.0, wait=None):
+            terminated.append(pid)
+            assert wait is not None
+            wait(0.01)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("backend.opencode.serve_client._terminate_process_tree", fake_terminate)
+        monkeypatch.setattr("backend.opencode.serve_client.asyncio.to_thread", fake_to_thread)
+
+        proc = FakeProc()
+        manager = OpenCodeServeManager()
+        manager._proc = proc
+
+        await manager._stop_locked()
+
+        assert terminated == [33333]
+        assert proc.wait_calls == [0.01]
+        assert not marker_path.exists()
+
+    asyncio.run(run())
+
+
+def test_stop_owned_serve_removes_stale_marker_without_terminating(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "pid": 11111,
+                "port": 4096,
+                "tool": "opencode",
+                "executable": "opencode",
+            }),
+            encoding="utf-8",
+        )
+        terminated: list[int] = []
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("backend.opencode.serve_client._pid_is_running", lambda pid: False)
+        monkeypatch.setattr("backend.opencode.serve_client._terminate_process_tree", lambda pid: terminated.append(pid))
+
+        manager = OpenCodeServeManager()
+        await manager._stop_owned_serve_on_port(4096)
+
+        assert terminated == []
+        assert not marker_path.exists()
 
     asyncio.run(run())
 

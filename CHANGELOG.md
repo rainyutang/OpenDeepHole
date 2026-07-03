@@ -2,6 +2,7 @@
 
 ## 2026-07-03
 
+- **修复** Windows 下停止扫描后继续运行时 OpenCode/nga serve 端口可能被旧子进程占用的问题；Agent 关闭或重启本 Agent 标记的 serve 时会清理进程树，避免 `.cmd` 父进程退出但 Node 子进程继续占用 `OPENCODE_SERVE_PORT`
 - **修复** OpenCode/nga serve 模式的 `x-opencode-directory` 请求头改为 ASCII 安全编码，避免项目路径包含中文等非 ASCII 字符时 httpx 在创建 `/session` 请求前抛出 `UnicodeEncodeError`
 - **优化** `loop_mut_idx_oob` Semgrep 初筛新增未校验循环上界召回：当循环变量由未提前比较校验的上界控制并用于数组下标或指针偏移访问时，会提取候选点，覆盖 `fragInfo[fragId]` 这类访问层级
 - **新增** 审计排序优先级：静态候选中若命中函数 `MC_EthBuildPayloadByFrag`，会在漏洞识别阶段优先放到第一个审计位置，不再限制漏洞类型

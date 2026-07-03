@@ -16,7 +16,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import httpx
@@ -202,24 +202,100 @@ def _marker_matches_serve_process(marker: dict[str, Any]) -> bool:
     return any("serve" == item or item.endswith(" serve") or " serve " in item for item in lowered)
 
 
-def _terminate_pid(pid: int, timeout: float = _SERVE_STOP_TIMEOUT_SECONDS) -> None:
+def _wait_process_exit(
+    pid: int,
+    timeout: float,
+    wait: Callable[[float], None] | None = None,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if wait is not None:
+            try:
+                wait(0.1)
+                return True
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                wait = None
+        if not _pid_is_running(pid):
+            return True
+        time.sleep(0.1)
+    if wait is not None:
+        try:
+            wait(0)
+            return True
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
+    return not _pid_is_running(pid)
+
+
+def _terminate_process_tree(
+    pid: int,
+    timeout: float = _SERVE_STOP_TIMEOUT_SECONDS,
+    wait: Callable[[float], None] | None = None,
+) -> None:
     if not _pid_is_running(pid):
         return
+    if sys.platform == "win32":
+        _terminate_windows_process_tree(pid, timeout, wait=wait)
+        return
+
+    pgid: int | None = None
     try:
-        os.kill(pid, signal.SIGTERM)
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    except Exception:
+        pgid = None
+
+    use_process_group = pgid is not None and pgid != os.getpgrp()
+
+    def _send(sig: signal.Signals | int) -> None:
+        if use_process_group and pgid is not None:
+            os.killpg(pgid, sig)
+        else:
+            os.kill(pid, sig)
+
+    try:
+        _send(signal.SIGTERM)
     except ProcessLookupError:
         return
     except Exception as exc:
         logger.warning("Failed to terminate old OpenCode serve pid %s: %s", pid, exc)
         return
 
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not _pid_is_running(pid):
-            return
-        time.sleep(0.1)
+    if _wait_process_exit(pid, timeout, wait=wait):
+        return
     try:
-        os.kill(pid, signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM)
+        _send(signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM)
+    except Exception:
+        pass
+
+
+def _terminate_windows_process_tree(
+    pid: int,
+    timeout: float,
+    *,
+    wait: Callable[[float], None] | None = None,
+) -> None:
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    except Exception as exc:
+        logger.warning("Failed to terminate old OpenCode serve process tree pid %s: %s", pid, exc)
+    if _wait_process_exit(pid, timeout, wait=wait):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
     except Exception:
         pass
 
@@ -708,7 +784,9 @@ class OpenCodeServeManager:
         if _port_is_in_use(port):
             raise RuntimeError(
                 f"OpenCode serve port 127.0.0.1:{port} is already in use by a process "
-                "not owned by this Agent; stop it or set OPENCODE_SERVE_PORT."
+                "not owned by this Agent. If this follows a stopped Windows task, "
+                "an old Agent may have left a child serve process; stop that process "
+                "or set OPENCODE_SERVE_PORT."
             )
         env = dict(os.environ)
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
@@ -767,7 +845,7 @@ class OpenCodeServeManager:
             pid,
             port,
         )
-        await asyncio.to_thread(_terminate_pid, pid)
+        await asyncio.to_thread(_terminate_process_tree, pid)
         _remove_marker(self._marker_path)
 
     async def _wait_health_locked(self) -> None:
@@ -828,14 +906,14 @@ class OpenCodeServeManager:
         if proc.poll() is not None:
             _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
             return
+        pid = int(getattr(proc, "pid", 0) or 0)
         try:
-            proc.terminate()
-            await asyncio.to_thread(proc.wait, timeout=_SERVE_STOP_TIMEOUT_SECONDS)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            if pid > 0:
+                await asyncio.to_thread(
+                    _terminate_process_tree,
+                    pid,
+                    wait=lambda wait_timeout: proc.wait(timeout=wait_timeout),
+                )
         finally:
             _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
 
