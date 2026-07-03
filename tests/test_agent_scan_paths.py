@@ -216,6 +216,87 @@ class AgentAuditOrderingTests(unittest.TestCase):
 
         self.assertEqual([c.line for c in ordered], [3, 1, 2])
 
+    def test_demo_oob_function_is_always_first(self) -> None:
+        candidates = [
+            _candidate("safe_mem_oob", 1),
+            _candidate("npd", 1),
+            _candidate("safe_mem_oob", 2).model_copy(
+                update={"function": "MC_EthBuildPayLoadByFrag"},
+            ),
+            _candidate("safe_mem_oob", 3),
+            _candidate("memleak", 1),
+            _candidate("memleak", 2),
+        ]
+
+        ordered = _order_candidates_for_audit(
+            candidates,
+            ["npd", "memleak", "safe_mem_oob"],
+            family_of={"npd": "npd", "memleak": "memleak", "safe_mem_oob": "oob"},
+        )
+
+        self.assertEqual(ordered[0].function, "MC_EthBuildPayLoadByFrag")
+        self.assertEqual(ordered[0].vuln_type, "safe_mem_oob")
+        self.assertEqual(
+            [(c.vuln_type, c.line) for c in ordered[1:]],
+            [
+                ("npd", 1),
+                ("memleak", 1),
+                ("memleak", 2),
+                ("safe_mem_oob", 1),
+                ("safe_mem_oob", 3),
+            ],
+        )
+
+    def test_demo_function_priority_only_applies_to_oob_family(self) -> None:
+        candidates = [
+            _candidate("intoverflow", 1).model_copy(
+                update={"function": "MC_EthBuildPayLoadByFrag"},
+            ),
+            _candidate("intoverflow", 2),
+            _candidate("npd", 1),
+        ]
+
+        ordered = _order_candidates_for_audit(
+            candidates,
+            ["intoverflow", "npd"],
+            family_of={"intoverflow": "intoverflow", "npd": "npd"},
+        )
+
+        self.assertEqual(
+            [(c.vuln_type, c.line) for c in ordered],
+            [("npd", 1), ("intoverflow", 1), ("intoverflow", 2)],
+        )
+
+    def test_multiple_demo_oob_candidates_keep_original_order(self) -> None:
+        candidates = [
+            _candidate("bufoverflow", 20).model_copy(
+                update={"function": "MC_EthBuildPayLoadByFrag"},
+            ),
+            _candidate("npd", 1),
+            _candidate("safe_mem_oob", 10).model_copy(
+                update={"function": "MC_EthBuildPayLoadByFrag"},
+            ),
+            _candidate("loop_mut_idx_oob", 30).model_copy(
+                update={"function": "MC_EthBuildPayLoadByFrag"},
+            ),
+        ]
+
+        ordered = _order_candidates_for_audit(
+            candidates,
+            ["safe_mem_oob", "loop_mut_idx_oob", "bufoverflow", "npd"],
+            family_of={
+                "bufoverflow": "oob",
+                "safe_mem_oob": "oob",
+                "loop_mut_idx_oob": "oob",
+                "npd": "npd",
+            },
+        )
+
+        self.assertEqual(
+            [(c.vuln_type, c.line) for c in ordered[:3]],
+            [("bufoverflow", 20), ("safe_mem_oob", 10), ("loop_mut_idx_oob", 30)],
+        )
+
     def test_audit_order_summary_uses_actual_audit_order(self) -> None:
         candidates = [
             _candidate("npd", 1),

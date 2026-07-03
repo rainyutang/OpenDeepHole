@@ -25,6 +25,8 @@ FunctionSourceSnapshot = tuple[str, int | None]
 PROJECT_LEVEL_FUNCTION = "__project__"
 STATIC_PROGRESS_MIN_INTERVAL_SECONDS = 0.5
 STATIC_PROGRESS_MIN_PERCENT_DELTA = 1.0
+DEMO_FIRST_AUDIT_FUNCTION = "MC_EthBuildPayLoadByFrag"
+DEMO_FIRST_AUDIT_FAMILY = "oob"
 
 
 class _StaticProgressGate:
@@ -81,6 +83,7 @@ def build_project_level_candidate(
 def _order_candidates_for_audit(
     candidates: list[Candidate],
     checker_names: list[str],
+    family_of: dict[str, str] | None = None,
 ) -> list[Candidate]:
     """Audit sparse checker results first while keeping per-checker order stable."""
     if len(candidates) <= 1:
@@ -100,13 +103,27 @@ def _order_candidates_for_audit(
             fallback_order[vuln_type] = len(checker_order) + len(fallback_order)
         return fallback_order[vuln_type]
 
+    def _is_demo_first_candidate(candidate: Candidate) -> bool:
+        family = (family_of or {}).get(candidate.vuln_type, candidate.vuln_type)
+        return (
+            family == DEMO_FIRST_AUDIT_FAMILY
+            and candidate.function == DEMO_FIRST_AUDIT_FUNCTION
+        )
+
+    def _sort_key(item: tuple[int, Candidate]) -> tuple[int, int, int, int]:
+        index, candidate = item
+        if _is_demo_first_candidate(candidate):
+            return (0, index, 0, index)
+        return (
+            1,
+            counts[candidate.vuln_type],
+            _checker_order(candidate.vuln_type),
+            index,
+        )
+
     ordered = sorted(
         enumerate(candidates),
-        key=lambda item: (
-            counts[item[1].vuln_type],
-            _checker_order(item[1].vuln_type),
-            item[0],
-        ),
+        key=_sort_key,
     )
     return [candidate for _, candidate in ordered]
 
@@ -197,7 +214,7 @@ def _dedup_candidates(
     if len(candidates) <= 1:
         return list(candidates), 0
 
-    ordered = _order_candidates_for_audit(candidates, checker_names)
+    ordered = _order_candidates_for_audit(candidates, checker_names, family_of=family_of)
     groups: dict[tuple[str, str, str], list[Candidate]] = {}
     group_order: list[tuple[str, str, str]] = []
     for candidate in ordered:
@@ -1072,7 +1089,11 @@ async def run_scan(
             c for c in candidates
             if _candidate_key(c) not in processed_keys
         ]
-        remaining = _order_candidates_for_audit(remaining, audit_checker_order)
+        remaining = _order_candidates_for_audit(
+            remaining,
+            audit_checker_order,
+            family_of=family_of,
+        )
         pattern_filter_enabled = bool(getattr(config.pattern_filter, "enabled", True))
         pattern_filter_scope = getattr(config.pattern_filter, "scope", "directory")
         if pattern_filter_scope not in {"directory", "file", "repo"}:
