@@ -21,6 +21,7 @@ from backend.models import (
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
+    ScanCandidate,
     ScanStatus,
     ScanSummary,
     SkillReport,
@@ -89,6 +90,20 @@ class ScanStoreBase(ABC):
 
         Use *clear_current_candidate=True* to set current_candidate to NULL.
         """
+
+    # -- Static-analysis candidates --
+
+    @abstractmethod
+    def replace_scan_candidates(
+        self,
+        scan_id: str,
+        candidates: list[Candidate | ScanCandidate],
+    ) -> list[ScanCandidate]:
+        """Replace the final static-analysis candidate list for a scan."""
+
+    @abstractmethod
+    def list_scan_candidates(self, scan_id: str) -> list[ScanCandidate]:
+        """Return persisted static-analysis candidates for a scan, ordered by index."""
 
     # -- Vulnerabilities --
 

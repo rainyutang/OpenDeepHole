@@ -23,6 +23,7 @@ from backend.models import (
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
+    ScanCandidate,
     ScanStatus,
     ScanSummary,
     SkillReport,
@@ -131,6 +132,19 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     UNIQUE(scan_id, idx)
 );
 
+CREATE TABLE IF NOT EXISTS scan_candidates (
+    scan_id           TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+    idx               INTEGER NOT NULL,
+    file              TEXT NOT NULL,
+    line              INTEGER NOT NULL,
+    function          TEXT NOT NULL,
+    vuln_type         TEXT NOT NULL,
+    description       TEXT NOT NULL,
+    related_functions TEXT NOT NULL DEFAULT '[]',
+    metadata          TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY(scan_id, idx)
+);
+
 CREATE TABLE IF NOT EXISTS vulnerability_validations (
     scan_id             TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
     vuln_index          INTEGER NOT NULL,
@@ -182,6 +196,7 @@ CREATE TABLE IF NOT EXISTS skill_reports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_skill_reports_scan ON skill_reports(scan_id);
+CREATE INDEX IF NOT EXISTS idx_scan_candidates_scan ON scan_candidates(scan_id);
 
 CREATE TABLE IF NOT EXISTS feedback_entries (
     id              TEXT PRIMARY KEY,
@@ -391,6 +406,23 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN output_source TEXT NOT NULL DEFAULT '{}'"
             )
+
+        self._conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS scan_candidates (
+                scan_id           TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                idx               INTEGER NOT NULL,
+                file              TEXT NOT NULL,
+                line              INTEGER NOT NULL,
+                function          TEXT NOT NULL,
+                vuln_type         TEXT NOT NULL,
+                description       TEXT NOT NULL,
+                related_functions TEXT NOT NULL DEFAULT '[]',
+                metadata          TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY(scan_id, idx)
+            );
+            CREATE INDEX IF NOT EXISTS idx_scan_candidates_scan
+                ON scan_candidates(scan_id);
+        """)
 
         report_cur = self._conn.execute("PRAGMA table_info(skill_reports)")
         report_cols = {r[1] for r in report_cur.fetchall()}
@@ -609,6 +641,7 @@ class SqliteScanStore(ScanStoreBase):
             progress=row["progress"],
             total_candidates=row["total_candidates"],
             processed_candidates=row["processed_candidates"],
+            candidates=self.list_scan_candidates(row["scan_id"]),
             vulnerabilities=self.get_vulnerabilities(row["scan_id"]),
             skill_reports=self.list_skill_reports(row["scan_id"]),
             validations=self.list_vulnerability_validations(row["scan_id"]),
@@ -683,6 +716,7 @@ class SqliteScanStore(ScanStoreBase):
                     scan.opencode_pool.model_dump_json() if scan.opencode_pool else "{}",
                 ),
             )
+            self._replace_scan_candidates_locked(scan.scan_id, scan.candidates)
             self._conn.commit()
 
     def load_scan(self, scan_id: str) -> tuple[ScanStatus, ScanMeta] | None:
@@ -1018,6 +1052,100 @@ class SqliteScanStore(ScanStoreBase):
                     (agent_id, scan_id),
                 )
             self._conn.commit()
+
+    def _replace_scan_candidates_locked(
+        self,
+        scan_id: str,
+        candidates: list[Candidate | ScanCandidate],
+    ) -> list[ScanCandidate]:
+        self._conn.execute("DELETE FROM scan_candidates WHERE scan_id = ?", (scan_id,))
+        persisted: list[ScanCandidate] = []
+        rows = []
+        for idx, candidate in enumerate(candidates):
+            scan_candidate = ScanCandidate(
+                idx=idx,
+                file=candidate.file,
+                line=candidate.line,
+                function=candidate.function,
+                description=candidate.description,
+                vuln_type=candidate.vuln_type,
+                related_functions=list(getattr(candidate, "related_functions", []) or []),
+                metadata=dict(getattr(candidate, "metadata", {}) or {}),
+            )
+            persisted.append(scan_candidate)
+            rows.append((
+                scan_id,
+                idx,
+                scan_candidate.file,
+                scan_candidate.line,
+                scan_candidate.function,
+                scan_candidate.vuln_type,
+                scan_candidate.description,
+                json.dumps(scan_candidate.related_functions, ensure_ascii=False),
+                json.dumps(scan_candidate.metadata, ensure_ascii=False),
+            ))
+        if rows:
+            self._conn.executemany(
+                """\
+                INSERT INTO scan_candidates
+                    (scan_id, idx, file, line, function, vuln_type,
+                     description, related_functions, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return persisted
+
+    def replace_scan_candidates(
+        self,
+        scan_id: str,
+        candidates: list[Candidate | ScanCandidate],
+    ) -> list[ScanCandidate]:
+        with self._lock:
+            persisted = self._replace_scan_candidates_locked(scan_id, candidates)
+            self._conn.commit()
+            return persisted
+
+    def list_scan_candidates(self, scan_id: str) -> list[ScanCandidate]:
+        cur = self._conn.execute(
+            """\
+            SELECT *
+            FROM scan_candidates
+            WHERE scan_id = ?
+            ORDER BY idx
+            """,
+            (scan_id,),
+        )
+
+        def _json_list(value: str | None) -> list[str]:
+            try:
+                raw = json.loads(value or "[]")
+            except Exception:
+                return []
+            if not isinstance(raw, list):
+                return []
+            return [str(item) for item in raw]
+
+        def _json_object(value: str | None) -> dict:
+            try:
+                raw = json.loads(value or "{}")
+            except Exception:
+                return {}
+            return raw if isinstance(raw, dict) else {}
+
+        return [
+            ScanCandidate(
+                idx=r["idx"],
+                file=r["file"],
+                line=r["line"],
+                function=r["function"],
+                description=r["description"],
+                vuln_type=r["vuln_type"],
+                related_functions=_json_list(r["related_functions"]),
+                metadata=_json_object(r["metadata"]),
+            )
+            for r in cur.fetchall()
+        ]
 
     def update_scan_feedback_ids(self, scan_id: str, feedback_ids: list[str]) -> None:
         with self._lock:

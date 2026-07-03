@@ -1041,6 +1041,9 @@ async def run_scan(
                     candidate_index=total,
                 )
 
+        if not retry_mode:
+            await reporter.report_candidates(scan_id, candidates)
+
         function_source_cache = await asyncio.to_thread(
             _build_function_source_cache,
             project_path,

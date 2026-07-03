@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from backend.models import (
+    Candidate,
     FpReviewResult,
     ScanItemStatus,
     ScanMeta,
@@ -139,6 +140,54 @@ class ScanMetaStoreTests(unittest.TestCase):
             self.assertIsNotNone(meta)
             self.assertEqual(meta, store.load_scan("scan-1")[1])
             self.assertIsNone(store.get_scan_meta("scan-missing"))
+
+
+class ScanCandidateStoreTests(unittest.TestCase):
+    def test_candidates_are_replaced_and_loaded_with_scan_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            scan, meta = _make_scan("scan-1")
+            store.save_scan(scan, meta)
+
+            first = Candidate(
+                file="src/a.c",
+                line=10,
+                function="foo",
+                description="desc a",
+                vuln_type="npd",
+                related_functions=["bar"],
+                metadata={"subject": "ptr"},
+            )
+            second = Candidate(
+                file="src/b.c",
+                line=20,
+                function="baz",
+                description="desc b",
+                vuln_type="memleak",
+            )
+
+            persisted = store.replace_scan_candidates("scan-1", [first, second])
+            loaded = store.load_scan("scan-1")
+
+            self.assertEqual([candidate.idx for candidate in persisted], [0, 1])
+            self.assertIsNotNone(loaded)
+            loaded_scan, _ = loaded
+            self.assertEqual(len(loaded_scan.candidates), 2)
+            self.assertEqual(loaded_scan.candidates[0].file, "src/a.c")
+            self.assertEqual(loaded_scan.candidates[0].related_functions, ["bar"])
+            self.assertEqual(loaded_scan.candidates[0].metadata["subject"], "ptr")
+
+            replacement = Candidate(
+                file="src/c.c",
+                line=30,
+                function="qux",
+                description="desc c",
+                vuln_type="oob",
+            )
+            store.replace_scan_candidates("scan-1", [replacement])
+
+            self.assertEqual(len(store.list_scan_candidates("scan-1")), 1)
+            self.assertEqual(store.load_scan("scan-1")[0].candidates[0].file, "src/c.c")
 
 
 if __name__ == "__main__":

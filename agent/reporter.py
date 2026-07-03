@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 
-from backend.models import FeedbackEntry, HistoryPattern, OutputSource, ScanEvent, Vulnerability, VulnerabilityValidation
+from backend.models import Candidate, FeedbackEntry, HistoryPattern, OutputSource, ScanEvent, Vulnerability, VulnerabilityValidation
 
 
 OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 15.0
@@ -68,6 +68,21 @@ class Reporter:
     # ---------------------------------------------------------------------------
     # Scan events / results
     # ---------------------------------------------------------------------------
+
+    async def report_candidates(self, scan_id: str, candidates: list[Candidate]) -> None:
+        """Push the final static-analysis candidate list for the scan."""
+        if self.dry_run:
+            print(f"  [CANDIDATES] {len(candidates)} static candidate(s)")
+            return
+        try:
+            resp = await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/candidates",
+                json={"candidates": [candidate.model_dump() for candidate in candidates]},
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"Warning: failed to upload static candidates: {e}")
 
     async def report_vulnerability(self, scan_id: str, vuln: Vulnerability) -> dict | None:
         """Push a single vulnerability result immediately after it is audited."""

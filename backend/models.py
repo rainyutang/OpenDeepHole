@@ -70,6 +70,11 @@ class Candidate(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class ScanCandidate(Candidate):
+    """A persisted static-analysis candidate for one scan."""
+    idx: int
+
+
 class OutputSource(BaseModel):
     """Metadata describing which runtime produced an AI-visible output."""
     agent_id: str = ""
@@ -389,6 +394,7 @@ class ScanStatus(BaseModel):
     progress: float            # 0.0 to 1.0
     total_candidates: int
     processed_candidates: int
+    candidates: list[ScanCandidate] = []
     vulnerabilities: list[Vulnerability]
     skill_reports: list[SkillReport] = []
     validations: list[VulnerabilityValidation] = []
@@ -425,6 +431,11 @@ class AgentScanFinish(BaseModel):
     total_candidates: int
     processed_candidates: int
     error_message: str | None = None
+
+
+class AgentScanCandidates(BaseModel):
+    """Sent by the agent after the final static candidate list is ready."""
+    candidates: list[Candidate] = []
 
 
 class AgentVulnerabilityValidationUpdate(BaseModel):

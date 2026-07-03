@@ -187,6 +187,12 @@ export interface Candidate {
   function: string;
   description: string;
   vuln_type: string;
+  related_functions?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface ScanCandidate extends Candidate {
+  idx: number;
 }
 
 export interface ScanEvent {
@@ -245,6 +251,7 @@ export interface ScanStatus {
   progress: number;
   total_candidates: number;
   processed_candidates: number;
+  candidates: ScanCandidate[];
   vulnerabilities: Vulnerability[];
   skill_reports: SkillReport[];
   validations?: VulnerabilityValidation[];

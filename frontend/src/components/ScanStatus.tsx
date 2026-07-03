@@ -2,33 +2,33 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, stopScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, retryIncompleteScan, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
-import type { Candidate, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, Vulnerability, OutputSource, VulnerabilityValidation } from "../types";
+import type { Candidate, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, ScanCandidate, Vulnerability, OutputSource, VulnerabilityValidation } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 
 const MAX_LOG_LINES = 500;
+const STATIC_CANDIDATE_PAGE_SIZE = 20;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
 
-type MainTab = "overview" | "threat" | "mining" | "validation" | "reports" | "issues";
-type ThreatTab = "index" | "static" | "git_history";
+type MainTab = "overview" | "threat" | "static" | "mining" | "validation" | "issues";
+type ThreatTab = "index" | "git_history";
 type MiningTab = "candidate_audit" | "variant_hunt";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 
 const MAIN_TABS: { key: MainTab; label: string }[] = [
   { key: "overview", label: "首页" },
   { key: "threat", label: "威胁分析" },
+  { key: "static", label: "静态分析" },
   { key: "mining", label: "漏洞挖掘" },
   { key: "validation", label: "漏洞验证" },
-  { key: "reports", label: "漏洞报告生成" },
   { key: "issues", label: "发现的问题" },
 ];
 
 const THREAT_TABS: { key: ThreatTab; label: string }[] = [
   { key: "index", label: "代码索引" },
-  { key: "static", label: "静态分析" },
   { key: "git_history", label: "Git 历史问题分析" },
 ];
 
@@ -88,6 +88,29 @@ function effectiveIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null)
     if (fpMap.get(index)?.verdict === "fp") return false;
     return true;
   }).length;
+}
+
+function issueItems(scan: ScanStatusType, fpReview: FpReviewJob | null): { vuln: Vulnerability; index: number }[] {
+  const fpMap = new Map((fpReview?.results ?? []).map((result) => [result.vuln_index, result]));
+  return scan.vulnerabilities
+    .map((vuln, index) => ({ vuln, index }))
+    .filter(({ vuln, index }) => isAiConfirmed(vuln) && fpMap.get(index)?.verdict !== "fp");
+}
+
+function isValidationTerminalStatus(status: string): boolean {
+  return ["verified", "success", "failed", "error", "timeout", "cancelled", "skipped"].includes(status);
+}
+
+function validatedIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
+  const validationMap = new Map((scan.validations ?? []).map((item) => [item.vuln_index, item]));
+  return issueItems(scan, fpReview).filter(({ index }) => {
+    const validation = validationMap.get(index);
+    return Boolean(validation && !validation.running && isValidationTerminalStatus(validation.status));
+  }).length;
+}
+
+function candidateKey(item: Pick<Candidate, "file" | "line" | "function" | "vuln_type">): string {
+  return `${item.file}\u0000${item.line}\u0000${item.function}\u0000${item.vuln_type}`;
 }
 
 function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): string {
@@ -211,6 +234,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         if (data.opencode_pool !== undefined) patch.opencode_pool = data.opencode_pool;
         return { ...prev, ...patch };
       });
+    },
+    onScanCandidates: (data) => {
+      setScan((prev) => prev ? { ...prev, candidates: data.candidates, total_candidates: data.candidates.length } : prev);
     },
     onScanVulnerability: (data) => {
       setScan((prev) => {
@@ -639,6 +665,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     (v) => !hasFinalUserVerdict(v) && (v.ai_verdict === "timeout" || v.ai_verdict === "no_result" || v.ai_verdict === "failed"),
   ).length || scan.retryable_candidates_count || 0;
   const issueCount = effectiveIssueCount(scan, fpReview);
+  const verifiedIssueCount = validatedIssueCount(scan, fpReview);
   const variantIssueCount = scan.vulnerabilities.filter((v) => v.variant_of).length;
   const indexProgress = formatIndexProgress(indexStatus, scan);
   const threatEvents = filterEvents(scan.events, ["init", "mcp_ready", "static_analysis", "git_history"]);
@@ -657,7 +684,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       vulnerabilities={scan.vulnerabilities}
       events={scan.events}
       isScanning={!!isRunning}
-      currentCandidate={scan.current_candidate}
       totalCandidates={scan.total_candidates}
       processedCandidates={scan.processed_candidates}
       fpReview={fpReview}
@@ -885,7 +911,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             >
               {tab.label}
               {tab.key === "issues" && (
-                <span className="ml-1.5 text-xs text-red-300">{issueCount}</span>
+                <span className="ml-1.5 text-xs text-red-300">
+                  发现 {issueCount} · 已验证 {verifiedIssueCount}
+                </span>
               )}
             </button>
           ))}
@@ -917,6 +945,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             isFpReviewing={isFpReviewing}
             currentFpReviewTargets={currentFpReviewTargets}
             hasReportModeSkill={hasReportModeSkill}
+            verifiedIssueCount={verifiedIssueCount}
             onNavigate={setActiveTab}
           />
         )}
@@ -929,13 +958,21 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             {activeThreatTab === "index" && (
               <IndexTaskPanel progress={indexProgress} indexStatus={indexStatus} events={threatEvents} />
             )}
-            {activeThreatTab === "static" && (
-              <StaticTaskPanel scan={scan} events={filterEvents(scan.events, ["static_analysis"])} />
-            )}
             {activeThreatTab === "git_history" && (
               <GitHistoryPanel patterns={gitHistory} events={filterEvents(scan.events, ["git_history"])} />
             )}
           </TabbedPanel>
+        )}
+        {activeTab === "static" && (
+          <StaticTaskPanel
+            scan={scan}
+            candidates={scan.candidates ?? []}
+            vulnerabilities={scan.vulnerabilities}
+            validations={scan.validations ?? []}
+            currentCandidate={scan.current_candidate}
+            processedCandidates={scan.processed_candidates}
+            events={filterEvents(scan.events, ["static_analysis"])}
+          />
         )}
         {activeTab === "mining" && (
           <TabbedPanel
@@ -968,19 +1005,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             stoppingValidationIndices={stoppingValidations}
             events={validationEvents}
             onStopValidation={handleStopValidation}
-          />
-        )}
-        {activeTab === "reports" && (
-          <ReportGenerationPanel
-            scan={scan}
-            displayedReports={displayedReports}
-            hasReportModeSkill={hasReportModeSkill}
-            isRunning={!!isRunning}
-            onOpenReports={loadSkillReports}
-            onExportZip={handleExportZip}
-            onDownloadCsv={handleDownloadReport}
-            exportingZip={exportingZip}
-            downloadingReport={downloadingReport}
           />
         )}
         {activeTab === "issues" && issuesView}
@@ -1262,6 +1286,7 @@ function ScanOverview({
   isFpReviewing,
   currentFpReviewTargets,
   hasReportModeSkill,
+  verifiedIssueCount,
   onNavigate,
 }: {
   scan: ScanStatusType;
@@ -1278,6 +1303,7 @@ function ScanOverview({
   isFpReviewing: boolean;
   currentFpReviewTargets: Vulnerability[];
   hasReportModeSkill: boolean;
+  verifiedIssueCount: number;
   onNavigate: (tab: MainTab) => void;
 }) {
   const staticSeen = scan.static_analysis_done || scan.status === "analyzing" || scan.status === "auditing" || hasEvent(scan.events, ["static_analysis"]);
@@ -1312,7 +1338,7 @@ function ScanOverview({
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
         <OverviewMetric icon="target" label="候选点" value={scan.total_candidates || scan.vulnerabilities.length} detail={`${scan.processed_candidates} 已审计`} tone="blue" />
-        <OverviewMetric icon="alert" label="发现的问题" value={issueCount} detail={`${scan.vulnerabilities.length} 条结果`} tone="red" onClick={() => onNavigate("issues")} />
+        <OverviewMetric icon="alert" label="发现的问题" value={issueCount} detail={`${verifiedIssueCount} 已验证`} tone="red" onClick={() => onNavigate("issues")} />
         <OverviewMetric icon="history" label="历史模式" value={gitHistoryCount} detail={`${variantIssueCount} 个变体候选`} tone="purple" onClick={() => onNavigate("threat")} />
         <OverviewMetric icon="queue" label="未完成候选" value={retryableCount} detail={retryableCount > 0 ? "可续扫" : "无待处理项"} tone="amber" />
       </div>
@@ -1359,10 +1385,10 @@ function ScanOverview({
               detail={fpReview ? `${fpReview.processed}/${fpReview.total} 已复核` : "后续接入验证任务"}
             />
             <TaskSummaryRow
-              label="漏洞报告生成"
+              label="报告导出"
               status={hasReportModeSkill ? (isRunning ? "同步中" : "可查看") : "预留"}
               tone={hasReportModeSkill ? "purple" : "slate"}
-              detail={hasReportModeSkill ? `${scan.skill_reports?.length ?? 0} 个 SKILL 报告` : "后续接入报告生成任务"}
+              detail={hasReportModeSkill ? `${scan.skill_reports?.length ?? 0} 个 SKILL 报告` : "可使用顶部导出按钮"}
             />
           </div>
         </section>
@@ -1499,11 +1525,126 @@ function IndexTaskPanel({
   );
 }
 
-function StaticTaskPanel({ scan, events }: { scan: ScanStatusType; events: ScanEvent[] }) {
+function StaticTaskPanel({
+  scan,
+  candidates,
+  vulnerabilities,
+  validations,
+  currentCandidate,
+  processedCandidates,
+  events,
+}: {
+  scan: ScanStatusType;
+  candidates: ScanCandidate[];
+  vulnerabilities: Vulnerability[];
+  validations: VulnerabilityValidation[];
+  currentCandidate: Candidate | null;
+  processedCandidates: number;
+  events: ScanEvent[];
+}) {
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [typeFilter, setTypeFilter] = useState(ALL_STATIC_FILTER);
+  const [auditFilter, setAuditFilter] = useState(ALL_STATIC_FILTER);
+  const [validationFilter, setValidationFilter] = useState(ALL_STATIC_FILTER);
+  const [currentPage, setCurrentPage] = useState(1);
   const running = scan.status === "analyzing" && !scan.static_analysis_done;
   const seen = scan.static_analysis_done || running || scan.status === "auditing" || events.length > 0;
   const scannedFiles = seen ? scan.static_scanned_files : 0;
   const totalFiles = seen ? scan.static_total_files : 0;
+  const displayedCandidates = useMemo<ScanCandidate[]>(() => {
+    if (candidates.length > 0) return candidates;
+    return vulnerabilities.map((vuln, index) => ({
+      idx: index,
+      file: vuln.file,
+      line: vuln.line,
+      function: vuln.function,
+      description: vuln.description,
+      vuln_type: vuln.vuln_type,
+      related_functions: [],
+      metadata: {},
+    }));
+  }, [candidates, vulnerabilities]);
+  const vulnerabilityByKey = useMemo(() => {
+    const out = new Map<string, { vuln: Vulnerability; index: number }>();
+    vulnerabilities.forEach((vuln, index) => {
+      out.set(candidateKey(vuln), { vuln, index });
+    });
+    return out;
+  }, [vulnerabilities]);
+  const validationByIndex = useMemo(
+    () => new Map(validations.map((validation) => [validation.vuln_index, validation])),
+    [validations],
+  );
+  const currentKey = currentCandidate ? candidateKey(currentCandidate) : "";
+  const annotated = useMemo(
+    () =>
+      displayedCandidates.map((candidate) => {
+        const vulnEntry = vulnerabilityByKey.get(candidateKey(candidate));
+        const validation = vulnEntry ? validationByIndex.get(vulnEntry.index) : undefined;
+        const auditStatus = currentKey && candidateKey(candidate) === currentKey
+          ? "running"
+          : vulnEntry
+            ? "done"
+            : "pending";
+        const validationStatus = !vulnEntry || !isAiConfirmed(vulnEntry.vuln)
+          ? "not_applicable"
+          : validation?.running || validation?.status === "running" || validation?.status === "queued"
+            ? "running"
+            : validation && isValidationTerminalStatus(validation.status)
+              ? isValidationFailed(validation.status) || validation.status === "failed"
+                ? "failed"
+                : "verified"
+              : "unverified";
+        return {
+          candidate,
+          vulnerability: vulnEntry?.vuln,
+          vulnerabilityIndex: vulnEntry?.index,
+          validation,
+          auditStatus,
+          validationStatus,
+        };
+      }),
+    [currentKey, displayedCandidates, validationByIndex, vulnerabilityByKey],
+  );
+  const typeOptions = useMemo(
+    () => valueOptions(displayedCandidates.map((candidate) => candidate.vuln_type), (value) => value.toUpperCase()),
+    [displayedCandidates],
+  );
+  const auditOptions = useMemo(() => countStaticOptions(annotated.map((item) => item.auditStatus), AUDIT_FILTER_LABELS), [annotated]);
+  const validationOptions = useMemo(
+    () => countStaticOptions(annotated.map((item) => item.validationStatus), VALIDATION_FILTER_LABELS),
+    [annotated],
+  );
+  const visible = useMemo(() => {
+    let list = annotated;
+    if (typeFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.candidate.vuln_type === typeFilter);
+    if (auditFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.auditStatus === auditFilter);
+    if (validationFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.validationStatus === validationFilter);
+    return list;
+  }, [annotated, auditFilter, typeFilter, validationFilter]);
+  const totalPages = Math.max(1, Math.ceil(visible.length / STATIC_CANDIDATE_PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paged = visible.slice((safePage - 1) * STATIC_CANDIDATE_PAGE_SIZE, safePage * STATIC_CANDIDATE_PAGE_SIZE);
+  const selected = selectedIndex === null
+    ? null
+    : annotated.find((item) => item.candidate.idx === selectedIndex) ?? null;
+  const verifiedCount = annotated.filter((item) => item.validationStatus === "verified" || item.validationStatus === "failed").length;
+  const runningValidationCount = annotated.filter((item) => item.validationStatus === "running").length;
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [auditFilter, typeFilter, validationFilter]);
+
+  useEffect(() => {
+    if (visible.length === 0) {
+      if (selectedIndex !== null) setSelectedIndex(null);
+      return;
+    }
+    if (selectedIndex === null || !visible.some((item) => item.candidate.idx === selectedIndex)) {
+      setSelectedIndex(visible[0].candidate.idx);
+    }
+  }, [selectedIndex, visible]);
+
   return (
     <TaskPanel
       title="静态分析过程"
@@ -1514,11 +1655,285 @@ function StaticTaskPanel({ scan, events }: { scan: ScanStatusType; events: ScanE
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <MiniMetric label="扫描文件" value={scannedFiles} tone="cyan" />
         <MiniMetric label="总文件" value={totalFiles} />
-        <MiniMetric label="候选点" value={scan.total_candidates} tone="blue" />
+        <MiniMetric label="候选点" value={displayedCandidates.length || scan.total_candidates} tone="blue" />
       </div>
       <ProgressBlock label="静态分析" current={scannedFiles} total={totalFiles} fallback="等待静态分析进度" />
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <MiniMetric label="已审计" value={processedCandidates} tone="blue" />
+        <MiniMetric label="验证中" value={runningValidationCount} tone="cyan" />
+        <MiniMetric label="已验证" value={verifiedCount} tone="green" />
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <StaticFilterSelect label="类型" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />
+        <StaticFilterSelect label="审计" value={auditFilter} options={auditOptions} onChange={setAuditFilter} />
+        <StaticFilterSelect label="验证" value={validationFilter} options={validationOptions} onChange={setValidationFilter} />
+      </div>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,24rem)_1fr]">
+        <div className="flex flex-col rounded-xl border border-slate-700 bg-slate-900/40">
+          <div className="max-h-[70vh] flex-1 overflow-y-auto">
+            {visible.length === 0 ? (
+              <div className="px-4 py-10 text-center text-sm text-slate-500">
+                {displayedCandidates.length === 0 ? "暂无静态分析候选点" : "当前筛选条件下无候选点"}
+              </div>
+            ) : (
+              <ul className="divide-y divide-slate-800">
+                {paged.map((item) => (
+                  <StaticCandidateListItem
+                    key={item.candidate.idx}
+                    item={item}
+                    active={selectedIndex === item.candidate.idx}
+                    onClick={() => setSelectedIndex(item.candidate.idx)}
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+          {visible.length > STATIC_CANDIDATE_PAGE_SIZE && (
+            <div className="flex items-center justify-between gap-2 border-t border-slate-800 px-3 py-2">
+              <button
+                type="button"
+                disabled={safePage === 1}
+                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                上一页
+              </button>
+              <span className="text-xs text-slate-500">
+                第 {safePage}/{totalPages} 页 · 共 {visible.length} 条
+              </span>
+              <button
+                type="button"
+                disabled={safePage === totalPages}
+                onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                下一页
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="min-h-[20rem] rounded-xl border border-slate-700 bg-slate-900/40">
+          {selected ? (
+            <StaticCandidateDetail item={selected} />
+          ) : (
+            <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
+              从左侧选择一个候选点查看详情
+            </div>
+          )}
+        </div>
+      </div>
       <EventList events={events} empty="暂无静态分析日志" />
     </TaskPanel>
+  );
+}
+
+const ALL_STATIC_FILTER = "__all__";
+
+const AUDIT_FILTER_LABELS: Record<string, string> = {
+  pending: "待审计",
+  running: "审计中",
+  done: "已审计",
+};
+
+const VALIDATION_FILTER_LABELS: Record<string, string> = {
+  unverified: "未验证",
+  running: "验证中",
+  verified: "已验证",
+  failed: "验证异常",
+  not_applicable: "无验证目标",
+};
+
+interface StaticFilterOption {
+  value: string;
+  label: string;
+  count: number;
+}
+
+interface StaticCandidateItem {
+  candidate: ScanCandidate;
+  vulnerability?: Vulnerability;
+  vulnerabilityIndex?: number;
+  validation?: VulnerabilityValidation;
+  auditStatus: string;
+  validationStatus: string;
+}
+
+function valueOptions(
+  values: string[],
+  formatLabel: (value: string) => string = (value) => value,
+): StaticFilterOption[] {
+  const counts = new Map<string, number>();
+  values.forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
+  return Array.from(counts.entries())
+    .sort(([a], [b]) => formatLabel(a).localeCompare(formatLabel(b)))
+    .map(([value, count]) => ({ value, label: formatLabel(value), count }));
+}
+
+function countStaticOptions(values: string[], labels: Record<string, string>): StaticFilterOption[] {
+  const counts = new Map<string, number>();
+  values.forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
+  return Object.entries(labels).map(([value, label]) => ({
+    value,
+    label,
+    count: counts.get(value) ?? 0,
+  }));
+}
+
+function StaticFilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: StaticFilterOption[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+      <span>{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 text-xs text-slate-200 focus:border-blue-500 focus:outline-none"
+      >
+        <option value={ALL_STATIC_FILTER}>全部</option>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label} ({option.count})
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function StaticCandidateListItem({
+  item,
+  active,
+  onClick,
+}: {
+  item: StaticCandidateItem;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const fileName = item.candidate.file.split("/").pop() || item.candidate.file;
+  const auditTone: TaskTone = item.auditStatus === "running" ? "blue" : item.auditStatus === "done" ? "green" : "slate";
+  const validationToneValue: TaskTone =
+    item.validationStatus === "running"
+      ? "blue"
+      : item.validationStatus === "verified"
+        ? "green"
+        : item.validationStatus === "failed"
+          ? "red"
+          : "slate";
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={onClick}
+        className={`w-full px-3 py-2.5 text-left transition-colors ${
+          active ? "bg-blue-500/15" : item.auditStatus === "running" ? "bg-blue-500/10 hover:bg-blue-500/15" : "hover:bg-slate-800/60"
+        }`}
+      >
+        <div className="flex items-center gap-1.5">
+          <span className="font-mono text-[11px] text-slate-500">#{item.candidate.idx}</span>
+          <span className="truncate font-mono text-xs text-slate-200" title={`${item.candidate.file}:${item.candidate.line}`}>
+            {fileName}:{item.candidate.line}
+          </span>
+          {item.auditStatus === "running" && (
+            <span className="ml-auto h-3 w-3 shrink-0 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />
+          )}
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <span className="rounded bg-slate-700/50 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-400">
+            {item.candidate.vuln_type}
+          </span>
+          <StatusPill label={AUDIT_FILTER_LABELS[item.auditStatus] ?? item.auditStatus} tone={auditTone} />
+          <StatusPill label={VALIDATION_FILTER_LABELS[item.validationStatus] ?? item.validationStatus} tone={validationToneValue} />
+        </div>
+        {item.candidate.function && (
+          <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={item.candidate.function}>
+            {item.candidate.function}
+          </div>
+        )}
+      </button>
+    </li>
+  );
+}
+
+function StaticCandidateDetail({ item }: { item: StaticCandidateItem }) {
+  const metadata = item.candidate.metadata && Object.keys(item.candidate.metadata).length > 0
+    ? JSON.stringify(item.candidate.metadata, null, 2)
+    : "";
+  const related = item.candidate.related_functions ?? [];
+  return (
+    <div className="max-h-[70vh] overflow-y-auto p-4">
+      <div className="border-b border-slate-800 pb-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-xs text-slate-500">#{item.candidate.idx}</span>
+              <span className="text-sm font-semibold text-slate-100">{item.candidate.vuln_type}</span>
+              {item.vulnerabilityIndex !== undefined && (
+                <span className="rounded border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-xs text-red-300">
+                  结果 #{item.vulnerabilityIndex}
+                </span>
+              )}
+            </div>
+            <div className="mt-1 break-all font-mono text-xs text-slate-300">{item.candidate.file}:{item.candidate.line}</div>
+            <div className="mt-1 truncate font-mono text-xs text-slate-500">{item.candidate.function}</div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <StatusPill label={AUDIT_FILTER_LABELS[item.auditStatus] ?? item.auditStatus} tone={item.auditStatus === "done" ? "green" : item.auditStatus === "running" ? "blue" : "slate"} />
+            <StatusPill label={VALIDATION_FILTER_LABELS[item.validationStatus] ?? item.validationStatus} tone={item.validationStatus === "verified" ? "green" : item.validationStatus === "running" ? "blue" : item.validationStatus === "failed" ? "red" : "slate"} />
+          </div>
+        </div>
+      </div>
+      <div className="mt-4 space-y-4">
+        <section>
+          <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">候选描述</h4>
+          <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
+            <MarkdownContent content={item.candidate.description || "（无描述）"} />
+          </div>
+        </section>
+        {item.vulnerability && (
+          <section>
+            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">AI 审计结论</h4>
+            <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
+              <MarkdownContent content={item.vulnerability.ai_analysis || "（无分析）"} />
+            </div>
+          </section>
+        )}
+        {item.validation && (
+          <section>
+            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">漏洞验证状态</h4>
+            <div className="flex flex-wrap gap-2">
+              <StatusPill label={validationStatusLabel(item.validation.status)} tone={validationTone(item.validation)} />
+              <StatusPill label={`验证成功：${formatNullableBool(item.validation.validation_success)}`} tone={nullableBoolTone(item.validation.validation_success)} />
+              <StatusPill label={`是否问题：${formatNullableBool(item.validation.is_problem)}`} tone={nullableBoolTone(item.validation.is_problem)} />
+            </div>
+          </section>
+        )}
+        {related.length > 0 && (
+          <section>
+            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">相关函数</h4>
+            <div className="rounded border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-300">
+              {related.join(", ")}
+            </div>
+          </section>
+        )}
+        {metadata && (
+          <section>
+            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">候选元数据</h4>
+            <pre className="max-h-72 overflow-auto rounded border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs leading-5 text-slate-300">
+              {metadata}
+            </pre>
+          </section>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1934,71 +2349,6 @@ function isValidationComplete(status: string): boolean {
 
 function isValidationFailed(status: string): boolean {
   return ["error", "timeout", "cancelled"].includes(status);
-}
-
-function ReportGenerationPanel({
-  scan,
-  displayedReports,
-  hasReportModeSkill,
-  isRunning,
-  onOpenReports,
-  onExportZip,
-  onDownloadCsv,
-  exportingZip,
-  downloadingReport,
-}: {
-  scan: ScanStatusType;
-  displayedReports: SkillReport[];
-  hasReportModeSkill: boolean;
-  isRunning: boolean;
-  onOpenReports: () => void;
-  onExportZip: () => void;
-  onDownloadCsv: () => void;
-  exportingZip: boolean;
-  downloadingReport: boolean;
-}) {
-  return (
-    <TaskPanel
-      title="漏洞报告生成"
-      status={hasReportModeSkill ? (isRunning ? "同步中" : "可查看") : "预留"}
-      tone={hasReportModeSkill ? "purple" : "slate"}
-      summary="报告生成页签已预留；当前保留现有导出能力和报告型 SKILL 的 Markdown 查看入口。"
-    >
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        <MiniMetric label="Markdown 报告" value={displayedReports.length} tone="purple" />
-        <MiniMetric label="确认问题" value={scan.vulnerabilities.filter((v) => isAiConfirmed(v)).length} tone="red" />
-        <MiniMetric label="扫描结果" value={scan.vulnerabilities.length} />
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={onExportZip}
-          disabled={exportingZip}
-          className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-800"
-        >
-          {exportingZip ? "导出中..." : "导出报告"}
-        </button>
-        <button
-          type="button"
-          onClick={onDownloadCsv}
-          disabled={downloadingReport}
-          className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-800"
-        >
-          {downloadingReport ? "下载中..." : "下载 CSV"}
-        </button>
-        {hasReportModeSkill && (
-          <button
-            type="button"
-            onClick={onOpenReports}
-            className="rounded-lg border border-purple-500/40 px-3 py-1.5 text-sm font-medium text-purple-200 transition-colors hover:bg-purple-500/10"
-          >
-            查看 SKILL 报告
-          </button>
-        )}
-      </div>
-      {!hasReportModeSkill && <EmptyState text="当前扫描没有报告型 SKILL 输出；后续报告生成任务会在此接入。" />}
-    </TaskPanel>
-  );
 }
 
 function TaskPanel({

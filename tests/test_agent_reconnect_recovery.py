@@ -11,7 +11,9 @@ from backend.api import scan as scan_api
 from backend.models import (
     AgentFpReviewStageOutput,
     AgentInfo,
+    AgentScanCandidates,
     AgentScanFinish,
+    Candidate,
     FpReviewStatus,
     OpenCodePoolStatus,
     ScanEvent,
@@ -469,6 +471,38 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.processed_candidates, 2)
             self.assertEqual(stored.progress, 0.5)
+
+    def test_candidate_report_persists_final_static_candidate_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.ANALYZING, total=0, processed=0)
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = scan
+            published: list[tuple[str, str, dict]] = []
+
+            body = AgentScanCandidates(candidates=[
+                Candidate(
+                    file="src/a.c",
+                    line=10,
+                    function="foo",
+                    description="desc",
+                    vuln_type="npd",
+                    metadata={"subject": "ptr"},
+                )
+            ])
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+            ):
+                response = asyncio.run(agent_api.agent_report_scan_candidates("scan-1", body))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(response["count"], 1)
+            self.assertEqual(stored.total_candidates, 1)
+            self.assertEqual(stored.candidates[0].metadata["subject"], "ptr")
+            self.assertEqual(agent_api._running_scans["scan-1"].candidates[0].file, "src/a.c")
+            self.assertTrue(any(event_type == "scan_candidates" for _sid, event_type, _data in published))
 
     def test_late_opencode_pool_snapshot_is_cleared_for_completed_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

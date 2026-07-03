@@ -50,6 +50,7 @@ from backend.models import (
     AgentOpenCodePoolStatus,
     AgentInfo,
     AgentRemoteConfig,
+    AgentScanCandidates,
     AgentScanFinish,
     AgentVulnerabilityValidationUpdate,
     FpReviewStatus,
@@ -1104,6 +1105,36 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
                 exc,
             )
     return {"ok": True, "index": vuln_index, "report_markdown": report_markdown}
+
+
+@router.post("/scan/{scan_id}/candidates")
+async def agent_report_scan_candidates(scan_id: str, body: AgentScanCandidates) -> dict:
+    """Agent pushes the final static-analysis candidate list for a scan."""
+    store = get_scan_store()
+    candidates = store.replace_scan_candidates(scan_id, body.candidates)
+    total = len(candidates)
+    store.update_scan_progress(scan_id, total_candidates=total)
+
+    scan = _ensure_running_scan(scan_id)
+    if scan is not None:
+        scan.candidates = candidates
+        scan.total_candidates = total
+
+    from backend.sse import publish
+    publish(scan_id, "scan_candidates", {
+        "candidates": [candidate.model_dump() for candidate in candidates],
+    })
+    publish(scan_id, "scan_status", {
+        "status": scan.status if scan else None,
+        "progress": scan.progress if scan else None,
+        "total_candidates": total,
+        "processed_candidates": scan.processed_candidates if scan else None,
+        "static_total_files": scan.static_total_files if scan else None,
+        "static_scanned_files": scan.static_scanned_files if scan else None,
+        "static_analysis_done": scan.static_analysis_done if scan else None,
+    })
+    logger.info("Stored %d static candidate(s) for scan %s", total, scan_id)
+    return {"ok": True, "count": total}
 
 
 @router.post("/scan/{scan_id}/validation")

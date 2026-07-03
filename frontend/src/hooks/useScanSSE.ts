@@ -5,6 +5,7 @@ import type {
   FpReviewStatus,
   IndexStatus,
   OutputSource,
+  ScanCandidate,
   ScanEvent,
   ScanStatus,
   Vulnerability,
@@ -29,6 +30,10 @@ interface ScanStatusEvent {
 interface ScanVulnerabilityEvent {
   index: number;
   vulnerability: Vulnerability;
+}
+
+interface ScanCandidatesEvent {
+  candidates: ScanCandidate[];
 }
 
 interface ScanEventPayload {
@@ -92,6 +97,7 @@ interface VulnerabilityValidationEvent {
 
 export interface ScanSSEHandlers {
   onScanStatus?: (data: ScanStatusEvent) => void;
+  onScanCandidates?: (data: ScanCandidatesEvent) => void;
   onScanVulnerability?: (data: ScanVulnerabilityEvent) => void;
   onScanEvent?: (data: ScanEventPayload) => void;
   onScanFinish?: (data: ScanFinishEvent) => void;
@@ -198,6 +204,7 @@ export function useScanSSE(
 
     // Register typed event listeners
     handle<ScanStatusEvent>("scan_status", (d) => handlersRef.current.onScanStatus?.(d));
+    handle<ScanCandidatesEvent>("scan_candidates", (d) => handlersRef.current.onScanCandidates?.(d));
     handle<ScanVulnerabilityEvent>("scan_vulnerability", (d) => handlersRef.current.onScanVulnerability?.(d));
     handle<ScanEventPayload>("scan_event", (d) => handlersRef.current.onScanEvent?.(d));
     handle<ScanFinishEvent>("scan_finish", (d) => handlersRef.current.onScanFinish?.(d));
