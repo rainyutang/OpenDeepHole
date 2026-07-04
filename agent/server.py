@@ -10,6 +10,8 @@ import re
 import shutil
 import threading
 import zipfile
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +25,20 @@ _fp_review_cancel_events: dict[str, threading.Event] = {}
 _fp_review_scan_ids: dict[str, str] = {}
 _validation_tasks: dict[tuple[str, int], asyncio.Task] = {}
 _validation_cancel_events: dict[tuple[str, int], threading.Event] = {}
+_validation_queues: dict[str, deque["_ValidationQueueItem"]] = {}
+_validation_workers: dict[str, asyncio.Task] = {}
+
+
+@dataclass
+class _ValidationQueueItem:
+    scan_id: str
+    vuln_index: int
+    project_path: str
+    code_scan_path: str
+    product: str
+    vulnerability: dict
+    report_markdown: str
+    cancel_event: threading.Event
 
 
 def active_fp_review_snapshots() -> list[dict]:
@@ -35,7 +51,7 @@ def active_fp_review_snapshots() -> list[dict]:
 
 
 def active_validation_snapshots() -> list[dict]:
-    """Snapshot of vulnerability validations still running in this agent."""
+    """Snapshot of vulnerability validations still queued or running in this agent."""
     return [
         {"scan_id": scan_id, "vuln_index": vuln_index}
         for (scan_id, vuln_index), task in _validation_tasks.items()
@@ -258,7 +274,7 @@ async def handle_vulnerability_validation(
     vulnerability: dict,
     report_markdown: str,
 ) -> None:
-    """Handle a 'vulnerability_validation' command — run local validator script."""
+    """Handle a 'vulnerability_validation' command — queue local validation by scan."""
     if _config is None or _reporter is None:
         print(f"Warning: agent not fully initialized, ignoring validation {scan_id}#{vuln_index}")
         return
@@ -269,45 +285,87 @@ async def handle_vulnerability_validation(
         return
 
     cancel_event = threading.Event()
+    item = _ValidationQueueItem(
+        scan_id=scan_id,
+        vuln_index=vuln_index,
+        project_path=project_path,
+        code_scan_path=code_scan_path,
+        product=product,
+        vulnerability=vulnerability,
+        report_markdown=report_markdown,
+        cancel_event=cancel_event,
+    )
+
+    queue = _validation_queues.setdefault(scan_id, deque())
+    queue.append(item)
+    worker = _validation_workers.get(scan_id)
+    if worker is None or worker.done():
+        worker = asyncio.create_task(_run_validation_worker(scan_id))
+        _validation_workers[scan_id] = worker
+    _validation_tasks[task_key] = worker
     _validation_cancel_events[task_key] = cancel_event
 
-    async def _run_validation() -> None:
-        from agent.config import apply_network_env, apply_remote_config
-        from agent.vulnerability_validation import run_vulnerability_validation
-        from backend.models import Vulnerability
-
-        if _reporter is not None and _agent_id is not None:
-            try:
-                remote_cfg = await _reporter.fetch_config(_agent_id)
-                if remote_cfg:
-                    apply_remote_config(_config, remote_cfg)
-                    apply_network_env(_config)
-            except Exception:
-                pass
-        try:
-            work_root = Path.home() / ".opendeephole" / "vulnerability_validation" / "runs" / scan_id
-            await run_vulnerability_validation(
-                config=_config,
-                reporter=_reporter,
-                scan_id=scan_id,
-                vuln_index=vuln_index,
-                vulnerability=Vulnerability(**vulnerability),
-                report_markdown=report_markdown,
-                scan_dir=work_root,
-                project_path=Path(project_path) if project_path else None,
-                code_scan_path=Path(code_scan_path) if code_scan_path else None,
-                product=product,
-                cancel_event=cancel_event,
-            )
-        except Exception as exc:
-            print(f"[validation] Unhandled error in validation {scan_id}#{vuln_index}: {exc}")
-        finally:
-            _validation_tasks.pop(task_key, None)
-            _validation_cancel_events.pop(task_key, None)
-
-    _validation_tasks[task_key] = asyncio.create_task(_run_validation())
     path_hint = f" ({project_path})" if project_path else ""
-    print(f"Started vulnerability validation {scan_id}#{vuln_index}{path_hint}")
+    print(f"Queued vulnerability validation {scan_id}#{vuln_index}{path_hint}")
+
+
+async def _run_validation_worker(scan_id: str) -> None:
+    """Run one vulnerability validation at a time for a scan."""
+    try:
+        while True:
+            queue = _validation_queues.get(scan_id)
+            if not queue:
+                return
+            item = queue.popleft()
+            task_key = (item.scan_id, item.vuln_index)
+            try:
+                if item.cancel_event.is_set():
+                    print(f"Skipping cancelled validation {item.scan_id}#{item.vuln_index}")
+                    continue
+                await _run_single_validation(item)
+            finally:
+                _validation_tasks.pop(task_key, None)
+                _validation_cancel_events.pop(task_key, None)
+    finally:
+        queue = _validation_queues.pop(scan_id, None)
+        if queue is not None:
+            for queued in queue:
+                task_key = (queued.scan_id, queued.vuln_index)
+                _validation_tasks.pop(task_key, None)
+                _validation_cancel_events.pop(task_key, None)
+        _validation_workers.pop(scan_id, None)
+
+
+async def _run_single_validation(item: _ValidationQueueItem) -> None:
+    from agent.config import apply_network_env, apply_remote_config
+    from agent.vulnerability_validation import run_vulnerability_validation
+    from backend.models import Vulnerability
+
+    if _reporter is not None and _agent_id is not None:
+        try:
+            remote_cfg = await _reporter.fetch_config(_agent_id)
+            if remote_cfg:
+                apply_remote_config(_config, remote_cfg)
+                apply_network_env(_config)
+        except Exception:
+            pass
+    try:
+        work_root = Path.home() / ".opendeephole" / "vulnerability_validation" / "runs" / item.scan_id
+        await run_vulnerability_validation(
+            config=_config,
+            reporter=_reporter,
+            scan_id=item.scan_id,
+            vuln_index=item.vuln_index,
+            vulnerability=Vulnerability(**item.vulnerability),
+            report_markdown=item.report_markdown,
+            scan_dir=work_root,
+            project_path=Path(item.project_path) if item.project_path else None,
+            code_scan_path=Path(item.code_scan_path) if item.code_scan_path else None,
+            product=item.product,
+            cancel_event=item.cancel_event,
+        )
+    except Exception as exc:
+        print(f"[validation] Unhandled error in validation {item.scan_id}#{item.vuln_index}: {exc}")
 
 
 async def handle_vulnerability_validation_stop(scan_id: str, vuln_index: int) -> None:
