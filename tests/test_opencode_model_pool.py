@@ -11,6 +11,7 @@ from backend.opencode.model_pool import (
     release_model_lease,
     refresh_configured_model_pool,
     total_model_capacity,
+    update_model_lease_context,
 )
 
 
@@ -455,6 +456,10 @@ def test_model_pool_snapshot_includes_active_task_context() -> None:
             assert model["active_tasks"][0]["checker"] == "npd"
             assert model["active_tasks"][0]["file"] == "src/a.c"
             assert model["active_tasks"][0]["line"] == 42
+            await update_model_lease_context(lease, {"serve_session_id": "ses_test"})
+            snapshot = model_pool_snapshot("scan-active")
+            model = snapshot["models"][0]
+            assert model["active_tasks"][0]["serve_session_id"] == "ses_test"
         finally:
             await release_model_lease(lease, outcome="success", duration_seconds=1.0)
 

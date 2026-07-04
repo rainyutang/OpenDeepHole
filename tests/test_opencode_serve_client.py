@@ -120,6 +120,19 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
         )
 
         assert lines == ["done"]
+        sessions: list[str] = []
+        await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            config_workspace=config_workspace,
+            config_content=config_content,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_session_id=sessions.append,
+        )
+        assert sessions == ["session-1"]
         session_client = _FakeAsyncClient.instances[0]
         message = next(
             item for item in session_client.posts
@@ -721,5 +734,39 @@ def test_config_hash_change_restarts_after_active_sessions_drain() -> None:
 
         manager._stop_locked.assert_awaited_once()
         manager._start_locked.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_config_hash_change_reuses_active_serve_process_without_waiting() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash="old",
+        )
+        manager._active_sessions = 1
+        manager._wait_until_idle_locked = AsyncMock()
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+
+        await manager._ensure_started_locked(OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_hash="new",
+            config_content='{"mcp": {}}',
+        ))
+
+        manager._wait_until_idle_locked.assert_not_awaited()
+        manager._stop_locked.assert_not_awaited()
+        manager._start_locked.assert_not_awaited()
+        assert manager._port == 12345
 
     asyncio.run(run())

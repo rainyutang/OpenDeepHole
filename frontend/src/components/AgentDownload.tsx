@@ -182,7 +182,22 @@ function compactTaskLabel(task: Record<string, unknown> | undefined): string {
   const file = task.file ? String(task.file) : "";
   const line = task.line ? `:${String(task.line)}` : "";
   const target = file ? `${file}${line}` : checker;
-  return [taskType + stage, target].filter(Boolean).join(" ");
+  const session = task.serve_session_id ? String(task.serve_session_id) : "";
+  return [taskType + stage, target, session].filter(Boolean).join(" ");
+}
+
+function ActiveTaskList({ tasks }: { tasks?: Record<string, unknown>[] }) {
+  const activeTasks = tasks || [];
+  if (activeTasks.length === 0) return <>—</>;
+  return (
+    <div className="space-y-1">
+      {activeTasks.map((task, index) => (
+        <div key={String(task.task_id || index)} className="truncate">
+          {compactTaskLabel(task)}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 interface AgentConfigPanelProps {
@@ -854,7 +869,6 @@ function AgentModelUsage({ pool }: { pool: AgentOpenCodePoolStatus | null }) {
 }
 
 function AgentModelUsageRow({ model }: { model: OpenCodePoolModelStats }) {
-  const active = model.active_tasks?.[0];
   return (
     <tr className="border-t border-slate-700/50 text-slate-300">
       <td className="px-2 py-1.5">
@@ -874,7 +888,7 @@ function AgentModelUsageRow({ model }: { model: OpenCodePoolModelStats }) {
       <td className="px-2 py-1.5 text-amber-300">{model.failure + model.timeout}</td>
       <td className="px-2 py-1.5">{formatDurationSeconds(model.avg_duration_seconds)}</td>
       <td className="px-2 py-1.5 max-w-64 truncate text-slate-400">
-        {compactTaskLabel(active)}
+        <ActiveTaskList tasks={model.active_tasks} />
       </td>
     </tr>
   );

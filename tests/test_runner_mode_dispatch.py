@@ -29,6 +29,7 @@ from backend.opencode.runner import (
     _wait_for_stream_exit_after_termination,
     run_audit,
     run_audit_batch,
+    run_threat_analysis_audit,
 )
 
 
@@ -254,6 +255,68 @@ def test_runtime_writable_paths_include_windows_slash_variants() -> None:
     assert "*" not in edit
     assert edit["C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1/**"] == "allow"
     assert edit[r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1/**"] == "allow"
+
+
+def test_threat_analysis_result_uses_scan_task_directory(tmp_path: Path) -> None:
+    async def run() -> None:
+        scans_dir = tmp_path / "scans"
+        workspace = scans_dir / "scan-1" / "opencode_workspace"
+        workspace.mkdir(parents=True)
+        project = tmp_path / "project"
+        scan_root = project / "src"
+        scan_root.mkdir(parents=True)
+        skill = tmp_path / "attack-tree-threat-analysis.md"
+        reference = tmp_path / "attack-method-reference-catalog.md"
+        skill.write_text("skill", encoding="utf-8")
+        reference.write_text("reference", encoding="utf-8")
+
+        cfg = SimpleNamespace(
+            opencode=SimpleNamespace(
+                mock=False,
+                tool="opencode",
+                executable="opencode",
+                invocation_mode="serve",
+                model="",
+                timeout=30,
+                max_retries=0,
+                models=[],
+            ),
+            opencode_concurrency=1,
+            storage=SimpleNamespace(scans_dir=str(scans_dir)),
+        )
+        captured: dict[str, object] = {}
+
+        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
+            captured["workspace"] = call_workspace
+            captured["prompt"] = prompt
+            captured["writable_paths"] = kwargs["writable_paths"]
+            (workspace.parent / "res.json").write_text(
+                '{"schema_version":"1.0","analysis_id":"ATA-SCAN","assets":[]}',
+                encoding="utf-8",
+            )
+
+        with (
+            patch("backend.opencode.runner.get_config", return_value=cfg),
+            patch("backend.opencode.runner._invoke_opencode", new=AsyncMock(side_effect=fake_invoke)),
+        ):
+            analysis = await run_threat_analysis_audit(
+                workspace=workspace,
+                project_id="scan-1",
+                skill_path=skill,
+                reference_catalog_path=reference,
+                project_dir=project,
+                code_scan_path=scan_root,
+            )
+
+        assert analysis is not None
+        result_path = workspace.parent / "res.json"
+        assert result_path.is_file()
+        assert str(result_path) in str(captured["prompt"])
+        assert str(project.resolve()) in str(captured["prompt"])
+        assert captured["workspace"] == workspace
+        assert captured["writable_paths"] == [scans_dir]
+
+    asyncio.run(run())
 
 
 def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> None:

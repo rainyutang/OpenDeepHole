@@ -750,6 +750,7 @@ class OpenCodeServeManager:
         model: str,
         timeout: int,
         on_line=None,
+        on_session_id=None,
         cancel_event=None,
     ) -> list[str]:
         key = OpenCodeServeKey(
@@ -774,6 +775,10 @@ class OpenCodeServeManager:
                 )
                 created.raise_for_status()
                 session_id = _session_id(created.json())
+                if on_session_id:
+                    result = on_session_id(session_id)
+                    if hasattr(result, "__await__"):
+                        await result
                 if on_line:
                     config_note = f" config={config_workspace}" if config_workspace else ""
                     on_line(f"[{tool} serve] session={session_id} directory={directory}{config_note}")
@@ -943,10 +948,26 @@ class OpenCodeServeManager:
         if self._proc is not None and self._key == key:
             self._dirty = False
             return
+        if self._proc is not None and self._same_process_key(self._key, key) and self._active_sessions > 0:
+            self._dirty = False
+            logger.info(
+                "Reusing active %s serve on 127.0.0.1:%s despite config hash change",
+                key.tool,
+                self._port,
+            )
+            return
         await self._wait_until_idle_locked()
         await self._stop_locked()
         await self._start_locked(key)
         self._dirty = False
+
+    @staticmethod
+    def _same_process_key(current: OpenCodeServeKey | None, requested: OpenCodeServeKey) -> bool:
+        return (
+            current is not None
+            and current.tool == requested.tool
+            and current.executable == requested.executable
+        )
 
     async def _wait_until_idle_locked(self) -> None:
         while self._active_sessions > 0:

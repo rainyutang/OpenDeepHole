@@ -23,6 +23,7 @@ from backend.opencode.model_pool import (
     acquire_model_lease,
     configured_global_concurrency,
     release_model_lease,
+    update_model_lease_context,
 )
 from backend.opencode.serve_client import get_serve_manager
 from backend.threat_analysis import (
@@ -829,7 +830,8 @@ async def run_threat_analysis_audit(
     max_retries = config.opencode.max_retries
     analysis_root = (project_dir or workspace).resolve()
     target_path = (code_scan_path or analysis_root).resolve()
-    result_path = analysis_root / "res.json"
+    result_path = workspace.parent / "res.json"
+    writable_root = Path(config.storage.scans_dir)
     scan_scope = build_threat_analysis_scan_scope(analysis_root, target_path)
     scan_scope_json = json.dumps(scan_scope.model_dump(), ensure_ascii=False)
 
@@ -868,7 +870,7 @@ async def run_threat_analysis_audit(
                 on_line=on_output,
                 cancel_event=cancel_event,
                 project_dir=analysis_root,
-                writable_paths=[result_path],
+                writable_paths=[writable_root],
                 model_capability="high",
                 prefer_high_model=True,
                 stats_scope_id=project_id,
@@ -1600,6 +1602,10 @@ async def _invoke_opencode(
                 writable_paths=writable_paths,
             )
             serve_env = _build_cli_env(config_workspace, tool, writable_paths=writable_paths)
+
+            async def record_serve_session(session_id: str) -> None:
+                await update_model_lease_context(lease, {"serve_session_id": session_id})
+
             try:
                 log_lines = await get_serve_manager().run_prompt(
                     tool=tool,
@@ -1611,6 +1617,7 @@ async def _invoke_opencode(
                     model=model,
                     timeout=timeout,
                     on_line=emit_line,
+                    on_session_id=record_serve_session,
                     cancel_event=cancel_event,
                 )
             except asyncio.CancelledError:

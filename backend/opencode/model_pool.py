@@ -581,6 +581,35 @@ async def release_model_lease(
         _condition.notify_all()
 
 
+async def update_model_lease_context(lease: ModelLease | None, updates: dict[str, Any]) -> None:
+    """Merge live metadata into the active task for a lease."""
+    if lease is None or not lease.task_id or not updates:
+        return
+    async with _condition:
+        task = _active_tasks.get(lease.task_id)
+        if task is None:
+            return
+        context = task.setdefault("context", {})
+        if not isinstance(context, dict):
+            context = {}
+            task["context"] = context
+        changed = False
+        for key, value in updates.items():
+            if value in (None, ""):
+                continue
+            if context.get(key) != value:
+                context[key] = value
+                changed = True
+        if not changed:
+            return
+        updated_at = _now_iso()
+        if lease.stats_scope_id:
+            _scope_updated_at[lease.stats_scope_id] = updated_at
+        global _global_updated_at
+        _global_updated_at = updated_at
+        _condition.notify_all()
+
+
 def _completed_count(item: ModelRuntimeStats) -> int:
     return item.success + item.failure + item.timeout + item.cancelled
 

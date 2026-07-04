@@ -3100,8 +3100,8 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
                 <td className={`${tdCls} text-amber-300`}>{model.timeout}</td>
                 <td className={`${tdCls} text-slate-300`}>{model.cancelled}</td>
                 <td className={tdCls}>{formatDuration(model.avg_duration_seconds)}</td>
-                <td className={`${tdCls} max-w-64 truncate text-slate-400`}>
-                  {modelTaskLabel(model.active_tasks?.[0])}
+                <td className={`${tdCls} max-w-72 text-slate-400`}>
+                  <ModelTaskList tasks={model.active_tasks} />
                 </td>
                 <td className={tdCls}>
                   <div className={statusClass(model.last_status)}>
@@ -3181,7 +3181,22 @@ function modelTaskLabel(task: Record<string, unknown> | undefined): string {
   const file = task.file ? String(task.file) : "";
   const line = task.line ? `:${String(task.line)}` : "";
   const target = file ? `${file}${line}` : checker;
-  return [taskType + stage, target].filter(Boolean).join(" ");
+  const session = task.serve_session_id ? String(task.serve_session_id) : "";
+  return [taskType + stage, target, session].filter(Boolean).join(" ");
+}
+
+function ModelTaskList({ tasks }: { tasks?: Record<string, unknown>[] }) {
+  const activeTasks = tasks || [];
+  if (activeTasks.length === 0) return <>-</>;
+  return (
+    <div className="space-y-1">
+      {activeTasks.map((task, index) => (
+        <div key={String(task.task_id || index)} className="truncate">
+          {modelTaskLabel(task)}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function formatDuration(seconds: number): string {
