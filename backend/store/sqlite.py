@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS vulnerability_validations (
     validator_name      TEXT NOT NULL DEFAULT '',
     validation_success  INTEGER,
     is_problem          INTEGER,
+    requires_human_intervention INTEGER,
     validation_code     TEXT NOT NULL DEFAULT '',
     validation_output   TEXT NOT NULL DEFAULT '',
     intermediate_output TEXT NOT NULL DEFAULT '',
@@ -584,6 +585,7 @@ class SqliteScanStore(ScanStoreBase):
                 validator_name      TEXT NOT NULL DEFAULT '',
                 validation_success  INTEGER,
                 is_problem          INTEGER,
+                requires_human_intervention INTEGER,
                 validation_code     TEXT NOT NULL DEFAULT '',
                 validation_output   TEXT NOT NULL DEFAULT '',
                 intermediate_output TEXT NOT NULL DEFAULT '',
@@ -614,6 +616,10 @@ class SqliteScanStore(ScanStoreBase):
         if "is_problem" not in validation_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerability_validations ADD COLUMN is_problem INTEGER"
+            )
+        if "requires_human_intervention" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN requires_human_intervention INTEGER"
             )
         if "final_output" not in validation_cols:
             self._conn.execute(
@@ -1484,10 +1490,10 @@ class SqliteScanStore(ScanStoreBase):
                 """\
                 INSERT INTO vulnerability_validations
                     (scan_id, vuln_index, status, running, product, validator_name,
-                     validation_success, is_problem, validation_code,
+                     validation_success, is_problem, requires_human_intervention, validation_code,
                      validation_output, intermediate_output, final_output, artifacts,
                      started_at, finished_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id, vuln_index) DO UPDATE SET
                     status = excluded.status,
                     running = excluded.running,
@@ -1495,6 +1501,7 @@ class SqliteScanStore(ScanStoreBase):
                     validator_name = excluded.validator_name,
                     validation_success = excluded.validation_success,
                     is_problem = excluded.is_problem,
+                    requires_human_intervention = excluded.requires_human_intervention,
                     validation_code = excluded.validation_code,
                     validation_output = excluded.validation_output,
                     intermediate_output = excluded.intermediate_output,
@@ -1513,6 +1520,7 @@ class SqliteScanStore(ScanStoreBase):
                     validation.validator_name,
                     _nullable_bool(validation.validation_success),
                     _nullable_bool(validation.is_problem),
+                    _nullable_bool(validation.requires_human_intervention),
                     validation.validation_code,
                     validation.validation_output,
                     validation.intermediate_output,
@@ -1556,6 +1564,7 @@ class SqliteScanStore(ScanStoreBase):
                 validator_name=r["validator_name"] or "",
                 validation_success=_bool_or_none(r["validation_success"]),
                 is_problem=_bool_or_none(r["is_problem"]),
+                requires_human_intervention=_bool_or_none(r["requires_human_intervention"]),
                 validation_code=r["validation_code"] or "",
                 validation_output=r["validation_output"] or "",
                 intermediate_output=r["intermediate_output"] or "",

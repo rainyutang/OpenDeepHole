@@ -2379,6 +2379,7 @@ function StaticCandidateDetail({ item }: { item: StaticCandidateItem }) {
               <StatusPill label={validationStatusLabel(item.validation.status)} tone={validationTone(item.validation)} />
               <StatusPill label={`验证成功：${formatNullableBool(item.validation.validation_success)}`} tone={nullableBoolTone(item.validation.validation_success)} />
               <StatusPill label={`是否问题：${formatNullableBool(item.validation.is_problem)}`} tone={nullableBoolTone(item.validation.is_problem)} />
+              <StatusPill label={`人工介入：${formatNullableBool(item.validation.requires_human_intervention)}`} tone={humanInterventionTone(item.validation.requires_human_intervention)} />
             </div>
           </section>
         )}
@@ -2671,6 +2672,10 @@ function ValidationDetail({
                 label={`是否问题：${formatNullableBool(validation.is_problem)}`}
                 tone={nullableBoolTone(validation.is_problem)}
               />
+              <StatusPill
+                label={`人工介入：${formatNullableBool(validation.requires_human_intervention)}`}
+                tone={humanInterventionTone(validation.requires_human_intervention)}
+              />
               {validation.product && <StatusPill label={`产品：${validation.product}`} tone="slate" />}
               {validation.validator_name && <StatusPill label={`方法：${validation.validator_name}`} tone="slate" />}
             </div>
@@ -2757,6 +2762,12 @@ function formatNullableBool(value?: boolean | null): string {
 function nullableBoolTone(value?: boolean | null): TaskTone {
   if (value === true) return "green";
   if (value === false) return "amber";
+  return "slate";
+}
+
+function humanInterventionTone(value?: boolean | null): TaskTone {
+  if (value === true) return "amber";
+  if (value === false) return "green";
   return "slate";
 }
 

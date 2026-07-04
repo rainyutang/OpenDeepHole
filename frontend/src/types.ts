@@ -145,6 +145,7 @@ export interface VulnerabilityValidation {
   validator_name?: string;
   validation_success?: boolean | null;
   is_problem?: boolean | null;
+  requires_human_intervention?: boolean | null;
   validation_code: string;
   validation_output: string;
   intermediate_output: string;

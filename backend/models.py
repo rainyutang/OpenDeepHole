@@ -406,6 +406,7 @@ class VulnerabilityValidation(BaseModel):
     validator_name: str = ""
     validation_success: bool | None = None
     is_problem: bool | None = None
+    requires_human_intervention: bool | None = None
     validation_code: str = ""
     validation_output: str = ""
     intermediate_output: str = ""
@@ -519,6 +520,7 @@ class AgentVulnerabilityValidationUpdate(BaseModel):
     validator_name: str = ""
     validation_success: bool | None = None
     is_problem: bool | None = None
+    requires_human_intervention: bool | None = None
     validation_code: str = ""
     validation_output: str = ""
     intermediate_output: str = ""
