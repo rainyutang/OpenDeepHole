@@ -33,7 +33,8 @@ def test_loop_mut_idx_oob_rule_yaml_is_valid() -> None:
     assert len(data["rules"]) == 5
     rule_ids = {rule["id"] for rule in data["rules"]}
     assert "c.loop-mutated-index-array-access.broad" in rule_ids
-    assert "c.loop-bound-unchecked-index-access.broad" in rule_ids
+    assert "c.loop-bound-unchecked-index-access.broad" not in rule_ids
+    assert "c.loop-mutated-copy-from-user-sink.broad" in rule_ids
     assert "c.loop-mutated-index-pointer-access.broad" in rule_ids
     assert "c.loop-mutated-index-memory-call.broad" in rule_ids
     assert "c.loop-mutated-index-derived-pointer-sink.broad" in rule_ids
@@ -97,6 +98,43 @@ def test_loop_mut_idx_oob_direct_result_uses_json_file_and_code_db(tmp_path: Pat
     assert "内存访问: dst[idx]" in candidate.description
     assert "宽召回" not in candidate.description
     assert "匹配代码" not in candidate.description
+
+
+def test_loop_mut_idx_oob_copy_from_user_result_names_focus_variable(tmp_path: Path) -> None:
+    output = _semgrep_output(
+        path=str(tmp_path / "copy.c"),
+        line=19,
+        check_id="c.loop-mutated-copy-from-user-sink.broad",
+        message="Possible loop length copy_from_user overflow.",
+        metavars={
+            "$COPY": {"abstract_content": "bspkern_copy_from_user"},
+            "$DST": {"abstract_content": "fragPayload"},
+            "$LEN": {"abstract_content": "fragLen"},
+            "$COND": {"abstract_content": "fragId < fragNum"},
+        },
+        metadata={"source_kind": "copy-from-user", "recall": "high"},
+        lines="bspkern_copy_from_user(fragPayload, fragPayloadFromUser, fragLen)",
+    )
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/semgrep"),
+        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
+    ):
+        candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path))
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert "重点变量 `fragLen`" in candidate.description
+    assert "目标 `fragPayload`" in candidate.description
+    assert "copy_from_user调用: bspkern_copy_from_user" in candidate.description
+    assert "重点变量/拷贝长度: fragLen" in candidate.description
+    assert candidate.metadata == {
+        "problem": "copy_from_user循环累加长度越界",
+        "focus_variable": "fragLen",
+        "target_variable": "fragPayload",
+        "sink": "bspkern_copy_from_user",
+    }
+    assert "subject" not in candidate.metadata
 
 
 def test_loop_mut_idx_oob_derived_pointer_result_and_dedup(tmp_path: Path) -> None:

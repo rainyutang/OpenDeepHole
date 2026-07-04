@@ -1,14 +1,14 @@
 # Loop Mutated Index OOB / 循环变更索引越界
 
-本 checker 使用 Semgrep 初筛循环中变化索引、未校验循环上界导致的潜在数组或指针越界，再由 LLM 判断是否真实可达。
+本 checker 使用 Semgrep 初筛循环中变化索引、循环累加指针和 `copy_from_user` 长度变量导致的潜在越界，再由 LLM 判断是否真实可达。
 
 ## 目标场景
 
 - `$IDX` 在循环第三表达式或循环体内递增、递减或按步长变化
 - `$IDX` 被用于 `arr[idx]`、`*(ptr + idx)`、`(ptr + idx)->field`、`&arr[idx]` 或内存函数参数
 - 循环条件没有直接包含 `$IDX`
+- `copy_from_user` 家族调用使用 `$LEN` 作为拷贝长度，同时目标 `$DST` 在循环内按 `$LEN` 累加或递减
 - 命中点附近没有明显 `idx < bound`、fail-fast 或 assert/check 宏
-- 循环条件直接使用 `idx < bound` / `bound > idx`，但循环前未看到 `bound` 参与任意大小比较，且 `idx` 被用于数组或指针访问
 
 ## 典型真阳性
 
@@ -38,16 +38,25 @@ void fill(char *base, unsigned remain, unsigned step) {
 如果 `remain` 不等价于 `base` 的容量，且 `idx` 没有被单独约束，派生指针可能越过目标缓冲区。
 
 ```c
-void build_payload(FragInfo *fragInfo, unsigned fragNum) {
+int MC_EthBuildPayloadByFrag(uintptr_t vaPayloadAddr, FragInfo *fragInfo, unsigned fragNum) {
+    unsigned char *fragPayload;
+    void __user *fragPayloadFromUser;
     unsigned fragId;
+    unsigned fragLen;
+    fragPayload = (unsigned char *)((uintptr_t)(vaPayloadAddr));
     for (fragId = 0; fragId < fragNum; fragId++) {
-        use(fragInfo[fragId].packet);
-        use(fragInfo[fragId].len);
+        fragPayloadFromUser = (void __user *)(uintptr_t)(fragInfo[fragId].packet);
+        fragLen = fragInfo[fragId].len;
+        if (bspkern_copy_from_user(fragPayload, fragPayloadFromUser, fragLen) != 0) {
+            return -1;
+        }
+        fragPayload += fragLen;
     }
+    return 0;
 }
 ```
 
-这里 `fragId` 被 `fragNum` 约束，但如果 `fragNum` 来自外部输入且循环前没有校验它不超过 `fragInfo` 的真实元素个数，`fragInfo[fragId]` 可能越界。
+这里 `fragLen` 决定每轮 `bspkern_copy_from_user` 的写入长度，`fragPayload` 又按 `fragLen` 累加。如果 `fragNum` 和各片段 `len` 来自用户或协议字段，且没有校验累计长度不超过 `vaPayloadAddr` 指向缓冲区的容量，就可能在某一轮触发越界写。
 
 ## 典型误报
 
@@ -79,24 +88,23 @@ void safe_sync(char dst[16], unsigned remain) {
 如果调用契约或上游校验证明 `remain <= 16`，虽然循环条件没有直接包含 `i`，也应判为误报。
 
 ```c
-void safe_bound(FragInfo *fragInfo, unsigned fragNum, unsigned maxFragNum) {
-    unsigned fragId;
-    if (fragNum > maxFragNum) {
+void safe_copy(char *dst, const char *src, unsigned len, unsigned remaining) {
+    if (len > remaining) {
         return;
     }
-    for (fragId = 0; fragId < fragNum; fragId++) {
-        use(fragInfo[fragId].packet);
-    }
+    copy_from_user(dst, src, len);
+    dst += len;
 }
 ```
 
-循环前已经比较过 `fragNum`，本 checker 会把这类形态先排除；若比较隐藏在宏、封装或上游调用中，仍由 LLM 复核时确认。
+拷贝前已经比较过 `len` 和剩余空间，真实写入被约束。若校验隐藏在宏、封装或上游调用中，仍由 LLM 复核时确认。
 
 ## LLM 复核重点
 
 - `$IDX` 的初始值、变化方向和最大可能值
 - 循环条件是否通过等价变量间接约束 `$IDX`
-- 循环上界是否来自外部输入，循环前或上游是否已经限制其不超过目标容量
+- `copy_from_user` 形态中的重点变量 `$LEN` 来源、单轮最大值和多轮累计值
+- `$DST` 指向的目标缓冲区真实容量，以及每轮推进后的剩余空间
 - 数组、指针或结构体成员的真实容量
 - 访问前是否有宏、断言、fail-fast 或上游校验
-- 触发路径是否受外部输入控制
+- 触发路径是否受外部输入控制，以及需要怎样的输入关系才能越过边界

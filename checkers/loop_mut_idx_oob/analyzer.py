@@ -8,6 +8,7 @@ checker 内重复做 tree-sitter 兜底。
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
@@ -27,6 +28,11 @@ _log = get_logger(__name__)
 _RULE_FILE = Path(__file__).parent / "loop_mut_idx_oob_semgrep.yml"
 _SEMGREP_TIMEOUT_SECONDS = DEFAULT_SEMGREP_TIMEOUT_SECONDS
 _SEV_LABEL = {"ERROR": "高风险", "WARNING": "中风险", "INFO": "低风险"}
+_COPY_FROM_USER_MESSAGE_RE = re.compile(
+    r"copy_from_user-family sink `(?P<copy>[^`]+)` uses destination variable "
+    r"`(?P<dst>[^`]+)`.*length variable `(?P<len>[^`]+)`",
+    re.DOTALL,
+)
 
 
 def _clean_text(value: object) -> str:
@@ -55,6 +61,9 @@ def _mv(metavars: dict, key: str) -> str:
 
 
 def _best_effort_memory_expr(metavars: dict, matched_lines: str) -> str:
+    copy_func = _mv(metavars, "$COPY")
+    dst = _mv(metavars, "$DST")
+    copy_len = _mv(metavars, "$LEN")
     memfunc = _mv(metavars, "$MEMFUNC")
     idx = _mv(metavars, "$IDX")
     base = _mv(metavars, "$BASE")
@@ -62,6 +71,8 @@ def _best_effort_memory_expr(metavars: dict, matched_lines: str) -> str:
     field = _mv(metavars, "$FIELD")
     off = _mv(metavars, "$OFF")
 
+    if copy_func and dst and copy_len:
+        return f"{copy_func}({dst}, ..., {copy_len})"
     if memfunc:
         return f"{memfunc}(...)"
     if base and idx and off:
@@ -89,9 +100,18 @@ def _rule_source(check_id: str, metadata: dict) -> str:
         return "pointer"
     if "memory-call" in check_id:
         return "memory-call"
+    if "copy-from-user" in check_id:
+        return "copy-from-user"
     if "derived-pointer" in check_id:
         return "derived-pointer"
     return check_id.rsplit(".", 1)[-1] if check_id else "unknown"
+
+
+def _copy_from_user_message_values(message: str) -> dict[str, str]:
+    match = _COPY_FROM_USER_MESSAGE_RE.search(message)
+    if not match:
+        return {}
+    return {key: _clean_text(value) for key, value in match.groupdict().items()}
 
 
 class Analyzer(BaseAnalyzer):
@@ -148,8 +168,18 @@ class Analyzer(BaseAnalyzer):
             cond_expr = _mv(metavars, "$COND")
             step_expr = _mv(metavars, "$STEP")
             bound_expr = _mv(metavars, "$BOUND")
-            memory_expr = _best_effort_memory_expr(metavars, matched_lines)
+            copy_func = _mv(metavars, "$COPY")
+            dst_expr = _mv(metavars, "$DST")
+            len_expr = _mv(metavars, "$LEN")
             source = _rule_source(check_id, metadata)
+            if source == "copy-from-user" and (not copy_func or not dst_expr or not len_expr):
+                message_values = _copy_from_user_message_values(message)
+                copy_func = copy_func or message_values.get("copy", "")
+                dst_expr = dst_expr or message_values.get("dst", "")
+                len_expr = len_expr or message_values.get("len", "")
+            memory_expr = _best_effort_memory_expr(metavars, matched_lines)
+            if source == "copy-from-user" and copy_func and dst_expr and len_expr:
+                memory_expr = f"{copy_func}({dst_expr}, ..., {len_expr})"
 
             dedup_key = (rel_path, start_line, source, idx_expr, memory_expr)
             if dedup_key in seen:
@@ -169,15 +199,32 @@ class Analyzer(BaseAnalyzer):
                     or "unknown"
                 )
 
-            idx_subject = idx_expr or "循环索引"
-            mem_subject = f"访问 `{memory_expr}` " if memory_expr else ""
-            parts: list[str] = [
-                f"函数 `{func_name}` 中循环索引 `{idx_subject}` {mem_subject}"
-                f"是否存在越界访问问题，请审计确认。"
-            ]
+            is_copy_from_user = source == "copy-from-user"
+            if is_copy_from_user:
+                copy_subject = len_expr or "拷贝长度变量"
+                dst_subject = dst_expr or "目标指针"
+                sink_subject = memory_expr or (f"{copy_func}(...)" if copy_func else "copy_from_user 类调用")
+                parts: list[str] = [
+                    f"函数 `{func_name}` 中 `{sink_subject}` 使用重点变量 `{copy_subject}` "
+                    f"写入循环内累加/递减的目标 `{dst_subject}`，是否存在越界写入并可被触发，请审计确认。"
+                ]
+            else:
+                idx_subject = idx_expr or "循环索引"
+                mem_subject = f"访问 `{memory_expr}` " if memory_expr else ""
+                parts = [
+                    f"函数 `{func_name}` 中循环索引 `{idx_subject}` {mem_subject}"
+                    f"是否存在越界访问问题，请审计确认。"
+                ]
 
             details: list[str] = []
-            if idx_expr:
+            if is_copy_from_user:
+                if len_expr:
+                    details.append(f"重点变量/拷贝长度: {len_expr}")
+                if dst_expr:
+                    details.append(f"目标指针/累加变量: {dst_expr}")
+                if copy_func:
+                    details.append(f"copy_from_user调用: {copy_func}")
+            elif idx_expr:
                 details.append(f"循环变化索引: {idx_expr}")
             if cond_expr:
                 details.append(f"循环条件: {cond_expr}")
@@ -189,7 +236,19 @@ class Analyzer(BaseAnalyzer):
                 details.append(f"内存访问: {memory_expr}")
             if details:
                 parts.append("相关线索：\n" + "\n".join(details))
-            parts.append("审计要点：严格确认真实边界与可达性。")
+            if is_copy_from_user:
+                parts.append("审计要点：严格确认重点变量来源、累计写入范围、目标真实边界与外部触发方式。")
+            else:
+                parts.append("审计要点：严格确认真实边界与可达性。")
+
+            candidate_metadata: dict = {}
+            if is_copy_from_user:
+                candidate_metadata = {
+                    "problem": "copy_from_user循环累加长度越界",
+                    "focus_variable": len_expr,
+                    "target_variable": dst_expr,
+                    "sink": copy_func,
+                }
 
             yield Candidate(
                 file=rel_path,
@@ -197,4 +256,5 @@ class Analyzer(BaseAnalyzer):
                 function=func_name,
                 description="\n".join(part for part in parts if part),
                 vuln_type=self.vuln_type,
+                metadata=candidate_metadata,
             )
