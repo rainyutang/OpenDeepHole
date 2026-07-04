@@ -145,6 +145,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             executable="opencode",
             config_hash=expected_hash,
         )
+        assert manager._acquire_session.await_args.kwargs["startup_cwd"] == config_workspace
         expected_params = {"directory": str(project)}
         expected_headers = {"x-opencode-directory": str(project)}
         assert session_client.posts[0]["path"] == "/session"
@@ -266,6 +267,7 @@ def test_list_models_uses_project_directory_context(monkeypatch, tmp_path: Path)
             "params": expected_params,
             "headers": expected_headers,
         }
+        assert manager._ensure_started.await_args.kwargs["startup_cwd"] == config_workspace
 
     asyncio.run(run())
 
@@ -396,8 +398,12 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         commands: list[list[str]] = []
         envs: list[dict[str, str]] = []
         popen_kwargs: list[dict] = []
+        git_init_cwds: list[Path] = []
         marker_path = tmp_path / "serve-marker.json"
         startup_log_path = tmp_path / "serve-startup.log"
+        project = tmp_path / "project"
+        startup_cwd = project / ".opendeephole" / "opencode" / "serve-test"
+        project.mkdir()
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
         monkeypatch.delenv("OPENCODE_SERVE_PORT", raising=False)
         monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
@@ -413,7 +419,15 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
             popen_kwargs.append(kwargs)
             return FakeProc()
 
+        def fake_run(cmd, **kwargs):
+            assert cmd == ["git", "init", "-q"]
+            cwd = Path(kwargs["cwd"])
+            git_init_cwds.append(cwd)
+            (cwd / ".git").mkdir(parents=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
         monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("backend.opencode.serve_client.subprocess.run", fake_run)
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
@@ -423,7 +437,7 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
             executable="opencode",
             config_hash="abc123",
             config_content='{"mcp": {}}',
-        ))
+        ), startup_cwd=startup_cwd)
 
         assert commands[0] == [
             "/bin/opencode",
@@ -441,8 +455,60 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert envs[0]["OPENCODE_CONFIG_CONTENT"] == '{"mcp": {}}'
         assert envs[0]["PYTHONIOENCODING"] == "utf-8"
         assert envs[0]["PYTHONUTF8"] == "1"
+        assert git_init_cwds == [startup_cwd]
+        assert (startup_cwd / ".git").is_dir()
+        assert not (project / ".git").exists()
+        assert popen_kwargs[0]["cwd"] == str(startup_cwd)
         assert popen_kwargs[0]["stdout"] != subprocess.DEVNULL
         assert popen_kwargs[0]["stderr"] == subprocess.STDOUT
+
+    asyncio.run(run())
+
+
+def test_start_locked_uses_bootstrap_cwd_without_runtime_workspace(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        class FakeProc:
+            pid = 12346
+
+            def poll(self):
+                return None
+
+        bootstrap_cwd = tmp_path / "bootstrap"
+        popen_kwargs: list[dict] = []
+        git_init_cwds: list[Path] = []
+        marker_path = tmp_path / "serve-marker.json"
+        startup_log_path = tmp_path / "serve-startup.log"
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("backend.opencode.serve_client._serve_bootstrap_cwd", lambda tool: bootstrap_cwd)
+        monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
+        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: False)
+        monkeypatch.setattr(
+            "backend.opencode.serve_client._new_serve_startup_log_path",
+            lambda tool, port: startup_log_path,
+        )
+
+        def fake_run(cmd, **kwargs):
+            assert cmd == ["git", "init", "-q"]
+            cwd = Path(kwargs["cwd"])
+            git_init_cwds.append(cwd)
+            (cwd / ".git").mkdir(parents=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        def fake_popen(cmd, **kwargs):
+            popen_kwargs.append(kwargs)
+            return FakeProc()
+
+        monkeypatch.setattr("backend.opencode.serve_client.subprocess.run", fake_run)
+        monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", fake_popen)
+
+        manager = OpenCodeServeManager()
+        manager._wait_health_locked = AsyncMock()
+
+        await manager._start_locked(OpenCodeServeKey(tool="opencode", executable="opencode"))
+
+        assert git_init_cwds == [bootstrap_cwd]
+        assert popen_kwargs[0]["cwd"] == str(bootstrap_cwd)
+        assert (bootstrap_cwd / ".git").is_dir()
 
     asyncio.run(run())
 
@@ -460,12 +526,14 @@ def test_wait_health_reports_startup_output_on_early_exit(tmp_path: Path) -> Non
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 4096
+        manager._startup_cwd = tmp_path / "runtime"
 
         with pytest.raises(RuntimeError) as excinfo:
             await manager._wait_health_locked(startup_log)
 
         message = str(excinfo.value)
         assert "OpenCode serve exited during startup with code 1" in message
+        assert f"startup_cwd={tmp_path / 'runtime'}" in message
         assert "OpenCode serve startup output:" in message
         assert "before bad byte" in message
         assert "after" in message
@@ -487,12 +555,14 @@ def test_wait_health_timeout_reports_startup_output(monkeypatch, tmp_path: Path)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 4096
+        manager._startup_cwd = tmp_path / "runtime"
 
         with pytest.raises(TimeoutError) as excinfo:
             await manager._wait_health_locked(startup_log)
 
         message = str(excinfo.value)
         assert "OpenCode serve did not become healthy" in message
+        assert f"startup_cwd={tmp_path / 'runtime'}" in message
         assert "provider failed to load" in message
 
     asyncio.run(run())

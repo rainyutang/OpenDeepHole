@@ -35,6 +35,7 @@ _DEFAULT_SERVE_PORT = 4096
 _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
 _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
+_SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,56 @@ def _new_serve_startup_log_path(tool: str, port: int) -> Path:
     )
     os.close(fd)
     return Path(raw_path)
+
+
+def _safe_name(value: str, default: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value or default).strip("._") or default
+
+
+def _serve_bootstrap_cwd(tool: str) -> Path:
+    try:
+        root = str(Path.cwd().resolve())
+    except Exception:
+        root = os.getcwd()
+    digest = hashlib.sha256(root.encode("utf-8", errors="replace")).hexdigest()[:12]
+    safe_tool = _safe_name(tool, "opencode")
+    return Path(tempfile.gettempdir()) / f"{_SERVE_BOOTSTRAP_CWD_PREFIX}-{safe_tool}-{digest}"
+
+
+def _ensure_minimal_git_repo(cwd: Path) -> None:
+    if (cwd / ".git").exists():
+        return
+    try:
+        completed = subprocess.run(
+            ["git", "init", "-q"],
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except FileNotFoundError:
+        logger.warning("git executable not found; OpenCode serve startup cwd remains non-git: %s", cwd)
+        return
+    except subprocess.TimeoutExpired:
+        logger.warning("git init timed out for OpenCode serve startup cwd: %s", cwd)
+        return
+    except Exception as exc:
+        logger.warning("Failed to initialize OpenCode serve startup cwd %s as git repo: %s", cwd, exc)
+        return
+    if completed.returncode != 0:
+        detail = _one_line_preview(completed.stderr or completed.stdout or f"exit {completed.returncode}")
+        logger.warning("Failed to initialize OpenCode serve startup cwd %s as git repo: %s", cwd, detail)
+
+
+def _prepare_serve_startup_cwd(tool: str, startup_cwd: Path | None) -> Path:
+    cwd = Path(startup_cwd) if startup_cwd is not None else _serve_bootstrap_cwd(tool)
+    cwd.mkdir(parents=True, exist_ok=True)
+    _ensure_minimal_git_repo(cwd)
+    return cwd
 
 
 def _read_serve_startup_log_tail(path: Path | None) -> str:
@@ -763,6 +814,7 @@ class OpenCodeServeManager:
         self._key: OpenCodeServeKey | None = None
         self._port: int | None = None
         self._startup_log_path: Path | None = None
+        self._startup_cwd: Path | None = None
         self._marker_path = _serve_marker_path()
         self._active_sessions = 0
         self._dirty = False
@@ -801,7 +853,7 @@ class OpenCodeServeManager:
             config_hash=_config_hash(config_content),
             config_content=config_content or "",
         )
-        await self._acquire_session(key)
+        await self._acquire_session(key, startup_cwd=config_workspace)
         session_id = ""
         event_task: asyncio.Task | None = None
         event_state: _ServeEventState | None = None
@@ -917,7 +969,7 @@ class OpenCodeServeManager:
             config_hash=_config_hash(config_content),
             config_content=config_content or "",
         )
-        await self._ensure_started(key)
+        await self._ensure_started(key, startup_cwd=config_workspace)
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
         async with httpx.AsyncClient(base_url=self.base_url, timeout=_SERVE_REQUEST_TIMEOUT_SECONDS) as client:
@@ -950,9 +1002,9 @@ class OpenCodeServeManager:
         async with self._lock:
             await self._stop_locked()
 
-    async def _acquire_session(self, key: OpenCodeServeKey) -> None:
+    async def _acquire_session(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
         async with self._lock:
-            await self._ensure_started_locked(key)
+            await self._ensure_started_locked(key, startup_cwd=startup_cwd)
             async with self._idle:
                 self._active_sessions += 1
 
@@ -979,14 +1031,15 @@ class OpenCodeServeManager:
                 raise asyncio.TimeoutError()
             await asyncio.sleep(0.2)
 
-    async def _ensure_started(self, key: OpenCodeServeKey) -> None:
+    async def _ensure_started(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
         async with self._lock:
-            await self._ensure_started_locked(key)
+            await self._ensure_started_locked(key, startup_cwd=startup_cwd)
 
-    async def _ensure_started_locked(self, key: OpenCodeServeKey) -> None:
+    async def _ensure_started_locked(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
         if self._proc is not None and self._proc.poll() is not None:
             self._proc = None
             self._port = None
+            self._startup_cwd = None
         if self._proc is not None and self._key == key:
             self._dirty = False
             return
@@ -1000,7 +1053,7 @@ class OpenCodeServeManager:
             return
         await self._wait_until_idle_locked()
         await self._stop_locked()
-        await self._start_locked(key)
+        await self._start_locked(key, startup_cwd=startup_cwd)
         self._dirty = False
 
     @staticmethod
@@ -1016,7 +1069,7 @@ class OpenCodeServeManager:
             async with self._idle:
                 await self._idle.wait()
 
-    async def _start_locked(self, key: OpenCodeServeKey) -> None:
+    async def _start_locked(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
         executable = _resolve_executable(key.executable)
         port = _serve_port()
         await self._stop_owned_serve_on_port(port)
@@ -1028,6 +1081,7 @@ class OpenCodeServeManager:
             )
             if _port_is_in_use(port):
                 raise RuntimeError(_port_busy_message(port, reclaim))
+        prepared_cwd = _prepare_serve_startup_cwd(key.tool, startup_cwd)
         env = dict(os.environ)
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
         env["PYTHONIOENCODING"] = "utf-8"
@@ -1059,6 +1113,7 @@ class OpenCodeServeManager:
                     stdout=startup_log,
                     stderr=subprocess.STDOUT,
                     env=env,
+                    cwd=str(prepared_cwd),
                     **kwargs,
                 )
         except Exception:
@@ -1067,6 +1122,7 @@ class OpenCodeServeManager:
             raise
         self._key = key
         self._port = port
+        self._startup_cwd = prepared_cwd
         _write_marker(self._marker_path, proc=self._proc, key=key, port=port)
         try:
             await self._wait_health_locked(startup_log_path)
@@ -1075,7 +1131,7 @@ class OpenCodeServeManager:
             raise
         _remove_file(startup_log_path)
         config_note = f" config_hash={key.config_hash[:12]}" if key.config_hash else ""
-        logger.info("Started %s serve on 127.0.0.1:%s%s", key.tool, port, config_note)
+        logger.info("Started %s serve on 127.0.0.1:%s cwd=%s%s", key.tool, port, prepared_cwd, config_note)
 
     async def _stop_owned_serve_on_port(self, port: int) -> None:
         marker = _read_marker(self._marker_path)
@@ -1114,8 +1170,9 @@ class OpenCodeServeManager:
         deadline = time.monotonic() + _SERVE_START_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             if self._proc is not None and self._proc.poll() is not None:
+                cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
                 raise RuntimeError(_with_serve_startup_log(
-                    f"OpenCode serve exited during startup with code {self._proc.returncode}",
+                    f"OpenCode serve exited during startup with code {self._proc.returncode}{cwd_note}",
                     startup_log_path,
                 ))
             try:
@@ -1125,8 +1182,9 @@ class OpenCodeServeManager:
                         return
             except Exception:
                 await asyncio.sleep(0.2)
+        cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
         raise TimeoutError(_with_serve_startup_log(
-            "OpenCode serve did not become healthy",
+            f"OpenCode serve did not become healthy{cwd_note}",
             startup_log_path,
         ))
 
@@ -1172,6 +1230,7 @@ class OpenCodeServeManager:
         self._port = None
         self._key = None
         self._startup_log_path = None
+        self._startup_cwd = None
         if proc is None:
             _remove_file(startup_log_path)
             return
