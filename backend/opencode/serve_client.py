@@ -30,6 +30,7 @@ _SERVE_START_TIMEOUT_SECONDS = 30.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 _SERVE_EVENT_PREVIEW_LIMIT = 500
+_SERVE_STARTUP_LOG_TAIL_LIMIT = 4000
 _DEFAULT_SERVE_PORT = 4096
 _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
@@ -106,6 +107,46 @@ def _run_command_text(cmd: list[str], timeout: float = 3.0) -> str:
         logger.debug("Failed to run %s: %s", cmd[0] if cmd else cmd, exc)
         return ""
     return completed.stdout or ""
+
+
+def _new_serve_startup_log_path(tool: str, port: int) -> Path:
+    safe_tool = re.sub(r"[^A-Za-z0-9_.-]+", "_", tool or "opencode").strip("._") or "opencode"
+    fd, raw_path = tempfile.mkstemp(
+        prefix=f"opendeephole-{safe_tool}-serve-startup-",
+        suffix=f"-{port}.log",
+    )
+    os.close(fd)
+    return Path(raw_path)
+
+
+def _read_serve_startup_log_tail(path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    if len(text) > _SERVE_STARTUP_LOG_TAIL_LIMIT:
+        text = text[-_SERVE_STARTUP_LOG_TAIL_LIMIT:]
+    return text
+
+
+def _with_serve_startup_log(message: str, path: Path | None) -> str:
+    tail = _read_serve_startup_log_tail(path)
+    if not tail:
+        return message
+    return f"{message}\n\nOpenCode serve startup output:\n{tail}"
+
+
+def _remove_file(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.debug("Failed to remove %s: %s", path, exc)
 
 
 def _address_token_has_port(token: str, port: int) -> bool:
@@ -721,6 +762,7 @@ class OpenCodeServeManager:
         self._proc: subprocess.Popen | None = None
         self._key: OpenCodeServeKey | None = None
         self._port: int | None = None
+        self._startup_log_path: Path | None = None
         self._marker_path = _serve_marker_path()
         self._active_sessions = 0
         self._dirty = False
@@ -988,6 +1030,8 @@ class OpenCodeServeManager:
                 raise RuntimeError(_port_busy_message(port, reclaim))
         env = dict(os.environ)
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         if key.config_content:
             env["OPENCODE_CONFIG_CONTENT"] = key.config_content
         else:
@@ -1005,23 +1049,31 @@ class OpenCodeServeManager:
         kwargs: dict[str, Any] = {}
         if sys.platform != "win32":
             kwargs["start_new_session"] = True
-        self._proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            env=env,
-            **kwargs,
-        )
+        startup_log_path = _new_serve_startup_log_path(key.tool, port)
+        self._startup_log_path = startup_log_path
+        try:
+            with startup_log_path.open("ab") as startup_log:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=startup_log,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    **kwargs,
+                )
+        except Exception:
+            self._startup_log_path = None
+            _remove_file(startup_log_path)
+            raise
         self._key = key
         self._port = port
         _write_marker(self._marker_path, proc=self._proc, key=key, port=port)
         try:
-            await self._wait_health_locked()
+            await self._wait_health_locked(startup_log_path)
         except Exception:
             await self._stop_locked()
             raise
+        _remove_file(startup_log_path)
         config_note = f" config_hash={key.config_hash[:12]}" if key.config_hash else ""
         logger.info("Started %s serve on 127.0.0.1:%s%s", key.tool, port, config_note)
 
@@ -1058,11 +1110,14 @@ class OpenCodeServeManager:
                 reason="Agent-owned serve process tree left listener behind",
             )
 
-    async def _wait_health_locked(self) -> None:
+    async def _wait_health_locked(self, startup_log_path: Path | None = None) -> None:
         deadline = time.monotonic() + _SERVE_START_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             if self._proc is not None and self._proc.poll() is not None:
-                raise RuntimeError(f"OpenCode serve exited during startup with code {self._proc.returncode}")
+                raise RuntimeError(_with_serve_startup_log(
+                    f"OpenCode serve exited during startup with code {self._proc.returncode}",
+                    startup_log_path,
+                ))
             try:
                 async with httpx.AsyncClient(base_url=self.base_url, timeout=2.0) as client:
                     response = await client.get("/global/health")
@@ -1070,7 +1125,10 @@ class OpenCodeServeManager:
                         return
             except Exception:
                 await asyncio.sleep(0.2)
-        raise TimeoutError("OpenCode serve did not become healthy")
+        raise TimeoutError(_with_serve_startup_log(
+            "OpenCode serve did not become healthy",
+            startup_log_path,
+        ))
 
     async def _abort_session(
         self,
@@ -1109,19 +1167,25 @@ class OpenCodeServeManager:
     async def _stop_locked(self) -> None:
         proc = self._proc
         port = self._port
+        startup_log_path = self._startup_log_path
         self._proc = None
         self._port = None
         self._key = None
+        self._startup_log_path = None
         if proc is None:
+            _remove_file(startup_log_path)
             return
         if proc.poll() is not None:
-            _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
-            if port is not None and _port_is_in_use(port):
-                await asyncio.to_thread(
-                    _reclaim_serve_port,
-                    port,
-                    reason="serve parent process already exited",
-                )
+            try:
+                _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
+                if port is not None and _port_is_in_use(port):
+                    await asyncio.to_thread(
+                        _reclaim_serve_port,
+                        port,
+                        reason="serve parent process already exited",
+                    )
+            finally:
+                _remove_file(startup_log_path)
             return
         pid = int(getattr(proc, "pid", 0) or 0)
         try:
@@ -1132,13 +1196,16 @@ class OpenCodeServeManager:
                     wait=lambda wait_timeout: proc.wait(timeout=wait_timeout),
                 )
         finally:
-            _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
-            if port is not None and _port_is_in_use(port):
-                await asyncio.to_thread(
-                    _reclaim_serve_port,
-                    port,
-                    reason="serve shutdown",
-                )
+            try:
+                _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
+                if port is not None and _port_is_in_use(port):
+                    await asyncio.to_thread(
+                        _reclaim_serve_port,
+                        port,
+                        reason="serve shutdown",
+                    )
+            finally:
+                _remove_file(startup_log_path)
 
 
 _manager = OpenCodeServeManager()

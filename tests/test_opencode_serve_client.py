@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -394,15 +395,22 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
 
         commands: list[list[str]] = []
         envs: list[dict[str, str]] = []
+        popen_kwargs: list[dict] = []
         marker_path = tmp_path / "serve-marker.json"
+        startup_log_path = tmp_path / "serve-startup.log"
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
         monkeypatch.delenv("OPENCODE_SERVE_PORT", raising=False)
         monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
         monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: False)
+        monkeypatch.setattr(
+            "backend.opencode.serve_client._new_serve_startup_log_path",
+            lambda tool, port: startup_log_path,
+        )
 
         def fake_popen(cmd, **kwargs):
             commands.append(cmd)
             envs.append(kwargs["env"])
+            popen_kwargs.append(kwargs)
             return FakeProc()
 
         monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", fake_popen)
@@ -431,6 +439,61 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert marker["tool"] == "opencode"
         assert marker["config_hash"] == "abc123"
         assert envs[0]["OPENCODE_CONFIG_CONTENT"] == '{"mcp": {}}'
+        assert envs[0]["PYTHONIOENCODING"] == "utf-8"
+        assert envs[0]["PYTHONUTF8"] == "1"
+        assert popen_kwargs[0]["stdout"] != subprocess.DEVNULL
+        assert popen_kwargs[0]["stderr"] == subprocess.STDOUT
+
+    asyncio.run(run())
+
+
+def test_wait_health_reports_startup_output_on_early_exit(tmp_path: Path) -> None:
+    async def run() -> None:
+        class FakeProc:
+            returncode = 1
+
+            def poll(self):
+                return 1
+
+        startup_log = tmp_path / "startup.log"
+        startup_log.write_bytes(b"before bad byte \x90 after\n")
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 4096
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager._wait_health_locked(startup_log)
+
+        message = str(excinfo.value)
+        assert "OpenCode serve exited during startup with code 1" in message
+        assert "OpenCode serve startup output:" in message
+        assert "before bad byte" in message
+        assert "after" in message
+
+    asyncio.run(run())
+
+
+def test_wait_health_timeout_reports_startup_output(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        class FakeProc:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        startup_log = tmp_path / "startup.log"
+        startup_log.write_text("provider failed to load\n", encoding="utf-8")
+        monkeypatch.setattr("backend.opencode.serve_client._SERVE_START_TIMEOUT_SECONDS", 0.0)
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 4096
+
+        with pytest.raises(TimeoutError) as excinfo:
+            await manager._wait_health_locked(startup_log)
+
+        message = str(excinfo.value)
+        assert "OpenCode serve did not become healthy" in message
+        assert "provider failed to load" in message
 
     asyncio.run(run())
 
