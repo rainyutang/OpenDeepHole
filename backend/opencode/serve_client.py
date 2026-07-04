@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -76,6 +77,181 @@ def _port_is_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
         return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _wait_port_released(port: int, timeout: float = _SERVE_STOP_TIMEOUT_SECONDS) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _port_is_in_use(port):
+            return True
+        time.sleep(0.1)
+    return not _port_is_in_use(port)
+
+
+def _run_command_text(cmd: list[str], timeout: float = 3.0) -> str:
+    try:
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    except Exception as exc:
+        logger.debug("Failed to run %s: %s", cmd[0] if cmd else cmd, exc)
+        return ""
+    return completed.stdout or ""
+
+
+def _address_token_has_port(token: str, port: int) -> bool:
+    value = token.strip().strip(",")
+    if ":" not in value:
+        return False
+    suffix = f":{port}"
+    if value.endswith(suffix):
+        return True
+    bracket_suffix = f"]:{port}"
+    return value.endswith(bracket_suffix)
+
+
+def _parse_listener_pids(output: str, port: int) -> set[int]:
+    pids: set[int] = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or "LISTEN" not in line.upper():
+            continue
+        tokens = line.split()
+        if not any(_address_token_has_port(token, port) for token in tokens):
+            continue
+        for match in re.finditer(r"(?:^|[^\w])pid=(\d+)(?:[^\w]|$)", line, re.IGNORECASE):
+            pids.add(int(match.group(1)))
+        if tokens:
+            match = re.match(r"^(\d+)(?:/.*)?$", tokens[-1])
+            if match:
+                pids.add(int(match.group(1)))
+    return pids
+
+
+def _windows_listener_pids_for_port(port: int) -> set[int]:
+    return _parse_listener_pids(_run_command_text(["netstat", "-ano", "-p", "tcp"]), port)
+
+
+def _posix_listener_pids_for_port(port: int) -> set[int]:
+    pids: set[int] = set()
+    if shutil.which("lsof"):
+        output = _run_command_text(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"])
+        for line in output.splitlines():
+            value = line.strip()
+            if value.isdigit():
+                pids.add(int(value))
+    if shutil.which("ss"):
+        pids.update(_parse_listener_pids(_run_command_text(["ss", "-ltnp", "sport", "=", f":{port}"]), port))
+    if shutil.which("netstat"):
+        pids.update(_parse_listener_pids(_run_command_text(["netstat", "-ltnp"]), port))
+    pids.update(_proc_listener_pids_for_port(port))
+    return pids
+
+
+def _proc_listener_pids_for_port(port: int) -> set[int]:
+    inodes: set[str] = set()
+    port_hex = f"{port:04X}"
+    for path in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) <= 9 or parts[3] != "0A":
+                continue
+            _, _, local_port = parts[1].rpartition(":")
+            if local_port.upper() == port_hex:
+                inodes.add(parts[9])
+    if not inodes:
+        return set()
+
+    pids: set[int] = set()
+    proc_root = Path("/proc")
+    try:
+        entries = list(proc_root.iterdir())
+    except Exception:
+        return set()
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        fd_dir = entry / "fd"
+        try:
+            fds = list(fd_dir.iterdir())
+        except Exception:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except Exception:
+                continue
+            match = re.match(r"socket:\[(\d+)\]$", target)
+            if match and match.group(1) in inodes:
+                pids.add(int(entry.name))
+                break
+    return pids
+
+
+def _listener_pids_for_port(port: int) -> set[int]:
+    if sys.platform == "win32":
+        return _windows_listener_pids_for_port(port)
+    return _posix_listener_pids_for_port(port)
+
+
+@dataclass(frozen=True)
+class _PortReclaimResult:
+    attempted: bool
+    pids: tuple[int, ...] = ()
+    released: bool = False
+    detail: str = ""
+
+
+def _reclaim_serve_port(port: int, *, reason: str) -> _PortReclaimResult:
+    if not _port_is_in_use(port):
+        return _PortReclaimResult(attempted=False, released=True, detail="port already free")
+    pids = tuple(sorted(pid for pid in _listener_pids_for_port(port) if pid > 0 and pid != os.getpid()))
+    if not pids:
+        return _PortReclaimResult(
+            attempted=False,
+            released=False,
+            detail="could not identify listener pid",
+        )
+
+    for pid in pids:
+        logger.warning(
+            "Reclaiming OpenCode serve port 127.0.0.1:%s by terminating listener pid %s (%s)",
+            port,
+            pid,
+            reason,
+        )
+        _terminate_process_tree(pid)
+    released = _wait_port_released(port)
+    return _PortReclaimResult(
+        attempted=True,
+        pids=pids,
+        released=released,
+        detail="port released" if released else "port still in use after terminating listener pid(s)",
+    )
+
+
+def _port_busy_message(port: int, reclaim: _PortReclaimResult | None) -> str:
+    detail = ""
+    if reclaim is not None:
+        pid_note = f" listener_pid(s)={','.join(str(pid) for pid in reclaim.pids)}." if reclaim.pids else ""
+        detail = f" Reclaim detail: {reclaim.detail}.{pid_note}"
+    return (
+        f"OpenCode serve port 127.0.0.1:{port} is already in use and could not be reclaimed."
+        f"{detail} Stop the listener process or set OPENCODE_SERVE_PORT."
+    )
 
 
 def _serve_marker_path() -> Path:
@@ -782,12 +958,13 @@ class OpenCodeServeManager:
         port = _serve_port()
         await self._stop_owned_serve_on_port(port)
         if _port_is_in_use(port):
-            raise RuntimeError(
-                f"OpenCode serve port 127.0.0.1:{port} is already in use by a process "
-                "not owned by this Agent. If this follows a stopped Windows task, "
-                "an old Agent may have left a child serve process; stop that process "
-                "or set OPENCODE_SERVE_PORT."
+            reclaim = await asyncio.to_thread(
+                _reclaim_serve_port,
+                port,
+                reason="serve startup",
             )
+            if _port_is_in_use(port):
+                raise RuntimeError(_port_busy_message(port, reclaim))
         env = dict(os.environ)
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
         if key.config_content:
@@ -836,6 +1013,12 @@ class OpenCodeServeManager:
         pid = int(marker.get("pid") or 0)
         if not _pid_is_running(pid):
             _remove_marker(self._marker_path)
+            if _port_is_in_use(port):
+                await asyncio.to_thread(
+                    _reclaim_serve_port,
+                    port,
+                    reason="stale Agent-owned serve marker",
+                )
             return
         if not _marker_matches_serve_process(marker):
             return
@@ -847,6 +1030,12 @@ class OpenCodeServeManager:
         )
         await asyncio.to_thread(_terminate_process_tree, pid)
         _remove_marker(self._marker_path)
+        if _port_is_in_use(port):
+            await asyncio.to_thread(
+                _reclaim_serve_port,
+                port,
+                reason="Agent-owned serve process tree left listener behind",
+            )
 
     async def _wait_health_locked(self) -> None:
         deadline = time.monotonic() + _SERVE_START_TIMEOUT_SECONDS
@@ -898,6 +1087,7 @@ class OpenCodeServeManager:
 
     async def _stop_locked(self) -> None:
         proc = self._proc
+        port = self._port
         self._proc = None
         self._port = None
         self._key = None
@@ -905,6 +1095,12 @@ class OpenCodeServeManager:
             return
         if proc.poll() is not None:
             _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
+            if port is not None and _port_is_in_use(port):
+                await asyncio.to_thread(
+                    _reclaim_serve_port,
+                    port,
+                    reason="serve parent process already exited",
+                )
             return
         pid = int(getattr(proc, "pid", 0) or 0)
         try:
@@ -916,6 +1112,12 @@ class OpenCodeServeManager:
                 )
         finally:
             _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
+            if port is not None and _port_is_in_use(port):
+                await asyncio.to_thread(
+                    _reclaim_serve_port,
+                    port,
+                    reason="serve shutdown",
+                )
 
 
 _manager = OpenCodeServeManager()
