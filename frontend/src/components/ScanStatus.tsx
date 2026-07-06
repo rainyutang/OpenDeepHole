@@ -14,8 +14,8 @@ const SCAN_QUEUE_PAGE_SIZE = 12;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
 
-type MainTab = "overview" | "threat" | "static" | "mining" | "validation" | "issues";
-type MiningTab = "candidate_audit" | "fp_review";
+type MainTab = "overview" | "threat" | "mining" | "validation" | "issues";
+type MiningTab = "static_analysis" | "candidate_audit" | "fp_review";
 type StaticTab = "call_graph" | "candidate_generation";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 type ScanQueueTaskStatus = "planned" | "queued" | "running";
@@ -32,13 +32,13 @@ interface ScanQueueTask {
 const MAIN_TABS: { key: MainTab; label: string }[] = [
   { key: "overview", label: "首页" },
   { key: "threat", label: "威胁分析" },
-  { key: "static", label: "静态分析" },
   { key: "mining", label: "漏洞挖掘" },
   { key: "validation", label: "漏洞验证" },
   { key: "issues", label: "发现的问题" },
 ];
 
 const MINING_TABS: { key: MiningTab; label: string }[] = [
+  { key: "static_analysis", label: "静态分析" },
   { key: "candidate_audit", label: "候选点审计" },
   { key: "fp_review", label: "对抗式去误报" },
 ];
@@ -134,10 +134,10 @@ function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): string {
   if (latest?.phase === "threat_analysis") return "威胁分析 / 攻击树分析";
   if (latest?.phase === "git_history") return "威胁分析 / Git 历史问题分析";
   if (latest?.phase === "auditing") return "漏洞挖掘 / 候选点 AI 审计";
-  if (latest?.phase === "static_analysis") return "威胁分析 / 静态分析";
+  if (latest?.phase === "static_analysis") return "漏洞挖掘 / 静态分析";
   if (latest?.phase === "mcp_ready" || latest?.phase === "init") return "威胁分析 / 代码索引";
   if (scan.status === "auditing") return "漏洞挖掘 / 候选点 AI 审计";
-  if (scan.status === "analyzing") return "威胁分析 / 静态分析";
+  if (scan.status === "analyzing") return "漏洞挖掘 / 静态分析";
   return "等待启动";
 }
 
@@ -188,7 +188,7 @@ interface Props {
 export default function ScanStatus({ scanId, onBack }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [activeTab, setActiveTab] = useState<MainTab>("overview");
-  const [activeMiningTab, setActiveMiningTab] = useState<MiningTab>("candidate_audit");
+  const [activeMiningTab, setActiveMiningTab] = useState<MiningTab>("static_analysis");
   const [stopping, setStopping] = useState(false);
   const [retryingIncomplete, setRetryingIncomplete] = useState(false);
   const [downloadingReport, setDownloadingReport] = useState(false);
@@ -1022,26 +1022,26 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             isDone={!!isDone}
           />
         )}
-        {activeTab === "static" && (
-          <StaticTaskPanel
-            scan={scan}
-            indexStatus={indexStatus}
-            indexProgress={indexProgress}
-            candidates={scan.candidates ?? []}
-            vulnerabilities={scan.vulnerabilities}
-            validations={scan.validations ?? []}
-            currentCandidate={scan.current_candidate}
-            processedCandidates={scan.processed_candidates}
-            events={filterEvents(scan.events, ["static_analysis"])}
-            indexEvents={filterEvents(scan.events, ["init"])}
-          />
-        )}
         {activeTab === "mining" && (
           <TabbedPanel
             tabs={MINING_TABS}
             active={activeMiningTab}
             onChange={setActiveMiningTab}
           >
+            {activeMiningTab === "static_analysis" && (
+              <StaticTaskPanel
+                scan={scan}
+                indexStatus={indexStatus}
+                indexProgress={indexProgress}
+                candidates={scan.candidates ?? []}
+                vulnerabilities={scan.vulnerabilities}
+                validations={scan.validations ?? []}
+                currentCandidate={scan.current_candidate}
+                processedCandidates={scan.processed_candidates}
+                events={filterEvents(scan.events, ["static_analysis"])}
+                indexEvents={filterEvents(scan.events, ["init"])}
+              />
+            )}
             {activeMiningTab === "candidate_audit" && (
               <AuditTaskPanel
                 scan={scan}
