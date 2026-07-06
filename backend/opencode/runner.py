@@ -1395,12 +1395,23 @@ def _opencode_no_proxy_value(cli_config, env: dict[str, str]) -> str:
     return _DEFAULT_OPENCODE_NO_PROXY
 
 
+def _opencode_proxy_url_value(cli_config, env: dict[str, str]) -> str:
+    for value in (
+        _cfg_value(cli_config, "proxy_url", "") if cli_config is not None else "",
+        env.get(_OPENCODE_PROXY_URL_ENV, ""),
+        env.get("http_proxy", ""),
+        env.get("https_proxy", ""),
+        env.get("HTTP_PROXY", ""),
+        env.get("HTTPS_PROXY", ""),
+    ):
+        proxy_url = _normalize_proxy_url(value)
+        if proxy_url:
+            return proxy_url
+    return ""
+
+
 def _opencode_proxy_env_overrides(cli_config, env: dict[str, str]) -> dict[str, str]:
-    proxy_url = _normalize_proxy_url(
-        _cfg_value(cli_config, "proxy_url", "") if cli_config is not None else ""
-    )
-    if not proxy_url:
-        proxy_url = _normalize_proxy_url(env.get(_OPENCODE_PROXY_URL_ENV, ""))
+    proxy_url = _opencode_proxy_url_value(cli_config, env)
     if not proxy_url:
         return {}
     for name in _OPENCODE_PROXY_CLEAR_ENV_KEYS:

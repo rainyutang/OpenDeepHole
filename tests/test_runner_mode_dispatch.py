@@ -495,6 +495,31 @@ def test_opencode_proxy_url_populates_child_process_env(tmp_path: Path) -> None:
     assert env["no_proxy"] == _DEFAULT_OPENCODE_NO_PROXY
 
 
+def test_opencode_proxy_env_prefers_lowercase_local_proxy(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "opencode.json").write_text(
+        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
+        encoding="utf-8",
+    )
+
+    env = _build_cli_env(
+        workspace,
+        "opencode",
+        base_env={
+            "HTTP_PROXY": "http://proxyjp.huawei.com:8080",
+            "HTTPS_PROXY": "http://proxyjp.huawei.com:8080",
+            "http_proxy": "127.0.0.1:3131",
+        },
+        cli_config={},
+    )
+
+    assert env["HTTP_PROXY"] == "http://127.0.0.1:3131"
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:3131"
+    assert env["http_proxy"] == "http://127.0.0.1:3131"
+    assert env["https_proxy"] == "http://127.0.0.1:3131"
+
+
 def test_opencode_proxy_no_proxy_can_be_overridden(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
