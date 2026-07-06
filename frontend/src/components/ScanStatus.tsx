@@ -3294,7 +3294,6 @@ function ValidationDetail({
               />
               {validation.product && <StatusPill label={`产品：${validation.product}`} tone="slate" />}
               {validation.validation_environment && <StatusPill label={`环境：${validation.validation_environment}`} tone="slate" />}
-              {validation.validator_name && <StatusPill label={`方法：${validation.validator_name}`} tone="slate" />}
             </div>
             <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
               <ValidationBlock title="中间产出" content={validation.intermediate_output} />
