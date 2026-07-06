@@ -453,14 +453,33 @@ async def _run_threat_analysis_phase(
     workspace: Path,
     cancel_event: threading.Event,
     emit: Callable[[str, str], object],
+    is_resume: bool = False,
 ) -> None:
     """Run attack-tree threat analysis without owning the scan terminal state."""
     if cancel_event.is_set():
         return
     try:
-        from backend.opencode.runner import run_threat_analysis_audit
-
         root_dir = Path(__file__).resolve().parent.parent
+        if is_resume:
+            from backend.threat_analysis import threat_analysis_scope_matches
+
+            existing_analysis = await reporter.get_threat_analysis(scan_id)
+            if existing_analysis is not None:
+                if threat_analysis_scope_matches(existing_analysis, project_path, code_scan_path):
+                    maybe = emit(
+                        "threat_analysis",
+                        "复用本次任务已完成的威胁分析结果，跳过重新分析",
+                    )
+                    if asyncio.iscoroutine(maybe):
+                        await maybe
+                    return
+                maybe = emit(
+                    "threat_analysis",
+                    "本次任务已有威胁分析结果，但扫描范围与当前续扫路径不一致，重新分析...",
+                )
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+
         analysis, cache_message = _load_existing_threat_analysis_for_scope(
             project_path, code_scan_path,
         )
@@ -469,6 +488,8 @@ async def _run_threat_analysis_phase(
             if asyncio.iscoroutine(maybe):
                 await maybe
         if analysis is None:
+            from backend.opencode.runner import run_threat_analysis_audit
+
             maybe = emit("threat_analysis", "开始基于攻击树的威胁分析...")
             if asyncio.iscoroutine(maybe):
                 await maybe
@@ -1061,6 +1082,7 @@ async def run_scan(
                 workspace=workspace,
                 cancel_event=cancel_event,
                 emit=lambda phase, message: emit(phase, message),
+                is_resume=is_resume,
             ))
 
         # --- Phase 6: Memory allocation/free API preprocessing ---

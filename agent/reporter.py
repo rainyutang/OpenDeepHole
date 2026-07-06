@@ -10,7 +10,16 @@ from typing import Optional
 
 import httpx
 
-from backend.models import Candidate, FeedbackEntry, HistoryPattern, OutputSource, ScanEvent, Vulnerability, VulnerabilityValidation
+from backend.models import (
+    Candidate,
+    FeedbackEntry,
+    HistoryPattern,
+    OutputSource,
+    ScanEvent,
+    ThreatAnalysis,
+    Vulnerability,
+    VulnerabilityValidation,
+)
 
 
 OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 15.0
@@ -155,6 +164,22 @@ class Reporter:
             )
         except Exception as e:
             print(f"Warning: failed to upload threat analysis: {e}")
+
+    async def get_threat_analysis(self, scan_id: str) -> ThreatAnalysis | None:
+        """Fetch an already stored threat-analysis result for scan resume."""
+        if self.dry_run:
+            return None
+        try:
+            resp = await self._client.get(
+                f"{self.server_url}/api/agent/scan/{scan_id}/threat-analysis",
+                timeout=10.0,
+            )
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return ThreatAnalysis(**resp.json())
+        except Exception:
+            return None
 
     async def send_event(self, scan_id: str, event: ScanEvent) -> None:
         """Push a progress event to the server (best-effort, never raises)."""

@@ -154,6 +154,55 @@ class AgentReporterTests(unittest.TestCase):
             )
         )
 
+    def test_get_threat_analysis_returns_parsed_result(self) -> None:
+        class FakeClient:
+            async def get(self, url, timeout=None):
+                request = httpx.Request("GET", url)
+                return httpx.Response(
+                    200,
+                    request=request,
+                    json={
+                        "schema_version": "1.0",
+                        "analysis_id": "stored-threat",
+                        "scan_scope": {
+                            "project_path": "/repo",
+                            "code_scan_path": "/repo/src",
+                            "code_scan_relative_path": "src",
+                        },
+                        "assets": [],
+                    },
+                )
+
+        reporter = Reporter("http://server")
+        reporter._client = FakeClient()  # type: ignore[assignment]
+
+        analysis = asyncio.run(reporter.get_threat_analysis("scan-1"))
+
+        self.assertIsNotNone(analysis)
+        self.assertEqual(analysis.analysis_id, "stored-threat")
+        self.assertEqual(analysis.scan_scope.code_scan_relative_path, "src")
+
+    def test_get_threat_analysis_returns_none_for_missing_result(self) -> None:
+        class FakeClient:
+            async def get(self, url, timeout=None):
+                request = httpx.Request("GET", url)
+                return httpx.Response(404, request=request)
+
+        reporter = Reporter("http://server")
+        reporter._client = FakeClient()  # type: ignore[assignment]
+
+        self.assertIsNone(asyncio.run(reporter.get_threat_analysis("scan-1")))
+
+    def test_get_threat_analysis_returns_none_for_transport_error(self) -> None:
+        class FakeClient:
+            async def get(self, url, timeout=None):
+                raise httpx.ConnectError("unreachable")
+
+        reporter = Reporter("http://server")
+        reporter._client = FakeClient()  # type: ignore[assignment]
+
+        self.assertIsNone(asyncio.run(reporter.get_threat_analysis("scan-1")))
+
 
 if __name__ == "__main__":
     unittest.main()

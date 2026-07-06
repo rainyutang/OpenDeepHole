@@ -59,6 +59,7 @@ from backend.models import (
     ScanEvent,
     ScanItemStatus,
     SkillReport,
+    ThreatAnalysis,
     User,
     Vulnerability,
     VulnerabilityValidation,
@@ -1227,6 +1228,15 @@ async def agent_push_threat_analysis(scan_id: str, body: dict) -> dict:
         scan_id, len(analysis.assets), len(analysis.attack_trees),
     )
     return {"ok": True, "asset_count": len(analysis.assets), "tree_count": len(analysis.attack_trees)}
+
+
+@router.get("/scan/{scan_id}/threat-analysis", response_model=ThreatAnalysis)
+async def agent_get_threat_analysis(scan_id: str) -> ThreatAnalysis:
+    """Return the stored attack-tree threat analysis for a scan resume."""
+    analysis = get_scan_store().get_threat_analysis(scan_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="No threat analysis found for this scan")
+    return analysis
 
 
 @router.post("/scan/{scan_id}/skill-report")

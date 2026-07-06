@@ -36,6 +36,7 @@ from agent.scanner import (
 from agent.config import AgentConfig
 from backend.models import Candidate, OpenCodePoolStatus, ScanItemStatus, ScanMeta, ScanStatus, ThreatAnalysis
 from backend.store.sqlite import SqliteScanStore
+from backend.threat_analysis import apply_threat_analysis_scan_scope
 
 
 def _candidate(vuln_type: str, line: int) -> Candidate:
@@ -259,6 +260,120 @@ class AgentScanPathTests(unittest.TestCase):
         self.assertEqual(reporter.pushed[0][1]["analysis_id"], "threat-1")
         self.assertTrue(any("开始基于攻击树的威胁分析" in message for _phase, message in events))
         self.assertTrue(any("威胁分析完成" in message for _phase, message in events))
+
+    def test_resume_reuses_stored_threat_analysis_for_matching_scan_scope(self) -> None:
+        class FakeReporter:
+            def __init__(self, analysis: ThreatAnalysis) -> None:
+                self.analysis = analysis
+                self.pushed: list[tuple[str, dict]] = []
+
+            async def get_threat_analysis(self, scan_id: str) -> ThreatAnalysis | None:
+                return self.analysis
+
+            async def push_threat_analysis(self, scan_id: str, analysis: dict) -> None:
+                self.pushed.append((scan_id, analysis))
+
+        async def run() -> tuple[list[tuple[str, str]], FakeReporter, AsyncMock]:
+            with tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp) / "project"
+                scan_dir = project / "module"
+                workspace = Path(tmp) / "workspace"
+                scan_dir.mkdir(parents=True)
+                workspace.mkdir()
+                analysis = apply_threat_analysis_scan_scope(
+                    ThreatAnalysis(schema_version="1.0", analysis_id="stored-threat"),
+                    project.resolve(),
+                    scan_dir.resolve(),
+                )
+                reporter = FakeReporter(analysis)
+                events: list[tuple[str, str]] = []
+
+                async def emit(phase: str, message: str) -> None:
+                    events.append((phase, message))
+
+                runner = AsyncMock(return_value=ThreatAnalysis(
+                    schema_version="1.0",
+                    analysis_id="new-threat",
+                ))
+                with patch("backend.opencode.runner.run_threat_analysis_audit", runner):
+                    await _run_threat_analysis_phase(
+                        config=AgentConfig(),
+                        project_path=project.resolve(),
+                        code_scan_path=scan_dir.resolve(),
+                        reporter=reporter,  # type: ignore[arg-type]
+                        scan_id="scan-1",
+                        product="demo",
+                        workspace=workspace,
+                        cancel_event=threading.Event(),
+                        emit=emit,
+                        is_resume=True,
+                    )
+                return events, reporter, runner
+
+        events, reporter, runner = asyncio.run(run())
+
+        runner.assert_not_awaited()
+        self.assertEqual(reporter.pushed, [])
+        self.assertTrue(any("复用本次任务已完成的威胁分析结果" in message for _phase, message in events))
+        self.assertFalse(any("开始基于攻击树的威胁分析" in message for _phase, message in events))
+
+    def test_resume_reruns_threat_analysis_when_stored_scope_differs(self) -> None:
+        class FakeReporter:
+            def __init__(self, analysis: ThreatAnalysis) -> None:
+                self.analysis = analysis
+                self.pushed: list[tuple[str, dict]] = []
+
+            async def get_threat_analysis(self, scan_id: str) -> ThreatAnalysis | None:
+                return self.analysis
+
+            async def push_threat_analysis(self, scan_id: str, analysis: dict) -> None:
+                self.pushed.append((scan_id, analysis))
+
+        async def run() -> tuple[list[tuple[str, str]], FakeReporter, AsyncMock]:
+            with tempfile.TemporaryDirectory() as tmp:
+                project = Path(tmp) / "project"
+                old_dir = project / "old"
+                scan_dir = project / "module"
+                workspace = Path(tmp) / "workspace"
+                old_dir.mkdir(parents=True)
+                scan_dir.mkdir()
+                workspace.mkdir()
+                analysis = apply_threat_analysis_scan_scope(
+                    ThreatAnalysis(schema_version="1.0", analysis_id="stored-threat"),
+                    project.resolve(),
+                    old_dir.resolve(),
+                )
+                reporter = FakeReporter(analysis)
+                events: list[tuple[str, str]] = []
+
+                async def emit(phase: str, message: str) -> None:
+                    events.append((phase, message))
+
+                runner = AsyncMock(return_value=ThreatAnalysis(
+                    schema_version="1.0",
+                    analysis_id="new-threat",
+                ))
+                with patch("backend.opencode.runner.run_threat_analysis_audit", runner):
+                    await _run_threat_analysis_phase(
+                        config=AgentConfig(),
+                        project_path=project.resolve(),
+                        code_scan_path=scan_dir.resolve(),
+                        reporter=reporter,  # type: ignore[arg-type]
+                        scan_id="scan-1",
+                        product="demo",
+                        workspace=workspace,
+                        cancel_event=threading.Event(),
+                        emit=emit,
+                        is_resume=True,
+                    )
+                return events, reporter, runner
+
+        events, reporter, runner = asyncio.run(run())
+
+        runner.assert_awaited_once()
+        self.assertEqual(reporter.pushed[0][1]["analysis_id"], "new-threat")
+        self.assertTrue(any("扫描范围与当前续扫路径不一致" in message for _phase, message in events))
+        self.assertTrue(any("开始基于攻击树的威胁分析" in message for _phase, message in events))
 
     def test_wait_for_threat_analysis_task_blocks_until_background_done(self) -> None:
         async def run() -> list[object]:
