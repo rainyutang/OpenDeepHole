@@ -454,6 +454,7 @@ async def _run_threat_analysis_phase(
     cancel_event: threading.Event,
     emit: Callable[[str, str], object],
     is_resume: bool = False,
+    planned_task_id: str = "",
 ) -> None:
     """Run attack-tree threat analysis without owning the scan terminal state."""
     if cancel_event.is_set():
@@ -504,6 +505,7 @@ async def _run_threat_analysis_phase(
                 project_dir=project_path,
                 code_scan_path=code_scan_path,
                 product=product,
+                planned_task_id=planned_task_id,
             )
         if analysis is not None:
             await reporter.push_threat_analysis(scan_id, analysis.model_dump())
@@ -527,6 +529,10 @@ async def _run_threat_analysis_phase(
         maybe = emit("threat_analysis", f"威胁分析异常（已跳过）: {exc}")
         if asyncio.iscoroutine(maybe):
             await maybe
+    finally:
+        if planned_task_id:
+            from backend.opencode.model_pool import clear_planned_task
+            await clear_planned_task(planned_task_id)
 
 
 async def _wait_for_threat_analysis_task(
@@ -1072,6 +1078,12 @@ async def run_scan(
 
         # --- Phase 5: Attack-tree threat analysis (fresh scans only, background) ---
         if not retry_mode and workspace is not None and not cancel_event.is_set():
+            from backend.opencode.model_pool import register_planned_task
+            threat_planned_task_id = await register_planned_task(
+                scan_id,
+                {"task_type": "threat_analysis"},
+                task_key=f"{scan_id}:threat_analysis",
+            )
             threat_analysis_task = asyncio.create_task(_run_threat_analysis_phase(
                 config=config,
                 project_path=project_path,
@@ -1083,6 +1095,7 @@ async def run_scan(
                 cancel_event=cancel_event,
                 emit=lambda phase, message: emit(phase, message),
                 is_resume=is_resume,
+                planned_task_id=threat_planned_task_id,
             ))
 
         # --- Phase 6: Memory allocation/free API preprocessing ---
@@ -1380,7 +1393,7 @@ async def run_scan(
             await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
 
         cancelled = False
-        from backend.opencode.model_pool import total_model_capacity
+        from backend.opencode.model_pool import register_planned_task, total_model_capacity
         audit_capacity = total_model_capacity(
             config.opencode,
             global_concurrency=config.opencode_concurrency,
@@ -1389,6 +1402,32 @@ async def run_scan(
         audit_concurrency = max(1, min(audit_capacity, len(remaining) or 1))
         result_lock = asyncio.Lock()
         rejected_patterns: set[tuple[object, ...]] = set()
+
+        def planned_candidate_context(global_index: int, candidate: Candidate) -> dict:
+            return {
+                "task_type": "audit",
+                "checker": candidate.vuln_type,
+                "file": candidate.file,
+                "line": candidate.line,
+                "function": candidate.function,
+                "audit_index": global_index,
+            }
+
+        for local_index, candidate in enumerate(remaining):
+            global_index = already_done + local_index
+            planned_id = await register_planned_task(
+                scan_id,
+                planned_candidate_context(global_index, candidate),
+                task_key=(
+                    f"audit:{global_index}:"
+                    f"{candidate.file}:{candidate.line}:{candidate.function}:{candidate.vuln_type}"
+                ),
+            )
+            metadata = dict(candidate.metadata or {})
+            metadata["_opencode_planned_task_id"] = planned_id
+            metadata["_opencode_audit_index"] = global_index
+            candidate.metadata = metadata
+
         queue: asyncio.Queue[tuple[int, Candidate]] = asyncio.Queue()
         for item in enumerate(remaining):
             queue.put_nowait(item)
@@ -1450,6 +1489,46 @@ async def run_scan(
                 candidate_index=candidate_index,
             )
 
+        async def schedule_fp_review(
+            *,
+            vuln: Vulnerability,
+            response: dict | None,
+            candidate_index: int,
+        ) -> None:
+            fp_info = response.get("fp_review") if isinstance(response, dict) else None
+            if not isinstance(fp_info, dict) or not fp_info.get("queued"):
+                return
+            review_id = str(fp_info.get("review_id") or "")
+            if not review_id:
+                return
+            try:
+                vuln_index = int(fp_info.get("vuln_index"))
+            except (TypeError, ValueError):
+                return
+            from agent import server as agent_server
+
+            payload = vuln.model_dump()
+            payload["index"] = vuln_index
+            queued = await agent_server.enqueue_fp_review(
+                config=config,
+                reporter=reporter,
+                scan_id=scan_id,
+                review_id=review_id,
+                vulnerability=payload,
+                project_path=str(project_path),
+                feedback_entries=feedback_entries or [],
+                processed_offset=int(fp_info.get("processed") or 0),
+            )
+            await emit(
+                "fp_review",
+                (
+                    f"[{candidate_index + 1}] FP review queued for vuln[{vuln_index}]"
+                    if queued
+                    else f"[{candidate_index + 1}] FP review skipped: duplicate or queue unavailable"
+                ),
+                candidate_index=candidate_index,
+            )
+
         async def process_candidate(global_index: int, candidate: Candidate) -> None:
             nonlocal processed_this_run
 
@@ -1470,6 +1549,12 @@ async def run_scan(
                 async with result_lock:
                     pattern_rejected = pattern_key in rejected_patterns
                 if pattern_rejected:
+                    planned_task_id = ""
+                    if isinstance(candidate.metadata, dict):
+                        planned_task_id = str(candidate.metadata.get("_opencode_planned_task_id") or "")
+                    if planned_task_id:
+                        from backend.opencode.model_pool import clear_planned_task
+                        await clear_planned_task(planned_task_id)
                     vuln = Vulnerability(
                         file=candidate.file,
                         line=candidate.line,
@@ -1618,6 +1703,11 @@ async def run_scan(
                         response=response,
                         candidate_index=global_index,
                     )
+                    await schedule_fp_review(
+                        vuln=project_vuln,
+                        response=response,
+                        candidate_index=global_index,
+                    )
                 confirmed_project = sum(1 for v in project_vulns if v.confirmed)
                 await emit(
                     "auditing",
@@ -1674,6 +1764,11 @@ async def run_scan(
             await emit("auditing", f"[{global_index + 1}] Result: {result_label}", candidate_index=global_index)
             response = await reporter.report_vulnerability(scan_id, vuln)
             await schedule_validation(
+                vuln=vuln,
+                response=response,
+                candidate_index=global_index,
+            )
+            await schedule_fp_review(
                 vuln=vuln,
                 response=response,
                 candidate_index=global_index,
@@ -1764,6 +1859,11 @@ async def run_scan(
         raise
 
     finally:
+        try:
+            from backend.opencode.model_pool import clear_planned_tasks
+            await clear_planned_tasks(scan_id, {"audit", "threat_analysis"})
+        except Exception:
+            pass
         pool_status_stop.set()
         if pool_status_task is not None:
             try:

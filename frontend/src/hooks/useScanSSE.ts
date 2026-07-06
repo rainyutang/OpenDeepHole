@@ -50,6 +50,7 @@ interface FpReviewStartedEvent {
   review_id: string;
   status: FpReviewStatus;
   total: number;
+  processed?: number;
 }
 
 interface FpReviewProgressEvent {

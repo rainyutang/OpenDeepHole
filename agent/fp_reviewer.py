@@ -153,7 +153,9 @@ async def run_fp_review(
     vulnerabilities: list[dict],
     feedback_entries: list[dict] | None = None,
     cancel_event: threading.Event | None = None,
-) -> None:
+    processed_offset: int = 0,
+    finish_on_complete: bool = True,
+) -> int:
     """Run FP review for a list of confirmed vulnerabilities.
 
     Each vulnerability dict: index, file, line, function, vuln_type,
@@ -180,6 +182,7 @@ async def run_fp_review(
     review_dir = Path.home() / ".opendeephole" / "fp_reviews" / review_id
     review_dir.mkdir(parents=True, exist_ok=True)
     set_fp_review_feedback(scan_id, feedback_entries or [])
+    processed_reviews = 0
 
     # 拉取本次扫描挖掘出的 git 历史问题模式，供「历史/校验匹配」阶段使用
     try:
@@ -257,7 +260,6 @@ async def run_fp_review(
             f"max_retries={getattr(fp_cli, 'max_retries', '')}",
         )
 
-        processed_reviews = 0
         active_indices: set[int] = set()
         progress_lock = asyncio.Lock()
         review_queue: asyncio.Queue[tuple[int, dict]] = asyncio.Queue()
@@ -277,7 +279,7 @@ async def run_fp_review(
             async with progress_lock:
                 active_indices.add(vuln_index)
                 await reporter.push_fp_progress(
-                    scan_id, review_id, vuln_index, processed_reviews, sorted(active_indices)
+                    scan_id, review_id, vuln_index, processed_offset + processed_reviews, sorted(active_indices)
                 )
             result_submitted = False
 
@@ -542,7 +544,7 @@ async def run_fp_review(
                 processed_reviews += 1
                 active_indices.discard(vuln_index)
                 await reporter.push_fp_progress(
-                    scan_id, review_id, vuln_index, processed_reviews, sorted(active_indices)
+                    scan_id, review_id, vuln_index, processed_offset + processed_reviews, sorted(active_indices)
                 )
                 if not result_submitted:
                     await emit("fp_review", f"[{position + 1}] No FP review result saved")
@@ -561,19 +563,28 @@ async def run_fp_review(
         await asyncio.gather(*(review_worker() for _ in range(review_concurrency)))
         if cancel_event is not None and cancel_event.is_set():
             await emit("fp_review", f"FP review cancelled after reviewing {processed_reviews} items")
-            await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
-            return
+            if finish_on_complete:
+                await reporter.finish_fp_review(scan_id, review_id, "cancelled", "用户手动停止")
+            return processed_reviews
 
-        await reporter.finish_fp_review(scan_id, review_id, "complete", None)
-        await emit("fp_review", f"FP review complete: {len(vulnerabilities)} vulnerabilities reviewed")
+        if finish_on_complete:
+            await reporter.finish_fp_review(scan_id, review_id, "complete", None)
+            await emit("fp_review", f"FP review complete: {len(vulnerabilities)} vulnerabilities reviewed")
+        else:
+            await emit("fp_review", f"FP review item complete: {len(vulnerabilities)} vulnerability reviewed")
+        return processed_reviews
 
     except Exception as exc:
         print(f"[fp_review] Error: {exc}")
         try:
-            await reporter.finish_fp_review(scan_id, review_id, "error", str(exc))
+            if finish_on_complete:
+                await reporter.finish_fp_review(scan_id, review_id, "error", str(exc))
             await emit("fp_review", f"FP review failed: {exc}")
         except Exception:
             pass
+        if not finish_on_complete:
+            raise
+        return processed_reviews
 
     finally:
         pool_status_stop.set()

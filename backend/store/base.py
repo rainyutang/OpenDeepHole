@@ -309,8 +309,10 @@ class ScanStoreBase(ABC):
         review_id: str,
         *,
         status: str | None = None,
+        total: int | None = None,
         processed: int | None = None,
         current_vuln_index: int | None = None,
+        current_vuln_indices: list[int] | None = None,
         clear_current_vuln_index: bool = False,
         error_message: str | None = None,
     ) -> None:

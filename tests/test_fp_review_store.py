@@ -109,6 +109,18 @@ class FpReviewStoreTests(unittest.TestCase):
             self.assertIsNotNone(complete)
             self.assertIsNone(complete.current_vuln_index)
 
+    def test_updates_fp_review_total_when_reusing_scan_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.create_fp_review_job("review", "scan-1", 1, "2026-01-01T00:00:00+00:00")
+
+            store.update_fp_review_job("review", status="running", total=3, processed=1)
+
+            job = store.get_fp_review_job("review")
+            self.assertIsNotNone(job)
+            self.assertEqual(job.total, 3)
+            self.assertEqual(job.processed, 1)
+
     def test_tracks_current_fp_review_indices(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")

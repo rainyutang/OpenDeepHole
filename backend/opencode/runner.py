@@ -838,6 +838,7 @@ async def run_threat_analysis_audit(
     project_dir: Path | None = None,
     code_scan_path: Path | None = None,
     product: str = "",
+    planned_task_id: str = "",
 ) -> ThreatAnalysis | None:
     """Run the attack-tree threat-analysis skill and parse ``res.json``."""
     config = get_config()
@@ -885,6 +886,9 @@ async def run_threat_analysis_audit(
         )
 
         try:
+            task_context = {"task_type": "threat_analysis"}
+            if planned_task_id:
+                task_context["planned_task_id"] = planned_task_id
             await _invoke_opencode(
                 workspace,
                 prompt,
@@ -897,7 +901,7 @@ async def run_threat_analysis_audit(
                 model_capability="high",
                 prefer_high_model=True,
                 stats_scope_id=project_id,
-                task_context={"task_type": "threat_analysis"},
+                task_context=task_context,
                 attempt=attempt,
             )
         except asyncio.TimeoutError:
@@ -1085,13 +1089,20 @@ def _effective_cli_config(cli_config, model_option) -> dict:
 
 
 def _candidate_task_context(candidate: Candidate, task_type: str = "audit") -> dict:
-    return {
+    metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+    context = {
         "task_type": task_type,
         "checker": candidate.vuln_type,
         "file": candidate.file,
         "line": candidate.line,
         "function": candidate.function,
     }
+    planned_task_id = str(metadata.get("_opencode_planned_task_id") or "").strip()
+    if planned_task_id:
+        context["planned_task_id"] = planned_task_id
+    if metadata.get("_opencode_audit_index") is not None:
+        context["audit_index"] = metadata.get("_opencode_audit_index")
+    return context
 
 
 def _normalize_tool(config_obj) -> str:

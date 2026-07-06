@@ -104,6 +104,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             project_path=msg["project_path"],
             vulnerabilities=msg.get("vulnerabilities", []),
             feedback_entries=msg.get("feedback_entries", []),
+            processed_offset=int(msg.get("processed_offset") or 0),
         )
     elif cmd_type == "vulnerability_validation":
         await agent_server.handle_vulnerability_validation(

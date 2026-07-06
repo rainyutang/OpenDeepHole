@@ -24,6 +24,8 @@ _agent_id: Optional[str] = None  # Assigned by server on WebSocket connect
 _fp_review_tasks: dict[str, asyncio.Task] = {}
 _fp_review_cancel_events: dict[str, threading.Event] = {}
 _fp_review_scan_ids: dict[str, str] = {}
+_fp_review_queues: dict[str, deque["_FpReviewQueueItem"]] = {}
+_fp_review_active_items: set[tuple[str, int]] = set()
 _validation_tasks: dict[tuple[str, int], asyncio.Task] = {}
 _validation_cancel_events: dict[tuple[str, int], threading.Event] = {}
 _validation_queues: dict[str, deque["_ValidationQueueItem"]] = {}
@@ -43,6 +45,20 @@ class _ValidationQueueItem:
     vulnerability: dict
     report_markdown: str
     cancel_event: threading.Event
+
+
+@dataclass
+class _FpReviewQueueItem:
+    config: Any
+    reporter: Any
+    scan_id: str
+    review_id: str
+    project_path: str
+    vulnerability: dict
+    feedback_entries: list[dict]
+    cancel_event: threading.Event
+    processed_offset: int = 0
+    planned_task_id: str = ""
 
 
 def active_fp_review_snapshots() -> list[dict]:
@@ -224,41 +240,179 @@ async def handle_fp_review(
     project_path: str,
     vulnerabilities: list[dict],
     feedback_entries: list[dict] | None = None,
+    processed_offset: int = 0,
 ) -> None:
-    """Handle an 'fp_review' command — start AI false-positive review."""
+    """Handle an 'fp_review' command — queue AI false-positive review items."""
     if _config is None or _reporter is None:
         print(f"Warning: agent not fully initialized, ignoring fp_review {review_id}")
         return
-    if review_id in _fp_review_tasks:
-        print(f"Warning: FP review {review_id} already exists, ignoring duplicate")
-        return
+    for offset, vulnerability in enumerate(vulnerabilities):
+        await enqueue_fp_review(
+            scan_id=scan_id,
+            review_id=review_id,
+            project_path=project_path,
+            vulnerability=vulnerability,
+            feedback_entries=feedback_entries or [],
+            processed_offset=processed_offset + offset,
+        )
+    print(f"Queued {len(vulnerabilities)} FP review item(s) for scan {scan_id}")
 
-    cancel_event = threading.Event()
-    _fp_review_cancel_events[review_id] = cancel_event
+
+async def enqueue_fp_review(
+    *,
+    scan_id: str,
+    review_id: str,
+    project_path: str,
+    vulnerability: dict,
+    feedback_entries: list[dict] | None = None,
+    processed_offset: int = 0,
+    config: Any | None = None,
+    reporter: Any | None = None,
+) -> bool:
+    """Queue one vulnerability for an existing scan-level FP review job."""
+    effective_config = config or _config
+    effective_reporter = reporter or _reporter
+    if effective_config is None or effective_reporter is None:
+        print(f"Warning: agent not fully initialized, ignoring fp_review {review_id}")
+        return False
+    try:
+        vuln_index = int(vulnerability["index"])
+    except (KeyError, TypeError, ValueError):
+        print(f"Warning: FP review {review_id} item missing vulnerability index")
+        return False
+    item_key = (review_id, vuln_index)
+    if item_key in _fp_review_active_items:
+        print(f"Warning: FP review {review_id} vuln[{vuln_index}] already queued/running")
+        return False
+
+    cancel_event = _fp_review_cancel_events.get(review_id)
+    if cancel_event is None:
+        cancel_event = threading.Event()
+        _fp_review_cancel_events[review_id] = cancel_event
     _fp_review_scan_ids[review_id] = scan_id
+    _fp_review_active_items.add(item_key)
+    from backend.opencode.model_pool import register_planned_task
 
-    async def _run_review() -> None:
-        from agent.fp_reviewer import run_fp_review
+    planned_context = {
+        "task_type": "fp_review",
+        "review_id": review_id,
+        "vuln_index": vuln_index,
+        "checker": str(vulnerability.get("vuln_type") or ""),
+        "file": str(vulnerability.get("file") or ""),
+        "line": vulnerability.get("line"),
+        "function": str(vulnerability.get("function") or ""),
+    }
+    planned_task_id = await register_planned_task(
+        scan_id,
+        planned_context,
+        task_key=f"fp_review:{review_id}:{vuln_index}",
+    )
+    queue = _fp_review_queues.setdefault(review_id, deque())
+    queue.append(_FpReviewQueueItem(
+        config=effective_config,
+        reporter=effective_reporter,
+        scan_id=scan_id,
+        review_id=review_id,
+        project_path=project_path,
+        vulnerability=vulnerability,
+        feedback_entries=feedback_entries or [],
+        cancel_event=cancel_event,
+        processed_offset=max(0, int(processed_offset or 0)),
+        planned_task_id=planned_task_id,
+    ))
+    worker = _fp_review_tasks.get(review_id)
+    if worker is None or worker.done():
+        worker = asyncio.create_task(_run_fp_review_worker(review_id))
+        _fp_review_tasks[review_id] = worker
+    print(f"Queued FP review {review_id} vuln[{vuln_index}] for scan {scan_id}")
+    return True
+
+
+async def _run_fp_review_worker(review_id: str) -> None:
+    """Run queued FP review items for one scan-level review job."""
+    processed_offset = 0
+    terminal_status = "complete"
+    terminal_error: str | None = None
+    try:
+        while True:
+            queue = _fp_review_queues.get(review_id)
+            if not queue:
+                break
+            item = queue.popleft()
+            scan_id = item.scan_id
+            vuln_index = int(item.vulnerability["index"])
+            processed_offset = max(processed_offset, item.processed_offset)
+            try:
+                if item.cancel_event.is_set():
+                    if item.planned_task_id:
+                        from backend.opencode.model_pool import clear_planned_task
+                        await clear_planned_task(item.planned_task_id)
+                    terminal_status = "cancelled"
+                    terminal_error = "用户手动停止"
+                    break
+                processed = await _run_single_fp_review_item(item, processed_offset)
+                processed_offset += max(0, processed)
+            except Exception as exc:
+                terminal_status = "error"
+                terminal_error = str(exc)
+                print(f"[fp_review] Unhandled error in review {review_id}: {exc}")
+                break
+            finally:
+                _fp_review_active_items.discard((review_id, vuln_index))
+    finally:
+        queue = _fp_review_queues.pop(review_id, None)
+        if queue is not None:
+            for queued in queue:
+                try:
+                    _fp_review_active_items.discard((review_id, int(queued.vulnerability["index"])))
+                except (KeyError, TypeError, ValueError):
+                    pass
+                if queued.planned_task_id:
+                    try:
+                        from backend.opencode.model_pool import clear_planned_task
+                        await clear_planned_task(queued.planned_task_id)
+                    except Exception:
+                        pass
+        scan_id = _fp_review_scan_ids.get(review_id, "")
+        reporter = _reporter
+        if reporter is not None and scan_id:
+            try:
+                await reporter.finish_fp_review(scan_id, review_id, terminal_status, terminal_error)
+            except Exception:
+                pass
+        _fp_review_tasks.pop(review_id, None)
+        _fp_review_cancel_events.pop(review_id, None)
+        _fp_review_scan_ids.pop(review_id, None)
+
+
+async def _run_single_fp_review_item(item: _FpReviewQueueItem, processed_offset: int) -> int:
+    from agent.config import apply_network_env, apply_remote_config
+    from agent.fp_reviewer import run_fp_review
+    from backend.opencode.model_pool import clear_planned_task
+
+    if item.planned_task_id:
+        await clear_planned_task(item.planned_task_id)
+
+    if item.reporter is not None and _agent_id is not None:
         try:
-            await run_fp_review(
-                config=_config,
-                reporter=_reporter,
-                scan_id=scan_id,
-                review_id=review_id,
-                project_path=project_path,
-                vulnerabilities=vulnerabilities,
-                feedback_entries=feedback_entries or [],
-                cancel_event=cancel_event,
-            )
-        except Exception as exc:
-            print(f"[fp_review] Unhandled error in review {review_id}: {exc}")
-        finally:
-            _fp_review_tasks.pop(review_id, None)
-            _fp_review_cancel_events.pop(review_id, None)
-            _fp_review_scan_ids.pop(review_id, None)
-
-    _fp_review_tasks[review_id] = asyncio.create_task(_run_review())
-    print(f"Started FP review {review_id} for scan {scan_id}")
+            remote_cfg = await item.reporter.fetch_config(_agent_id)
+            if remote_cfg:
+                apply_remote_config(item.config, remote_cfg)
+                apply_network_env(item.config)
+        except Exception:
+            pass
+    return await run_fp_review(
+        config=item.config,
+        reporter=item.reporter,
+        scan_id=item.scan_id,
+        review_id=item.review_id,
+        project_path=item.project_path,
+        vulnerabilities=[item.vulnerability],
+        feedback_entries=item.feedback_entries,
+        cancel_event=item.cancel_event,
+        processed_offset=processed_offset,
+        finish_on_complete=False,
+    )
 
 
 async def handle_fp_review_stop(scan_id: str, review_id: str) -> None:

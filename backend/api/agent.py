@@ -813,6 +813,7 @@ async def get_agent_opencode_pool(
         result.global_running = latest.global_running
         result.global_queued = latest.global_queued
         result.queued_tasks = latest.queued_tasks
+        result.planned_tasks = latest.planned_tasks
         result.updated_at = latest.updated_at or result.updated_at
     return result
 
@@ -1092,15 +1093,37 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
         scan_id, vuln.vuln_type, vuln.file, vuln.line, vuln.confirmed,
     )
     report_markdown = ""
+    fp_review_info = None
     if vuln.confirmed or vuln.ai_verdict == "confirmed":
         try:
-            from backend.api.scan import _scan_fp_result_map, _vuln_report_markdown
+            from backend.api.scan import (
+                _ensure_fp_review_job_for_scan,
+                _scan_fp_result_map,
+                _vuln_report_markdown,
+            )
 
             report_markdown = _vuln_report_markdown(
                 vuln_index,
                 vuln,
                 _scan_fp_result_map(scan_id).get(vuln_index),
             )
+            if get_config().fp_review.auto_on_complete:
+                ensured = _ensure_fp_review_job_for_scan(
+                    scan_id,
+                    scan,
+                    allow_cancelled=False,
+                    publish_started=True,
+                    require_unresolved=True,
+                )
+                if ensured is not None and not ensured.get("cancelled") and not ensured.get("no_unresolved"):
+                    latest_results = ensured.get("latest_results") or {}
+                    fp_review_info = {
+                        "review_id": ensured["review_id"],
+                        "vuln_index": vuln_index,
+                        "queued": vuln_index not in latest_results,
+                        "total": ensured["total"],
+                        "processed": ensured["processed"],
+                    }
         except Exception as exc:
             logger.warning(
                 "Failed to render vulnerability report for validation scan=%s idx=%s: %s",
@@ -1108,7 +1131,10 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
                 vuln_index,
                 exc,
             )
-    return {"ok": True, "index": vuln_index, "report_markdown": report_markdown}
+    response = {"ok": True, "index": vuln_index, "report_markdown": report_markdown}
+    if fp_review_info is not None:
+        response["fp_review"] = fp_review_info
+    return response
 
 
 @router.post("/scan/{scan_id}/candidates")

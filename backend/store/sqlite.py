@@ -2311,6 +2311,7 @@ class SqliteScanStore(ScanStoreBase):
         review_id: str,
         *,
         status: str | None = None,
+        total: int | None = None,
         processed: int | None = None,
         current_vuln_index: int | None = None,
         current_vuln_indices: list[int] | None = None,
@@ -2322,6 +2323,9 @@ class SqliteScanStore(ScanStoreBase):
         if status is not None:
             updates.append("status = ?")
             params.append(status)
+        if total is not None:
+            updates.append("total = ?")
+            params.append(total)
         if processed is not None:
             updates.append("processed = ?")
             params.append(processed)

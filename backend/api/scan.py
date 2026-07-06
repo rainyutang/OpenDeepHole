@@ -177,6 +177,92 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
     return unresolved + reviewed
 
 
+def _ensure_fp_review_job_for_scan(
+    scan_id: str,
+    scan: ScanStatus | None = None,
+    *,
+    allow_cancelled: bool = False,
+    publish_started: bool = True,
+    require_unresolved: bool = False,
+) -> dict | None:
+    """Create or reuse the scan-level FP review job for current confirmed findings."""
+    store = get_scan_store()
+    if scan is None:
+        if scan_id in _running_scans:
+            scan = _running_scans[scan_id]
+        else:
+            loaded = store.load_scan(scan_id)
+            if loaded is None:
+                return None
+            scan = loaded[0]
+
+    latest_fp_results = _latest_fp_review_result_map(scan_id)
+    confirmed = _ordered_fp_review_candidates(scan, latest_fp_results)
+    if not confirmed:
+        return None
+
+    processed = sum(1 for item in confirmed if int(item["index"]) in latest_fp_results)
+    job = store.get_fp_review_by_scan(scan_id)
+    created = False
+    if require_unresolved and processed >= len(confirmed):
+        if job is None:
+            return None
+        return {
+            "review_id": job.review_id,
+            "total": len(confirmed),
+            "processed": processed,
+            "confirmed": confirmed,
+            "latest_results": latest_fp_results,
+            "created": False,
+            "cancelled": False,
+            "no_unresolved": True,
+        }
+    if job is not None and job.status == FpReviewStatus.CANCELLED and not allow_cancelled:
+        return {
+            "review_id": job.review_id,
+            "total": job.total,
+            "processed": job.processed,
+            "confirmed": confirmed,
+            "latest_results": latest_fp_results,
+            "created": False,
+            "cancelled": True,
+        }
+    if job is None or (job.status == FpReviewStatus.CANCELLED and allow_cancelled):
+        review_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        store.create_fp_review_job(review_id, scan_id, len(confirmed), now)
+        job = store.get_fp_review_job(review_id)
+        created = True
+    if job is None:
+        return None
+
+    store.update_fp_review_job(
+        job.review_id,
+        status=FpReviewStatus.RUNNING.value,
+        total=len(confirmed),
+        processed=processed,
+        error_message="",
+    )
+    if publish_started:
+        from backend.sse import publish
+        publish(scan_id, "fp_review_started", {
+            "review_id": job.review_id,
+            "status": FpReviewStatus.RUNNING.value,
+            "total": len(confirmed),
+            "processed": processed,
+        })
+    return {
+        "review_id": job.review_id,
+        "total": len(confirmed),
+        "processed": processed,
+        "confirmed": confirmed,
+        "latest_results": latest_fp_results,
+        "created": created,
+        "cancelled": False,
+        "no_unresolved": False,
+    }
+
+
 def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJob:
     """Attach scan-wide latest per-vulnerability results to the current job.
 
@@ -1521,10 +1607,16 @@ async def _start_fp_review(
             return _fail(404, "Scan not found")
         scan = loaded[0]
 
-    latest_fp_results = _latest_fp_review_result_map(scan_id)
-    confirmed = _ordered_fp_review_candidates(scan, latest_fp_results)
-    if not confirmed:
+    fp_job_info = _ensure_fp_review_job_for_scan(
+        scan_id,
+        scan,
+        allow_cancelled=True,
+        publish_started=False,
+    )
+    if fp_job_info is None:
         return _fail(400, "No confirmed vulnerabilities to review")
+    confirmed = fp_job_info["confirmed"]
+    review_id = str(fp_job_info["review_id"])
 
     meta = store.get_scan_meta(scan_id)
     if meta is None:
@@ -1553,9 +1645,6 @@ async def _start_fp_review(
         store.update_scan_agent(scan_id, agent_id, meta.agent_name)
 
     feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
-    review_id = uuid.uuid4().hex
-    now = datetime.now(timezone.utc).isoformat()
-    store.create_fp_review_job(review_id, scan_id, len(confirmed), now)
 
     ok = await send_agent_command(agent_id, {
         "type": "fp_review",
@@ -1564,16 +1653,17 @@ async def _start_fp_review(
         "project_path": meta.project_path,
         "vulnerabilities": confirmed,
         "feedback_entries": feedback_entries,
+        "processed_offset": 0,
         "agent_runtime_update": create_agent_runtime_update_payload(server_url),
     })
     if not ok:
         store.update_fp_review_job(review_id, status="error", error_message="Agent not connected")
         return _fail(502, "Agent not connected")
 
-    store.update_fp_review_job(review_id, status="running")
+    store.update_fp_review_job(review_id, status="running", processed=0)
     from backend.sse import publish
     publish(scan_id, "fp_review_started", {
-        "review_id": review_id, "status": "running", "total": len(confirmed),
+        "review_id": review_id, "status": "running", "total": len(confirmed), "processed": 0,
     })
     logger.info("FP review %s triggered for scan %s (%d candidates)", review_id, scan_id, len(confirmed))
     return {

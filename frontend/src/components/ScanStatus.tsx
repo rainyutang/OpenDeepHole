@@ -14,7 +14,7 @@ const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
 
 type MainTab = "overview" | "threat" | "static" | "mining" | "validation" | "issues";
-type MiningTab = "candidate_audit" | "variant_hunt";
+type MiningTab = "candidate_audit" | "fp_review";
 type StaticTab = "call_graph" | "candidate_generation";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 
@@ -28,8 +28,8 @@ const MAIN_TABS: { key: MainTab; label: string }[] = [
 ];
 
 const MINING_TABS: { key: MiningTab; label: string }[] = [
-  { key: "candidate_audit", label: "候选点 AI 审计" },
-  { key: "variant_hunt", label: "历史同类问题挖掘" },
+  { key: "candidate_audit", label: "候选点审计" },
+  { key: "fp_review", label: "对抗式去误报" },
 ];
 
 const STATIC_TABS: { key: StaticTab; label: string }[] = [
@@ -118,7 +118,8 @@ function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): string {
   if (scan.status === "cancelled") return "已取消";
   if (scan.status === "complete") return "完成";
   const latest = [...events].reverse().find((event) => event.phase !== "opencode_output");
-  if (latest?.phase === "variant_hunt") return "漏洞挖掘 / 历史同类问题挖掘";
+  if (latest?.phase === "fp_review") return "漏洞挖掘 / 对抗式去误报";
+  if (latest?.phase === "variant_hunt") return "威胁分析 / 历史同类问题挖掘";
   if (latest?.phase === "threat_analysis") return "威胁分析 / 攻击树分析";
   if (latest?.phase === "git_history") return "威胁分析 / Git 历史问题分析";
   if (latest?.phase === "auditing") return "漏洞挖掘 / 候选点 AI 审计";
@@ -328,7 +329,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         scan_id: scanId,
         status: data.status,
         total: data.total,
-        processed: 0,
+        processed: data.processed ?? 0,
         current_vuln_index: null,
         results: [],
         error_message: null,
@@ -719,14 +720,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const showGitHistoryStages = gitHistory.length > 0
     || variantIssueCount > 0
     || hasEvent(scan.events, ["git_history", "variant_hunt"]);
-  const visibleMiningTabs = showGitHistoryStages
-    ? MINING_TABS
-    : MINING_TABS.filter((tab) => tab.key !== "variant_hunt");
-  const visibleMiningTab = showGitHistoryStages ? activeMiningTab : "candidate_audit";
   const indexProgress = formatIndexProgress(indexStatus, scan);
   const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis"]);
-  const miningEvents = filterEvents(scan.events, ["variant_hunt", "auditing", "opencode_output"]);
-  const validationEvents = filterEvents(scan.events, ["validation", "fp_review"]);
+  const miningEvents = filterEvents(scan.events, ["auditing", "fp_review", "opencode_output"]);
+  const validationEvents = filterEvents(scan.events, ["validation"]);
   const issuesView = scan.vulnerabilities.length === 0 && isDone ? (
     <div className="flex items-center justify-center h-64 text-slate-400">
       <div className="text-center">
@@ -1030,11 +1027,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         )}
         {activeTab === "mining" && (
           <TabbedPanel
-            tabs={visibleMiningTabs}
-            active={visibleMiningTab}
+            tabs={MINING_TABS}
+            active={activeMiningTab}
             onChange={setActiveMiningTab}
           >
-            {visibleMiningTab === "candidate_audit" && (
+            {activeMiningTab === "candidate_audit" && (
               <AuditTaskPanel
                 scan={scan}
                 pct={pct}
@@ -1043,11 +1040,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 pool={scan.opencode_pool ?? null}
               />
             )}
-            {visibleMiningTab === "variant_hunt" && (
-              <VariantHuntPanel
-                variantIssueCount={variantIssueCount}
+            {activeMiningTab === "fp_review" && (
+              <FpReviewPanel
                 vulnerabilities={scan.vulnerabilities}
-                events={filterEvents(scan.events, ["variant_hunt"])}
+                fpReview={fpReview}
+                isFpReviewing={isFpReviewing}
+                loading={fpReviewLoading}
+                stopping={fpReviewStopping}
+                events={filterEvents(miningEvents, ["fp_review", "opencode_output"])}
+                onTrigger={handleFpReview}
+                onStop={handleStopFpReview}
               />
             )}
           </TabbedPanel>
@@ -1443,11 +1445,11 @@ function ScanOverview({
               detail={scan.total_candidates ? `${scan.processed_candidates}/${scan.total_candidates} 候选点` : "等待候选点"}
             />
             <TaskSummaryRow
-              label="漏洞验证"
+              label="对抗式去误报"
               status={fpReview ? taskStateLabel(fpReview.status === "complete", isFpReviewing, fpReview.status === "error") : "预留"}
               tone={isFpReviewing ? "amber" : fpReview?.status === "complete" ? "green" : fpReview?.status === "error" ? "red" : "slate"}
               progress={fpReview?.total ? percent(fpReview.processed, fpReview.total) : undefined}
-              detail={fpReview ? `${fpReview.processed}/${fpReview.total} 已复核` : "后续接入验证任务"}
+              detail={fpReview ? `${fpReview.processed}/${fpReview.total} 已复核` : "等待确认漏洞"}
             />
             <TaskSummaryRow
               label="报告导出"
@@ -2578,43 +2580,314 @@ function AuditTaskPanel({
   );
 }
 
-function VariantHuntPanel({
-  variantIssueCount,
+const FP_REVIEW_STAGE_LABELS: Record<string, string> = {
+  history_match: "历史匹配",
+  prove_bug: "正报论证",
+  prove_fp: "误报论证",
+  final_judge: "最终裁决",
+};
+
+function FpReviewPanel({
   vulnerabilities,
+  fpReview,
+  isFpReviewing,
+  loading,
+  stopping,
   events,
+  onTrigger,
+  onStop,
 }: {
-  variantIssueCount: number;
   vulnerabilities: Vulnerability[];
+  fpReview: FpReviewJob | null;
+  isFpReviewing: boolean;
+  loading: boolean;
+  stopping: boolean;
   events: ScanEvent[];
+  onTrigger: () => void | Promise<void>;
+  onStop: () => void | Promise<void>;
 }) {
-  const variants = vulnerabilities.filter((vuln) => vuln.variant_of);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const confirmed = useMemo(
+    () => vulnerabilities.map((vuln, index) => ({ vuln, index })).filter(({ vuln }) => isAiConfirmed(vuln)),
+    [vulnerabilities],
+  );
+  const resultByIndex = useMemo(
+    () => new Map((fpReview?.results ?? []).map((result) => [result.vuln_index, result])),
+    [fpReview],
+  );
+  const currentIndices = useMemo(() => {
+    if (!isFpReviewing) return new Set<number>();
+    const values = fpReview?.current_vuln_indices?.length
+      ? fpReview.current_vuln_indices
+      : fpReview?.current_vuln_index != null
+        ? [fpReview.current_vuln_index]
+        : [];
+    return new Set(values.filter((index) => index >= 0));
+  }, [fpReview, isFpReviewing]);
+  const items = useMemo(
+    () =>
+      confirmed
+        .map(({ vuln, index }) => ({
+          vuln,
+          index,
+          result: resultByIndex.get(index),
+          running: currentIndices.has(index),
+        }))
+        .sort((a, b) => fpReviewSortRank(a.result, a.running) - fpReviewSortRank(b.result, b.running) || a.index - b.index),
+    [confirmed, currentIndices, resultByIndex],
+  );
+  const waitingCount = items.filter((item) => !item.result && !item.running).length;
+  const tpCount = items.filter((item) => item.result?.verdict === "tp").length;
+  const fpCount = items.filter((item) => item.result?.verdict === "fp").length;
+  const status = isFpReviewing
+    ? "复核中"
+    : fpReview?.status === "complete"
+      ? "已完成"
+      : fpReview?.status === "error"
+        ? "异常"
+        : fpReview?.status === "cancelled"
+          ? "已停止"
+          : confirmed.length > 0
+            ? "等待"
+            : "无目标";
+  const tone: TaskTone = isFpReviewing
+    ? "amber"
+    : fpReview?.status === "complete"
+      ? "green"
+      : fpReview?.status === "error"
+        ? "red"
+        : fpReview?.status === "cancelled"
+          ? "amber"
+          : "slate";
+  const selected = selectedIndex === null ? null : items.find((item) => item.index === selectedIndex) ?? null;
+  const canTrigger = confirmed.length > 0 && !isFpReviewing && !loading;
+
+  useEffect(() => {
+    if (items.length === 0) {
+      if (selectedIndex !== null) setSelectedIndex(null);
+      return;
+    }
+    if (selectedIndex === null || !items.some((item) => item.index === selectedIndex)) {
+      setSelectedIndex(items[0].index);
+    }
+  }, [items, selectedIndex]);
+
   return (
     <TaskPanel
-      title="历史同类问题挖掘"
-      status={events.length > 0 ? "已运行" : "等待"}
-      tone={variantIssueCount > 0 ? "purple" : events.length > 0 ? "amber" : "slate"}
-      summary="基于 Git 历史提炼的问题模式，在当前代码中搜索同类变体候选。"
+      title="对抗式去误报"
+      status={status}
+      tone={tone}
+      summary="对漏洞挖掘阶段确认的问题逐条复核，输出正报或误报裁决。"
     >
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <MiniMetric label="变体候选" value={variantIssueCount} tone="purple" />
-        <MiniMetric label="变体来源结果" value={variants.length} />
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+        <MiniMetric label="确认问题" value={confirmed.length} tone="red" />
+        <MiniMetric label="等待复核" value={waitingCount} />
+        <MiniMetric label="复核中" value={currentIndices.size} tone="amber" />
+        <MiniMetric label="保留正报" value={tpCount} tone="red" />
+        <MiniMetric label="判定误报" value={fpCount} tone="green" />
       </div>
-      {variants.length > 0 ? (
-        <div className="space-y-2">
-          {variants.slice(0, 12).map((vuln, index) => (
-            <div key={`${vuln.file}:${vuln.line}:${index}`} className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
-              <div className="font-mono text-xs text-slate-200">{vuln.file}:{vuln.line}</div>
-              <div className="mt-1 text-xs text-purple-200">{vuln.variant_of}</div>
-            </div>
-          ))}
-          {variants.length > 12 && <div className="text-xs text-slate-500">仅展示前 12 条，完整列表见“发现的问题”。</div>}
-        </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={onTrigger}
+          disabled={!canTrigger}
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {loading ? "启动中..." : "启动去误报"}
+        </button>
+        {isFpReviewing && (
+          <button
+            type="button"
+            onClick={onStop}
+            disabled={stopping}
+            className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {stopping ? "停止中..." : "停止复核"}
+          </button>
+        )}
+        {fpReview?.error_message && (
+          <span className="text-xs text-red-300">{fpReview.error_message}</span>
+        )}
+      </div>
+      {confirmed.length === 0 ? (
+        <EmptyState text="当前还没有漏洞挖掘阶段确认的问题。" />
       ) : (
-        <EmptyState text="暂未产生历史同类变体候选。" />
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,22rem)_1fr]">
+          <div className="flex flex-col rounded-xl border border-slate-700 bg-slate-900/40">
+            <div className="max-h-[70vh] flex-1 overflow-y-auto">
+              <ul className="divide-y divide-slate-800">
+                {items.map(({ vuln, index, result, running }) => {
+                  const active = selectedIndex === index;
+                  const fileName = vuln.file.split("/").pop() || vuln.file;
+                  return (
+                    <li key={`${index}-${vuln.file}-${vuln.line}`}>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedIndex(index)}
+                        className={`w-full px-3 py-2.5 text-left transition-colors ${
+                          active ? "bg-amber-500/15" : running ? "bg-amber-500/10 hover:bg-amber-500/15" : "hover:bg-slate-800/60"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[11px] text-slate-500">#{index}</span>
+                          <span className="truncate font-mono text-xs text-slate-200" title={`${vuln.file}:${vuln.line}`}>
+                            {fileName}:{vuln.line}
+                          </span>
+                          {running && <span className="ml-auto h-3 w-3 shrink-0 rounded-full border border-amber-500/30 border-t-amber-300 animate-spin" />}
+                        </div>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          <span className="rounded bg-slate-700/50 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-400">
+                            {vuln.vuln_type}
+                          </span>
+                          <StatusPill label={fpReviewItemLabel(result, running)} tone={fpReviewItemTone(result, running)} />
+                        </div>
+                        {vuln.function && (
+                          <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={vuln.function}>
+                            {vuln.function}
+                          </div>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </div>
+          <div className="min-h-[20rem] rounded-xl border border-slate-700 bg-slate-900/40">
+            {selected ? (
+              <FpReviewDetail
+                index={selected.index}
+                vulnerability={selected.vuln}
+                result={selected.result}
+                running={selected.running}
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
+                从左侧选择一个问题查看复核详情
+              </div>
+            )}
+          </div>
+        </div>
       )}
-      <EventList events={events} empty="暂无历史同类问题挖掘日志" />
+      <EventList events={events} empty="暂无去误报任务日志" />
     </TaskPanel>
   );
+}
+
+function FpReviewDetail({
+  index,
+  vulnerability,
+  result,
+  running,
+}: {
+  index: number;
+  vulnerability: Vulnerability;
+  result?: FpReviewJob["results"][number];
+  running: boolean;
+}) {
+  const stageEntries = Object.entries(result?.stage_outputs ?? {})
+    .filter(([, content]) => Boolean(content))
+    .sort(([a], [b]) => fpStageOrder(a) - fpStageOrder(b));
+  return (
+    <div className="max-h-[70vh] overflow-y-auto p-4">
+      <div className="border-b border-slate-800 pb-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-xs text-slate-500">#{index}</span>
+              <span className="text-sm font-semibold text-slate-100">{vulnerability.vuln_type}</span>
+              <span className="text-xs text-slate-500">{vulnerability.severity}</span>
+            </div>
+            <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerability.file}:{vulnerability.line}</div>
+            <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerability.function}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {running && <span className="h-3 w-3 rounded-full border border-amber-500/30 border-t-amber-300 animate-spin" />}
+            <StatusPill label={fpReviewItemLabel(result, running)} tone={fpReviewItemTone(result, running)} />
+          </div>
+        </div>
+      </div>
+      <div className="mt-4 space-y-4">
+        <section>
+          <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">漏洞摘要</h4>
+          <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
+            <MarkdownContent content={vulnerability.description || "（无描述）"} />
+          </div>
+        </section>
+        {result ? (
+          <>
+            <section>
+              <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">复核结论</h4>
+              <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
+                <div className="mb-2 flex flex-wrap gap-2">
+                  <StatusPill label={result.verdict === "fp" ? "误报" : "正报"} tone={result.verdict === "fp" ? "green" : "red"} />
+                  <StatusPill label={`严重性：${result.severity || "-"}`} tone="slate" />
+                  {result.match_type && <StatusPill label={`依据：${result.match_type}`} tone="purple" />}
+                </div>
+                <MarkdownContent content={result.reason || "（无结论说明）"} />
+                {result.match_reference && (
+                  <div className="mt-2 rounded border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-400">
+                    {result.match_reference}
+                  </div>
+                )}
+              </div>
+            </section>
+            {result.vulnerability_report && (
+              <section>
+                <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">漏洞报告</h4>
+                <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
+                  <MarkdownContent content={result.vulnerability_report} />
+                </div>
+              </section>
+            )}
+            {stageEntries.length > 0 && (
+              <section className="space-y-3">
+                <h4 className="text-xs font-semibold uppercase text-slate-500">阶段输出</h4>
+                {stageEntries.map(([stage, content]) => (
+                  <div key={stage} className="rounded-lg border border-slate-800 bg-slate-950/40">
+                    <div className="border-b border-slate-800 px-3 py-2 text-xs font-semibold text-slate-400">
+                      {FP_REVIEW_STAGE_LABELS[stage] ?? stage}
+                    </div>
+                    <div className="px-4 py-2">
+                      <MarkdownContent content={content} />
+                    </div>
+                  </div>
+                ))}
+              </section>
+            )}
+          </>
+        ) : (
+          <div className="rounded border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs text-slate-500">
+            {running ? "当前问题正在复核中" : "等待去误报任务处理"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function fpStageOrder(stage: string): number {
+  const order = ["history_match", "prove_bug", "prove_fp", "final_judge"];
+  const index = order.indexOf(stage);
+  return index >= 0 ? index : order.length;
+}
+
+function fpReviewSortRank(result: FpReviewJob["results"][number] | undefined, running: boolean): number {
+  if (running) return 0;
+  if (!result) return 1;
+  return 2;
+}
+
+function fpReviewItemLabel(result: FpReviewJob["results"][number] | undefined, running: boolean): string {
+  if (running) return "复核中";
+  if (!result) return "等待复核";
+  return result.verdict === "fp" ? "误报" : "正报";
+}
+
+function fpReviewItemTone(result: FpReviewJob["results"][number] | undefined, running: boolean): TaskTone {
+  if (running) return "amber";
+  if (!result) return "slate";
+  return result.verdict === "fp" ? "green" : "red";
 }
 
 function ValidationPanel({
@@ -3165,6 +3438,7 @@ function EventLine({ event }: { event: ScanEvent }) {
 
 function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
   const models = pool?.models ?? [];
+  const plannedTasks = pool?.planned_tasks ?? [];
   const queuedTasks = pool?.queued_tasks ?? [];
   const total = models.reduce((sum, item) => sum + item.total, 0);
   const success = models.reduce((sum, item) => sum + item.success, 0);
@@ -3172,11 +3446,11 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
   const timeout = models.reduce((sum, item) => sum + item.timeout, 0);
   const cancelled = models.reduce((sum, item) => sum + item.cancelled, 0);
 
-  if (!pool || models.length === 0) {
+  if (!pool || (models.length === 0 && plannedTasks.length === 0 && queuedTasks.length === 0)) {
     return (
       <div className="flex-1 overflow-y-auto p-5">
         <div className="rounded-lg border border-slate-800 bg-slate-950 px-4 py-5 text-sm text-slate-500">
-          当前扫描尚未产生 OpenCode 模型池统计。开始运行审计、扫描前内存 API 识别或 AI 去误报后，这里会显示模型分配情况。
+          当前扫描尚未产生 OpenCode 模型池统计。开始运行威胁分析、候选点审计或去误报后，这里会显示模型分配情况。
         </div>
       </div>
     );
@@ -3184,7 +3458,8 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
 
   return (
     <div className="flex-1 overflow-y-auto p-5 space-y-4">
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-7 gap-3">
+        <MetricBox label="计划中" value={plannedTasks.length} tone="amber" />
         <MetricBox label="运行中" value={pool.global_running} tone="cyan" />
         <MetricBox label="排队中" value={pool.global_queued} tone="amber" />
         <MetricBox label="累计任务" value={total} />
@@ -3192,6 +3467,23 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
         <MetricBox label="失败" value={failure} tone="red" />
         <MetricBox label="超时/取消" value={timeout + cancelled} tone="amber" />
       </div>
+
+      {plannedTasks.length > 0 && (
+        <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
+          <div className="mb-2 text-xs font-semibold text-slate-400">计划中任务</div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {plannedTasks.map((task, index) => (
+              <div
+                key={String(task.planned_task_id || index)}
+                className="truncate rounded border border-slate-500/20 bg-slate-800/70 px-2 py-1.5 text-xs text-slate-200"
+                title={modelTaskLabel(task)}
+              >
+                {modelTaskLabel(task)}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {queuedTasks.length > 0 && (
         <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
@@ -3201,6 +3493,7 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
               <div
                 key={String(task.request_id || index)}
                 className="truncate rounded border border-amber-500/20 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-100"
+                title={modelTaskLabel(task)}
               >
                 {modelTaskLabel(task)}
               </div>

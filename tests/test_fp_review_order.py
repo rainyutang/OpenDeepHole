@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.store.sqlite import SqliteScanStore
-from backend.api.scan import _ordered_fp_review_candidates, _retry_incomplete_candidates
+from backend.api.scan import _ensure_fp_review_job_for_scan, _ordered_fp_review_candidates, _retry_incomplete_candidates
 from backend.models import (
     AgentInfo,
     BatchUnmarkRequest,
@@ -243,6 +243,66 @@ class FpReviewOrderTests(unittest.TestCase):
             command = send.await_args.args[1]
             self.assertEqual(command["type"], "fp_review")
             self.assertEqual(command["agent_runtime_update"], {"hash": "runtime-hash"})
+
+    def test_auto_fp_review_does_not_restart_when_all_findings_have_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            now = datetime.now(timezone.utc).isoformat()
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_items=["npd"],
+                created_at=now,
+                status=ScanItemStatus.COMPLETE,
+                progress=1.0,
+                total_candidates=1,
+                processed_candidates=1,
+                vulnerabilities=[
+                    Vulnerability(
+                        file="a.c",
+                        line=10,
+                        function="parse",
+                        vuln_type="npd",
+                        severity="high",
+                        description="desc",
+                        ai_analysis="analysis",
+                        confirmed=True,
+                        ai_verdict="confirmed",
+                    ),
+                ],
+            )
+            store.save_scan(scan, ScanMeta(scan_items=["npd"], created_at=now, user_id="owner"))
+            store.create_fp_review_job("review", "scan-1", 1, now)
+            store.add_fp_review_result(
+                "review",
+                FpReviewResult(
+                    vuln_index=0,
+                    verdict="tp",
+                    severity="high",
+                    reason="already reviewed",
+                    vulnerability_report="",
+                    created_at=now,
+                ),
+            )
+            store.update_fp_review_job("review", status="complete", processed=1)
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.sse.publish") as publish,
+            ):
+                info = _ensure_fp_review_job_for_scan(
+                    "scan-1",
+                    scan,
+                    require_unresolved=True,
+                    publish_started=True,
+                )
+
+            self.assertIsNotNone(info)
+            self.assertTrue(info["no_unresolved"])
+            job = store.get_fp_review_job("review")
+            self.assertIsNotNone(job)
+            self.assertEqual(job.status.value, "complete")
+            publish.assert_not_called()
 
     def test_unmark_removes_generated_feedback_and_readds_fp_review_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

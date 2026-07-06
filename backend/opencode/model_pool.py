@@ -74,6 +74,16 @@ class _PendingLeaseRequest:
     queued_at_iso: str
 
 
+@dataclass
+class _PlannedTask:
+    task_id: str
+    task_key: str
+    sequence: int
+    scope_id: str
+    task_context: dict[str, Any]
+    planned_at_iso: str
+
+
 _condition = asyncio.Condition()
 _running_by_model: dict[str, int] = {}
 _global_running = 0
@@ -85,7 +95,10 @@ _scope_updated_at: dict[str, str] = {}
 _global_updated_at: str = ""
 _active_tasks: dict[str, dict[str, Any]] = {}
 _pending_requests: list[_PendingLeaseRequest] = []
+_planned_tasks: dict[str, _PlannedTask] = {}
+_planned_task_ids_by_key: dict[tuple[str, str], str] = {}
 _pending_sequence = 0
+_planned_sequence = 0
 
 
 def _now_iso() -> str:
@@ -415,6 +428,82 @@ def _remove_pending_request_locked(request: _PendingLeaseRequest) -> bool:
     return True
 
 
+def _remove_planned_task_locked(task_id: str) -> bool:
+    planned = _planned_tasks.pop(task_id, None)
+    if planned is None:
+        return False
+    if planned.task_key:
+        _planned_task_ids_by_key.pop((planned.scope_id, planned.task_key), None)
+    return True
+
+
+def _consume_planned_task_locked(request: _PendingLeaseRequest) -> None:
+    raw_id = request.task_context.get("planned_task_id")
+    if raw_id and _remove_planned_task_locked(str(raw_id)):
+        _touch_queue_locked(request.stats_scope_id)
+
+
+async def register_planned_task(
+    scope_id: str,
+    task_context: dict[str, Any] | None = None,
+    *,
+    task_key: str = "",
+) -> str:
+    """Register a future OpenCode invocation that has not requested a lease yet."""
+    global _planned_sequence
+    context = dict(task_context or {})
+    async with _condition:
+        if task_key:
+            existing_id = _planned_task_ids_by_key.get((scope_id, task_key))
+            if existing_id and existing_id in _planned_tasks:
+                return existing_id
+        _planned_sequence += 1
+        task_id = uuid4().hex
+        planned = _PlannedTask(
+            task_id=task_id,
+            task_key=task_key,
+            sequence=_planned_sequence,
+            scope_id=scope_id,
+            task_context=context,
+            planned_at_iso=_now_iso(),
+        )
+        _planned_tasks[task_id] = planned
+        if task_key:
+            _planned_task_ids_by_key[(scope_id, task_key)] = task_id
+        _touch_queue_locked(scope_id)
+        _condition.notify_all()
+        return task_id
+
+
+async def clear_planned_task(task_id: str) -> None:
+    """Remove one planned OpenCode task that will not request a lease."""
+    if not task_id:
+        return
+    async with _condition:
+        planned = _planned_tasks.get(task_id)
+        scope_id = planned.scope_id if planned is not None else ""
+        if _remove_planned_task_locked(task_id):
+            _touch_queue_locked(scope_id)
+            _condition.notify_all()
+
+
+async def clear_planned_tasks(scope_id: str, task_types: set[str] | None = None) -> None:
+    """Remove all planned OpenCode tasks for a scope."""
+    async with _condition:
+        removed = False
+        for task_id, planned in list(_planned_tasks.items()):
+            if planned.scope_id != scope_id:
+                continue
+            planned_type = str((planned.task_context or {}).get("task_type") or "")
+            if task_types is not None and planned_type not in task_types:
+                continue
+            _remove_planned_task_locked(task_id)
+            removed = True
+        if removed:
+            _touch_queue_locked(scope_id)
+            _condition.notify_all()
+
+
 def _prune_cancelled_pending_locked() -> None:
     removed_scope_ids: set[str] = set()
     for request in list(_pending_requests):
@@ -582,6 +671,7 @@ async def acquire_model_lease(
                     queued_at=time.monotonic(),
                     queued_at_iso=queued_at_iso,
                 )
+                _consume_planned_task_locked(request)
                 option, all_options = _choose_available_for_request_locked(request)
                 if option is not None and not _pending_requests:
                     return _grant_lease_locked(request, option, all_options)
@@ -753,11 +843,28 @@ def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
     }
 
 
+def _planned_task_snapshot(planned: _PlannedTask) -> dict[str, Any]:
+    return {
+        "planned_task_id": planned.task_id,
+        "scope_id": planned.scope_id,
+        "planned_at": planned.planned_at_iso,
+        **dict(planned.task_context or {}),
+    }
+
+
 def _pending_requests_snapshot(scope_id: str = "") -> list[dict[str, Any]]:
     return [
         _pending_request_snapshot(request)
         for request in _pending_requests
         if _pending_request_matches_scope(request, scope_id)
+    ]
+
+
+def _planned_tasks_snapshot(scope_id: str = "") -> list[dict[str, Any]]:
+    return [
+        _planned_task_snapshot(planned)
+        for planned in sorted(_planned_tasks.values(), key=lambda item: item.sequence)
+        if not scope_id or planned.scope_id == scope_id
     ]
 
 
@@ -769,21 +876,25 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
             for item in stats.values()
         ]
         queued_tasks = _pending_requests_snapshot(scope_id)
+        planned_tasks = _planned_tasks_snapshot(scope_id)
         return {
             "scope_id": scope_id,
             "global_running": sum(item.running for item in stats.values()),
             "global_queued": len(queued_tasks),
             "queued_tasks": queued_tasks,
+            "planned_tasks": planned_tasks,
             "models": sorted(models, key=lambda item: item["id"]),
             "updated_at": _scope_updated_at.get(scope_id, ""),
         }
     stats = _global_stats_by_model
     models = [_stats_item_snapshot(item, option=_options_by_id.get(item.id)) for item in stats.values()]
     queued_tasks = _pending_requests_snapshot()
+    planned_tasks = _planned_tasks_snapshot()
     return {
         "global_running": _global_running,
         "global_queued": len(queued_tasks),
         "queued_tasks": queued_tasks,
+        "planned_tasks": planned_tasks,
         "models": sorted(models, key=lambda item: item["id"]),
         "updated_at": _global_updated_at,
     }

@@ -6,8 +6,11 @@ import pytest
 import backend.opencode.model_pool as model_pool_module
 from backend.opencode.model_pool import (
     acquire_model_lease,
+    clear_planned_task,
+    clear_planned_tasks,
     model_options,
     model_pool_snapshot,
+    register_planned_task,
     release_model_lease,
     refresh_configured_model_pool,
     total_model_capacity,
@@ -30,7 +33,10 @@ def _reset_model_pool():
     model_pool_module._global_updated_at = ""
     model_pool_module._active_tasks.clear()
     model_pool_module._pending_requests.clear()
+    model_pool_module._planned_tasks.clear()
+    model_pool_module._planned_task_ids_by_key.clear()
     model_pool_module._pending_sequence = 0
+    model_pool_module._planned_sequence = 0
     yield
 
 
@@ -114,6 +120,79 @@ def test_immediate_lease_does_not_count_as_queued() -> None:
             assert snapshot["models"][0]["queued"] == 0
         finally:
             await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_planned_task_snapshot_dedupes_and_is_consumed_by_lease() -> None:
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "deep", "model": "deep-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        scope = "scope-planned"
+
+        planned_id = await register_planned_task(
+            scope,
+            {"task_type": "audit", "checker": "overflow", "file": "src/a.c", "line": 42},
+            task_key="audit:42",
+        )
+        duplicate_id = await register_planned_task(
+            scope,
+            {"task_type": "audit", "checker": "ignored"},
+            task_key="audit:42",
+        )
+        assert duplicate_id == planned_id
+
+        planned_snapshot = model_pool_snapshot(scope)
+        assert planned_snapshot["planned_tasks"] == [
+            {
+                "planned_task_id": planned_id,
+                "scope_id": scope,
+                "planned_at": planned_snapshot["planned_tasks"][0]["planned_at"],
+                "task_type": "audit",
+                "checker": "overflow",
+                "file": "src/a.c",
+                "line": 42,
+            }
+        ]
+
+        lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="high",
+            stats_scope_id=scope,
+            task_context={"planned_task_id": planned_id, "task_type": "audit", "file": "src/a.c", "line": 42},
+        )
+        try:
+            active_snapshot = model_pool_snapshot(scope)
+            assert active_snapshot["planned_tasks"] == []
+            active_tasks = active_snapshot["models"][0]["active_tasks"]
+            assert active_tasks[0]["task_type"] == "audit"
+            assert active_tasks[0]["file"] == "src/a.c"
+        finally:
+            await release_model_lease(lease)
+
+    asyncio.run(run())
+
+
+def test_can_clear_planned_tasks_before_lease_request() -> None:
+    async def run():
+        first = await register_planned_task("scan-a", {"task_type": "fp_review"}, task_key="fp:1")
+        await register_planned_task("scan-a", {"task_type": "audit"}, task_key="audit:1")
+        await register_planned_task("scan-b", {"task_type": "threat_analysis"}, task_key="threat")
+
+        await clear_planned_task(first)
+        assert [task["task_type"] for task in model_pool_snapshot("scan-a")["planned_tasks"]] == ["audit"]
+
+        await register_planned_task("scan-a", {"task_type": "fp_review"}, task_key="fp:2")
+        await clear_planned_tasks("scan-a", {"audit"})
+        assert [task["task_type"] for task in model_pool_snapshot("scan-a")["planned_tasks"]] == ["fp_review"]
+
+        await clear_planned_tasks("scan-a")
+        assert model_pool_snapshot("scan-a")["planned_tasks"] == []
+        assert [task["task_type"] for task in model_pool_snapshot("scan-b")["planned_tasks"]] == ["threat_analysis"]
 
     asyncio.run(run())
 
