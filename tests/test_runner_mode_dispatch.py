@@ -202,6 +202,7 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
             timeout=30,
             max_retries=0,
             models=[],
+            proxy_url="127.0.0.1:3131",
         )
         fake_manager = SimpleNamespace(run_prompt=AsyncMock(return_value=["done"]))
         output_lines: list[str] = []
@@ -233,6 +234,10 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         assert json.loads(kwargs["config_content"]) == json.loads(
             (kwargs["config_workspace"] / "opencode.json").read_text(encoding="utf-8")
         )
+        assert kwargs["env_overrides"]["HTTP_PROXY"] == "http://127.0.0.1:3131"
+        assert kwargs["env_overrides"]["HTTPS_PROXY"] == "http://127.0.0.1:3131"
+        assert "127.0.0.1" in kwargs["env_overrides"]["NO_PROXY"]
+        assert "localhost" in kwargs["env_overrides"]["NO_PROXY"]
         assert "真实项目根目录" in kwargs["prompt"]
         assert str(project.resolve()) in kwargs["prompt"]
         assert "优先使用 deephole-code MCP 源码查询工具" in kwargs["prompt"]
@@ -462,6 +467,31 @@ def test_opencode_env_uses_env_config_path_and_strips_schema(tmp_path: Path) -> 
     assert env_config["provider"]["corp"]["options"]["apiKey"] == "env-secret"
     assert env_config["model"] == "corp/env-model"
     assert env_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
+
+
+def test_opencode_proxy_url_populates_child_process_env(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "opencode.json").write_text(
+        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
+        encoding="utf-8",
+    )
+
+    env = _build_cli_env(
+        workspace,
+        "opencode",
+        base_env={"NO_PROXY": "10.0.0.0/8"},
+        cli_config={"proxy_url": "127.0.0.1:3131"},
+    )
+
+    assert env["HTTP_PROXY"] == "http://127.0.0.1:3131"
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:3131"
+    assert env["ALL_PROXY"] == "http://127.0.0.1:3131"
+    assert env["http_proxy"] == "http://127.0.0.1:3131"
+    assert env["https_proxy"] == "http://127.0.0.1:3131"
+    assert env["all_proxy"] == "http://127.0.0.1:3131"
+    assert env["NO_PROXY"] == "10.0.0.0/8,127.0.0.1,localhost"
+    assert env["no_proxy"] == "10.0.0.0/8,127.0.0.1,localhost"
 
 
 def test_opencode_env_merges_executable_project_and_config_paths(tmp_path: Path) -> None:

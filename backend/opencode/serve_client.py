@@ -41,14 +41,30 @@ _SENSITIVE_CONFIG_KEY_RE = re.compile(
     r"(api[_-]?key|apikey|token|secret|password|authorization|cookie|credential|headers?)",
     re.IGNORECASE,
 )
+_SERVE_DEBUG_ENV_NAMES = (
+    "NODE_TLS_REJECT_UNAUTHORIZED",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "OPENCODE_CONFIG_CONTENT",
+)
 
 
 @dataclass(frozen=True)
 class OpenCodeServeKey:
     tool: str
     executable: str
+    env_hash: str = ""
     config_hash: str = ""
     config_content: str = field(default="", compare=False, repr=False)
+    env_overrides: tuple[tuple[str, str], ...] = field(default_factory=tuple, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -231,12 +247,7 @@ def _serve_debug_env_value(name: str, value: str | None) -> str | None:
 
 def _serve_startup_env_debug(env: dict[str, str]) -> list[str]:
     lines: list[str] = []
-    for name in (
-        "NODE_TLS_REJECT_UNAUTHORIZED",
-        "PYTHONIOENCODING",
-        "PYTHONUTF8",
-        "OPENCODE_CONFIG_CONTENT",
-    ):
+    for name in _SERVE_DEBUG_ENV_NAMES:
         value = _serve_debug_env_value(name, env.get(name))
         lines.append(f"    {name}={value if value is not None else '(unset)'}")
     lines.append("    OPENCODE_SERVER_PASSWORD=(cleared)")
@@ -247,12 +258,7 @@ def _serve_startup_env_debug(env: dict[str, str]) -> list[str]:
 def _serve_startup_shell_debug(cmd: list[str], cwd: Path, env: dict[str, str]) -> str:
     env_parts = [
         f"{name}={shlex.quote(_serve_debug_env_value(name, env[name]) or '')}"
-        for name in (
-            "NODE_TLS_REJECT_UNAUTHORIZED",
-            "PYTHONIOENCODING",
-            "PYTHONUTF8",
-            "OPENCODE_CONFIG_CONTENT",
-        )
+        for name in _SERVE_DEBUG_ENV_NAMES
         if name in env
     ]
     prefix = " ".join(env_parts)
@@ -698,6 +704,26 @@ def _config_hash(config_content: str | None) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _normalized_env_overrides(env_overrides: dict[str, str] | None) -> tuple[tuple[str, str], ...]:
+    if not env_overrides:
+        return ()
+    normalized: list[tuple[str, str]] = []
+    for key, value in env_overrides.items():
+        name = str(key).strip()
+        if not name:
+            continue
+        normalized.append((name, str(value)))
+    return tuple(sorted(normalized))
+
+
+def _env_hash(env_overrides: tuple[tuple[str, str], ...]) -> str:
+    if not env_overrides:
+        return ""
+    return hashlib.sha256(
+        json.dumps(env_overrides, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _extract_text(value: Any) -> list[str]:
     lines: list[str] = []
     if isinstance(value, str):
@@ -951,12 +977,16 @@ class OpenCodeServeManager:
         on_line=None,
         on_session_id=None,
         cancel_event=None,
+        env_overrides: dict[str, str] | None = None,
     ) -> list[str]:
+        normalized_env_overrides = _normalized_env_overrides(env_overrides)
         key = OpenCodeServeKey(
             tool=tool,
             executable=executable,
+            env_hash=_env_hash(normalized_env_overrides),
             config_hash=_config_hash(config_content),
             config_content=config_content or "",
+            env_overrides=normalized_env_overrides,
         )
         await self._acquire_session(key, startup_cwd=config_workspace)
         session_id = ""
@@ -1066,13 +1096,17 @@ class OpenCodeServeManager:
         directory: Path | None = None,
         config_workspace: Path | None = None,
         config_content: str | None = None,
+        env_overrides: dict[str, str] | None = None,
         refresh: bool = False,
     ) -> list[OpenCodeModelInfo]:
+        normalized_env_overrides = _normalized_env_overrides(env_overrides)
         key = OpenCodeServeKey(
             tool=tool,
             executable=executable,
+            env_hash=_env_hash(normalized_env_overrides),
             config_hash=_config_hash(config_content),
             config_content=config_content or "",
+            env_overrides=normalized_env_overrides,
         )
         await self._ensure_started(key, startup_cwd=config_workspace)
         params = _serve_context_params(directory)
@@ -1167,6 +1201,7 @@ class OpenCodeServeManager:
             current is not None
             and current.tool == requested.tool
             and current.executable == requested.executable
+            and current.env_hash == requested.env_hash
         )
 
     async def _wait_until_idle_locked(self) -> None:
@@ -1195,6 +1230,8 @@ class OpenCodeServeManager:
             env["OPENCODE_CONFIG_CONTENT"] = key.config_content
         else:
             env.pop("OPENCODE_CONFIG_CONTENT", None)
+        for name, value in key.env_overrides:
+            env[name] = value
         env.pop("OPENCODE_SERVER_PASSWORD", None)
         env.pop("OPENCODE_SERVER_USERNAME", None)
         cmd = [

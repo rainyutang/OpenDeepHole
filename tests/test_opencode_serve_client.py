@@ -120,6 +120,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             prompt="hello",
             model="anthropic/claude-sonnet",
             timeout=30,
+            env_overrides={"HTTPS_PROXY": "http://127.0.0.1:3131"},
         )
 
         assert lines == ["done"]
@@ -134,6 +135,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             model="",
             timeout=30,
             on_session_id=sessions.append,
+            env_overrides={"HTTPS_PROXY": "http://127.0.0.1:3131"},
         )
         assert sessions == ["session-1"]
         session_client = _FakeAsyncClient.instances[0]
@@ -142,10 +144,16 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             if item["path"] == "/session/session-1/message"
         )
         expected_hash = hashlib.sha256(config_content.encode("utf-8")).hexdigest()
+        expected_env_overrides = (("HTTPS_PROXY", "http://127.0.0.1:3131"),)
+        expected_env_hash = hashlib.sha256(
+            json.dumps(expected_env_overrides, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
         assert manager._acquire_session.await_args.args[0] == OpenCodeServeKey(
             tool="opencode",
             executable="opencode",
+            env_hash=expected_env_hash,
             config_hash=expected_hash,
+            env_overrides=expected_env_overrides,
         )
         assert manager._acquire_session.await_args.kwargs["startup_cwd"] == config_workspace
         expected_params = {"directory": str(project)}
@@ -442,8 +450,14 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         await manager._start_locked(OpenCodeServeKey(
             tool="opencode",
             executable="opencode",
+            env_hash="proxyhash",
             config_hash="abc123",
             config_content='{"mcp": {}}',
+            env_overrides=(
+                ("HTTP_PROXY", "http://127.0.0.1:3131"),
+                ("HTTPS_PROXY", "http://127.0.0.1:3131"),
+                ("NO_PROXY", "127.0.0.1,localhost"),
+            ),
         ), startup_cwd=startup_cwd)
 
         assert commands[0] == [
@@ -460,6 +474,9 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert marker["tool"] == "opencode"
         assert marker["config_hash"] == "abc123"
         assert envs[0]["OPENCODE_CONFIG_CONTENT"] == '{"mcp": {}}'
+        assert envs[0]["HTTP_PROXY"] == "http://127.0.0.1:3131"
+        assert envs[0]["HTTPS_PROXY"] == "http://127.0.0.1:3131"
+        assert envs[0]["NO_PROXY"] == "127.0.0.1,localhost"
         assert envs[0]["PYTHONIOENCODING"] == "utf-8"
         assert envs[0]["PYTHONUTF8"] == "1"
         assert git_init_cwds == [startup_cwd]
@@ -478,6 +495,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert 'argv=["/bin/opencode", "serve", "--hostname", "127.0.0.1", "--port", "4096"]' in log_text
         assert "shell=cd " in log_text
         assert "/bin/opencode serve --hostname 127.0.0.1 --port 4096" in log_text
+        assert "HTTP_PROXY=http://127.0.0.1:3131" in log_text
+        assert "HTTPS_PROXY=http://127.0.0.1:3131" in log_text
         assert 'OPENCODE_CONFIG_CONTENT={"mcp": {}}' in log_text
         assert "popen_kwargs={'start_new_session': True}" in log_text
 

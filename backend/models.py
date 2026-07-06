@@ -577,6 +577,7 @@ class AgentOpenCodeConfig(BaseModel):
     max_retries: int = 2
     models: list[AgentOpenCodeModelConfig] = []
     config_paths: list[str] = []
+    proxy_url: str = ""
 
 
 class AgentMemoryApiDiscoveryConfig(BaseModel):

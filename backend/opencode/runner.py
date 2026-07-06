@@ -54,6 +54,17 @@ _SOURCE_READING_PRIORITY_INSTRUCTION = (
 _GLOBAL_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
 _PROJECT_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
 _OPENCODE_CONFIG_PATH_ENV = "OPENCODE_CONFIG_PATH"
+_OPENCODE_PROXY_URL_ENV = "OPENCODE_PROXY_URL"
+_OPENCODE_PROCESS_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
 
 
 @dataclass
@@ -1047,6 +1058,7 @@ def _effective_cli_config(cli_config, model_option) -> dict:
         "max_retries": _cfg_value(cli_config, "max_retries", 2),
         "models": _cfg_value(cli_config, "models", []),
         "config_paths": _cfg_value(cli_config, "config_paths", []),
+        "proxy_url": _cfg_value(cli_config, "proxy_url", ""),
     }
     if model_option.tool:
         data["tool"] = model_option.tool
@@ -1353,6 +1365,52 @@ def _explicit_opencode_config_candidates(
     for raw_path in _split_config_path_value(env.get(_OPENCODE_CONFIG_PATH_ENV)):
         paths.extend(("env", path) for path in _expand_explicit_opencode_config_path(raw_path))
     return paths
+
+
+def _normalize_proxy_url(value: object) -> str:
+    proxy = str(value or "").strip()
+    if not proxy:
+        return ""
+    if "://" not in proxy:
+        proxy = f"http://{proxy}"
+    return proxy
+
+
+def _merge_no_proxy(existing: str | None) -> str:
+    values: list[str] = []
+    for part in str(existing or "").split(","):
+        part = part.strip()
+        if part and part not in values:
+            values.append(part)
+    for part in ("127.0.0.1", "localhost"):
+        if part not in values:
+            values.append(part)
+    return ",".join(values)
+
+
+def _opencode_proxy_env_overrides(cli_config, env: dict[str, str]) -> dict[str, str]:
+    proxy_url = _normalize_proxy_url(
+        _cfg_value(cli_config, "proxy_url", "") if cli_config is not None else ""
+    )
+    if not proxy_url:
+        proxy_url = _normalize_proxy_url(env.get(_OPENCODE_PROXY_URL_ENV, ""))
+    if not proxy_url:
+        return {}
+    no_proxy = _merge_no_proxy(env.get("NO_PROXY") or env.get("no_proxy"))
+    return {
+        "HTTP_PROXY": proxy_url,
+        "HTTPS_PROXY": proxy_url,
+        "ALL_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "https_proxy": proxy_url,
+        "all_proxy": proxy_url,
+        "NO_PROXY": no_proxy,
+        "no_proxy": no_proxy,
+    }
+
+
+def _opencode_process_env_overrides(env: dict[str, str]) -> dict[str, str]:
+    return {name: env[name] for name in _OPENCODE_PROCESS_ENV_KEYS if name in env}
 
 
 def _log_user_opencode_config_discovery(
@@ -1746,6 +1804,7 @@ def _build_cli_env(
     env = dict(os.environ if base_env is None else base_env)
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
     if tool in {"nga", "opencode"}:
+        env.update(_opencode_proxy_env_overrides(cli_config, env))
         opencode_config = _opencode_config_for_env(
             workspace,
             tool,
@@ -1975,6 +2034,7 @@ async def _invoke_opencode(
                     on_line=emit_line,
                     on_session_id=record_serve_session,
                     cancel_event=cancel_event,
+                    env_overrides=_opencode_process_env_overrides(serve_env),
                 )
             except asyncio.CancelledError:
                 if cancel_event and cancel_event.is_set():

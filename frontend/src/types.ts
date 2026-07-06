@@ -431,6 +431,7 @@ export interface AgentOpenCodeConfig {
   max_retries: number;
   models: AgentOpenCodeModelConfig[];
   config_paths?: string[];
+  proxy_url?: string;
 }
 
 export interface AgentOpenCodeModelConfig {

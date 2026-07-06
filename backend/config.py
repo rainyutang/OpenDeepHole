@@ -54,6 +54,7 @@ class OpenCodeConfig(BaseModel):
     mock: bool = False  # When True, skip real opencode and return fake results
     models: list[OpenCodeModelConfig] = []
     config_paths: list[str] = []  # optional OpenCode config files to merge
+    proxy_url: str = ""  # optional proxy for opencode/nga child processes
 
 
 class MemoryApiDiscoveryConfig(BaseModel):
