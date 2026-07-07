@@ -16,6 +16,7 @@
 - **修复** 注入到 `OPENCODE_CONFIG_CONTENT` 的运行时 JSON 会移除顶层 `"$schema"`，避免环境变量携带 schema URL；启动诊断会记录候选配置文件命中情况和最终顶层 key，便于定位配置未合并的问题
 - **修复** OpenCode/nga 子进程支持通过 `opencode.proxy_url` 或 `OPENCODE_PROXY_URL` 显式注入 `HTTP_PROXY`/`HTTPS_PROXY` 及小写形式，默认 `NO_PROXY/no_proxy` 使用已验证的内网列表且可由 `opencode.no_proxy` 或 `OPENCODE_NO_PROXY` 覆盖，避免 Agent 进程未继承交互式终端代理环境时 serve 启动阶段访问 Provider 被公司代理拦截；代理变化会触发 serve 重启
 - **修复** 重启/续扫任务时若当前 `scan_id` 已保存匹配扫描范围的威胁分析结果，Agent 会直接复用并跳过重新执行威胁分析，避免重复消耗模型调用
+- **变更** 威胁分析 `res.json` 恢复写入项目根目录，并继续按 `scan_scope` 判断是否可复用，避免扫描任务目录清理后跨任务无法复用威胁分析结果
 
 ## 2026-07-04
 

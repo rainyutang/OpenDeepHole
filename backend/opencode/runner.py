@@ -854,8 +854,7 @@ async def run_threat_analysis_audit(
     max_retries = config.opencode.max_retries
     analysis_root = (project_dir or workspace).resolve()
     target_path = (code_scan_path or analysis_root).resolve()
-    result_path = workspace.parent / "res.json"
-    writable_root = Path(config.storage.scans_dir)
+    result_path = analysis_root / "res.json"
     scan_scope = build_threat_analysis_scan_scope(analysis_root, target_path)
     scan_scope_json = json.dumps(scan_scope.model_dump(), ensure_ascii=False)
 
@@ -897,7 +896,7 @@ async def run_threat_analysis_audit(
                 on_line=on_output,
                 cancel_event=cancel_event,
                 project_dir=analysis_root,
-                writable_paths=[writable_root],
+                writable_paths=[analysis_root],
                 model_capability="high",
                 prefer_high_model=True,
                 stats_scope_id=project_id,

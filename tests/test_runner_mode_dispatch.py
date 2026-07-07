@@ -263,7 +263,7 @@ def test_runtime_writable_paths_include_windows_slash_variants() -> None:
     assert edit[r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1/**"] == "allow"
 
 
-def test_threat_analysis_result_uses_scan_task_directory(tmp_path: Path) -> None:
+def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
     async def run() -> None:
         scans_dir = tmp_path / "scans"
         workspace = scans_dir / "scan-1" / "opencode_workspace"
@@ -296,7 +296,7 @@ def test_threat_analysis_result_uses_scan_task_directory(tmp_path: Path) -> None
             captured["workspace"] = call_workspace
             captured["prompt"] = prompt
             captured["writable_paths"] = kwargs["writable_paths"]
-            (workspace.parent / "res.json").write_text(
+            (project / "res.json").write_text(
                 '{"schema_version":"1.0","analysis_id":"ATA-SCAN","assets":[]}',
                 encoding="utf-8",
             )
@@ -315,12 +315,12 @@ def test_threat_analysis_result_uses_scan_task_directory(tmp_path: Path) -> None
             )
 
         assert analysis is not None
-        result_path = workspace.parent / "res.json"
+        result_path = project / "res.json"
         assert result_path.is_file()
         assert str(result_path) in str(captured["prompt"])
         assert str(project.resolve()) in str(captured["prompt"])
         assert captured["workspace"] == workspace
-        assert captured["writable_paths"] == [scans_dir]
+        assert captured["writable_paths"] == [project.resolve()]
 
     asyncio.run(run())
 
