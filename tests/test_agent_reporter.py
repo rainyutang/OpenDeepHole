@@ -103,7 +103,7 @@ class AgentReporterTests(unittest.TestCase):
 
         self.assertEqual(output.getvalue().count("failed to push static analysis progress"), 1)
 
-    def test_opencode_pool_status_skips_unchanged_poll_snapshots(self) -> None:
+    def test_opencode_pool_status_skips_unchanged_snapshots_between_heartbeats(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
                 self.posts: list[dict] = []
@@ -123,6 +123,10 @@ class AgentReporterTests(unittest.TestCase):
                 await asyncio.sleep(0.05)
                 stop_event.set()
 
+            async def wait_for_update(scope_id="", *, last_updated_at="", timeout=None):
+                await asyncio.sleep(60)
+                return last_updated_at
+
             with patch(
                 "backend.opencode.model_pool.model_pool_snapshot",
                 return_value={
@@ -132,12 +136,15 @@ class AgentReporterTests(unittest.TestCase):
                     "models": [],
                     "updated_at": "2026-06-10T16:00:00",
                 },
+            ), patch(
+                "backend.opencode.model_pool.wait_for_model_pool_update",
+                side_effect=wait_for_update,
             ):
                 await asyncio.gather(
                     reporter.publish_opencode_pool_until(
                         "scan-1",
                         stop_event,
-                        interval_seconds=0.005,
+                        debounce_seconds=0.001,
                         unchanged_heartbeat_seconds=999.0,
                     ),
                     stop_soon(),
@@ -152,6 +159,195 @@ class AgentReporterTests(unittest.TestCase):
                 post["url"].endswith("/api/agent/scan/scan-1/opencode-pool")
                 for post in fake_client.posts
             )
+        )
+
+    def test_opencode_pool_status_debounces_changed_snapshots(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.posts: list[dict] = []
+
+            async def post(self, url, json=None, timeout=None):
+                self.posts.append({"url": url, "json": json, "timeout": timeout})
+                request = httpx.Request("POST", url)
+                return httpx.Response(200, request=request)
+
+        async def run_publisher() -> FakeClient:
+            reporter = Reporter("http://server")
+            fake_client = FakeClient()
+            reporter._client = fake_client  # type: ignore[assignment]
+            stop_event = asyncio.Event()
+            snapshots = [
+                {
+                    "scope_id": "scan-1",
+                    "global_running": 0,
+                    "global_queued": 0,
+                    "models": [],
+                    "updated_at": "t0",
+                },
+                {
+                    "scope_id": "scan-1",
+                    "global_running": 2,
+                    "global_queued": 0,
+                    "models": [],
+                    "updated_at": "t2",
+                },
+                {
+                    "scope_id": "scan-1",
+                    "global_running": 2,
+                    "global_queued": 0,
+                    "models": [],
+                    "updated_at": "t2",
+                },
+            ]
+
+            async def stop_soon() -> None:
+                await asyncio.sleep(0.03)
+                stop_event.set()
+
+            async def wait_for_update(scope_id="", *, last_updated_at="", timeout=None):
+                if last_updated_at == "t0":
+                    await asyncio.sleep(0.001)
+                    return "t1"
+                await asyncio.sleep(60)
+                return last_updated_at
+
+            with patch(
+                "backend.opencode.model_pool.model_pool_snapshot",
+                side_effect=snapshots,
+            ), patch(
+                "backend.opencode.model_pool.wait_for_model_pool_update",
+                side_effect=wait_for_update,
+            ):
+                await asyncio.gather(
+                    reporter.publish_opencode_pool_until(
+                        "scan-1",
+                        stop_event,
+                        debounce_seconds=0.01,
+                        unchanged_heartbeat_seconds=999.0,
+                    ),
+                    stop_soon(),
+                )
+            return fake_client
+
+        fake_client = asyncio.run(run_publisher())
+
+        self.assertEqual(len(fake_client.posts), 3)
+        self.assertEqual(fake_client.posts[0]["json"]["updated_at"], "t0")
+        self.assertEqual(fake_client.posts[1]["json"]["updated_at"], "t2")
+        self.assertEqual(fake_client.posts[2]["json"]["updated_at"], "t2")
+
+    def test_opencode_pool_status_keeps_low_frequency_heartbeat(self) -> None:
+        async def run_publisher() -> list[dict]:
+            heartbeat_sent = asyncio.Event()
+
+            class FakeClient:
+                def __init__(self) -> None:
+                    self.posts: list[dict] = []
+
+                async def post(self, url, json=None, timeout=None):
+                    self.posts.append({"url": url, "json": json, "timeout": timeout})
+                    if len(self.posts) == 2:
+                        heartbeat_sent.set()
+                    request = httpx.Request("POST", url)
+                    return httpx.Response(200, request=request)
+
+            reporter = Reporter("http://server")
+            fake_client = FakeClient()
+            reporter._client = fake_client  # type: ignore[assignment]
+            stop_event = asyncio.Event()
+
+            async def stop_after_heartbeat() -> None:
+                await asyncio.wait_for(heartbeat_sent.wait(), timeout=1.0)
+                stop_event.set()
+
+            async def wait_for_update(scope_id="", *, last_updated_at="", timeout=None):
+                await asyncio.sleep(timeout or 0)
+                return last_updated_at
+
+            with patch(
+                "backend.opencode.model_pool.model_pool_snapshot",
+                return_value={
+                    "scope_id": "scan-1",
+                    "global_running": 1,
+                    "global_queued": 0,
+                    "models": [],
+                    "updated_at": "t0",
+                },
+            ), patch(
+                "backend.opencode.model_pool.wait_for_model_pool_update",
+                side_effect=wait_for_update,
+            ):
+                await asyncio.gather(
+                    reporter.publish_opencode_pool_until(
+                        "scan-1",
+                        stop_event,
+                        debounce_seconds=0.001,
+                        unchanged_heartbeat_seconds=0.005,
+                    ),
+                    stop_after_heartbeat(),
+                )
+            return fake_client.posts
+
+        posts = asyncio.run(run_publisher())
+
+        self.assertEqual(len(posts), 3)
+        self.assertTrue(all(post["json"]["updated_at"] == "t0" for post in posts))
+
+    def test_agent_opencode_pool_status_uses_event_driven_publisher(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.posts: list[dict] = []
+
+            async def post(self, url, json=None, timeout=None):
+                self.posts.append({"url": url, "json": json, "timeout": timeout})
+                request = httpx.Request("POST", url)
+                return httpx.Response(200, request=request)
+
+        async def run_publisher() -> tuple[FakeClient, Reporter]:
+            reporter = Reporter("http://server")
+            reporter.set_agent_id("agent-1")
+            fake_client = FakeClient()
+            reporter._client = fake_client  # type: ignore[assignment]
+            stop_event = asyncio.Event()
+
+            async def stop_soon() -> None:
+                await asyncio.sleep(0.01)
+                stop_event.set()
+
+            async def wait_for_update(scope_id="", *, last_updated_at="", timeout=None):
+                await asyncio.sleep(60)
+                return last_updated_at
+
+            with patch(
+                "backend.opencode.model_pool.model_pool_snapshot",
+                return_value={
+                    "global_running": 1,
+                    "global_queued": 0,
+                    "models": [],
+                    "updated_at": "t0",
+                },
+            ), patch(
+                "backend.opencode.model_pool.wait_for_model_pool_update",
+                side_effect=wait_for_update,
+            ):
+                await asyncio.gather(
+                    reporter.publish_agent_opencode_pool_until(
+                        stop_event,
+                        debounce_seconds=0.001,
+                        unchanged_heartbeat_seconds=999.0,
+                    ),
+                    stop_soon(),
+                )
+            return fake_client, reporter
+
+        fake_client, reporter = asyncio.run(run_publisher())
+
+        self.assertEqual(len(fake_client.posts), 2)
+        self.assertTrue(
+            all(post["url"].endswith("/api/agent/agent-1/opencode-pool") for post in fake_client.posts)
+        )
+        self.assertTrue(
+            all(post["json"]["agent_session_id"] == reporter.agent_session_id for post in fake_client.posts)
         )
 
     def test_get_threat_analysis_returns_parsed_result(self) -> None:

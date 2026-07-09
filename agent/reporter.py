@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from uuid import uuid4
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import httpx
 
@@ -23,7 +23,8 @@ from backend.models import (
 )
 
 
-OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 15.0
+OPENCODE_POOL_DEBOUNCE_SECONDS = 2.0
+OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 60.0
 
 
 def _snapshot_signature(snapshot: dict) -> str:
@@ -399,43 +400,19 @@ class Reporter:
         self,
         scan_id: str,
         stop_event: asyncio.Event,
-        interval_seconds: float = 1.0,
+        interval_seconds: float | None = None,
+        debounce_seconds: float = OPENCODE_POOL_DEBOUNCE_SECONDS,
         unchanged_heartbeat_seconds: float = OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS,
     ) -> None:
-        """Publish model-pool stats until *stop_event* is set.
-
-        The model pool is polled frequently so running/queued transitions are
-        reflected quickly, but identical snapshots are not posted every poll.
-        """
-        from backend.opencode.model_pool import model_pool_snapshot
-
-        last_signature: str | None = None
-        last_sent_at = 0.0
-
-        async def publish_if_needed(*, force: bool = False) -> None:
-            nonlocal last_signature, last_sent_at
-            snapshot = model_pool_snapshot(scan_id)
-            signature = _snapshot_signature(snapshot)
-            now = time.monotonic()
-            if (
-                not force
-                and signature == last_signature
-                and now - last_sent_at < unchanged_heartbeat_seconds
-            ):
-                return
-            if await self.push_opencode_pool_status(scan_id, snapshot):
-                last_signature = signature
-                last_sent_at = now
-
-        try:
-            while not stop_event.is_set():
-                await publish_if_needed()
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
-                except asyncio.TimeoutError:
-                    pass
-        finally:
-            await publish_if_needed(force=True)
+        """Publish scan-local model-pool stats until *stop_event* is set."""
+        await self._publish_opencode_pool_until(
+            stop_event,
+            scope_id=scan_id,
+            push_snapshot=lambda snapshot: self.push_opencode_pool_status(scan_id, snapshot),
+            interval_seconds=interval_seconds,
+            debounce_seconds=debounce_seconds,
+            unchanged_heartbeat_seconds=unchanged_heartbeat_seconds,
+        )
 
     async def push_agent_opencode_pool_status(self, snapshot: dict) -> bool:
         """Push the latest Agent-wide OpenCode model-pool status snapshot."""
@@ -456,37 +433,99 @@ class Reporter:
     async def publish_agent_opencode_pool_until(
         self,
         stop_event: asyncio.Event,
-        interval_seconds: float = 1.0,
+        interval_seconds: float | None = None,
+        debounce_seconds: float = OPENCODE_POOL_DEBOUNCE_SECONDS,
         unchanged_heartbeat_seconds: float = OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS,
     ) -> None:
         """Publish Agent-wide model-pool stats until *stop_event* is set."""
+        await self._publish_opencode_pool_until(
+            stop_event,
+            scope_id="",
+            push_snapshot=self.push_agent_opencode_pool_status,
+            interval_seconds=interval_seconds,
+            debounce_seconds=debounce_seconds,
+            unchanged_heartbeat_seconds=unchanged_heartbeat_seconds,
+        )
+
+    async def _publish_opencode_pool_until(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        scope_id: str,
+        push_snapshot: Callable[[dict], Awaitable[bool]],
+        interval_seconds: float | None = None,
+        debounce_seconds: float = OPENCODE_POOL_DEBOUNCE_SECONDS,
+        unchanged_heartbeat_seconds: float = OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS,
+    ) -> None:
+        """Publish model-pool stats on state changes, with a low-frequency heartbeat."""
         from backend.opencode.model_pool import model_pool_snapshot
+        from backend.opencode.model_pool import wait_for_model_pool_update
 
         last_signature: str | None = None
+        last_seen_updated_at = ""
         last_sent_at = 0.0
+        heartbeat_seconds = (
+            interval_seconds if interval_seconds is not None else unchanged_heartbeat_seconds
+        )
+        heartbeat_seconds = max(0.001, heartbeat_seconds)
+        debounce_seconds = max(0.0, debounce_seconds)
 
         async def publish_if_needed(*, force: bool = False) -> None:
-            nonlocal last_signature, last_sent_at
-            snapshot = model_pool_snapshot()
+            nonlocal last_seen_updated_at, last_signature, last_sent_at
+            snapshot = model_pool_snapshot(scope_id)
+            last_seen_updated_at = str(snapshot.get("updated_at") or "")
             signature = _snapshot_signature(snapshot)
             now = time.monotonic()
-            if (
-                not force
-                and signature == last_signature
-                and now - last_sent_at < unchanged_heartbeat_seconds
-            ):
+            if not force and signature == last_signature:
                 return
-            if await self.push_agent_opencode_pool_status(snapshot):
+            if await push_snapshot(snapshot):
                 last_signature = signature
                 last_sent_at = now
 
+        async def wait_for_update_or_stop(timeout: float | None) -> tuple[str, bool]:
+            update_task = asyncio.create_task(
+                wait_for_model_pool_update(
+                    scope_id,
+                    last_updated_at=last_seen_updated_at,
+                    timeout=timeout,
+                )
+            )
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, pending = await asyncio.wait(
+                {update_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            if stop_task in done:
+                return last_seen_updated_at, True
+            return update_task.result(), False
+
         try:
+            await publish_if_needed(force=True)
             while not stop_event.is_set():
+                if last_sent_at > 0:
+                    wait_timeout = max(
+                        0.0,
+                        heartbeat_seconds - (time.monotonic() - last_sent_at),
+                    )
+                else:
+                    wait_timeout = heartbeat_seconds
+                next_updated_at, stopped = await wait_for_update_or_stop(wait_timeout)
+                if stopped:
+                    break
+                if next_updated_at == last_seen_updated_at:
+                    await publish_if_needed(force=True)
+                    continue
+                if debounce_seconds > 0:
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=debounce_seconds)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
                 await publish_if_needed()
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
-                except asyncio.TimeoutError:
-                    pass
         finally:
             await publish_if_needed(force=True)
 

@@ -475,6 +475,41 @@ def _touch_queue_locked(*scope_ids: str) -> None:
             _scope_updated_at[scope_id] = now
 
 
+def _updated_at_locked(scope_id: str = "") -> str:
+    if scope_id:
+        return _scope_updated_at.get(scope_id, "")
+    return _global_updated_at
+
+
+async def wait_for_model_pool_update(
+    scope_id: str = "",
+    *,
+    last_updated_at: str = "",
+    timeout: float | None = None,
+) -> str:
+    """Wait until the model-pool updated_at marker changes for a scope.
+
+    Returns the current marker. If *timeout* expires before a matching update,
+    the returned value is unchanged from *last_updated_at*.
+    """
+    async with _condition:
+        if _updated_at_locked(scope_id) != last_updated_at:
+            return _updated_at_locked(scope_id)
+        if timeout is not None and timeout <= 0:
+            return _updated_at_locked(scope_id)
+        try:
+            if timeout is None:
+                await _condition.wait_for(lambda: _updated_at_locked(scope_id) != last_updated_at)
+            else:
+                await asyncio.wait_for(
+                    _condition.wait_for(lambda: _updated_at_locked(scope_id) != last_updated_at),
+                    timeout=timeout,
+                )
+        except asyncio.TimeoutError:
+            pass
+        return _updated_at_locked(scope_id)
+
+
 def _remove_pending_request_locked(request: _PendingLeaseRequest) -> bool:
     try:
         _pending_requests.remove(request)

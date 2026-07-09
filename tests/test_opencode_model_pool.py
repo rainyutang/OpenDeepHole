@@ -15,6 +15,7 @@ from backend.opencode.model_pool import (
     refresh_configured_model_pool,
     total_model_capacity,
     update_model_lease_context,
+    wait_for_model_pool_update,
 )
 
 
@@ -76,6 +77,32 @@ def test_model_options_normalizes_enabled_models() -> None:
     assert options[0].weight == 2
     assert options[0].max_concurrency == 2
     assert options[0].time_windows == ((540, 1080),)
+
+
+def test_wait_for_model_pool_update_follows_scope_marker() -> None:
+    async def run() -> None:
+        unchanged = await wait_for_model_pool_update(
+            "scan-1",
+            last_updated_at="",
+            timeout=0.001,
+        )
+        assert unchanged == ""
+
+        waiter = asyncio.create_task(
+            wait_for_model_pool_update(
+                "scan-1",
+                last_updated_at="",
+                timeout=1.0,
+            )
+        )
+        await asyncio.sleep(0)
+        await register_planned_task("scan-1", {"task_type": "audit"})
+        updated_at = await waiter
+
+        assert updated_at
+        assert updated_at == model_pool_snapshot("scan-1")["updated_at"]
+
+    asyncio.run(run())
 
 
 def test_acquire_model_lease_filters_by_capability_and_releases() -> None:

@@ -2,6 +2,7 @@
 
 ## 2026-07-09
 
+- **优化** Agent 上报 OpenCode/nga 模型池状态改为模型池变更唤醒并延迟 2 秒合并连续变化；扫描级和 Agent 级 `opencode-pool` POST 无变化时只保留 60 秒低频心跳，减少服务端写库和 SSE 广播压力
 - **优化** Agent 控制台降低 `httpx`/`httpcore`/`openai` 的 HTTP Request 日志噪音；OpenCode/nga serve 与 API 直调模式的 LLM 输出按文本、推理、工具调用和工具结果摘要区分打印，文本内容统一压缩为单行
 - **变更** MCP Server 不再注册 `submit_result` 工具；漏洞审计结果统一通过最终 JSON 输出解析，OpenCode session 注入插件只保留仍在使用的历史模式、变体命中和去误报匹配提交工具
 - **变更** 漏洞审计类 LLM 结果回传从 `submit_result` MCP 工具切换为最终 JSON 输出解析；普通候选、项目级审计、威胁审计、`sensitive_clear` 和去误报 `prove-bug`/`prove-fp`/`final-judge` 阶段均按统一 schema 解析，运行时会覆盖旧 SKILL 中的 `submit_result` 要求
