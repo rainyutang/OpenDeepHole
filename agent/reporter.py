@@ -185,7 +185,11 @@ class Reporter:
     async def push_threat_audit_task(self, scan_id: str, task: ThreatAuditTask) -> ThreatAuditTask | None:
         """Create or update one threat-analysis-derived audit task."""
         if self.dry_run:
-            print(f"  [THREAT_AUDIT] {task.status} {task.code_path} {task.method_name}")
+            print(
+                "  [THREAT_AUDIT] "
+                f"{task.status} {task.surface_name or task.surface_node_id} / "
+                f"{task.method_name or task.method_node_id}"
+            )
             return task
         task.output_source = self._with_agent_source(task.output_source)
         try:

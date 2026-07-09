@@ -16,7 +16,6 @@ from backend.models import (
     ThreatAttackTree,
     ThreatAttackTreeNode,
     ThreatAuditTask,
-    ThreatCodePath,
     Vulnerability,
 )
 
@@ -32,16 +31,11 @@ def _now() -> str:
 def _stable_task_id(
     scan_id: str,
     surface_node_id: str,
-    method_node_id: str,
-    code_path: str,
+    method_identity: str,
 ) -> str:
-    raw = f"{scan_id}\0{surface_node_id}\0{method_node_id}\0{code_path}"
+    raw = f"{scan_id}\0{surface_node_id}\0{method_identity}"
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
     return f"threat-audit-{digest}"
-
-
-def _node_map(tree: ThreatAttackTree) -> dict[str, ThreatAttackTreeNode]:
-    return {node.node_id: node for node in tree.nodes if node.node_id}
 
 
 def _child_map(tree: ThreatAttackTree) -> dict[str, list[ThreatAttackTreeNode]]:
@@ -82,16 +76,29 @@ def _description(
     *,
     surface: ThreatAttackTreeNode,
     method: ThreatAttackTreeNode,
-    path: ThreatCodePath,
     tree: ThreatAttackTree,
 ) -> str:
     return (
         f"审计攻击面节点 `{surface.name or surface.node_id}`，"
-        f"攻击方式 `{method.name or method.node_id or '未标记攻击方式'}`，"
-        f"代码路径 `{path.path}`。"
+        f"攻击方式 `{method.name or method.node_id or '未标记攻击方式'}`。"
         f"攻击目标：{tree.attack_goal or '未标记'}。"
-        f"路径说明：{path.description or '无'}。"
     )
+
+
+def _method_identity(method: ThreatAttackTreeNode) -> str:
+    node_id = str(method.node_id or "").strip()
+    if node_id:
+        return node_id
+    name = str(method.name or "").strip()
+    if name:
+        return f"name:{name}\0order:{method.order}"
+    return f"order:{method.order}\0type:{method.node_type}"
+
+
+def _task_label(task: ThreatAuditTask) -> str:
+    surface = task.surface_name or task.surface_node_id or "未标记攻击面"
+    method = task.method_name or task.method_node_id or "未标记攻击方式"
+    return f"{surface} / {method}"
 
 
 def _scan_path_from_analysis(analysis: ThreatAnalysis, project_path: Path) -> str:
@@ -106,11 +113,10 @@ def _scan_path_from_analysis(analysis: ThreatAnalysis, project_path: Path) -> st
 
 
 def build_threat_audit_tasks(scan_id: str, analysis: ThreatAnalysis) -> list[ThreatAuditTask]:
-    """Build stable audit tasks from attack-tree surface/method/path mappings."""
+    """Build stable audit tasks from attack-tree surface/method mappings."""
     risk_by_id = _risk_lookup(analysis)
     trees_by_surface: dict[str, tuple[ThreatAttackTree, ThreatAttackTreeNode, list[ThreatAttackTreeNode]]] = {}
     for tree in analysis.attack_trees:
-        nodes = _node_map(tree)
         children = _child_map(tree)
         for node in tree.nodes:
             if node.node_type.lower() != "surface":
@@ -121,7 +127,7 @@ def build_threat_audit_tasks(scan_id: str, analysis: ThreatAnalysis) -> list[Thr
             trees_by_surface[node.node_id] = (tree, node, methods)
 
     tasks: list[ThreatAuditTask] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str]] = set()
     now = _now()
     for mapping in analysis.code_path_mappings:
         surface_info = trees_by_surface.get(mapping.surface_node_id)
@@ -129,37 +135,34 @@ def build_threat_audit_tasks(scan_id: str, analysis: ThreatAnalysis) -> list[Thr
             continue
         tree, surface, methods = surface_info
         risk_name, asset_id, asset_name = risk_by_id.get(tree.risk_id, ("", tree.asset_id, ""))
-        for raw_path in mapping.code_paths:
-            code_path = str(raw_path.path or "").strip()
-            if not code_path:
+        for method in methods:
+            method_identity = _method_identity(method)
+            key = (surface.node_id, method_identity)
+            if key in seen:
                 continue
-            for method in methods:
-                key = (surface.node_id, method.node_id, code_path)
-                if key in seen:
-                    continue
-                seen.add(key)
-                task_id = _stable_task_id(scan_id, surface.node_id, method.node_id, code_path)
-                tasks.append(
-                    ThreatAuditTask(
-                        task_id=task_id,
-                        scan_id=scan_id,
-                        status="pending",
-                        surface_node_id=surface.node_id,
-                        surface_name=surface.name,
-                        method_node_id=method.node_id,
-                        method_name=method.name,
-                        attack_goal=tree.attack_goal,
-                        risk_id=tree.risk_id,
-                        risk_name=risk_name,
-                        asset_id=asset_id,
-                        asset_name=asset_name,
-                        code_path=code_path,
-                        code_path_description=raw_path.description,
-                        description=_description(surface=surface, method=method, path=raw_path, tree=tree),
-                        created_at=now,
-                        updated_at=now,
-                    )
+            seen.add(key)
+            task_id = _stable_task_id(scan_id, surface.node_id, method_identity)
+            tasks.append(
+                ThreatAuditTask(
+                    task_id=task_id,
+                    scan_id=scan_id,
+                    status="pending",
+                    surface_node_id=surface.node_id,
+                    surface_name=surface.name,
+                    method_node_id=method.node_id or method_identity,
+                    method_name=method.name,
+                    attack_goal=tree.attack_goal,
+                    risk_id=tree.risk_id,
+                    risk_name=risk_name,
+                    asset_id=asset_id,
+                    asset_name=asset_name,
+                    code_path="",
+                    code_path_description="",
+                    description=_description(surface=surface, method=method, tree=tree),
+                    created_at=now,
+                    updated_at=now,
                 )
+            )
     return tasks
 
 
@@ -199,7 +202,7 @@ async def run_threat_audit_tasks(
     """Run threat-analysis-derived audits through the shared OpenCode queue."""
     tasks = build_threat_audit_tasks(scan_id, analysis)
     if not tasks:
-        await _maybe_emit(emit, "威胁分析未生成可审计的攻击面/代码路径任务")
+        await _maybe_emit(emit, "威胁分析未生成可审计的攻击面/攻击方式任务")
         return
 
     existing = {task.task_id: task for task in await reporter.get_threat_audit_tasks(scan_id)}
@@ -265,8 +268,7 @@ async def run_threat_audit_tasks(
                 await reporter.push_threat_audit_task(scan_id, running)
                 await _maybe_emit(
                     emit,
-                    f"开始威胁审计：{running.surface_name or running.surface_node_id} / "
-                    f"{running.method_name or running.method_node_id or '未标记攻击方式'} / {running.code_path}",
+                    f"开始威胁审计：{_task_label(running)}",
                 )
                 results = await run_threat_audit(
                     workspace,
@@ -309,7 +311,7 @@ async def run_threat_audit_tasks(
                 final_task_ids.add(done.task_id)
                 await _maybe_emit(
                     emit,
-                    f"威胁审计完成：{done.code_path}，结果 {len(result_indexes)} 条，状态 {done.status}",
+                    f"威胁审计完成：{_task_label(done)}，结果 {len(result_indexes)} 条，状态 {done.status}",
                 )
             except asyncio.CancelledError:
                 raise
@@ -324,7 +326,7 @@ async def run_threat_audit_tasks(
                 )
                 await reporter.push_threat_audit_task(scan_id, failed)
                 final_task_ids.add(failed.task_id)
-                await _maybe_emit(emit, f"威胁审计异常：{task.code_path}，原因：{exc}")
+                await _maybe_emit(emit, f"威胁审计异常：{_task_label(task)}，原因：{exc}")
             finally:
                 queue.task_done()
 

@@ -93,8 +93,8 @@ class ThreatAnalysisParserTests(unittest.TestCase):
         self.assertEqual(analysis.code_path_mappings[0].code_paths[0].path, "src/api")
         self.assertEqual(analysis.scan_scope.code_scan_relative_path, "src")
 
-    def test_build_threat_audit_tasks_from_surface_methods_and_paths(self) -> None:
-        analysis = parse_threat_analysis_data({
+    def test_build_threat_audit_tasks_from_surface_methods_ignores_paths(self) -> None:
+        payload = {
             "schema_version": "1.0",
             "analysis_id": "ATA-001",
             "assets": [
@@ -123,18 +123,32 @@ class ThreatAnalysisParserTests(unittest.TestCase):
             "code_path_mappings": [
                 {
                     "surface_node_id": "NODE-003",
-                    "code_paths": [{"path": "src/api", "description": "管理接口实现"}],
+                    "code_paths": [
+                        {"path": "src/api", "description": "管理接口实现"},
+                        {"path": "src/api/v2", "description": "管理接口新实现"},
+                    ],
                 }
             ],
-        })
+        }
+        analysis = parse_threat_analysis_data(payload)
 
         tasks = build_threat_audit_tasks("scan-1", analysis)
 
         self.assertEqual(len(tasks), 2)
         self.assertEqual({task.method_name for task in tasks}, {"认证绕过", "接口泛洪"})
-        self.assertTrue(all(task.code_path == "src/api" for task in tasks))
+        self.assertTrue(all(task.code_path == "" for task in tasks))
+        self.assertTrue(all(task.code_path_description == "" for task in tasks))
         self.assertTrue(all(task.task_id.startswith("threat-audit-") for task in tasks))
         self.assertIn("攻击面节点", tasks[0].description)
+        self.assertNotIn("代码路径", tasks[0].description)
+
+        pathless = parse_threat_analysis_data({
+            **payload,
+            "code_path_mappings": [{"surface_node_id": "NODE-003", "code_paths": []}],
+        })
+        pathless_tasks = build_threat_audit_tasks("scan-1", pathless)
+
+        self.assertEqual([task.task_id for task in pathless_tasks], [task.task_id for task in tasks])
 
     def test_parse_file_accepts_fenced_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
