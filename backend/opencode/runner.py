@@ -895,22 +895,12 @@ async def run_threat_audit(
             attempt_source = source
             last_source = source
 
+        surface_label = task.surface_name or task.surface_node_id or "相关攻击面"
+        method_label = task.method_name or task.method_node_id or "相关攻击方式"
         prompt = (
-            "根据威胁分析结果执行一次独立审计。"
-            "你可以自行决定是否使用当前 workspace 中已加载的威胁审计相关 SKILL，不要求使用某个指定 SKILL。"
-            f"project_id 为 `{project_id}`。"
-            f"任务 ID 为 `{task.task_id}`。"
-            f"攻击目标：{task.attack_goal or '未标记'}。"
-            f"价值资产/风险：{task.asset_name or task.asset_id or '未标记'} / {task.risk_name or task.risk_id or '未标记'}。"
-            f"攻击面节点：{task.surface_name or task.surface_node_id}。"
-            f"攻击方式：{task.method_name or task.method_node_id}。"
-            f"代码路径：`{task.code_path}`。"
-            f"路径说明：{task.code_path_description or '无'}。"
-            f"任务描述：{task.description}。"
-            "请审计该攻击面和攻击方式在这条代码路径中是否存在真实可利用漏洞。"
+            f"审计代码仓中{surface_label}的实现是否存在漏洞，导致{method_label}。"
             "每发现一个真实问题，都必须调用一次 submit_result MCP 工具，并填写真实 file、line、function。"
-            "如果未发现真实漏洞，也必须调用一次 submit_result，confirmed=false，"
-            f"file=`{candidate.file}`，line=1，function=`{candidate.function}`。"
+            "如果未发现真实漏洞，也必须调用一次 submit_result，confirmed=false。"
         ).replace("\n", " ")
         prompt = _with_source_reading_priority_instruction(prompt)
         log_path = workspace / f"opencode_threat_audit_{attempt_id}.log"

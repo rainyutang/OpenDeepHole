@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from backend.models import Candidate
+from backend.models import Candidate, ThreatAuditTask
 from backend.opencode import llm_api_runner
 from backend.opencode.llm_api_runner import LLMApiUnavailableError
 from backend.opencode.runner import (
@@ -31,6 +31,7 @@ from backend.opencode.runner import (
     run_audit,
     run_audit_batch,
     run_threat_analysis_audit,
+    run_threat_audit,
 )
 
 
@@ -321,6 +322,73 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
         assert str(project.resolve()) in str(captured["prompt"])
         assert captured["workspace"] == workspace
         assert captured["writable_paths"] == [project.resolve()]
+
+    asyncio.run(run())
+
+
+def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(
+            opencode=SimpleNamespace(
+                mock=False,
+                tool="opencode",
+                executable="opencode",
+                invocation_mode="serve",
+                model="",
+                timeout=30,
+                max_retries=0,
+                models=[],
+            ),
+            opencode_concurrency=1,
+        )
+        task = ThreatAuditTask(
+            task_id="threat-audit-1",
+            surface_node_id="SURFACE-1",
+            surface_name="管理接口",
+            method_node_id="METHOD-1",
+            method_name="认证绕过",
+            attack_goal="获取管理员权限",
+            asset_name="管理后台",
+            risk_name="权限提升",
+            code_path="src/api",
+            code_path_description="API 入口",
+            description="旧描述不应进入 prompt",
+        )
+        captured: dict[str, str] = {}
+
+        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
+            captured["prompt"] = prompt
+
+        with (
+            patch("backend.opencode.runner.get_config", return_value=cfg),
+            patch("backend.opencode.runner._invoke_opencode", new=AsyncMock(side_effect=fake_invoke)),
+        ):
+            await run_threat_audit(
+                tmp_path,
+                task,
+                "scan-1",
+                project_dir=tmp_path / "project",
+            )
+
+        prompt = captured["prompt"]
+        assert "审计代码仓中管理接口的实现是否存在漏洞，导致认证绕过。" in prompt
+        assert "submit_result MCP 工具" in prompt
+        for removed in (
+            "project_id",
+            "任务 ID",
+            "攻击目标",
+            "价值资产/风险",
+            "攻击面节点",
+            "攻击方式",
+            "代码路径",
+            "路径说明",
+            "任务描述",
+            "threat-audit-1",
+            "获取管理员权限",
+            "src/api",
+            "旧描述不应进入 prompt",
+        ):
+            assert removed not in prompt
 
     asyncio.run(run())
 
