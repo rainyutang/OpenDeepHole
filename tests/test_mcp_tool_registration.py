@@ -56,7 +56,7 @@ def test_reference_lookup_helpers_are_not_registered_as_mcp_tools() -> None:
     assert "view_function_code" in mcp.tools
     assert "view_struct_code" in mcp.tools
     assert "view_global_variable_definition" in mcp.tools
-    assert "submit_result" in mcp.tools
+    assert "submit_result" not in mcp.tools
     assert "find_function_references" not in mcp.tools
     assert "find_global_variable_references" not in mcp.tools
 
@@ -70,7 +70,6 @@ def test_registered_mcp_tools_do_not_expose_caller_model() -> None:
         "view_function_code",
         "view_struct_code",
         "view_global_variable_definition",
-        "submit_result",
         "submit_history_pattern",
         "submit_variant_finding",
         "submit_match_result",
@@ -84,7 +83,6 @@ def test_submit_tools_do_not_expose_result_id() -> None:
     register_tools(mcp)
 
     for name in (
-        "submit_result",
         "submit_history_pattern",
         "submit_variant_finding",
         "submit_match_result",
@@ -174,27 +172,28 @@ def test_mcp_submit_log_summarizes_long_fields(tmp_path, monkeypatch, capsys) ->
     mcp = _FakeMCP()
     register_tools(mcp, project_dir=tmp_path)
 
-    mcp.tools["submit_result"](
+    mcp.tools["submit_match_result"](
         True,
-        "high",
-        "desc",
-        "line 1\n" + "A" * 500,
-        vulnerability_report="report\n" + "B" * 500,
+        match_type="history",
+        match_reference="history\n" + "A" * 500,
+        description="desc",
+        ai_analysis="line 1\n" + "B" * 500,
+        vulnerability_report="report\n" + "C" * 500,
         opencode_session_id="session-submit",
         opencode_call_id="call-submit",
         ctx=_fake_context("session-submit"),
     )
 
     output = capsys.readouterr().out
-    assert output.count("[MCP ▶] submit_result") == 1
-    assert output.count("[MCP ◀] submit_result") == 1
-    assert "[MCP ▶] submit_result" in output
-    assert "[MCP ◀] submit_result" in output
+    assert output.count("[MCP ▶] submit_match_result") == 1
+    assert output.count("[MCP ◀] submit_match_result") == 1
+    assert "[MCP ▶] submit_match_result" in output
+    assert "[MCP ◀] submit_match_result" in output
     assert "<chars=" in output
     assert "[truncated" in output
     assert "AAAAA" in output
-    submitted = submit_sink.read_submissions("session-submit", "submit_result")[0]
-    assert submitted["description"] == "desc"
+    submitted = submit_sink.read_submissions("session-submit", "submit_match_result")[0]
+    assert submitted["match_type"] == "history"
     assert submitted["opencode_call_id"] == "call-submit"
 
 
@@ -239,22 +238,23 @@ def test_submit_sink_separates_submit_tools_by_session_and_tool(tmp_path, monkey
     assert variants[0]["opencode_call_id"] == "call-variant"
 
 
-def test_submit_result_requires_opencode_session_injected_by_plugin(tmp_path, monkeypatch) -> None:
+def test_submit_tool_requires_opencode_session_injected_by_plugin(tmp_path, monkeypatch) -> None:
     import backend.opencode.submit_sink as submit_sink
 
     monkeypatch.setattr(submit_sink, "_db_path", lambda: tmp_path / "scans" / "scans.db")
     mcp = _FakeMCP()
     register_tools(mcp, project_dir=tmp_path)
 
-    message = mcp.tools["submit_result"](
+    message = mcp.tools["submit_match_result"](
         True,
-        "high",
-        "desc",
-        "analysis",
+        match_type="history",
+        match_reference="missing clamp",
+        description="desc",
+        ai_analysis="analysis",
     )
 
     assert "opencode_session_id" in message
-    assert submit_sink.read_submissions("session-submit", "submit_result") == []
+    assert submit_sink.read_submissions("session-submit", "submit_match_result") == []
 
 
 def test_code_index_cache_reopens_after_db_replacement(tmp_path) -> None:

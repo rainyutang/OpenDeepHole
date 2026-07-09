@@ -2,6 +2,7 @@
 
 ## 2026-07-09
 
+- **变更** MCP Server 不再注册 `submit_result` 工具；漏洞审计结果统一通过最终 JSON 输出解析，OpenCode session 注入插件只保留仍在使用的历史模式、变体命中和去误报匹配提交工具
 - **变更** 漏洞审计类 LLM 结果回传从 `submit_result` MCP 工具切换为最终 JSON 输出解析；普通候选、项目级审计、威胁审计、`sensitive_clear` 和去误报 `prove-bug`/`prove-fp`/`final-judge` 阶段均按统一 schema 解析，运行时会覆盖旧 SKILL 中的 `submit_result` 要求
 - **新增** 扫描详情页「首页」任务队列支持点击展开任务详情；排队中和运行中的 OpenCode/nga 任务会显示本次实际发送给模型的 prompt，计划中任务进入排队或运行后自动展示完整 prompt
 - **新增** 威胁分析完成后会基于攻击树结果创建独立的威胁审计任务：按「攻击面节点 + 攻击方式」生成任务，不再按代码路径拆分，不阻塞静态分析和候选点审计；任务通过现有 OpenCode/nga 模型池排队，受总并发和模型并发约束，扫描详情首页任务队列可看到 `threat_audit`，同一扫描续跑会跳过已完成的威胁审计任务

@@ -444,7 +444,9 @@ def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> N
     plugin_text = plugin_path.read_text(encoding="utf-8")
     assert "tool.execute.before" in plugin_text
     assert "opencode_session_id" in plugin_text
-    assert "submit_result" in plugin_text
+    assert "submit_result" not in plugin_text
+    assert "submit_history_pattern" in plugin_text
+    assert "submit_match_result" in plugin_text
     assert str(plugin_path.resolve()) in runtime_config["plugin"]
     assert str(plugin_path.resolve()) in env_config["plugin"]
 

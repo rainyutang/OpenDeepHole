@@ -435,58 +435,6 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
         return result
 
     @mcp.tool()
-    def submit_result(
-        confirmed: bool,
-        severity: str,
-        description: str,
-        ai_analysis: str,
-        vulnerability_report: str = "",
-        file: str = "",
-        line: int = 0,
-        function: str = "",
-        opencode_session_id: str | None = None,
-        opencode_call_id: str | None = None,
-        ctx: Context | None = None,
-    ) -> str:
-        """
-        提交本次漏洞分析的最终结论。分析完成后必须调用此工具，否则结果将丢失。
-
-        参数：
-            confirmed: 是否存在真实漏洞。true 表示确认漏洞，false 表示误报。
-            severity: 严重程度，可选值为 "high"、"medium"、"low"（仅 confirmed=true 时有意义）。
-            description: 漏洞的一句话摘要。
-            ai_analysis: 详细的分析推理过程，需包含具体的代码路径。
-            vulnerability_report: 可选 Markdown 漏洞报告。外部可触发且 severity="high" 时填写。
-            file: 可选，真实问题所在文件路径。项目级审计发现问题时必须填写。
-            line: 可选，真实问题所在行号。项目级审计发现问题时必须填写。
-            function: 可选，真实问题所在函数。项目级审计发现问题时必须填写。
-            opencode_session_id: OpenCode plugin 自动注入的 session ID。
-            opencode_call_id: OpenCode plugin 自动注入的 tool call ID。
-
-        返回：
-            提交成功的确认消息。
-        """
-        payload = {
-            "confirmed": confirmed,
-            "severity": severity,
-            "description": description,
-            "ai_analysis": ai_analysis,
-            "vulnerability_report": vulnerability_report,
-            "file": file,
-            "line": line,
-            "function": function,
-        }
-        _mcp_log_call("submit_result", _json_preview({
-            "opencode_session_id": opencode_session_id,
-            "opencode_call_id": opencode_call_id,
-            **_context_trace(ctx),
-            **payload,
-        }))
-        ok, message = _submit_payload("submit_result", opencode_session_id, opencode_call_id, payload)
-        _mcp_log_return("submit_result", message)
-        return message
-
-    @mcp.tool()
     def submit_history_pattern(
         security_related: bool,
         pattern: str = "",

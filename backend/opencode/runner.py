@@ -1848,7 +1848,6 @@ def _append_submit_result_runtime_override(skill_path: Path) -> None:
 _OPENCODE_SESSION_PLUGIN = """\
 export const OpenDeepHoleMcpSession = async () => {
   const submitTools = new Set([
-    "submit_result",
     "submit_history_pattern",
     "submit_variant_finding",
     "submit_match_result",
