@@ -357,9 +357,6 @@ async def run_project_audit(
             f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
             f"project_id 为 `{project_id}`。"
             f"这是项目级审计任务，不是单个候选点复核。"
-            f"每发现一个真实问题，都必须在最终 JSON 的 results 数组中添加一个元素，"
-            f"并填写真实的 file、line、function。"
-            f"如果没有发现真实问题，也必须输出一个 results 元素，confirmed=false，"
             f"file=`{candidate.file}`，line={candidate.line}，function=`{candidate.function}`。"
         ).replace("\n", " ")
         if attempt > 1:
@@ -925,8 +922,6 @@ async def run_threat_audit(
             scan_path_label = "当前扫描目录"
         prompt = (
             f"审计代码仓{scan_path_label}中{surface_label}的实现是否存在漏洞，导致{method_label}。"
-            "每发现一个真实问题，都必须在最终 JSON 的 results 数组中添加一个元素，并填写真实 file、line、function。"
-            "如果未发现真实漏洞，也必须输出一个 results 元素，confirmed=false。"
         ).replace("\n", " ")
         if attempt > 1:
             prompt += _json_result_retry_message(multiple=True)
@@ -2153,17 +2148,6 @@ def _json_result_retry_message(*, multiple: bool = False) -> str:
     )
 
 
-def _with_project_root_instruction(prompt: str, project_dir: Path | None) -> str:
-    if project_dir is None:
-        return prompt
-    return (
-        prompt.rstrip()
-        + "\n\n真实项目根目录："
-        + f"`{project_dir.resolve()}`。所有源码相对路径都以这个目录为基准；"
-        + "如果需要用内置文件工具读取源码，请读取该目录下的绝对路径。"
-    )
-
-
 def _with_model_prefix(line: str, model_label: str) -> str:
     prefix = f"[model={model_label}]"
     if line.startswith(prefix):
@@ -2352,7 +2336,6 @@ async def _invoke_opencode(
     config = get_config()
     explicit_cli_config = cli_config is not None
     cli_config = cli_config or config.opencode
-    prompt = _with_project_root_instruction(prompt, project_dir)
     lease_task_context = dict(task_context or {})
     lease_task_context["prompt"] = prompt
     lease_task_context["prompt_length"] = len(prompt)

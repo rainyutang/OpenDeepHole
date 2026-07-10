@@ -235,8 +235,8 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
         assert kwargs["env_overrides"]["HTTPS_PROXY"] == "http://127.0.0.1:3131"
         assert kwargs["env_overrides"]["NO_PROXY"] == _DEFAULT_OPENCODE_NO_PROXY
         assert kwargs["env_overrides"]["no_proxy"] == _DEFAULT_OPENCODE_NO_PROXY
-        assert "真实项目根目录" in kwargs["prompt"]
-        assert str(project.resolve()) in kwargs["prompt"]
+        assert kwargs["prompt"] == "hello"
+        assert "真实项目根目录" not in kwargs["prompt"]
         assert "优先使用 deephole-code MCP 源码查询工具" not in kwargs["prompt"]
         assert "源码阅读规则" not in kwargs["prompt"]
         assert "caller_model" not in kwargs["prompt"]
@@ -375,7 +375,8 @@ def test_threat_audit_prompt_uses_only_surface_and_method(tmp_path: Path) -> Non
             f"审计代码仓{scan_root.resolve().as_posix()}中管理接口的实现是否存在漏洞，导致认证绕过。"
             in prompt
         )
-        assert "最终 JSON 的 results 数组" in prompt
+        assert "每个真实问题使用一个 results 元素" in prompt
+        assert "真实项目根目录" not in prompt
         assert "submit_result MCP 工具" not in prompt
         for removed in (
             "project_id",
