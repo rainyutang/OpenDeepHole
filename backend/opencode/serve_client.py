@@ -760,6 +760,25 @@ def _extract_text(value: Any) -> list[str]:
     return lines
 
 
+def _response_model(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    info = value.get("info")
+    if not isinstance(info, dict):
+        return ""
+    provider_id = info.get("providerID")
+    model_id = info.get("modelID")
+    if not isinstance(provider_id, str) or not isinstance(model_id, str):
+        return ""
+    provider_id = provider_id.strip()
+    model_id = model_id.strip()
+    if not provider_id or not model_id:
+        return ""
+    if model_id.startswith(f"{provider_id}/"):
+        return model_id
+    return f"{provider_id}/{model_id}"
+
+
 def _one_line_preview(value: object, limit: int = _SERVE_EVENT_PREVIEW_LIMIT) -> str:
     text = "" if value is None else str(value)
     text = " ".join(text.split())
@@ -1031,6 +1050,7 @@ class OpenCodeServeManager:
         timeout: int,
         on_line=None,
         on_session_id=None,
+        on_response_model=None,
         cancel_event=None,
         env_overrides: dict[str, str] | None = None,
     ) -> list[str]:
@@ -1105,7 +1125,13 @@ class OpenCodeServeManager:
                 response.raise_for_status()
                 if event_state:
                     event_state.flush()
-                lines = _extract_text(response.json())
+                response_data = response.json()
+                response_model = _response_model(response_data)
+                if response_model and on_response_model:
+                    result = on_response_model(response_model)
+                    if hasattr(result, "__await__"):
+                        await result
+                lines = _extract_text(response_data)
                 for line in lines:
                     if on_line and not (event_state and event_state.emitted_response_text):
                         preview = _one_line_preview(line)

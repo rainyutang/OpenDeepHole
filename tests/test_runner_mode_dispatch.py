@@ -248,6 +248,77 @@ def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_invoke_opencode_records_actual_serve_default_model(tmp_path: Path) -> None:
+    async def run() -> None:
+        workspace = tmp_path / "workspace"
+        project = tmp_path / "project"
+        skills = workspace / ".opencode" / "skills"
+        skills.mkdir(parents=True)
+        project.mkdir()
+        (workspace / "opencode.json").write_text(
+            json.dumps({
+                "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
+                "skills": {"paths": [str(skills)]},
+            }),
+            encoding="utf-8",
+        )
+        option = SimpleNamespace(
+            id="default",
+            capability="high",
+            tool="",
+            executable="",
+            model="",
+            use_default_model=True,
+            timeout=None,
+            max_retries=None,
+        )
+        lease = SimpleNamespace(
+            option=option,
+            running=1,
+            global_running=1,
+            started_at=time.monotonic(),
+        )
+        cfg = SimpleNamespace(
+            tool="opencode",
+            executable="opencode",
+            invocation_mode="serve",
+            model="configured-model",
+            timeout=30,
+            max_retries=0,
+            models=[],
+            proxy_url="",
+        )
+        sources = []
+
+        async def fake_run_prompt(**kwargs):
+            assert kwargs["model"] == ""
+            kwargs["on_response_model"]("anthropic/claude-sonnet")
+            return ["done"]
+
+        fake_manager = SimpleNamespace(run_prompt=AsyncMock(side_effect=fake_run_prompt))
+
+        with patch("backend.opencode.runner.acquire_model_lease", AsyncMock(return_value=lease)), \
+            patch("backend.opencode.runner.release_model_lease", AsyncMock()), \
+            patch("backend.opencode.runner._resolve_cli_executable", return_value="opencode"), \
+            patch("backend.opencode.runner.get_serve_manager", return_value=fake_manager):
+            result = await _invoke_opencode(
+                workspace,
+                "hello",
+                timeout=30,
+                cli_config=cfg,
+                project_dir=project,
+                on_invocation_metadata=sources.append,
+            )
+
+        assert result == "done"
+        assert len(sources) == 1
+        assert sources[0].model_id == "default"
+        assert sources[0].model == "anthropic/claude-sonnet"
+        assert sources[0].use_default_model is True
+
+    asyncio.run(run())
+
+
 def test_runtime_writable_paths_include_windows_slash_variants() -> None:
     path = PureWindowsPath("C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1")
 

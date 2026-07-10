@@ -66,7 +66,13 @@ class FpReviewStoreTests(unittest.TestCase):
                 "prove_bug",
                 "# Prove Bug\n\nanalysis",
                 "2026-01-01T00:00:01+00:00",
-                OutputSource(agent_name="agent-a", tool="opencode", model_id="deep", model="deep-model"),
+                OutputSource(
+                    agent_name="agent-a",
+                    tool="opencode",
+                    model_id="default",
+                    model="provider/actual-model",
+                    use_default_model=True,
+                ),
             )
             store.add_fp_review_result(
                 "review",
@@ -89,7 +95,9 @@ class FpReviewStoreTests(unittest.TestCase):
             results = store.list_fp_review_results_by_scan("scan-1")
 
             self.assertEqual(outputs[0].markdown, "# Prove Bug\n\nanalysis")
-            self.assertEqual(outputs[0].output_source.model_id, "deep")
+            self.assertEqual(outputs[0].output_source.model_id, "default")
+            self.assertEqual(outputs[0].output_source.model, "provider/actual-model")
+            self.assertTrue(outputs[0].output_source.use_default_model)
             self.assertEqual(results[0].stage_outputs["final_judge"], "# Final")
             self.assertEqual(results[0].stage_output_sources["final_judge"].model_id, "judge")
             self.assertEqual(results[0].output_source.model_id, "judge")

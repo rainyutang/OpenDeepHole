@@ -2,6 +2,7 @@
 
 ## 2026-07-10
 
+- **修复** 使用 OpenCode/nga serve 默认模型时，会从最终 LLM 响应记录实际 `provider/model`，漏洞审计、对抗式去误报、SKILL 报告及 Markdown 导出的输出来源显示为“模型池 ID / 实际模型”，旧结果或无法取得响应元数据时继续回退显示默认模型
 - **优化** Agent 模型配置页从 OpenCode/nga serve 读取模型时会复用兼容的现有进程并缓存成功结果，普通打开不再因任务级配置哈希变化反复重启 serve；`刷新` 会绕过缓存，活动会话期间延后配置重载并立即返回当前列表
 - **优化** serve 模型枚举优先只请求已包含全部可用和已连接模型的 `/provider`，仅在接口失败、响应异常或缺少已连接 Provider 时回退 `/config/providers`，同时记录启动、接口和缓存命中耗时
 - **变更** CLI 任务不再在模型 Prompt 末尾统一追加“真实项目根目录”说明；OpenCode/nga serve 会话继续通过 `directory` 和 `x-opencode-directory` 绑定项目根目录，CLI 模式继续通过 `--dir` 传递，各任务自身必需的扫描路径保持不变

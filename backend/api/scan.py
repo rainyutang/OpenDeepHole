@@ -1107,8 +1107,9 @@ def _format_output_source(source) -> str:
         return ""
     agent = source.agent_name or source.agent_id or ""
     tool = source.tool or source.backend or ""
-    model = "CLI 默认模型" if source.use_default_model else (source.model or source.model_id or "")
-    parts = [part for part in [agent, tool, model] if part]
+    model = source.model or ("CLI 默认模型" if source.use_default_model else source.model_id or "")
+    model_label = f"{source.model_id} / {model}" if source.model_id and source.model_id != model else model
+    parts = [part for part in [agent, tool, model_label] if part]
     return " / ".join(parts)
 
 

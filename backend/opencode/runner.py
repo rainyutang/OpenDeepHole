@@ -2411,6 +2411,11 @@ async def _invoke_opencode(
                 invocation_source.serve_session_id = session_id
                 await update_model_lease_context(lease, {"serve_session_id": session_id})
 
+            def record_response_model(actual_model: str) -> None:
+                normalized_model = str(actual_model or "").strip()
+                if normalized_model:
+                    invocation_source.model = normalized_model
+
             try:
                 log_lines = await get_serve_manager().run_prompt(
                     tool=tool,
@@ -2423,6 +2428,7 @@ async def _invoke_opencode(
                     timeout=timeout,
                     on_line=emit_line,
                     on_session_id=record_serve_session,
+                    on_response_model=record_response_model,
                     cancel_event=cancel_event,
                     env_overrides=_opencode_process_env_overrides(serve_env),
                 )

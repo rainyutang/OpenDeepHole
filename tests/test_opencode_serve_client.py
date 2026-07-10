@@ -26,8 +26,10 @@ class _FakeResponse:
     def __init__(self, data, *, error: Exception | None = None) -> None:
         self._data = data
         self._error = error
+        self.json_calls = 0
 
     def json(self):
+        self.json_calls += 1
         return self._data
 
     def raise_for_status(self) -> None:
@@ -56,12 +58,14 @@ class _FakeAsyncClient:
     event_lines: list[str] = []
     tool_ids: list[str] | Exception = ["read", "grep", "mcp__deephole-code__view_function_code"]
     message_text = "done"
+    message_info: object | None = None
 
     def __init__(self, *args, **kwargs) -> None:
         self.posts: list[dict] = []
         self.gets: list[dict] = []
         self.deletes: list[dict] = []
         self.streams: list[dict] = []
+        self.message_response: _FakeResponse | None = None
 
     async def __aenter__(self):
         self.instances.append(self)
@@ -84,7 +88,11 @@ class _FakeAsyncClient:
             return _FakeResponse({"id": "session-1"})
         if path == "/session/session-1/message":
             await asyncio.sleep(0)
-            return _FakeResponse({"parts": [{"type": "text", "text": self.message_text}]})
+            data = {"parts": [{"type": "text", "text": self.message_text}]}
+            if self.message_info is not None:
+                data["info"] = self.message_info
+            self.message_response = _FakeResponse(data)
+            return self.message_response
         return _FakeResponse({})
 
     async def delete(self, path: str, **kwargs):
@@ -208,6 +216,106 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
         }
 
     asyncio.run(run())
+
+
+def test_run_prompt_reports_actual_response_model_for_default_request(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = []
+        _FakeAsyncClient.message_info = {
+            "providerID": "anthropic",
+            "modelID": "claude-sonnet",
+        }
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        response_models: list[str] = []
+        callback_awaited = False
+
+        async def on_response_model(model: str) -> None:
+            nonlocal callback_awaited
+            response_models.append(model)
+            callback_awaited = True
+
+        lines = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_response_model=on_response_model,
+        )
+
+        assert lines == ["done"]
+        assert response_models == ["anthropic/claude-sonnet"]
+        assert callback_awaited is True
+        session_client = _FakeAsyncClient.instances[0]
+        message = next(
+            item for item in session_client.posts
+            if item["path"] == "/session/session-1/message"
+        )
+        assert "model" not in message["json"]
+        assert session_client.message_response is not None
+        assert session_client.message_response.json_calls == 1
+
+    try:
+        asyncio.run(run())
+    finally:
+        _FakeAsyncClient.message_info = None
+
+
+@pytest.mark.parametrize(
+    "message_info",
+    [None, {"providerID": "anthropic", "modelID": 42}],
+)
+def test_run_prompt_ignores_missing_or_invalid_response_model_info(
+    monkeypatch,
+    tmp_path: Path,
+    message_info: object | None,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = []
+        _FakeAsyncClient.message_info = message_info
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        response_models: list[str] = []
+
+        lines = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="hello",
+            model="",
+            timeout=30,
+            on_response_model=response_models.append,
+        )
+
+        assert lines == ["done"]
+        assert response_models == []
+
+    try:
+        asyncio.run(run())
+    finally:
+        _FakeAsyncClient.message_info = None
 
 
 def test_serve_context_headers_encode_non_ascii_directory(tmp_path: Path) -> None:
