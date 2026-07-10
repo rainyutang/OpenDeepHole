@@ -1,11 +1,9 @@
 """OpenDeepHole MCP Server — provides source code query tools for opencode."""
 
 import uvicorn
-from mcp.server.fastmcp import FastMCP
-from mcp_server.tools import register_tools
+from mcp_server.factory import create_mcp_server
 
-mcp = FastMCP("OpenDeepHole Code Tools")
-register_tools(mcp)
+mcp = create_mcp_server()
 
 if __name__ == "__main__":
     app = mcp.streamable_http_app()

@@ -30,11 +30,9 @@ class LocalMCPServer:
     def start(self) -> int:
         """Start the server and block until it is ready. Returns port number."""
         import uvicorn
-        from mcp.server.fastmcp import FastMCP
-        from mcp_server.tools import register_tools
+        from mcp_server.factory import create_mcp_server
 
-        mcp = FastMCP("OpenDeepHole Code Tools")
-        register_tools(mcp, project_dir=self.project_dir)
+        mcp = create_mcp_server(project_dir=self.project_dir)
         app = mcp.streamable_http_app()
 
         config = uvicorn.Config(

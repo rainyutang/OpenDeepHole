@@ -1,9 +1,11 @@
+import asyncio
 import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
 from code_parser import CodeDatabase
 from mcp.server.fastmcp.tools.base import Tool
+from mcp_server.factory import MCP_SERVER_INSTRUCTIONS, create_mcp_server
 from mcp_server.tools import clear_db_cache, register_tools
 
 
@@ -61,6 +63,25 @@ def test_reference_lookup_helpers_are_not_registered_as_mcp_tools() -> None:
     assert "find_global_variable_references" not in mcp.tools
 
 
+def test_mcp_server_instructions_prioritize_source_lookup_tools() -> None:
+    mcp = create_mcp_server()
+
+    assert mcp.instructions == MCP_SERVER_INSTRUCTIONS
+    assert "deephole-code MCP Server" in mcp.instructions
+    assert "view_function_code" in mcp.instructions
+    assert "view_struct_code" in mcp.instructions
+    assert "view_global_variable_definition" in mcp.instructions
+    assert "代码索引不可用、查询未命中" in mcp.instructions
+    assert "`read`、`grep`、`glob`" in mcp.instructions
+
+    tool_names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert {
+        "view_function_code",
+        "view_struct_code",
+        "view_global_variable_definition",
+    } <= tool_names
+
+
 def test_registered_mcp_tools_do_not_expose_caller_model() -> None:
     mcp = _FakeMCP()
 
@@ -95,7 +116,7 @@ def test_submit_tools_do_not_expose_result_id() -> None:
         assert "opencode_call_id" in properties
 
 
-def test_source_lookup_tools_describe_deephole_code_priority() -> None:
+def test_source_lookup_tool_descriptions_do_not_repeat_server_instructions() -> None:
     mcp = _FakeMCP()
 
     register_tools(mcp)
@@ -106,8 +127,8 @@ def test_source_lookup_tools_describe_deephole_code_priority() -> None:
         "view_global_variable_definition",
     ):
         doc = inspect.getdoc(mcp.tools[name]) or ""
-        assert "优先使用本 deephole-code MCP 工具" in doc
-        assert "read/grep/glob" in doc
+        assert "优先使用本 deephole-code MCP 工具" not in doc
+        assert "read/grep/glob" not in doc
 
 
 def test_bound_project_dir_isolated_from_agent_project_env(tmp_path, monkeypatch) -> None:

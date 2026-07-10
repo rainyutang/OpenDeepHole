@@ -53,11 +53,6 @@ _DEFAULT_EXECUTABLES = {
     "hac": "hac",
     "claude": "claude",
 }
-_SOURCE_READING_PRIORITY_INSTRUCTION = (
-    "源码阅读规则：当需要阅读或定位源码时，优先使用 deephole-code MCP 源码查询工具"
-    "（view_function_code、view_struct_code、view_global_variable_definition）；"
-    "仅在索引不可用、未命中或需要目录级枚举/文本搜索时，再使用内置 read/grep/glob。"
-)
 _GLOBAL_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
 _PROJECT_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
 _OPENCODE_CONFIG_PATH_ENV = "OPENCODE_CONFIG_PATH"
@@ -230,9 +225,7 @@ async def _run_audit_via_opencode(
         )
         if attempt > 1:
             prompt += _json_result_retry_message()
-        prompt = _with_json_result_instruction(
-            _with_source_reading_priority_instruction(prompt.replace('\n', ' '))
-        )
+        prompt = _with_json_result_instruction(prompt.replace('\n', ' '))
 
         log_path = workspace / f"opencode_attempt_{attempt_id}.log"
 
@@ -360,10 +353,7 @@ async def run_project_audit(
         ).replace("\n", " ")
         if attempt > 1:
             prompt += _json_result_retry_message(multiple=True)
-        prompt = _with_json_result_instruction(
-            _with_source_reading_priority_instruction(prompt),
-            multiple=True,
-        )
+        prompt = _with_json_result_instruction(prompt, multiple=True)
         log_path = workspace / f"opencode_attempt_{attempt_id}.log"
 
         if on_output:
@@ -599,7 +589,7 @@ async def run_sensitive_clear_audit(
             last_source = source
 
         prompt = _with_json_result_instruction(
-            _with_source_reading_priority_instruction(_sensitive_clear_prompt(skill_name, candidate, project_id))
+            _sensitive_clear_prompt(skill_name, candidate, project_id)
         )
         if attempt > 1:
             prompt += _json_result_retry_message()
@@ -798,7 +788,6 @@ async def run_project_report_audit(
             f"不得修改 REPORT_DIR 之外的任何文件。"
             f"如果没有发现问题，也要写入一个 Markdown 报告说明审计范围和未发现问题的原因。"
         ).replace("\n", " ")
-        prompt = _with_source_reading_priority_instruction(prompt)
         log_path = workspace / f"opencode_attempt_{attempt_id}.log"
 
         if on_output:
@@ -937,10 +926,7 @@ async def run_threat_audit(
         ).replace("\n", " ")
         if attempt > 1:
             prompt += _json_result_retry_message(multiple=True)
-        prompt = _with_json_result_instruction(
-            _with_source_reading_priority_instruction(prompt),
-            multiple=True,
-        )
+        prompt = _with_json_result_instruction(prompt, multiple=True)
         log_path = workspace / f"opencode_threat_audit_{attempt_id}.log"
 
         if on_output:
@@ -2121,12 +2107,6 @@ def _invocation_model_label(option, model: str) -> str:
     return "default"
 
 
-def _with_source_reading_priority_instruction(prompt: str) -> str:
-    if _SOURCE_READING_PRIORITY_INSTRUCTION in prompt:
-        return prompt
-    return prompt.rstrip() + "\n\n" + _SOURCE_READING_PRIORITY_INSTRUCTION
-
-
 def _with_json_result_instruction(prompt: str, *, multiple: bool = False) -> str:
     instruction = (
         VULNERABILITY_RESULTS_JSON_INSTRUCTION
@@ -2147,7 +2127,6 @@ def _json_result_retry_message(*, multiple: bool = False) -> str:
 
 
 def _with_project_root_instruction(prompt: str, project_dir: Path | None) -> str:
-    prompt = _with_source_reading_priority_instruction(prompt)
     if project_dir is None:
         return prompt
     return (
