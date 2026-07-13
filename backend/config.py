@@ -78,6 +78,14 @@ class GitHistoryConfig(BaseModel):
     variant_hunt: bool = True       # 是否对每条历史模式做全仓同类变体排查
 
 
+class ThreatAnalysisConfig(BaseModel):
+    enabled: bool = True
+    implementation: str = "attack_tree"
+    attack_path_audit_mode: str = "after_analysis"  # after_analysis | immediate
+    product_mcp_name: str = "product-info"
+    product_mcp_detection_timeout_seconds: int = 60
+
+
 class PatternFilterConfig(BaseModel):
     enabled: bool = True
     scope: str = "directory"        # directory | file | repo
@@ -147,6 +155,7 @@ class AppConfig(BaseModel):
     fp_review: FpReviewConfig = FpReviewConfig()
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
     git_history: GitHistoryConfig = GitHistoryConfig()
+    threat_analysis: ThreatAnalysisConfig = ThreatAnalysisConfig()
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = PatternFilterConfig()
     vulnerability_validation: VulnerabilityValidationConfig = VulnerabilityValidationConfig()
