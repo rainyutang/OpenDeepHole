@@ -10,7 +10,7 @@ REM   run_agent.bat C:\path\to\source --server http://192.168.1.10:8000
 REM   run_agent.bat C:\path\to\source --checkers npd,oob --name "MyProject"
 REM   run_agent.bat C:\path\to\source --dry-run
 REM
-REM Before first run: edit agent.yaml to set server_url and llm_api.api_key
+REM Before first run: edit agent.yaml to set server_url and OpenCode model pool.
 
 cd /d "%~dp0"
 set "BUNDLED_CTAGS_DIR=%~dp0ctags-p6.2.20260517.0-x64"
@@ -41,7 +41,7 @@ for /f "delims=" %%I in ('%PYTHON_CMD% -c "import sysconfig; print(sysconfig.get
 if defined PYTHON_SCRIPTS set "PATH=%PYTHON_SCRIPTS%;%PATH%"
 
 set "MISSING_DEPS="
-%PYTHON_CMD% -c "import semgrep, httpx, websockets, yaml, pydantic, openai, tree_sitter, tree_sitter_cpp, uvicorn, fastapi; from mcp.server.fastmcp import FastMCP" 2>nul
+%PYTHON_CMD% -c "import semgrep, httpx, websockets, yaml, pydantic, tree_sitter, tree_sitter_cpp, uvicorn, fastapi; from mcp.server.fastmcp import FastMCP" 2>nul
 if errorlevel 1 set "MISSING_DEPS=1"
 
 where semgrep >nul 2>nul

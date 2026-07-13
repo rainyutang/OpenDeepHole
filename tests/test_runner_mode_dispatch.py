@@ -2,16 +2,13 @@ import asyncio
 import json
 import re
 import time
-import sys
 from pathlib import Path, PureWindowsPath
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from backend.models import Candidate, ThreatAuditTask
-from backend.opencode import llm_api_runner
-from backend.opencode.llm_api_runner import LLMApiUnavailableError
 from backend.opencode.model_pool import NoAvailableModelError
 from backend.opencode.runner import (
     _DEFAULT_OPENCODE_NO_PROXY,
@@ -19,7 +16,6 @@ from backend.opencode.runner import (
     _build_cli_env,
     _cleanup_prompt_file,
     _effective_cli_config,
-    _invoke_opencode,
     _prompt_file_message,
     _prepare_cli_workspace,
     _run_audit_via_opencode,
@@ -29,8 +25,6 @@ from backend.opencode.runner import (
     _write_prompt_file,
     _terminate_process_tree,
     _wait_for_stream_exit_after_termination,
-    run_audit,
-    run_audit_batch,
     run_threat_analysis_audit,
     run_threat_audit,
 )
@@ -46,22 +40,15 @@ def _candidate(line: int = 12) -> Candidate:
     )
 
 
-def _api_registry(tmp_path: Path):
-    prompt_path = tmp_path / "prompt.txt"
-    prompt_path.write_text("api prompt", encoding="utf-8")
-    return {"memleak": SimpleNamespace(mode="api", prompt_path=prompt_path)}
-
-
 def test_cli_command_builders_use_selected_tool(tmp_path: Path) -> None:
-    claude = _build_cli_command("claude", "claude", tmp_path, "hello", "sonnet")
-    hac = _build_cli_command("hac", "hac", tmp_path, "hello", "gemini-model")
     nga = _build_cli_command("nga", "nga", tmp_path, "hello", "qwen")
     project_dir = tmp_path / "project"
     isolated_nga = _build_cli_command("nga", "nga", tmp_path, "hello", "qwen", project_dir=project_dir)
 
-    assert claude[:3] == ["claude", "-p", "--mcp-config"]
-    assert "--model" in claude
-    assert hac == ["hac", "--model", "gemini-model", "-p", "hello"]
+    with pytest.raises(ValueError, match="Unsupported OpenCode serve tool"):
+        _build_cli_command("claude", "claude", tmp_path, "hello", "sonnet")
+    with pytest.raises(ValueError, match="Unsupported OpenCode serve tool"):
+        _build_cli_command("hac", "hac", tmp_path, "hello", "gemini-model")
     assert nga[:3] == ["nga", "run", "--dir"]
     assert isolated_nga[:4] == ["nga", "run", "--dir", str(project_dir)]
     assert "--model" in nga
@@ -74,7 +61,6 @@ def test_effective_cli_config_can_select_cli_default_model() -> None:
         model="configured-model",
         timeout=1200,
         max_retries=2,
-        invocation_mode="cli",
         models=[],
     )
     option = SimpleNamespace(
@@ -87,7 +73,7 @@ def test_effective_cli_config_can_select_cli_default_model() -> None:
     )
 
     assert _effective_cli_config(cfg, option)["model"] == ""
-    assert _effective_cli_config(cfg, option)["invocation_mode"] == "cli"
+    assert "invocation_mode" not in _effective_cli_config(cfg, option)
 
 
 def test_long_prompt_file_reference_is_passed_as_message(tmp_path: Path) -> None:
@@ -102,7 +88,7 @@ def test_long_prompt_file_reference_is_passed_as_message(tmp_path: Path) -> None
     assert not prompt_path.exists()
 
 
-def test_prepare_cli_workspace_creates_claude_and_gemini_skill_configs(tmp_path: Path) -> None:
+def test_prepare_cli_workspace_rejects_non_opencode_tools(tmp_path: Path) -> None:
     (tmp_path / "opencode.json").write_text(
         '{"mcp":{"deephole-code":{"url":"http://127.0.0.1:9123/mcp"}}}',
         encoding="utf-8",
@@ -111,13 +97,10 @@ def test_prepare_cli_workspace_creates_claude_and_gemini_skill_configs(tmp_path:
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("fp skill", encoding="utf-8")
 
-    _prepare_cli_workspace(tmp_path, "claude")
-    _prepare_cli_workspace(tmp_path, "hac")
-
-    assert (tmp_path / ".claude" / "opendeephole-mcp.json").is_file()
-    assert (tmp_path / ".claude" / "skills" / "prove-bug" / "SKILL.md").is_file()
-    assert (tmp_path / ".gemini" / "settings.json").is_file()
-    assert (tmp_path / ".gemini" / "skills" / "prove-bug" / "SKILL.md").is_file()
+    with pytest.raises(ValueError, match="Unsupported OpenCode serve tool"):
+        _prepare_cli_workspace(tmp_path, "claude")
+    with pytest.raises(ValueError, match="Unsupported OpenCode serve tool"):
+        _prepare_cli_workspace(tmp_path, "hac")
 
 
 def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(tmp_path: Path) -> None:
@@ -154,178 +137,6 @@ def test_opencode_runtime_cwd_can_be_namespaced_per_invocation(tmp_path: Path) -
 
     assert runtime_cwd == project / ".opendeephole" / "opencode" / "fast_model_1"
     assert runtime_cwd.is_dir()
-
-
-def test_invoke_opencode_uses_serve_manager_when_configured(tmp_path: Path) -> None:
-    async def run() -> None:
-        workspace = tmp_path / "workspace"
-        project = tmp_path / "project"
-        skills = workspace / ".opencode" / "skills"
-        skills.mkdir(parents=True)
-        project.mkdir()
-        (workspace / "opencode.json").write_text(
-            json.dumps({
-                "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
-                "skills": {"paths": [str(skills)]},
-            }),
-            encoding="utf-8",
-        )
-        option = SimpleNamespace(
-            id="anthropic/claude-sonnet",
-            capability="high",
-            tool="",
-            executable="",
-            model="anthropic/claude-sonnet",
-            use_default_model=False,
-            timeout=None,
-            max_retries=None,
-        )
-        lease = SimpleNamespace(
-            option=option,
-            running=1,
-            global_running=1,
-            started_at=time.monotonic(),
-        )
-        cfg = SimpleNamespace(
-            tool="opencode",
-            executable="opencode",
-            invocation_mode="serve",
-            model="",
-            timeout=30,
-            max_retries=0,
-            models=[],
-            proxy_url="127.0.0.1:3131",
-        )
-        fake_manager = SimpleNamespace(run_prompt=AsyncMock(return_value=["done"]))
-        output_lines: list[str] = []
-        acquire = AsyncMock(return_value=lease)
-
-        with patch("backend.opencode.runner.acquire_model_lease", acquire), \
-            patch("backend.opencode.runner.release_model_lease", AsyncMock()) as release, \
-            patch("backend.opencode.runner._resolve_cli_executable", return_value="opencode"), \
-            patch("backend.opencode.runner.get_serve_manager", return_value=fake_manager), \
-            patch("backend.opencode.runner.subprocess.Popen", side_effect=AssertionError("CLI should not run")):
-            await _invoke_opencode(
-                workspace,
-                "hello",
-                timeout=30,
-                cli_config=cfg,
-                project_dir=project,
-                on_line=output_lines.append,
-                task_context={"task_type": "audit"},
-            )
-
-        fake_manager.run_prompt.assert_awaited_once()
-        kwargs = fake_manager.run_prompt.await_args.kwargs
-        acquire.assert_awaited_once()
-        lease_context = acquire.await_args.kwargs["task_context"]
-        assert lease_context["task_type"] == "audit"
-        assert lease_context["prompt"] == kwargs["prompt"]
-        assert lease_context["prompt_length"] == len(kwargs["prompt"])
-        assert kwargs["tool"] == "opencode"
-        assert kwargs["model"] == "anthropic/claude-sonnet"
-        assert kwargs["directory"] == project
-        assert kwargs["config_workspace"] == (
-            project / ".opendeephole" / "opencode" / _serve_runtime_namespace(workspace)
-        )
-        assert kwargs["config_workspace"].is_dir()
-        assert (kwargs["config_workspace"] / "opencode.json").is_file()
-        assert json.loads(kwargs["config_content"]) == json.loads(
-            (kwargs["config_workspace"] / "opencode.json").read_text(encoding="utf-8")
-        )
-        assert kwargs["env_overrides"]["HTTP_PROXY"] == "http://127.0.0.1:3131"
-        assert kwargs["env_overrides"]["HTTPS_PROXY"] == "http://127.0.0.1:3131"
-        assert kwargs["env_overrides"]["NO_PROXY"] == _DEFAULT_OPENCODE_NO_PROXY
-        assert kwargs["env_overrides"]["no_proxy"] == _DEFAULT_OPENCODE_NO_PROXY
-        assert kwargs["prompt"] == "hello"
-        assert "真实项目根目录" not in kwargs["prompt"]
-        assert "优先使用 deephole-code MCP 源码查询工具" not in kwargs["prompt"]
-        assert "源码阅读规则" not in kwargs["prompt"]
-        assert "caller_model" not in kwargs["prompt"]
-        assert output_lines
-        assert all(
-            re.match(
-                r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] "
-                r"\[model=anthropic/claude-sonnet\]",
-                line,
-            )
-            for line in output_lines
-        )
-        release.assert_awaited_once()
-        assert release.await_args.kwargs["outcome"] == "success"
-
-    asyncio.run(run())
-
-
-def test_invoke_opencode_records_actual_serve_default_model(tmp_path: Path) -> None:
-    async def run() -> None:
-        workspace = tmp_path / "workspace"
-        project = tmp_path / "project"
-        skills = workspace / ".opencode" / "skills"
-        skills.mkdir(parents=True)
-        project.mkdir()
-        (workspace / "opencode.json").write_text(
-            json.dumps({
-                "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
-                "skills": {"paths": [str(skills)]},
-            }),
-            encoding="utf-8",
-        )
-        option = SimpleNamespace(
-            id="default",
-            capability="high",
-            tool="",
-            executable="",
-            model="",
-            use_default_model=True,
-            timeout=None,
-            max_retries=None,
-        )
-        lease = SimpleNamespace(
-            option=option,
-            running=1,
-            global_running=1,
-            started_at=time.monotonic(),
-        )
-        cfg = SimpleNamespace(
-            tool="opencode",
-            executable="opencode",
-            invocation_mode="serve",
-            model="configured-model",
-            timeout=30,
-            max_retries=0,
-            models=[],
-            proxy_url="",
-        )
-        sources = []
-
-        async def fake_run_prompt(**kwargs):
-            assert kwargs["model"] == ""
-            kwargs["on_response_model"]("anthropic/claude-sonnet")
-            return ["done"]
-
-        fake_manager = SimpleNamespace(run_prompt=AsyncMock(side_effect=fake_run_prompt))
-
-        with patch("backend.opencode.runner.acquire_model_lease", AsyncMock(return_value=lease)), \
-            patch("backend.opencode.runner.release_model_lease", AsyncMock()), \
-            patch("backend.opencode.runner._resolve_cli_executable", return_value="opencode"), \
-            patch("backend.opencode.runner.get_serve_manager", return_value=fake_manager):
-            result = await _invoke_opencode(
-                workspace,
-                "hello",
-                timeout=30,
-                cli_config=cfg,
-                project_dir=project,
-                on_invocation_metadata=sources.append,
-            )
-
-        assert result == "done"
-        assert len(sources) == 1
-        assert sources[0].model_id == "default"
-        assert sources[0].model == "anthropic/claude-sonnet"
-        assert sources[0].use_default_model is True
-
-    asyncio.run(run())
 
 
 def test_runtime_writable_paths_include_windows_slash_variants() -> None:
@@ -365,16 +176,24 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
             opencode_concurrency=1,
             storage=SimpleNamespace(scans_dir=str(scans_dir)),
         )
-        captured: dict[str, object] = {}
+        captured_calls: list[dict[str, object]] = []
 
-        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
-            captured["workspace"] = call_workspace
-            captured["prompt"] = prompt
-            captured["project_dir"] = kwargs["project_dir"]
-            captured["writable_paths"] = kwargs["writable_paths"]
-            match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
-            assert match is not None
-            Path(match.group(1)).write_text("{}", encoding="utf-8")
+        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> str:
+            captured_calls.append({
+                "workspace": call_workspace,
+                "prompt": prompt,
+                "project_dir": kwargs["project_dir"],
+                "output_schema": kwargs["output_schema"],
+                "skills": kwargs["skills"],
+                "permissions": kwargs["permissions"],
+            })
+            return json.dumps({
+                "assets": [],
+                "high_risk_external_interfaces": [],
+                "asset_interface_links": [],
+                "risks": [],
+                "attack_goals": [],
+            })
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
@@ -393,10 +212,31 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
         result_path = project / "runs" / "scan-1" / "res.json"
         assert result_path.is_file()
         assert (project / "res.json").is_file()
-        assert str(project.resolve()) in str(captured["prompt"])
-        assert captured["workspace"] == workspace
-        assert captured["project_dir"] == project.resolve()
-        assert captured["writable_paths"] == [project.resolve() / "runs" / "scan-1"]
+        assert captured_calls
+        assert all(
+            "通过本消息附带的原生 JSON Schema" in str(call["prompt"])
+            for call in captured_calls
+        )
+        assert all(
+            "不要写入或修改项目文件" in str(call["prompt"])
+            for call in captured_calls
+        )
+        assert all(
+            str(project.resolve()) in str(call["prompt"])
+            for call in captured_calls
+        )
+        assert all(call["workspace"] == workspace for call in captured_calls)
+        assert all(
+            call["project_dir"] == project.resolve() for call in captured_calls
+        )
+        assert all(
+            call["output_schema"] == {"type": "object"}
+            for call in captured_calls
+        )
+        assert captured_calls[0]["skills"] == ["threat-asset-interface-agent"]
+        assert all(call["permissions"] == [
+            {"permission": "edit", "pattern": "*", "action": "deny"},
+        ] for call in captured_calls)
 
     asyncio.run(run())
 
@@ -441,66 +281,56 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
         )
         stage_order: list[str] = []
         output_lines: list[str] = []
-
-        def output_path_from_prompt(prompt: str) -> Path:
-            match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
-            assert match is not None
-            return Path(match.group(1))
+        stage_calls: list[dict[str, object]] = []
 
         def input_data_from_prompt(prompt: str) -> dict:
             match = re.search(r"读取输入 JSON 文件：`([^`]+)`", prompt)
             assert match is not None
             return json.loads(Path(match.group(1)).read_text(encoding="utf-8"))
 
-        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
-            output_path = output_path_from_prompt(prompt)
-            if "threat-base-model-shard-planner" in prompt:
-                output_path.write_text(
-                    json.dumps({
-                        "planning_summary": "单一 C/C++ 入口使用一个基础建模分片",
-                        "shards": [
-                            {
-                                "type": "entry_family",
-                                "name": "主程序入口",
-                                "description": "覆盖主程序入口相关 C/C++ 路径",
-                                "planning_reason": "当前索引只有一个主程序入口",
-                                "include_paths": ["src/app.cpp"],
-                                "entry_candidates": [],
-                                "languages": ["cpp"],
-                            }
-                        ],
-                    }),
-                    encoding="utf-8",
-                )
-                return
-            if "threat-asset-interface-agent" in prompt:
-                output_path.write_text(
-                    json.dumps({
-                        "assets": [],
-                        "high_risk_external_interfaces": [],
-                        "asset_interface_links": [],
-                        "risks": [],
-                        "attack_goals": [
-                            {"attack_goal_id": "GOAL-1", "name": "goal 1"},
-                            {"attack_goal_id": "GOAL-2", "name": "goal 2"},
-                        ]
-                    }),
-                    encoding="utf-8",
-                )
-                return
-            if "threat-base-model-gap-review-agent" in prompt:
-                output_path.write_text(
-                    json.dumps({
-                        "assets": [],
-                        "high_risk_external_interfaces": [],
-                        "asset_interface_links": [],
-                        "risks": [],
-                        "attack_goals": [],
-                    }),
-                    encoding="utf-8",
-                )
-                return
-            if "threat-attack-goal-agent" in prompt:
+        async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> str:
+            skill_name = kwargs["skills"][0]
+            stage_calls.append({
+                "workspace": call_workspace,
+                "prompt": prompt,
+                "skill": skill_name,
+                "output_schema": kwargs["output_schema"],
+            })
+            if skill_name == "threat-base-model-shard-planner":
+                return json.dumps({
+                    "planning_summary": "单一 C/C++ 入口使用一个基础建模分片",
+                    "shards": [
+                        {
+                            "type": "entry_family",
+                            "name": "主程序入口",
+                            "description": "覆盖主程序入口相关 C/C++ 路径",
+                            "planning_reason": "当前索引只有一个主程序入口",
+                            "include_paths": ["src/app.cpp"],
+                            "entry_candidates": [],
+                            "languages": ["cpp"],
+                        }
+                    ],
+                })
+            if skill_name == "threat-asset-interface-agent":
+                return json.dumps({
+                    "assets": [],
+                    "high_risk_external_interfaces": [],
+                    "asset_interface_links": [],
+                    "risks": [],
+                    "attack_goals": [
+                        {"attack_goal_id": "GOAL-1", "name": "goal 1"},
+                        {"attack_goal_id": "GOAL-2", "name": "goal 2"},
+                    ]
+                })
+            if skill_name == "threat-base-model-gap-review-agent":
+                return json.dumps({
+                    "assets": [],
+                    "high_risk_external_interfaces": [],
+                    "asset_interface_links": [],
+                    "risks": [],
+                    "attack_goals": [],
+                })
+            if skill_name == "threat-attack-goal-agent":
                 goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
                 stage_order.append(f"goal:{goal_id}")
                 domains = (
@@ -511,12 +341,8 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     if goal_id == "GOAL-1"
                     else [{"domain_id": "DOMAIN-GOAL-2-A", "name": "运维面"}]
                 )
-                output_path.write_text(
-                    json.dumps({"domains": domains}),
-                    encoding="utf-8",
-                )
-                return
-            if "threat-attack-domain-agent" in prompt:
+                return json.dumps({"domains": domains})
+            if skill_name == "threat-attack-domain-agent":
                 input_data = input_data_from_prompt(prompt)
                 goal_id = input_data["attack_goal"]["attack_goal_id"]
                 domain_id = input_data["attack_domain"]["domain_id"]
@@ -532,12 +358,8 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                         "surface_id": "SURFACE-GOAL-1-A-2",
                         "name": "管理接口二",
                     })
-                output_path.write_text(
-                    json.dumps({"surfaces": surfaces}),
-                    encoding="utf-8",
-                )
-                return
-            if "threat-attack-surface-agent" in prompt:
+                return json.dumps({"surfaces": surfaces})
+            if skill_name == "threat-attack-surface-agent":
                 input_data = input_data_from_prompt(prompt)
                 goal_id = input_data["attack_goal"]["attack_goal_id"]
                 domain_id = input_data["attack_domain"]["domain_id"]
@@ -560,24 +382,16 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                             }
                         ],
                     }
-                output_path.write_text(
-                    json.dumps(method_payload),
-                    encoding="utf-8",
-                )
-                return
-            if "threat-method-confirm-agent" in prompt:
+                return json.dumps(method_payload)
+            if skill_name == "threat-method-confirm-agent":
                 input_data = input_data_from_prompt(prompt)
                 goal_id = input_data["attack_goal"]["attack_goal_id"]
                 domain_id = input_data["attack_domain"]["domain_id"]
                 surface_id = input_data["attack_surface"]["surface_id"]
                 method_id = input_data["method_confirmation_task"]["method_id"]
                 stage_order.append(f"method:{goal_id}:{domain_id}:{surface_id}:{method_id}")
-                output_path.write_text(
-                    json.dumps({"attack_paths": []}),
-                    encoding="utf-8",
-                )
-                return
-            output_path.write_text("{}", encoding="utf-8")
+                return json.dumps({"attack_paths": []})
+            return "{}"
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
@@ -610,6 +424,9 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
         assert not any("攻击目标分解并发度" in line for line in output_lines)
         assert not any("攻击域分析并发度" in line for line in output_lines)
         assert not any("攻击面分析并发度" in line for line in output_lines)
+        assert stage_calls
+        assert all(call["output_schema"] == {"type": "object"} for call in stage_calls)
+        assert all("不要写入或修改项目文件" in str(call["prompt"]) for call in stage_calls)
 
     asyncio.run(run())
 
@@ -725,15 +542,9 @@ def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> N
     assert runtime_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
     assert env_config["skills"]["paths"] == runtime_config["skills"]["paths"]
     plugin_path = runtime_cwd / ".opencode" / "plugins" / "inject-mcp-session.ts"
-    assert plugin_path.is_file()
-    plugin_text = plugin_path.read_text(encoding="utf-8")
-    assert "tool.execute.before" in plugin_text
-    assert "opencode_session_id" in plugin_text
-    assert "submit_result" not in plugin_text
-    assert "submit_history_pattern" in plugin_text
-    assert "submit_match_result" in plugin_text
-    assert str(plugin_path.resolve()) in runtime_config["plugin"]
-    assert str(plugin_path.resolve()) in env_config["plugin"]
+    assert not plugin_path.exists()
+    assert all("inject-mcp-session" not in str(value) for value in runtime_config.get("plugin", []))
+    assert all("inject-mcp-session" not in str(value) for value in env_config.get("plugin", []))
 
 
 def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_path: Path) -> None:
@@ -813,9 +624,8 @@ def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_pa
     assert env_config["mcp"]["other"]["url"] == "http://127.0.0.1:9999/mcp"
     assert env_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
     assert env_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
-    plugin_path = runtime_cwd / ".opencode" / "plugins" / "inject-mcp-session.ts"
-    assert runtime_config["plugin"] == ["task-plugin", str(plugin_path.resolve())]
-    assert env_config["plugin"] == ["global-plugin", "task-plugin", str(plugin_path.resolve())]
+    assert runtime_config["plugin"] == ["task-plugin"]
+    assert env_config["plugin"] == ["global-plugin", "task-plugin"]
 
 
 def test_opencode_env_uses_env_config_path_and_strips_schema(tmp_path: Path) -> None:
@@ -1154,256 +964,3 @@ def test_run_audit_via_opencode_propagates_no_model_without_retry(tmp_path: Path
         invoke.assert_awaited_once()
 
     asyncio.run(run())
-
-
-def test_api_checker_uses_api_even_when_legacy_global_switch_is_false(tmp_path: Path) -> None:
-    candidate = _candidate()
-    config = SimpleNamespace(
-        opencode=SimpleNamespace(mock=False, timeout=1200, max_retries=0),
-        llm_api=SimpleNamespace(enabled=False),
-    )
-    expected = object()
-
-    with (
-        patch("backend.opencode.runner.get_config", return_value=config),
-        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
-        patch("backend.opencode.llm_api_runner.ensure_llm_api_available", new=AsyncMock(return_value=None)),
-        patch("backend.opencode.llm_api_runner.run_audit_via_api", new=AsyncMock(return_value=expected)) as api_audit,
-    ):
-        result = asyncio.run(run_audit(tmp_path, candidate, "scan-1"))
-
-    assert result is expected
-    api_audit.assert_awaited_once()
-
-
-def test_api_checker_falls_back_to_opencode_when_api_check_fails(tmp_path: Path) -> None:
-    candidate = _candidate()
-    config = SimpleNamespace(
-        opencode=SimpleNamespace(mock=False, timeout=1200, max_retries=0),
-        llm_api=SimpleNamespace(enabled=False),
-    )
-    expected = object()
-
-    with (
-        patch("backend.opencode.runner.get_config", return_value=config),
-        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
-        patch(
-            "backend.opencode.llm_api_runner.ensure_llm_api_available",
-            new=AsyncMock(side_effect=LLMApiUnavailableError("bad api")),
-        ),
-        patch("backend.opencode.llm_api_runner.run_audit_via_api", new=AsyncMock()) as api_audit,
-        patch("backend.opencode.runner._run_audit_via_opencode", new=AsyncMock(return_value=expected)) as opencode_audit,
-    ):
-        result = asyncio.run(run_audit(tmp_path, candidate, "scan-1"))
-
-    assert result is expected
-    api_audit.assert_not_awaited()
-    opencode_audit.assert_awaited_once()
-
-
-def test_api_checker_falls_back_to_opencode_when_api_call_fails(tmp_path: Path) -> None:
-    candidate = _candidate()
-    config = SimpleNamespace(
-        opencode=SimpleNamespace(mock=False, timeout=1200, max_retries=0),
-        llm_api=SimpleNamespace(enabled=False),
-    )
-    expected = object()
-
-    with (
-        patch("backend.opencode.runner.get_config", return_value=config),
-        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
-        patch("backend.opencode.llm_api_runner.ensure_llm_api_available", new=AsyncMock(return_value=None)),
-        patch(
-            "backend.opencode.llm_api_runner.run_audit_via_api",
-            new=AsyncMock(side_effect=LLMApiUnavailableError("call failed")),
-        ) as api_audit,
-        patch("backend.opencode.runner._run_audit_via_opencode", new=AsyncMock(return_value=expected)) as opencode_audit,
-    ):
-        result = asyncio.run(run_audit(tmp_path, candidate, "scan-1"))
-
-    assert result is expected
-    api_audit.assert_awaited_once()
-    opencode_audit.assert_awaited_once()
-
-
-def test_api_checker_batch_uses_api_even_when_legacy_global_switch_is_false(tmp_path: Path) -> None:
-    candidates = [_candidate(12), _candidate(18)]
-    config = SimpleNamespace(
-        opencode=SimpleNamespace(mock=False, timeout=1200, max_retries=0),
-        llm_api=SimpleNamespace(enabled=False),
-    )
-    expected = [object(), object()]
-
-    with (
-        patch("backend.opencode.runner.get_config", return_value=config),
-        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
-        patch("backend.opencode.llm_api_runner.ensure_llm_api_available", new=AsyncMock(return_value=None)),
-        patch("backend.opencode.llm_api_runner.run_batch_audit_via_api", new=AsyncMock(return_value=expected)) as api_audit,
-    ):
-        result = asyncio.run(run_audit_batch(tmp_path, candidates, "scan-1"))
-
-    assert result is expected
-    api_audit.assert_awaited_once()
-
-
-def test_api_checker_batch_falls_back_to_opencode_when_api_check_fails(tmp_path: Path) -> None:
-    candidates = [_candidate(12), _candidate(18)]
-    config = SimpleNamespace(
-        opencode=SimpleNamespace(mock=False, timeout=1200, max_retries=0),
-        llm_api=SimpleNamespace(enabled=False),
-    )
-    expected = [object(), object()]
-
-    with (
-        patch("backend.opencode.runner.get_config", return_value=config),
-        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
-        patch(
-            "backend.opencode.llm_api_runner.ensure_llm_api_available",
-            new=AsyncMock(side_effect=LLMApiUnavailableError("bad api")),
-        ),
-        patch("backend.opencode.llm_api_runner.run_batch_audit_via_api", new=AsyncMock()) as api_audit,
-        patch("backend.opencode.runner._run_audit_via_opencode", new=AsyncMock(side_effect=expected)) as opencode_audit,
-    ):
-        result = asyncio.run(run_audit_batch(tmp_path, candidates, "scan-1"))
-
-    assert result == expected
-    api_audit.assert_not_awaited()
-    assert opencode_audit.await_count == 2
-
-
-def test_api_checker_batch_falls_back_to_opencode_when_api_call_fails(tmp_path: Path) -> None:
-    candidates = [_candidate(12), _candidate(18)]
-    config = SimpleNamespace(
-        opencode=SimpleNamespace(mock=False, timeout=1200, max_retries=0),
-        llm_api=SimpleNamespace(enabled=False),
-    )
-    expected = [object(), object()]
-
-    with (
-        patch("backend.opencode.runner.get_config", return_value=config),
-        patch("backend.registry.get_registry", return_value=_api_registry(tmp_path)),
-        patch("backend.opencode.llm_api_runner.ensure_llm_api_available", new=AsyncMock(return_value=None)),
-        patch(
-            "backend.opencode.llm_api_runner.run_batch_audit_via_api",
-            new=AsyncMock(side_effect=LLMApiUnavailableError("call failed")),
-        ) as api_audit,
-        patch("backend.opencode.runner._run_audit_via_opencode", new=AsyncMock(side_effect=expected)) as opencode_audit,
-    ):
-        result = asyncio.run(run_audit_batch(tmp_path, candidates, "scan-1"))
-
-    assert result == expected
-    api_audit.assert_awaited_once()
-    assert opencode_audit.await_count == 2
-
-
-def test_llm_api_health_check_uses_minimal_request_and_caches(monkeypatch) -> None:
-    client_kwargs = []
-    requests = []
-
-    class FakeCompletions:
-        def create(self, **kwargs):
-            requests.append(kwargs)
-            return object()
-
-    class FakeOpenAI:
-        def __init__(self, **kwargs):
-            client_kwargs.append(kwargs)
-            self.chat = SimpleNamespace(completions=FakeCompletions())
-
-    config = SimpleNamespace(
-        llm_api=SimpleNamespace(
-            base_url="https://example.test/v1",
-            api_key="secret",
-            model="fake-model",
-            timeout=30,
-        )
-    )
-
-    openai_module = ModuleType("openai")
-    openai_module.OpenAI = FakeOpenAI
-    monkeypatch.setitem(sys.modules, "openai", openai_module)
-    llm_api_runner._api_health_cache.clear()
-
-    with patch("backend.opencode.llm_api_runner.get_config", return_value=config):
-        asyncio.run(llm_api_runner.ensure_llm_api_available())
-        asyncio.run(llm_api_runner.ensure_llm_api_available())
-
-    assert len(client_kwargs) == 1
-    assert client_kwargs[0]["base_url"] == "https://example.test/v1"
-    assert client_kwargs[0]["api_key"] == "secret"
-    assert client_kwargs[0]["timeout"] == 10.0
-    assert len(requests) == 1
-    assert requests[0]["model"] == "fake-model"
-    assert requests[0]["max_tokens"] == 1
-
-
-def test_llm_api_health_check_output_includes_model(monkeypatch) -> None:
-    class FakeCompletions:
-        def create(self, **kwargs):
-            return object()
-
-    class FakeOpenAI:
-        def __init__(self, **kwargs):
-            self.chat = SimpleNamespace(completions=FakeCompletions())
-
-    config = SimpleNamespace(
-        llm_api=SimpleNamespace(
-            base_url="https://example.test/v1",
-            api_key="secret",
-            model="fake-model",
-            timeout=30,
-        )
-    )
-    lines: list[str] = []
-
-    openai_module = ModuleType("openai")
-    openai_module.OpenAI = FakeOpenAI
-    monkeypatch.setitem(sys.modules, "openai", openai_module)
-    llm_api_runner._api_health_cache.clear()
-
-    with patch("backend.opencode.llm_api_runner.get_config", return_value=config):
-        asyncio.run(llm_api_runner.ensure_llm_api_available(on_output=lines.append))
-
-    assert lines
-    assert all(
-        re.match(
-            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[model=fake-model\]",
-            line,
-        )
-        for line in lines
-    )
-
-
-def test_llm_api_health_check_failure_is_cached(monkeypatch) -> None:
-    requests = []
-
-    class FakeCompletions:
-        def create(self, **kwargs):
-            requests.append(kwargs)
-            raise RuntimeError("unauthorized")
-
-    class FakeOpenAI:
-        def __init__(self, **kwargs):
-            self.chat = SimpleNamespace(completions=FakeCompletions())
-
-    config = SimpleNamespace(
-        llm_api=SimpleNamespace(
-            base_url="https://example.test/v1",
-            api_key="bad",
-            model="fake-model",
-            timeout=3,
-        )
-    )
-
-    openai_module = ModuleType("openai")
-    openai_module.OpenAI = FakeOpenAI
-    monkeypatch.setitem(sys.modules, "openai", openai_module)
-    llm_api_runner._api_health_cache.clear()
-
-    with patch("backend.opencode.llm_api_runner.get_config", return_value=config):
-        with pytest.raises(LLMApiUnavailableError, match="unauthorized"):
-            asyncio.run(llm_api_runner.ensure_llm_api_available())
-        with pytest.raises(LLMApiUnavailableError, match="unauthorized"):
-            asyncio.run(llm_api_runner.ensure_llm_api_available())
-
-    assert len(requests) == 1

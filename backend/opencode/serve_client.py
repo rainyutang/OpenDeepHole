@@ -95,6 +95,19 @@ class OpenCodeModelListResult:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class OpenCodePromptResult:
+    """Result of one message appended to an OpenCode session."""
+
+    session_id: str
+    message_id: str
+    lines: list[str]
+    text: str
+    structured: Any = None
+    model: str = ""
+    raw: Any = field(default=None, repr=False, compare=False)
+
+
 @dataclass
 class _EventChannelRuntime:
     key: str
@@ -830,6 +843,59 @@ def _response_model(value: Any) -> str:
     if model_id.startswith(f"{provider_id}/"):
         return model_id
     return f"{provider_id}/{model_id}"
+
+
+def _response_message_id(value: Any) -> str:
+    if not isinstance(value, dict) or not isinstance(value.get("info"), dict):
+        return ""
+    return str(value["info"].get("id") or "").strip()
+
+
+def _response_structured(value: Any) -> Any:
+    if not isinstance(value, dict) or not isinstance(value.get("info"), dict):
+        return None
+    return value["info"].get("structured")
+
+
+def _normalize_tool_selector(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _mcp_tool_overrides(
+    tool_ids: list[str],
+    requested: list[str] | tuple[str, ...] | None,
+) -> dict[str, bool]:
+    """Build message-level MCP overrides while leaving built-in tools untouched."""
+    mcp_ids = [tool_id for tool_id in tool_ids if _tool_source(tool_id) == "mcp"]
+    if requested is None:
+        return {tool_id: True for tool_id in tool_ids}
+    overrides = {tool_id: False for tool_id in mcp_ids}
+    unresolved: list[str] = []
+    for raw_selector in requested:
+        selector = str(raw_selector or "").strip()
+        normalized = _normalize_tool_selector(selector)
+        matches = [
+            tool_id
+            for tool_id in mcp_ids
+            if selector == tool_id
+            or (normalized and normalized == _normalize_tool_selector(tool_id))
+            or (
+                normalized
+                and normalized in _normalize_tool_selector(tool_id)
+                and _normalize_tool_selector(selector.rsplit("/", 1)[-1])
+                in _normalize_tool_selector(tool_id)
+            )
+        ]
+        if not matches:
+            unresolved.append(selector)
+            continue
+        for tool_id in matches:
+            overrides[tool_id] = True
+    if unresolved:
+        raise ValueError(
+            "Unknown OpenCode MCP tool selector(s): " + ", ".join(unresolved)
+        )
+    return overrides
 
 
 def _one_line_preview(value: object, limit: int = _SERVE_EVENT_PREVIEW_LIMIT) -> str:
@@ -1633,7 +1699,15 @@ class OpenCodeServeManager:
         on_response_model=None,
         cancel_event=None,
         env_overrides: dict[str, str] | None = None,
-    ) -> list[str]:
+        session_id: str | None = None,
+        session_title: str = "OpenDeepHole task",
+        mcp_tools: list[str] | tuple[str, ...] | None = None,
+        output_schema: dict[str, Any] | None = None,
+        output_retry_count: int = 2,
+        system_prompt: str = "",
+        permissions: list[dict[str, str]] | None = None,
+        return_details: bool = False,
+    ) -> list[str] | OpenCodePromptResult:
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
         key = OpenCodeServeKey(
             tool=tool,
@@ -1644,7 +1718,7 @@ class OpenCodeServeManager:
             env_overrides=normalized_env_overrides,
         )
         await self._acquire_session(key, startup_cwd=config_workspace)
-        session_id = ""
+        active_session_id = str(session_id or "").strip()
         event_state: _ServeEventState | None = None
         event_registered = False
         event_flush_task: asyncio.Task | None = None
@@ -1657,41 +1731,64 @@ class OpenCodeServeManager:
                 timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
                 trust_env=False,
             ) as client:
-                created = await client.post(
-                    "/session",
-                    params=params,
-                    headers=headers,
-                    json={"title": "OpenDeepHole task"},
-                )
-                created.raise_for_status()
-                session_id = _session_id(created.json())
+                if not active_session_id:
+                    create_payload: dict[str, Any] = {
+                        "title": str(session_title or "").strip() or "OpenDeepHole task",
+                    }
+                    if permissions is not None:
+                        create_payload["permission"] = permissions
+                    created = await client.post(
+                        "/session",
+                        params=params,
+                        headers=headers,
+                        json=create_payload,
+                    )
+                    created.raise_for_status()
+                    active_session_id = _session_id(created.json())
+                elif permissions is not None:
+                    updated = await client.patch(
+                        f"/session/{active_session_id}",
+                        params=params,
+                        headers=headers,
+                        json={"permission": permissions},
+                    )
+                    updated.raise_for_status()
                 if on_session_id:
-                    result = on_session_id(session_id)
+                    result = on_session_id(active_session_id)
                     if hasattr(result, "__await__"):
                         await result
                 if on_line:
                     config_note = f" config={config_workspace}" if config_workspace else ""
-                    on_line(f"[{tool} serve] session={session_id} directory={directory}{config_note}")
-                    event_state = _ServeEventState(tool, session_id, on_line)
+                    on_line(f"[{tool} serve] session={active_session_id} directory={directory}{config_note}")
+                    event_state = _ServeEventState(tool, active_session_id, on_line)
                     event_flush_task = asyncio.create_task(
                         _flush_event_state_periodically(event_state)
                     )
-                    await self._register_event_state(session_id, directory, event_state)
+                    await self._register_event_state(active_session_id, directory, event_state)
                     event_registered = True
                 payload: dict[str, Any] = {
                     "agent": agent,
                     "parts": [{"type": "text", "text": prompt}],
                 }
                 tool_ids = await self._list_tool_ids(client, params, headers, on_line=on_line, tool=tool)
-                if tool_ids:
-                    payload["tools"] = {tool_id: True for tool_id in tool_ids}
+                mcp_overrides = _mcp_tool_overrides(tool_ids, mcp_tools)
+                if mcp_overrides:
+                    payload["tools"] = mcp_overrides
                 if model:
                     provider_id, model_id = split_model_id(model)
                     payload["model"] = {"providerID": provider_id, "modelID": model_id}
+                if output_schema is not None:
+                    payload["format"] = {
+                        "type": "json_schema",
+                        "schema": output_schema,
+                        "retryCount": max(0, int(output_retry_count)),
+                    }
+                if system_prompt:
+                    payload["system"] = system_prompt
 
                 request = asyncio.create_task(
                     client.post(
-                        f"/session/{session_id}/message",
+                        f"/session/{active_session_id}/message",
                         params=params,
                         headers=headers,
                         json=payload,
@@ -1702,7 +1799,7 @@ class OpenCodeServeManager:
                     snapshot_poll_task = asyncio.create_task(
                         self._poll_session_snapshots(
                             client=client,
-                            session_id=session_id,
+                            session_id=active_session_id,
                             directory=directory,
                             params=params,
                             headers=headers,
@@ -1713,7 +1810,7 @@ class OpenCodeServeManager:
                     response = await self._wait_for_response(
                         client=client,
                         request=request,
-                        session_id=session_id,
+                        session_id=active_session_id,
                         params=params,
                         headers=headers,
                         timeout=timeout,
@@ -1740,7 +1837,7 @@ class OpenCodeServeManager:
                             await snapshot_poll_task
                         snapshot_poll_task = None
                     if event_registered:
-                        await self._unregister_event_state(session_id)
+                        await self._unregister_event_state(active_session_id)
                         event_registered = False
                     event_state.flush()
                 response_data = response.json()
@@ -1769,14 +1866,23 @@ class OpenCodeServeManager:
                         preview = _one_line_preview(line)
                         if preview:
                             on_line(f"[{tool} serve llm text] {preview}")
-                return lines
+                details = OpenCodePromptResult(
+                    session_id=active_session_id,
+                    message_id=_response_message_id(response_data),
+                    lines=lines,
+                    text="\n".join(response_text),
+                    structured=_response_structured(response_data),
+                    model=response_model,
+                    raw=response_data,
+                )
+                return details if return_details else lines
         finally:
             if snapshot_poll_task is not None:
                 snapshot_poll_task.cancel()
                 with contextlib.suppress(BaseException):
                     await snapshot_poll_task
             if event_registered:
-                await self._unregister_event_state(session_id)
+                await self._unregister_event_state(active_session_id)
             if event_flush_task is not None:
                 event_flush_task.cancel()
                 with contextlib.suppress(BaseException):
@@ -1784,6 +1890,78 @@ class OpenCodeServeManager:
             if event_state:
                 event_state.flush()
             await self._release_active_session()
+
+    async def _session_api_request(
+        self,
+        *,
+        tool: str,
+        executable: str,
+        directory: Path,
+        method: str,
+        path: str,
+        config_workspace: Path | None = None,
+        config_content: str | None = None,
+        env_overrides: dict[str, str] | None = None,
+        json_body: Any = None,
+    ) -> Any:
+        normalized_env_overrides = _normalized_env_overrides(env_overrides)
+        key = OpenCodeServeKey(
+            tool=tool,
+            executable=executable,
+            env_hash=_env_hash(normalized_env_overrides),
+            config_hash=_config_hash(config_content),
+            config_content=config_content or "",
+            env_overrides=normalized_env_overrides,
+        )
+        await self._acquire_session(key, startup_cwd=config_workspace)
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
+                trust_env=False,
+            ) as client:
+                response = await client.request(
+                    method,
+                    path,
+                    params=_serve_context_params(directory),
+                    headers=_serve_context_headers(directory),
+                    json=json_body,
+                )
+                response.raise_for_status()
+                if not response.content:
+                    return None
+                return response.json()
+        finally:
+            await self._release_active_session()
+
+    async def get_session(self, session_id: str, **runtime: Any) -> Any:
+        return await self._session_api_request(
+            method="GET",
+            path=f"/session/{session_id}",
+            **runtime,
+        )
+
+    async def get_session_messages(self, session_id: str, **runtime: Any) -> list[dict[str, Any]]:
+        value = await self._session_api_request(
+            method="GET",
+            path=f"/session/{session_id}/message",
+            **runtime,
+        )
+        return value if isinstance(value, list) else []
+
+    async def delete_session(self, session_id: str, **runtime: Any) -> Any:
+        return await self._session_api_request(
+            method="DELETE",
+            path=f"/session/{session_id}",
+            **runtime,
+        )
+
+    async def abort_session(self, session_id: str, **runtime: Any) -> Any:
+        return await self._session_api_request(
+            method="POST",
+            path=f"/session/{session_id}/abort",
+            **runtime,
+        )
 
     @staticmethod
     def _event_directory_key(directory: Path) -> str:

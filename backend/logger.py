@@ -8,7 +8,7 @@ from pathlib import Path
 from backend.config import get_config
 
 _initialized = False
-_NOISY_HTTP_LOGGERS = ("httpx", "httpcore", "openai")
+_NOISY_HTTP_LOGGERS = ("httpx", "httpcore")
 
 
 def _suppress_third_party_http_logging() -> None:

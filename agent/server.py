@@ -311,22 +311,6 @@ async def enqueue_fp_review(
         _fp_review_cancel_events[review_id] = cancel_event
     _fp_review_scan_ids[review_id] = scan_id
     _fp_review_active_items.add(item_key)
-    from backend.opencode.model_pool import register_planned_task
-
-    planned_context = {
-        "task_type": "fp_review",
-        "review_id": review_id,
-        "vuln_index": vuln_index,
-        "checker": str(vulnerability.get("vuln_type") or ""),
-        "file": str(vulnerability.get("file") or ""),
-        "line": vulnerability.get("line"),
-        "function": str(vulnerability.get("function") or ""),
-    }
-    planned_task_id = await register_planned_task(
-        scan_id,
-        planned_context,
-        task_key=f"fp_review:{review_id}:{vuln_index}",
-    )
     queue = _fp_review_queues.setdefault(review_id, deque())
     queue.append(_FpReviewQueueItem(
         config=effective_config,
@@ -338,7 +322,7 @@ async def enqueue_fp_review(
         feedback_entries=feedback_entries or [],
         cancel_event=cancel_event,
         processed_offset=max(0, int(processed_offset or 0)),
-        planned_task_id=planned_task_id,
+        planned_task_id="",
     ))
     worker = _fp_review_tasks.get(review_id)
     if worker is None or worker.done():
@@ -678,47 +662,6 @@ async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[
     set_fp_review_feedback(scan_id, feedback_entries)
 
 
-async def handle_config_test(request_id: str, remote_config: dict) -> dict:
-    """Validate a candidate remote config without mutating the live Agent config."""
-    import copy
-    import os
-
-    from agent.config import apply_remote_config
-    from backend.opencode.llm_api_runner import probe_llm_api_config
-
-    test_config = copy.deepcopy(_config)
-    apply_remote_config(test_config, remote_config)
-
-    old_no_proxy = os.environ.get("no_proxy")
-    old_no_proxy_upper = os.environ.get("NO_PROXY")
-    try:
-        if test_config.no_proxy:
-            os.environ["no_proxy"] = test_config.no_proxy
-            os.environ["NO_PROXY"] = test_config.no_proxy
-        else:
-            os.environ.pop("no_proxy", None)
-            os.environ.pop("NO_PROXY", None)
-        ok, reason = await asyncio.to_thread(probe_llm_api_config, test_config.llm_api)
-    except Exception as exc:
-        ok, reason = False, str(exc)
-    finally:
-        if old_no_proxy is None:
-            os.environ.pop("no_proxy", None)
-        else:
-            os.environ["no_proxy"] = old_no_proxy
-        if old_no_proxy_upper is None:
-            os.environ.pop("NO_PROXY", None)
-        else:
-            os.environ["NO_PROXY"] = old_no_proxy_upper
-
-    return {
-        "type": "config_test_result",
-        "request_id": request_id,
-        "ok": ok,
-        "message": "API 配置可用" if ok else reason,
-    }
-
-
 async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict:
     """Return models visible to the Agent's OpenCode-compatible serve process."""
     try:
@@ -778,7 +721,7 @@ async def handle_skill_create(
     user_input: str,
     skill_creator_package: dict | None = None,
 ) -> dict:
-    """Create a pure project-level SKILL draft by invoking the configured AI CLI."""
+    """Create a pure project-level SKILL draft through the OpenCode task service."""
     try:
         draft = await _run_skill_creator(request_id, name, description, user_input, skill_creator_package)
         return {
@@ -836,14 +779,12 @@ async def _run_skill_creator(
 
     _configure_backend(_config, workspace)
     prompt = _skill_creator_prompt(name, description, user_input)
-    lines: list[str] = []
 
     def on_output(line: str) -> None:
         if line:
             print(with_local_timestamp(line, prefix="[skill_create]"), flush=True)
-            lines.append(line)
 
-    await _invoke_opencode(
+    output_text = await _invoke_opencode(
         workspace,
         prompt,
         timeout=_config.opencode.timeout,
@@ -851,8 +792,22 @@ async def _run_skill_creator(
         project_dir=workspace,
         model_capability="high",
         prefer_high_model=True,
+        task_name="skill_create",
+        priority=70,
+        mcp_tools=[],
+        skills=[_SKILL_CREATOR_NAME],
+        output_schema={
+            "type": "object",
+            "properties": {
+                "skill_md": {"type": "string"},
+                "scenarios_md": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+            "required": ["skill_md", "scenarios_md", "summary"],
+            "additionalProperties": False,
+        },
     )
-    return _parse_skill_creator_output("\n".join(lines))
+    return _parse_skill_creator_output(output_text)
 
 
 def _write_skill_creator_package(package: dict, skills_root: Path) -> None:

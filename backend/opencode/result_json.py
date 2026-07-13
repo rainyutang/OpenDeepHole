@@ -22,6 +22,34 @@ VULNERABILITY_RESULTS_SCHEMA: dict[str, Any] = {
     "results": [VULNERABILITY_RESULT_SCHEMA],
 }
 
+VULNERABILITY_RESULT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "confirmed": {"type": "boolean"},
+        "severity": {"type": "string"},
+        "description": {"type": "string"},
+        "ai_analysis": {"type": "string"},
+        "vulnerability_report": {"type": "string"},
+        "file": {"type": "string"},
+        "line": {"type": "integer"},
+        "function": {"type": "string"},
+    },
+    "required": list(VULNERABILITY_RESULT_SCHEMA),
+    "additionalProperties": True,
+}
+
+VULNERABILITY_RESULTS_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": VULNERABILITY_RESULT_JSON_SCHEMA,
+        }
+    },
+    "required": ["results"],
+    "additionalProperties": False,
+}
+
 VULNERABILITY_RESULT_JSON_INSTRUCTION = """\
 分析完成后，最终回复必须包含且只包含一个符合以下 schema 的 JSON 对象：
 {

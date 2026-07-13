@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenDeepHole is a SKILL-based C/C++ source code white-box audit tool. It uses static analysis to find candidate vulnerability locations, then invokes a configured AI CLI tool (or a direct LLM API) with specialized skills and MCP tools for AI-powered deep semantic analysis.
+OpenDeepHole is a SKILL-based C/C++ source code white-box audit tool. It uses static analysis to find candidate vulnerability locations, then submits every model-backed operation through a unified OpenCode task/session service with specialized skills and MCP tools.
 
 ## Architecture
 
@@ -16,8 +16,8 @@ Browser  ──HTTP──►  Backend (FastAPI, port 8000)
                         │                                       │
                         │                                       ├── tree-sitter indexer
                         │                                       ├── static analyzers
-                        │                                       ├── LocalMCPServer (random port)
-                        │                                       └── AI CLI / LLM API
+                        │                                       ├── shared MCP gateway
+                        │                                       └── OpenCode serve/session service
                         │
                    MCP Server (FastMCP, port 8100)
                         │  streamable-http transport
@@ -27,7 +27,7 @@ Browser  ──HTTP──►  Backend (FastAPI, port 8000)
 - **Frontend**: React + TypeScript + Vite + Tailwind CSS (builds to `backend/static/`)
 - **Backend**: Python FastAPI (port 8000) — serves API + frontend static files, stores scan records in SQLite, manages WebSocket connections to agents
 - **Agent**: Python daemon (`agent/`) — runs on the machine with the source code, connects to backend via WebSocket, executes the full scan pipeline locally
-- **MCP Server**: Python FastMCP (port 8100) — provides source code query tools for AI CLI tools (server-side; agent also spawns a local in-process copy)
+- **MCP Server**: Python FastMCP (port 8100) — provides source-code query tools; the Agent owns one shared local gateway and routes `project_id` to each scan index
 - **Deployment**: `start.sh` builds frontend and restarts uvicorn; Docker via `docker-compose.yml`
 
 ## Agent — Connection Model (v2)
@@ -64,14 +64,14 @@ Each scan runs the full pipeline locally on the agent machine:
 ```
 1. Index    — tree-sitter C++ parse → code_index.db (reuses IndexStore cache if available)
 2. Feedback — fetch false-positive history from server (for SKILL enrichment)
-3. MCP      — start LocalMCPServer in-process on a random port (CLI audit mode only)
+3. MCP      — register project_id → code_index.db on the Agent-owned shared gateway
 4. Workspace — create_scan_workspace() with per-task opencode.json + skill symlinks + merged feedback
 5. Static   — each checker's analyzer.find_candidates() → scoped candidate list (cached for resume)
 5.5 Git history — (fresh scans, git repo, git_history.enabled) agent/git_history.py mines security-fix
-    patterns from commit history (one LLM call per commit, submit_history_pattern); agent/variant_hunter.py
-    then hunts whole-repo same-class sites per pattern (submit_variant_finding) → extra candidates tagged
+    patterns from commit history (one structured OpenCode task per commit); agent/variant_hunter.py
+    then hunts whole-repo same-class sites per pattern via structured output → extra candidates tagged
     metadata.variant_of, merged into the candidate set. Patterns pushed via POST /api/agent/scan/{id}/git_history
-6. AI audit — run_audit() per deduplicated candidate (selected CLI tool or LLM API direct call);
+6. AI audit — run_audit() per deduplicated candidate through OpenCodeTaskService;
     variant_of propagated to Vulnerability; `pattern_filter` can skip candidates whose same-pattern
     representative was already rejected by AI
 7. Report   — upload vulnerabilities + finish event to server; clean up on completion
@@ -86,10 +86,10 @@ Each scan runs the full pipeline locally on the agent machine:
 
 ## Agent — FP Review Pipeline (`agent/fp_reviewer.py`)
 
-Per vulnerability: an optional `history_match` stage first, then the three-stage debate `prove_bug` → `prove_fp` → `final_judge`, each a CLI call that must write a Markdown artifact **and** call its submit tool (missing either → retry per `fp_review_cli.max_retries`, then stage failure; retry prompts re-emphasize the contract).
+Per vulnerability: an optional `history_match` stage first, then the three-stage debate `prove_bug` → `prove_fp` → `final_judge`. Each stage is an OpenCode task using native JSON Schema; Python owns Markdown artifact persistence and retries invalid/missing structured results.
 
 - **Auto-trigger on completion**: when a scan finishes with status `complete` and ≥1 confirmed vulnerability, the backend automatically starts FP review at the end of `agent_finish_scan` (no manual click). Gated by config `fp_review.auto_on_complete` (default `true`) and skipped if the scan already has an FP review job (avoids duplicate triggers on resume/repeat finish). The shared trigger logic lives in `backend/api/scan.py::_start_fp_review` (used by both the manual `POST /api/scan/{id}/fp_review` endpoint and the auto path; `raise_on_error=False` on the auto path so a blocked review never breaks scan finish). The manual button is retained for re-runs / catching up unreviewed candidates.
-- **History/validation match** (`history_match`, skill `fp_review_match.md`, tool `submit_match_result`): runs first when git-history patterns exist (fetched via `reporter.get_git_history`) or the candidate carries `variant_of`. If the candidate corresponds to a historical problem pattern (same root cause) or another call site that validates correctly (which this site lacks), it is **directly marked `high` and the three-stage debate is skipped**; the result records `match_type` (`history`|`validation`) and `match_reference`. No match → fall through to the debate.
+- **History/validation match** (`history_match`, skill `fp_review_match.md`): runs first when git-history patterns exist or the candidate carries `variant_of`; its structured result may directly mark a match as `high` and skip the three-stage debate.
 - **Binary severity**: FP-review severity is now high/low only — match or externally-triggerable → `high`, everything else (former medium, fp) → `low` (`_normalize_fp_severity`, debate prompts, and the result endpoint all enforce this).
 - **Early exit**: if `prove_bug` submits `confirmed=false`, the review pushes a final `fp` result with prove_bug's reasoning and skips the other two stages. Only confirmed-by-prove_bug candidates go through the full debate, where `final_judge` decides.
 - **Concurrency**: review workers are sized from `total_model_capacity()`; the agent reports the full set of in-progress vuln indices (`active_indices`) with each progress push. Backend stores it in `fp_review_jobs.current_vuln_indices` (JSON) and the frontend highlights all of them.
@@ -103,21 +103,13 @@ Vulnerability types are **plugin-based**. Each checker is a self-contained direc
 
 ```
 checkers/<name>/
-├── checker.yaml    # Required: name, label, description, enabled, mode (api|opencode)
-├── SKILL.md        # Required for opencode mode: opencode skill definition
-├── prompt.txt      # Required for api mode: LLM system prompt
+├── checker.yaml    # Required: name, label, description, enabled
+├── SKILL.md        # OpenCode skill definition
+├── prompt.txt      # Legacy input, wrapped as a temporary OpenCode SKILL
 └── analyzer.py     # Optional: static analyzer (class Analyzer extends BaseAnalyzer)
 ```
 
-Each checker independently chooses its AI invocation mode via `checker.yaml`:
-- `mode: opencode` (default) — uses the selected Agent CLI tool (`nga`, `opencode`, `hac`, or `claude`) + `SKILL.md`
-- `mode: api` — uses LLM API direct call + `prompt.txt` as system prompt (requires `llm_api.enabled: true` in `config.yaml`)
-
-Agent CLI tool notes:
-- `nga` and `opencode` use per-task OpenCode-compatible config injected through `OPENCODE_CONFIG_CONTENT`; `--dir` still points at the real project root.
-- `hac` uses per-task Gemini CLI-compatible `.gemini/settings.json` MCP config and copied `.gemini/skills`.
-- `claude` uses per-task Claude Code-compatible `--mcp-config` plus copied `.claude/skills`.
-- `fp_review_cli` may override the AI false-positive review tool/model; when omitted, FP review inherits the normal audit CLI config.
+All model work uses the unified OpenCode task/session service. `nga` and `opencode` are supported serve-compatible executables; there is no direct LLM API or per-task CLI-run path. Legacy `mode: api` checkers are wrapped from `prompt.txt` into a temporary OpenCode SKILL.
 
 To add a new checker: create a directory with `checker.yaml` + `SKILL.md` (or `prompt.txt`). No code changes needed.  
 Backend refreshes checker discovery via `backend/registry.py` when listing checkers and when creating scans. Frontend fetches available checkers from `GET /api/checkers`.
@@ -175,8 +167,8 @@ tail -f logs/opendeephole.log
 - Pydantic models for all API request/response in `backend/models.py`
 - `vuln_type` is a plain string (not enum) matching the checker directory name
 - CLI config workspaces are created per scan/review under the task directory; `opencode`/`nga` receive config through `OPENCODE_CONFIG_CONTENT` while `--dir` still points at the real project root
-- Agent configs (LLM API key, model, etc.) are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and on UI save
-- Model-pool scheduling (`backend/opencode/model_pool.py`): concurrency is limited per model by `max_concurrency` only — there is no cross-scan global gate, so concurrent scans/FP reviews never starve each other's idle models. A queued task switches to any other capability-eligible free model if its queue-target model stays busy; `prefer_high` is a soft preference. Scan and FP-review worker counts are sized from `total_model_capacity()` (sum of eligible enabled models' `max_concurrency`); `opencode_concurrency` is the single-model concurrency when no `models` list is configured
+- Agent OpenCode configs are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and UI save
+- Model-pool scheduling (`backend/opencode/model_pool.py`): `opencode_concurrency` is a global Agent gate, with per-model `max_concurrency`; pending tasks are priority-descending/FIFO, require capability without downgrade, prefer the lowest sufficient model, and remain blocked until model configuration/time-window changes make them runnable
 - **Always update both README.md and CLAUDE.md when making structural or architectural changes**
 
 ## Code Parser (Shared Indexer)
@@ -207,8 +199,9 @@ backend/
     feedback.py   — Feedback CRUD
   analyzers/base.py — BaseAnalyzer ABC + Candidate dataclass
   opencode/
-    runner.py     — run_audit(): dispatches to selected AI CLI or LLM API
-    llm_api_runner.py — LLM API direct-call mode with function calling
+    task_service.py — priority/capability scheduling, OpenCode task/session lifecycle, structured output
+    runner.py     — audit prompt/result compatibility facade over task_service
+    serve_client.py — long-lived OpenCode serve process and session API
     config.py     — create_scan_workspace(), cleanup_workspace()
   registry.py     — Auto-discovers and loads checkers from checkers/
   store/          — SQLite scan store (scans, vulnerabilities, events, feedback, processed keys)
@@ -226,14 +219,14 @@ agent/
   reporter.py     — HTTP client: pushes events/results/git-history to backend
   task_manager.py — In-memory task registry with cancel_event per scan
   index_store.py  — Manages code_index.db in project directory
-  local_mcp.py    — LocalMCPServer: runs MCP server in-process on random port
+  local_mcp.py    — Agent-owned shared MCP gateway with per-project routing
   config.py       — AgentConfig, load_config(), apply_remote_config()
   skills/         — Standalone skills: fp_review*.md, fp_review_match.md, git_history_mine.md, variant_hunt.md
 
 checkers/         — Plugin directories (npd, oob, safe_mem_oob, uaf, intoverflow, memleak)
 code_parser/      — Shared C/C++ indexer (ctags + tree-sitter + SQLite)
-mcp_server/       — MCP Server (tools.py: code queries + submit_result/submit_history_pattern/submit_variant_finding/submit_match_result)
+mcp_server/       — MCP Server source-query tools and project-id routing
 frontend/         — React + TypeScript + Vite + Tailwind CSS
-config.yaml       — Server-side settings (ports, storage, logging, llm_api, opencode, git_history, fp_review)
-agent.yaml        — Agent-side settings (server_url, agent_name, llm_api, opencode, fp_review_cli, git_history)
+config.yaml       — Server-side settings (ports, storage, logging, opencode, git_history, fp_review)
+agent.yaml        — Agent-side settings (server_url, agent_name, opencode, fp_review_cli, git_history)
 ```

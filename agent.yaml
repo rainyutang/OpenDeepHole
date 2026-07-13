@@ -17,19 +17,8 @@ no_proxy: "10.0.0.0/8"
 # 可选值: npd, oob, uaf, intoverflow, memleak
 checkers: []
 
-# LLM API 配置（供 mode: api 的检查项使用）
-# 各检查项的 mode 在其 checker.yaml 中独立配置
-llm_api:
-  base_url: "https://api.anthropic.com"   # OpenAI 兼容接口地址
-  api_key: "your-api-key-here"
-  model: "claude-sonnet-4-6"
-  temperature: 0.1
-  timeout: 300      # 单次调用超时（秒）
-  max_retries: 3
-  stream: false      # 是否使用流式传输（部分 API 仅支持流式）
-
-# CLI 审计工具配置（供 mode: opencode 的检查项使用）
-# tool 可选: nga, opencode, hac, claude
+# OpenCode 审计任务配置。所有模型任务都通过 OpenCode serve/session 执行。
+# tool 可选: nga, opencode
 opencode:
   tool: "nga"
   executable: "nga"  # 可执行文件名或完整路径，Windows 示例："C:/tools/nga.cmd"
@@ -39,7 +28,7 @@ opencode:
   proxy_url: ""            # 可选：OpenCode/nga 子进程代理，如 "http://127.0.0.1:3131"
   no_proxy: ""             # 可选：OpenCode/nga 子进程 no_proxy；留空时使用内网默认列表
   config_paths: []         # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
-  # 模型池。空池或全禁用时，所有 LLM 任务会立即失败。
+  # 模型池。空池或全禁用时，任务保持排队，等待配置更新后重新调度。
   # 如需 CLI 默认模型，必须显式添加 use_default_model: true 的启用行。
   # models:
   #   - id: "fast"
@@ -80,11 +69,11 @@ vulnerability_validation:
   command: ""          # 可选自定义命令；会追加 --report <file> --output <file>
   timeout_seconds: 7200
 
-# AI 去误报 CLI 配置（可选）
+# AI 去误报 OpenCode 配置（可选）
 # 删除或设为 null 时，默认继承上面的 opencode 工具和模型配置。
 # fp_review_cli:
-#   tool: "claude"
-#   executable: "claude"
+#   tool: "opencode"
+#   executable: "opencode"
 #   model: ""       # 已废弃兼容字段；模型调度只读取 models
 #   timeout: 1200
 #   max_retries: 2

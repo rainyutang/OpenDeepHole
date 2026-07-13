@@ -27,6 +27,32 @@ logger = get_logger(__name__)
 ARTIFACT_FILENAME = "memory_api_pairs.json"
 SCHEMA_VERSION = 1
 
+_MEMORY_API_BATCH_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "string"},
+                    "is_memory_api": {"type": "boolean"},
+                    "role": {"type": "string", "enum": ["alloc", "free", "realloc", "not_memory"]},
+                    "pair_with": {"type": "string"},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "reason": {"type": "string"},
+                },
+                "required": [
+                    "candidate_id", "is_memory_api", "role", "pair_with", "confidence", "reason"
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["results"],
+    "additionalProperties": False,
+}
+
 _SRC_EXTS = {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"}
 _SKIP_DIRS = {
     ".git", ".svn", ".hg",
@@ -446,7 +472,7 @@ async def _run_memory_api_batch(
         output_path=output_path,
     )
     log_path = output_path.with_suffix(".log")
-    await _invoke_opencode(
+    output_text = await _invoke_opencode(
         workspace,
         prompt,
         timeout,
@@ -454,7 +480,6 @@ async def _run_memory_api_batch(
         on_line=on_line,
         cancel_event=cancel_event,
         project_dir=project_root,
-        writable_paths=[output_path.parent],
         model_capability="any",
         stats_scope_id=project_id,
         task_context={
@@ -462,6 +487,12 @@ async def _run_memory_api_batch(
             "batch_index": batch_index,
             "batch_count": batch_count,
         },
+        task_name=f"内存 API 识别 {batch_index}/{batch_count}",
+        output_schema=_MEMORY_API_BATCH_JSON_SCHEMA,
+    )
+    output_path.write_text(
+        json.dumps(json.loads(output_text), ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
 
@@ -482,8 +513,7 @@ def _build_batch_prompt(
         "请判断每个候选是否是真正的底层通用堆内存申请/释放 API 或薄 wrapper。"
         "只保留 malloc/calloc/realloc/strdup/new/delete/free 这类通用堆内存 API 或直接薄封装；"
         "排除结构体/对象专用 create/destroy/free、复杂 cleanup/refcount 生命周期函数、文件/socket/mmap 等资源 API。"
-        f"你必须把结果写入这个 JSON 文件：`{output_path.resolve()}`。"
-        "除了该 JSON 文件，不得修改任何文件。"
+        "不要写文件，最终通过 structured output 返回结果。"
         "JSON 格式必须为："
         "{\"results\":[{\"candidate_id\":\"...\",\"is_memory_api\":true,"
         "\"role\":\"alloc|free|realloc|not_memory\",\"pair_with\":\"对应函数名或空字符串\","

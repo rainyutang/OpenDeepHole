@@ -5,14 +5,77 @@
 
 import json
 import os
+import threading
 from pathlib import Path
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import FastMCP
 
 from backend.opencode.output_format import with_local_timestamp
 
 # 按 DB 路径缓存连接，MCP Server 是长驻进程，避免每次重新打开
 _db_cache: dict[str, tuple[object, tuple[int, int, int, int]]] = {}
+_db_cache_lock = threading.RLock()
+_project_paths: dict[str, Path] = {}
+_project_path_refcounts: dict[str, int] = {}
+_project_paths_lock = threading.RLock()
+
+
+def register_project_path(project_id: str, project_dir: Path | str) -> None:
+    """Register one Agent scan's index directory on the shared MCP gateway."""
+    key = str(project_id or "").strip()
+    if not key:
+        raise ValueError("project_id is required for MCP project registration")
+    resolved = Path(project_dir).resolve()
+    with _project_paths_lock:
+        current = _project_paths.get(key)
+        if current == resolved:
+            _project_path_refcounts[key] = _project_path_refcounts.get(key, 1) + 1
+            return
+        _project_paths[key] = resolved
+        _project_path_refcounts[key] = 1
+    if current is not None:
+        clear_db_cache(current)
+
+
+def unregister_project_path(project_id: str, project_dir: Path | str | None = None) -> None:
+    """Remove a shared-gateway route without disturbing other active scans."""
+    key = str(project_id or "").strip()
+    with _project_paths_lock:
+        current = _project_paths.get(key)
+        if current is None:
+            return
+        if project_dir is not None and current != Path(project_dir).resolve():
+            return
+        refcount = _project_path_refcounts.get(key, 1)
+        if refcount > 1:
+            _project_path_refcounts[key] = refcount - 1
+            return
+        _project_paths.pop(key, None)
+        _project_path_refcounts.pop(key, None)
+    clear_db_cache(current)
+
+
+def clear_project_paths() -> None:
+    """Remove all scan routes when the process-wide gateway is shut down."""
+    with _project_paths_lock:
+        project_dirs = set(_project_paths.values())
+        _project_paths.clear()
+        _project_path_refcounts.clear()
+    for project_dir in project_dirs:
+        clear_db_cache(project_dir)
+
+
+def _registered_project_path(project_id: str) -> Path | None:
+    with _project_paths_lock:
+        exact = _project_paths.get(str(project_id or "").strip())
+        if exact is not None:
+            return exact
+        # Backward-compatible route for standalone utilities that bind a single
+        # local index but do not yet have a durable scan id.
+        wildcard = _project_paths.get("*")
+        if wildcard is not None and len(_project_paths) == 1:
+            return wildcard
+    return None
 
 
 def _get_config():
@@ -81,6 +144,10 @@ def _open_complete_db(cache_key: str, db_path: Path):
 
 
 def _resolve_db_path(project_id: str, project_dir: Path | None = None) -> Path:
+    registered = _registered_project_path(project_id)
+    if registered is not None:
+        return registered / "code_index.db"
+
     if project_dir is not None:
         return project_dir / "code_index.db"
 
@@ -99,12 +166,13 @@ def _get_db(project_id: str, project_dir: Path | None = None):
     """
     db_path = _resolve_db_path(project_id, project_dir)
     cache_key = _cache_key_for_path(db_path)
-    cached = _db_cache.get(cache_key)
-    if cached is not None:
-        if _cached_db_is_usable(cached, db_path):
-            return cached[0]
-        _close_cached_db(cache_key)
-    return _open_complete_db(cache_key, db_path)
+    with _db_cache_lock:
+        cached = _db_cache.get(cache_key)
+        if cached is not None:
+            if _cached_db_is_usable(cached, db_path):
+                return cached[0]
+            _close_cached_db(cache_key)
+        return _open_complete_db(cache_key, db_path)
 
 
 def clear_db_cache(project_dir: Path | str | None = None):
@@ -113,15 +181,16 @@ def clear_db_cache(project_dir: Path | str | None = None):
     MCP server 停止时调用，防止跨扫描返回失效连接。传入 project_dir 时
     只清理该本地 MCP 实例绑定的索引连接，避免影响其他并发扫描。
     """
-    if project_dir is not None:
-        _close_cached_db(_cache_key_for_path(Path(project_dir) / "code_index.db"))
-        return
-    for db, _fingerprint in _db_cache.values():
-        try:
-            db.close()
-        except Exception:
-            pass
-    _db_cache.clear()
+    with _db_cache_lock:
+        if project_dir is not None:
+            _close_cached_db(_cache_key_for_path(Path(project_dir) / "code_index.db"))
+            return
+        for db, _fingerprint in _db_cache.values():
+            try:
+                db.close()
+            except Exception:
+                pass
+        _db_cache.clear()
 
 
 _MCP_LOG_DETAIL_LIMIT = 500
@@ -186,71 +255,6 @@ def _json_preview(value: object, max_chars: int = _MCP_LOG_ARGS_LIMIT) -> str:
     except Exception:
         text = str(value)
     return _preview(text, max_chars)
-
-
-def _append_result_payload(result_path: Path, payload: dict) -> None:
-    """Append payload while preserving compatibility with old single-result files."""
-    if result_path.exists():
-        try:
-            current = json.loads(result_path.read_text(encoding="utf-8"))
-        except Exception:
-            current = None
-        if isinstance(current, dict) and isinstance(current.get("results"), list):
-            results = [item for item in current["results"] if isinstance(item, dict)]
-        elif isinstance(current, list):
-            results = [item for item in current if isinstance(item, dict)]
-        elif isinstance(current, dict):
-            results = [current]
-        else:
-            results = []
-        results.append(payload)
-        data = {"results": results}
-    else:
-        data = payload
-    result_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-
-
-def _context_trace(ctx: Context | None) -> dict:
-    if ctx is None:
-        return {}
-    trace: dict[str, str] = {}
-    try:
-        request_id = str(ctx.request_id or "").strip()
-    except Exception:
-        request_id = ""
-    try:
-        client_id = str(ctx.client_id or "").strip()
-    except Exception:
-        client_id = ""
-    if request_id:
-        trace["mcp_request_id"] = request_id
-    if client_id:
-        trace["mcp_client_id"] = client_id
-    return trace
-
-
-def _submit_payload(
-    tool_name: str,
-    opencode_session_id: str | None,
-    opencode_call_id: str | None,
-    payload: dict,
-) -> tuple[bool, str]:
-    session_id = str(opencode_session_id or "").strip()
-    call_id = str(opencode_call_id or "").strip()
-    if not session_id:
-        return False, "无法提交结果：OpenCode plugin 未注入 opencode_session_id，无法判断 OpenCode session。"
-    payload_to_save = dict(payload)
-    payload_to_save["opencode_session_id"] = session_id
-    if call_id:
-        payload_to_save["opencode_call_id"] = call_id
-    try:
-        from backend.opencode.submit_sink import record_submission
-
-        seq = record_submission(session_id, tool_name, payload_to_save)
-    except Exception as exc:
-        return False, f"无法提交结果：保存 {tool_name} 结果失败：{exc}"
-    call_note = f", call_id={call_id}" if call_id else ""
-    return True, f"结果已提交（session_id={session_id}{call_note}, tool={tool_name}, seq={seq}）。"
 
 
 def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
@@ -466,156 +470,3 @@ def register_tools(mcp: FastMCP, project_dir: Path | str | None = None) -> None:
             detail=f"{len(rows)} reference(s)",
         )
         return result
-
-    @mcp.tool()
-    def submit_history_pattern(
-        security_related: bool,
-        pattern: str = "",
-        lens_hint: str = "",
-        files: str = "",
-        rationale: str = "",
-        opencode_session_id: str | None = None,
-        opencode_call_id: str | None = None,
-        ctx: Context | None = None,
-    ) -> str:
-        """
-        提交一条 git 历史提交的安全问题模式判定结论。分析完单条提交后必须调用此工具。
-
-        参数：
-            security_related: 该提交是否是一次安全修复。
-            pattern: 若相关，提炼出的可复用问题模式（根因 + 缺陷类型 + 触发条件的抽象描述，不要只抄提交标题）。
-            lens_hint: 安全视角，可选值 memory/integer/race/injection/authn/crypto/dos/infoleak。
-            files: 涉及的文件，逗号分隔。
-            rationale: 判定理由 + 改动要点摘要。
-            opencode_session_id: OpenCode plugin 自动注入的 session ID。
-            opencode_call_id: OpenCode plugin 自动注入的 tool call ID。
-
-        返回：
-            提交成功的确认消息。
-        """
-        file_list = [s.strip() for s in str(files or "").replace("\n", ",").split(",") if s.strip()]
-        payload = {
-            "kind": "history_pattern",
-            "security_related": bool(security_related),
-            "pattern": pattern,
-            "lens_hint": lens_hint,
-            "files": file_list,
-            "rationale": rationale,
-        }
-        _mcp_log_call("submit_history_pattern", _json_preview({
-            "opencode_session_id": opencode_session_id,
-            "opencode_call_id": opencode_call_id,
-            **_context_trace(ctx),
-            "security_related": security_related,
-            "pattern": pattern,
-            "lens_hint": lens_hint,
-            "files": files,
-            "rationale": rationale,
-        }))
-        ok, message = _submit_payload("submit_history_pattern", opencode_session_id, opencode_call_id, payload)
-        _mcp_log_return("submit_history_pattern", message, status="ok" if ok else "error")
-        return message
-
-    @mcp.tool()
-    def submit_variant_finding(
-        file: str,
-        line: int,
-        function: str,
-        vuln_type: str,
-        description: str,
-        rationale: str = "",
-        opencode_session_id: str | None = None,
-        opencode_call_id: str | None = None,
-        ctx: Context | None = None,
-    ) -> str:
-        """
-        提交一处同类变体排查命中的疑似缺陷站点。每核实坐实一处即调用一次（可多次调用累加）。
-
-        参数：
-            file: 命中站点所在文件路径（相对项目根）。
-            line: 命中站点行号。
-            function: 命中站点所在函数。
-            vuln_type: 缺陷类型，必须从分析提示给出的可选检查项列表中选一个。
-            description: 一句话描述该处缺陷及其与历史问题模式的相似点。
-            rationale: 可选，核实推理过程（为何该站点缺少等价校验/存在同类缺陷）。
-            opencode_session_id: OpenCode plugin 自动注入的 session ID。
-            opencode_call_id: OpenCode plugin 自动注入的 tool call ID。
-
-        返回：
-            提交成功的确认消息。
-        """
-        payload = {
-            "kind": "variant_finding",
-            "file": file,
-            "line": line,
-            "function": function,
-            "vuln_type": vuln_type,
-            "description": description,
-            "rationale": rationale,
-        }
-        _mcp_log_call("submit_variant_finding", _json_preview({
-            "opencode_session_id": opencode_session_id,
-            "opencode_call_id": opencode_call_id,
-            **_context_trace(ctx),
-            **payload,
-        }))
-        ok, message = _submit_payload("submit_variant_finding", opencode_session_id, opencode_call_id, payload)
-        _mcp_log_return("submit_variant_finding", message, status="ok" if ok else "error")
-        return message
-
-    @mcp.tool()
-    def submit_match_result(
-        matched: bool,
-        match_type: str = "",
-        match_reference: str = "",
-        description: str = "",
-        ai_analysis: str = "",
-        vulnerability_report: str = "",
-        opencode_session_id: str | None = None,
-        opencode_call_id: str | None = None,
-        ctx: Context | None = None,
-    ) -> str:
-        """
-        提交去误报「历史/校验匹配」阶段的结论。判断该候选是否能与历史问题模式或其它函数的
-        正确校验对应上；若能对应，则直接判定为 high。
-
-        参数：
-            matched: 是否成立匹配（true 表示与历史问题或其它函数校验对应上，可直接定为 high）。
-            match_type: 匹配类型，"history"（对应历史问题模式）或 "validation"（对应其它函数的正确校验）。
-            match_reference: 对应的修复/校验描述：历史模式根因摘要+出处提交，或正确校验站点 path:line + 一句话说明。
-            description: 一句话结论摘要。
-            ai_analysis: 详细推理（含代码路径与匹配依据）。
-            vulnerability_report: 匹配成立时填写的 Markdown 问题报告。
-            opencode_session_id: OpenCode plugin 自动注入的 session ID。
-            opencode_call_id: OpenCode plugin 自动注入的 tool call ID。
-
-        返回：
-            提交成功的确认消息。
-        """
-        payload = {
-            "kind": "match_result",
-            "confirmed": bool(matched),
-            "severity": "high" if matched else "low",
-            "description": description,
-            "ai_analysis": ai_analysis,
-            "vulnerability_report": vulnerability_report,
-            "match_type": match_type,
-            "match_reference": match_reference,
-            "file": "",
-            "line": 0,
-            "function": "",
-        }
-        _mcp_log_call("submit_match_result", _json_preview({
-            "opencode_session_id": opencode_session_id,
-            "opencode_call_id": opencode_call_id,
-            **_context_trace(ctx),
-            "matched": matched,
-            "match_type": match_type,
-            "match_reference": match_reference,
-            "description": description,
-            "ai_analysis": ai_analysis,
-            "vulnerability_report": vulnerability_report,
-        }))
-        ok, message = _submit_payload("submit_match_result", opencode_session_id, opencode_call_id, payload)
-        _mcp_log_return("submit_match_result", message, status="ok" if ok else "error")
-        return message

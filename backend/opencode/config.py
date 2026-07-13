@@ -231,9 +231,8 @@ def _link_skills(
                 )
                 if fp_section:
                     logger.debug("Merged FP experience into prompt for checker %s", name)
-            # API checker can fall back to opencode when the API is unavailable.
-            # If SKILL.md exists, generate it too so opencode can use the same
-            # checker name as the API-mode prompt directory.
+            # Legacy API checkers are executed only through OpenCode now.  Keep
+            # prompt.txt compatibility by materializing a temporary SKILL.
             if entry.skill_path.is_file():
                 skill_dest = link_dir / "SKILL.md"
                 if skill_dest.exists():
@@ -247,8 +246,22 @@ def _link_skills(
                     logger.debug("Merged FP experience into fallback skill for checker %s", name)
             else:
                 logger.warning(
-                    "SKILL.md not found for API checker %s; opencode fallback is unavailable",
+                    "Checker %s uses deprecated mode=api; wrapping prompt.txt as a temporary OpenCode SKILL",
                     name,
+                )
+                prompt_text = (
+                    entry.prompt_path.read_text(encoding="utf-8")
+                    if entry.prompt_path and entry.prompt_path.is_file()
+                    else ""
+                )
+                skill_dest = link_dir / "SKILL.md"
+                skill_dest.write_text(
+                    "---\n"
+                    f"name: {name}\n"
+                    "description: Legacy prompt.txt checker wrapped for OpenCode execution.\n"
+                    "---\n\n"
+                    + _merge_feedback_section(prompt_text, fp_section),
+                    encoding="utf-8",
                 )
             _link_skill_resources(entry, link_dir)
             continue

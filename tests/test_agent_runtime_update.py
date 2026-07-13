@@ -336,30 +336,6 @@ class AgentRuntimePackageTests(unittest.TestCase):
                         "not-the-expected-hash",
                     )
 
-    def test_config_test_does_not_mutate_live_config(self) -> None:
-        live_config = AgentConfig()
-        live_config.llm_api.api_key = "live-key"
-        agent_server._config = live_config
-
-        def fake_probe(llm_cfg):
-            self.assertEqual(llm_cfg.api_key, "form-key")
-            return True, ""
-
-        async def fake_to_thread(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        with (
-            patch("agent.server.asyncio.to_thread", new=fake_to_thread),
-            patch("backend.opencode.llm_api_runner.probe_llm_api_config", side_effect=fake_probe),
-        ):
-            result = asyncio.run(agent_server.handle_config_test(
-                "req-1",
-                {"llm_api": {"api_key": "form-key"}},
-            ))
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(live_config.llm_api.api_key, "live-key")
-
     def test_skill_creator_output_parser_accepts_fenced_json(self) -> None:
         parsed = agent_server._parse_skill_creator_output(
             "```json\n"

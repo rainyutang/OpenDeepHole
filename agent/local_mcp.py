@@ -1,8 +1,4 @@
-"""Local MCP server for agent opencode mode.
-
-Starts the MCP server in-process on a background thread so that opencode CLI
-can call the code-query tools against the locally indexed source.
-"""
+"""Agent-owned shared MCP gateway for OpenCode source-query tools."""
 
 from __future__ import annotations
 
@@ -10,6 +6,13 @@ import socket
 import threading
 import time
 from pathlib import Path
+
+
+_gateway_lock = threading.RLock()
+_gateway_port: int | None = None
+_gateway_server = None
+_gateway_thread: threading.Thread | None = None
+_gateway_thread_error: BaseException | None = None
 
 
 def _find_free_port() -> int:
@@ -21,34 +24,56 @@ def _find_free_port() -> int:
 class LocalMCPServer:
     """Runs the MCP server in-process on a background daemon thread."""
 
-    def __init__(self, project_dir: Path | str | None = None) -> None:
-        self.port: int = _find_free_port()
+    def __init__(
+        self,
+        project_dir: Path | str | None = None,
+        project_id: str | None = None,
+    ) -> None:
+        self.port: int = _gateway_port or _find_free_port()
         self.project_dir = Path(project_dir).resolve() if project_dir is not None else None
+        self.project_id = str(project_id or "").strip() or "*"
         self._server = None
         self._thread: threading.Thread | None = None
         self._thread_error: BaseException | None = None
 
     def start(self) -> int:
-        """Start the server and block until it is ready. Returns port number."""
+        """Register this scan and return the single Agent-wide gateway port."""
+        global _gateway_port, _gateway_server, _gateway_thread, _gateway_thread_error
         import uvicorn
         from mcp_server.factory import create_mcp_server
+        from mcp_server.tools import register_project_path
 
-        mcp = create_mcp_server(project_dir=self.project_dir)
-        app = mcp.streamable_http_app()
-
-        config = uvicorn.Config(
-            app, host="127.0.0.1", port=self.port, log_level="error"
-        )
-        self._server = uvicorn.Server(config)
-        self._thread_error = None
-        self._thread = threading.Thread(target=self._run_server, daemon=True)
-        self._thread.start()
-
-        try:
-            self._wait_ready()
-        except Exception:
-            self.stop()
-            raise
+        with _gateway_lock:
+            if _gateway_server is None:
+                self.port = _gateway_port or self.port
+                mcp = create_mcp_server()
+                app = mcp.streamable_http_app()
+                config = uvicorn.Config(
+                    app, host="127.0.0.1", port=self.port, log_level="error"
+                )
+                self._server = uvicorn.Server(config)
+                self._thread_error = None
+                self._thread = threading.Thread(target=self._run_server, daemon=True)
+                self._thread.start()
+                try:
+                    self._wait_ready()
+                except Exception:
+                    if self._server:
+                        self._server.should_exit = True
+                    if self._thread:
+                        self._thread.join(timeout=5)
+                    raise
+                _gateway_port = self.port
+                _gateway_server = self._server
+                _gateway_thread = self._thread
+                _gateway_thread_error = self._thread_error
+            else:
+                self.port = int(_gateway_port or self.port)
+                self._server = _gateway_server
+                self._thread = _gateway_thread
+                self._thread_error = _gateway_thread_error
+            if self.project_dir is not None:
+                register_project_path(self.project_id, self.project_dir)
         return self.port
 
     def _run_server(self) -> None:
@@ -85,17 +110,29 @@ class LocalMCPServer:
         )
 
     def stop(self) -> None:
-        from mcp_server.tools import clear_db_cache
-        clear_db_cache(self.project_dir)
-        if self._server:
-            self._server.should_exit = True
-        if self._thread:
-            self._thread.join(timeout=5)
-        self._server = None
-        self._thread = None
-        self._thread_error = None
+        """Unregister this scan; the Agent-wide gateway remains alive."""
+        from mcp_server.tools import unregister_project_path
+        unregister_project_path(self.project_id, self.project_dir)
 
     def restart(self) -> int:
-        """Restart the in-process MCP server while keeping the same port."""
+        """Refresh this scan's route while keeping the shared gateway alive."""
         self.stop()
         return self.start()
+
+
+def shutdown_local_mcp_gateway() -> None:
+    """Stop the shared gateway during Agent process shutdown or tests."""
+    global _gateway_port, _gateway_server, _gateway_thread, _gateway_thread_error
+    from mcp_server.tools import clear_db_cache, clear_project_paths
+
+    with _gateway_lock:
+        if _gateway_server is not None:
+            _gateway_server.should_exit = True
+        if _gateway_thread is not None:
+            _gateway_thread.join(timeout=5)
+        _gateway_port = None
+        _gateway_server = None
+        _gateway_thread = None
+        _gateway_thread_error = None
+        clear_project_paths()
+        clear_db_cache()

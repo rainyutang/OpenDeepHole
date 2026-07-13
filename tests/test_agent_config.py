@@ -23,11 +23,8 @@ class AgentConfigTests(unittest.TestCase):
         cfg = AgentConfig()
 
         self.assertEqual(cfg.no_proxy, "10.0.0.0/8")
-        self.assertEqual(cfg.llm_api.timeout, 300)
-        self.assertFalse(cfg.llm_api.stream)
         self.assertEqual(cfg.opencode.tool, "nga")
         self.assertEqual(cfg.opencode.executable, "nga")
-        self.assertEqual(cfg.opencode.invocation_mode, "serve")
         self.assertEqual(cfg.opencode.timeout, 1200)
         self.assertEqual(cfg.opencode.max_retries, 2)
         self.assertEqual(cfg.opencode.config_paths, [])
@@ -75,7 +72,6 @@ class AgentConfigTests(unittest.TestCase):
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
         cfg = AgentConfig()
         cfg.no_proxy = "localhost"
-        cfg.llm_api.stream = True
         cfg.opencode.max_retries = 5
         cfg.git_history.enabled = True
 
@@ -83,7 +79,6 @@ class AgentConfigTests(unittest.TestCase):
             cfg,
             {
                 "no_proxy": "",
-                "llm_api": {"stream": False, "timeout": 300},
                 "opencode": {
                     "tool": "nga",
                     "executable": "nga",
@@ -94,8 +89,8 @@ class AgentConfigTests(unittest.TestCase):
                     "no_proxy": "corp.local,127.0.0.1",
                 },
                 "fp_review_cli": {
-                    "tool": "claude",
-                    "executable": "claude",
+                    "tool": "opencode",
+                    "executable": "opencode",
                     "model": "sonnet",
                     "timeout": 900,
                     "max_retries": 1,
@@ -133,18 +128,14 @@ class AgentConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(cfg.no_proxy, "")
-        self.assertFalse(cfg.llm_api.stream)
-        self.assertEqual(cfg.llm_api.timeout, 300)
         self.assertEqual(cfg.opencode.max_retries, 0)
         self.assertEqual(cfg.opencode.timeout, 1200)
         self.assertEqual(cfg.opencode.tool, "nga")
-        self.assertEqual(cfg.opencode.invocation_mode, "serve")
         self.assertEqual(cfg.opencode.config_paths, ["/opt/opencode/config.json"])
         self.assertEqual(cfg.opencode.proxy_url, "http://127.0.0.1:3131")
         self.assertEqual(cfg.opencode.no_proxy, "corp.local,127.0.0.1")
         self.assertIsNotNone(cfg.fp_review_cli)
-        self.assertEqual(cfg.fp_review_cli.tool, "claude")
-        self.assertEqual(cfg.fp_review_cli.invocation_mode, "serve")
+        self.assertEqual(cfg.fp_review_cli.tool, "opencode")
         self.assertEqual(cfg.fp_review_cli.model, "sonnet")
         self.assertEqual(cfg.fp_review_cli.config_paths, ["/opt/opencode/fp.json"])
         self.assertEqual(cfg.fp_review_cli.proxy_url, "http://127.0.0.1:3132")
@@ -171,18 +162,15 @@ class AgentConfigTests(unittest.TestCase):
 
     def test_remote_config_dict_exports_managed_fields(self) -> None:
         cfg = AgentConfig()
-        cfg.llm_api.stream = True
         cfg.opencode.tool = "nga"
         cfg.opencode.executable = "nga"
 
         remote = remote_config_dict(cfg)
 
         self.assertEqual(remote["no_proxy"], "10.0.0.0/8")
-        self.assertTrue(remote["llm_api"]["stream"])
-        self.assertEqual(remote["llm_api"]["timeout"], 300)
+        self.assertNotIn("llm_api", remote)
         self.assertEqual(remote["opencode"]["executable"], "nga")
         self.assertEqual(remote["opencode"]["tool"], "nga")
-        self.assertEqual(remote["opencode"]["invocation_mode"], "serve")
         self.assertEqual(remote["opencode"]["timeout"], 1200)
         self.assertEqual(remote["opencode"]["max_retries"], 2)
         self.assertEqual(remote["opencode_concurrency"], 4)
@@ -234,7 +222,6 @@ class AgentConfigTests(unittest.TestCase):
                 cfg,
                 {
                     "no_proxy": "10.0.0.0/8",
-                    "llm_api": {"stream": False, "timeout": 300},
                     "opencode": {
                         "tool": "opencode",
                         "executable": "opencode",
@@ -245,8 +232,8 @@ class AgentConfigTests(unittest.TestCase):
                         "no_proxy": "corp.local,127.0.0.1",
                     },
                     "fp_review_cli": {
-                        "tool": "claude",
-                        "executable": "claude",
+                        "tool": "opencode",
+                        "executable": "opencode",
                         "timeout": 900,
                         "config_paths": ["/opt/opencode/fp.json"],
                         "proxy_url": "http://127.0.0.1:3132",
@@ -276,10 +263,8 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["server_url"], "http://example.test")
             self.assertEqual(raw["agent_name"], "local-agent")
             self.assertEqual(raw["no_proxy"], "10.0.0.0/8")
-            self.assertEqual(raw["llm_api"]["timeout"], 300)
-            self.assertFalse(raw["llm_api"]["stream"])
+            self.assertNotIn("llm_api", raw)
             self.assertEqual(raw["opencode"]["tool"], "opencode")
-            self.assertEqual(raw["opencode"]["invocation_mode"], "serve")
             self.assertEqual(raw["opencode"]["timeout"], 1200)
             self.assertEqual(raw["opencode"]["max_retries"], 2)
             self.assertEqual(raw["opencode"]["models"], [])
@@ -287,8 +272,7 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["opencode"]["proxy_url"], "http://127.0.0.1:3131")
             self.assertEqual(raw["opencode"]["no_proxy"], "corp.local,127.0.0.1")
             self.assertEqual(raw["opencode_concurrency"], 4)
-            self.assertEqual(raw["fp_review_cli"]["tool"], "claude")
-            self.assertEqual(raw["fp_review_cli"]["invocation_mode"], "serve")
+            self.assertEqual(raw["fp_review_cli"]["tool"], "opencode")
             self.assertEqual(raw["fp_review_cli"]["timeout"], 900)
             self.assertEqual(raw["fp_review_cli"]["config_paths"], ["/opt/opencode/fp.json"])
             self.assertEqual(raw["fp_review_cli"]["proxy_url"], "http://127.0.0.1:3132")

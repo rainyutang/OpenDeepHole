@@ -985,16 +985,6 @@ def _backend_runtime_sections(config: AgentConfig, scan_dir: Path | None = None)
     opencode_config = dataclasses.asdict(config.opencode)
     opencode_config["mock"] = False
     raw = {
-        "llm_api": {
-            "enabled": True,  # per-checker mode in checker.yaml controls api vs opencode
-            "base_url": config.llm_api.base_url,
-            "api_key": config.llm_api.api_key,
-            "model": config.llm_api.model,
-            "temperature": config.llm_api.temperature,
-            "timeout": config.llm_api.timeout,
-            "max_retries": config.llm_api.max_retries,
-            "stream": config.llm_api.stream,
-        },
         "opencode": opencode_config,
         "opencode_concurrency": config.opencode_concurrency,
         "memory_api_discovery": {
@@ -1056,7 +1046,6 @@ def refresh_backend_runtime_config(config: AgentConfig) -> None:
     if current is None:
         return
     raw = _backend_runtime_sections(config)
-    current.llm_api = _cfg.LLMApiConfig(**raw["llm_api"])
     current.opencode = _cfg.OpenCodeConfig(**raw["opencode"])
     current.opencode_concurrency = int(raw["opencode_concurrency"])
     current.memory_api_discovery = _cfg.MemoryApiDiscoveryConfig(**raw["memory_api_discovery"])
@@ -1074,7 +1063,7 @@ def refresh_backend_runtime_config(config: AgentConfig) -> None:
 
 def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
     """Write a temporary backend config and reset singletons so all backend
-    modules use the agent's settings (LLM API key, scans_dir, etc.)."""
+    modules use the Agent's OpenCode, storage and network settings."""
     raw = _backend_runtime_sections(config, scan_dir)
     config_path = scan_dir / "config.yaml"
     config_path.write_text(yaml.dump(raw), encoding="utf-8")
@@ -1367,7 +1356,7 @@ async def run_scan(
         if selected_feedback:
             await emit("init", f"Loaded {len(selected_feedback)} selected feedback entries")
 
-        # --- Phase 3: Start local MCP (needed by opencode and API fallback) ---
+        # --- Phase 3: Register this scan on the Agent-wide MCP gateway ---
         mcp_port = None
         needs_opencode = (
             not candidate_retry_mode
@@ -1377,7 +1366,7 @@ async def run_scan(
         if needs_opencode:
             from agent.local_mcp import LocalMCPServer
             from agent import mcp_registry
-            mcp_server = LocalMCPServer(project_dir=project_path)
+            mcp_server = LocalMCPServer(project_dir=project_path, project_id=scan_id)
             mcp_port = await asyncio.to_thread(mcp_server.start)
             mcp_registry.register(project_path, mcp_port, scan_id)
             await emit("mcp_ready", f"Local MCP server ready on port {mcp_port}")
@@ -1401,15 +1390,6 @@ async def run_scan(
             and not cancel_event.is_set()
             and threat_analysis_enabled(config)
         ):
-            from backend.opencode.model_pool import register_planned_task
-            threat_planned_task_id = await register_planned_task(
-                scan_id,
-                {
-                    "task_type": "threat_analysis",
-                    "required_capability": "high",
-                },
-                task_key=f"{scan_id}:threat_analysis",
-            )
             threat_analysis_task = asyncio.create_task(_run_threat_analysis_phase(
                 config=config,
                 project_path=project_path,
@@ -1421,7 +1401,7 @@ async def run_scan(
                 cancel_event=cancel_event,
                 emit=lambda phase, message: emit(phase, message),
                 is_resume=is_resume,
-                planned_task_id=threat_planned_task_id,
+                planned_task_id="",
                 retry_threat_audit_task_ids=retry_threat_audit_task_ids,
             ))
 
@@ -1748,7 +1728,7 @@ async def run_scan(
             await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
 
         cancelled = False
-        from backend.opencode.model_pool import register_planned_task, total_model_capacity
+        from backend.opencode.model_pool import total_model_capacity
         audit_capacity = total_model_capacity(
             config.opencode,
             global_concurrency=config.opencode_concurrency,
@@ -1758,36 +1738,9 @@ async def run_scan(
         result_lock = asyncio.Lock()
         rejected_patterns: set[tuple[object, ...]] = set()
 
-        def planned_candidate_context(global_index: int, candidate: Candidate) -> dict:
-            checker_entry = registry.get(candidate.vuln_type)
-            required_capability = (
-                checker_entry.model_capability
-                if checker_entry is not None and checker_entry.model_capability
-                else "any"
-            )
-            return {
-                "task_type": "audit",
-                "checker": candidate.vuln_type,
-                "file": candidate.file,
-                "line": candidate.line,
-                "function": candidate.function,
-                "audit_index": global_index,
-                "required_capability": required_capability,
-                "queue_group": f"{scan_id}:audit",
-            }
-
         for local_index, candidate in enumerate(remaining):
             global_index = already_done + local_index
-            planned_id = await register_planned_task(
-                scan_id,
-                planned_candidate_context(global_index, candidate),
-                task_key=(
-                    f"audit:{global_index}:"
-                    f"{candidate.file}:{candidate.line}:{candidate.function}:{candidate.vuln_type}"
-                ),
-            )
             metadata = dict(candidate.metadata or {})
-            metadata["_opencode_planned_task_id"] = planned_id
             metadata["_opencode_audit_index"] = global_index
             candidate.metadata = metadata
 
@@ -2251,11 +2204,6 @@ async def run_scan(
         except Exception:
             pass
         # 清理 API runner 缓存的 DB 连接
-        try:
-            from backend.opencode.llm_api_runner import _close_db_cache
-            _close_db_cache()
-        except Exception:
-            pass
         try:
             if workspace is not None:
                 await asyncio.to_thread(cleanup_workspace, workspace)

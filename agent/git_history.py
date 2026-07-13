@@ -2,7 +2,7 @@
 
 迁移自 SecAnt 的历史问题模式挖掘能力：扫描 git 提交历史，逐条提交判定是否
 为一次安全修复，若是则提炼一条「可复用于同类变体排查的问题模式」。每条提交
-派一个 CLI 调用（忠于 SecAnt 的 per-commit 粒度），并发数由模型池容量决定。
+派一个 OpenCode 任务（忠于 SecAnt 的 per-commit 粒度），并发数由模型池容量决定。
 
 挖掘结果（list[HistoryPattern]）用于：
 1. 同类变体排查（agent/variant_hunter.py）——全仓搜索同类代码模式；
@@ -19,13 +19,25 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
-from backend.models import Candidate, HistoryPattern
+from backend.models import HistoryPattern
 from backend.opencode.output_format import with_local_timestamp
 
 # 单条提交 diff 注入 prompt 的字符上限，避免超长提交撑爆上下文
 _DIFF_CHAR_LIMIT = 16000
 _LENS_VALUES = {
     "memory", "integer", "race", "injection", "authn", "crypto", "dos", "infoleak",
+}
+_HISTORY_PATTERN_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "security_related": {"type": "boolean"},
+        "pattern": {"type": "string"},
+        "lens_hint": {"type": "string"},
+        "files": {"type": "array", "items": {"type": "string"}},
+        "rationale": {"type": "string"},
+    },
+    "required": ["security_related", "pattern", "lens_hint", "files", "rationale"],
+    "additionalProperties": False,
 }
 
 
@@ -114,7 +126,7 @@ def _commit_diff(project_path: Path, commit_hash: str) -> str:
 
 
 def _ensure_skill(workspace: Path) -> None:
-    """把 git 历史挖掘 skill 写入工作区，供 CLI 工具加载。"""
+    """把 git 历史挖掘 skill 写入工作区，供 OpenCode 任务加载。"""
     skill_src = Path(__file__).parent / "skills" / "git_history_mine.md"
     skill_dir = workspace / ".opencode" / "skills" / "git-history-mine"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -140,7 +152,7 @@ def _build_prompt(commit: _Commit, diff: str) -> str:
         "标注最相关的 lens_hint（memory/integer/race/injection/authn/crypto/dos/infoleak）、涉及文件，"
         "并在 rationale 里简述改动要点与判定理由。\n"
         "(3) 若不相关：security_related=false 即可，其它字段可留空。\n\n"
-        "分析完成后，你**必须**调用 `submit_history_pattern` MCP 工具提交结论。"
+        "分析完成后通过 structured output 返回 security_related、pattern、lens_hint、files、rationale。"
     )
 
 
@@ -158,11 +170,7 @@ async def mine_history(
 
     返回去重后的 HistoryPattern 列表。非 git 仓库或无提交时返回 []。
     """
-    from backend.opencode.runner import (
-        _invoke_opencode,
-        _read_session_result_file,
-        _session_id_from_output_source,
-    )
+    from backend.opencode.runner import _invoke_opencode
     from backend.opencode.model_pool import NoAvailableModelError, total_model_capacity
 
     gh = config.git_history
@@ -204,18 +212,9 @@ async def mine_history(
         attempt_id = uuid4().hex
         prompt = _build_prompt(commit, diff)
         log_path = scan_dir / f"git_history_{commit.hash[:10]}_{attempt_id}.log"
-        attempt_source = None
 
-        def capture_source(source) -> None:
-            nonlocal attempt_source
-            attempt_source = source
-
-        fake_candidate = Candidate(
-            file="", line=0, function="", description=commit.subject,
-            vuln_type="git_history",
-        )
         try:
-            await _invoke_opencode(
+            output_text = await _invoke_opencode(
                 workspace,
                 prompt,
                 int(getattr(cli_config, "timeout", 1200) or 1200),
@@ -229,7 +228,9 @@ async def mine_history(
                 project_dir=project_path,
                 model_capability="any",
                 stats_scope_id=scan_id,
-                on_invocation_metadata=capture_source,
+                task_name=f"Git 历史审计 {commit.hash[:10]}",
+                skills=["git-history-mine"],
+                output_schema=_HISTORY_PATTERN_JSON_SCHEMA,
             )
         except asyncio.CancelledError:
             raise
@@ -244,11 +245,11 @@ async def mine_history(
             except Exception:
                 pass
 
-        payload = _read_session_result_file(
-            _session_id_from_output_source(attempt_source),
-            fake_candidate,
-            tool_name="submit_history_pattern",
-        )
+        try:
+            import json
+            payload = json.loads(output_text)
+        except Exception:
+            payload = {}
 
         async with lock:
             processed += 1

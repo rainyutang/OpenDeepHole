@@ -119,14 +119,8 @@ agent_name: "my-agent"
 # 用户归属 token（下载 Agent 时自动填入，勿手动修改）
 owner_token: ""
 
-# LLM API 配置（供 mode: api 的检查项使用）
-llm_api:
-  base_url: "https://api.anthropic.com"
-  api_key: "your-api-key-here"
-  model: "claude-sonnet-4-6"
-
-# CLI 审计工具配置（供 mode: opencode 的检查项使用）
-# tool 可选: nga, opencode, hac, claude
+# OpenCode 任务配置。所有模型任务都通过 OpenCode serve/session 执行。
+# tool 可选: nga, opencode
 opencode:
   tool: "nga"
   executable: "nga"
@@ -136,7 +130,7 @@ opencode:
   proxy_url: ""   # 可选：OpenCode/nga 子进程代理，如 "http://127.0.0.1:3131"
   no_proxy: ""    # 可选：OpenCode/nga 子进程 no_proxy；留空时使用内网默认列表
   config_paths: [] # 可选：额外合并的 OpenCode 配置文件，一行/一项一个路径
-  # 模型池。空池或全禁用时 LLM 任务会立即失败；CLI 默认模型也必须显式添加。
+  # 模型池。空池或全禁用时任务保持阻塞排队；默认模型也必须显式添加。
   models:
     - id: "fast"
       model: "fast-model"
@@ -175,10 +169,10 @@ vulnerability_validation:
   enabled: true
   timeout_seconds: 7200
 
-# AI 去误报 CLI 配置可选；不配置则继承上面的审计工具和模型
+# AI 去误报 OpenCode 配置可选；不配置则继承上面的审计工具和模型
 # fp_review_cli:
-#   tool: "claude"
-#   executable: "claude"
+#   tool: "opencode"
+#   executable: "opencode"
 #   model: ""      # 已废弃兼容字段；模型调度只读取 models
 #   timeout: 1200
 #   max_retries: 2
@@ -191,12 +185,12 @@ vulnerability_validation:
 #       enabled: true
 ```
 
-> 每个检查项的调用方式（`api` 或 `opencode`）在其 `checker.yaml` 中独立配置，无需全局 `mode` 选项。
+> 所有检查项都通过统一 OpenCode 任务组件执行。旧 `mode: api` + `prompt.txt` 检查项会被兼容包装成临时 SKILL，不再直调 LLM API。
 > 每个检查项可在 `checker.yaml` 中设置 `model_capability: low|medium|high` 指定最低模型能力；未配置时默认为 `any`，AI 去误报默认优先使用高能力模型。
-> OpenCode/兼容 CLI 模型必须在 `models[]` 中显式添加并启用；顶层 `model` 不再参与调度。空模型池或全禁用时配置仍可保存，但 LLM 任务会立即失败。如需 CLI 自行选择默认模型，请添加 `use_default_model: true` 的启用行。
+> OpenCode 模型必须在 `models[]` 中显式添加并启用；顶层 `model` 不再参与调度。空模型池或全禁用时配置仍可保存，任务会保持阻塞排队。如需 OpenCode 自行选择默认模型，请添加 `use_default_model: true` 的启用行。
 > 模型池的 `time_windows` 使用 Agent 本地每日时间，支持跨午夜窗口；空数组表示全天可用。若存在满足能力要求但当前不在时间窗口内的模型，任务会排队等待，而不会降级使用当前时段的低能力模型。
 > 扫描详情页顶部的「模型看板」会展示当前扫描的 OpenCode 模型池统计，包括每个模型累计任务、成功/失败/超时/取消次数、平均耗时、运行中和排队数；页面刷新后会读取最近一次上报快照。
-> Agent 启动并连接服务器后，也可以在 Web UI 的「客户端」页面中直接保存或校验 LLM API 配置，并在独立「模型池」页签中配置默认模型、能力、每日使用时间和并发；保存后的配置会写回 `agent.yaml`。
+> Agent 启动并连接服务器后，可以在 Web UI 的「客户端」页面配置 OpenCode 可执行文件、代理、默认模型、能力、每日使用时间和并发；保存后的配置会写回 `agent.yaml`。
 
 **第 3 步：确认代码索引工具**
 
@@ -259,7 +253,7 @@ Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 
 - **停止**：在扫描详情页点击「停止扫描」，服务器直接通知 Agent 停止。当前候选处理完成后立即停止，已处理的结果保留。
 - **恢复**：在扫描列表页点击「恢复」，服务器通知 Agent 继续同一扫描任务，自动跳过已处理的候选，从断点继续。无需重新启动 Agent 或重新索引代码。
-- **配置更新**：运行中的扫描收到新的 Agent 配置后，不会中断当前候选点；从下一个候选点开始使用最新 LLM API、AI CLI 工具和代理配置。
+- **配置更新**：运行中的扫描收到新的 Agent 配置后，不会中断当前 OpenCode 任务；排队任务会按新模型配置重新调度，后续任务使用最新工具、模型池和代理配置。
 
 ## 误报反馈机制
 
@@ -283,7 +277,7 @@ Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 checkers/<name>/
 ├── checker.yaml    # 必须：name, label, description, enabled, mode
 ├── SKILL.md        # opencode 模式必须；定义 AI 分析技巧
-├── prompt.txt      # api 模式可选；自定义系统提示词
+├── prompt.txt      # 旧 mode: api 的兼容输入，会包装成临时 OpenCode SKILL
 └── analyzer.py     # 可选：静态分析器（导出 Analyzer 类，继承 BaseAnalyzer）
 ```
 
@@ -296,12 +290,12 @@ description: "Use-After-Free 检测"
 enabled: true
 visibility: public    # public: 所有用户可见；admin: 仅管理员测试可见
 # family: uaf          # 可选，同类 checker 的跨规则去重家族；未配置时使用 name
-# mode: opencode       # 可选，默认 opencode；设为 api 则使用 prompt.txt + LLM 直接调用
-# skill_name: uaf-audit # 可选，opencode 模式下自定义 skill 名称
+# mode: opencode       # 可选；旧 api 值仅作 prompt.txt 兼容，不会直调 API
+# skill_name: uaf-audit # 可选，自定义 OpenCode skill 名称
 # model_capability: high # 可选，any/low/medium/high；未配置默认 any
 ```
 
-每个 Checker 独立配置 `mode`，同一次扫描中不同 Checker 可使用不同调用方式。
+新 Checker 应提供 `SKILL.md` 并使用默认 `mode: opencode`。历史 `mode: api` checker 仍可读取 `prompt.txt`，但运行时会包装成临时 SKILL 后提交 OpenCode session。
 同一 `family` 的候选会在静态阶段按同文件同函数做跨规则合并，只保留一个代表候选进入 AI 审计；代表点和同模式过滤规则见上文“静态候选合并与同模式过滤”。
 新增或修改 `checkers/` 下的 checker 后无需重启后端；后端会在列表刷新和点击开始扫描时重新扫描目录。测试阶段建议设置 `visibility: admin`，只有管理员能看到并启动该 checker；测试完成后改为 `visibility: public` 即可对所有用户开放。
 
@@ -360,16 +354,10 @@ name: mycheck
 label: MYCHECK
 description: "我的自定义漏洞检测"
 enabled: true
-mode: "api"
+mode: "opencode"
 ```
 
-**第 2 步（api 模式）：编写 prompt.txt**
-
-```
-你是专业的 C/C++ 漏洞审计专家。请分析以下函数是否存在 XXX 漏洞...
-```
-
-**第 2 步（opencode 模式）：编写 SKILL.md**
+**第 2 步：编写 SKILL.md**
 
 参考 `checkers/npd/SKILL.md`，定义分析步骤和可用 MCP 工具。
 
@@ -448,7 +436,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --json-output
 # 精确断言候选点数量
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-candidates 3
 
-# 可选：对前 1 个候选点运行真实 AI 审计（会使用 agent.yaml 中的 LLM/AI CLI 配置）
+# 可选：对前 1 个候选点运行真实 AI 审计（会使用 agent.yaml 中的 OpenCode 配置）
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --audit --audit-limit 1 --config agent.yaml
 ```
 
@@ -576,7 +564,7 @@ def find_candidates(self, project_path: Path, db=None) -> list[Candidate]:
 - Generator 模式适合耗时较长的分析器，可让 LLM 提前开始处理已发现的候选项
 - `on_file_progress` 回调用于前端进度条显示，建议在循环中定期调用
 - `description` 字段会作为初始 prompt 的一部分传递给 AI，应保持中性、简短，只描述需要审计确认的问题
-- `mode: api` 的 checker 使用 `prompt.txt` 而非 `SKILL.md`，适用于无需 MCP 工具的场景；需要 MCP 辅助复核的 checker 应使用 `mode: opencode`
+- 新 checker 统一使用 `SKILL.md`；旧 `mode: api` + `prompt.txt` 仅作为迁移兼容，模型调用仍走 OpenCode
 - 返回空列表是合法的，表示未找到候选点
 
 ### 服务端 config.yaml
@@ -616,18 +604,8 @@ no_proxy: "10.0.0.0/8"
 # 要运行的检查项，留空则运行全部已启用的检查项
 checkers: []
 
-# LLM API 配置（供 mode: api 的检查项使用）
-llm_api:
-  base_url: "https://api.anthropic.com"
-  api_key: "your-api-key-here"
-  model: "claude-sonnet-4-6"
-  temperature: 0.1
-  timeout: 300
-  max_retries: 3
-  stream: false
-
-# CLI 审计工具配置（供 mode: opencode 的检查项使用）
-# tool 可选: nga, opencode, hac, claude
+# OpenCode 任务配置；所有模型调用均使用 serve/session API。
+# tool 可选: nga, opencode
 opencode:
   tool: "nga"
   executable: "nga"
@@ -637,7 +615,7 @@ opencode:
   proxy_url: ""   # 可选：OpenCode/nga 子进程代理，也可用 OPENCODE_PROXY_URL 指定
   no_proxy: ""    # 可选：OpenCode/nga 子进程 no_proxy，也可用 OPENCODE_NO_PROXY 指定
   config_paths: [] # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
-  models: []     # 空池/全禁用会让 LLM 任务立即失败；字段同上方快速开始示例
+  models: []     # 空池/全禁用会让任务保持阻塞排队；字段同上方快速开始示例
 
 # OpenCode/兼容 CLI 总并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
 # 配置 models 后，该值仍是所有模型合计运行数的硬上限
@@ -667,10 +645,10 @@ git_history:
   paths: ""
   variant_hunt: true
 
-# AI 去误报 CLI 配置（可选；不配置则继承上面的审计工具和模型）
+# AI 去误报 OpenCode 配置（可选；不配置则继承上面的审计工具和模型）
 # fp_review_cli:
-#   tool: "claude"
-#   executable: "claude"
+#   tool: "opencode"
+#   executable: "opencode"
 #   model: ""      # 已废弃兼容字段；模型调度只读取 models
 #   timeout: 1200
 #   max_retries: 2
@@ -684,19 +662,52 @@ fp_review:
   auto_on_complete: true  # 扫描完成且存在已确认漏洞时自动触发去误报（无需手动点击）
 ```
 
-CLI 工具调用约定：
+OpenCode 调用约定：
 
 - `nga` / `opencode`：每个扫描或复核任务使用隔离的 OpenCode 配置目录；Agent 会合并用户全局目录、OpenCode 可执行文件所在目录、真实项目根目录、`opencode.config_paths` 和 `OPENCODE_CONFIG_PATH` 指向的 OpenCode provider/model 配置，再通过 `OPENCODE_CONFIG_CONTENT` 注入当前任务的 MCP URL、SKILL 路径和权限配置；注入环境变量前会移除顶层 `"$schema"`；`opencode.proxy_url` 或 `OPENCODE_PROXY_URL` 会被展开为 `HTTP_PROXY`/`HTTPS_PROXY` 及小写形式传给 OpenCode 子进程，`NO_PROXY/no_proxy` 默认使用内网列表且可由 `opencode.no_proxy` 或 `OPENCODE_NO_PROXY` 覆盖；API `directory` 始终指向真实项目根目录，不复制源码。
-- `nga` / `opencode` 默认通过 serve API 调用，单个 Agent 复用一个固定端口的 serve 进程；默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。发送 message 时不显式传 `tools`，由 OpenCode 按启动配置和 agent 默认能力暴露内置工具与 MCP 工具；配置内容变化时会等当前 session 结束后重启 serve。
+- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。每个任务在 message 级指定需要的 MCP 工具、SKILL system prompt、模型和原生 JSON Schema；权限在 session 创建/续写时设置。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
-- `hac`：按 Gemini CLI 兼容方式运行，Agent 会在任务隔离配置目录写入 `.gemini/settings.json` 的 MCP server，并把技能复制到 `.gemini/skills/`。
-- `claude`：按 Claude Code 兼容方式运行，Agent 会在任务隔离配置目录写入 `.claude/opendeephole-mcp.json` 并通过 `--mcp-config` 注入 MCP，同时把技能复制到 `.claude/skills/`。
+- Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
+- 漏洞验证 worker 通过父进程 RPC 调用同一个 OpenCode 任务组件；父进程按需复用共享 MCP 网关、注册项目索引路由并向 prompt 补充 `project_id`；验证脚本直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
+
+内部 Python 调用统一使用 `backend.opencode.task_service`：
+
+```python
+from backend.opencode.task_service import OpenCodeTaskSpec, get_opencode_task_service
+
+service = get_opencode_task_service()
+handle = service.submit_task(OpenCodeTaskSpec(
+    task_name="candidate audit",
+    prompt="...",
+    directory=project_path,
+    required_capability="medium",
+    mcp_tools=["view_function_code"],
+    skills=["npd"],
+    timeout_seconds=1200,
+    priority=60,
+    output_schema={"type": "object", "properties": {}, "additionalProperties": False},
+    permissions=[{"permission": "edit", "pattern": "*", "action": "deny"}],
+))
+session_id = await handle.wait_session_id()  # session 创建后即可取得
+result = await handle.result()               # 执行完成后取得结构化结果
+
+continued = await service.run_task(OpenCodeTaskSpec(
+    task_name="candidate follow-up",
+    prompt="...",
+    directory=project_path,
+    session_id=session_id,
+))
+messages = await service.get_session_messages(session_id)
+await service.delete_session(session_id)
+```
 
 OpenCode 模型池统计：
 
-- 位置审计、威胁分析和 AI 去误报都会通过统一调用入口累计模型池统计；扫描管线中的内存 API 预处理已禁用。
-- 模型必须在 `models[]` 中显式添加并启用；顶层 `model` 已废弃且不参与调度。空池或全禁用时任务立即失败，不会隐式使用 CLI 默认模型。
+- 威胁分析、候选点审计、威胁审计、去误报、历史分析、变体排查、SKILL 创建和漏洞验证全部通过 `OpenCodeTaskService`，统一创建/续写 session 并累计模型池统计。
+- 模型必须在 `models[]` 中显式添加并启用；顶层 `model` 已废弃且不参与调度。空池、能力不满足或时间窗外时任务保持阻塞排队，配置变化后自动重新调度。
 - 配置模型池后，`opencode_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
+- 任务优先级范围为 `1..100`，数值越大越先运行，同优先级按 FIFO；低/中能力任务优先用最低足够能力模型，在其不可用时可升级，高能力任务不会降级。
+- 任务超时只计算获得模型后的执行阶段，不包含排队时间。排队中的任务修改模型、能力、优先级或其它参数时保留 task ID、增加 revision 并重新入队；运行中任务不被隐式重启。
 - 模型行可设置 `use_default_model: true`，表示参与模型池调度但调用 CLI 时不传 `--model`。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。
@@ -754,7 +765,7 @@ OpenDeepHole/
 │   ├── task_manager.py    # 任务生命周期管理（创建/停止/恢复）
 │   ├── scanner.py         # 完整扫描流程（索引→静态分析→AI审计→上报）
 │   ├── reporter.py        # 向服务器上报进度和结果
-│   └── local_mcp.py       # CLI 审计模式：本地启动 MCP Server
+│   └── local_mcp.py       # Agent 进程级共享 MCP 网关
 ├── checkers/              # 插件目录（每种漏洞类型一个子目录）
 │   ├── npd/               # checker.yaml + SKILL.md/prompt.txt + analyzer.py
 │   ├── oob/
@@ -778,8 +789,8 @@ OpenDeepHole/
 │   │   └── auth.py        # 用户认证与管理 API
 │   ├── registry.py        # Checker 自动发现与注册
 │   ├── analyzers/base.py  # 静态分析器基类
-│   └── opencode/          # AI CLI + LLM API 集成
-├── mcp_server/            # MCP Server（Agent CLI 审计模式本地启动）
+│   └── opencode/          # OpenCode task/session、模型调度与 serve 集成
+├── mcp_server/            # Agent 共享 MCP 网关与源码查询工具
 ├── agent.yaml             # Agent 配置模板
 ├── run_agent.sh           # Agent 守护进程启动脚本（Linux/macOS）
 ├── run_agent.bat          # Agent 守护进程启动脚本（Windows）

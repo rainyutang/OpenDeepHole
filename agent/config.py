@@ -4,30 +4,18 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
-AI_CLI_TOOLS = ("nga", "opencode", "hac", "claude")
+AI_CLI_TOOLS = ("nga", "opencode")
 _DEFAULT_EXECUTABLES = {
     "nga": "nga",
     "opencode": "opencode",
-    "hac": "hac",
-    "claude": "claude",
 }
-
-
-@dataclass
-class LLMApiConfig:
-    base_url: str = ""
-    api_key: str = ""
-    model: str = "claude-sonnet-4-6"
-    temperature: float = 0.1
-    timeout: int = 300
-    max_retries: int = 3
-    stream: bool = False
 
 
 @dataclass
@@ -50,7 +38,6 @@ class OpenCodeModelConfig:
 class OpenCodeConfig:
     tool: str = "nga"
     executable: str = "nga"  # CLI executable name or full path
-    invocation_mode: str = "serve"  # serve | cli
     model: str = ""
     timeout: int = 1200
     max_retries: int = 2          # retry on transient errors (not timeout)
@@ -102,11 +89,9 @@ class VulnerabilityValidationConfig:
 
 
 def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
-    """Normalize a CLI config in place while keeping legacy executable values."""
+    """Normalize legacy AI-tool config to OpenCode-compatible serve mode."""
     tool = (config.tool or "").strip().lower()
     executable = (config.executable or "").strip()
-    invocation_mode = (getattr(config, "invocation_mode", "") or "").strip().lower()
-    config.invocation_mode = invocation_mode if invocation_mode in {"serve", "cli"} else "serve"
     raw_config_paths = getattr(config, "config_paths", []) or []
     if isinstance(raw_config_paths, str):
         config.config_paths = [line.strip() for line in raw_config_paths.splitlines() if line.strip()]
@@ -118,11 +103,18 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     config.proxy_url = str(getattr(config, "proxy_url", "") or "").strip()
     config.no_proxy = str(getattr(config, "no_proxy", "") or "").strip()
     if tool not in AI_CLI_TOOLS:
+        if tool:
+            warnings.warn(
+                f"Legacy AI tool {tool!r} is no longer supported; using opencode serve",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         inferred = Path(executable).name.lower() if executable else ""
         if inferred in AI_CLI_TOOLS:
             tool = inferred
         else:
             tool = "opencode"
+            executable = ""
     config.tool = tool
     if not executable:
         config.executable = _DEFAULT_EXECUTABLES[tool]
@@ -136,8 +128,14 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
         model_tool = (model_cfg.tool or "").strip().lower()
         model_executable = (model_cfg.executable or "").strip()
         if model_tool and model_tool not in AI_CLI_TOOLS:
-            inferred = Path(model_executable).name.lower() if model_executable else ""
-            model_tool = inferred if inferred in AI_CLI_TOOLS else ""
+            warnings.warn(
+                f"Legacy per-model AI tool {model_tool!r} is no longer supported; inheriting OpenCode tool",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            model_tool = ""
+            model_executable = ""
+            model_cfg.executable = ""
         model_cfg.tool = model_tool
         if model_tool and not model_executable:
             model_cfg.executable = _DEFAULT_EXECUTABLES[model_tool]
@@ -236,7 +234,6 @@ class AgentConfig:
     owner_token: str = ""
     no_proxy: str = "10.0.0.0/8"
     checkers: list = field(default_factory=list)
-    llm_api: LLMApiConfig = field(default_factory=LLMApiConfig)
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     fp_review_cli: OpenCodeConfig | None = None
     opencode_concurrency: int = 4
@@ -259,15 +256,13 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     """
     if "no_proxy" in remote and remote["no_proxy"] is not None:
         config.no_proxy = remote["no_proxy"]
-    for attr, sub_cfg in [("llm_api", config.llm_api), ("opencode", config.opencode)]:
-        section = remote.get(attr) or {}
-        if attr == "opencode" and isinstance(section, dict) and "tool" not in section and "executable" in section:
-            sub_cfg.tool = ""
-        for f in dataclasses.fields(sub_cfg):
-            if f.name in section and section[f.name] is not None:
-                setattr(sub_cfg, f.name, section[f.name])
-        if attr == "opencode":
-            normalize_cli_config(sub_cfg)
+    section = remote.get("opencode") or {}
+    if isinstance(section, dict) and "tool" not in section and "executable" in section:
+        config.opencode.tool = ""
+    for f in dataclasses.fields(config.opencode):
+        if f.name in section and section[f.name] is not None:
+            setattr(config.opencode, f.name, section[f.name])
+    normalize_cli_config(config.opencode)
     if "opencode_concurrency" in remote and remote["opencode_concurrency"] is not None:
         try:
             config.opencode_concurrency = max(1, min(8, int(remote["opencode_concurrency"])))
@@ -340,10 +335,6 @@ def remote_config_dict(config: AgentConfig) -> dict:
     """Return the server-managed subset of the local Agent config."""
     return {
         "no_proxy": config.no_proxy,
-        "llm_api": {
-            f.name: getattr(config.llm_api, f.name)
-            for f in dataclasses.fields(config.llm_api)
-        },
         "opencode": _opencode_config_dict(config.opencode),
         "opencode_concurrency": config.opencode_concurrency,
         "fp_review_cli": (
@@ -390,14 +381,12 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
 
-    llm_fields = {f.name for f in dataclasses.fields(LLMApiConfig)}
     oc_fields = {f.name for f in dataclasses.fields(OpenCodeConfig)}
     model_fields = {f.name for f in dataclasses.fields(OpenCodeModelConfig)}
     memory_api_fields = {f.name for f in dataclasses.fields(MemoryApiDiscoveryConfig)}
     pattern_filter_fields = {f.name for f in dataclasses.fields(PatternFilterConfig)}
     validation_fields = {f.name for f in dataclasses.fields(VulnerabilityValidationConfig)}
 
-    llm_raw = {k: v for k, v in raw.get("llm_api", {}).items() if k in llm_fields}
     oc_raw = {k: v for k, v in raw.get("opencode", {}).items() if k in oc_fields}
     if isinstance(oc_raw.get("models"), list):
         oc_raw["models"] = [
@@ -450,7 +439,6 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         owner_token=raw.get("owner_token", ""),
         no_proxy=raw.get("no_proxy", "10.0.0.0/8"),
         checkers=raw.get("checkers", []),
-        llm_api=LLMApiConfig(**llm_raw),
         opencode=normalize_cli_config(OpenCodeConfig(**oc_raw)),
         fp_review_cli=normalize_cli_config(fp_cfg) if fp_cfg is not None else None,
         opencode_concurrency=_bounded_int(raw.get("opencode_concurrency", 4), 4, 1, 8),
@@ -483,7 +471,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 def save_config(config: AgentConfig) -> None:
     """Persist remotely-managed config sections back to agent.yaml.
 
-    Only overwrites llm_api, opencode, and no_proxy — local fields like
+    Only overwrites opencode and no_proxy — local fields like
     server_url, agent_name, and agent_port are preserved as-is.
     """
     path = config.config_file
@@ -495,8 +483,7 @@ def save_config(config: AgentConfig) -> None:
     except Exception:
         raw = {}
     raw["no_proxy"] = config.no_proxy
-    raw["llm_api"] = {f.name: getattr(config.llm_api, f.name)
-                      for f in dataclasses.fields(config.llm_api)}
+    raw.pop("llm_api", None)
     raw["opencode"] = _opencode_config_dict(config.opencode)
     raw["opencode_concurrency"] = config.opencode_concurrency
     if config.fp_review_cli is None:

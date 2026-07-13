@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentConfigTestResult, AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
+import type { AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -558,11 +558,6 @@ export async function getAgentOpenCodeModels(agentId: string, refresh = false): 
 
 export async function updateAgentConfig(agentId: string, config: AgentRemoteConfig): Promise<void> {
   await api.put(`/api/agent/${agentId}/config`, config);
-}
-
-export async function testAgentConfig(agentId: string, config: AgentRemoteConfig): Promise<AgentConfigTestResult> {
-  const { data } = await api.post<AgentConfigTestResult>(`/api/agent/${agentId}/config/test`, config);
-  return data;
 }
 
 export async function syncProductValidators(agentId: string): Promise<{ ok: boolean; message: string; installed: string[] }> {

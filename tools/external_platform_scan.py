@@ -27,22 +27,22 @@ POLL_INTERVAL_SECONDS = 10
 
 AGENT_CONFIG: dict[str, Any] = {
     "no_proxy": "10.0.0.0/8,127.0.0.1,localhost",
-    "llm_api": {
-        "base_url": "https://api.example.com/v1",
-        "api_key": "replace-with-api-key",
-        "model": "claude-sonnet-4-6",
-        "temperature": 0.1,
-        "timeout": 300,
-        "max_retries": 3,
-        "stream": False,
-    },
     "opencode": {
         "tool": "opencode",
         "executable": "opencode",
         "model": "anthropic/claude-sonnet-4-20250514",
         "timeout": 1200,
         "max_retries": 2,
+        "models": [{
+            "id": "anthropic/claude-sonnet-4-20250514",
+            "model": "anthropic/claude-sonnet-4-20250514",
+            "capability": "high",
+            "weight": 1,
+            "max_concurrency": 1,
+            "enabled": True,
+        }],
     },
+    "opencode_concurrency": 1,
     "fp_review_cli": None,
 }
 

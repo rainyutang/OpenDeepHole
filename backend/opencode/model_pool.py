@@ -1,4 +1,4 @@
-"""Model-pool scheduling for OpenCode-compatible CLI invocations."""
+"""Capability and priority scheduling for unified OpenCode tasks."""
 
 from __future__ import annotations
 
@@ -74,6 +74,8 @@ class ModelRuntimeStats:
 class _PendingLeaseRequest:
     request_id: str
     sequence: int
+    priority: int
+    revision: int
     cli_config: Any
     global_concurrency: int | Any
     required_capability: str
@@ -83,6 +85,9 @@ class _PendingLeaseRequest:
     task_context: dict[str, Any]
     queued_at: float
     queued_at_iso: str
+    strict_capability: bool = False
+    prefer_lowest_capability: bool = False
+    wait_when_unavailable: bool = False
 
 
 @dataclass
@@ -136,6 +141,15 @@ def normalize_requirement(value: object) -> str:
     if normalized in {"", "any"}:
         return "low"
     return normalized if normalized in CAPABILITY_ORDER else "low"
+
+
+def normalize_priority(value: object, default: int = 50) -> int:
+    """Normalize public task priority to the supported 1..100 range."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(100, parsed))
 
 
 def capability_satisfies(model_capability: str, required: str) -> bool:
@@ -235,7 +249,7 @@ def total_model_capacity(
 ) -> int:
     """Sum of max_concurrency across enabled models satisfying the requirement.
 
-    This is the number of CLI invocations that can actually run in parallel.
+    This is the number of OpenCode messages that can actually run in parallel.
     When a model pool is configured, the top-level concurrency is a hard cap
     over all currently time-eligible models.
     """
@@ -338,6 +352,7 @@ def _available_options(
     *,
     global_concurrency: int,
     prefer_high: bool = False,
+    prefer_lowest_capability: bool = False,
 ) -> list[ModelOption]:
     if _global_running >= global_concurrency:
         return []
@@ -356,6 +371,7 @@ def _available_options(
     return sorted(
         available,
         key=lambda option: (
+            CAPABILITY_ORDER[option.capability] if prefer_lowest_capability else 0,
             _running_by_model.get(option.id, 0) / option.weight,
             _running_by_model.get(option.id, 0),
             -option.weight,
@@ -406,7 +422,12 @@ def _eligible_options_for_request_locked(
         all_options,
         required_capability=request.required_capability,
     )
-    if not eligible and active_options and (not pool_enabled or not configured_match):
+    if (
+        not request.strict_capability
+        and not eligible
+        and active_options
+        and (not pool_enabled or not configured_match)
+    ):
         # Configuration is too restrictive for the requested capability. Fall
         # back to all currently time-eligible models, but never use a model that
         # is outside its configured time window.
@@ -422,6 +443,7 @@ def _choose_available_for_request_locked(
         eligible,
         global_concurrency=hard_global_concurrency,
         prefer_high=request.prefer_high,
+        prefer_lowest_capability=request.prefer_lowest_capability,
     ):
         if _planned_order_allows_option_locked(request, option):
             return option, all_options
@@ -641,7 +663,10 @@ def _prune_cancelled_pending_locked() -> None:
 
 def _next_runnable_pending_locked() -> tuple[_PendingLeaseRequest, ModelOption, list[ModelOption]] | None:
     _prune_cancelled_pending_locked()
-    for request in _pending_requests:
+    for request in sorted(
+        _pending_requests,
+        key=lambda item: (-item.priority, item.sequence),
+    ):
         option, all_options = _choose_available_for_request_locked(request)
         if option is not None:
             return request, option, all_options
@@ -661,7 +686,7 @@ def _grant_lease_locked(
     _last_used[option.id] = time.monotonic()
     started_at = time.monotonic()
     started_at_iso = _now_iso()
-    task_id = uuid4().hex
+    task_id = request.request_id
     global_item = _global_stats_by_model[option.id]
     global_item.running += 1
     global_item.total += 1
@@ -766,11 +791,19 @@ async def acquire_model_lease(
     cancel_event=None,
     stats_scope_id: str = "",
     task_context: dict[str, Any] | None = None,
+    priority: int = 50,
+    task_id: str = "",
+    revision: int = 1,
+    strict_capability: bool = False,
+    prefer_lowest_capability: bool = False,
+    wait_when_unavailable: bool = False,
 ) -> ModelLease | None:
     required = normalize_requirement(required_capability)
     request: _PendingLeaseRequest | None = None
     context = dict(task_context or {})
     context.setdefault("required_capability", required)
+    context.setdefault("priority", normalize_priority(priority))
+    context.setdefault("revision", max(1, int(revision or 1)))
 
     while True:
         if cancel_event is not None and cancel_event.is_set():
@@ -787,8 +820,10 @@ async def acquire_model_lease(
                 _pending_sequence += 1
                 queued_at_iso = _now_iso()
                 request = _PendingLeaseRequest(
-                    request_id=uuid4().hex,
+                    request_id=str(task_id or "").strip() or uuid4().hex,
                     sequence=_pending_sequence,
+                    priority=normalize_priority(priority),
+                    revision=max(1, int(revision or 1)),
                     cli_config=cli_config,
                     global_concurrency=global_concurrency,
                     required_capability=required,
@@ -798,9 +833,12 @@ async def acquire_model_lease(
                     task_context=dict(context),
                     queued_at=time.monotonic(),
                     queued_at_iso=queued_at_iso,
+                    strict_capability=bool(strict_capability),
+                    prefer_lowest_capability=bool(prefer_lowest_capability),
+                    wait_when_unavailable=bool(wait_when_unavailable),
                 )
                 option, all_options = _choose_available_for_request_locked(request)
-                if not all_options:
+                if not all_options and not request.wait_when_unavailable:
                     _fail_no_available_model_locked(request)
                     raise NoAvailableModelError()
                 if option is not None and not _pending_requests:
@@ -810,7 +848,7 @@ async def acquire_model_lease(
                 _condition.notify_all()
             else:
                 _, _, all_options, _, _ = _request_options_locked(request)
-                if not all_options:
+                if not all_options and not request.wait_when_unavailable:
                     _fail_no_available_model_locked(request)
                     raise NoAvailableModelError()
 
@@ -997,12 +1035,37 @@ def _pending_request_matches_scope(request: _PendingLeaseRequest, scope_id: str)
 
 
 def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
+    cli_config = _current_request_cli_config(request)
+    global_concurrency = _current_request_global_concurrency(request)
+    all_options = model_options(cli_config, global_concurrency=global_concurrency)
+    active_options = (
+        _active_options(all_options)
+        if _configured_model_pool_enabled(cli_config)
+        else all_options
+    )
+    eligible = _eligible_options(
+        active_options,
+        required_capability=request.required_capability,
+    )
+    if not all_options:
+        blocked_reason = NO_AVAILABLE_MODEL_MESSAGE
+    elif not eligible:
+        blocked_reason = (
+            f"没有满足 {request.required_capability} 能力要求且当前可用的模型；"
+            "等待模型配置或时间窗口变化。"
+        )
+    else:
+        blocked_reason = ""
     return {
         "request_id": request.request_id,
+        "task_id": request.request_id,
         "scope_id": request.stats_scope_id,
         "queued_at": request.queued_at_iso,
         "required_capability": request.required_capability,
         "prefer_high": request.prefer_high,
+        "priority": request.priority,
+        "revision": request.revision,
+        "blocked_reason": blocked_reason,
         **dict(request.task_context or {}),
     }
 
@@ -1019,7 +1082,10 @@ def _planned_task_snapshot(planned: _PlannedTask) -> dict[str, Any]:
 def _pending_requests_snapshot(scope_id: str = "") -> list[dict[str, Any]]:
     return [
         _pending_request_snapshot(request)
-        for request in _pending_requests
+        for request in sorted(
+            _pending_requests,
+            key=lambda item: (-item.priority, item.sequence),
+        )
         if _pending_request_matches_scope(request, scope_id)
     ]
 
@@ -1086,7 +1152,7 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
 
 
 async def refresh_configured_model_pool(cli_config: Any, *, global_concurrency: int) -> None:
-    """Refresh configured model rows without waiting for the next CLI lease.
+    """Refresh configured model rows without waiting for the next task lease.
 
     Config changes should become visible to queued leases and dashboards
     immediately. Runtime counters are preserved for models that keep the same id.

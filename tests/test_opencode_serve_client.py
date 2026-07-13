@@ -11,6 +11,7 @@ import pytest
 from backend.opencode.serve_client import (
     OpenCodeModelInfo,
     OpenCodeModelListResult,
+    OpenCodePromptResult,
     OpenCodeServeKey,
     OpenCodeServeManager,
     _ServeEventState,
@@ -49,6 +50,7 @@ class _FakeResponse:
         self.status_code = status_code
         self.headers = {"content-type": content_type}
         self.json_calls = 0
+        self.content = b"" if data is None else b"json"
 
     def json(self):
         self.json_calls += 1
@@ -88,6 +90,8 @@ class _FakeAsyncClient:
         self.posts: list[dict] = []
         self.gets: list[dict] = []
         self.deletes: list[dict] = []
+        self.patches: list[dict] = []
+        self.requests: list[dict] = []
         self.streams: list[dict] = []
         self.message_response: _FakeResponse | None = None
 
@@ -110,7 +114,7 @@ class _FakeAsyncClient:
         self.posts.append({"path": path, **kwargs})
         if path == "/session":
             return _FakeResponse({"id": "session-1"})
-        if path == "/session/session-1/message":
+        if path.startswith("/session/") and path.endswith("/message"):
             await asyncio.sleep(0)
             data = {"parts": [{"type": "text", "text": self.message_text}]}
             if self.message_info is not None:
@@ -118,6 +122,18 @@ class _FakeAsyncClient:
             self.message_response = _FakeResponse(data)
             return self.message_response
         return _FakeResponse({})
+
+    async def patch(self, path: str, **kwargs):
+        self.patches.append({"path": path, **kwargs})
+        return _FakeResponse({"id": path.rsplit("/", 1)[-1]})
+
+    async def request(self, method: str, path: str, **kwargs):
+        self.requests.append({"method": method, "path": path, **kwargs})
+        if method == "GET" and path.endswith("/message"):
+            return _FakeResponse([{"info": {"role": "assistant"}, "parts": []}])
+        if method == "GET":
+            return _FakeResponse({"id": path.rsplit("/", 1)[-1]})
+        return _FakeResponse(True)
 
     async def delete(self, path: str, **kwargs):
         self.deletes.append({"path": path, **kwargs})
@@ -248,6 +264,121 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             "providerID": "anthropic",
             "modelID": "claude-sonnet",
         }
+
+    asyncio.run(run())
+
+
+def test_run_prompt_continues_session_with_native_schema_and_selected_mcp_tools(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = [
+            "read",
+            "grep",
+            "mcp__deephole-code__view_function_code",
+            "mcp__deephole-code__view_struct_code",
+        ]
+        _FakeAsyncClient.message_info = {
+            "id": "msg_structured",
+            "providerID": "provider",
+            "modelID": "actual",
+            "structured": {"ok": True},
+        }
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        schema = {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        }
+        permissions = [{"permission": "edit", "pattern": "*", "action": "deny"}]
+
+        details = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="continue",
+            model="provider/requested",
+            timeout=30,
+            session_id="session-existing",
+            mcp_tools=["view_function_code"],
+            output_schema=schema,
+            output_retry_count=4,
+            system_prompt="selected skill",
+            permissions=permissions,
+            return_details=True,
+        )
+
+        assert isinstance(details, OpenCodePromptResult)
+        assert details.session_id == "session-existing"
+        assert details.message_id == "msg_structured"
+        assert details.structured == {"ok": True}
+        assert details.model == "provider/actual"
+        client = _FakeAsyncClient.instances[0]
+        assert all(item["path"] != "/session" for item in client.posts)
+        assert client.patches == [{
+            "path": "/session/session-existing",
+            "params": {"directory": str(project)},
+            "headers": {"x-opencode-directory": str(project)},
+            "json": {"permission": permissions},
+        }]
+        message = next(item for item in client.posts if item["path"].endswith("/message"))
+        assert message["json"]["format"] == {
+            "type": "json_schema",
+            "schema": schema,
+            "retryCount": 4,
+        }
+        assert message["json"]["system"] == "selected skill"
+        assert message["json"]["tools"] == {
+            "mcp__deephole-code__view_function_code": True,
+            "mcp__deephole-code__view_struct_code": False,
+        }
+
+    try:
+        asyncio.run(run())
+    finally:
+        _FakeAsyncClient.message_info = None
+
+
+def test_session_management_methods_use_durable_session_routes(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        monkeypatch.setattr(
+            "backend.opencode.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        directory = tmp_path / "project"
+        directory.mkdir()
+        runtime = {
+            "tool": "opencode",
+            "executable": "opencode",
+            "directory": directory,
+        }
+        assert (await manager.get_session("ses_1", **runtime))["id"] == "ses_1"
+        assert len(await manager.get_session_messages("ses_1", **runtime)) == 1
+        assert await manager.abort_session("ses_1", **runtime) is True
+        assert await manager.delete_session("ses_1", **runtime) is True
+        requests = [item for client in _FakeAsyncClient.instances for item in client.requests]
+        assert [(item["method"], item["path"]) for item in requests] == [
+            ("GET", "/session/ses_1"),
+            ("GET", "/session/ses_1/message"),
+            ("POST", "/session/ses_1/abort"),
+            ("DELETE", "/session/ses_1"),
+        ]
+        assert all(item["params"] == {"directory": str(directory)} for item in requests)
 
     asyncio.run(run())
 

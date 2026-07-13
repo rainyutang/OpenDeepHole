@@ -23,8 +23,7 @@ from backend.models import OutputSource, ScanEvent
 from backend.opencode.model_pool import NoAvailableModelError
 from backend.opencode.output_format import with_local_timestamp
 from backend.opencode.result_json import (
-    VULNERABILITY_RESULT_JSON_INSTRUCTION,
-    parse_vulnerability_result,
+    VULNERABILITY_RESULT_JSON_SCHEMA,
 )
 from agent.config import effective_fp_review_cli_config
 
@@ -50,6 +49,23 @@ _ISSUE_REPORT_HEADINGS = (
     "Impact",
     "Evidence",
 )
+
+_FP_STAGE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        **VULNERABILITY_RESULT_JSON_SCHEMA["properties"],
+        "stage_markdown": {"type": "string"},
+        "match_type": {"type": "string"},
+        "match_reference": {"type": "string"},
+    },
+    "required": [
+        *VULNERABILITY_RESULT_JSON_SCHEMA["required"],
+        "stage_markdown",
+        "match_type",
+        "match_reference",
+    ],
+    "additionalProperties": False,
+}
 
 
 @dataclass(frozen=True)
@@ -243,7 +259,7 @@ async def run_fp_review(
             _patched_cfg = True
 
             from agent.local_mcp import LocalMCPServer
-            own_mcp_server = LocalMCPServer(project_dir=db_dir)
+            own_mcp_server = LocalMCPServer(project_dir=db_dir, project_id=scan_id)
             mcp_port = own_mcp_server.start()
             await emit("fp_review", f"Started own MCP server on port {mcp_port}")
 
@@ -651,8 +667,6 @@ async def _run_fp_review_stage(
 ) -> _FpStageResult | None:
     from backend.opencode.runner import (
         _invoke_opencode,
-        _read_result_from_source,
-        _read_session_result_file,
         _session_id_from_output_source,
         _vulnerability_from_payload,
     )
@@ -664,8 +678,7 @@ async def _run_fp_review_stage(
     for attempt in range(1, max_retries + 2):
         attempt_source: OutputSource | None = None
         attempt_id = uuid4().hex
-        submit_tool_name = "submit_match_result" if stage == "history_match" else "json_result"
-        uses_json_result = stage != "history_match"
+        submit_tool_name = "structured result"
 
         def capture_source(source: OutputSource) -> None:
             nonlocal attempt_source, last_source
@@ -687,18 +700,10 @@ async def _run_fp_review_stage(
             variant_of=variant_of,
         )
         if attempt > 1:
-            if uses_json_result:
-                prompt += (
-                    "上一次尝试未写入 Markdown 工件或未输出符合 schema 的 JSON。"
-                    "即使结论是非问题（confirmed=false），也必须把论证写入指定 Markdown 路径，"
-                    "并在最终回复中只输出 JSON 结论。"
-                )
-            else:
-                prompt += (
-                    f"上一次尝试未写入 Markdown 工件或未调用 {submit_tool_name}。"
-                    "即使结论是非问题（confirmed=false），也必须把论证写入指定 Markdown 路径，"
-                    f"并调用 {submit_tool_name} 提交结论。"
-                )
+            prompt += (
+                "上一次尝试未返回完整 structured result。"
+                "即使结论是非问题（confirmed=false），也必须在 stage_markdown 返回完整论证。"
+            )
         log_path = review_dir / f"fp_{stage}_{attempt_id}.log"
 
         try:
@@ -719,7 +724,6 @@ async def _run_fp_review_stage(
                 cancel_event=cancel_event,
                 cli_config=cli_config,
                 project_dir=project,
-                writable_paths=[artifact_dir],
                 model_capability="high",
                 prefer_high_model=True,
                 stats_scope_id=scan_id,
@@ -735,6 +739,9 @@ async def _run_fp_review_stage(
                 },
                 attempt=attempt,
                 on_invocation_metadata=capture_source,
+                task_name=f"去误报复核 {stage}",
+                skills=[stage.replace("_", "-")],
+                output_schema=_FP_STAGE_JSON_SCHEMA,
             )
         except asyncio.CancelledError:
             raise
@@ -751,17 +758,16 @@ async def _run_fp_review_stage(
             )
             continue
 
-        markdown = _read_stage_markdown(output_markdown_path)
         payload: dict = {}
-        if uses_json_result:
-            try:
-                payload = parse_vulnerability_result(output_text)
-                result = _vulnerability_from_payload(payload, candidate)
-            except Exception:
-                result = None
-        else:
-            result = _read_result_from_source(attempt_source, candidate, tool_name=submit_tool_name)
-            payload = _read_fp_result_payload(_session_id_from_output_source(attempt_source), submit_tool_name)
+        try:
+            payload = json.loads(output_text)
+            result = _vulnerability_from_payload(payload, candidate)
+        except Exception:
+            result = None
+        markdown = str(payload.get("stage_markdown") or "")
+        if markdown.strip():
+            output_markdown_path.parent.mkdir(parents=True, exist_ok=True)
+            output_markdown_path.write_text(markdown, encoding="utf-8")
         missing: list[str] = []
         if not markdown.strip():
             missing.append("Markdown artifact")
@@ -841,12 +847,13 @@ def _build_fp_review_prompt(
             f"已挖掘的历史问题模式列表（可用 git show <出处提交> 复核根因）：\n{patterns_text or '（无）'}\n"
             f"判断标准（满足任一即视为匹配）：(a) 与某条历史问题模式**同根因**（同缺陷类型、同触发条件）；"
             f"(b) 全仓存在对**同一被调点/危险原语**把校验做对了的另一处调用站点，而本候选缺失该校验。"
-            f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
-            f"分析完成后，你**必须**调用 `submit_match_result` MCP 工具提交结论："
-            f"matched=true 表示对应上（match_type 填 history 或 validation，match_reference 填"
+            "你必须在 structured output 的 stage_markdown 返回本阶段完整 Markdown 论证。"
+            "分析完成后通过 structured output 提交结论："
+            "confirmed=true 表示对应上（match_type 填 history 或 validation，match_reference 填"
             f"历史模式根因摘要+出处提交，或正确校验站点 path:line + 一句话说明，并提交 vulnerability_report，"
             f"包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、Why It is Reachable、Impact、Evidence 七个二级标题）；"
-            f"matched=false 表示无法对应（此时会转入三阶段辩论，不要勉强匹配）。不要使用 CVSS 打分。"
+            "confirmed=false 表示无法对应（此时会转入三阶段辩论，不要勉强匹配）。"
+            "severity 使用 high/low；file、line、function 使用当前候选值；不要使用 CVSS 打分。"
         )
     elif stage == "prove_bug":
         prompt = (
@@ -857,15 +864,16 @@ def _build_fp_review_prompt(
             f"review_id 为 `{review_id}`，vuln_index 为 `{vuln_index}`。"
             f"原始描述：{vuln['description']} "
             f"{ai_analysis_ref}"
-            f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
-            f"分析完成后，你必须在最终回复中输出 JSON 阶段结论，不要调用 submit_result。"
+            "你必须在 structured output 的 stage_markdown 返回本阶段完整 Markdown 论证。"
+            "match_type 和 match_reference 在本阶段使用空字符串。"
             f"默认假设代码是安全的；只有证明真实代码问题时才使用 confirmed=true。"
             f"severity 只分两档：外部可触发的问题使用 high；其余（无法证明外部可触发或非问题）一律使用 low。"
             f"只要 confirmed=true，"
             f"都必须在 vulnerability_report 中提交 Markdown 问题报告，"
             f"并包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
             f"Why It is Reachable、Impact、Evidence 七个二级标题。不要使用 CVSS 打分。"
-            f"{VULNERABILITY_RESULT_JSON_INSTRUCTION}"
+            "structured output 同时返回 confirmed、severity、description、ai_analysis、"
+            "vulnerability_report、file、line、function。"
         )
     elif stage == "prove_fp":
         bug_summary = _stage_result_summary(prove_bug)
@@ -880,14 +888,15 @@ def _build_fp_review_prompt(
             f"{ai_analysis_ref}"
             f"正方阶段结构化摘要：{bug_summary} "
             f"你必须先读取正方 Markdown 文件 `{prove_bug_path}`，再进行反方论证。"
-            f"你必须将本阶段 Markdown 论证写入 `{output_path}`，不得写入其它路径。"
-            f"分析完成后，你必须在最终回复中输出 JSON 阶段结论，不要调用 submit_result。"
+            "你必须在 structured output 的 stage_markdown 返回本阶段完整 Markdown 论证。"
+            "match_type 和 match_reference 在本阶段使用空字符串。"
             f"如果找到足以证明非问题的理由，使用 confirmed=false 且 severity=low。"
             f"如果反方未能证明非问题，仍使用 confirmed=true；severity 只分两档："
             f"外部可触发为 high，其余一律为 low。"
             f"只要 confirmed=true，"
             f"都必须提交 vulnerability_report，可沿用或修正 prove-bug 的报告。不要使用 CVSS 打分。"
-            f"{VULNERABILITY_RESULT_JSON_INSTRUCTION}"
+            "structured output 同时返回 confirmed、severity、description、ai_analysis、"
+            "vulnerability_report、file、line、function。"
         )
     elif stage == "final_judge":
         bug_summary = _stage_result_summary(prove_bug)
@@ -905,8 +914,8 @@ def _build_fp_review_prompt(
             f"正方阶段结构化摘要：{bug_summary} "
             f"反方阶段结构化摘要：{fp_summary} "
             f"你必须读取正方 Markdown 文件 `{bug_path}` 和反方 Markdown 文件 `{fp_path}`。"
-            f"你必须将最终裁决 Markdown 写入 `{output_path}`，不得写入其它路径。"
-            f"分析完成后，你必须在最终回复中输出 JSON 最终结论，不要调用 submit_result。"
+            "你必须在 structured output 的 stage_markdown 返回最终裁决完整 Markdown。"
+            "match_type 和 match_reference 在本阶段使用空字符串。"
             f"最终 confirmed=false 表示误报；confirmed=true 表示真实问题。"
             f"severity 只分两档：论证为外部可触发的问题使用 high；其余（无法证明外部可触发或非问题）一律使用 low。"
             f"最终 ai_analysis 必须像 memleak 输出一样包含完整代码链、关键代码片段和说明，"
@@ -914,7 +923,8 @@ def _build_fp_review_prompt(
             f"只要 confirmed=true，"
             f"都必须提交 vulnerability_report，包含 Summary、Vulnerable Code、Full Call Stack、Root Cause、"
             f"Why It is Reachable、Impact、Evidence 七个二级标题。不要使用 CVSS 打分。"
-            f"{VULNERABILITY_RESULT_JSON_INSTRUCTION}"
+            "structured output 同时返回 confirmed、severity、description、ai_analysis、"
+            "vulnerability_report、file、line、function。"
         )
     else:
         raise ValueError(f"Unknown FP review stage: {stage}")
@@ -944,16 +954,6 @@ def _configure_fp_backend(config, review_dir: Path) -> None:
     opencode_config = dataclasses.asdict(config.opencode)
     opencode_config["mock"] = False
     raw = {
-        "llm_api": {
-            "enabled": True,
-            "base_url": config.llm_api.base_url,
-            "api_key": config.llm_api.api_key,
-            "model": config.llm_api.model,
-            "temperature": config.llm_api.temperature,
-            "timeout": config.llm_api.timeout,
-            "max_retries": config.llm_api.max_retries,
-            "stream": config.llm_api.stream,
-        },
         "opencode": opencode_config,
         "opencode_concurrency": config.opencode_concurrency,
         "storage": {
@@ -1076,23 +1076,6 @@ def _has_required_issue_report_sections(report: str) -> bool:
         if not any(line == expected or line.startswith(expected + " ") for line in lowered_lines):
             return False
     return True
-
-
-def _dummy_candidate():
-    from backend.models import Candidate
-
-    return Candidate(file="", line=0, function="", description="", vuln_type="fp_review")
-
-
-def _read_fp_result_payload(session_id: str, tool_name: str) -> dict:
-    """Read optional FP review fields that are not part of Vulnerability."""
-    try:
-        from backend.opencode.runner import _read_session_result_file
-
-        payload = _read_session_result_file(session_id, candidate=_dummy_candidate(), tool_name=tool_name)
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
 
 
 def _create_fp_workspace(

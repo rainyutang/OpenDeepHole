@@ -5,8 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.models import Candidate
-from backend.opencode.submit_sink import record_submission
-from backend.opencode.runner import _read_sensitive_clear_audit_result, _sensitive_clear_prompt
+from backend.opencode.runner import _sensitive_clear_prompt
 from checkers.sensitive_clear.analyzer import Analyzer
 
 
@@ -126,81 +125,6 @@ class SensitiveClearFunctionTests(unittest.TestCase):
         self.assertNotIn("password", prompt)
         self.assertNotIn("char *password", prompt)
         self.assertNotIn("变量清单", prompt)
-
-    def test_sensitive_clear_result_stores_markdown_in_vulnerability_entry_only(self) -> None:
-        candidate = _candidate()
-        with tempfile.TemporaryDirectory() as tmp:
-            session_id = "session-sensitive"
-            payload = {
-                "confirmed": True,
-                "severity": "high",
-                "description": "login leaves password uncleared",
-                "file": "src/auth.c",
-                "line": 25,
-                "function": "login",
-                "ai_analysis": MARKDOWN_ANALYSIS,
-            }
-
-            fake_config = SimpleNamespace(storage=SimpleNamespace(scans_dir=tmp))
-            with patch("backend.opencode.submit_sink.get_config", return_value=fake_config):
-                record_submission(session_id, "submit_result", payload)
-                result = _read_sensitive_clear_audit_result(session_id, candidate)
-
-        self.assertIsNotNone(result)
-        self.assertTrue(result.complete)
-        self.assertEqual(len(result.vulnerabilities), 1)
-        self.assertEqual(result.vulnerabilities[0].file, "src/auth.c")
-        self.assertEqual(result.vulnerabilities[0].line, 25)
-        self.assertEqual(result.vulnerabilities[0].function, "login")
-        self.assertEqual(result.vulnerabilities[0].ai_analysis, MARKDOWN_ANALYSIS.strip())
-        self.assertEqual(result.reports, [])
-
-    def test_sensitive_clear_result_accepts_single_false_markdown_result(self) -> None:
-        candidate = _candidate()
-        with tempfile.TemporaryDirectory() as tmp:
-            session_id = "session-sensitive"
-            payload = {
-                "confirmed": False,
-                "severity": "low",
-                "description": "login clears all sensitive data",
-                "ai_analysis": MARKDOWN_ANALYSIS.replace("confirmed=true", "confirmed=false"),
-            }
-
-            fake_config = SimpleNamespace(storage=SimpleNamespace(scans_dir=tmp))
-            with patch("backend.opencode.submit_sink.get_config", return_value=fake_config):
-                record_submission(session_id, "submit_result", payload)
-                result = _read_sensitive_clear_audit_result(session_id, candidate)
-
-        self.assertIsNotNone(result)
-        self.assertTrue(result.complete)
-        self.assertEqual(len(result.vulnerabilities), 1)
-        self.assertFalse(result.vulnerabilities[0].confirmed)
-        self.assertEqual(result.vulnerabilities[0].ai_verdict, "not_confirmed")
-        self.assertIn("confirmed=false", result.vulnerabilities[0].ai_analysis)
-        self.assertEqual(result.reports, [])
-
-    def test_sensitive_clear_result_rejects_multiple_submit_results(self) -> None:
-        candidate = _candidate()
-        with tempfile.TemporaryDirectory() as tmp:
-            session_id = "session-sensitive"
-
-            fake_config = SimpleNamespace(storage=SimpleNamespace(scans_dir=tmp))
-            with patch("backend.opencode.submit_sink.get_config", return_value=fake_config):
-                record_submission(session_id, "submit_result", {
-                    "confirmed": False,
-                    "severity": "low",
-                    "description": "first",
-                    "ai_analysis": MARKDOWN_ANALYSIS,
-                })
-                record_submission(session_id, "submit_result", {
-                    "confirmed": False,
-                    "severity": "low",
-                    "description": "second",
-                    "ai_analysis": MARKDOWN_ANALYSIS,
-                })
-                result = _read_sensitive_clear_audit_result(session_id, candidate)
-
-        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

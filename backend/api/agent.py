@@ -99,7 +99,6 @@ class _RuntimeDownload:
 
 # Short-lived tokens used by online agents to fetch runtime update archives.
 _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
-_config_test_waiters: dict[str, asyncio.Future] = {}
 _opencode_model_waiters: dict[str, asyncio.Future] = {}
 _product_validator_sync_waiters: dict[str, asyncio.Future] = {}
 
@@ -662,12 +661,6 @@ async def agent_websocket(websocket: WebSocket) -> None:
             if isinstance(incoming, dict) and incoming.get("type") == "heartbeat":
                 await _send_agent_json(agent_id, {"type": "heartbeat_ack"})
                 continue
-            if isinstance(incoming, dict) and incoming.get("type") == "config_test_result":
-                request_id = str(incoming.get("request_id") or "")
-                waiter = _config_test_waiters.pop(request_id, None)
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(incoming)
-                continue
             if isinstance(incoming, dict) and incoming.get("type") == "opencode_models_result":
                 request_id = str(incoming.get("request_id") or "")
                 waiter = _opencode_model_waiters.pop(request_id, None)
@@ -732,11 +725,6 @@ async def send_agent_command(agent_id: str, command: dict) -> bool:
 class _AgentRegisterBody(BaseModel):
     port: int
     name: str = ""
-
-
-class _AgentConfigTestResponse(BaseModel):
-    ok: bool
-    message: str = ""
 
 
 class _ProductValidatorsSyncResponse(BaseModel):
@@ -973,44 +961,6 @@ async def update_agent_config(
     # Push update to agent immediately if connected via WebSocket
     await send_agent_command(agent_id, {"type": "config", "config": body.model_dump()})
     return {"ok": True}
-
-
-@router.post("/{agent_id}/config/test", response_model=_AgentConfigTestResponse)
-async def test_agent_config(
-    agent_id: str,
-    body: AgentRemoteConfig,
-    current_user: User = Depends(get_current_user),
-) -> _AgentConfigTestResponse:
-    """Ask the online Agent to validate the provided LLM API config."""
-    agent = _registered_agents.get(agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if current_user.role != "admin" and agent.user_id != current_user.user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    if agent_id not in _agent_ws:
-        raise HTTPException(status_code=400, detail="Agent is offline")
-
-    request_id = uuid.uuid4().hex
-    loop = asyncio.get_running_loop()
-    waiter = loop.create_future()
-    _config_test_waiters[request_id] = waiter
-    ok = await send_agent_command(agent_id, {
-        "type": "config_test",
-        "request_id": request_id,
-        "config": body.model_dump(),
-    })
-    if not ok:
-        _config_test_waiters.pop(request_id, None)
-        raise HTTPException(status_code=502, detail="Agent not connected")
-    try:
-        result = await asyncio.wait_for(waiter, timeout=20.0)
-    except asyncio.TimeoutError:
-        _config_test_waiters.pop(request_id, None)
-        raise HTTPException(status_code=504, detail="Agent API config test timed out")
-    return _AgentConfigTestResponse(
-        ok=bool(result.get("ok")),
-        message=str(result.get("message") or ""),
-    )
 
 
 @router.post("/{agent_id}/product-validators/sync", response_model=_ProductValidatorsSyncResponse)
@@ -2020,7 +1970,7 @@ OpenDeepHole Agent
 
 Setup
 -----
-1. Edit agent.yaml — set server_url and llm_api.api_key
+1. Edit agent.yaml — set server_url and the OpenCode model pool
 
 2. Install Python 3.10+ if not already installed
 

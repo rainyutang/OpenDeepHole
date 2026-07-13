@@ -62,6 +62,9 @@ def _stage_json_result(
         "file": "a.c",
         "line": 10,
         "function": "parse",
+        "stage_markdown": report or f"# Stage\n\n{ai_analysis}",
+        "match_type": "",
+        "match_reference": "",
     })
 
 
@@ -211,7 +214,6 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch.object(fp_reviewer, "_cleanup_fp_workspace"),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
                     patch("backend.opencode.runner._invoke_opencode", new=invoke),
-                    patch("backend.opencode.runner._read_result_from_source", return_value=None),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -239,7 +241,7 @@ class AgentFeedbackTests(unittest.TestCase):
         self.assertEqual(reporter.results, [])
         self.assertEqual(len(reporter.stage_outputs), 1)
         self.assertEqual(reporter.stage_outputs[0][0], "prove_bug")
-        self.assertIn("Missing json_result", reporter.stage_outputs[0][1])
+        self.assertIn("Missing Markdown artifact and structured result", reporter.stage_outputs[0][1])
         self.assertEqual(reporter.progress, [(3, 0), (3, 1)])
         self.assertEqual(reporter.finished, ("complete", None))
 

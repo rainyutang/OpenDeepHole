@@ -18,21 +18,21 @@ description: 去误报「历史/校验匹配」阶段——判断候选漏洞能
 
 ## 判定原则
 
-- 只要确实满足上述任一类对应关系，就视为**匹配成立**（matched=true）——这类问题有历史/同类
+- 只要确实满足上述任一类对应关系，就视为**匹配成立**（confirmed=true）——这类问题有历史/同类
   佐证，**直接定级为 high**，无需再做可触发性辩论。
-- 若证据不足、只是表面相似而根因不同、或本站点其实已正确校验，则**匹配不成立**（matched=false），
+- 若证据不足、只是表面相似而根因不同、或本站点其实已正确校验，则**匹配不成立**（confirmed=false），
   交由后续三阶段对抗辩论判断，**不要勉强匹配**。
 
 ## 输出要求（必须遵守）
 
-1. 将本阶段的匹配论证写入分析提示指定的 Markdown 路径。
-2. 调用 `submit_match_result` MCP 工具：
-   - `matched`：是否对应上（true/false）。
-   - `match_type`：`history` 或 `validation`（matched=true 时必填）。
+1. 在任务指定的 structured output `stage_markdown` 字段返回本阶段完整 Markdown 论证。
+2. 在同一个 structured output 返回结论：
+   - `confirmed`：是否对应上（true/false）。
+   - `match_type`：`history` 或 `validation`（confirmed=true 时必填）。
    - `match_reference`：对应的修复/校验描述——历史模式根因摘要 + 出处提交，或正确校验站点
      `path:line` + 一句话说明。让报告能回溯到对应的历史问题或正面对照。
    - `description` / `ai_analysis`：结论摘要与详细推理。
-   - `vulnerability_report`：matched=true 时提交，含 Summary、Vulnerable Code、Full Call Stack、
+   - `vulnerability_report`：confirmed=true 时提交，含 Summary、Vulnerable Code、Full Call Stack、
      Root Cause、Why It is Reachable、Impact、Evidence 七个二级标题。
 
-不要使用 CVSS 打分。
+不要调用结果提交类 MCP 工具，不要使用 CVSS 打分。

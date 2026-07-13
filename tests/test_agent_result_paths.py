@@ -1,18 +1,12 @@
-import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import yaml
 
 from agent.config import AgentConfig
 from agent.scanner import _configure_backend
-from backend.models import Candidate
-from backend.opencode.submit_sink import record_submission
-from backend.opencode.runner import _read_result, _read_results, _read_session_result, _read_session_results
 
 
 class AgentResultPathTests(unittest.TestCase):
@@ -39,133 +33,6 @@ class AgentResultPathTests(unittest.TestCase):
 
             import backend.registry as _reg
             _reg._registry = None
-
-    def test_read_result_uses_configured_scans_dir(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            scans_dir = Path(tmp) / "scan-123"
-            scans_dir.mkdir()
-            result_id = "result-test"
-            (scans_dir / f"{result_id}.json").write_text(
-                json.dumps({
-                    "confirmed": True,
-                    "severity": "high",
-                    "description": "confirmed issue",
-                    "ai_analysis": "analysis text",
-                }),
-                encoding="utf-8",
-            )
-
-            candidate = Candidate(
-                file="test.c",
-                line=42,
-                function="demo",
-                description="candidate issue",
-                vuln_type="npd",
-            )
-
-            fake_config = SimpleNamespace(
-                storage=SimpleNamespace(scans_dir=str(scans_dir))
-            )
-            with patch("backend.opencode.runner.get_config", return_value=fake_config):
-                result = _read_result(result_id, candidate)
-
-            self.assertIsNotNone(result)
-            self.assertEqual(result.file, "test.c")
-            self.assertEqual(result.line, 42)
-            self.assertTrue(result.confirmed)
-            self.assertEqual(result.ai_verdict, "confirmed")
-
-    def test_read_results_accepts_project_level_multiple_payloads(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            scans_dir = Path(tmp) / "scan-123"
-            scans_dir.mkdir()
-            result_id = "result-project"
-            (scans_dir / f"{result_id}.json").write_text(
-                json.dumps({
-                    "results": [
-                        {
-                            "confirmed": True,
-                            "severity": "high",
-                            "description": "first issue",
-                            "ai_analysis": "analysis one",
-                            "file": "src/a.c",
-                            "line": 10,
-                            "function": "a",
-                        },
-                        {
-                            "confirmed": False,
-                            "severity": "low",
-                            "description": "no issue",
-                            "ai_analysis": "analysis two",
-                            "file": ".",
-                            "line": 1,
-                            "function": "__project__",
-                        },
-                    ]
-                }),
-                encoding="utf-8",
-            )
-            candidate = Candidate(
-                file=".",
-                line=1,
-                function="__project__",
-                description="project audit",
-                vuln_type="auth_bypass",
-            )
-            fake_config = SimpleNamespace(
-                storage=SimpleNamespace(scans_dir=str(scans_dir))
-            )
-
-            with patch("backend.opencode.runner.get_config", return_value=fake_config):
-                results = _read_results(result_id, candidate)
-
-            self.assertEqual(len(results), 2)
-            self.assertEqual(results[0].file, "src/a.c")
-            self.assertEqual(results[0].line, 10)
-            self.assertEqual(results[0].function, "a")
-            self.assertTrue(results[0].confirmed)
-            self.assertEqual(results[1].file, ".")
-            self.assertFalse(results[1].confirmed)
-
-    def test_read_session_results_uses_result_sink_and_tool_filter(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            candidate = Candidate(
-                file="test.c",
-                line=42,
-                function="demo",
-                description="candidate issue",
-                vuln_type="npd",
-            )
-            fake_config = SimpleNamespace(
-                storage=SimpleNamespace(scans_dir=str(Path(tmp) / "scan-123"))
-            )
-
-            with patch("backend.opencode.submit_sink.get_config", return_value=fake_config):
-                record_submission("session-1", "submit_history_pattern", {
-                    "security_related": True,
-                    "pattern": "history-only",
-                })
-                record_submission("session-1", "submit_result", {
-                    "confirmed": True,
-                    "severity": "high",
-                    "description": "confirmed issue",
-                    "ai_analysis": "analysis text",
-                })
-                record_submission("session-1", "submit_result", {
-                    "confirmed": False,
-                    "severity": "low",
-                    "description": "not this one",
-                    "ai_analysis": "second analysis",
-                })
-
-                results = _read_session_results("session-1", candidate, tool_name="submit_result")
-                latest = _read_session_result("session-1", candidate, tool_name="submit_result")
-
-            self.assertEqual(len(results), 2)
-            self.assertEqual(results[0].description, "confirmed issue")
-            self.assertEqual(results[1].description, "not this one")
-            self.assertIsNotNone(latest)
-            self.assertEqual(latest.description, "not this one")
 
 
 if __name__ == "__main__":

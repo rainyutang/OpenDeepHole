@@ -21,6 +21,30 @@ from backend.opencode.output_format import with_local_timestamp
 
 EmitFn = Callable[[str, str], Awaitable[None]]
 
+_VARIANT_FINDINGS_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "function": {"type": "string"},
+                    "vuln_type": {"type": "string"},
+                    "description": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["file", "line", "function", "vuln_type", "description", "rationale"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["results"],
+    "additionalProperties": False,
+}
+
 
 def _ensure_skill(workspace: Path) -> None:
     skill_src = Path(__file__).parent / "skills" / "variant_hunt.md"
@@ -49,10 +73,10 @@ def _build_prompt(
         "这是有的放矢的定向排查，不是盲扫。\n"
         "- 逐一核实每个候选站点：该站点是否缺少历史修复所加的校验/夹紧/判空等不变量，"
         "从而存在同类缺陷；\n"
-        "- 对**坐实**的站点，调用 `submit_variant_finding` 提交（每处一次，可多次调用）；\n"
-        "- 已修复或不满足相似条件的站点不要提交。\n\n"
+        "- 对**坐实**的站点，在 structured output 的 results 数组返回一项；\n"
+        "- 已修复或不满足相似条件的站点不要返回。\n\n"
         f"`vuln_type` 必须从以下可选检查项中选最贴切的一个：{checkers}。\n"
-        "若全仓未发现同类缺陷，可以不调用提交工具直接结束。"
+        "若全仓未发现同类缺陷，返回空 results 数组。"
     )
 
 
@@ -70,12 +94,7 @@ async def hunt_variants(
     cli_config,
 ) -> list[Candidate]:
     """对每条历史问题模式做全仓同类变体排查，返回命中候选列表。"""
-    from backend.opencode.runner import (
-        _invoke_opencode,
-        _read_session_result_file,
-        _result_payloads,
-        _session_id_from_output_source,
-    )
+    from backend.opencode.runner import _invoke_opencode, _result_payloads
     from backend.opencode.model_pool import NoAvailableModelError, total_model_capacity
 
     if not patterns:
@@ -107,18 +126,9 @@ async def hunt_variants(
         attempt_id = uuid4().hex
         prompt = _build_prompt(pattern, checker_types, scan_id)
         log_path = scan_dir / f"variant_hunt_{attempt_id}.log"
-        attempt_source = None
 
-        def capture_source(source) -> None:
-            nonlocal attempt_source
-            attempt_source = source
-
-        fake_candidate = Candidate(
-            file="", line=0, function="", description=pattern.pattern,
-            vuln_type="variant",
-        )
         try:
-            await _invoke_opencode(
+            output_text = await _invoke_opencode(
                 workspace,
                 prompt,
                 int(getattr(cli_config, "timeout", 1200) or 1200),
@@ -132,7 +142,9 @@ async def hunt_variants(
                 project_dir=project_path,
                 model_capability="any",
                 stats_scope_id=scan_id,
-                on_invocation_metadata=capture_source,
+                task_name=f"同类变体排查 {pattern.source or pattern.pattern[:30]}",
+                skills=["variant-hunt"],
+                output_schema=_VARIANT_FINDINGS_JSON_SCHEMA,
             )
         except asyncio.CancelledError:
             raise
@@ -147,12 +159,10 @@ async def hunt_variants(
             except Exception:
                 pass
 
-        payload = _read_session_result_file(
-            _session_id_from_output_source(attempt_source),
-            fake_candidate,
-            tool_name="submit_variant_finding",
-        )
-        if payload is None:
+        try:
+            import json
+            payload = json.loads(output_text)
+        except Exception:
             payload = {}
 
         variant_ref = (

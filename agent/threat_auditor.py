@@ -319,7 +319,7 @@ async def run_threat_audit_tasks(
     if not pending:
         return
 
-    from backend.opencode.model_pool import register_planned_task, total_model_capacity
+    from backend.opencode.model_pool import total_model_capacity
     from backend.opencode.runner import run_threat_audit
 
     scan_path = _scan_path_from_analysis(analysis, project_path)
@@ -334,25 +334,8 @@ async def run_threat_audit_tasks(
     concurrency = max(1, min(capacity, len(pending)))
     queue: asyncio.Queue[ThreatAuditTask] = asyncio.Queue()
 
-    planned_ids: dict[str, str] = {}
     final_task_ids: set[str] = set()
     for index, task in enumerate(pending):
-        planned_id = await register_planned_task(
-            scan_id,
-            {
-                "task_type": "threat_audit",
-                "checker": "threat_audit",
-                "file": task.code_path,
-                "function": "__threat_path__",
-                "threat_surface_node_id": task.surface_node_id,
-                "threat_method_node_id": task.method_node_id,
-                "required_capability": "high",
-                "queue_group": f"{scan_id}:threat_audit",
-                "audit_index": index,
-            },
-            task_key=f"threat_audit:{task.task_id}",
-        )
-        planned_ids[task.task_id] = planned_id
         queued = task.model_copy(update={"status": "queued", "updated_at": _now()})
         await reporter.push_threat_audit_task(scan_id, queued)
         queue.put_nowait(queued)
@@ -379,7 +362,7 @@ async def run_threat_audit_tasks(
                     cancel_event=cancel_event,
                     timeout=config.opencode.timeout,
                     project_dir=project_path,
-                    planned_task_id=planned_ids.get(running.task_id, ""),
+                    planned_task_id="",
                     scan_path=scan_path,
                 )
                 result_indexes: list[int] = []
@@ -445,10 +428,6 @@ async def run_threat_audit_tasks(
                 queue.task_done()
 
     async def finish_unfinished_tasks(status: str, failure_reason: str) -> None:
-        from backend.opencode.model_pool import clear_planned_task
-
-        for planned_id in planned_ids.values():
-            await clear_planned_task(planned_id)
         for task in pending:
             if task.task_id in final_task_ids:
                 continue

@@ -159,11 +159,6 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 print("Config updated from server and persisted to agent.yaml")
             except Exception as e:
                 print(f"Config updated from server (warning: failed to persist: {e})")
-    elif cmd_type == "config_test":
-        return await agent_server.handle_config_test(
-            request_id=msg.get("request_id", ""),
-            remote_config=msg.get("config") or {},
-        )
     elif cmd_type == "opencode_models":
         return await agent_server.handle_opencode_models(
             request_id=msg.get("request_id", ""),

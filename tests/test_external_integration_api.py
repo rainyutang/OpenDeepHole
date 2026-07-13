@@ -95,7 +95,6 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                             scan_name="project",
                             validation_environment="仿真UBBPi板环境",
                             agent_config=AgentRemoteConfig(
-                                llm_api={"base_url": "https://api.example.test", "api_key": "key"},
                                 opencode={"tool": "opencode", "executable": "opencode", "model": "model"},
                             ),
                         ),

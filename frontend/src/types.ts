@@ -514,20 +514,9 @@ export interface AgentInfo {
   agent_session_id?: string;
 }
 
-export interface AgentLLMApiConfig {
-  base_url: string;
-  api_key: string;
-  model: string;
-  temperature: number;
-  timeout: number;
-  max_retries: number;
-  stream: boolean;
-}
-
 export interface AgentOpenCodeConfig {
-  tool: "nga" | "opencode" | "hac" | "claude" | string;
+  tool: "nga" | "opencode" | string;
   executable: string;
-  invocation_mode?: "serve" | "cli" | string;
   model: string;
   timeout: number;
   max_retries: number;
@@ -545,7 +534,7 @@ export interface AgentOpenCodeModelConfig {
   weight: number;
   max_concurrency: number;
   enabled: boolean;
-  tool?: "nga" | "opencode" | "hac" | "claude" | string;
+  tool?: "nga" | "opencode" | string;
   executable?: string;
   timeout?: number | null;
   max_retries?: number | null;
@@ -590,7 +579,6 @@ export interface AgentVulnerabilityValidationConfig {
 export interface AgentRemoteConfig {
   no_proxy: string;
   opencode_concurrency: number;
-  llm_api: AgentLLMApiConfig;
   opencode: AgentOpenCodeConfig;
   fp_review_cli?: AgentOpenCodeConfig | null;
   memory_api_discovery: AgentMemoryApiDiscoveryConfig;
@@ -599,11 +587,6 @@ export interface AgentRemoteConfig {
   static_dedup?: boolean;
   pattern_filter?: AgentPatternFilterConfig;
   vulnerability_validation?: AgentVulnerabilityValidationConfig;
-}
-
-export interface AgentConfigTestResult {
-  ok: boolean;
-  message: string;
 }
 
 export interface AgentOpenCodeModelListItem {

@@ -1993,6 +1993,9 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                   const failureReason = typeof task.task.failure_reason === "string"
                     ? task.task.failure_reason.trim()
                     : "";
+                  const blockedReason = typeof task.task.blocked_reason === "string"
+                    ? task.task.blocked_reason.trim()
+                    : "";
                   return (
                     <Fragment key={taskKey}>
                       <tr
@@ -2049,6 +2052,14 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                                   <div className="text-xs font-semibold text-red-200">失败原因</div>
                                   <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-red-300">
                                     {failureReason}
+                                  </div>
+                                </div>
+                              )}
+                              {blockedReason && (
+                                <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                                  <div className="text-xs font-semibold text-amber-200">阻塞原因</div>
+                                  <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-amber-300">
+                                    {blockedReason}
                                   </div>
                                 </div>
                               )}
@@ -2211,7 +2222,9 @@ function scanQueueTaskTitle(task: Record<string, unknown>): string {
   const stage = task.stage ? `/${String(task.stage)}` : "";
   const checker = task.checker ? String(task.checker) : "";
   const vulnType = task.vuln_type ? String(task.vuln_type) : "";
-  return [type + stage, checker || vulnType].filter(Boolean).join(" · ");
+  const priority = task.priority != null ? `P${String(task.priority)}` : "";
+  const revision = Number(task.revision || 1) > 1 ? `r${String(task.revision)}` : "";
+  return [priority, revision, type + stage, checker || vulnType].filter(Boolean).join(" · ");
 }
 
 function scanQueueTaskTarget(task: Record<string, unknown>): string {
@@ -3805,7 +3818,7 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
     <div className="flex-1 overflow-y-auto p-5 space-y-4">
       {!hasEnabledModel && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-6 text-amber-200">
-          当前没有启用的模型，新的 LLM 任务会立即失败。如需使用 CLI 默认模型，必须在 Agent 模型池中显式添加并启用“默认模型”。
+          当前没有启用的模型，新的 OpenCode 任务会保持阻塞排队，直到启用满足能力要求的模型或用户取消。
         </div>
       )}
       <div className="grid grid-cols-2 md:grid-cols-7 gap-3">
@@ -3999,7 +4012,10 @@ function modelTaskLabel(task: Record<string, unknown> | undefined): string {
   const line = task.line ? `:${String(task.line)}` : "";
   const target = file ? `${file}${line}` : checker;
   const session = task.serve_session_id ? String(task.serve_session_id) : "";
-  return [taskType + stage, target, session].filter(Boolean).join(" ");
+  const priority = task.priority != null ? `P${String(task.priority)}` : "";
+  const revision = Number(task.revision || 1) > 1 ? `r${String(task.revision)}` : "";
+  const blocked = task.blocked_reason ? "阻塞" : "";
+  return [priority, revision, taskType + stage, target, session, blocked].filter(Boolean).join(" ");
 }
 
 function ModelTaskList({ tasks }: { tasks?: Record<string, unknown>[] }) {

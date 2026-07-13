@@ -9,7 +9,14 @@ from code_parser import CodeDatabase
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from agent.local_mcp import LocalMCPServer
+from agent.local_mcp import LocalMCPServer, shutdown_local_mcp_gateway
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_gateway():
+    shutdown_local_mcp_gateway()
+    yield
+    shutdown_local_mcp_gateway()
 
 
 class _FakeThread:
@@ -144,6 +151,8 @@ def test_start_cleans_up_after_readiness_failure(monkeypatch) -> None:
     stopped = []
 
     class _FakeAppServer:
+        should_exit = False
+
         def run(self) -> None:
             return None
 
@@ -151,16 +160,14 @@ def test_start_cleans_up_after_readiness_failure(monkeypatch) -> None:
         def streamable_http_app(self):
             return object()
 
-    monkeypatch.setattr("mcp_server.factory.create_mcp_server", lambda project_dir: _FakeMCP())
+    monkeypatch.setattr("mcp_server.factory.create_mcp_server", lambda project_dir=None: _FakeMCP())
     monkeypatch.setattr("uvicorn.Server", lambda _config: _FakeAppServer())
     monkeypatch.setattr(
         server,
         "_wait_ready",
         lambda: (_ for _ in ()).throw(TimeoutError("not ready")),
     )
-    monkeypatch.setattr(server, "stop", lambda: stopped.append(True))
-
     with pytest.raises(TimeoutError, match="not ready"):
         server.start()
 
-    assert stopped == [True]
+    assert server._server.should_exit is True

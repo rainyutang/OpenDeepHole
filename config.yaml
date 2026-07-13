@@ -2,7 +2,7 @@
 
 no_proxy: "10.0.0.0/8"  # 逗号分隔的不走代理地址，如 "localhost,127.0.0.1,10.0.0.0/8"
 
-opencode_concurrency: 4  # OpenCode/兼容 CLI 全局并发数
+opencode_concurrency: 4  # OpenCode serve 全局并发数
 
 static_dedup: true  # 静态候选跨规则去重：同 family、同函数只保留一个代表候选
 
@@ -33,7 +33,7 @@ opencode:
   proxy_url: ""  # optional proxy for opencode/nga child processes, e.g. "http://127.0.0.1:3131"
   no_proxy: ""   # optional no_proxy for opencode/nga child processes; empty uses intranet defaults
   config_paths: [] # optional OpenCode config files to merge; OPENCODE_CONFIG_PATH is also supported
-  models: []     # empty/all-disabled => LLM tasks fail; add use_default_model: true explicitly for CLI default
+  models: []     # 空池/全禁用会让任务阻塞排队；默认模型也需显式配置 use_default_model: true
 
 fp_review:
   auto_on_complete: true  # 扫描完成且存在已确认漏洞时，自动触发去误报（无需手动点击）
@@ -74,15 +74,6 @@ logging:
   file: "logs/opendeephole.log"
   max_size_mb: 10      # max size per log file in MB
   backup_count: 5      # number of rotated log files to keep
-
-llm_api:
-  enabled: false       # true 启用 API 直调模式（优先于 opencode）
-  base_url: ""         # OpenAI 兼容 API 地址
-  api_key: ""          # API key
-  model: "gpt-4o-mini"
-  temperature: 0.1
-  timeout: 300         # 单次调用超时（秒）
-  max_retries: 3
 
 auth:
   secret_key: ""                  # JWT 签名密钥，留空则自动生成（重启后旧 token 失效）

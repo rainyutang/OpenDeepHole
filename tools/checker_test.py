@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -383,7 +383,7 @@ async def _run_audits(
 
     agent_project_dir = _agent_project_dir_for_index(index_db)
     scan_id = f"checker-test-{uuid4().hex[:12]}"
-    mcp_server = LocalMCPServer(project_dir=agent_project_dir)
+    mcp_server = LocalMCPServer(project_dir=agent_project_dir, project_id=scan_id)
     workspace: Path | None = None
     try:
         port = mcp_server.start()
@@ -460,24 +460,11 @@ def _configure_backend_from_agent_config(config_path: Path, project_path: Path) 
     config_dir = Path(tempfile.mkdtemp(prefix="opendeephole-checker-audit-"))
     scan_dir = config_dir / "scans"
     scan_dir.mkdir(parents=True, exist_ok=True)
+    opencode_config = asdict(agent_cfg.opencode)
+    opencode_config["mock"] = False
     raw = {
-        "llm_api": {
-            "enabled": True,
-            "base_url": agent_cfg.llm_api.base_url,
-            "api_key": agent_cfg.llm_api.api_key,
-            "model": agent_cfg.llm_api.model,
-            "temperature": agent_cfg.llm_api.temperature,
-            "timeout": agent_cfg.llm_api.timeout,
-            "max_retries": agent_cfg.llm_api.max_retries,
-            "stream": agent_cfg.llm_api.stream,
-        },
-        "opencode": {
-            "executable": agent_cfg.opencode.executable,
-            "model": agent_cfg.opencode.model,
-            "timeout": agent_cfg.opencode.timeout,
-            "max_retries": agent_cfg.opencode.max_retries,
-            "mock": False,
-        },
+        "opencode": opencode_config,
+        "opencode_concurrency": agent_cfg.opencode_concurrency,
         "storage": {
             "projects_dir": str(project_path.parent),
             "scans_dir": str(scan_dir),

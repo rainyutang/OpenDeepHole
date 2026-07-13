@@ -1,4 +1,4 @@
-"""opencode CLI runner — invokes opencode for AI-powered vulnerability analysis."""
+"""Business prompts and compatibility facade for unified OpenCode tasks."""
 
 import asyncio
 import copy
@@ -22,17 +22,14 @@ from backend.logger import get_logger
 from backend.models import Candidate, OutputSource, ThreatAnalysis, ThreatAuditTask, Vulnerability
 from backend.opencode.model_pool import (
     NoAvailableModelError,
-    acquire_model_lease,
     clear_planned_task,
-    configured_global_concurrency,
-    release_model_lease,
-    update_model_lease_context,
 )
 from backend.opencode.output_format import with_local_timestamp
-from backend.opencode.serve_client import get_serve_manager
 from backend.opencode.result_json import (
     VULNERABILITY_RESULT_JSON_INSTRUCTION,
+    VULNERABILITY_RESULT_JSON_SCHEMA,
     VULNERABILITY_RESULTS_JSON_INSTRUCTION,
+    VULNERABILITY_RESULTS_JSON_SCHEMA,
     parse_vulnerability_result,
     parse_vulnerability_results,
 )
@@ -44,15 +41,13 @@ from backend.threat_analysis import (
 
 logger = get_logger(__name__)
 
-AI_CLI_TOOLS = ("nga", "opencode", "hac", "claude")
+AI_CLI_TOOLS = ("nga", "opencode")
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 PROCESS_EXIT_GRACE_SECONDS = 5.0
 _DEFAULT_EXECUTABLES = {
     "nga": "nga",
     "opencode": "opencode",
-    "hac": "hac",
-    "claude": "claude",
 }
 _GLOBAL_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
 _PROJECT_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
@@ -89,6 +84,28 @@ def _threat_display_label(value: str, fallback: str) -> str:
 
 
 _OPENCODE_PROXY_CLEAR_ENV_KEYS = ("ALL_PROXY", "all_proxy")
+
+_MARKDOWN_REPORTS_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reports": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string"},
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["filename", "title", "content"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["reports"],
+    "additionalProperties": False,
+}
 
 
 @dataclass
@@ -136,9 +153,7 @@ async def run_audit(
 ) -> Vulnerability | None:
     """Run opencode to analyze a single candidate vulnerability.
 
-    Supports two modes (selected via checker.yaml):
-    - opencode CLI mode (default): invokes opencode subprocess with MCP tools
-    - LLM API mode: direct API call with function calling
+    Every checker runs through the unified OpenCode task/session service.
 
     Args:
         workspace: Path to the generated opencode config workspace.
@@ -146,7 +161,7 @@ async def run_audit(
         candidate: The candidate vulnerability to analyze.
         project_id: Project identifier for MCP tool calls.
         on_output: Optional callback(line: str) called for each output line in real-time.
-        cancel_event: Optional threading.Event; when set, the subprocess is killed.
+        cancel_event: Optional event; when set, the OpenCode task is cancelled.
         timeout: Per-candidate timeout in seconds. Falls back to config if not provided.
 
     Returns:
@@ -160,38 +175,9 @@ async def run_audit(
 
     effective_timeout = timeout if timeout is not None else config.opencode.timeout
 
-    # 按 checker 的 mode 决定调用方式
     from backend.registry import get_registry
     registry = get_registry()
     checker_entry = registry.get(candidate.vuln_type)
-    use_api = checker_entry is not None and checker_entry.mode == "api"
-
-    if use_api:
-        from backend.opencode.llm_api_runner import (
-            LLMApiUnavailableError,
-            ensure_llm_api_available,
-            run_audit_via_api,
-        )
-        try:
-            await ensure_llm_api_available(on_output=on_output)
-            # 优先使用 workspace 中合并了反馈的 prompt
-            merged_prompt = workspace / ".opencode" / "skills" / candidate.vuln_type / "PROMPT.md"
-            prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
-            await _clear_candidate_planned_task(candidate)
-            return await run_audit_via_api(
-                candidate, project_id,
-                prompt_path=prompt_path,
-                on_output=on_output,
-                cancel_event=cancel_event,
-                project_dir=project_dir,
-            )
-        except LLMApiUnavailableError as exc:
-            logger.warning(
-                "LLM API unavailable for checker %s; falling back to CLI audit: %s",
-                candidate.vuln_type, exc,
-            )
-            if on_output:
-                on_output(f"[API] API 不可用，降级为 CLI 审计: {exc}")
 
     return await _run_audit_via_opencode(
         workspace,
@@ -274,6 +260,9 @@ async def _run_audit_via_opencode(
                 task_context=_candidate_task_context(candidate),
                 attempt=attempt,
                 on_invocation_metadata=capture_source,
+                task_name=f"候选点审计 {candidate.vuln_type}",
+                skills=[skill_name],
+                output_schema=VULNERABILITY_RESULT_JSON_SCHEMA,
             )
         except asyncio.TimeoutError:
             # Timeout — no retry; check if result was submitted before kill
@@ -399,6 +388,9 @@ async def run_project_audit(
                 task_context=_candidate_task_context(candidate, "project_audit"),
                 attempt=attempt,
                 on_invocation_metadata=capture_source,
+                task_name=f"项目审计 {candidate.vuln_type}",
+                skills=[skill_name],
+                output_schema=VULNERABILITY_RESULTS_JSON_SCHEMA,
             )
         except asyncio.TimeoutError:
             logger.error("%s project audit timed out for %s (timeout=%ds)", tool, candidate.vuln_type, effective_timeout)
@@ -559,21 +551,6 @@ def _parse_sensitive_clear_audit_result(text: str, candidate: Candidate) -> Sens
     return _sensitive_clear_audit_result_from_payload(payload, candidate)
 
 
-def _read_sensitive_clear_audit_result(session_id: str, candidate: Candidate) -> SensitiveClearAuditResult | None:
-    """Legacy reader for tests/tools that still inspect submit_result sink data."""
-    payload_data = _read_session_result_file(session_id, candidate, tool_name="submit_result")
-    if payload_data is None:
-        return None
-    payloads = _result_payloads(payload_data)
-    if len(payloads) != 1:
-        logger.warning(
-            "Expected exactly one sensitive_clear result for session_id=%s, got %d",
-            session_id, len(payloads),
-        )
-        return None
-    return _sensitive_clear_audit_result_from_payload(payloads[0], candidate)
-
-
 async def run_sensitive_clear_audit(
     workspace: Path,
     candidate: Candidate,
@@ -641,6 +618,9 @@ async def run_sensitive_clear_audit(
                 task_context=_candidate_task_context(candidate, "sensitive_clear"),
                 attempt=attempt,
                 on_invocation_metadata=capture_source,
+                task_name=f"敏感信息清理审计 {candidate.function}",
+                skills=[skill_name],
+                output_schema=VULNERABILITY_RESULT_JSON_SCHEMA,
             )
         except asyncio.TimeoutError:
             logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
@@ -811,10 +791,9 @@ async def run_project_report_audit(
             f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
             f"project_id 为 `{project_id}`。"
             f"这是用户创建的 Markdown 报告型项目级审计任务。"
-            f"REPORT_DIR 为 `{report_dir.resolve()}`。"
-            f"你必须将一个或多个 Markdown 报告写入 REPORT_DIR，文件扩展名必须是 .md。"
-            f"不得修改 REPORT_DIR 之外的任何文件。"
-            f"如果没有发现问题，也要写入一个 Markdown 报告说明审计范围和未发现问题的原因。"
+            "请在 structured output 的 reports 数组返回一个或多个 Markdown 报告；"
+            "filename 必须使用 .md 扩展名，title 为报告标题，content 为完整 Markdown。"
+            "如果没有发现问题，也要返回一个报告说明审计范围和未发现问题的原因。"
         ).replace("\n", " ")
         log_path = workspace / f"opencode_attempt_{attempt_id}.log"
 
@@ -828,7 +807,7 @@ async def run_project_report_audit(
         )
 
         try:
-            await _invoke_opencode(
+            output_text = await _invoke_opencode(
                 workspace,
                 prompt,
                 effective_timeout,
@@ -836,12 +815,14 @@ async def run_project_report_audit(
                 on_line=on_output,
                 cancel_event=cancel_event,
                 project_dir=project_dir,
-                writable_paths=[report_dir],
                 model_capability=getattr(checker_entry, "model_capability", "any"),
                 stats_scope_id=project_id,
                 task_context=_candidate_task_context(candidate, "report_audit"),
                 attempt=attempt,
                 on_invocation_metadata=capture_source,
+                task_name=f"报告审计 {candidate.vuln_type}",
+                skills=[skill_name],
+                output_schema=_MARKDOWN_REPORTS_JSON_SCHEMA,
             )
         except asyncio.TimeoutError:
             logger.error(
@@ -861,6 +842,20 @@ async def run_project_report_audit(
                 continue
             return _collect_markdown_reports(report_dir, candidate.vuln_type, attempt_source)
 
+        try:
+            report_payload = json.loads(output_text)
+        except Exception:
+            report_payload = {}
+        for index, item in enumerate(report_payload.get("reports") or [], start=1):
+            if not isinstance(item, dict):
+                continue
+            raw_name = Path(str(item.get("filename") or f"report-{index}.md")).name
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_name).strip("._")
+            if not safe_name.lower().endswith(".md"):
+                safe_name = f"{safe_name or f'report-{index}'}.md"
+            content = str(item.get("content") or "")
+            if content.strip():
+                (report_dir / safe_name).write_text(content, encoding="utf-8")
         reports = _collect_markdown_reports(report_dir, candidate.vuln_type, attempt_source)
         if reports:
             return reports
@@ -946,13 +941,8 @@ async def run_threat_audit(
             scan_path_label = project_dir.resolve().as_posix()
         if not scan_path_label:
             scan_path_label = "当前扫描目录"
-        code_paths_label = ", ".join(
-            item.path for item in task.code_paths if item.path
-        ) or task.code_path or "威胁分析未定位明确代码路径"
         prompt = (
             f"审计代码仓{scan_path_label}中{surface_label}的实现是否存在漏洞，导致{method_label}。"
-            f"威胁分析给出的相关代码路径为：{code_paths_label}。"
-            f"攻击路径上下文：{task.description or '未提供'}。"
         ).replace("\n", " ")
         if attempt > 1:
             prompt += _json_result_retry_message(multiple=True)
@@ -995,6 +985,8 @@ async def run_threat_audit(
                 task_context=task_context,
                 attempt=attempt,
                 on_invocation_metadata=capture_source,
+                task_name=f"威胁审计 {task.task_id}",
+                output_schema=VULNERABILITY_RESULTS_JSON_SCHEMA,
             )
         except asyncio.TimeoutError:
             logger.error("%s threat audit timed out for %s", tool, task.task_id)
@@ -1232,7 +1224,6 @@ def _effective_cli_config(cli_config, model_option) -> dict:
         "tool": _cfg_value(cli_config, "tool", ""),
         "executable": _cfg_value(cli_config, "executable", ""),
         "model": _cfg_value(cli_config, "model", ""),
-        "invocation_mode": _cfg_value(cli_config, "invocation_mode", "serve"),
         "timeout": _cfg_value(cli_config, "timeout", 1200),
         "max_retries": _cfg_value(cli_config, "max_retries", 2),
         "models": _cfg_value(cli_config, "models", []),
@@ -1308,7 +1299,10 @@ def _resolve_cli_executable(config_obj) -> str:
     process was started without sourcing those files.
     """
     tool = _normalize_tool(config_obj)
-    name = _cfg_value(config_obj, "executable", "") or _DEFAULT_EXECUTABLES[tool]
+    name = str(_cfg_value(config_obj, "executable", "") or "").strip()
+    if Path(name).name.lower() in {"hac", "claude"}:
+        name = ""
+    name = name or _DEFAULT_EXECUTABLES[tool]
     # Direct resolution: works when the binary is already in the current PATH
     resolved = shutil.which(name)
     if resolved:
@@ -1339,8 +1333,8 @@ def _resolve_cli_executable(config_obj) -> str:
 
 
 def _invocation_mode(config_obj) -> str:
-    mode = str(_cfg_value(config_obj, "invocation_mode", "serve") or "serve").strip().lower()
-    return mode if mode in {"serve", "cli"} else "serve"
+    """OpenDeepHole model work always uses the OpenCode serve/session API."""
+    return "serve"
 
 
 def _read_opencode_config(workspace: Path) -> dict:
@@ -1802,64 +1796,6 @@ def _append_submit_result_runtime_override(skill_path: Path) -> None:
         logger.warning("Failed to append JSON result override to %s: %s", skill_path, exc)
 
 
-_OPENCODE_SESSION_PLUGIN = """\
-export const OpenDeepHoleMcpSession = async () => {
-  const submitTools = new Set([
-    "submit_history_pattern",
-    "submit_variant_finding",
-    "submit_match_result",
-  ])
-
-  const isOpenDeepHoleSubmitTool = (tool: string): boolean => {
-    if (!tool) return false
-    const hasServerMarker = tool.includes("deephole-code") || tool.includes("deephole_code")
-    for (const name of submitTools) {
-      if (tool === name) return true
-      if (hasServerMarker && (tool.endsWith(`__${name}`) || tool.endsWith(`_${name}`))) return true
-    }
-    return false
-  }
-
-  return {
-    "tool.execute.before": async (
-      input: { tool: string; sessionID: string; callID: string },
-      output: { args: any },
-    ) => {
-      if (!isOpenDeepHoleSubmitTool(String(input.tool || ""))) return
-
-      output.args = output.args ?? {}
-      output.args.opencode_session_id = input.sessionID
-      output.args.opencode_call_id = input.callID
-    },
-  }
-}
-"""
-
-
-def _write_opencode_session_plugin(runtime_cwd: Path) -> Path:
-    plugin_path = runtime_cwd / ".opencode" / "plugins" / "inject-mcp-session.ts"
-    plugin_path.parent.mkdir(parents=True, exist_ok=True)
-    if not plugin_path.is_file() or plugin_path.read_text(encoding="utf-8") != _OPENCODE_SESSION_PLUGIN:
-        plugin_path.write_text(_OPENCODE_SESSION_PLUGIN, encoding="utf-8")
-    return plugin_path
-
-
-def _with_opencode_session_plugin(config: dict, plugin_path: Path | None) -> dict:
-    if plugin_path is None:
-        return config
-    next_config = copy.deepcopy(config)
-    plugin_entry = str(plugin_path.resolve())
-    existing = next_config.get("plugin")
-    if isinstance(existing, list):
-        plugins = existing
-    elif existing:
-        plugins = [existing]
-    else:
-        plugins = []
-    next_config["plugin"] = _merge_opencode_plugin_lists(plugins, [plugin_entry])
-    return next_config
-
-
 def _merge_json_file(path: Path, data: dict) -> None:
     current: dict = {}
     if path.is_file():
@@ -1882,13 +1818,12 @@ def _opencode_config_for_runtime(
     workspace: Path,
     skills_dir: Path,
     writable_paths: list[Path] | None = None,
-    plugin_path: Path | None = None,
 ) -> dict:
     config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
     if not config:
         return {}
     config["skills"] = {"paths": [str(skills_dir.resolve())]}
-    return _with_opencode_session_plugin(config, plugin_path)
+    return config
 
 
 def _opencode_config_for_env(
@@ -1938,13 +1873,11 @@ def _prepare_opencode_runtime_workspace(
     merged later into ``OPENCODE_CONFIG_CONTENT`` and are not written here.
     """
     if runtime_cwd == workspace:
-        plugin_path = _write_opencode_session_plugin(runtime_cwd)
         runtime_skills = runtime_cwd / ".opencode" / "skills"
         runtime_config = _opencode_config_for_runtime(
             workspace,
             runtime_skills,
             writable_paths,
-            plugin_path=plugin_path,
         )
         if runtime_config:
             _write_json_file(runtime_cwd / "opencode.json", runtime_config)
@@ -1953,13 +1886,11 @@ def _prepare_opencode_runtime_workspace(
     source_skills = workspace / ".opencode" / "skills"
     runtime_skills = runtime_cwd / ".opencode" / "skills"
     _copy_skill_tree(source_skills, runtime_skills)
-    plugin_path = _write_opencode_session_plugin(runtime_cwd)
 
     runtime_config = _opencode_config_for_runtime(
         workspace,
         runtime_skills,
         writable_paths,
-        plugin_path=plugin_path,
     )
     if runtime_config:
         _write_json_file(runtime_cwd / "opencode.json", runtime_config)
@@ -1981,42 +1912,7 @@ def _prepare_cli_workspace(
             writable_paths,
         )
 
-    mcp_url = _read_mcp_url(workspace)
-    opencode_skills = workspace / ".opencode" / "skills"
-
-    if tool == "claude":
-        claude_dir = workspace / ".claude"
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        mcp_config = {
-            "mcpServers": {
-                "deephole-code": {
-                    "type": "http",
-                    "url": mcp_url,
-                }
-            }
-        }
-        (claude_dir / "opendeephole-mcp.json").write_text(
-            json.dumps(mcp_config, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        _copy_skill_tree(opencode_skills, claude_dir / "skills")
-        return workspace
-
-    if tool == "hac":
-        gemini_dir = workspace / ".gemini"
-        settings_path = gemini_dir / "settings.json"
-        _merge_json_file(
-            settings_path,
-            {
-                "mcpServers": {
-                    "deephole-code": {
-                        "httpUrl": mcp_url,
-                    }
-                }
-            },
-        )
-        _copy_skill_tree(opencode_skills, gemini_dir / "skills")
-    return workspace
+    raise ValueError(f"Unsupported OpenCode serve tool: {tool}")
 
 
 def _build_cli_command(
@@ -2035,21 +1931,7 @@ def _build_cli_command(
         cmd.append(prompt)
         return cmd
 
-    if tool == "claude":
-        cmd = [executable, "-p", "--mcp-config", str(workspace / ".claude" / "opendeephole-mcp.json")]
-        if model:
-            cmd += ["--model", model]
-        cmd.append(prompt)
-        return cmd
-
-    if tool == "hac":
-        cmd = [executable]
-        if model:
-            cmd += ["--model", model]
-        cmd += ["-p", prompt]
-        return cmd
-
-    raise ValueError(f"Unsupported AI CLI tool: {tool}")
+    raise ValueError(f"Unsupported OpenCode serve tool: {tool}")
 
 
 def _write_prompt_file(runtime_dir: Path, prompt: str) -> Path:
@@ -2258,6 +2140,25 @@ async def _wait_for_stream_exit_after_termination(
         )
 
 
+
+
+def _infer_task_skills(workspace: Path, prompt: str) -> list[str]:
+    """Resolve only skill names explicitly mentioned by an existing prompt."""
+    skill_root = workspace / ".opencode" / "skills"
+    if not skill_root.is_dir():
+        return []
+    mentioned: list[str] = []
+    candidates = set(re.findall(r"`([A-Za-z0-9_.-]+)`", prompt or ""))
+    candidates.update(
+        match.group(1)
+        for match in re.finditer(r"使用\s+([A-Za-z0-9_.-]+)\s+技能", prompt or "")
+    )
+    for name in sorted(candidates):
+        if (skill_root / name / "SKILL.md").is_file():
+            mentioned.append(name)
+    return mentioned
+
+
 async def _invoke_opencode(
     workspace: Path,
     prompt: str,
@@ -2274,296 +2175,58 @@ async def _invoke_opencode(
     task_context: dict | None = None,
     attempt: int = 0,
     on_invocation_metadata=None,
+    *,
+    task_name: str = "",
+    priority: int = 50,
+    mcp_tools: list[str] | None = None,
+    skills: list[str | Path] | None = None,
+    output_schema: dict | None = None,
+    permissions: list[dict[str, str]] | None = None,
+    session_id: str | None = None,
 ) -> str:
-    """Invoke the configured AI CLI, stream output line-by-line, and return captured text.
+    """Compatibility facade backed exclusively by ``OpenCodeTaskService``."""
+    from backend.opencode.task_service import OpenCodeTaskSpec, get_opencode_task_service
 
-    Uses subprocess.Popen in a thread executor instead of
-    asyncio.create_subprocess_exec to avoid the asyncio child-watcher
-    requirement on Linux (which raises NotImplementedError in some
-    environments regardless of Python version).
-    """
-    config = get_config()
-    explicit_cli_config = cli_config is not None
-    cli_config = cli_config or config.opencode
-    lease_task_context = dict(task_context or {})
-    lease_task_context["prompt"] = prompt
-    lease_task_context["prompt_length"] = len(prompt)
-    lease_cli_config = cli_config if explicit_cli_config else (lambda: get_config().opencode)
-    lease_global_concurrency = (
-        (lambda: configured_global_concurrency(get_config()))
-        if not explicit_cli_config
-        else configured_global_concurrency(config)
+    context = dict(task_context or {})
+    inferred_task_name = (
+        str(task_name or "").strip()
+        or str(context.get("task_name") or "").strip()
+        or str(context.get("task_type") or "").strip()
+        or "OpenDeepHole task"
     )
-    lease = await acquire_model_lease(
-        lease_cli_config,
-        global_concurrency=lease_global_concurrency,
-        required_capability=model_capability,
-        prefer_high=prefer_high_model,
+    required_capability = model_capability
+    if prefer_high_model and str(model_capability or "").strip().lower() in {"", "any", "low"}:
+        required_capability = "high"
+    selected_skills = list(skills) if skills is not None else _infer_task_skills(workspace, prompt)
+    result = await get_opencode_task_service().run_task(OpenCodeTaskSpec(
+        task_name=inferred_task_name,
+        prompt=prompt,
+        directory=project_dir or workspace,
+        workspace=workspace,
+        required_capability=required_capability,
+        scope_id=stats_scope_id,
+        task_context=context,
+        mcp_tools=mcp_tools,
+        skills=selected_skills,
+        timeout_seconds=timeout,
+        priority=priority,
+        output_schema=output_schema,
+        permissions=permissions,
+        session_id=session_id,
+        writable_paths=list(writable_paths or []),
+        cli_config=cli_config,
+        attempt=attempt,
+        on_output=on_line,
+        on_invocation_metadata=on_invocation_metadata,
         cancel_event=cancel_event,
-        stats_scope_id=stats_scope_id,
-        task_context=lease_task_context,
-    )
-    if lease is None:
-        return ""
-    outcome = "failure"
-    duration_seconds: float | None = None
-    try:
-        invoke_started = lease.started_at or time.monotonic()
-        if not explicit_cli_config:
-            cli_config = get_config().opencode
-        effective_cli_config = _effective_cli_config(cli_config, lease.option)
-        timeout = int(_cfg_value(effective_cli_config, "timeout", timeout) or timeout)
-        tool = _normalize_tool(effective_cli_config)
-        executable = _resolve_cli_executable(effective_cli_config)
-        model = str(_cfg_value(effective_cli_config, "model", "") or "")
-        model_label = _invocation_model_label(lease.option, model)
-        emit_line = _model_line_emitter(on_line, model_label)
-        invocation_source = _output_source_from_invocation(
-            lease=lease,
-            tool=tool,
-            model=model,
-            required_capability=model_capability,
-            attempt=attempt,
-        )
-        if on_invocation_metadata:
-            on_invocation_metadata(invocation_source)
-        invocation_mode = _invocation_mode(effective_cli_config)
-        runtime_namespace = (
-            _serve_runtime_namespace(workspace)
-            if invocation_mode == "serve" and tool in {"nga", "opencode"}
-            else f"{lease.option.id}-{uuid4().hex[:8]}"
-        )
-        cwd = _select_cli_cwd(workspace, tool, project_dir, runtime_namespace=runtime_namespace)
-        if emit_line:
-            capability_note = model_capability or "any"
-            emit_line(
-                f"[{tool}] model={lease.option.id} capability={lease.option.capability} "
-                f"required={capability_note} running={lease.running}/{lease.global_running}"
-            )
-        if invocation_mode == "serve" and tool in {"nga", "opencode"}:
-            config_workspace = _prepare_cli_workspace(
-                workspace,
-                tool,
-                runtime_cwd=cwd,
-                writable_paths=writable_paths,
-            )
-            serve_env = _build_cli_env(
-                config_workspace,
-                tool,
-                writable_paths=writable_paths,
-                project_dir=project_dir or workspace,
-                executable=executable,
-                cli_config=effective_cli_config,
-            )
-
-            async def record_serve_session(session_id: str) -> None:
-                invocation_source.serve_session_id = session_id
-                await update_model_lease_context(lease, {"serve_session_id": session_id})
-
-            def record_response_model(actual_model: str) -> None:
-                normalized_model = str(actual_model or "").strip()
-                if normalized_model:
-                    invocation_source.model = normalized_model
-
-            try:
-                log_lines = await get_serve_manager().run_prompt(
-                    tool=tool,
-                    executable=executable,
-                    directory=project_dir or workspace,
-                    config_workspace=config_workspace,
-                    config_content=serve_env.get("OPENCODE_CONFIG_CONTENT"),
-                    prompt=prompt,
-                    model=model,
-                    timeout=timeout,
-                    on_line=emit_line,
-                    on_session_id=record_serve_session,
-                    on_response_model=record_response_model,
-                    cancel_event=cancel_event,
-                    env_overrides=_opencode_process_env_overrides(serve_env),
-                )
-            except asyncio.CancelledError:
-                if cancel_event and cancel_event.is_set():
-                    outcome = "cancelled"
-                    return ""
-                raise
-            except asyncio.TimeoutError:
-                outcome = "timeout"
-                raise
-            if log_path and log_lines:
-                try:
-                    log_path.write_text("\n".join(log_lines), encoding="utf-8")
-                except Exception:
-                    pass
-            outcome = "success"
-            return "\n".join(log_lines)
-        prompt_file: Path | None = None
-        # When the prompt is very long, pass a short file-reference message instead
-        # of the full command-line argument to avoid hitting the Windows
-        # CreateProcess 32767-character limit ([WinError 206]).
-        _PROMPT_CLI_LIMIT = 8000
-        prompt_arg = prompt
-        if len(prompt) > _PROMPT_CLI_LIMIT:
-            prompt_file = _write_prompt_file(cwd, prompt)
-            prompt_arg = _prompt_file_message(prompt_file)
-        cmd = _build_cli_command(
-            tool, executable, workspace, prompt_arg, model,
-            project_dir=project_dir,
-        )
-
-        logger.debug("%s command: %s", tool, " ".join(shlex.quote(part) for part in cmd))
-
-        config_workspace = _prepare_cli_workspace(
-            workspace,
-            tool,
-            runtime_cwd=cwd,
-            writable_paths=writable_paths,
-        )
-        env = _build_cli_env(
-            config_workspace,
-            tool,
-            writable_paths=writable_paths,
-            project_dir=project_dir or workspace,
-            executable=executable,
-            cli_config=effective_cli_config,
-        )
-
-        kwargs: dict = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-        else:
-            kwargs["start_new_session"] = True
-
-        loop = asyncio.get_running_loop()
-        # Queue carries output lines; None is the end-of-stream sentinel.
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
-        proc_holder: list[subprocess.Popen | None] = [None]
-
-        def _stream() -> int:
-            """Blocking: run the selected CLI, push lines into the asyncio queue."""
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(cwd),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-                **kwargs,
-            )
-            proc_holder[0] = proc
-            try:
-                assert proc.stdout is not None
-                while True:
-                    line = proc.stdout.readline()
-                    if not line:
-                        if proc.poll() is not None:
-                            break
-                        continue
-                    line = _strip_ansi(line.rstrip())
-                    if line:
-                        loop.call_soon_threadsafe(queue.put_nowait, line)
-            finally:
-                try:
-                    proc.stdout.close()
-                except Exception:
-                    pass
-                proc.wait()
-                loop.call_soon_threadsafe(queue.put_nowait, None)
-            return proc.returncode
-
-        def _terminate(reason: str) -> None:
-            proc = proc_holder[0]
-            if proc is not None:
-                _terminate_process_tree(proc, tool=tool, reason=reason)
-
-        stream_future = loop.run_in_executor(None, _stream)
-
-        # Watcher: kill proc immediately when cancel_event fires.
-        async def _cancel_watcher() -> None:
-            if cancel_event:
-                while not cancel_event.is_set():
-                    await asyncio.sleep(0.2)
-                _terminate("cancel")
-
-        watcher = asyncio.create_task(_cancel_watcher()) if cancel_event else None
-
-        log_lines: list[str] = []
-        started = time.monotonic()
-        deadline = asyncio.get_event_loop().time() + timeout
-        timed_out = False
-        cancelled = False
-
+    ))
+    if log_path and result.text:
         try:
-            while True:
-                if cancel_event and cancel_event.is_set():
-                    cancelled = True
-                    _terminate("cancel")
-                    break
-                remaining = deadline - asyncio.get_event_loop().time()
-                if remaining <= 0:
-                    timed_out = True
-                    _terminate("timeout")
-                    break
-                try:
-                    line = await asyncio.wait_for(queue.get(), timeout=min(remaining, 1.0))
-                except asyncio.TimeoutError:
-                    continue
-                if line is None:  # end-of-stream sentinel
-                    break
-                log_lines.append(line)
-                logger.debug("[%s] %s", tool, line)
-                if emit_line:
-                    emit_line(line)
-        finally:
-            if watcher:
-                watcher.cancel()
-                try:
-                    await watcher
-                except asyncio.CancelledError:
-                    pass
-            if log_path and log_lines:
-                try:
-                    log_path.write_text("\n".join(log_lines), encoding="utf-8")
-                except Exception:
-                    pass
-
-        if timed_out or cancelled:
-            await _wait_for_stream_exit_after_termination(
-                stream_future,
-                tool=tool,
-                timed_out=timed_out,
-                cancelled=cancelled,
-                timeout=timeout,
-                started=started,
-            )
-            _cleanup_prompt_file(prompt_file)
-            if timed_out:
-                outcome = "timeout"
-                raise asyncio.TimeoutError()
-            outcome = "cancelled"
-            return ""
-
-        try:
-            await stream_future  # wait for thread to exit cleanly
-        finally:
-            _cleanup_prompt_file(prompt_file)
-
-        proc = proc_holder[0]
-        if proc and proc.returncode not in (0, None):
-            logger.error("%s exited with code %d", tool, proc.returncode)
-            raise RuntimeError(f"{tool} exited with code {proc.returncode}")
-        outcome = "success"
-        return "\n".join(log_lines)
-    except asyncio.CancelledError:
-        outcome = "cancelled"
-        raise
-    finally:
-        if 'invoke_started' in locals():
-            duration_seconds = time.monotonic() - invoke_started
-        await release_model_lease(lease, outcome=outcome, duration_seconds=duration_seconds)
+            log_path.write_text(result.text, encoding="utf-8")
+        except Exception:
+            pass
+    result.raise_for_status()
+    return result.text
 
 
 def _parse_result_from_text(text: str, candidate: Candidate) -> Vulnerability | None:
@@ -2647,122 +2310,10 @@ def _session_id_from_output_source(source: OutputSource | None) -> str:
     return str(getattr(source, "serve_session_id", "") or "").strip()
 
 
-def _read_session_result_file(
-    session_id: str,
-    candidate: Candidate,
-    *,
-    tool_name: str = "submit_result",
-):
-    normalized_session = str(session_id or "").strip()
-    if not normalized_session:
-        logger.warning(
-            "%s was not called for %s:%d (missing serve_session_id)",
-            tool_name, candidate.file, candidate.line,
-        )
-        return None
-    try:
-        from backend.opencode.submit_sink import read_submissions_as_result_file
-
-        data = read_submissions_as_result_file(normalized_session, tool_name=tool_name)
-    except Exception as exc:
-        logger.error(
-            "Failed to read %s payloads for session_id=%s: %s",
-            tool_name, normalized_session, exc,
-        )
-        return None
-    if data is None:
-        logger.warning(
-            "%s was not called for %s:%d (session_id=%s)",
-            tool_name, candidate.file, candidate.line, normalized_session,
-        )
-    return data
 
 
-def _read_session_results(
-    session_id: str,
-    candidate: Candidate,
-    *,
-    tool_name: str = "submit_result",
-) -> list[Vulnerability]:
-    data = _read_session_result_file(session_id, candidate, tool_name=tool_name)
-    if data is None:
-        return []
-    return [_vulnerability_from_payload(item, candidate) for item in _result_payloads(data)]
 
 
-def _read_session_result(
-    session_id: str,
-    candidate: Candidate,
-    *,
-    tool_name: str = "submit_result",
-) -> Vulnerability | None:
-    results = _read_session_results(session_id, candidate, tool_name=tool_name)
-    if not results:
-        return None
-    return results[-1]
-
-
-def _read_result_from_source(
-    source: OutputSource | None,
-    candidate: Candidate,
-    *,
-    tool_name: str = "submit_result",
-) -> Vulnerability | None:
-    return _read_session_result(
-        _session_id_from_output_source(source),
-        candidate,
-        tool_name=tool_name,
-    )
-
-
-def _read_results_from_source(
-    source: OutputSource | None,
-    candidate: Candidate,
-    *,
-    tool_name: str = "submit_result",
-) -> list[Vulnerability]:
-    return _read_session_results(
-        _session_id_from_output_source(source),
-        candidate,
-        tool_name=tool_name,
-    )
-
-
-def _read_result_file(result_id: str, candidate: Candidate):
-    config = get_config()
-    result_path = Path(config.storage.scans_dir) / f"{result_id}.json"
-
-    if not result_path.exists():
-        logger.warning(
-            "submit_result was not called for %s:%d (result_id=%s, path=%s)",
-            candidate.file, candidate.line, result_id, result_path,
-        )
-        return None
-
-    try:
-        return json.loads(result_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.error(
-            "Failed to parse result file for result_id=%s path=%s: %s",
-            result_id, result_path, exc,
-        )
-        return None
-
-
-def _read_results(result_id: str, candidate: Candidate) -> list[Vulnerability]:
-    """Read all result payloads written for a project-level audit."""
-    data = _read_result_file(result_id, candidate)
-    if data is None:
-        return []
-    return [_vulnerability_from_payload(item, candidate) for item in _result_payloads(data)]
-
-
-def _read_result(result_id: str, candidate: Candidate) -> Vulnerability | None:
-    """Read one result file written by the submit_result MCP tool."""
-    results = _read_results(result_id, candidate)
-    if not results:
-        return None
-    return results[-1]
 
 
 async def run_audit_batch(
@@ -2776,8 +2327,7 @@ async def run_audit_batch(
 ) -> list[Vulnerability | None]:
     """Run batch audit for multiple candidates in the same function.
 
-    In LLM API mode, sends all candidates in one LLM call.
-    In opencode CLI mode, falls back to sequential single-candidate calls.
+    Candidates are submitted sequentially through the same OpenCode service.
     """
     config = get_config()
 
@@ -2786,41 +2336,9 @@ async def run_audit_batch(
             await _clear_candidate_planned_task(candidate)
         return [_mock_result(c) for c in candidates]
 
-    # 按 checker 的 mode 决定调用方式
     from backend.registry import get_registry
     registry = get_registry()
     checker_entry = registry.get(candidates[0].vuln_type) if candidates else None
-    use_api = checker_entry is not None and checker_entry.mode == "api"
-
-    if use_api:
-        from backend.opencode.llm_api_runner import (
-            LLMApiUnavailableError,
-            ensure_llm_api_available,
-            run_batch_audit_via_api,
-        )
-        try:
-            await ensure_llm_api_available(on_output=on_output)
-            # 优先使用 workspace 中合并了反馈的 prompt
-            merged_prompt = workspace / ".opencode" / "skills" / candidates[0].vuln_type / "PROMPT.md"
-            prompt_path = merged_prompt if merged_prompt.is_file() else checker_entry.prompt_path
-            for candidate in candidates:
-                await _clear_candidate_planned_task(candidate)
-            return await run_batch_audit_via_api(
-                candidates, project_id,
-                prompt_path=prompt_path,
-                on_output=on_output,
-                cancel_event=cancel_event,
-                project_dir=project_dir,
-            )
-        except LLMApiUnavailableError as exc:
-            logger.warning(
-                "LLM API unavailable for checker %s batch; falling back to CLI audit: %s",
-                candidates[0].vuln_type, exc,
-            )
-            if on_output:
-                on_output(f"[API] API 不可用，批量审计降级为 CLI 审计: {exc}")
-
-    # CLI 模式：退化为逐个调用
     results = []
     for candidate in candidates:
         if cancel_event and cancel_event.is_set():

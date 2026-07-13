@@ -2,6 +2,7 @@
 
 import os
 import secrets
+import warnings
 from pathlib import Path
 
 import yaml
@@ -9,7 +10,7 @@ from pydantic import BaseModel
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "OpenDeepHoleData"
-_AI_CLI_TOOLS = {"nga", "opencode", "hac", "claude"}
+_AI_CLI_TOOLS = {"nga", "opencode"}
 
 
 class ServerConfig(BaseModel):
@@ -47,7 +48,6 @@ class OpenCodeModelConfig(BaseModel):
 class OpenCodeConfig(BaseModel):
     tool: str = "opencode"
     executable: str = "opencode"  # CLI executable name or full path
-    invocation_mode: str = "serve"  # serve | cli
     model: str = "anthropic/claude-sonnet-4-20250514"
     timeout: int = 1200
     max_retries: int = 2  # retry on transient errors (not timeout)
@@ -127,18 +127,6 @@ class LoggingConfig(BaseModel):
     backup_count: int = 5
 
 
-class LLMApiConfig(BaseModel):
-    """LLM API 直调模式配置（替代 opencode CLI）。"""
-    enabled: bool = False
-    base_url: str = ""
-    api_key: str = ""
-    model: str = "gpt-4o-mini"
-    temperature: float = 0.1
-    timeout: int = 300
-    max_retries: int = 3
-    stream: bool = False
-
-
 class FpReviewConfig(BaseModel):
     """去误报（false-positive review）流程配置。"""
     # 扫描完成且存在已确认漏洞时，自动触发去误报，无需手动点击。
@@ -162,7 +150,6 @@ class AppConfig(BaseModel):
     storage: StorageConfig = StorageConfig()
     scan: ScanConfig = ScanConfig()
     logging: LoggingConfig = LoggingConfig()
-    llm_api: LLMApiConfig = LLMApiConfig()
     auth: AuthConfig = AuthConfig()
 
 
@@ -191,15 +178,6 @@ def load_config(config_path: str | None = None) -> AppConfig:
     if model := os.environ.get("OPENCODE_MODEL"):
         raw.setdefault("opencode", {})["model"] = model
 
-    # LLM API environment variable overrides
-    if v := os.environ.get("LLM_API_ENABLED"):
-        raw.setdefault("llm_api", {})["enabled"] = v.lower() in ("1", "true", "yes")
-    if v := os.environ.get("LLM_API_BASE_URL"):
-        raw.setdefault("llm_api", {})["base_url"] = v
-    if v := os.environ.get("LLM_API_KEY"):
-        raw.setdefault("llm_api", {})["api_key"] = v
-    if v := os.environ.get("LLM_API_MODEL"):
-        raw.setdefault("llm_api", {})["model"] = v
     if v := os.environ.get("NO_PROXY"):
         raw["no_proxy"] = v
 
@@ -209,8 +187,8 @@ def load_config(config_path: str | None = None) -> AppConfig:
 def _normalize_cli_section(section: object) -> None:
     if not isinstance(section, dict):
         return
-    invocation_mode = str(section.get("invocation_mode") or "").strip().lower()
-    section["invocation_mode"] = invocation_mode if invocation_mode in {"serve", "cli"} else "serve"
+    if str(section.pop("invocation_mode", "") or "").strip().lower() == "cli":
+        warnings.warn("Legacy OpenCode CLI invocation is no longer supported; using serve", RuntimeWarning)
     tool = str(section.get("tool") or "").strip().lower()
     if tool in _AI_CLI_TOOLS:
         section["tool"] = tool
@@ -219,6 +197,11 @@ def _normalize_cli_section(section: object) -> None:
     inferred = Path(executable).name.lower() if executable else ""
     if inferred in _AI_CLI_TOOLS:
         section["tool"] = inferred
+        return
+    if tool:
+        warnings.warn(f"Legacy AI tool {tool!r} is no longer supported; using opencode", RuntimeWarning)
+    section["tool"] = "opencode"
+    section["executable"] = "opencode"
 
 
 def _resolve_storage_paths(raw: dict, base_dir: Path) -> None:

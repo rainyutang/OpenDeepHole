@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getAgentOpenCodeModels, getAgentOpenCodePool, getAgents, getAgentConfig, syncProductValidators, testAgentConfig, updateAgentConfig } from "../api/client";
+import { getAgentOpenCodeModels, getAgentOpenCodePool, getAgents, getAgentConfig, syncProductValidators, updateAgentConfig } from "../api/client";
 import type {
   AgentGitHistoryConfig,
   AgentInfo,
@@ -48,19 +48,9 @@ const DEFAULT_VULNERABILITY_VALIDATION = {
 const DEFAULT_CONFIG: AgentRemoteConfig = {
   no_proxy: "10.0.0.0/8",
   opencode_concurrency: 4,
-  llm_api: {
-    base_url: "https://api.anthropic.com",
-    api_key: "",
-    model: "claude-sonnet-4-6",
-    temperature: 0.1,
-    timeout: 300,
-    max_retries: 3,
-    stream: false,
-  },
   opencode: {
     tool: "nga",
     executable: "nga",
-    invocation_mode: "serve",
     model: "",
     timeout: 1200,
     max_retries: 2,
@@ -101,15 +91,11 @@ const DEFAULT_MODEL: AgentOpenCodeModelConfig = {
 const TOOL_OPTIONS = [
   { value: "nga", label: "nga" },
   { value: "opencode", label: "opencode" },
-  { value: "hac", label: "hac" },
-  { value: "claude", label: "claude" },
 ];
 
 const DEFAULT_EXECUTABLE_BY_TOOL: Record<string, string> = {
   nga: "nga",
   opencode: "opencode",
-  hac: "hac",
-  claude: "claude",
 };
 
 function deepClone<T>(obj: T): T {
@@ -148,7 +134,6 @@ function normalizeConfig(config: AgentRemoteConfig): AgentRemoteConfig {
       ...DEFAULT_VULNERABILITY_VALIDATION,
       ...config.vulnerability_validation,
     },
-    llm_api: { ...base.llm_api, ...config.llm_api },
   };
 }
 
@@ -228,7 +213,10 @@ function compactTaskLabel(task: Record<string, unknown> | undefined): string {
   const line = task.line ? `:${String(task.line)}` : "";
   const target = file ? `${file}${line}` : checker;
   const session = task.serve_session_id ? String(task.serve_session_id) : "";
-  return [taskType + stage, target, session].filter(Boolean).join(" ");
+  const priority = task.priority != null ? `P${String(task.priority)}` : "";
+  const revision = Number(task.revision || 1) > 1 ? `r${String(task.revision)}` : "";
+  const blocked = task.blocked_reason ? "阻塞" : "";
+  return [priority, revision, taskType + stage, target, session, blocked].filter(Boolean).join(" ");
 }
 
 function ActiveTaskList({ tasks }: { tasks?: Record<string, unknown>[] }) {
@@ -259,10 +247,8 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
   const [cfg, setCfg] = useState<AgentRemoteConfig>(deepClone(DEFAULT_CONFIG));
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
   const [syncingValidators, setSyncingValidators] = useState(false);
   const [validatorSyncConfirmOpen, setValidatorSyncConfirmOpen] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [validatorSyncResult, setValidatorSyncResult] = useState<{ ok: boolean; message: string; installed: string[] } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -332,20 +318,6 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     }
   };
 
-  const handleTest = async () => {
-    setTesting(true);
-    setError(null);
-    setTestResult(null);
-    try {
-      const result = await testAgentConfig(agent.agent_id, cfg);
-      setTestResult(result);
-    } catch {
-      setError("API 校验失败，请确认 Agent 在线并重试");
-    } finally {
-      setTesting(false);
-    }
-  };
-
   const handleSyncValidators = () => {
     if (!agent.online || syncingValidators) return;
     setValidatorSyncConfirmOpen(true);
@@ -368,10 +340,6 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
     } finally {
       setSyncingValidators(false);
     }
-  };
-
-  const setLLM = (key: keyof AgentRemoteConfig["llm_api"], value: string | number | boolean) => {
-    setCfg((prev) => ({ ...prev, llm_api: { ...prev.llm_api, [key]: value } }));
   };
 
   const setOC = (key: keyof AgentRemoteConfig["opencode"], value: string | number | string[]) => {
@@ -647,55 +615,7 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
 
               {activeTab === "base" && (
                 <>
-              {/* LLM API */}
-              <div>
-                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">LLM API 配置</h3>
-                <div className="grid grid-cols-1 gap-3">
-                  <Field label="API 地址" hint="OpenAI 兼容接口">
-                    <input type="text" value={cfg.llm_api.base_url}
-                      onChange={(e) => setLLM("base_url", e.target.value)}
-                      className={inputCls} placeholder="https://api.anthropic.com" />
-                  </Field>
-                  <Field label="API Key">
-                    <input type="password" value={cfg.llm_api.api_key}
-                      onChange={(e) => setLLM("api_key", e.target.value)}
-                      className={inputCls} placeholder="sk-..." />
-                  </Field>
-                  <Field label="模型">
-                    <input type="text" value={cfg.llm_api.model}
-                      onChange={(e) => setLLM("model", e.target.value)}
-                      className={inputCls} placeholder="claude-sonnet-4-6" />
-                  </Field>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <Field label="超时（秒）">
-                      <input type="number" value={cfg.llm_api.timeout}
-                        onChange={(e) => setLLM("timeout", Number(e.target.value))}
-                        className={inputCls} min={10} />
-                    </Field>
-                    <Field label="最大重试">
-                      <input type="number" value={cfg.llm_api.max_retries}
-                        onChange={(e) => setLLM("max_retries", Number(e.target.value))}
-                        className={inputCls} min={0} max={10} />
-                    </Field>
-                    <Field label="Temperature">
-                      <input type="number" value={cfg.llm_api.temperature}
-                        onChange={(e) => setLLM("temperature", Number(e.target.value))}
-                        className={inputCls} min={0} max={2} step={0.1} />
-                    </Field>
-                  </div>
-                  <label className="flex items-center gap-2 text-sm text-slate-300">
-                    <input
-                      type="checkbox"
-                      checked={cfg.llm_api.stream}
-                      onChange={(e) => setLLM("stream", e.target.checked)}
-                      className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
-                    />
-                    使用流式传输
-                  </label>
-                </div>
-              </div>
-
-              {/* CLI audit */}
+              {/* OpenCode audit */}
               <div>
                 <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">LLM 审计工具</h3>
                 <div className="grid grid-cols-1 gap-3">
@@ -706,14 +626,6 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                       {TOOL_OPTIONS.map((item) => (
                         <option key={item.value} value={item.value}>{item.label}</option>
                       ))}
-                    </select>
-                  </Field>
-                  <Field label="调用方式">
-                    <select value={cfg.opencode.invocation_mode || "serve"}
-                      onChange={(e) => setOC("invocation_mode", e.target.value)}
-                      className={inputCls}>
-                      <option value="serve">serve API（默认）</option>
-                      <option value="cli">CLI run</option>
                     </select>
                   </Field>
                   <Field label="可执行文件" hint="CLI 名称或完整路径">
@@ -839,14 +751,6 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                         ))}
                       </select>
                     </Field>
-                    <Field label="调用方式">
-                      <select value={cfg.fp_review_cli.invocation_mode || "serve"}
-                        onChange={(e) => setFpCli("invocation_mode", e.target.value)}
-                        className={inputCls}>
-                        <option value="serve">serve API（默认）</option>
-                        <option value="cli">CLI run</option>
-                      </select>
-                    </Field>
                     <Field label="可执行文件" hint="CLI 名称或完整路径">
                       <input type="text" value={cfg.fp_review_cli.executable}
                         onChange={(e) => setFpCli("executable", e.target.value)}
@@ -946,24 +850,10 @@ function AgentConfigPanel({ agent }: AgentConfigPanelProps) {
                 </p>
               )}
 
-              {testResult && (
-                <p className={`text-sm rounded-lg px-3 py-2 border ${
-                  testResult.ok
-                    ? "text-green-300 bg-green-500/10 border-green-500/20"
-                    : "text-red-300 bg-red-500/10 border-red-500/20"
-                }`}>
-                  {testResult.message || (testResult.ok ? "API 配置可用" : "API 配置不可用")}
-                </p>
-              )}
-
               <div className="flex flex-wrap justify-end gap-2 pt-1">
                 <button onClick={() => setOpen(false)}
                   className="px-4 py-1.5 text-sm text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors">
                   关闭
-                </button>
-                <button onClick={handleTest} disabled={testing || !agent.online}
-                  className="px-4 py-1.5 text-sm font-medium text-slate-100 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded-lg transition-colors">
-                  {testing ? "校验中…" : "校验 API"}
                 </button>
                 <button onClick={handleSave} disabled={saving}
                   className="px-4 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg transition-colors">
@@ -1064,7 +954,7 @@ function AgentModelUsage({ pool }: { pool: AgentOpenCodePoolStatus | null }) {
     <div className="border-t border-slate-700/60 px-4 py-3">
       {!hasEnabledModel && (
         <div className="mb-3 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
-          当前没有启用的模型。LLM 任务会立即失败；如需使用 CLI 默认模型，请在模型池中显式添加并启用“默认模型”。
+          当前没有启用的模型。OpenCode 任务会保持阻塞排队，直到启用满足能力要求的模型，或由用户取消。
         </div>
       )}
       <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
@@ -1079,7 +969,9 @@ function AgentModelUsage({ pool }: { pool: AgentOpenCodePoolStatus | null }) {
               key={String(task.request_id || index)}
               className="truncate rounded border border-amber-500/20 bg-amber-500/10 px-2 py-1 text-xs text-amber-100"
             >
-              {compactTaskLabel(task)}
+              <span title={String(task.blocked_reason || compactTaskLabel(task))}>
+                {compactTaskLabel(task)}
+              </span>
             </div>
           ))}
         </div>
@@ -1216,9 +1108,9 @@ function ModelPoolEditor({
       {!hasUsableModel && (
         <p className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
           {models.length === 0
-            ? "当前未配置模型。配置可以保存，但所有 LLM 任务都会立即失败；如需使用 CLI 默认模型，必须点击“添加默认模型”显式添加并启用。"
+            ? "当前未配置模型。OpenCode 任务会保持阻塞排队；如需使用默认模型，必须点击“添加默认模型”显式添加并启用。"
             : !hasEnabledModel
-              ? "当前模型已全部禁用。配置可以保存，但所有 LLM 任务都会立即失败；请至少启用一个模型。"
+              ? "当前模型已全部禁用。OpenCode 任务会保持阻塞排队；请至少启用一个模型。"
               : "当前没有有效的已启用模型。请为启用行填写模型名，或显式选择“使用 CLI 默认模型”。"}
         </p>
       )}
@@ -1531,7 +1423,7 @@ Connecting to ws://.../api/agent/ws ...
   Connected. Agent ID: a1b2c3d4...`}</pre>
 
           <p className="text-slate-400 text-xs mt-3">
-            可选：在 <code className="text-blue-400">agent.yaml</code> 中修改 <code className="text-blue-400">agent_name</code>（显示名称）。LLM API 等其他配置可在此页面直接配置，无需手动编辑文件。
+            可选：在 <code className="text-blue-400">agent.yaml</code> 中修改 <code className="text-blue-400">agent_name</code>（显示名称）。OpenCode 工具、代理和模型池可在此页面直接配置，无需手动编辑文件。
           </p>
         </div>
 
@@ -1542,7 +1434,7 @@ Connecting to ws://.../api/agent/ws ...
             在此页面配置 Agent
           </h2>
           <p className="text-slate-300 text-sm mb-2">
-            Agent 启动并连接后，会在顶部「已连接 Agent」列表中出现。点击对应 Agent 的「配置」按钮，填写 LLM API Key 等信息并保存。
+            Agent 启动并连接后，会在顶部「已连接 Agent」列表中出现。点击对应 Agent 的「配置」按钮，设置 OpenCode 可执行文件、代理和模型池后保存。
           </p>
           <p className="text-slate-400 text-sm">
             保存后会立即推送到在线 Agent 并写回 agent.yaml。正在运行的扫描会从下一个候选点开始使用新配置。

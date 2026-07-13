@@ -635,16 +635,6 @@ class AgentInfo(BaseModel):
     agent_session_id: str = ""
 
 
-class AgentLLMApiConfig(BaseModel):
-    base_url: str = "https://api.anthropic.com"
-    api_key: str = ""
-    model: str = "claude-sonnet-4-6"
-    temperature: float = 0.1
-    timeout: int = 300
-    max_retries: int = 3
-    stream: bool = False
-
-
 class AgentOpenCodeModelConfig(BaseModel):
     id: str = ""
     model: str = ""
@@ -663,7 +653,6 @@ class AgentOpenCodeModelConfig(BaseModel):
 class AgentOpenCodeConfig(BaseModel):
     tool: str = "nga"
     executable: str = "nga"
-    invocation_mode: str = "serve"
     model: str = ""
     timeout: int = 1200
     max_retries: int = 2
@@ -712,7 +701,6 @@ class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
     no_proxy: str = "10.0.0.0/8"
     opencode_concurrency: int = 4
-    llm_api: AgentLLMApiConfig = AgentLLMApiConfig()
     opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
     fp_review_cli: AgentOpenCodeConfig | None = None
     memory_api_discovery: AgentMemoryApiDiscoveryConfig = AgentMemoryApiDiscoveryConfig()

@@ -104,7 +104,7 @@ def describe_vulnerability(vuln: dict) -> str:
 
 ### `ctx.get_report_markdown()`
 
-返回后端生成的单漏洞 Markdown 报告。这是验证脚本的主输入，内容和页面下载的单漏洞报告保持一致。需要传给外部工具或 nga skill 时，建议先写入一个明确的文件路径。
+返回后端生成的单漏洞 Markdown 报告。这是验证脚本的主输入，内容和页面下载的单漏洞报告保持一致。需要传给外部工具或 OpenCode 任务时，建议先写入一个明确的文件路径。
 
 ```python
 report_path = Path(ctx.work_dir) / "vulnerability.md"
@@ -169,30 +169,7 @@ ctx.publish_artifact("step-1.md", path=step_1_artifact, title="阶段产物", ki
 
 执行外部命令，并把 stdout 和 stderr 合并同步到 `ctx.emit_stdout(...)`。`output_title` 可指定命令输出进入哪个页面栏，不传时进入默认“中间产出”栏。返回进程退出码。
 
-```python
-return_code = ctx.run_command(
-    ["nga", "run", "--dir", str(project_dir), prompt],
-    cwd=project_dir,
-    timeout=ctx.timeout_seconds,
-    output_title="命令输出",
-)
-if return_code == 124:
-    return ValidationResult(
-        validation_success=False,
-        is_problem=True,
-        requires_human_intervention=True,
-        status="timeout",
-        summary=f"nga timed out after {ctx.timeout_seconds}s",
-    )
-if return_code != 0:
-    return ValidationResult(
-        validation_success=False,
-        is_problem=True,
-        requires_human_intervention=True,
-        status="failed",
-        summary=f"nga failed with return_code={return_code}",
-    )
-```
+`run_command` 仅用于编译器、测试程序、PoC 等普通外部命令。不得用它启动 `nga`、`opencode`、`claude` 或 `hac`；这类命令返回 `126`，模型任务必须使用下面的 `ctx.run_opencode_task(...)`。
 
 注意事项：
 
@@ -202,8 +179,39 @@ if return_code != 0:
 - 运行器会给子进程合并当前 PATH、Windows 用户/系统 PATH 和常见工具目录，例如 `%APPDATA%\npm`、`%LOCALAPPDATA%\pnpm`、`%LOCALAPPDATA%\Volta\bin`、`%USERPROFILE%\scoop\shims`、`%ProgramData%\chocolatey\bin`。
 - `timeout` 是单条命令超时。整体验证仍受 `ctx.timeout_seconds` 限制。
 - 命令超时时返回 `124`。
-- `nga`、`opencode`、`claude`、`hac` 找不到时返回 `127`，并把当前 PATH 和处理建议写入中间产物。
+- 直接执行 AI CLI 时返回 `126`，并提示改用统一 OpenCode 任务接口。
 - 用户停止验证时，运行器会终止正在执行的命令进程树，并返回负数退出码或已结束进程的退出码。
+
+### `ctx.run_opencode_task(...)`
+
+通过 Agent 父进程的统一 OpenCode 队列执行模型任务。验证 worker 不创建 CLI 子进程；模型选择、优先级、执行超时、权限、MCP、SKILL、JSON Schema 和 session 都由公共组件管理。
+
+```python
+result = ctx.run_opencode_task(
+    task_name="PoC 设计",
+    prompt="根据漏洞报告设计验证步骤，只返回结构化结果。",
+    required_capability="high",       # low | medium | high
+    directory=ctx.project_path,
+    mcp_tools=["view_function_code"],
+    skills=["validation-poc"],
+    timeout_seconds=ctx.timeout_seconds,
+    priority=80,                       # 1..100，数值越大越优先
+    output_schema={
+        "type": "object",
+        "properties": {"content": {"type": "string"}},
+        "required": ["content"],
+        "additionalProperties": False,
+    },
+    permissions=[{"permission": "edit", "pattern": "*", "action": "deny"}],
+    session_id=None,
+)
+session_id = result["session_id"]
+content = result["structured"]["content"]
+```
+
+后续阶段把返回的 `session_id` 再传入，即可在同一 OpenCode session 中追加 prompt。session 的运行目录固定不能更换；每次追加仍可独立指定模型能力、MCP 工具、SKILL、权限和输出 Schema。任务超时只从真正获得模型并开始执行时计算，排队时间不计入单次 OpenCode 执行超时，但仍受验证流程的整体超时约束。
+
+验证父进程会按需把当前扫描的 `code_index.db` 注册到共享 MCP 网关，并自动在 prompt 前补充 deephole-code 所需的 `project_id`。按名称选择的 SKILL 会从验证工作区和任务 `directory` 下的 `.opencode/skills`、`.agents/skills` 或 `skills` 目录查找；也可传入 SKILL 目录或 `SKILL.md` 的绝对路径。
 
 ### `ctx.cancelled()`
 
@@ -257,20 +265,20 @@ ValidationResult(
 - 验证函数运行时当前目录是 `ctx.validator_dir`。脚本目录下的 `input/input.json` 可直接用 `open("input/input.json", encoding="utf-8")` 读取。
 - 方法目录是独立 Python 包；同目录辅助文件使用 `from . import helper`，子模块使用 `from .helpers import name`，嵌套子包继续使用包内相对导入。
 - 普通中间文件优先写入 `ctx.work_dir`，它是当前漏洞验证任务的隔离工作目录。
-- 需要 nga 在项目根目录内发现 skill 或读写文件时，可以使用 `ctx.project_path`，但必须先判断它是否为空。
+- OpenCode 任务需要读取项目源码时，可以使用 `ctx.project_path` 作为 `directory`，但必须先判断它是否为空。
 - 如果验证只针对本次扫描范围，优先参考 `ctx.code_scan_path`。
 - 传给外部工具的漏洞输入建议来自 `ctx.get_report_markdown()`，不要重新拼一个第二格式。
 - 每个重要阶段都用 `print(...)` 写 Agent 控制台诊断；需要漏洞验证页面可见的开始、结束、失败和重试信息必须调用 `ctx.emit_stdout("标题", "内容")`。
 - 每个需要页面保留的报告、PoC、日志摘要或验证代码都用 `ctx.publish_artifact(..., title="标题")` 发布。
 
-## nga 多阶段验证建议
+## OpenCode 多阶段验证建议
 
-`demo/__init__.py` 展示了一个四阶段 nga 验证模板：读取漏洞 Markdown，写入项目目录下的 `.opendeephole/vulnerability_validation/{scan_id}/vuln-{idx}/`，再按 STEP 1 到 STEP 4 串行调用固定 skill。接入真实验证流程时，优先替换每个 STEP 的 skill 名称、产物文件名、重试次数和提示词。
+`demo/__init__.py` 展示了一个四阶段 OpenCode 验证模板：读取漏洞 Markdown，按 STEP 1 到 STEP 4 通过 `ctx.run_opencode_task(...)` 串行执行，并复用同一个 session。模型通过 JSON Schema 返回阶段内容，Python 再写入 `.opendeephole/vulnerability_validation/{scan_id}/vuln-{idx}/`，避免依赖模型直接写文件。
 
 多阶段流程建议遵守以下规则：
 
 - 每个 STEP 开始前调用 `ctx.cancelled()`。
 - 每个 STEP 开始、失败重试、成功完成都调用 `ctx.emit_stdout("验证过程", ...)`。
 - 每个 STEP 产物生成后调用 `ctx.publish_artifact(..., title="阶段产物")`。
-- 子命令统一用 `ctx.run_command(..., output_title="命令输出")`，并处理 `124` 超时返回码。
+- 模型阶段统一用 `ctx.run_opencode_task(...)`；编译、运行 PoC 等非模型命令才使用 `ctx.run_command(...)`。
 - 某个必需 STEP 没有产物时，应返回 `validation_success=False`，`requires_human_intervention=True`，并在 `summary` 写清楚缺失的 STEP 和产物路径。

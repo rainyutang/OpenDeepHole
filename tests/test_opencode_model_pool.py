@@ -988,3 +988,110 @@ def test_model_pool_snapshot_includes_active_task_context() -> None:
             await release_model_lease(lease, outcome="success", duration_seconds=1.0)
 
     asyncio.run(run())
+
+
+def test_priority_queue_runs_higher_priority_before_earlier_lower_priority() -> None:
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "only", "model": "only-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        occupied = await acquire_model_lease(cfg, global_concurrency=1)
+        low_task = asyncio.create_task(acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            task_id="task-low",
+            priority=10,
+            strict_capability=True,
+            wait_when_unavailable=True,
+        ))
+        await asyncio.sleep(0.02)
+        high_task = asyncio.create_task(acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            task_id="task-high",
+            priority=90,
+            strict_capability=True,
+            wait_when_unavailable=True,
+        ))
+        await asyncio.sleep(0.02)
+        queued = model_pool_snapshot()["queued_tasks"]
+        assert [item["task_id"] for item in queued] == ["task-high", "task-low"]
+        assert [item["priority"] for item in queued] == [90, 10]
+
+        await release_model_lease(occupied, outcome="success", duration_seconds=0.1)
+        high = await asyncio.wait_for(high_task, timeout=1)
+        assert high is not None and high.task_id == "task-high"
+        assert not low_task.done()
+        await release_model_lease(high, outcome="success", duration_seconds=0.1)
+        low = await asyncio.wait_for(low_task, timeout=1)
+        assert low is not None and low.task_id == "task-low"
+        await release_model_lease(low, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_strict_capability_uses_lowest_sufficient_model_without_downgrade() -> None:
+    async def run():
+        cfg = SimpleNamespace(
+            models=[
+                {"id": "low", "model": "low-model", "capability": "low", "max_concurrency": 1},
+                {"id": "medium", "model": "medium-model", "capability": "medium", "max_concurrency": 1},
+                {"id": "high", "model": "high-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        leases = []
+        for required, expected in (("low", "low"), ("medium", "medium"), ("high", "high")):
+            lease = await acquire_model_lease(
+                cfg,
+                global_concurrency=3,
+                required_capability=required,
+                strict_capability=True,
+                prefer_lowest_capability=True,
+                wait_when_unavailable=True,
+            )
+            assert lease is not None
+            assert lease.option.id == expected
+            leases.append(lease)
+        for lease in leases:
+            await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_waiting_strict_task_is_redispatched_after_model_config_change() -> None:
+    async def run():
+        current = {
+            "config": SimpleNamespace(
+                models=[
+                    {"id": "low", "model": "low-model", "capability": "low", "max_concurrency": 1},
+                ],
+            )
+        }
+        task = asyncio.create_task(acquire_model_lease(
+            lambda: current["config"],
+            global_concurrency=1,
+            required_capability="high",
+            task_id="strict-high",
+            strict_capability=True,
+            prefer_lowest_capability=True,
+            wait_when_unavailable=True,
+        ))
+        await asyncio.sleep(0.03)
+        assert not task.done()
+        queued = model_pool_snapshot()["queued_tasks"]
+        assert queued[0]["task_id"] == "strict-high"
+        assert "high" in queued[0]["blocked_reason"]
+
+        current["config"] = SimpleNamespace(
+            models=[
+                {"id": "high", "model": "high-model", "capability": "high", "max_concurrency": 1},
+            ],
+        )
+        await refresh_configured_model_pool(current["config"], global_concurrency=1)
+        lease = await asyncio.wait_for(task, timeout=1)
+        assert lease is not None and lease.option.id == "high"
+        await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
