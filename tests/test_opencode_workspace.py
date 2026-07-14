@@ -285,6 +285,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
             config = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
             self.assertEqual(config.get("permission", {}).get("task"), {"*": "allow"})
+            self.assertTrue((
+                workspace / ".opencode" / "skills" / "threat-base-model-shard-planner" / "SKILL.md"
+            ).is_file())
             agents = config.get("agent", {})
             self.assertIsInstance(agents, dict)
             for name in (

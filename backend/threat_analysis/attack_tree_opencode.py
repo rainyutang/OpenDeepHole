@@ -37,8 +37,24 @@ _MAX_GOALS = 30
 _MAX_DOMAINS = 150
 _MAX_SURFACES = 300
 _MAX_CONFIRMATIONS = 300
-_MAX_BASE_MODEL_AGENTS = 6
 _STAGE_FAILURE_RETRIES = 3
+_BASE_MODEL_TARGET_FILES_PER_AGENT = 180
+_CPP_CODE_EXTENSIONS = {
+    ".c",
+    ".c++",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".cu",
+    ".h",
+    ".h++",
+    ".hh",
+    ".hpp",
+    ".hxx",
+    ".cuh",
+    ".ipp",
+    ".inl",
+}
 _GENERATED_THREAT_ID_PATTERN = re.compile(
     r"^(?:METHOD|NODE|AP|ASSET|RISK|GOAL|DOMAIN|SURFACE|TREE)-[A-Z0-9][A-Z0-9-]*$",
     re.IGNORECASE,
@@ -455,7 +471,20 @@ async def _run_base_model_agents(
     """Run first-step shard coordinator agents and merge their JSON fragments."""
     base_context_dir = contexts_dir / "base_model"
     base_stage_dir = stages_dir / "base_model"
-    shards = _base_model_agent_shards(base_input)
+    shards = await _plan_base_model_agent_shards(
+        opencode_runner=opencode_runner,
+        workspace=workspace,
+        analysis_root=analysis_root,
+        run_dir=run_dir,
+        contexts_dir=contexts_dir,
+        stages_dir=stages_dir,
+        base_input=base_input,
+        timeout=timeout,
+        on_output=on_output,
+        cancel_event=cancel_event,
+        planned_task_id=planned_task_id,
+        stats_scope_id=stats_scope_id,
+    )
     try:
         config = opencode_runner.get_config()
     except Exception:
@@ -522,6 +551,68 @@ async def _run_base_model_agents(
             f"攻击目标 {len(_dict_items(merged.get('attack_goals')))} 个"
         )
     return merged
+
+
+async def _plan_base_model_agent_shards(
+    *,
+    opencode_runner,
+    workspace: Path,
+    analysis_root: Path,
+    run_dir: Path,
+    contexts_dir: Path,
+    stages_dir: Path,
+    base_input: dict[str, Any],
+    timeout: int,
+    on_output,
+    cancel_event,
+    planned_task_id: str,
+    stats_scope_id: str,
+) -> list[dict[str, Any]]:
+    """Ask the planner Skill for semantic base-model shards, with heuristic fallback."""
+    fallback_shards = _base_model_agent_shards(base_input)
+    input_path = contexts_dir / "base_model_shard_plan.input.json"
+    output_path = stages_dir / "base_model_shard_plan.output.json"
+    write_json(input_path, {
+        **base_input,
+        "heuristic_shard_candidates": fallback_shards,
+        "planner_contract": {
+            "output_field": "shards",
+            "path_scope": "仅允许 C/C++ 源文件、头文件和 C/C++ 构建相关证据",
+            "decision_rule": (
+                "分片数量由资产边界、外部入口族、协议/接口族、共享基础能力、"
+                "产品/MCP 模块和代码耦合关系决定；目录候选只能作为参考。"
+            ),
+        },
+    })
+    await _invoke_stage(
+        opencode_runner=opencode_runner,
+        workspace=workspace,
+        analysis_root=analysis_root,
+        run_dir=run_dir,
+        skill_name="threat-base-model-shard-planner",
+        input_path=input_path,
+        output_path=output_path,
+        timeout=timeout,
+        on_output=on_output,
+        cancel_event=cancel_event,
+        planned_task_id=planned_task_id,
+        stats_scope_id=stats_scope_id,
+        attempt=0,
+        task_label="基础建模分片规划",
+    )
+    planner_output = read_json_object(output_path)
+    planned_shards = _normalize_planned_base_model_shards(planner_output)
+    if planned_shards:
+        if on_output:
+            on_output(f"[威胁分析] 基础建模分片规划完成：{len(planned_shards)} 个语义分片")
+        return planned_shards
+    if on_output:
+        reason = str(planner_output.get("error") or "规划结果为空或不可用").strip()
+        on_output(
+            "[威胁分析] 基础建模分片规划不可用，使用代码索引候选兜底："
+            f"{len(fallback_shards)} 个分片，原因：{reason}"
+        )
+    return fallback_shards
 
 
 async def _invoke_stage(
@@ -626,6 +717,7 @@ def _validate_stage_output(skill_name: str, output: dict[str, Any]) -> None:
     if output.get("error"):
         raise _StageOutputError(str(output.get("error")))
     required_list_fields = {
+        "threat-base-model-shard-planner": ["shards"],
         "threat-asset-interface-agent": [
             "assets",
             "high_risk_external_interfaces",
@@ -740,11 +832,23 @@ def _stage_prompt(
         "只处理输入文件指定的当前对象或当前阶段，不要扩展到其他阶段。\n"
         "输出文件必须是合法 JSON 对象；不要用 Markdown 代码块包裹。\n"
         "代码路径必须来自输入代码索引或实际检索结果，无法确认时输出空数组。\n"
+        "本工具当前只分析 C/C++ 源文件、头文件和 C/C++ 构建文件；"
+        "不要把非 C/C++ 文件作为资产、风险、攻击目标或代码证据依据。\n"
         "除内部 ID、JSON 字段名、枚举值、文件路径、函数名、协议名和标准缩写外，"
         "所有面向用户展示的自然语言字段必须使用中文；不要输出英文标题、英文描述或英文严重性标签。\n"
         "不得修改输出 JSON 文件之外的任何项目文件。\n"
     )
-    if skill_name == "threat-asset-interface-agent":
+    if skill_name == "threat-base-model-shard-planner":
+        prompt += (
+            "这是威胁分析第一步之前的基础建模分片规划阶段。"
+            "只分析输入代码索引、MCP 状态、启发式候选和扫描范围，输出语义分片计划。"
+            "不要创建子 Agent，不要分析资产明细、攻击目标、攻击域、攻击面或攻击方法。"
+            "分片数量不要按目录数量机械决定；应按价值资产边界、外部入口族、协议/接口族、"
+            "共享基础能力、产品/MCP 模块、构建目标和代码耦合关系决定。"
+            "输出 `shards` 数组，每项必须包含人类可读 `name`、`description`、"
+            "`include_paths`、`entry_candidates` 和规划理由；路径只能来自输入代码索引。\n"
+        )
+    elif skill_name == "threat-asset-interface-agent":
         prompt += (
             "这是 Harness 启动的第一步基础建模分片协调 Agent。"
             "允许并建议在当前分片范围内使用 Task 派发子 Agent："
@@ -777,100 +881,219 @@ def _base_model_agent_shards(base_input: dict[str, Any]) -> list[dict[str, Any]]
     code_index = base_input.get("code_index") if isinstance(base_input.get("code_index"), dict) else {}
     scan_scope = base_input.get("scan_scope") if isinstance(base_input.get("scan_scope"), dict) else {}
     scan_relative = str(scan_scope.get("code_scan_relative_path") or "").strip()
-    files = [str(item) for item in code_index.get("files") or [] if str(item or "").strip()]
-    entry_candidates = [
-        str(item)
-        for item in code_index.get("entry_candidates") or []
-        if str(item or "").strip()
-    ]
+    files = _unique_cpp_paths(code_index.get("files") or [])
+    entry_candidates = _unique_cpp_paths(code_index.get("entry_candidates") or [])
+    if not files and not entry_candidates:
+        return [
+            {
+                "shard_id": "BASE-SHARD-001",
+                "type": "full_scan",
+                "name": "C/C++ 扫描范围",
+                "description": "未在当前扫描范围发现 C/C++ 源文件，基础建模只保留产品信息和空代码索引上下文",
+                "include_paths": [],
+                "entry_candidates": [],
+                "languages": [],
+            }
+        ]
+
+    groups = _base_model_path_groups(files, entry_candidates, scan_relative, depth=1)
+    shard_type = "top_level_path"
+    if len(groups) <= 1:
+        nested_groups = _base_model_path_groups(files, entry_candidates, scan_relative, depth=2)
+        if len(nested_groups) > 1:
+            groups = nested_groups
+            shard_type = "module_path"
+
+    shard_specs: list[dict[str, Any]] = []
+    for group in sorted(
+        groups.values(),
+        key=lambda item: (-(len(item["files"]) + len(item["entry_candidates"]) * 3), item["name"]),
+    ):
+        shard_specs.extend(_split_base_model_group(group, shard_type))
+
+    if not shard_specs:
+        shard_specs.append({
+            "type": "full_scan",
+            "name": "C/C++ 扫描范围",
+            "description": "分析完整 C/C++ 扫描范围内的资产、接口、风险、攻击目标和代码证据",
+            "include_paths": files,
+            "entry_candidates": entry_candidates,
+            "languages": sorted({_language_from_index_path(path) for path in files if _language_from_index_path(path)}),
+        })
+
+    for index, shard in enumerate(shard_specs, start=1):
+        shard["shard_id"] = f"BASE-SHARD-{index:03d}"
+    return shard_specs
+
+
+def _normalize_planned_base_model_shards(planner_output: dict[str, Any]) -> list[dict[str, Any]]:
+    shards: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_index, raw in enumerate(_dict_items(planner_output.get("shards")), start=1):
+        include_paths = _unique_cpp_paths(
+            raw.get("include_paths")
+            or raw.get("paths")
+            or raw.get("files")
+            or []
+        )
+        entry_candidates = _unique_cpp_paths(raw.get("entry_candidates") or [])
+        allows_empty_scope = bool(
+            raw.get("use_product_mcp")
+            or raw.get("product_mcp_scope")
+            or str(raw.get("type") or "").strip().lower() in {
+                "product_mcp",
+                "mcp_product_module",
+                "product_module",
+            }
+        )
+        if not include_paths and not entry_candidates and not allows_empty_scope:
+            continue
+        name = _readable_stage_label(raw.get("name"), f"语义分片 {raw_index}")
+        description = _readable_stage_label(
+            raw.get("description"),
+            f"分析 `{name}` 范围内的 C/C++ 资产、接口、风险、攻击目标和代码证据",
+        )
+        languages = _planned_shard_languages(raw, include_paths)
+        shard = {
+            **raw,
+            "shard_id": f"BASE-SHARD-{len(shards) + 1:03d}",
+            "type": str(raw.get("type") or "ai_planned").strip() or "ai_planned",
+            "name": name,
+            "description": description,
+            "include_paths": include_paths,
+            "entry_candidates": entry_candidates,
+            "languages": languages,
+        }
+        key = _planned_shard_key(shard)
+        if key in seen:
+            continue
+        seen.add(key)
+        shards.append(shard)
+    return shards
+
+
+def _planned_shard_languages(raw: dict[str, Any], include_paths: list[str]) -> list[str]:
+    known = {"c", "cpp", "c/cpp"}
     languages = [
-        item
-        for item in code_index.get("languages") or []
-        if isinstance(item, dict) and str(item.get("language") or "").strip()
+        str(item or "").strip()
+        for item in raw.get("languages") or []
+        if str(item or "").strip() in known
     ]
+    if not languages:
+        languages = [
+            language
+            for language in (_language_from_index_path(path) for path in include_paths)
+            if language
+        ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for language in languages:
+        if language in seen:
+            continue
+        seen.add(language)
+        out.append(language)
+    return out
+
+
+def _planned_shard_key(shard: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "type": shard.get("type"),
+            "name": shard.get("name"),
+            "include_paths": shard.get("include_paths") or [],
+            "entry_candidates": shard.get("entry_candidates") or [],
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
+def _unique_cpp_paths(paths: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in paths:
+        path = str(item or "").strip()
+        if not path or not _is_cpp_code_path(path) or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def _is_cpp_code_path(path: str) -> bool:
+    return Path(path).suffix.lower() in _CPP_CODE_EXTENSIONS
+
+
+def _base_model_path_groups(
+    files: list[str],
+    entry_candidates: list[str],
+    scan_relative: str,
+    *,
+    depth: int,
+) -> dict[str, dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for path in files:
-        top = _shard_group_name_for_path(path, scan_relative)
-        group = grouped.setdefault(top, {"name": top, "files": [], "entry_candidates": [], "languages": set()})
-        if len(group["files"]) < 200:
-            group["files"].append(path)
-        suffix_language = _language_from_index_path(path, languages)
-        if suffix_language:
-            group["languages"].add(suffix_language)
+        name = _shard_group_name_for_path(path, scan_relative, depth=depth)
+        group = grouped.setdefault(name, {"name": name, "files": [], "entry_candidates": [], "languages": set()})
+        group["files"].append(path)
+        language = _language_from_index_path(path)
+        if language:
+            group["languages"].add(language)
+    file_groups = {
+        path: _shard_group_name_for_path(path, scan_relative, depth=depth)
+        for path in files
+    }
     for path in entry_candidates:
-        top = _shard_group_name_for_path(path, scan_relative)
-        group = grouped.setdefault(top, {"name": top, "files": [], "entry_candidates": [], "languages": set()})
-        if len(group["entry_candidates"]) < 100:
-            group["entry_candidates"].append(path)
-
-    groups = sorted(
-        grouped.values(),
-        key=lambda item: (-(len(item["files"]) + len(item["entry_candidates"]) * 3), item["name"]),
-    )
-    if len(groups) > 1:
-        selected_groups = groups
-        if len(groups) > _MAX_BASE_MODEL_AGENTS:
-            selected_groups = groups[:_MAX_BASE_MODEL_AGENTS - 1]
-            rest = groups[_MAX_BASE_MODEL_AGENTS - 1:]
-            selected_groups.append({
-                "name": "其他路径",
-                "files": _flatten_limited([group["files"] for group in rest], 200),
-                "entry_candidates": _flatten_limited([group["entry_candidates"] for group in rest], 100),
-                "languages": set().union(*(group["languages"] for group in rest)),
-            })
-        return [
-            {
-                "shard_id": f"BASE-SHARD-{index:03d}",
-                "type": "top_level_path",
-                "name": str(group["name"]),
-                "description": f"分析顶层路径 `{group['name']}` 下的资产、接口、风险、攻击目标和代码证据",
-                "include_paths": list(group["files"])[:200],
-                "entry_candidates": list(group["entry_candidates"])[:100],
-                "languages": sorted(group["languages"]),
-            }
-            for index, group in enumerate(selected_groups, start=1)
-        ]
-
-    language_groups = [
-        item
-        for item in sorted(languages, key=lambda entry: (-int(entry.get("files") or 0), str(entry.get("language") or "")))
-        if int(item.get("files") or 0) > 0
-    ]
-    if len(language_groups) > 1:
-        selected_languages = language_groups
-        if len(language_groups) > _MAX_BASE_MODEL_AGENTS:
-            selected_languages = language_groups[:_MAX_BASE_MODEL_AGENTS - 1]
-            selected_languages.append({
-                "language": "其他语言",
-                "files": sum(int(item.get("files") or 0) for item in language_groups[_MAX_BASE_MODEL_AGENTS - 1:]),
-            })
-        return [
-            {
-                "shard_id": f"BASE-SHARD-{index:03d}",
-                "type": "language",
-                "name": str(item.get("language") or ""),
-                "description": f"分析 `{item.get('language')}` 语言相关资产、接口、风险、攻击目标和代码证据",
-                "include_paths": _paths_for_language_shard(files, languages, str(item.get("language") or ""), 200),
-                "entry_candidates": _paths_for_language_shard(entry_candidates, languages, str(item.get("language") or ""), 100),
-                "languages": [str(item.get("language") or "")],
-            }
-            for index, item in enumerate(selected_languages, start=1)
-        ]
-
-    return [
-        {
-            "shard_id": "BASE-SHARD-001",
-            "type": "full_scan",
-            "name": "完整扫描范围",
-            "description": "分析完整扫描范围内的资产、接口、风险、攻击目标和代码证据",
-            "include_paths": files[:200],
-            "entry_candidates": entry_candidates[:100],
-            "languages": [str(item.get("language") or "") for item in language_groups[:_MAX_BASE_MODEL_AGENTS]],
-        }
-    ]
+        name = file_groups.get(path) or _shard_group_name_for_path(path, scan_relative, depth=depth)
+        group = grouped.setdefault(name, {"name": name, "files": [], "entry_candidates": [], "languages": set()})
+        group["entry_candidates"].append(path)
+        language = _language_from_index_path(path)
+        if language:
+            group["languages"].add(language)
+    return grouped
 
 
-def _shard_group_name_for_path(path: str, scan_relative: str) -> str:
+def _split_base_model_group(group: dict[str, Any], shard_type: str) -> list[dict[str, Any]]:
+    files = list(group.get("files") or [])
+    entry_candidates = list(group.get("entry_candidates") or [])
+    languages = sorted(group.get("languages") or [])
+    group_name = str(group.get("name") or "C/C++ 扫描范围")
+    if len(files) <= _BASE_MODEL_TARGET_FILES_PER_AGENT:
+        return [{
+            "type": shard_type,
+            "name": group_name,
+            "description": f"分析 `{group_name}` 范围内的 C/C++ 资产、接口、风险、攻击目标和代码证据",
+            "include_paths": files,
+            "entry_candidates": entry_candidates,
+            "languages": languages,
+        }]
+
+    shards: list[dict[str, Any]] = []
+    assigned_entries: set[str] = set()
+    for chunk_index, start in enumerate(range(0, len(files), _BASE_MODEL_TARGET_FILES_PER_AGENT), start=1):
+        chunk = files[start:start + _BASE_MODEL_TARGET_FILES_PER_AGENT]
+        chunk_set = set(chunk)
+        chunk_entries = [path for path in entry_candidates if path in chunk_set]
+        assigned_entries.update(chunk_entries)
+        shards.append({
+            "type": f"{shard_type}_chunk",
+            "name": f"{group_name} #{chunk_index}",
+            "description": (
+                f"分析 `{group_name}` 范围内第 {chunk_index} 个 C/C++ 文件批次的"
+                "资产、接口、风险、攻击目标和代码证据"
+            ),
+            "include_paths": chunk,
+            "entry_candidates": chunk_entries,
+            "languages": sorted({_language_from_index_path(path) for path in chunk if _language_from_index_path(path)}),
+        })
+
+    remaining_entries = [path for path in entry_candidates if path not in assigned_entries]
+    if remaining_entries:
+        shards[0]["entry_candidates"] = _merge_mixed_lists(shards[0]["entry_candidates"], remaining_entries)
+    return shards
+
+
+def _shard_group_name_for_path(path: str, scan_relative: str, *, depth: int = 1) -> str:
     relative = path
     if scan_relative and scan_relative != ".":
         prefix = scan_relative.rstrip("/") + "/"
@@ -878,82 +1101,307 @@ def _shard_group_name_for_path(path: str, scan_relative: str) -> str:
             relative = "."
         elif relative.startswith(prefix):
             relative = relative[len(prefix):]
-    return relative.split("/", 1)[0] if "/" in relative else "."
+    parts = [part for part in relative.split("/") if part]
+    if len(parts) <= 1:
+        return "."
+    directories = parts[:-1]
+    if not directories:
+        return "."
+    return "/".join(directories[:max(1, depth)])
 
 
-def _flatten_limited(groups: list[list[Any]], limit: int) -> list[Any]:
-    out: list[Any] = []
-    for group in groups:
-        for item in group:
-            if len(out) >= limit:
-                return out
-            out.append(item)
-    return out
-
-
-def _paths_for_language_shard(paths: list[str], languages: list[dict[str, Any]], language: str, limit: int) -> list[str]:
-    if language == "其他语言":
-        selected_language_names = [
-            str(item.get("language") or "")
-            for item in sorted(languages, key=lambda entry: (-int(entry.get("files") or 0), str(entry.get("language") or "")))
-        ][:_MAX_BASE_MODEL_AGENTS - 1]
-        return [
-            path
-            for path in paths
-            if _language_from_index_path(path, languages) not in set(selected_language_names)
-        ][:limit]
-    return [
-        path
-        for path in paths
-        if _language_from_index_path(path, languages) == language
-    ][:limit]
-
-
-def _language_from_index_path(path: str, languages: list[dict[str, Any]]) -> str:
+def _language_from_index_path(path: str) -> str:
     suffix = Path(path).suffix.lower()
     by_suffix = {
         ".c": "c",
+        ".c++": "cpp",
         ".cc": "cpp",
         ".cpp": "cpp",
         ".cxx": "cpp",
+        ".cu": "cpp",
         ".h": "c/cpp",
+        ".h++": "cpp",
+        ".hh": "cpp",
         ".hpp": "cpp",
-        ".go": "go",
-        ".java": "java",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".py": "python",
-        ".rs": "rust",
-        ".php": "php",
-        ".rb": "ruby",
-        ".cs": "csharp",
-        ".kt": "kotlin",
-        ".swift": "swift",
-        ".sh": "shell",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".json": "json",
-        ".xml": "xml",
-        ".proto": "protobuf",
+        ".hxx": "cpp",
+        ".cuh": "cpp",
+        ".ipp": "cpp",
+        ".inl": "cpp",
     }
-    language = by_suffix.get(suffix, "")
-    if not language:
-        return ""
-    known = {str(item.get("language") or "") for item in languages}
-    return language if not known or language in known else ""
+    return by_suffix.get(suffix, "")
 
 
 def _merge_base_model_outputs(*outputs: dict[str, Any]) -> dict[str, Any]:
+    valid_outputs = [
+        output
+        for output in outputs
+        if isinstance(output, dict) and not output.get("error")
+    ]
+    aliases = _base_model_reference_aliases(valid_outputs)
     merged: dict[str, Any] = {field: [] for field in _BASE_MODEL_LIST_FIELDS}
-    for output in outputs:
-        if not isinstance(output, dict) or output.get("error"):
-            continue
+    for output in valid_outputs:
+        output = _normalize_base_model_references(output, aliases)
         for field in _BASE_MODEL_LIST_FIELDS:
             merged[field] = _merge_object_lists(field, merged[field], _dict_items(output.get(field)))
     _attach_top_level_risks_to_assets(merged)
     return merged
+
+
+def _base_model_reference_aliases(outputs: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    aliases = {
+        "asset_ids": {},
+        "interface_ids": {},
+        "risk_ids": {},
+        "attack_goal_ids": {},
+    }
+    asset_by_semantic: dict[str, str] = {}
+    interface_by_semantic: dict[str, str] = {}
+    risk_by_semantic: dict[str, str] = {}
+    goal_by_semantic: dict[str, str] = {}
+
+    for output in outputs:
+        for asset in _dict_items(output.get("assets")):
+            asset_id = _first_text(asset, "asset_id", "id")
+            if asset_id:
+                aliases["asset_ids"].setdefault(asset_id, asset_id)
+            semantic = _semantic_name(asset.get("name") or asset.get("asset_name"))
+            if asset_id and semantic:
+                _register_semantic_alias(aliases["asset_ids"], asset_by_semantic, semantic, asset_id)
+
+        for interface in _dict_items(output.get("high_risk_external_interfaces")):
+            interface_id = _first_text(interface, "interface_id", "id")
+            if interface_id:
+                aliases["interface_ids"].setdefault(interface_id, interface_id)
+            semantic = _interface_semantic_key(interface)
+            if interface_id and semantic:
+                _register_semantic_alias(aliases["interface_ids"], interface_by_semantic, semantic, interface_id)
+
+    for output in outputs:
+        for asset in _dict_items(output.get("assets")):
+            asset_id = _canonical_ref(aliases, "asset_ids", _first_text(asset, "asset_id", "id"))
+            for risk in _dict_items(asset.get("risks")):
+                _register_risk_alias(risk, asset_id, aliases, risk_by_semantic)
+        for risk in _dict_items(output.get("risks")):
+            asset_id = _canonical_ref(aliases, "asset_ids", _first_text(risk, "asset_id"))
+            _register_risk_alias(risk, asset_id, aliases, risk_by_semantic)
+
+    for output in outputs:
+        for goal in _dict_items(output.get("attack_goals")):
+            goal_id = _first_text(goal, "attack_goal_id", "goal_id", "id")
+            if goal_id:
+                aliases["attack_goal_ids"].setdefault(goal_id, goal_id)
+            semantic = _attack_goal_semantic_key(goal, aliases)
+            if goal_id and semantic:
+                _register_semantic_alias(aliases["attack_goal_ids"], goal_by_semantic, semantic, goal_id)
+
+    for bucket in aliases.values():
+        for value in list(bucket):
+            bucket[value] = _resolve_alias(bucket, value)
+    return aliases
+
+
+def _register_risk_alias(
+    risk: dict[str, Any],
+    asset_id: str,
+    aliases: dict[str, dict[str, str]],
+    risk_by_semantic: dict[str, str],
+) -> None:
+    risk_id = _first_text(risk, "risk_id", "id")
+    if risk_id:
+        aliases["risk_ids"].setdefault(risk_id, risk_id)
+    semantic = _risk_semantic_key(risk, asset_id)
+    if risk_id and semantic:
+        _register_semantic_alias(aliases["risk_ids"], risk_by_semantic, semantic, risk_id)
+
+
+def _register_semantic_alias(
+    aliases: dict[str, str],
+    semantic_to_id: dict[str, str],
+    semantic_key: str,
+    raw_id: str,
+) -> str:
+    canonical = semantic_to_id.get(semantic_key)
+    if not canonical:
+        canonical = _resolve_alias(aliases, raw_id)
+        semantic_to_id[semantic_key] = canonical
+    aliases[raw_id] = canonical
+    return canonical
+
+
+def _normalize_base_model_references(
+    output: dict[str, Any],
+    aliases: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "assets": [
+            _normalize_asset_item(item, aliases)
+            for item in _dict_items(output.get("assets"))
+        ],
+        "high_risk_external_interfaces": [
+            _normalize_interface_item(item, aliases)
+            for item in _dict_items(output.get("high_risk_external_interfaces"))
+        ],
+        "asset_interface_links": [
+            _normalize_link_item(item, aliases)
+            for item in _dict_items(output.get("asset_interface_links"))
+        ],
+        "risks": [
+            _normalize_risk_item(item, aliases)
+            for item in _dict_items(output.get("risks"))
+        ],
+        "attack_goals": [
+            _normalize_attack_goal_item(item, aliases)
+            for item in _dict_items(output.get("attack_goals"))
+        ],
+    }
+
+
+def _normalize_asset_item(item: dict[str, Any], aliases: dict[str, dict[str, str]]) -> dict[str, Any]:
+    out = dict(item)
+    asset_id = _rewrite_id_field(out, "asset_id", aliases, "asset_ids")
+    if not asset_id:
+        asset_id = _rewrite_id_field(out, "id", aliases, "asset_ids")
+    risks = [
+        _normalize_risk_item(risk, aliases, asset_id=asset_id)
+        for risk in _dict_items(out.get("risks"))
+    ]
+    if risks:
+        out["risks"] = risks
+    return out
+
+
+def _normalize_interface_item(item: dict[str, Any], aliases: dict[str, dict[str, str]]) -> dict[str, Any]:
+    out = dict(item)
+    _rewrite_id_field(out, "interface_id", aliases, "interface_ids")
+    _rewrite_id_field(out, "id", aliases, "interface_ids")
+    for key in ("affected_asset_ids", "asset_ids"):
+        if isinstance(out.get(key), list):
+            out[key] = _rewrite_id_list(out[key], aliases, "asset_ids")
+    return out
+
+
+def _normalize_link_item(item: dict[str, Any], aliases: dict[str, dict[str, str]]) -> dict[str, Any]:
+    out = dict(item)
+    _rewrite_id_field(out, "asset_id", aliases, "asset_ids")
+    _rewrite_id_field(out, "interface_id", aliases, "interface_ids")
+    _rewrite_id_field(out, "risk_id", aliases, "risk_ids")
+    _rewrite_id_field(out, "attack_goal_id", aliases, "attack_goal_ids")
+    return out
+
+
+def _normalize_risk_item(
+    item: dict[str, Any],
+    aliases: dict[str, dict[str, str]],
+    *,
+    asset_id: str = "",
+) -> dict[str, Any]:
+    out = dict(item)
+    canonical_asset_id = _rewrite_id_field(out, "asset_id", aliases, "asset_ids") or asset_id
+    if canonical_asset_id and not out.get("asset_id"):
+        out["asset_id"] = canonical_asset_id
+    _rewrite_id_field(out, "risk_id", aliases, "risk_ids")
+    _rewrite_id_field(out, "id", aliases, "risk_ids")
+    return out
+
+
+def _normalize_attack_goal_item(item: dict[str, Any], aliases: dict[str, dict[str, str]]) -> dict[str, Any]:
+    out = dict(item)
+    _rewrite_id_field(out, "attack_goal_id", aliases, "attack_goal_ids")
+    _rewrite_id_field(out, "goal_id", aliases, "attack_goal_ids")
+    _rewrite_id_field(out, "id", aliases, "attack_goal_ids")
+    _rewrite_id_field(out, "asset_id", aliases, "asset_ids")
+    _rewrite_id_field(out, "risk_id", aliases, "risk_ids")
+    for key in ("related_interface_ids", "interface_ids"):
+        if isinstance(out.get(key), list):
+            out[key] = _rewrite_id_list(out[key], aliases, "interface_ids")
+    return out
+
+
+def _rewrite_id_field(
+    item: dict[str, Any],
+    key: str,
+    aliases: dict[str, dict[str, str]],
+    alias_bucket: str,
+) -> str:
+    value = str(item.get(key) or "").strip()
+    if not value:
+        return ""
+    canonical = _canonical_ref(aliases, alias_bucket, value)
+    item[key] = canonical
+    return canonical
+
+
+def _rewrite_id_list(values: list[Any], aliases: dict[str, dict[str, str]], alias_bucket: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        canonical = _canonical_ref(aliases, alias_bucket, str(value or "").strip())
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+    return out
+
+
+def _canonical_ref(aliases: dict[str, dict[str, str]], alias_bucket: str, value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    return _resolve_alias(aliases.get(alias_bucket, {}), value)
+
+
+def _resolve_alias(aliases: dict[str, str], value: str) -> str:
+    current = str(value or "").strip()
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        next_value = aliases.get(current, current)
+        if next_value == current:
+            return current
+        current = next_value
+    return current
+
+
+def _first_text(item: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _semantic_name(value: Any) -> str:
+    readable = _readable_stage_label(value)
+    return re.sub(r"\s+", " ", readable).strip().casefold()
+
+
+def _interface_semantic_key(item: dict[str, Any]) -> str:
+    name = _semantic_name(item.get("name") or item.get("interface_name"))
+    if not name:
+        return ""
+    qualifiers = [
+        str(item.get(key) or "").strip().casefold()
+        for key in ("protocol", "endpoint", "path", "component", "module", "type")
+        if str(item.get(key) or "").strip()
+    ]
+    return "\0".join([name, *qualifiers])
+
+
+def _risk_semantic_key(item: dict[str, Any], asset_id: str = "") -> str:
+    name = _semantic_name(item.get("name") or item.get("risk_name"))
+    if not name:
+        return ""
+    return "\0".join([asset_id, name]) if asset_id else name
+
+
+def _attack_goal_semantic_key(item: dict[str, Any], aliases: dict[str, dict[str, str]] | None = None) -> str:
+    name = _semantic_name(item.get("name") or item.get("attack_goal") or item.get("attack_goal_name"))
+    if not name:
+        return ""
+    aliases = aliases or {}
+    asset_id = _canonical_ref(aliases, "asset_ids", _first_text(item, "asset_id"))
+    risk_id = _canonical_ref(aliases, "risk_ids", _first_text(item, "risk_id"))
+    return "\0".join([asset_id, risk_id, name])
 
 
 def _merge_object_lists(field: str, existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -987,6 +1435,30 @@ def _sanitize_display_names(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _merge_item_key(field: str, item: dict[str, Any], index: int) -> str:
+    if field == "assets":
+        name = _semantic_name(item.get("name") or item.get("asset_name"))
+        if name:
+            return f"{field}:name:{name}"
+    elif field == "high_risk_external_interfaces":
+        interface_key = _interface_semantic_key(item)
+        if interface_key:
+            return f"{field}:name:{interface_key}"
+    elif field == "risks":
+        risk_key = _risk_semantic_key(item, str(item.get("asset_id") or "").strip())
+        if risk_key:
+            return f"{field}:name:{risk_key}"
+    elif field == "attack_goals":
+        goal_key = _attack_goal_semantic_key(item)
+        if goal_key:
+            return f"{field}:name:{goal_key}"
+    elif field == "asset_interface_links":
+        link_key = "\0".join(
+            str(item.get(key) or "").strip()
+            for key in ("asset_id", "interface_id", "risk_id", "attack_goal_id")
+        )
+        if link_key.strip("\0"):
+            return f"{field}:link:{link_key}"
+
     id_keys = {
         "assets": ("asset_id", "id"),
         "high_risk_external_interfaces": ("interface_id", "id"),
@@ -997,13 +1469,6 @@ def _merge_item_key(field: str, item: dict[str, Any], index: int) -> str:
         value = str(item.get(key) or "").strip()
         if value:
             return f"{field}:id:{value}"
-    if field == "asset_interface_links":
-        link_key = "\0".join(
-            str(item.get(key) or "").strip()
-            for key in ("asset_id", "interface_id", "risk_id", "attack_goal_id")
-        )
-        if link_key.strip("\0"):
-            return f"{field}:link:{link_key}"
     name = _readable_stage_label(item.get("name"))
     if name:
         prefix = str(item.get("asset_id") or item.get("risk_id") or "").strip()
@@ -1022,6 +1487,19 @@ def _merge_dict_values(left: dict[str, Any], right: dict[str, Any]) -> dict[str,
             readable = _readable_stage_label(current)
             incoming = _readable_stage_label(value)
             merged[key] = readable or incoming
+        elif key in {
+            "asset_name",
+            "risk_name",
+            "attack_goal_name",
+            "attack_domain_name",
+            "attack_surface_name",
+            "attack_method_name",
+        }:
+            readable = _readable_stage_label(current)
+            incoming = _readable_stage_label(value)
+            merged[key] = readable or incoming
+        elif key == "risks" and isinstance(current, list) and isinstance(value, list):
+            merged[key] = _merge_object_lists("risks", _dict_items(current), _dict_items(value))
         elif isinstance(current, list) and isinstance(value, list):
             merged[key] = _merge_mixed_lists(current, value)
         elif isinstance(current, dict) and isinstance(value, dict):

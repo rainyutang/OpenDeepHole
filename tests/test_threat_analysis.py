@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import tempfile
 import unittest
 import time
@@ -7,7 +8,14 @@ from pathlib import Path
 
 from agent.scanner import _is_streaming_threat_analysis, _streaming_threat_analysis_id
 from agent.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
-from backend.threat_analysis.attack_tree_opencode import _invoke_stage, _run_base_model_agents, _stage_prompt
+from backend.threat_analysis.attack_tree_opencode import (
+    _base_model_agent_shards,
+    _invoke_stage,
+    _merge_base_model_outputs,
+    _run_base_model_agents,
+    _stage_prompt,
+)
+from backend.threat_analysis.harness import build_code_index
 from backend.opencode.runner import _read_fresh_threat_analysis_result
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
 from backend.store.sqlite import SqliteScanStore
@@ -57,6 +65,35 @@ class ThreatAnalysisParserTests(unittest.TestCase):
         self.assertIn("所有面向用户展示的自然语言字段必须使用中文", prompt)
         self.assertIn("英文严重性标签", prompt)
 
+    def test_build_code_index_limits_scope_to_cpp_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scan_root = root / "src"
+            (scan_root / "api").mkdir(parents=True)
+            (scan_root / "core").mkdir(parents=True)
+            (scan_root / "web").mkdir(parents=True)
+            (scan_root / "api" / "auth.cpp").write_text("int auth() { return 0; }\n", encoding="utf-8")
+            (scan_root / "core" / "config.hpp").write_text("#pragma once\n", encoding="utf-8")
+            (scan_root / "web" / "app.ts").write_text("export const app = 1;\n", encoding="utf-8")
+            (scan_root / "server.py").write_text("def main(): pass\n", encoding="utf-8")
+            (scan_root / "CMakeLists.txt").write_text("add_executable(app api/auth.cpp)\n", encoding="utf-8")
+            (scan_root / "package.json").write_text("{}", encoding="utf-8")
+
+            index = build_code_index(root, scan_root)
+
+        self.assertEqual(
+            set(index["files"]),
+            {"src/api/auth.cpp", "src/core/config.hpp"},
+        )
+        self.assertEqual(
+            set(index["entry_candidates"]),
+            {"src/api/auth.cpp", "src/core/config.hpp"},
+        )
+        self.assertEqual(index["build_files"], ["src/CMakeLists.txt"])
+        self.assertNotIn("src/web/app.ts", index["files"])
+        self.assertNotIn("src/server.py", index["files"])
+        self.assertNotIn("src/package.json", index["build_files"])
+
     def test_base_model_uses_shard_coordinator_agents_and_merges_outputs(self) -> None:
         class FakeOpenCodeRunner:
             class NoAvailableModelError(RuntimeError):
@@ -66,15 +103,65 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 self.stage_dir = stage_dir
                 self.stages: list[str] = []
                 self.prompts: list[str] = []
+                self.asset_calls = 0
 
             async def _invoke_opencode(self, *args, **kwargs) -> str:
                 stage = kwargs["task_context"]["stage"]
                 self.stages.append(stage)
-                self.prompts.append(str(args[1]))
-                call_index = len(self.stages)
+                prompt = str(args[1])
+                self.prompts.append(prompt)
+                output_match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
+                assert output_match is not None
+                output_path = Path(output_match.group(1))
+                if stage == "threat-base-model-shard-planner":
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(
+                        json.dumps({
+                            "planning_summary": "按管理面链路和驱动协议链路规划两个语义分片",
+                            "shards": [
+                                {
+                                    "type": "entry_family",
+                                    "name": "管理面认证与配置链路",
+                                    "description": "覆盖管理 API、认证和配置变更相关 C/C++ 路径",
+                                    "planning_reason": "这些路径共同服务管理面入口和配置资产",
+                                    "include_paths": [
+                                        "src/api/auth.cpp",
+                                        "src/api/session.cpp",
+                                        "src/web/config/routes.cpp",
+                                        "src/web/config/store.cpp",
+                                    ],
+                                    "entry_candidates": [
+                                        "src/api/auth.cpp",
+                                        "src/web/config/routes.cpp",
+                                    ],
+                                    "languages": ["cpp"],
+                                },
+                                {
+                                    "type": "entry_family",
+                                    "name": "驱动协议入口链路",
+                                    "description": "覆盖驱动 ioctl 和协议解析相关 C/C++ 路径",
+                                    "planning_reason": "这些路径共同承接外部驱动和协议输入",
+                                    "include_paths": [
+                                        "src/driver/ioctl.cpp",
+                                        "src/protocol/codec.cpp",
+                                    ],
+                                    "entry_candidates": [
+                                        "src/driver/ioctl.cpp",
+                                        "src/protocol/codec.cpp",
+                                    ],
+                                    "languages": ["cpp"],
+                                },
+                            ],
+                        }),
+                        encoding="utf-8",
+                    )
+                    return ""
+                assert stage == "threat-asset-interface-agent"
+                self.asset_calls += 1
+                call_index = self.asset_calls
                 outputs = [
                     (
-                        self.stage_dir / "base_model" / f"base_model_agent_{call_index:03d}.output.json",
+                        output_path,
                         {
                             "assets": [
                                 {
@@ -101,7 +188,7 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                         },
                     ),
                     (
-                        self.stage_dir / "base_model" / f"base_model_agent_{call_index:03d}.output.json",
+                        output_path,
                         {
                             "assets": [
                                 {
@@ -147,9 +234,23 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                     "project_id": "scan-1",
                     "scan_scope": {"code_scan_relative_path": "src"},
                     "code_index": {
-                        "files": ["src/api/auth.py", "src/web/config/routes.py"],
-                        "entry_candidates": ["src/api/auth.py", "src/web/config/routes.py"],
-                        "languages": [{"language": "python", "files": 2}],
+                        "files": [
+                            "src/api/auth.cpp",
+                            "src/api/session.cpp",
+                            "src/web/config/routes.cpp",
+                            "src/web/config/store.cpp",
+                            "src/driver/ioctl.cpp",
+                            "src/protocol/codec.cpp",
+                            "src/core/cache.hpp",
+                            "src/core/log.cpp",
+                        ],
+                        "entry_candidates": [
+                            "src/api/auth.cpp",
+                            "src/web/config/routes.cpp",
+                            "src/driver/ioctl.cpp",
+                            "src/protocol/codec.cpp",
+                        ],
+                        "languages": [{"language": "cpp", "files": 8}],
                     },
                     "product_mcp": {},
                 },
@@ -162,14 +263,196 @@ class ThreatAnalysisParserTests(unittest.TestCase):
             ))
 
             self.assertEqual(runner.stages, [
+                "threat-base-model-shard-planner",
                 "threat-asset-interface-agent",
                 "threat-asset-interface-agent",
             ])
-            self.assertTrue(all("允许并建议在当前分片范围内使用 Task 派发子 Agent" in prompt for prompt in runner.prompts))
+            self.assertIn("分片数量不要按目录数量机械决定", runner.prompts[0])
+            self.assertTrue(all(
+                "允许并建议在当前分片范围内使用 Task 派发子 Agent" in prompt
+                for prompt in runner.prompts[1:]
+            ))
             self.assertEqual(result["assets"][0]["name"], "管理员权限")
             self.assertEqual(result["assets"][1]["name"], "用户配置数据")
             self.assertEqual(result["attack_goals"][1]["candidate_code_paths"], ["web/config"])
             self.assertEqual(result["high_risk_external_interfaces"][1]["candidate_code_paths"], ["web/config"])
+
+    def test_base_model_shards_follow_cpp_paths_without_six_agent_cap(self) -> None:
+        files = [f"src/module{i}/entry.cpp" for i in range(1, 9)]
+        shards = _base_model_agent_shards({
+            "scan_scope": {"code_scan_relative_path": "src"},
+            "code_index": {
+                "files": files,
+                "entry_candidates": files,
+                "languages": [{"language": "cpp", "files": len(files)}],
+            },
+        })
+
+        self.assertEqual(len(shards), 8)
+        self.assertEqual(
+            {shard["name"] for shard in shards},
+            {f"module{i}" for i in range(1, 9)},
+        )
+        self.assertFalse(any(shard["name"] == "其他路径" for shard in shards))
+
+    def test_base_model_shards_ignore_non_cpp_code_index_entries(self) -> None:
+        shards = _base_model_agent_shards({
+            "scan_scope": {"code_scan_relative_path": "src"},
+            "code_index": {
+                "files": [
+                    "src/api/auth.cpp",
+                    "src/core/config.hpp",
+                    "src/web/app.ts",
+                    "scripts/build.py",
+                ],
+                "entry_candidates": [
+                    "src/api/auth.cpp",
+                    "src/core/config.hpp",
+                    "src/web/app.ts",
+                    "scripts/build.py",
+                ],
+                "languages": [
+                    {"language": "cpp", "files": 2},
+                    {"language": "typescript", "files": 1},
+                    {"language": "python", "files": 1},
+                ],
+            },
+        })
+
+        include_paths = [path for shard in shards for path in shard["include_paths"]]
+        entry_candidates = [path for shard in shards for path in shard["entry_candidates"]]
+        self.assertEqual(set(include_paths), {"src/api/auth.cpp", "src/core/config.hpp"})
+        self.assertEqual(set(entry_candidates), {"src/api/auth.cpp", "src/core/config.hpp"})
+        self.assertNotIn("src/web/app.ts", include_paths)
+        self.assertNotIn("scripts/build.py", include_paths)
+
+    def test_base_model_merge_deduplicates_semantic_assets_and_rewrites_references(self) -> None:
+        merged = _merge_base_model_outputs(
+            {
+                "assets": [
+                    {
+                        "asset_id": "ASSET-A",
+                        "name": "管理员权限",
+                        "candidate_code_paths": ["src/auth/admin.cpp"],
+                        "risks": [
+                            {"risk_id": "RISK-A", "name": "权限被未授权获取"}
+                        ],
+                    }
+                ],
+                "high_risk_external_interfaces": [
+                    {
+                        "interface_id": "IF-A",
+                        "name": "管理 API",
+                        "affected_asset_ids": ["ASSET-A"],
+                        "candidate_code_paths": ["src/api/admin.cpp"],
+                    }
+                ],
+                "asset_interface_links": [
+                    {
+                        "asset_id": "ASSET-A",
+                        "interface_id": "IF-A",
+                        "risk_id": "RISK-A",
+                        "attack_goal_id": "GOAL-A",
+                    }
+                ],
+                "risks": [
+                    {"risk_id": "RISK-A", "asset_id": "ASSET-A", "name": "权限被未授权获取"}
+                ],
+                "attack_goals": [
+                    {
+                        "attack_goal_id": "GOAL-A",
+                        "asset_id": "ASSET-A",
+                        "risk_id": "RISK-A",
+                        "name": "绕过管理面身份认证获取管理员权限",
+                        "related_interface_ids": ["IF-A"],
+                        "candidate_code_paths": ["src/api/admin.cpp"],
+                    }
+                ],
+            },
+            {
+                "assets": [
+                    {
+                        "asset_id": "ASSET-B",
+                        "name": "管理员权限",
+                        "candidate_code_paths": ["src/session/role.cpp"],
+                        "risks": [
+                            {"risk_id": "RISK-B", "name": "权限被未授权获取"}
+                        ],
+                    }
+                ],
+                "high_risk_external_interfaces": [
+                    {
+                        "interface_id": "IF-B",
+                        "name": "管理 API",
+                        "affected_asset_ids": ["ASSET-B"],
+                        "candidate_code_paths": ["src/session/admin_route.cpp"],
+                    }
+                ],
+                "asset_interface_links": [
+                    {
+                        "asset_id": "ASSET-B",
+                        "interface_id": "IF-B",
+                        "risk_id": "RISK-B",
+                        "attack_goal_id": "GOAL-B",
+                    }
+                ],
+                "risks": [
+                    {"risk_id": "RISK-B", "asset_id": "ASSET-B", "name": "权限被未授权获取"}
+                ],
+                "attack_goals": [
+                    {
+                        "attack_goal_id": "GOAL-B",
+                        "asset_id": "ASSET-B",
+                        "risk_id": "RISK-B",
+                        "name": "绕过管理面身份认证获取管理员权限",
+                        "related_interface_ids": ["IF-B"],
+                        "candidate_code_paths": ["src/session/admin_route.cpp"],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(len(merged["assets"]), 1)
+        self.assertEqual(merged["assets"][0]["asset_id"], "ASSET-A")
+        self.assertEqual(
+            set(merged["assets"][0]["candidate_code_paths"]),
+            {"src/auth/admin.cpp", "src/session/role.cpp"},
+        )
+        self.assertEqual(len(merged["assets"][0]["risks"]), 1)
+        self.assertEqual(merged["assets"][0]["risks"][0]["risk_id"], "RISK-A")
+        self.assertEqual(merged["assets"][0]["risks"][0]["asset_id"], "ASSET-A")
+
+        self.assertEqual(len(merged["risks"]), 1)
+        self.assertEqual(merged["risks"][0]["risk_id"], "RISK-A")
+        self.assertEqual(merged["risks"][0]["asset_id"], "ASSET-A")
+
+        self.assertEqual(len(merged["high_risk_external_interfaces"]), 1)
+        interface = merged["high_risk_external_interfaces"][0]
+        self.assertEqual(interface["interface_id"], "IF-A")
+        self.assertEqual(interface["affected_asset_ids"], ["ASSET-A"])
+        self.assertEqual(
+            set(interface["candidate_code_paths"]),
+            {"src/api/admin.cpp", "src/session/admin_route.cpp"},
+        )
+
+        self.assertEqual(len(merged["attack_goals"]), 1)
+        goal = merged["attack_goals"][0]
+        self.assertEqual(goal["attack_goal_id"], "GOAL-A")
+        self.assertEqual(goal["asset_id"], "ASSET-A")
+        self.assertEqual(goal["risk_id"], "RISK-A")
+        self.assertEqual(goal["related_interface_ids"], ["IF-A"])
+        self.assertEqual(
+            set(goal["candidate_code_paths"]),
+            {"src/api/admin.cpp", "src/session/admin_route.cpp"},
+        )
+        self.assertEqual(merged["asset_interface_links"], [
+            {
+                "asset_id": "ASSET-A",
+                "interface_id": "IF-A",
+                "risk_id": "RISK-A",
+                "attack_goal_id": "GOAL-A",
+            }
+        ])
 
     def test_threat_analysis_stage_retries_invalid_json_three_times(self) -> None:
         class FakeOpenCodeRunner:

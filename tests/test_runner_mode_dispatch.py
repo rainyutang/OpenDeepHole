@@ -409,7 +409,7 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
         project = tmp_path / "project"
         scan_root = project / "src"
         scan_root.mkdir(parents=True)
-        (scan_root / "app.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+        (scan_root / "app.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
         repo_root = Path(__file__).resolve().parent.parent
         skill = repo_root / "attack-tree-threat-analysis.md"
         reference = repo_root / "attack-method-reference-catalog.md"
@@ -454,6 +454,25 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
 
         async def fake_invoke(call_workspace: Path, prompt: str, *args, **kwargs) -> None:
             output_path = output_path_from_prompt(prompt)
+            if "threat-base-model-shard-planner" in prompt:
+                output_path.write_text(
+                    json.dumps({
+                        "planning_summary": "单一 C/C++ 入口使用一个基础建模分片",
+                        "shards": [
+                            {
+                                "type": "entry_family",
+                                "name": "主程序入口",
+                                "description": "覆盖主程序入口相关 C/C++ 路径",
+                                "planning_reason": "当前索引只有一个主程序入口",
+                                "include_paths": ["src/app.cpp"],
+                                "entry_candidates": [],
+                                "languages": ["cpp"],
+                            }
+                        ],
+                    }),
+                    encoding="utf-8",
+                )
+                return
             if "threat-asset-interface-agent" in prompt:
                 output_path.write_text(
                     json.dumps({

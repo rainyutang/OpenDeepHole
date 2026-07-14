@@ -8,6 +8,7 @@ from pathlib import Path
 
 _AGENT_SKILL_FILES = {
     "threat-analysis-harness": "threat-analysis-harness.md",
+    "threat-base-model-shard-planner": "threat-base-model-shard-planner.md",
     "threat-asset-interface-agent": "threat-asset-interface-agent.md",
     "threat-asset-enumerator": "threat-asset-enumerator.md",
     "threat-attack-goal-enumerator": "threat-attack-goal-enumerator.md",
@@ -27,7 +28,8 @@ _THREAT_ANALYSIS_SUBAGENTS = {
         "prompt": (
             "你是威胁分析第一步基础建模协调 Agent 派发的价值资产枚举子 Agent。"
             "只做资产、风险和接口关系识别，不分析攻击方法或漏洞是否存在。"
-            "当调用方给出目录、语言、入口类型或接口分片时，只分析该分片，并在结果中标注 shard_scope。"
+            "当前工具只分析 C/C++ 源文件、头文件和 C/C++ 构建文件，不把非 C/C++ 文件作为依据。"
+            "当调用方给出 C/C++ 目录、模块、入口类型或接口分片时，只分析该分片，并在结果中标注 shard_scope。"
             "优先使用输入中可用的产品信息 MCP 事实，并用代码索引、目录浏览、grep、read 结果补充。"
             "输出给调用方的内容必须聚焦 assets、risks、asset_interface_links 和遗漏风险，不要写项目文件。"
             "除内部 ID、JSON 字段名、枚举值、文件路径、函数名、协议名和标准缩写外，"
@@ -59,6 +61,7 @@ _THREAT_ANALYSIS_SUBAGENTS = {
         "prompt": (
             "你是威胁分析第一步基础建模协调 Agent 派发的攻击目标枚举子 Agent。"
             "围绕输入资产、风险、外部接口和代码线索，从攻击者视角生成具体攻击目标。"
+            "当前工具只分析 C/C++ 源文件、头文件和 C/C++ 构建文件，不把非 C/C++ 文件作为依据。"
             "当调用方给出资产、风险、业务域或接口族分片时，只为该 goal_scope 生成攻击目标。"
             "攻击目标必须描述攻击者想造成的资产损害结果，不能写成漏洞类型或测试动作。"
             "输出给调用方的内容必须聚焦 attack_goals、related_interface_ids、candidate_code_paths 和覆盖缺口，不要写项目文件。"
@@ -91,6 +94,7 @@ _THREAT_ANALYSIS_SUBAGENTS = {
         "prompt": (
             "你是威胁分析第一步基础建模协调 Agent 派发的代码证据映射子 Agent。"
             "只确认资产、接口、风险和攻击目标是否有真实代码路径支撑。"
+            "当前工具只分析 C/C++ 源文件、头文件和 C/C++ 构建文件，不把非 C/C++ 文件作为依据。"
             "当调用方给出候选资产、接口、攻击目标或代码路径分片时，只核对该 evidence_scope。"
             "代码路径必须来自输入代码索引、目录浏览、grep 或 read 结果；无法确认时明确返回空路径和原因。"
             "输出给调用方的内容必须聚焦 candidate_code_paths、evidence 和不确定项，不要写项目文件。"
