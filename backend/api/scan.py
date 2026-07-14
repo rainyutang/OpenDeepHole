@@ -73,6 +73,29 @@ _scan_owners: dict[str, str] = {}
 
 _FINAL_USER_VERDICTS = {"confirmed", "false_positive"}
 _MARK_VERDICTS = _FINAL_USER_VERDICTS | {"pending_analysis"}
+SCAN_MODE_FULL = "full"
+SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
+_SCAN_MODE_ALIASES = {
+    "": SCAN_MODE_FULL,
+    SCAN_MODE_FULL: SCAN_MODE_FULL,
+    "normal": SCAN_MODE_FULL,
+    "default": SCAN_MODE_FULL,
+    SCAN_MODE_THREAT_ANALYSIS_ONLY: SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    "threat_only": SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    "threat-analysis-only": SCAN_MODE_THREAT_ANALYSIS_ONLY,
+}
+
+
+def _normalize_scan_mode(value: str | None) -> str:
+    mode = str(value or "").strip().lower()
+    normalized = _SCAN_MODE_ALIASES.get(mode)
+    if normalized is None:
+        raise HTTPException(status_code=400, detail=f"Unknown scan mode: {value}")
+    return normalized
+
+
+def _is_threat_analysis_only_mode(value: str | None) -> bool:
+    return _normalize_scan_mode(value) == SCAN_MODE_THREAT_ANALYSIS_ONLY
 
 
 def _has_final_user_verdict(vuln) -> bool:
@@ -590,9 +613,14 @@ async def create_agent_scan(
     if enforce_agent_owner and current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Agent does not belong to you")
 
+    scan_mode = _normalize_scan_mode(body.scan_mode)
     selected_checkers = checker_names if checker_names is not None else body.checkers
-    validated_checker_names = _validated_checker_names(selected_checkers, current_user)
-    checker_packages = _checker_packages_for(validated_checker_names)
+    if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
+        validated_checker_names = []
+        checker_packages = []
+    else:
+        validated_checker_names = _validated_checker_names(selected_checkers, current_user)
+        checker_packages = _checker_packages_for(validated_checker_names)
     scan_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     project_path = body.project_path.strip()
@@ -606,6 +634,7 @@ async def create_agent_scan(
     scan = ScanStatus(
         scan_id=scan_id,
         project_id=scan_name,
+        scan_mode=scan_mode,
         product=product,
         validation_environment=validation_environment,
         scan_items=validated_checker_names,
@@ -621,6 +650,7 @@ async def create_agent_scan(
     meta = ScanMeta(
         scan_items=validated_checker_names,
         created_at=now,
+        scan_mode=scan_mode,
         feedback_ids=body.feedback_ids,
         agent_id=body.agent_id,
         agent_name=agent.name,
@@ -647,6 +677,7 @@ async def create_agent_scan(
         "project_path": project_path,
         "code_scan_path": code_scan_path,
         "checkers": validated_checker_names,
+        "scan_mode": scan_mode,
         "scan_name": scan_name,
         "product": product,
         "validation_environment": validation_environment,
@@ -955,11 +986,16 @@ async def _continue_scan(
         "project_path": meta.project_path,
         "code_scan_path": meta.code_scan_path or meta.project_path,
         "checkers": meta.scan_items,
+        "scan_mode": meta.scan_mode,
         "scan_name": meta.scan_name,
         "product": meta.product,
         "validation_environment": meta.validation_environment or _default_validation_environment(),
         "feedback_entries": feedback_entries,
-        "checker_packages": _checker_packages_for(meta.scan_items),
+        "checker_packages": (
+            []
+            if _is_threat_analysis_only_mode(meta.scan_mode)
+            else _checker_packages_for(meta.scan_items)
+        ),
         "retry_candidates": (
             [candidate.model_dump() for candidate in candidate_payload]
             if candidate_payload is not None

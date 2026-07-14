@@ -212,6 +212,7 @@ export async function createScan(body: {
   project_path: string;
   code_scan_path?: string;
   scan_name: string;
+  scan_mode?: string;
   product?: string;
   validation_environment?: string;
   checkers: string[];

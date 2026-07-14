@@ -36,9 +36,11 @@ from agent.scanner import (
 )
 from agent.config import AgentConfig
 from backend.api import agent as agent_api
+from backend.api import scan as scan_api
 from backend.models import (
     AgentInfo,
     Candidate,
+    CreateScanRequest,
     OpenCodePoolStatus,
     ScanItemStatus,
     ScanMeta,
@@ -1012,6 +1014,38 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded[1].code_scan_path, "/repo/project/module")
 
+    def test_scan_meta_persists_scan_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_mode="threat_analysis_only",
+                scan_items=[],
+                created_at="2026-01-01T00:00:00+00:00",
+                status=ScanItemStatus.PENDING,
+                progress=0.0,
+                total_candidates=0,
+                processed_candidates=0,
+                vulnerabilities=[],
+            )
+            meta = ScanMeta(
+                scan_items=[],
+                created_at=scan.created_at,
+                scan_mode="threat_analysis_only",
+                project_path="/repo/project",
+                code_scan_path="/repo/project",
+                scan_name="project",
+            )
+
+            store.save_scan(scan, meta)
+
+            loaded = store.load_scan("scan-1")
+            self.assertIsNotNone(loaded)
+            loaded_scan, loaded_meta = loaded
+            self.assertEqual(loaded_scan.scan_mode, "threat_analysis_only")
+            self.assertEqual(loaded_meta.scan_mode, "threat_analysis_only")
+
     def test_scan_meta_persists_and_updates_product(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -1048,6 +1082,54 @@ class ScanStoreCodeScanPathTests(unittest.TestCase):
             self.assertEqual(loaded_meta.product, "5G")
             self.assertEqual(loaded_scan.validation_environment, "仿真UBBPi板环境")
             self.assertEqual(loaded_meta.validation_environment, "仿真UBBPi板环境")
+
+    def test_create_threat_analysis_only_scan_allows_empty_checkers(self) -> None:
+        class Request:
+            base_url = "http://server/"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            agent = AgentInfo(
+                agent_id="agent-id",
+                name="agent-a",
+                ip="127.0.0.1",
+                port=8001,
+                last_seen=datetime.now(timezone.utc).isoformat(),
+                user_id="user-1",
+            )
+            sent = AsyncMock(return_value=True)
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch.dict(agent_api._registered_agents, {"agent-id": agent}, clear=True),
+                patch("backend.api.scan.refresh_registry", side_effect=AssertionError("checker registry not needed")),
+                patch("backend.api.agent.create_agent_runtime_update_payload", return_value={}),
+                patch("backend.api.agent.send_agent_command", sent),
+            ):
+                response = asyncio.run(
+                    scan_api.create_agent_scan(
+                        CreateScanRequest(
+                            agent_id="agent-id",
+                            project_path="/repo/project",
+                            scan_name="project",
+                            scan_mode="threat_analysis_only",
+                            checkers=[],
+                        ),
+                        Request(),
+                        User(user_id="user-1", username="alice", role="user"),
+                    )
+                )
+
+            loaded = store.load_scan(response.scan_id)
+            self.assertIsNotNone(loaded)
+            loaded_scan, loaded_meta = loaded
+            self.assertEqual(loaded_scan.scan_mode, "threat_analysis_only")
+            self.assertEqual(loaded_meta.scan_mode, "threat_analysis_only")
+            self.assertEqual(loaded_scan.scan_items, [])
+            sent.assert_awaited_once()
+            command = sent.await_args.args[1]
+            self.assertEqual(command["scan_mode"], "threat_analysis_only")
+            self.assertEqual(command["checkers"], [])
+            self.assertEqual(command["checker_packages"], [])
 
     def test_scan_persists_opencode_pool_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

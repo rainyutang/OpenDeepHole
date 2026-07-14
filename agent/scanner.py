@@ -35,6 +35,8 @@ GIT_HISTORY_PIPELINE_ENABLED = False
 # Keep memory API discovery available as a standalone module/config surface, but
 # do not run it as a scan-pipeline precondition.
 MEMORY_API_DISCOVERY_PIPELINE_ENABLED = False
+SCAN_MODE_FULL = "full"
+SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 
 
 class _StaticProgressGate:
@@ -957,6 +959,7 @@ async def run_scan(
     retry_processed_offset: int = 0,
     resume_threat_analysis: bool = False,
     retry_threat_audit_task_ids: list[str] | None = None,
+    scan_mode: str = SCAN_MODE_FULL,
 ) -> None:
     """Orchestrate the full local pipeline: index → static analysis → AI audit → report.
 
@@ -975,6 +978,13 @@ async def run_scan(
     threat_analysis_task: asyncio.Task | None = None
 
     try:
+        normalized_scan_mode = str(scan_mode or SCAN_MODE_FULL).strip().lower()
+        if normalized_scan_mode in {"threat_only", "threat-analysis-only"}:
+            normalized_scan_mode = SCAN_MODE_THREAT_ANALYSIS_ONLY
+        if normalized_scan_mode not in {SCAN_MODE_FULL, SCAN_MODE_THREAT_ANALYSIS_ONLY}:
+            raise ValueError(f"Unknown scan mode: {scan_mode}")
+        threat_analysis_only = normalized_scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY
+
         project_path, code_scan_path = _resolve_scan_paths(project_path, code_scan_path)
 
         if checker_packages:
@@ -1001,27 +1011,35 @@ async def run_scan(
             await emit("init", f"Product: {product}")
         if validation_environment:
             await emit("init", f"Validation environment: {validation_environment}")
-        await emit("init", f"Checkers: {checker_names or 'all'}" + (" (resume)" if is_resume else ""))
+        await emit("init", f"Scan mode: {normalized_scan_mode}" + (" (resume)" if is_resume else ""))
 
-        # Load checker registry (discovers from bundled checkers/ dir)
-        from backend.registry import get_registry
-        registry = get_registry(refresh=True)
+        registry = {}
+        family_of: dict[str, str] = {}
+        audit_checker_order: list[str] = []
+        if threat_analysis_only:
+            await emit("init", "仅威胁分析模式：跳过检查项加载、静态分析和候选点 AI 审计")
+        else:
+            await emit("init", f"Checkers: {checker_names or 'all'}" + (" (resume)" if is_resume else ""))
 
-        if checker_names:
-            registry = {k: v for k, v in registry.items() if k in checker_names}
-            unknown = set(checker_names) - set(registry.keys())
-            if unknown:
-                raise ValueError(f"Unknown checkers: {unknown}")
+            # Load checker registry (discovers from bundled checkers/ dir)
+            from backend.registry import get_registry
+            registry = get_registry(refresh=True)
 
-        if not registry:
-            raise ValueError("No checkers available or none matched the requested names")
+            if checker_names:
+                registry = {k: v for k, v in registry.items() if k in checker_names}
+                unknown = set(checker_names) - set(registry.keys())
+                if unknown:
+                    raise ValueError(f"Unknown checkers: {unknown}")
 
-        family_of = {
-            name: (getattr(entry, "family", "") or name)
-            for name, entry in registry.items()
-        }
-        audit_checker_order = checker_names or list(registry.keys())
-        await emit("init", f"Loaded {len(registry)} checker(s): {list(registry.keys())}")
+            if not registry:
+                raise ValueError("No checkers available or none matched the requested names")
+
+            family_of = {
+                name: (getattr(entry, "family", "") or name)
+                for name, entry in registry.items()
+            }
+            audit_checker_order = checker_names or list(registry.keys())
+            await emit("init", f"Loaded {len(registry)} checker(s): {list(registry.keys())}")
 
         candidates_cache_path = scan_dir / "candidates.json"
 
@@ -1232,6 +1250,32 @@ async def run_scan(
                 planned_task_id=threat_planned_task_id,
                 retry_threat_audit_task_ids=retry_threat_audit_task_ids,
             ))
+
+        if threat_analysis_only:
+            await emit(
+                "static_analysis",
+                "仅威胁分析模式：跳过静态分析和候选点 AI 审计",
+                candidate_index=0,
+            )
+            await reporter.send_static_progress(scan_id, 0, 0, done=True)
+            if threat_analysis_task is None:
+                await emit("threat_analysis", "威胁分析未启动：配置关闭或任务已取消")
+            await _wait_for_threat_analysis_task(
+                threat_analysis_task,
+                cancel_event=cancel_event,
+                emit=emit,
+            )
+            if db is not None:
+                db.close()
+                db = None
+            if cancel_event.is_set():
+                await emit("complete", "仅威胁分析任务已取消")
+                await reporter.finish_scan(scan_id, [], "cancelled", 0, 0)
+                return
+            await emit("complete", "仅威胁分析任务完成")
+            await reporter.finish_scan(scan_id, [], "complete", 0, 0)
+            shutil.rmtree(scan_dir, ignore_errors=True)
+            return
 
         # --- Phase 6: Memory allocation/free API preprocessing ---
         # Hard-disabled in the scan pipeline. The standalone module/config remain

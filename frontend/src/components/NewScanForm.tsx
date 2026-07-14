@@ -7,6 +7,9 @@ interface Props {
   onBack: () => void;
 }
 
+const SCAN_MODE_FULL = "full";
+const SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only";
+
 export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
@@ -20,11 +23,13 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [projectPath, setProjectPath] = useState<string>("");
   const [codeScanPath, setCodeScanPath] = useState<string>("");
   const [scanName, setScanName] = useState<string>("");
+  const [selectedScanMode, setSelectedScanMode] = useState<string>(SCAN_MODE_FULL);
   const [selectedProduct, setSelectedProduct] = useState<string>("");
   const [selectedValidationEnvironment, setSelectedValidationEnvironment] = useState<string>("");
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
   const builtinCheckers = checkers.filter((checker) => !checker.user_created);
   const userCheckers = checkers.filter((checker) => checker.user_created);
+  const threatAnalysisOnly = selectedScanMode === SCAN_MODE_THREAT_ANALYSIS_ONLY;
 
   useEffect(() => {
     const load = async () => {
@@ -93,7 +98,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       setError("请输入项目路径");
       return;
     }
-    if (selectedCheckers.size === 0) {
+    if (!threatAnalysisOnly && selectedCheckers.size === 0) {
       setError("请至少选择一个检查项");
       return;
     }
@@ -105,9 +110,10 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         project_path: projectPath.trim(),
         code_scan_path: codeScanPath.trim(),
         scan_name: scanName.trim(),
+        scan_mode: selectedScanMode,
         product: selectedProduct,
         validation_environment: selectedValidationEnvironment,
-        checkers: Array.from(selectedCheckers),
+        checkers: threatAnalysisOnly ? [] : Array.from(selectedCheckers),
       });
       onScanStarted(resp.scan_id);
     } catch (e: unknown) {
@@ -200,6 +206,55 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                   ))}
                 </div>
               )}
+            </div>
+
+            {/* Scan mode */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <label className="block text-sm font-medium text-slate-300 mb-3">
+                扫描模式
+              </label>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <label
+                  className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
+                    selectedScanMode === SCAN_MODE_FULL
+                      ? "border-blue-500 bg-blue-500/10"
+                      : "border-slate-600 hover:border-slate-500"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="scan_mode"
+                    value={SCAN_MODE_FULL}
+                    checked={selectedScanMode === SCAN_MODE_FULL}
+                    onChange={() => setSelectedScanMode(SCAN_MODE_FULL)}
+                    className="mt-0.5 h-4 w-4 border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-white">完整扫描</div>
+                    <div className="mt-1 text-xs text-slate-500">代码索引、威胁分析、静态分析和候选点审计</div>
+                  </div>
+                </label>
+                <label
+                  className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
+                    selectedScanMode === SCAN_MODE_THREAT_ANALYSIS_ONLY
+                      ? "border-emerald-500 bg-emerald-500/10"
+                      : "border-slate-600 hover:border-slate-500"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="scan_mode"
+                    value={SCAN_MODE_THREAT_ANALYSIS_ONLY}
+                    checked={selectedScanMode === SCAN_MODE_THREAT_ANALYSIS_ONLY}
+                    onChange={() => setSelectedScanMode(SCAN_MODE_THREAT_ANALYSIS_ONLY)}
+                    className="mt-0.5 h-4 w-4 border-slate-500 bg-slate-700 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-0"
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-white">仅威胁分析</div>
+                    <div className="mt-1 text-xs text-slate-500">用于单独执行和调试威胁分析 Agent</div>
+                  </div>
+                </label>
+              </div>
             </div>
 
             {/* Project path */}
@@ -299,7 +354,11 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               <label className="block text-sm font-medium text-slate-300 mb-3">
                 检查项
               </label>
-              {checkers.length === 0 ? (
+              {threatAnalysisOnly ? (
+                <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-4 text-sm text-emerald-200">
+                  仅威胁分析模式不需要选择检查项。
+                </div>
+              ) : checkers.length === 0 ? (
                 <p className="text-sm text-slate-500">无可用检查项</p>
               ) : (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

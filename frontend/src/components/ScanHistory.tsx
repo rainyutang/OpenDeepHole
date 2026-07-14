@@ -48,6 +48,10 @@ function productFilterLabel(value: string) {
   return value === UNCONFIGURED_PRODUCT_FILTER ? "未配置" : value;
 }
 
+function isThreatAnalysisOnlyScan(scan: ScanSummary) {
+  return scan.scan_mode === "threat_analysis_only";
+}
+
 function uniqueOptions(values: string[]) {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 }
@@ -568,14 +572,20 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-wrap gap-1">
-                          {scan.scan_items.map((item) => (
-                            <span
-                              key={item}
-                              className="text-xs bg-slate-700/50 text-slate-400 px-1.5 py-0.5 rounded"
-                            >
-                              {item}
+                          {isThreatAnalysisOnlyScan(scan) ? (
+                            <span className="text-xs bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded">
+                              仅威胁分析
                             </span>
-                          ))}
+                          ) : (
+                            scan.scan_items.map((item) => (
+                              <span
+                                key={item}
+                                className="text-xs bg-slate-700/50 text-slate-400 px-1.5 py-0.5 rounded"
+                              >
+                                {item}
+                              </span>
+                            ))
+                          )}
                         </div>
                       </td>
                       {user.role === "admin" && (

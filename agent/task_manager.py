@@ -14,6 +14,7 @@ class ScanTask:
     code_scan_path: Path
     checkers: list[str]
     scan_name: str
+    scan_mode: str = "full"
     product: str = ""
     validation_environment: str = ""
     feedback_entries: list[dict] = field(default_factory=list)
@@ -38,6 +39,7 @@ class TaskManager:
         code_scan_path: str | None,
         checkers: list[str],
         scan_name: str,
+        scan_mode: str = "full",
         product: str = "",
         validation_environment: str = "",
         feedback_entries: list[dict] | None = None,
@@ -54,6 +56,7 @@ class TaskManager:
             code_scan_path=Path(code_scan_path or project_path),
             checkers=checkers,
             scan_name=scan_name,
+            scan_mode=scan_mode or "full",
             product=product,
             validation_environment=validation_environment,
             feedback_entries=feedback_entries or [],
@@ -100,6 +103,7 @@ class TaskManager:
                 "code_scan_path": str(task.code_scan_path),
                 "checkers": task.checkers,
                 "scan_name": task.scan_name,
+                "scan_mode": task.scan_mode,
                 "product": task.product,
                 "validation_environment": task.validation_environment,
             })
