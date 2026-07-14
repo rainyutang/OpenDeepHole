@@ -581,6 +581,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertEqual(kwargs["retry_candidates"][0]["file"], "src/a.c")
             self.assertEqual(kwargs["retry_threat_audit_task_ids"], ["threat-timeout"])
             self.assertTrue(kwargs["resume_threat_analysis"])
+            self.assertEqual(kwargs["scan_mode"], "threat_analysis_only")
 
         command = {
             "type": "resume",
@@ -588,6 +589,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "project_path": "/repo/project",
             "code_scan_path": "/repo/project/src",
             "checkers": ["npd"],
+            "scan_mode": "threat_analysis_only",
             "retry_candidates": [{"file": "src/a.c"}],
             "retry_total_candidates": 2,
             "retry_processed_offset": 1,

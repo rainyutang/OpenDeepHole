@@ -542,6 +542,7 @@ class AgentOpenCodePoolStatus(OpenCodePoolStatus):
 class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
+    scan_mode: str = "full"
     product: str = ""
     validation_environment: str = ""
     scan_items: list[str] = []
@@ -728,6 +729,7 @@ class CreateScanRequest(BaseModel):
     project_path: str
     code_scan_path: str = ""
     scan_name: str = ""
+    scan_mode: str = "full"
     product: str = ""
     validation_environment: str = ""
     checkers: list[str]
@@ -750,6 +752,7 @@ class ScanMeta(BaseModel):
     """扫描元数据，记录扫描配置信息。"""
     scan_items: list[str]
     created_at: str
+    scan_mode: str = "full"
     feedback_ids: list[str] = []
     agent_id: str = ""
     agent_name: str = ""
@@ -766,6 +769,7 @@ class ScanSummary(BaseModel):
     """扫描列表的摘要信息。"""
     scan_id: str
     project_id: str
+    scan_mode: str = "full"
     scan_name: str = ""
     product: str = ""
     validation_environment: str = ""

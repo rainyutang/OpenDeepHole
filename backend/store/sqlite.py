@@ -96,6 +96,7 @@ _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS scans (
     scan_id            TEXT PRIMARY KEY,
     project_id         TEXT NOT NULL,
+    scan_mode          TEXT NOT NULL DEFAULT 'full',
     scan_items         TEXT NOT NULL,
     status             TEXT NOT NULL DEFAULT 'pending',
     created_at         TEXT NOT NULL,
@@ -398,6 +399,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN feedback_ids TEXT DEFAULT '[]'")
         if "workspace_path" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN workspace_path TEXT")
+        if "scan_mode" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN scan_mode TEXT NOT NULL DEFAULT 'full'")
         if "static_total_files" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN static_total_files INTEGER DEFAULT 0")
         if "static_scanned_files" not in cols:
@@ -779,6 +782,7 @@ class SqliteScanStore(ScanStoreBase):
         return ScanStatus(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
+            scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             product=row["product"] if row["product"] is not None else "",
             validation_environment=(
                 row["validation_environment"] if row["validation_environment"] is not None else ""
@@ -811,6 +815,7 @@ class SqliteScanStore(ScanStoreBase):
         return ScanMeta(
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
+            scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
             agent_name=row["agent_name"] if row["agent_name"] is not None else "",
@@ -842,8 +847,8 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, project_path, code_scan_path, scan_name,
-                     product, validation_environment, public_access_token, opencode_pool)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     scan_mode, product, validation_environment, public_access_token, opencode_pool)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -866,6 +871,7 @@ class SqliteScanStore(ScanStoreBase):
                     meta.project_path,
                     meta.code_scan_path,
                     meta.scan_name,
+                    meta.scan_mode,
                     meta.product,
                     meta.validation_environment,
                     meta.public_access_token,
@@ -896,6 +902,7 @@ class SqliteScanStore(ScanStoreBase):
         return ScanSummary(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
+            scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             product=row["product"] if row["product"] is not None else "",
             validation_environment=(

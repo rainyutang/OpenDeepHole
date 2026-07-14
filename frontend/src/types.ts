@@ -403,6 +403,7 @@ export interface AgentOpenCodePoolStatus extends OpenCodePoolStatus {
 export interface ScanStatus {
   scan_id: string;
   project_id: string;
+  scan_mode?: string;
   product: string;
   validation_environment: string;
   scan_items: string[];
@@ -480,6 +481,7 @@ export interface IndexStatus {
 export interface ScanSummary {
   scan_id: string;
   project_id: string;
+  scan_mode?: string;
   scan_name: string;
   product: string;
   validation_environment: string;

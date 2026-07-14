@@ -105,6 +105,7 @@ async def _run(task, is_resume: bool) -> None:
             code_scan_path=task.code_scan_path,
             reporter=_reporter,
             scan_name=task.scan_name,
+            scan_mode=task.scan_mode,
             product=task.product,
             validation_environment=task.validation_environment,
             checker_names=task.checkers,
@@ -129,6 +130,7 @@ async def handle_task(
     code_scan_path: str | None,
     checkers: list[str],
     scan_name: str,
+    scan_mode: str = "full",
     product: str = "",
     validation_environment: str = "",
     feedback_entries: list[dict] | None = None,
@@ -150,6 +152,7 @@ async def handle_task(
         code_scan_path=code_scan_path,
         checkers=checkers,
         scan_name=scan_name,
+        scan_mode=scan_mode,
         product=product,
         validation_environment=validation_environment,
         feedback_entries=feedback_entries,
@@ -176,6 +179,7 @@ async def handle_resume(
     code_scan_path: Optional[str] = None,
     checkers: Optional[list[str]] = None,
     scan_name: Optional[str] = None,
+    scan_mode: Optional[str] = None,
     product: Optional[str] = None,
     validation_environment: Optional[str] = None,
     feedback_entries: Optional[list[dict]] = None,
@@ -201,6 +205,7 @@ async def handle_resume(
             code_scan_path=code_scan_path,
             checkers=checkers or [],
             scan_name=scan_name or "",
+            scan_mode=scan_mode or "full",
             product=product or "",
             validation_environment=validation_environment or "",
             feedback_entries=feedback_entries,
@@ -222,6 +227,8 @@ async def handle_resume(
             task.checkers = checkers
         if scan_name is not None:
             task.scan_name = scan_name
+        if scan_mode is not None:
+            task.scan_mode = scan_mode
         if product is not None:
             task.product = product
         if validation_environment is not None:
