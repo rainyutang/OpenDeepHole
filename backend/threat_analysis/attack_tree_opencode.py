@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -37,10 +38,21 @@ _MAX_DOMAINS = 150
 _MAX_SURFACES = 300
 _MAX_CONFIRMATIONS = 300
 _STAGE_FAILURE_RETRIES = 3
+_GENERATED_THREAT_ID_PATTERN = re.compile(
+    r"^(?:METHOD|NODE|AP|ASSET|RISK|GOAL|DOMAIN|SURFACE|TREE)-[A-Z0-9][A-Z0-9-]*$",
+    re.IGNORECASE,
+)
 
 
 class _StageOutputError(RuntimeError):
     """Raised when a threat-analysis stage did not write a usable JSON object."""
+
+
+def _readable_stage_label(value: object, fallback: str = "") -> str:
+    normalized = str(value or "").strip()
+    if normalized and not _GENERATED_THREAT_ID_PATTERN.fullmatch(normalized):
+        return normalized
+    return fallback
 
 
 async def run_attack_tree_threat_analysis(
@@ -611,8 +623,8 @@ def _attack_goals_from_base_output(base_output: dict[str, Any]) -> list[dict[str
         asset_risks = risks_by_asset.get(asset_id) or _dict_items(asset.get("risks"))
         for risk_index, risk in enumerate(asset_risks, start=1):
             risk_id = str(risk.get("risk_id") or risk.get("id") or f"RISK-{asset_index:03d}-{risk_index:03d}")
-            risk_name = str(risk.get("name") or "关键风险")
-            asset_name = str(asset.get("name") or asset_id)
+            risk_name = _readable_stage_label(risk.get("name"), "关键风险")
+            asset_name = _readable_stage_label(asset.get("name"), "未命名资产")
             out.append({
                 "attack_goal_id": f"GOAL-{asset_index:03d}-{risk_index:03d}",
                 "asset_id": asset_id,

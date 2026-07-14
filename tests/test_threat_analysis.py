@@ -243,6 +243,85 @@ class ThreatAnalysisParserTests(unittest.TestCase):
             self.assertEqual(len(analysis.attack_trees), 1)
             self.assertEqual(analysis.code_path_mappings[0].code_paths[0].path, "src/api")
 
+    def test_generated_method_ids_are_not_used_as_display_names(self) -> None:
+        path = parse_attack_path_data({
+            "asset": {"name": "管理员权限"},
+            "risk": {"name": "管理员权限被未授权获取"},
+            "attack_goal": {"name": "绕过管理面身份认证"},
+            "attack_domain": {"name": "管理面"},
+            "attack_surface": {"name": "管理 API", "surface_type": "api"},
+            "attack_method": {"id": "METHOD-2C94B22378", "name": "METHOD-2C94B22378"},
+            "code_paths": [{"path": "src/api", "description": "管理 API"}],
+        })
+
+        self.assertEqual(path.attack_method_id, "METHOD-2C94B22378")
+        self.assertEqual(path.attack_method_name, "")
+        analysis = build_analysis_from_attack_paths(
+            [path],
+            analysis_id="ATA-NO-METHOD-ID-DISPLAY",
+            sources=parse_threat_analysis_data({"sources": {"repositories": ["."]}}).sources,
+            scan_scope=parse_threat_analysis_data({}).scan_scope,
+        )
+        method_nodes = [
+            node
+            for tree in analysis.attack_trees
+            for node in tree.nodes
+            if node.node_type == "method"
+        ]
+        self.assertEqual(method_nodes[0].node_id, "METHOD-2C94B22378")
+        self.assertEqual(method_nodes[0].name, "未命名攻击方式")
+
+        tasks = build_threat_audit_tasks("scan-1", analysis)
+
+        self.assertEqual(tasks[0].method_node_id, "METHOD-2C94B22378")
+        self.assertEqual(tasks[0].method_name, "未命名攻击方式")
+        self.assertNotIn("METHOD-2C94B22378", tasks[0].description)
+
+    def test_generated_object_ids_are_not_used_as_display_names(self) -> None:
+        path = parse_attack_path_data({
+            "asset": {"asset_id": "ASSET-XX-01", "name": "ASSET-XX-01"},
+            "risk": {"risk_id": "RISK-XX-01", "name": "RISK-XX-01"},
+            "attack_goal": {"attack_goal_id": "GOAL-XX-01", "name": "GOAL-XX-01"},
+            "attack_domain": {"domain_id": "DOMAIN-XX-01", "name": "DOMAIN-XX-01"},
+            "attack_surface": {
+                "surface_id": "SURFACE-XX-01",
+                "name": "SURFACE-XX-01",
+                "surface_type": "api",
+            },
+            "attack_method": {"name": "认证绕过"},
+            "code_paths": [{"path": "src/api"}],
+        })
+
+        self.assertEqual(path.asset_name, "")
+        self.assertEqual(path.risk_name, "")
+        self.assertEqual(path.attack_goal_name, "")
+        self.assertEqual(path.attack_domain_name, "")
+        self.assertEqual(path.attack_surface_name, "")
+        analysis = build_analysis_from_attack_paths(
+            [path],
+            analysis_id="ATA-NO-OBJECT-ID-DISPLAY",
+            sources=parse_threat_analysis_data({"sources": {"repositories": ["."]}}).sources,
+            scan_scope=parse_threat_analysis_data({}).scan_scope,
+        )
+
+        self.assertEqual(analysis.assets[0].name, "未命名资产")
+        self.assertEqual(analysis.assets[0].risks[0].name, "未命名风险")
+        tree = analysis.attack_trees[0]
+        self.assertEqual(tree.attack_goal, "未命名攻击目标")
+        node_names = {node.node_type: node.name for node in tree.nodes}
+        self.assertEqual(node_names["goal"], "未命名攻击目标")
+        self.assertEqual(node_names["domain"], "未命名攻击域")
+        self.assertEqual(node_names["surface"], "未命名攻击面")
+
+        tasks = build_threat_audit_tasks("scan-1", analysis)
+
+        self.assertEqual(tasks[0].surface_name, "未命名攻击面")
+        self.assertEqual(tasks[0].asset_name, "未命名资产")
+        self.assertEqual(tasks[0].risk_name, "未命名风险")
+        self.assertEqual(tasks[0].attack_goal, "未命名攻击目标")
+        self.assertNotIn("ASSET-XX-01", tasks[0].description)
+        self.assertNotIn("SURFACE-XX-01", tasks[0].description)
+
     def test_build_threat_audit_tasks_from_surface_methods_ignores_paths(self) -> None:
         payload = {
             "schema_version": "1.0",
