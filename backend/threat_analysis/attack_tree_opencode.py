@@ -182,11 +182,10 @@ async def run_attack_tree_threat_analysis(
         planned_task_id=planned_task_id,
         stats_scope_id=project_id,
     )
-    await append_attack_paths(base_output)
 
     attack_goals = _attack_goals_from_base_output(base_output)[:_MAX_GOALS]
     if on_output and len(attack_goals) > 1:
-        on_output(f"[威胁分析] 攻击树优先调度：按 {len(attack_goals)} 个攻击目标逐棵展开")
+        on_output(f"[威胁分析] 攻击树优先调度（深度优先）：按 {len(attack_goals)} 个攻击目标逐棵展开")
     domain_stage_count = 0
     surface_stage_count = 0
     confirmation_stage_count = 0
@@ -347,94 +346,50 @@ async def run_attack_tree_threat_analysis(
         goal_output = await _run_goal_stage(goal_index, goal)
 
         raw_domains = _dict_items(goal_output.get("domains"))
-        domain_tasks: list[dict[str, Any]] = []
         for local_index, domain in enumerate(raw_domains, start=1):
-            if domain_stage_count >= _MAX_DOMAINS:
+            if _cancelled(cancel_event) or domain_stage_count >= _MAX_DOMAINS:
                 break
             domain_stage_count += 1
-            domain_tasks.append({
+            domain_task = {
                 "attack_goal": goal,
                 "attack_domain": domain,
                 "_stage_index": domain_stage_count,
                 "_local_index": local_index,
+                "_local_total": len(raw_domains),
                 "_goal_index": goal_index,
-            })
-        for task in domain_tasks:
-            task["_local_total"] = len(domain_tasks)
+            }
+            domain_output = await _run_domain_stage(local_index, domain_task)
 
-        domain_concurrency = _stage_concurrency(config, len(domain_tasks))
-        if on_output and len(domain_tasks) > 1:
-            on_output(
-                f"[威胁分析] 攻击树 {goal_index}/{len(attack_goals)}："
-                f"攻击域分析并发度 {domain_concurrency}/{len(domain_tasks)}"
-            )
-        domain_outputs = await _run_stage_batch(
-            domain_tasks,
-            concurrency=domain_concurrency,
-            run_one=_run_domain_stage,
-        )
-
-        surface_tasks: list[dict[str, Any]] = []
-        for task, domain_output in zip(domain_tasks, domain_outputs):
             raw_surfaces = _dict_items(domain_output.get("surfaces"))
-            for surface in raw_surfaces:
-                if surface_stage_count >= _MAX_SURFACES:
+            for surface_local_index, surface in enumerate(raw_surfaces, start=1):
+                if _cancelled(cancel_event) or surface_stage_count >= _MAX_SURFACES:
                     break
                 surface_stage_count += 1
-                surface_tasks.append({
-                    **_strip_internal_stage_fields(task),
+                surface_task = {
+                    **_strip_internal_stage_fields(domain_task),
                     "attack_surface": surface,
                     "_stage_index": surface_stage_count,
-                    "_local_index": len(surface_tasks) + 1,
+                    "_local_index": surface_local_index,
+                    "_local_total": len(raw_surfaces),
                     "_goal_index": goal_index,
-                })
-            if surface_stage_count >= _MAX_SURFACES:
-                break
-        for task in surface_tasks:
-            task["_local_total"] = len(surface_tasks)
+                }
+                surface_output = await _run_surface_stage(surface_local_index, surface_task)
 
-        surface_concurrency = _stage_concurrency(config, len(surface_tasks))
-        if on_output and len(surface_tasks) > 1:
-            on_output(
-                f"[威胁分析] 攻击树 {goal_index}/{len(attack_goals)}："
-                f"攻击面分析并发度 {surface_concurrency}/{len(surface_tasks)}"
-            )
-        surface_outputs = await _run_stage_batch(
-            surface_tasks,
-            concurrency=surface_concurrency,
-            run_one=_run_surface_stage,
-        )
-
-        confirmation_tasks: list[dict[str, Any]] = []
-        for task, surface_output in zip(surface_tasks, surface_outputs):
-            for method_task in _dict_items(surface_output.get("method_confirmation_tasks")):
-                if confirmation_stage_count >= _MAX_CONFIRMATIONS:
-                    break
-                confirmation_stage_count += 1
-                method_task = _with_method_confirmation_task_defaults(method_task, surface_output)
-                confirmation_tasks.append({
-                    **_strip_internal_stage_fields(task),
-                    "method_confirmation_task": method_task,
-                    "_stage_index": confirmation_stage_count,
-                    "_local_index": len(confirmation_tasks) + 1,
-                    "_goal_index": goal_index,
-                })
-            if confirmation_stage_count >= _MAX_CONFIRMATIONS:
-                break
-        for task in confirmation_tasks:
-            task["_local_total"] = len(confirmation_tasks)
-
-        confirmation_concurrency = _stage_concurrency(config, len(confirmation_tasks))
-        if on_output and len(confirmation_tasks) > 1:
-            on_output(
-                f"[威胁分析] 攻击树 {goal_index}/{len(attack_goals)}："
-                f"方法确认并发度 {confirmation_concurrency}/{len(confirmation_tasks)}"
-            )
-        await _run_stage_batch(
-            confirmation_tasks,
-            concurrency=confirmation_concurrency,
-            run_one=_run_confirmation_stage,
-        )
+                method_tasks = _dict_items(surface_output.get("method_confirmation_tasks"))
+                for confirmation_local_index, method_task in enumerate(method_tasks, start=1):
+                    if _cancelled(cancel_event) or confirmation_stage_count >= _MAX_CONFIRMATIONS:
+                        break
+                    confirmation_stage_count += 1
+                    method_task = _with_method_confirmation_task_defaults(method_task, surface_output)
+                    confirmation_task = {
+                        **_strip_internal_stage_fields(surface_task),
+                        "method_confirmation_task": method_task,
+                        "_stage_index": confirmation_stage_count,
+                        "_local_index": confirmation_local_index,
+                        "_local_total": len(method_tasks),
+                        "_goal_index": goal_index,
+                    }
+                    await _run_confirmation_stage(confirmation_local_index, confirmation_task)
 
         if on_output:
             on_output(f"[威胁分析] 攻击树 {goal_index}/{len(attack_goals)} 调度完成")
@@ -812,23 +767,231 @@ def _validate_stage_output(skill_name: str, output: dict[str, Any]) -> None:
         raise _StageOutputError(
             f"stage output field(s) must be arrays: {', '.join(wrong_type)}"
         )
-
-
-def _stage_concurrency(config: Any, pending_count: int) -> int:
-    if pending_count <= 1:
-        return 1
-    try:
-        from backend.opencode.model_pool import total_model_capacity
-
-        global_concurrency = int(getattr(config, "opencode_concurrency", 1) or 1)
-        capacity = total_model_capacity(
-            config.opencode,
-            global_concurrency=max(1, global_concurrency),
-            required_capability="high",
+    forbidden_fields = {
+        "threat-asset-interface-agent": [
+            "domains",
+            "surfaces",
+            "methods",
+            "attack_paths",
+            "method_confirmation_tasks",
+        ],
+        "threat-asset-enumerator": [
+            "attack_goals",
+            "domains",
+            "surfaces",
+            "methods",
+            "attack_paths",
+            "method_confirmation_tasks",
+        ],
+        "threat-attack-goal-enumerator": [
+            "domains",
+            "surfaces",
+            "methods",
+            "attack_paths",
+            "method_confirmation_tasks",
+        ],
+        "threat-code-evidence-mapper": [
+            "domains",
+            "surfaces",
+            "methods",
+            "attack_paths",
+            "method_confirmation_tasks",
+        ],
+        "threat-base-model-gap-review-agent": [
+            "domains",
+            "surfaces",
+            "methods",
+            "attack_paths",
+            "method_confirmation_tasks",
+        ],
+        "threat-attack-goal-agent": [
+            "surfaces",
+            "methods",
+            "attack_paths",
+            "method_confirmation_tasks",
+        ],
+        "threat-attack-domain-agent": [
+            "methods",
+            "attack_paths",
+            "method_confirmation_tasks",
+        ],
+    }.get(skill_name, [])
+    present_forbidden = [
+        field
+        for field in forbidden_fields
+        if field in output and _has_non_empty_stage_value(output.get(field))
+    ]
+    if present_forbidden:
+        raise _StageOutputError(
+            f"stage output contains out-of-scope field(s): {', '.join(present_forbidden)}"
         )
-    except Exception:
-        capacity = 1
-    return max(1, min(int(capacity or 1), pending_count))
+    _validate_readable_stage_labels(skill_name, output)
+
+
+def _has_non_empty_stage_value(value: Any) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    return True
+
+
+def _validate_readable_stage_labels(skill_name: str, output: dict[str, Any]) -> None:
+    errors: list[str] = []
+    for field in ("assets", "high_risk_external_interfaces", "risks", "attack_goals"):
+        for index, item in enumerate(_dict_items(output.get(field)), start=1):
+            _collect_readable_label_errors(errors, f"{field}[{index}]", item)
+            if field == "assets":
+                for risk_index, risk in enumerate(_dict_items(item.get("risks")), start=1):
+                    _collect_readable_label_errors(
+                        errors,
+                        f"{field}[{index}].risks[{risk_index}]",
+                        risk,
+                    )
+    for field in ("domains", "surfaces", "methods"):
+        for index, item in enumerate(_dict_items(output.get(field)), start=1):
+            _collect_readable_label_errors(errors, f"{field}[{index}]", item)
+    method_names_by_id = _readable_method_names_by_id(output)
+    method_name_keys = _readable_method_name_keys(output)
+    method_count = len(_dict_items(output.get("methods")))
+    for index, task in enumerate(_dict_items(output.get("method_confirmation_tasks")), start=1):
+        _collect_method_label_errors(
+            errors,
+            f"method_confirmation_tasks[{index}]",
+            task,
+            method_names_by_id=method_names_by_id,
+            require_for_method_id=True,
+        )
+    for index, path in enumerate(_dict_items(output.get("attack_paths")), start=1):
+        _collect_attack_path_label_errors(
+            errors,
+            f"attack_paths[{index}]",
+            path,
+            method_names_by_id=method_names_by_id,
+            method_name_keys=method_name_keys,
+            method_count=method_count,
+            require_method_name=skill_name == "threat-method-confirm-agent",
+            require_method_match=skill_name == "threat-attack-surface-agent",
+        )
+    if errors:
+        raise _StageOutputError("; ".join(errors[:5]))
+
+
+def _collect_readable_label_errors(errors: list[str], path: str, item: dict[str, Any]) -> None:
+    for key in (
+        "name",
+        "asset_name",
+        "risk_name",
+        "attack_goal_name",
+        "attack_domain_name",
+        "attack_surface_name",
+        "attack_method_name",
+    ):
+        if key not in item:
+            continue
+        value = str(item.get(key) or "").strip()
+        if value and not _readable_stage_label(value):
+            errors.append(f"{path}.{key} must be a readable display label")
+
+
+def _collect_method_label_errors(
+    errors: list[str],
+    path: str,
+    item: dict[str, Any],
+    *,
+    method_names_by_id: dict[str, str],
+    require_for_method_id: bool,
+) -> None:
+    _collect_readable_label_errors(errors, path, item)
+    method_id = _first_text(item, "attack_method_id", "method_id", "id")
+    method_name = _method_display_name(item)
+    if method_name:
+        return
+    if method_id and method_names_by_id.get(method_id):
+        return
+    if require_for_method_id and method_id:
+        errors.append(f"{path} must include a readable attack method name")
+
+
+def _collect_attack_path_label_errors(
+    errors: list[str],
+    path: str,
+    item: dict[str, Any],
+    *,
+    method_names_by_id: dict[str, str],
+    method_name_keys: set[str],
+    method_count: int,
+    require_method_name: bool,
+    require_method_match: bool,
+) -> None:
+    _collect_readable_label_errors(errors, path, item)
+    method_id = _attack_path_method_id(item)
+    method_name = _attack_path_method_name(item)
+    method_match = False
+    if method_id and method_names_by_id.get(method_id):
+        method_match = True
+    if method_name and _semantic_name(method_name) in method_name_keys:
+        method_match = True
+    if not method_id and not method_name and method_count == 1:
+        method_match = True
+    if method_name:
+        pass
+    elif method_id and method_names_by_id.get(method_id):
+        pass
+    elif require_method_name:
+        errors.append(f"{path} must include a readable attack method name")
+    if require_method_match and not method_match:
+        errors.append(f"{path} attack method must match one item in methods")
+
+
+def _readable_method_names_by_id(output: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for method in _dict_items(output.get("methods")):
+        method_id = _first_text(method, "attack_method_id", "method_id", "id")
+        method_name = _method_display_name(method)
+        if method_id and method_name:
+            out[method_id] = method_name
+    return out
+
+
+def _readable_method_name_keys(output: dict[str, Any]) -> set[str]:
+    out: set[str] = set()
+    for method in _dict_items(output.get("methods")):
+        method_name = _method_display_name(method)
+        if method_name:
+            out.add(_semantic_name(method_name))
+    return out
+
+
+def _method_display_name(item: dict[str, Any]) -> str:
+    nested = item.get("attack_method") if isinstance(item.get("attack_method"), dict) else {}
+    return _readable_stage_label(
+        item.get("attack_method_name")
+        or item.get("method_name")
+        or item.get("name")
+        or nested.get("attack_method_name")
+        or nested.get("method_name")
+        or nested.get("name")
+    )
+
+
+def _attack_path_method_id(item: dict[str, Any]) -> str:
+    nested = item.get("attack_method") if isinstance(item.get("attack_method"), dict) else {}
+    return _first_text(item, "attack_method_id", "method_id") or _first_text(
+        nested,
+        "attack_method_id",
+        "method_id",
+        "id",
+    )
+
+
+def _attack_path_method_name(item: dict[str, Any]) -> str:
+    nested = item.get("attack_method") if isinstance(item.get("attack_method"), dict) else {}
+    return _readable_stage_label(
+        item.get("attack_method_name")
+        or item.get("method_name")
+        or nested.get("attack_method_name")
+        or nested.get("method_name")
+        or nested.get("name")
+    )
 
 
 async def _run_stage_batch(
@@ -888,6 +1051,8 @@ def _stage_prompt(
         "不要把非 C/C++ 文件作为资产、风险、攻击目标或代码证据依据。\n"
         "除内部 ID、JSON 字段名、枚举值、文件路径、函数名、协议名和标准缩写外，"
         "所有面向用户展示的自然语言字段必须使用中文；不要输出英文标题、英文描述或英文严重性标签。\n"
+        "所有 `name`、`*_name` 展示字段必须是可读业务名称；不要把 `ASSET-*`、`RISK-*`、"
+        "`GOAL-*`、`DOMAIN-*`、`SURFACE-*`、`METHOD-*` 或“未命名/未知/未标记”写入展示字段。\n"
         "不得修改输出 JSON 文件之外的任何项目文件。\n"
     )
     if skill_name == "threat-base-model-shard-planner":
@@ -927,6 +1092,32 @@ def _stage_prompt(
         prompt += (
             "这是基础建模角色 Agent 阶段；不要再创建子 Agent，也不要再派发 Task。"
             "只完成当前 skill 和输入 scope 指定的工作，结果由 Harness 合并。\n"
+        )
+    elif skill_name == "threat-attack-goal-agent":
+        prompt += (
+            "这是单个攻击目标的攻击域分解阶段。输出只能包含当前攻击目标下的 `domains`；"
+            "不要输出攻击面、攻击方法、攻击路径或方法确认任务。\n"
+        )
+    elif skill_name == "threat-attack-domain-agent":
+        prompt += (
+            "这是单个攻击域的攻击面识别阶段。输出只能包含当前攻击域内的 `surfaces`；"
+            "每个攻击面必须服务于输入中的当前攻击目标和当前攻击域。"
+            "不要输出攻击方法、攻击路径或方法确认任务。\n"
+        )
+    elif skill_name == "threat-attack-surface-agent":
+        prompt += (
+            "这是单个攻击面的攻击方法识别阶段。输入 JSON 中的 `attack_goal`、"
+            "`attack_domain`、`attack_surface` 是唯一上级上下文；输出的 `attack_paths` "
+            "不得改变这些对象的 ID 或展示名称。`methods` 和 `attack_paths` 中的攻击方法"
+            "必须一一对应；如果无法明确某条路径属于哪个方法，输出 `method_confirmation_tasks`，"
+            "不要输出缺少可读攻击方法名称的 `attack_paths`。\n"
+        )
+    elif skill_name == "threat-method-confirm-agent":
+        prompt += (
+            "这是单个复杂攻击方法确认阶段。输入 JSON 中的 `attack_goal`、`attack_domain`、"
+            "`attack_surface`、`method_confirmation_task` 是唯一上下文；输出的 `attack_paths` "
+            "必须与这些对象一致，攻击方法必须使用当前确认任务的可读方法名。"
+            "如果该方法不适用于当前攻击面或代码路径证据不足，输出空 `attack_paths`。\n"
         )
     return prompt
 

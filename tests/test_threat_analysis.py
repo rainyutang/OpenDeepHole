@@ -6,7 +6,11 @@ import unittest
 import time
 from pathlib import Path
 
-from agent.scanner import _is_streaming_threat_analysis, _streaming_threat_analysis_id
+from agent.scanner import (
+    _is_streaming_threat_analysis,
+    _opencode_pool_has_pipeline_work,
+    _streaming_threat_analysis_id,
+)
 from agent.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
 from backend.threat_analysis.attack_tree_opencode import (
     _attack_goals_from_base_output,
@@ -15,6 +19,7 @@ from backend.threat_analysis.attack_tree_opencode import (
     _merge_base_model_outputs,
     _run_base_model_agents,
     _stage_prompt,
+    _validate_stage_output,
     _with_attack_path_defaults,
     _with_method_confirmation_task_defaults,
 )
@@ -57,6 +62,47 @@ def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
 
 
 class ThreatAnalysisParserTests(unittest.TestCase):
+    def test_opencode_pool_pipeline_work_ignores_post_scan_fp_review(self) -> None:
+        self.assertFalse(
+            _opencode_pool_has_pipeline_work(
+                {
+                    "planned_tasks": [{"task_type": "fp_review"}],
+                    "queued_tasks": [],
+                    "models": [
+                        {
+                            "active_tasks": [
+                                {"task_type": "fp_review"},
+                            ],
+                        },
+                    ],
+                }
+            )
+        )
+        self.assertTrue(
+            _opencode_pool_has_pipeline_work(
+                {
+                    "planned_tasks": [],
+                    "queued_tasks": [{"task_type": "threat_analysis"}],
+                    "models": [],
+                }
+            )
+        )
+        self.assertTrue(
+            _opencode_pool_has_pipeline_work(
+                {
+                    "planned_tasks": [],
+                    "queued_tasks": [],
+                    "models": [
+                        {
+                            "active_tasks": [
+                                {"task_type": "threat_audit"},
+                            ],
+                        },
+                    ],
+                }
+            )
+        )
+
     def test_stage_prompt_requires_chinese_display_text(self) -> None:
         prompt = _stage_prompt(
             skill_name="threat-attack-surface-agent",
@@ -67,6 +113,78 @@ class ThreatAnalysisParserTests(unittest.TestCase):
 
         self.assertIn("所有面向用户展示的自然语言字段必须使用中文", prompt)
         self.assertIn("英文严重性标签", prompt)
+        self.assertIn("不要把 `ASSET-*`", prompt)
+        self.assertIn("唯一上级上下文", prompt)
+
+    def test_stage_validation_rejects_base_model_attack_paths(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "out-of-scope"):
+            _validate_stage_output(
+                "threat-asset-interface-agent",
+                {
+                    "assets": [],
+                    "high_risk_external_interfaces": [],
+                    "asset_interface_links": [],
+                    "risks": [],
+                    "attack_goals": [],
+                    "attack_paths": [
+                        {
+                            "attack_method_name": "泛洪攻击",
+                            "code_paths": [{"path": "src/amf/context.cpp"}],
+                        }
+                    ],
+                },
+            )
+
+    def test_stage_validation_rejects_generated_or_missing_method_names(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "readable display label"):
+            _validate_stage_output(
+                "threat-attack-surface-agent",
+                {
+                    "methods": [
+                        {
+                            "method_id": "METHOD-UE-CONTEXT-STEAL",
+                            "name": "METHOD-UE-CONTEXT-STEAL",
+                        }
+                    ],
+                    "attack_paths": [],
+                    "method_confirmation_tasks": [],
+                },
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "readable attack method name"):
+            _validate_stage_output(
+                "threat-method-confirm-agent",
+                {
+                    "attack_paths": [
+                        {
+                            "attack_method_id": "METHOD-UE-CONTEXT-STEAL",
+                            "code_paths": [{"path": "src/amf/context.cpp"}],
+                        }
+                    ],
+                },
+            )
+
+    def test_stage_validation_rejects_attack_path_method_mismatch(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "attack method must match one item in methods"):
+            _validate_stage_output(
+                "threat-attack-surface-agent",
+                {
+                    "methods": [
+                        {
+                            "method_id": "METHOD-AUTH-BYPASS",
+                            "name": "认证绕过",
+                        }
+                    ],
+                    "attack_paths": [
+                        {
+                            "attack_method_id": "METHOD-FLOOD",
+                            "attack_method_name": "接口泛洪",
+                            "code_paths": [{"path": "src/api.cpp"}],
+                        }
+                    ],
+                    "method_confirmation_tasks": [],
+                },
+            )
 
     def test_build_code_index_limits_scope_to_cpp_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
