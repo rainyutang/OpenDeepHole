@@ -73,6 +73,27 @@ def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
     return workspace
 
 
+def refresh_global_opencode_config() -> Path:
+    """Rewrite managed MCP entries while preserving the active code gateway URL."""
+    workspace = get_global_opencode_workspace()
+    config_path = workspace / "opencode.json"
+    mcp_url = f"http://127.0.0.1:{get_config().mcp_server.port}/mcp"
+    try:
+        existing = json.loads(config_path.read_text(encoding="utf-8"))
+        current_url = existing.get("mcp", {}).get("deephole-code", {}).get("url")
+        if current_url:
+            mcp_url = str(current_url)
+    except Exception:
+        pass
+    skills_dir = (workspace / ".opencode" / "skills").resolve()
+    with get_workspace_lock(workspace):
+        _write_text_atomic(
+            config_path,
+            json.dumps(build_opencode_config(mcp_url, [str(skills_dir)]), indent=2),
+        )
+    return workspace
+
+
 def _write_text_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
@@ -166,6 +187,53 @@ def build_opencode_config(
             "edit": edit_permissions,
         },
     }
+    runtime_config = get_config()
+    code_graph_config = getattr(runtime_config, "code_graph", None)
+    for managed in (
+        code_graph_config,
+        getattr(runtime_config, "product_info", None),
+    ):
+        if managed is None or not bool(getattr(managed, "enabled", False)):
+            continue
+        name = str(getattr(managed, "name", "") or "").strip()
+        if not name or name == "deephole-code":
+            continue
+        timeout_ms = max(1, int(getattr(managed, "timeout_seconds", 300))) * 1000
+        if str(getattr(managed, "transport", "local")) == "remote":
+            remote = getattr(managed, "remote", None)
+            url = str(getattr(remote, "url", "") or "").strip()
+            if not url:
+                continue
+            entry = {
+                "type": "remote",
+                "url": url,
+                "enabled": True,
+                "timeout": timeout_ms,
+            }
+            headers = dict(getattr(remote, "headers", {}) or {})
+            if headers:
+                entry["headers"] = headers
+        else:
+            local = getattr(managed, "local", None)
+            executable = str(getattr(local, "executable", "") or "").strip()
+            if not executable:
+                continue
+            if managed is code_graph_config and not (
+                shutil.which(executable) or Path(executable).is_file()
+            ):
+                # CodeGraph is optional.  If its local executable is absent,
+                # omit the broken MCP process and leave deephole-code active.
+                continue
+            entry = {
+                "type": "local",
+                "command": [executable, *[str(item) for item in (getattr(local, "args", []) or [])]],
+                "enabled": True,
+                "timeout": timeout_ms,
+            }
+            environment = dict(getattr(local, "environment", {}) or {})
+            if environment:
+                entry["environment"] = environment
+        data["mcp"][name] = entry
     if skills_paths:
         data["skills"] = {"paths": skills_paths}
     return data

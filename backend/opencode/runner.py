@@ -831,9 +831,16 @@ async def run_threat_audit(
         await _clear_planned_task_id(planned_task_id)
         return _annotate_threat_audit_results([_mock_result_from_defaults(defaults)], task)
 
-    effective_timeout = timeout if timeout is not None else config.opencode.timeout
+    mining_policy = getattr(config, "vulnerability_mining", None)
+    effective_timeout = int(
+        getattr(mining_policy, "timeout_seconds", 0)
+        or timeout
+        or config.opencode.timeout
+    )
     tool = _normalize_tool(config.opencode)
-    max_retries = config.opencode.max_retries
+    # Fresh-session retries are owned by OpenCodeTaskService and the phase
+    # policy.  Keep this legacy business-layer loop to one invocation.
+    max_retries = 0
     last_source: OutputSource | None = None
 
     for attempt in range(1, max_retries + 2):

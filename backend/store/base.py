@@ -392,6 +392,29 @@ class ScanStoreBase(ABC):
     def list_scans_by_user(self, user_id: str) -> list[ScanSummary]:
         """List scans owned by a specific user."""
 
+    # -- Persistent Agent catalog/config --
+
+    def find_agent_record(self, user_id: str, ip: str, machine_name: str) -> dict | None:
+        raise NotImplementedError
+
+    def get_agent_record(self, agent_key: str) -> dict | None:
+        raise NotImplementedError
+
+    def list_agent_records(self, user_id: str | None = None) -> list[dict]:
+        raise NotImplementedError
+
+    def upsert_agent_record(self, **kwargs) -> dict:
+        raise NotImplementedError
+
+    def update_agent_config_record(self, agent_key: str, config_json: str) -> bool:
+        raise NotImplementedError
+
+    def update_agent_catalog_record(self, agent_key: str, catalog_json: str) -> bool:
+        raise NotImplementedError
+
+    def touch_agent_record(self, agent_key: str, agent_id: str, last_seen: str) -> bool:
+        raise NotImplementedError
+
     # -- Cleanup --
 
     @abstractmethod

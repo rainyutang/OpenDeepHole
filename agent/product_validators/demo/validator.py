@@ -24,7 +24,7 @@ async def validate(ctx) -> ValidationResult:
     await ctx.emit_stdout(
         "验证过程",
         f"入口={ctx.validation_entry_function} 漏洞函数={ctx.vulnerable_function} "
-        f"类型={ctx.vulnerability_type}",
+        f"类型={ctx.vulnerability_type} 目标={ctx.target_ip or '自动发现'}",
     )
     prompt = (
         "请根据当前项目代码和以下 Markdown 漏洞报告验证问题是否真实可触发。"
@@ -38,10 +38,11 @@ async def validate(ctx) -> ValidationResult:
                 task_name=f"漏洞验证 {ctx.vulnerability_type}",
                 prompt=prompt,
                 directory=ctx.project_path,
-                required_capability="high",
-                timeout_seconds=ctx.timeout_seconds,
+                required_capability=ctx.required_capability,
+                timeout_seconds=ctx.model_timeout_seconds,
                 priority=80,
                 output_schema=RESULT_SCHEMA,
+                attempt=ctx.model_max_retries,
                 on_output=ctx.opencode_output,
                 cancel_event=ctx.cancel_event,
             )

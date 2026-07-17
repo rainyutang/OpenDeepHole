@@ -1009,6 +1009,11 @@ def _backend_runtime_sections(config: AgentConfig, scan_dir: Path | None = None)
                 config.threat_analysis.product_mcp_detection_timeout_seconds
             ),
         },
+        "threat_analysis_policy": dataclasses.asdict(config.threat_analysis.model_policy),
+        "vulnerability_mining": dataclasses.asdict(config.vulnerability_mining),
+        "false_positive": dataclasses.asdict(config.false_positive),
+        "code_graph": dataclasses.asdict(config.code_graph),
+        "product_info": dataclasses.asdict(config.product_info),
         "static_dedup": config.static_dedup,
         "pattern_filter": {
             "enabled": config.pattern_filter.enabled,
@@ -1018,6 +1023,13 @@ def _backend_runtime_sections(config: AgentConfig, scan_dir: Path | None = None)
             "port": 8100,  # placeholder; overridden by local_mcp if opencode mode
         },
         "no_proxy": config.no_proxy,
+        "vulnerability_validation": {
+            "enabled": config.vulnerability_validation.enabled,
+            "environments": {
+                name: dataclasses.asdict(value)
+                for name, value in config.vulnerability_validation.environments.items()
+            },
+        },
     }
     if scan_dir is not None:
         # Keep result JSON files isolated inside this scan's directory so the
@@ -1051,6 +1063,14 @@ def refresh_backend_runtime_config(config: AgentConfig) -> None:
     current.memory_api_discovery = _cfg.MemoryApiDiscoveryConfig(**raw["memory_api_discovery"])
     current.git_history = _cfg.GitHistoryConfig(**raw["git_history"])
     current.threat_analysis = _cfg.ThreatAnalysisConfig(**raw["threat_analysis"])
+    current.threat_analysis_policy = _cfg.ModelTaskPolicyConfig(**raw["threat_analysis_policy"])
+    current.vulnerability_mining = _cfg.ModelTaskPolicyConfig(**raw["vulnerability_mining"])
+    current.false_positive = _cfg.ModelTaskPolicyConfig(**raw["false_positive"])
+    current.code_graph = _cfg.McpConfig(**raw["code_graph"])
+    current.product_info = _cfg.McpConfig(**raw["product_info"])
+    current.vulnerability_validation = _cfg.VulnerabilityValidationConfig(
+        **raw["vulnerability_validation"]
+    )
     current.static_dedup = bool(raw["static_dedup"])
     current.pattern_filter = _cfg.PatternFilterConfig(**raw["pattern_filter"])
     current.no_proxy = str(raw.get("no_proxy") or "")
@@ -1368,6 +1388,13 @@ async def run_scan(
         ]
         if selected_feedback:
             await emit("init", f"Loaded {len(selected_feedback)} selected feedback entries")
+
+        from agent.codegraph import prepare_codegraph
+        await prepare_codegraph(
+            config,
+            project_path,
+            emit=lambda message: emit("mcp_ready", message),
+        )
 
         # --- Phase 3: Register this scan on the Agent-wide MCP gateway ---
         mcp_port = None

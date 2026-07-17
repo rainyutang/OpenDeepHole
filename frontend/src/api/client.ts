@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
+import type { AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -208,7 +208,7 @@ export async function startScan(
 }
 
 export async function createScan(body: {
-  agent_id: string;
+  agent_key: string;
   project_path: string;
   code_scan_path?: string;
   scan_name: string;
@@ -540,8 +540,8 @@ export async function getCheckerDashboard(product?: string): Promise<CheckerDash
 
 // --- Agent config ---
 
-export async function getAgentConfig(agentId: string): Promise<AgentRemoteConfig> {
-  const { data } = await api.get<AgentRemoteConfig>(`/api/agent/${agentId}/config`);
+export async function getAgentConfig(agentKey: string): Promise<AgentRemoteConfig> {
+  const { data } = await api.get<AgentRemoteConfig>(`/api/agent-configs/${agentKey}`);
   return data;
 }
 
@@ -558,8 +558,24 @@ export async function getAgentOpenCodeModels(agentId: string, refresh = false): 
   return data;
 }
 
-export async function updateAgentConfig(agentId: string, config: AgentRemoteConfig): Promise<void> {
-  await api.put(`/api/agent/${agentId}/config`, config);
+export async function updateAgentConfig(agentKey: string, config: AgentRemoteConfig): Promise<void> {
+  await api.put(`/api/agent-configs/${agentKey}`, config);
+}
+
+export async function getAgentValidatorCatalog(agentKey: string, product = ""): Promise<AgentValidatorCatalog> {
+  const { data } = await api.get<AgentValidatorCatalog>(
+    `/api/agent-configs/${agentKey}/validator-catalog`,
+    { params: product ? { product } : undefined },
+  );
+  return data;
+}
+
+export async function getAgentValidationEnvironments(agentKey: string, product: string): Promise<string[]> {
+  const { data } = await api.get<{ validation_environments: string[] }>(
+    `/api/agent-configs/${agentKey}/validation-environments`,
+    { params: { product } },
+  );
+  return data.validation_environments;
 }
 
 // --- FP Review ---

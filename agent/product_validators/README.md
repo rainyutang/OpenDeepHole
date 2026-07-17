@@ -21,15 +21,22 @@ agent/product_validators/
 
 ```yaml
 schema_version: 1
-product: LTE
-validation_environment: 仿真UBBPi板环境
-timeout_seconds: 7200
+id: lte_lab
+label: LTE 仿真板验证
+registrations:
+  - product: LTE
+    environment: 仿真UBBPi板环境
+    fields:
+      - key: board_ip
+        label: 板卡 IP
+        type: string
+        required: true
 ```
 
 - `schema_version`：必填，当前只能为 `1`。
-- `product`：必填，后端页面展示的产品名。
-- `validation_environment`：必填，只能与本 manifest 的产品成对选择。
-- `timeout_seconds`：可选，范围 `1..86400`；不填时使用 Agent 全局验证超时。
+- `id` / `label`：方法稳定标识和页面名称。
+- `registrations`：声明一个或多个产品/验证环境，以及该方法在页面需要的动态字段。
+- 动态字段支持 `string`、`integer`、`number`、`boolean`、`select`、`secret`，以及 `required/default/options/min/max/help/placeholder`。
 - 不接受未知字段。
 
 目录名只能包含字母、数字、点、下划线和连字符。缺文件、manifest 非法，或两个目录声明了相同的产品/环境对时，相关方法会被隔离并从后端目录中排除，不影响其它方法。`validator.py` 导入失败或入口不符合约定时，Agent 会跳过该方法并在控制台记录原因，因此上传前必须完成独立调试。
@@ -96,7 +103,11 @@ async def validate(ctx) -> ValidationResult:
 | `ctx.report_path` | `report_markdown` 已落盘的路径 |
 | `ctx.product` / `ctx.validation_environment` | 当前成对验证目标 |
 | `ctx.scan_id` / `ctx.vuln_index` | 扫描与漏洞索引 |
-| `ctx.timeout_seconds` | 本次验证整体超时 |
+| `ctx.required_capability` | 当前环境要求的模型能力 |
+| `ctx.model_timeout_seconds` / `ctx.timeout_seconds` | 单次模型调用超时；后者仅为兼容别名 |
+| `ctx.model_max_retries` | 模型新 session 重试次数 |
+| `ctx.validation_max_retries` / `ctx.validation_attempt` | 整体验证重试配置与当前尝试序号 |
+| `ctx.<key>` / `ctx.config.<key>` | `validator.yaml` 声明并在 Agent 配置页填写的动态值；推荐直接使用前者 |
 | `ctx.vulnerability` | 完整 `Vulnerability` 模型 |
 
 也可使用：
@@ -104,12 +115,13 @@ async def validate(ctx) -> ValidationResult:
 - `ctx.get_report_markdown()`：返回 Markdown 报告。
 - `ctx.get_validation_info()`：返回以上字段及漏洞字典的可序列化快照。
 - `ctx.cancelled()`：检查用户是否已经停止验证；纯 Python 长循环必须定期检查。
+- `ctx.get_config(key, default)`：读取方法动态配置。
 
 候选点审计和威胁审计必须输出 `vuln_type`、非空 `call_chain` 和 Markdown `vulnerability_report`。运行时保证调用链至少包含漏洞函数，并把第一个函数作为验证入口。
 
 ## 4. OpenCode 调用
 
-验证器与威胁分析、候选点审计使用同一个任务服务，直接调用 `get_opencode_task_service().run_task()`：
+验证器与威胁分析、候选点审计使用同一个任务服务，直接调用 `get_opencode_task_service().run_task()`。页面的验证环境策略会在任务服务中强制覆盖模型能力、超时和模型重试：
 
 ```python
 from backend.opencode.task_service import OpenCodeTaskSpec, get_opencode_task_service
@@ -120,10 +132,11 @@ result = await get_opencode_task_service().run_task(
         task_name="PoC 设计",
         prompt=ctx.report_markdown,
         directory=ctx.project_path,
-        required_capability="high",
-        timeout_seconds=ctx.timeout_seconds,
+        required_capability=ctx.required_capability,
+        timeout_seconds=ctx.model_timeout_seconds,
         priority=80,
         output_schema=RESULT_SCHEMA,
+        attempt=ctx.model_max_retries,
         writable_paths=[ctx.work_dir],
         on_output=ctx.opencode_output,
         cancel_event=ctx.cancel_event,
@@ -212,7 +225,7 @@ exit_code = await ctx.run_command(
 )
 ```
 
-`run_command` 不经过 shell，返回退出码；命令超时返回 `124`。用户取消或验证整体结束时会终止该命令的进程树。验证器自行创建的后台进程不受可靠托管，因此不要 daemonize，也不要绕过 `ctx.run_command(...)`。
+`run_command` 不经过 shell，返回退出码；这里的 `timeout` 只约束这一条命令，超时返回 `124`，`None` 表示无命令截止时间。模型超时不会覆盖它，验证函数本身也没有整体截止时间；用户取消仍会终止命令进程树。
 
 ## 6. 无后端独立调试
 

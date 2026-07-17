@@ -56,7 +56,10 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("agent/product_validators/demo/validator.py", names)
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
-        self.assertFalse(yaml.safe_load(agent_yaml)["git_history"]["enabled"])
+        parsed = yaml.safe_load(agent_yaml)
+        self.assertEqual(parsed["schema_version"], 2)
+        self.assertEqual(parsed["model_pool"]["models"], [])
+        self.assertNotIn("llm_api", parsed)
 
     def test_launchers_do_not_auto_install_ctags_system_packages(self) -> None:
         root = Path(__file__).resolve().parent.parent

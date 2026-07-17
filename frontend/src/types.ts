@@ -515,7 +515,9 @@ export interface ScanSummary {
 
 export interface AgentInfo {
   agent_id: string;
+  agent_key: string;
   name: string;
+  machine_name: string;
   ip: string;
   port?: number;
   last_seen: string;
@@ -523,22 +525,9 @@ export interface AgentInfo {
   agent_session_id?: string;
 }
 
-export interface AgentOpenCodeConfig {
-  tool: "nga" | "opencode" | string;
-  executable: string;
-  model: string;
-  timeout: number;
-  max_retries: number;
-  models: AgentOpenCodeModelConfig[];
-  config_paths?: string[];
-  proxy_url?: string;
-  no_proxy?: string;
-}
-
 export interface AgentOpenCodeModelConfig {
   id: string;
   model: string;
-  use_default_model?: boolean;
   capability: "low" | "medium" | "high" | string;
   weight: number;
   max_concurrency: number;
@@ -550,50 +539,89 @@ export interface AgentOpenCodeModelConfig {
   time_windows?: { start: string; end: string }[];
 }
 
-export interface AgentMemoryApiDiscoveryConfig {
-  enabled: boolean;
-  batch_size: number;
-  timeout_seconds: number;
-  max_candidates: number;
+export interface AgentBaseConfig {
+  tool: "nga" | "opencode" | string;
+  executable: string;
+  no_proxy: string;
 }
 
-export interface AgentGitHistoryConfig {
+export interface AgentModelPoolConfig {
+  global_concurrency: number;
+  models: AgentOpenCodeModelConfig[];
+}
+
+export interface AgentModelTaskPolicy {
+  required_capability: "any" | "low" | "medium" | "high" | string;
+  timeout_seconds: number;
+  max_retries: number;
+}
+
+export interface AgentMcpConfig {
   enabled: boolean;
-  max_commits: number;
-  since: string;
-  paths: string;
-  variant_hunt: boolean;
+  name: string;
+  transport: "local" | "remote" | string;
+  timeout_seconds: number;
+  local: { executable: string; args: string[]; environment: Record<string, string> };
+  remote: { url: string; headers: Record<string, string> };
 }
 
 export interface AgentThreatAnalysisConfig {
   enabled: boolean;
-  implementation: string;
-  attack_path_audit_mode?: "after_analysis" | "immediate" | string;
-  product_mcp_name?: string;
-  product_mcp_detection_timeout_seconds?: number;
+  attack_path_audit_mode: "after_analysis" | "immediate" | string;
+  model_policy: AgentModelTaskPolicy;
 }
 
-export interface AgentPatternFilterConfig {
-  enabled: boolean;
-  scope: "directory" | "file" | "repo" | string;
+export interface AgentValidationEnvironmentConfig {
+  supported_vulnerability_types: string[];
+  concurrency: number;
+  validation_max_retries: number;
+  model_policy: AgentModelTaskPolicy;
+  methods: Record<string, Record<string, unknown>>;
 }
 
 export interface AgentVulnerabilityValidationConfig {
-  enabled: boolean;
-  timeout_seconds: number;
+  environments: Record<string, AgentValidationEnvironmentConfig>;
+}
+
+export interface AgentValidatorField {
+  key: string;
+  label: string;
+  type: "string" | "integer" | "number" | "boolean" | "select" | "secret" | string;
+  required: boolean;
+  default?: unknown;
+  options: unknown[];
+  min?: number | null;
+  max?: number | null;
+  help?: string;
+  placeholder?: string;
+}
+
+export interface AgentValidatorRegistration {
+  registration_key: string;
+  method_id: string;
+  method_label: string;
+  product: string;
+  environment: string;
+  fields: AgentValidatorField[];
+  legacy?: boolean;
+}
+
+export interface AgentValidatorCatalog {
+  registrations: AgentValidatorRegistration[];
+  errors: string[];
+  updated_at: string;
 }
 
 export interface AgentRemoteConfig {
-  no_proxy: string;
-  opencode_concurrency: number;
-  opencode: AgentOpenCodeConfig;
-  fp_review_cli?: AgentOpenCodeConfig | null;
-  memory_api_discovery: AgentMemoryApiDiscoveryConfig;
-  git_history?: AgentGitHistoryConfig;
-  threat_analysis?: AgentThreatAnalysisConfig;
-  static_dedup?: boolean;
-  pattern_filter?: AgentPatternFilterConfig;
-  vulnerability_validation?: AgentVulnerabilityValidationConfig;
+  schema_version: 2;
+  base: AgentBaseConfig;
+  model_pool: AgentModelPoolConfig;
+  threat_analysis: AgentThreatAnalysisConfig;
+  code_graph: AgentMcpConfig;
+  product_info: AgentMcpConfig;
+  vulnerability_mining: AgentModelTaskPolicy;
+  false_positive: AgentModelTaskPolicy;
+  vulnerability_validation: AgentVulnerabilityValidationConfig;
 }
 
 export interface AgentOpenCodeModelListItem {

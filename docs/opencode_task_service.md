@@ -291,7 +291,7 @@ result = await get_opencode_task_service().run_task(
         prompt="分析漏洞报告并只输出 JSON。",
         required_capability="high",
         directory=ctx.project_path,
-        timeout_seconds=ctx.timeout_seconds,
+        timeout_seconds=ctx.model_timeout_seconds,
         priority=80,
         output_schema=RESULT_SCHEMA,
         output_retry_count=2,
@@ -303,11 +303,11 @@ result = await get_opencode_task_service().run_task(
 )
 ```
 
-validator 不传 MCP、SKILL 或权限列表。运行时自动绑定当前 `scan_id`、当前漏洞工作目录和验证任务元数据，并复用共享 MCP 网关。`attempt` 与后端接口含义相同：它是新 Session 重试次数。
+validator 不传 MCP、SKILL 或权限列表。运行时自动绑定当前 `scan_id`、当前漏洞工作目录和验证任务元数据，并复用共享 MCP 网关。验证环境策略会覆盖这里填写的模型能力、模型调用超时和新 Session 重试次数；`attempt` 与后端接口含义相同。
 
 两个独立任务可以用 `asyncio.gather()` 并发调用 `run_task()`；它们各自创建 Session，并受同一个全局模型池调度。带相同 `session_id` 的续写任务必须串行执行，避免破坏同一会话的消息顺序。
 
-验证页面的 `intermediate_output` 仍只接收显式 `ctx.emit_stdout(...)` 和 `ctx.run_command(...)` 输出；OpenCode 内部流只打印到 Agent 控制台。
+验证页面的 `intermediate_output` 仍只接收显式 `ctx.emit_stdout(...)` 和 `ctx.run_command(...)` 输出；OpenCode 内部流只打印到 Agent 控制台。`ctx.run_command(timeout=...)` 的超时只属于该命令，不受模型调用超时覆盖；验证函数本身没有整体截止时间。
 
 ## 11. 新业务接入检查
 

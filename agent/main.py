@@ -215,13 +215,19 @@ async def _apply_live_config_update(config) -> None:
     from backend.opencode.serve_client import mark_serve_config_dirty
 
     apply_network_env(config)
-    mark_serve_config_dirty()
     refresh_backend_runtime_config(config)
+    from backend.opencode.config import refresh_global_opencode_config
+    refresh_global_opencode_config()
+    mark_serve_config_dirty()
     await refresh_configured_model_pool(
         config.opencode,
         global_concurrency=config.opencode_concurrency,
     )
     await notify_model_pool_config_changed()
+    # Increasing an environment limit should start already queued validations
+    # immediately; lowering it only affects subsequent dispatches.
+    from agent.server import refresh_validation_scheduling
+    refresh_validation_scheduling()
 
 
 async def _ws_loop(config, task_manager, reporter) -> None:
@@ -229,6 +235,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
     import websockets
     import agent.server as agent_server
     from agent.config import apply_network_env, apply_remote_config, remote_config_dict
+    from agent.vulnerability_validation import build_validator_catalog
     from agent.updater import compute_runtime_hash, load_pending_commands, pending_scan_snapshots
 
     name = config.agent_name or socket.gethostname()
@@ -253,7 +260,9 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 hello_msg = {
                     "type": "hello",
                     "name": name,
+                    "machine_name": socket.gethostname(),
                     "config": remote_config_dict(config),
+                    "validator_catalog": build_validator_catalog().model_dump(),
                     "runtime_hash": compute_runtime_hash(),
                     "agent_session_id": reporter.agent_session_id,
                     "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),

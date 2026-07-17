@@ -5,6 +5,7 @@ import type { ScanSummary, ScanItemStatus, User, ValidationTarget } from "../typ
 interface Props {
   onViewScan: (scanId: string) => void;
   onDownloadAgent: () => void;
+  onAgentConfig: () => void;
   onNewScan: () => void;
   user: User;
   onLogout: () => void;
@@ -206,7 +207,7 @@ function NavButton({
   );
 }
 
-export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog }: Props) {
+export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
   const [validationTargets, setValidationTargets] = useState<ValidationTarget[]>([]);
   const [loading, setLoading] = useState(true);
@@ -433,8 +434,13 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onNewScan, us
             />
             <NavButton
               label="客户端"
-              description="查看已连接客户端，并配置扫描执行参数"
+              description="下载并启动 Agent 客户端"
               onClick={onDownloadAgent}
+            />
+            <NavButton
+              label="Agent 配置"
+              description="按机器名和 IP 配置 Agent 扫描能力"
+              onClick={onAgentConfig}
             />
             <NavButton
               label="新建扫描"

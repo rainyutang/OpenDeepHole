@@ -5,6 +5,7 @@ from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from agent import codegraph as codegraph_runtime
 from agent.fp_reviewer import _create_fp_workspace
 from backend.opencode.config import (
     build_opencode_config,
@@ -47,6 +48,87 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             edit[r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1/**"],
             "allow",
         )
+
+    def test_build_opencode_config_includes_local_and_remote_managed_mcp(self) -> None:
+        fake_config = SimpleNamespace(
+            code_graph=SimpleNamespace(
+                enabled=True,
+                name="codegraph",
+                transport="local",
+                timeout_seconds=45,
+                local=SimpleNamespace(
+                    executable="codegraph",
+                    args=["serve", "--mcp"],
+                    environment={"CODEGRAPH_MCP_TOOLS": "explore,node"},
+                ),
+            ),
+            product_info=SimpleNamespace(
+                enabled=True,
+                name="product-info",
+                transport="remote",
+                timeout_seconds=12,
+                remote=SimpleNamespace(
+                    url="http://10.0.0.8:9000/mcp",
+                    headers={"Authorization": "Bearer token"},
+                ),
+            ),
+        )
+        with (
+            patch("backend.opencode.config.get_config", return_value=fake_config),
+            patch("backend.opencode.config.shutil.which", return_value="/usr/bin/codegraph"),
+        ):
+            config = build_opencode_config("http://127.0.0.1:9123/mcp")
+
+        self.assertEqual(
+            config["mcp"]["codegraph"]["command"],
+            ["codegraph", "serve", "--mcp"],
+        )
+        self.assertEqual(config["mcp"]["codegraph"]["timeout"], 45_000)
+        self.assertEqual(
+            config["mcp"]["codegraph"]["environment"]["CODEGRAPH_MCP_TOOLS"],
+            "explore,node",
+        )
+        self.assertEqual(config["mcp"]["product-info"]["type"], "remote")
+        self.assertEqual(config["mcp"]["product-info"]["timeout"], 12_000)
+
+    def test_codegraph_readiness_survives_restart_and_applies_to_subdirectories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            nested = root / "src" / "module"
+            nested.mkdir(parents=True)
+            database = root / ".codegraph" / "codegraph.db"
+            database.parent.mkdir()
+            database.write_bytes(b"sqlite")
+            codegraph_runtime._ready_projects.clear()
+
+            self.assertTrue(codegraph_runtime.is_codegraph_ready(nested))
+            self.assertIn(root.resolve(), codegraph_runtime._ready_projects)
+            codegraph_runtime._ready_projects.clear()
+
+    def test_existing_codegraph_database_does_not_disable_fallback_without_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / ".codegraph" / "codegraph.db"
+            database.parent.mkdir()
+            database.touch()
+            runtime = SimpleNamespace(
+                code_graph=SimpleNamespace(
+                    enabled=True,
+                    name="codegraph",
+                    transport="local",
+                    local=SimpleNamespace(executable="missing-codegraph"),
+                ),
+            )
+
+            codegraph_runtime._ready_projects.clear()
+            with (
+                patch("agent.codegraph.shutil.which", return_value=None),
+                patch("backend.opencode.task_service.get_config", return_value=runtime),
+            ):
+                from backend.opencode.task_service import _disabled_source_mcp_tools
+
+                self.assertFalse(codegraph_runtime.is_codegraph_mcp_available(runtime))
+                self.assertEqual(_disabled_source_mcp_tools(root), ("codegraph",))
 
     def test_global_workspace_is_shared_and_does_not_embed_scan_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

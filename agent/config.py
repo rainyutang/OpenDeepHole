@@ -72,6 +72,50 @@ class ThreatAnalysisConfig:
     attack_path_audit_mode: str = "after_analysis"  # after_analysis | immediate
     product_mcp_name: str = "product-info"
     product_mcp_detection_timeout_seconds: int = 60
+    model_policy: "ModelTaskPolicyConfig" = field(
+        default_factory=lambda: ModelTaskPolicyConfig(
+            required_capability="high", timeout_seconds=1200, max_retries=3
+        )
+    )
+
+
+@dataclass
+class ModelTaskPolicyConfig:
+    required_capability: str = "high"
+    timeout_seconds: int = 1200
+    max_retries: int = 2
+
+
+@dataclass
+class McpLocalConfig:
+    executable: str = ""
+    args: list[str] = field(default_factory=list)
+    environment: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class McpRemoteConfig:
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class McpConfig:
+    enabled: bool = False
+    name: str = ""
+    transport: str = "local"
+    timeout_seconds: int = 300
+    local: McpLocalConfig = field(default_factory=McpLocalConfig)
+    remote: McpRemoteConfig = field(default_factory=McpRemoteConfig)
+
+
+@dataclass
+class ValidationEnvironmentConfig:
+    supported_vulnerability_types: list[str] = field(default_factory=lambda: ["*"])
+    concurrency: int = 1
+    validation_max_retries: int = 0
+    model_policy: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
+    methods: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 @dataclass
@@ -83,7 +127,10 @@ class PatternFilterConfig:
 @dataclass
 class VulnerabilityValidationConfig:
     enabled: bool = True
+    # Deprecated compatibility value.  Validation no longer has an overall
+    # deadline; model calls and ctx.run_command own their separate timeouts.
     timeout_seconds: int = 7200
+    environments: dict[str, ValidationEnvironmentConfig] = field(default_factory=dict)
 
 
 def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
@@ -238,11 +285,94 @@ class AgentConfig:
     memory_api_discovery: MemoryApiDiscoveryConfig = field(default_factory=MemoryApiDiscoveryConfig)
     git_history: GitHistoryConfig = field(default_factory=GitHistoryConfig)
     threat_analysis: ThreatAnalysisConfig = field(default_factory=ThreatAnalysisConfig)
+    code_graph: McpConfig = field(default_factory=lambda: McpConfig(
+        name="codegraph",
+        local=McpLocalConfig(
+            executable="codegraph",
+            args=["serve", "--mcp"],
+            environment={
+                "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status",
+            },
+        ),
+    ))
+    product_info: McpConfig = field(default_factory=lambda: McpConfig(name="product-info"))
+    vulnerability_mining: ModelTaskPolicyConfig = field(default_factory=lambda: ModelTaskPolicyConfig(
+        required_capability="any",
+    ))
+    false_positive: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = field(default_factory=PatternFilterConfig)
     vulnerability_validation: VulnerabilityValidationConfig = field(default_factory=VulnerabilityValidationConfig)
     # Runtime-only: path to the loaded config file (not serialized)
     config_file: Optional[Path] = field(default=None, repr=False, compare=False)
+
+
+def _apply_policy(target: ModelTaskPolicyConfig, raw: object) -> None:
+    if not isinstance(raw, dict):
+        return
+    capability = str(raw.get("required_capability") or target.required_capability).strip().lower()
+    target.required_capability = capability if capability in {"any", "low", "medium", "high"} else target.required_capability
+    target.timeout_seconds = _bounded_int(raw.get("timeout_seconds"), target.timeout_seconds, 1, 86400)
+    target.max_retries = _bounded_int(raw.get("max_retries"), target.max_retries, 0, 20)
+
+
+def _mcp_config(raw: object, default: McpConfig) -> McpConfig:
+    if not isinstance(raw, dict):
+        return default
+    local_raw = raw.get("local") if isinstance(raw.get("local"), dict) else {}
+    remote_raw = raw.get("remote") if isinstance(raw.get("remote"), dict) else {}
+    transport = str(raw.get("transport") or default.transport).strip().lower()
+    return McpConfig(
+        enabled=_bool_value(raw.get("enabled", default.enabled), default.enabled),
+        name=str(raw.get("name") or default.name).strip(),
+        transport=transport if transport in {"local", "remote"} else "local",
+        timeout_seconds=_bounded_int(raw.get("timeout_seconds"), default.timeout_seconds, 1, 86400),
+        local=McpLocalConfig(
+            executable=str(local_raw.get("executable") or default.local.executable).strip(),
+            args=[str(item) for item in (local_raw.get("args") or default.local.args)],
+            environment={
+                str(key): str(value)
+                for key, value in (local_raw.get("environment") or default.local.environment).items()
+            },
+        ),
+        remote=McpRemoteConfig(
+            url=str(remote_raw.get("url") or default.remote.url).strip(),
+            headers={
+                str(key): str(value)
+                for key, value in (remote_raw.get("headers") or default.remote.headers).items()
+            },
+        ),
+    )
+
+
+def _validation_environments(raw: object) -> dict[str, ValidationEnvironmentConfig]:
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, ValidationEnvironmentConfig] = {}
+    for raw_name, raw_config in raw.items():
+        name = str(raw_name or "").strip()
+        if not name or not isinstance(raw_config, dict):
+            continue
+        policy = ModelTaskPolicyConfig()
+        _apply_policy(policy, raw_config.get("model_policy"))
+        supported = [
+            str(item).strip()
+            for item in (raw_config.get("supported_vulnerability_types") or ["*"])
+            if str(item).strip()
+        ]
+        methods = raw_config.get("methods") if isinstance(raw_config.get("methods"), dict) else {}
+        result[name] = ValidationEnvironmentConfig(
+            supported_vulnerability_types=supported or ["*"],
+            concurrency=_bounded_int(raw_config.get("concurrency"), 1, 1, 64),
+            validation_max_retries=_bounded_int(raw_config.get("validation_max_retries"), 0, 0, 20),
+            model_policy=policy,
+            methods={
+                str(key): dict(value)
+                for key, value in methods.items()
+                if isinstance(value, dict)
+            },
+        )
+    return result
 
 
 def apply_remote_config(config: AgentConfig, remote: dict) -> None:
@@ -252,6 +382,48 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     falsey values like stream=false. server_url, agent_port, and agent_name
     are never overwritten because they are local-only settings.
     """
+    if isinstance(remote.get("base"), dict) or isinstance(remote.get("model_pool"), dict):
+        base = remote.get("base") if isinstance(remote.get("base"), dict) else {}
+        model_pool = remote.get("model_pool") if isinstance(remote.get("model_pool"), dict) else {}
+        if "no_proxy" in base:
+            config.no_proxy = str(base.get("no_proxy") or "")
+        if "tool" in base:
+            config.opencode.tool = str(base.get("tool") or "")
+        if "executable" in base:
+            config.opencode.executable = str(base.get("executable") or "")
+        if isinstance(model_pool.get("models"), list):
+            fields = {item.name for item in dataclasses.fields(OpenCodeModelConfig)}
+            config.opencode.models = [
+                OpenCodeModelConfig(**{key: value for key, value in item.items() if key in fields})
+                for item in model_pool["models"]
+                if isinstance(item, dict)
+            ]
+        config.opencode_concurrency = _bounded_int(
+            model_pool.get("global_concurrency"), config.opencode_concurrency, 1, 64
+        )
+        normalize_cli_config(config.opencode)
+        config.fp_review_cli = None
+
+        threat = remote.get("threat_analysis") if isinstance(remote.get("threat_analysis"), dict) else {}
+        if "enabled" in threat:
+            config.threat_analysis.enabled = _bool_value(threat.get("enabled"), True)
+        if "attack_path_audit_mode" in threat:
+            config.threat_analysis.attack_path_audit_mode = str(threat.get("attack_path_audit_mode") or "")
+        _normalize_threat_analysis_config(config.threat_analysis)
+        _apply_policy(config.threat_analysis.model_policy, threat.get("model_policy"))
+        _apply_policy(config.vulnerability_mining, remote.get("vulnerability_mining"))
+        _apply_policy(config.false_positive, remote.get("false_positive"))
+        config.code_graph = _mcp_config(remote.get("code_graph"), config.code_graph)
+        config.product_info = _mcp_config(remote.get("product_info"), config.product_info)
+        config.threat_analysis.product_mcp_name = config.product_info.name
+        config.threat_analysis.product_mcp_detection_timeout_seconds = config.product_info.timeout_seconds
+        validation = remote.get("vulnerability_validation")
+        if isinstance(validation, dict):
+            config.vulnerability_validation.environments = _validation_environments(
+                validation.get("environments")
+            )
+        return
+
     if "no_proxy" in remote and remote["no_proxy"] is not None:
         config.no_proxy = remote["no_proxy"]
     section = remote.get("opencode") or {}
@@ -331,33 +503,68 @@ def apply_network_env(config: AgentConfig) -> None:
 
 def remote_config_dict(config: AgentConfig) -> dict:
     """Return the server-managed subset of the local Agent config."""
+    models: list[dict] = []
+    seen_ids: set[str] = set()
+    seen_runtime_models: set[tuple[str, str, str]] = set()
+    sources = [(config.opencode.models, "")]
+    if config.fp_review_cli is not None:
+        sources.append((config.fp_review_cli.models, "fp-"))
+    for source_models, collision_prefix in sources:
+        for index, model in enumerate(source_models, start=1):
+            item = {
+                key: value
+                for key, value in dataclasses.asdict(model).items()
+                if key != "use_default_model"
+            }
+            # v2 has no implicit/default-model row.  Keep a legacy row visible
+            # for manual repair, but never advertise it as enabled capacity.
+            if model.use_default_model:
+                item["enabled"] = False
+                item["model"] = ""
+            signature = (
+                str(item.get("model") or ""),
+                str(item.get("tool") or ""),
+                str(item.get("executable") or ""),
+            )
+            if collision_prefix and signature in seen_runtime_models:
+                continue
+            model_id = str(item.get("id") or f"model-{index}")
+            if model_id in seen_ids:
+                base = f"{collision_prefix or 'migrated-'}{model_id}"
+                model_id = base
+                suffix = 2
+                while model_id in seen_ids:
+                    model_id = f"{base}-{suffix}"
+                    suffix += 1
+            item["id"] = model_id
+            models.append(item)
+            seen_ids.add(model_id)
+            seen_runtime_models.add(signature)
     return {
-        "no_proxy": config.no_proxy,
-        "opencode": _opencode_config_dict(config.opencode),
-        "opencode_concurrency": config.opencode_concurrency,
-        "fp_review_cli": (
-            None if config.fp_review_cli is None else _opencode_config_dict(config.fp_review_cli)
-        ),
-        "memory_api_discovery": {
-            f.name: getattr(config.memory_api_discovery, f.name)
-            for f in dataclasses.fields(config.memory_api_discovery)
+        "schema_version": 2,
+        "base": {
+            "tool": config.opencode.tool,
+            "executable": config.opencode.executable,
+            "no_proxy": config.no_proxy,
         },
-        "git_history": {
-            f.name: getattr(config.git_history, f.name)
-            for f in dataclasses.fields(config.git_history)
+        "model_pool": {
+            "global_concurrency": config.opencode_concurrency,
+            "models": models,
         },
         "threat_analysis": {
-            f.name: getattr(config.threat_analysis, f.name)
-            for f in dataclasses.fields(config.threat_analysis)
+            "enabled": config.threat_analysis.enabled,
+            "attack_path_audit_mode": config.threat_analysis.attack_path_audit_mode,
+            "model_policy": dataclasses.asdict(config.threat_analysis.model_policy),
         },
-        "static_dedup": config.static_dedup,
-        "pattern_filter": {
-            f.name: getattr(config.pattern_filter, f.name)
-            for f in dataclasses.fields(config.pattern_filter)
-        },
+        "code_graph": dataclasses.asdict(config.code_graph),
+        "product_info": dataclasses.asdict(config.product_info),
+        "vulnerability_mining": dataclasses.asdict(config.vulnerability_mining),
+        "false_positive": dataclasses.asdict(config.false_positive),
         "vulnerability_validation": {
-            f.name: getattr(config.vulnerability_validation, f.name)
-            for f in dataclasses.fields(config.vulnerability_validation)
+            "environments": {
+                name: dataclasses.asdict(value)
+                for name, value in config.vulnerability_validation.environments.items()
+            },
         },
     }
 
@@ -404,7 +611,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     threat_analysis_fields = {f.name for f in dataclasses.fields(ThreatAnalysisConfig)}
     threat_analysis_raw = {
         k: v for k, v in raw.get("threat_analysis", {}).items()
-        if k in threat_analysis_fields
+        if k in threat_analysis_fields and k != "model_policy"
     }
     pattern_filter_raw = {
         k: v for k, v in raw.get("pattern_filter", {}).items()
@@ -463,6 +670,8 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     )
     _normalize_git_history_config(cfg.git_history)
     _normalize_threat_analysis_config(cfg.threat_analysis)
+    if isinstance(raw.get("base"), dict) or isinstance(raw.get("model_pool"), dict):
+        apply_remote_config(cfg, raw)
     return cfg
 
 
@@ -480,34 +689,27 @@ def save_config(config: AgentConfig) -> None:
             raw = yaml.safe_load(f) or {}
     except Exception:
         raw = {}
-    raw["no_proxy"] = config.no_proxy
-    raw.pop("llm_api", None)
-    raw["opencode"] = _opencode_config_dict(config.opencode)
-    raw["opencode_concurrency"] = config.opencode_concurrency
-    if config.fp_review_cli is None:
-        raw.pop("fp_review_cli", None)
-    else:
-        raw["fp_review_cli"] = _opencode_config_dict(config.fp_review_cli)
-    raw["memory_api_discovery"] = {
-        f.name: getattr(config.memory_api_discovery, f.name)
-        for f in dataclasses.fields(config.memory_api_discovery)
-    }
-    raw["git_history"] = {
-        f.name: getattr(config.git_history, f.name)
-        for f in dataclasses.fields(config.git_history)
-    }
-    raw["threat_analysis"] = {
-        f.name: getattr(config.threat_analysis, f.name)
-        for f in dataclasses.fields(config.threat_analysis)
-    }
-    raw["static_dedup"] = config.static_dedup
-    raw["pattern_filter"] = {
-        f.name: getattr(config.pattern_filter, f.name)
-        for f in dataclasses.fields(config.pattern_filter)
-    }
-    raw["vulnerability_validation"] = {
-        f.name: getattr(config.vulnerability_validation, f.name)
-        for f in dataclasses.fields(config.vulnerability_validation)
-    }
+    for key in (
+        "llm_api",
+        "no_proxy",
+        "opencode",
+        "opencode_concurrency",
+        "fp_review_cli",
+        "memory_api_discovery",
+        "git_history",
+        "threat_analysis",
+        "static_dedup",
+        "pattern_filter",
+        "vulnerability_validation",
+        "base",
+        "model_pool",
+        "code_graph",
+        "product_info",
+        "vulnerability_mining",
+        "false_positive",
+        "schema_version",
+    ):
+        raw.pop(key, None)
+    raw.update(remote_config_dict(config))
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(raw, f, allow_unicode=True, default_flow_style=False)

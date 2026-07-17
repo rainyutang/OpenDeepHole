@@ -36,7 +36,7 @@
 **源码不离开本地**：Agent 只上报漏洞分析结论，不上传源码文件。  
 **误报反馈闭环**：用户在 Web UI 标记正报或误报后，选中的经验会注入 SKILL 中减少重复误判；也可将问题标为“待分析”作为人工待处理状态，该状态不进入经验库且仍可继续 AI 去误报复核；已标记问题也可以取消标记，取消后会移除该标记生成的经验并重新进入 AI 去误报候选。
 **静态候选收敛、同类合并与同模式过滤**：DB 类 checker 会按本次 `code_scan_path` 在 SQL 层收敛函数范围；静态候选进入 AI 前会按 checker `family` 做函数级同类合并，并只向 OpenCode 提供“函数/变量或表达式/问题类型”的最小审计问题。AI 审计确认某个同模式代表点为非问题后，可通过 `pattern_filter` 自动过滤同 `vuln_type + subject + scope` 的后续候选。详细规则见下文“静态候选合并与同模式过滤”。
-**git 历史问题挖掘 + 同类变体排查（可选，默认关闭）**：默认扫描链路在完成代码索引和工作区准备后，会并行启动威胁分析和静态分析；静态分析完成后立即进入候选点 AI 审计，威胁分析结果生成后独立上报展示，并在扫描最终完成前收尾。需要历史增强时，在 Agent 配置中设置 `git_history.enabled: true`；若目标是 git 仓库，扫描会分析 git 提交历史——逐条提交（每条一个 LLM 调用）判定是否为安全修复并提炼「历史问题模式」（根因+缺陷类型+触发条件的抽象描述），再对每条模式派一个 agent 在全仓搜索同类未修复站点，命中的作为新候选（带「同类变体来源」`variant_of`）并入 AI 审计。挖掘出的历史问题模式在扫描详情页「git 历史问题模式」面板展示。相关配置见 `git_history`（`enabled`/`max_commits`/`since`/`paths`/`variant_hunt`）。
+**git 历史问题挖掘 + 同类变体排查（当前硬禁用）**：默认扫描链路在完成代码索引和工作区准备后，会并行启动威胁分析和静态分析；静态分析完成后立即进入候选点 AI 审计，威胁分析结果生成后独立上报展示，并在扫描最终完成前收尾。git 历史问题挖掘及同类变体排查的实现代码仍保留，但当前版本不会执行该阶段，也不在 Agent 配置页面中暴露开关。
 
 **AI 去误报（扫描完成自动触发，历史/校验匹配 + 三阶段辩论，二元定级）**：扫描完成且存在已确认漏洞时**自动发起去误报**，无需手动点击（受 `fp_review.auto_on_complete` 控制，默认开启；仅在该扫描尚无去误报任务时触发，避免重复复核）。扫描详情页顶部「AI去误报」按钮仍保留，可手动重跑或补跑未复核项。FP 复核先运行 `history_match` 阶段——判断候选能否与某条历史问题模式（同根因）或其它函数里把校验做对了的调用站点对应上；**能对应上则直接判定 high 并跳过三阶段对抗辩论**，报告中以「对应修复/校验」字段（`match_type` history/validation + `match_reference`）回溯到对应的历史问题或正面对照。对应不上才进入 `prove-bug`、`prove-fp`、`final-judge` 三阶段辩论（各阶段通过本地 Markdown artifact 文件交接；`prove-bug` 判定非问题时正式早退，记录"可能误报"）。去误报定级简化为二元：命中匹配或论证为外部可触发 → **high**，其余一律 → **low**。阶段结束后页面即可查看论证；阶段未写工件或未提交结论会按配置重试并展示失败原因，复核结束后无最终结论显示"复核失败"。复核按模型池容量并发执行并同时高亮所有进行中的行；Agent 断线重连后复核任务自动重新挂接，不会被误判为已停止。
 **漏洞报告导出**：对每一个 AI 判定为「是问题」的扫描项可单独导出 Markdown 报告（含元信息、描述、AI 分析及去误报三阶段论证）；扫描详情页顶部「导出报告」可将本次所有确认为问题的漏洞各自导出为 Markdown 并打包为 zip。对应端点 `GET /api/scan/{id}/vulnerability/{idx}/report`（单项 Markdown）与 `GET /api/scan/{id}/report.zip`（整体 zip）。
@@ -110,86 +110,14 @@ checkers/<name>/
 **第 2 步：配置 agent.yaml**
 
 ```yaml
-# Web Server 地址
 server_url: "http://your-server:8000"
-
-# Agent 显示名称（显示在新建扫描的下拉列表中），留空则使用主机名
 agent_name: "my-agent"
-
-# 用户归属 token（下载 Agent 时自动填入，勿手动修改）
 owner_token: ""
-
-# OpenCode 任务配置。所有模型任务都通过 OpenCode serve/session 执行。
-# tool 可选: nga, opencode
-opencode:
-  tool: "nga"
-  executable: "nga"
-  model: ""       # 已废弃兼容字段；模型调度只读取 models
-  timeout: 1200
-  max_retries: 2
-  proxy_url: ""   # 可选：OpenCode/nga 子进程代理，如 "http://127.0.0.1:3131"
-  no_proxy: ""    # 可选：OpenCode/nga 子进程 no_proxy；留空时使用内网默认列表
-  config_paths: [] # 可选：额外合并的 OpenCode 配置文件，一行/一项一个路径
-  # 模型池。空池或全禁用时任务保持阻塞排队；默认模型也必须显式添加。
-  models:
-    - id: "fast"
-      model: "fast-model"
-      use_default_model: false
-      capability: "low"      # low | medium | high
-      weight: 3              # 权重越高，空闲时越优先分配
-      max_concurrency: 2
-      enabled: true
-      time_windows:          # Agent 本地每日时间；空数组表示全天可用
-        - start: "09:00"
-          end: "18:00"
-    - id: "deep"
-      model: "deep-model"
-      use_default_model: false
-      capability: "high"
-      weight: 1
-      max_concurrency: 1
-      enabled: true
-      time_windows: []
-    - id: "default"
-      model: ""
-      use_default_model: true # 不传 --model，使用 CLI 默认模型
-      capability: "high"
-      weight: 1
-      max_concurrency: 1
-      enabled: true
-      time_windows: []
-
-# OpenCode/兼容 CLI 总并发数：所有模型合计运行数不得超过该值，
-# 同时受单模型 max_concurrency 和每日使用时间限制。
-opencode_concurrency: 3
-
-# 漏洞验证默认整体超时为 2 小时；验证方法可在 validator.yaml 中覆盖。
-vulnerability_validation:
-  enabled: true
-  timeout_seconds: 7200
-
-# AI 去误报 OpenCode 配置可选；不配置则继承上面的审计工具和模型
-# fp_review_cli:
-#   tool: "opencode"
-#   executable: "opencode"
-#   model: ""      # 已废弃兼容字段；模型调度只读取 models
-#   timeout: 1200
-#   max_retries: 2
-#   models:
-#     - id: "judge"
-#       model: "high-capability-model"
-#       capability: "high"
-#       weight: 1
-#       max_concurrency: 1
-#       enabled: true
 ```
 
-> 所有检查项都通过统一 OpenCode 任务组件执行。旧 `mode: api` + `prompt.txt` 检查项会被兼容包装成临时 SKILL，不再直调 LLM API。
-> 每个检查项可在 `checker.yaml` 中设置 `model_capability: low|medium|high` 指定最低模型能力；未配置时默认为 `any`，AI 去误报默认优先使用高能力模型。
-> OpenCode 模型必须在 `models[]` 中显式添加并启用；顶层 `model` 不再参与调度。空模型池或全禁用时配置仍可保存，任务会保持阻塞排队。如需 OpenCode 自行选择默认模型，请添加 `use_default_model: true` 的启用行。
-> 模型池的 `time_windows` 使用 Agent 本地每日时间，支持跨午夜窗口；空数组表示全天可用。若存在满足能力要求但当前不在时间窗口内的模型，任务会排队等待，而不会降级使用当前时段的低能力模型。
-> 扫描详情页顶部的「模型看板」会展示当前扫描的 OpenCode 模型池统计，包括每个模型累计任务、成功/失败/超时/取消次数、平均耗时、运行中和排队数；页面刷新后会读取最近一次上报快照。
-> Agent 启动并连接服务器后，可以在 Web UI 的「客户端」页面配置 OpenCode 可执行文件、代理、默认模型、能力、每日使用时间和并发；保存后的配置会写回 `agent.yaml`。
+下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、威胁分析、代码图谱 MCP、产品信息 MCP、漏洞挖掘、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
+
+模型池必须至少包含一个已启用且填写明确 `provider/model` 的模型；不再支持“使用 CLI 默认模型”的配置行，没有显式模型时创建和续扫都会被拒绝。阶段级模型能力、模型调用超时和模型重试会覆盖具体模型行的超时/重试；漏洞验证的 `ctx.run_command(timeout=...)` 仍只由该命令自己的超时控制，不受模型超时影响，也没有验证函数整体截止时间。
 
 **第 3 步：确认代码索引工具**
 
@@ -267,7 +195,7 @@ Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 7. AI 去误报复核在**扫描完成且存在已确认漏洞时自动触发**（无需手动点击，受 `fp_review.auto_on_complete` 控制），也可在扫描详情页手动重跑；复核会依次运行 `prove-bug`、`prove-fp`、`final-judge` 三个阶段；各阶段将 Markdown 写入本次复核的 artifact 目录，后续阶段按文件路径读取，避免把完整论证塞进 prompt
 8. **正方早退**：`prove-bug` 最终 JSON 返回 `confirmed=false`（非问题）时正式早退，直接以正方理由记录"可能误报"最终结果并推送前端，跳过 `prove-fp` 和 `final-judge`；只有正方判定为真实问题时才进入后两个阶段，此时最终结论采用 `final-judge` 的最终 JSON
 9. 每个阶段结束后，扫描详情页会实时展示对应 Markdown；复核按模型池容量并发执行，所有正在复核的项同时高亮。详情页为**左右主从布局**：左侧为精简问题列表（文件:行 / 函数 / 类型 / 严重级别 + AI、去误报状态徽章及变体/命中标记，顶部带严重级别与类型筛选），右侧为选中问题详情，描述、AI 分析与去误报各阶段输出均以 Markdown 渲染。页面**默认只显示「问题」**——AI 审计未确认或去误报判为误报的候选默认隐藏，顶部「显示全部」开关可查看
-10. 阶段产物必须同时包含非空 Markdown artifact 和符合 schema 的最终 JSON；缺失时会按 `fp_review_cli.max_retries` 重试（重试 prompt 会强调即使非问题也必须写工件并输出 JSON），仍失败则停止该候选的后续 FP 复核阶段并保留已有有效结论，前端在复核结束后显示"复核失败"而非一直"复核中"；阶段输出会持久化，页面刷新后仍可查看
+10. 阶段产物必须同时包含非空 Markdown artifact 和符合 schema 的最终 JSON；缺失时会先在原 Session 纠正输出，仍失败时按 Agent 配置页「去误报」策略创建新 Session 重试，耗尽后停止该候选的后续 FP 复核阶段并保留已有有效结论，前端在复核结束后显示"复核失败"而非一直"复核中"；阶段输出会持久化，页面刷新后仍可查看
 11. **断线续挂**：Agent WebSocket 重连时会在 hello 中上报仍在运行的 FP 复核任务，后端重新挂接并恢复 running 状态；progress/result/stage-output 上报也会自动把因断连误标为 error 的复核任务恢复为 running
 
 ## 插件式 Checker 架构
@@ -590,82 +518,27 @@ logging:
 ### Agent agent.yaml
 
 ```yaml
-# Web Server 地址
 server_url: "http://your-server:8000"
-
-# Agent 显示名称（留空则使用主机名）
 agent_name: ""
-
-# 用户归属 token（下载 Agent 时自动填入，勿手动修改）
 owner_token: ""
-
-# 代理跳过列表，逗号分隔
-no_proxy: "10.0.0.0/8"
-
-# 要运行的检查项，留空则运行全部已启用的检查项
 checkers: []
-
-# OpenCode 任务配置；所有模型调用均使用 serve/session API。
-# tool 可选: nga, opencode
-opencode:
+schema_version: 2
+base:
   tool: "nga"
   executable: "nga"
-  model: ""      # 已废弃兼容字段；模型调度只读取 models
-  timeout: 1200
-  max_retries: 2
-  proxy_url: ""   # 可选：OpenCode/nga 子进程代理，也可用 OPENCODE_PROXY_URL 指定
-  no_proxy: ""    # 可选：OpenCode/nga 子进程 no_proxy，也可用 OPENCODE_NO_PROXY 指定
-  config_paths: [] # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
-  models: []     # 空池/全禁用会让任务保持阻塞排队；字段同上方快速开始示例
-
-# OpenCode/兼容 CLI 总并发数；位置审计、扫描前 API 识别和 AI 去误报都会复用。
-# 配置 models 后，该值仍是所有模型合计运行数的硬上限
-opencode_concurrency: 4
-
-# 静态候选跨规则去重：同 family、同文件、同函数只保留一个代表候选
-static_dedup: true
-
-# AI 审计同模式批量过滤：代表点被 AI 否决后，跳过同 vuln_type/subject/scope 后续候选
-pattern_filter:
-  enabled: true
-  scope: "directory"  # directory | file | repo
-
-# 漏洞验证脚本配置；默认整体超时 2 小时。
-vulnerability_validation:
-  enabled: true
-  timeout_seconds: 7200
-
-# Git 历史安全问题挖掘配置；默认关闭，设为 true 后会在静态分析后、
-# 候选点 AI 审计前分析历史提交并可选合并同类变体候选。
-git_history:
-  enabled: false
-  max_commits: 200
-  since: ""
-  paths: ""
-  variant_hunt: true
-
-# AI 去误报 OpenCode 配置（可选；不配置则继承上面的审计工具和模型）
-# fp_review_cli:
-#   tool: "opencode"
-#   executable: "opencode"
-#   model: ""      # 已废弃兼容字段；模型调度只读取 models
-#   timeout: 1200
-#   max_retries: 2
-#   proxy_url: ""
-#   no_proxy: ""
-#   config_paths: []
-#   models: []
-
-# AI 去误报流程配置
-fp_review:
-  auto_on_complete: true  # 扫描完成且存在已确认漏洞时自动触发去误报（无需手动点击）
+  no_proxy: "10.0.0.0/8"
+model_pool:
+  global_concurrency: 4
+  models: []
 ```
+
+`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v2 字段由 Web **「Agent 配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。
 
 OpenCode 调用约定：
 
-- `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 会合并用户全局目录、OpenCode 可执行文件所在目录、`opencode.config_paths` 和 `OPENCODE_CONFIG_PATH` 指向的 provider/model 配置，再通过稳定的 `OPENCODE_CONFIG_CONTENT` 启动 serve；API `directory` 始终指向真实代码目录。
+- `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置；API `directory` 始终指向真实代码目录。
 - `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。所有内置/checker SKILL 注册到全局 skill root，由 OpenCode 按 prompt 名称加载；MCP 工具默认全部可用。任务权限由 `directory`、当前 `scan_id` 对应的扫描目录和 `writable_paths` 自动计算。
-- `output_schema` 使用普通文本 JSON 约束，不发送 OpenCode 原生 `format`。JSON 不合规时默认在原 session 追加 2 次纠正；`attempt` 表示纠正仍失败或普通执行错误后重新排队并创建新 session 的次数，未传时使用 `opencode.max_retries`。
+- `output_schema` 使用普通文本 JSON 约束，不发送 OpenCode 原生 `format`。JSON 不合规时默认在原 session 追加 2 次纠正；`attempt` 表示纠正仍失败或普通执行错误后重新排队并创建新 session 的次数。威胁分析、漏洞挖掘、去误报和验证环境的页面策略会覆盖任务/模型行的能力、超时与重试。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
 - 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个 `OpenCodeTaskService`，复用共享 MCP 网关和项目索引路由；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
@@ -703,11 +576,10 @@ await service.delete_session(session_id)
 OpenCode 模型池统计：
 
 - 威胁分析、候选点审计、威胁审计、去误报、历史分析、变体排查、SKILL 创建和漏洞验证全部通过 `OpenCodeTaskService`，统一创建/续写 session 并累计模型池统计。
-- 模型必须在 `models[]` 中显式添加并启用；顶层 `model` 已废弃且不参与调度。空池、能力不满足或时间窗外时任务保持阻塞排队，配置变化后自动重新调度。
-- 配置模型池后，`opencode_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
+- 模型必须在 `model_pool.models[]` 中填写明确模型名并启用；不再接受默认模型行。没有显式模型时不能创建或恢复扫描。
+- `model_pool.global_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 任务优先级范围为 `1..100`，数值越大越先运行，同优先级按 FIFO；低/中能力任务优先用最低足够能力模型，在其不可用时可升级，高能力任务不会降级。
 - 任务超时只计算每条模型消息的执行阶段，不包含排队时间。新 session 重试保持同一 task ID、释放并重新申请模型 Lease；模型池 completed-task 历史只记录一次最终状态。排队中的任务修改能力、优先级或其它参数时保留 task ID、增加 revision 并重新入队。
-- 模型行可设置 `use_default_model: true`，表示参与模型池调度但调用 CLI 时不传 `--model`。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。
 

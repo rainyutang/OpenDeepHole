@@ -857,14 +857,16 @@ def _normalize_tool_selector(value: object) -> str:
 def _mcp_tool_overrides(
     tool_ids: list[str],
     requested: list[str] | tuple[str, ...] | None,
+    disabled: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, bool]:
     """Build message-level MCP overrides while leaving built-in tools untouched."""
     mcp_ids = [tool_id for tool_id in tool_ids if _tool_source(tool_id) == "mcp"]
     if requested is None:
-        return {tool_id: True for tool_id in tool_ids}
-    overrides = {tool_id: False for tool_id in mcp_ids}
+        overrides = {tool_id: True for tool_id in tool_ids}
+    else:
+        overrides = {tool_id: False for tool_id in mcp_ids}
     unresolved: list[str] = []
-    for raw_selector in requested:
+    for raw_selector in requested or ():
         selector = str(raw_selector or "").strip()
         normalized = _normalize_tool_selector(selector)
         matches = [
@@ -884,6 +886,12 @@ def _mcp_tool_overrides(
             continue
         for tool_id in matches:
             overrides[tool_id] = True
+    for raw_selector in disabled or ():
+        selector = str(raw_selector or "").strip()
+        normalized = _normalize_tool_selector(selector)
+        for tool_id in mcp_ids:
+            if selector == tool_id or (normalized and normalized in _normalize_tool_selector(tool_id)):
+                overrides[tool_id] = False
     if unresolved:
         raise ValueError(
             "Unknown OpenCode MCP tool selector(s): " + ", ".join(unresolved)
@@ -1695,6 +1703,7 @@ class OpenCodeServeManager:
         session_id: str | None = None,
         session_title: str = "OpenDeepHole task",
         mcp_tools: list[str] | tuple[str, ...] | None = None,
+        disabled_mcp_tools: list[str] | tuple[str, ...] | None = None,
         system_prompt: str = "",
         permissions: list[dict[str, str]] | None = None,
         return_details: bool = False,
@@ -1762,7 +1771,7 @@ class OpenCodeServeManager:
                     "parts": [{"type": "text", "text": prompt}],
                 }
                 tool_ids = await self._list_tool_ids(client, params, headers, on_line=on_line, tool=tool)
-                mcp_overrides = _mcp_tool_overrides(tool_ids, mcp_tools)
+                mcp_overrides = _mcp_tool_overrides(tool_ids, mcp_tools, disabled_mcp_tools)
                 if mcp_overrides:
                     payload["tools"] = mcp_overrides
                 if model:

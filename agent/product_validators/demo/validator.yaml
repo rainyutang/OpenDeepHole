@@ -1,4 +1,13 @@
 schema_version: 1
-product: LTE
-validation_environment: 仿真UBBPi板环境
-timeout_seconds: 7200
+id: demo
+label: Demo 验证方法
+registrations:
+  - product: LTE
+    environment: 仿真UBBPi板环境
+    fields:
+      - key: target_ip
+        label: 验证目标 IP
+        type: string
+        required: false
+        default: ""
+        help: 留空时由验证方法自行发现目标

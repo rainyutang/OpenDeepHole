@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import secrets
 import socket
 import time
@@ -49,6 +50,7 @@ from backend.models import (
     AgentOpenCodePoolStatus,
     AgentInfo,
     AgentRemoteConfig,
+    AgentValidatorCatalog,
     AgentScanCandidates,
     AgentScanFinish,
     AgentVulnerabilityValidationUpdate,
@@ -82,9 +84,213 @@ _agent_ws: dict[str, WebSocket] = {}
 _agent_ws_locks: dict[str, asyncio.Lock] = {}
 _agent_disconnect_tasks: dict[str, asyncio.Task] = {}
 
-# Agent configs persisted by agent_name (survives agent reconnects)
+# Compatibility cache.  New entries are keyed by stable agent_key; name keys
+# are still read for tests and pre-v2 HTTP agents.
 _agent_configs: dict[str, AgentRemoteConfig] = {}
 _agent_opencode_pool_latest: dict[str, OpenCodePoolStatus] = {}
+
+
+def _stored_agent_config(record: dict | None) -> AgentRemoteConfig:
+    if not record:
+        return AgentRemoteConfig()
+    try:
+        payload = json.loads(str(record.get("config_json") or "{}"))
+        return AgentRemoteConfig(**payload)
+    except Exception as exc:
+        logger.warning("Ignoring invalid persisted Agent config: %s", exc)
+        return AgentRemoteConfig()
+
+
+def _stored_validator_catalog(record: dict | None) -> AgentValidatorCatalog:
+    if not record:
+        return AgentValidatorCatalog()
+    try:
+        payload = json.loads(str(record.get("validator_catalog_json") or "{}"))
+        return AgentValidatorCatalog(**payload)
+    except Exception as exc:
+        logger.warning("Ignoring invalid persisted validator catalog: %s", exc)
+        return AgentValidatorCatalog(errors=[str(exc)])
+
+
+def _live_agent_for_key(agent_key: str) -> tuple[str, AgentInfo] | None:
+    candidates = [
+        (agent_id, agent)
+        for agent_id, agent in _registered_agents.items()
+        if agent.agent_key == agent_key and agent_id in _agent_ws
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[1].last_seen)
+
+
+def resolve_agent_connection(agent_key: str) -> tuple[str, AgentInfo] | None:
+    """Resolve a stable Agent key to its current WebSocket connection."""
+    return _live_agent_for_key(str(agent_key or "").strip())
+
+
+def _authorize_agent_record(record: dict | None, current_user: User) -> dict:
+    if record is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if current_user.role != "admin" and str(record.get("user_id") or "") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return record
+
+
+def agent_config_has_explicit_model(config: AgentRemoteConfig) -> bool:
+    return any(
+        model.enabled and bool(str(model.model or "").strip()) and not model.use_default_model
+        for model in config.model_pool.models
+    )
+
+
+def get_managed_agent_config(agent_key: str) -> AgentRemoteConfig:
+    record = get_scan_store().get_agent_record(str(agent_key or "").strip())
+    if record is None:
+        return AgentRemoteConfig()
+    return _stored_agent_config(record)
+
+
+def _validate_managed_config(
+    config: AgentRemoteConfig,
+    catalog: AgentValidatorCatalog | None = None,
+) -> None:
+    if config.base.tool not in {"nga", "opencode"}:
+        raise HTTPException(status_code=422, detail="基础配置中的工具只能是 nga 或 opencode")
+    if not config.base.executable.strip():
+        raise HTTPException(status_code=422, detail="工具可执行文件不能为空")
+    if not 1 <= config.model_pool.global_concurrency <= 64:
+        raise HTTPException(status_code=422, detail="模型池总并发数必须在 1 到 64 之间")
+    seen: set[str] = set()
+    for index, model in enumerate(config.model_pool.models, start=1):
+        model_id = model.id.strip()
+        if not model_id:
+            raise HTTPException(status_code=422, detail=f"模型第 {index} 行缺少 ID")
+        if model_id in seen:
+            raise HTTPException(status_code=422, detail=f"模型 ID 重复：{model_id}")
+        seen.add(model_id)
+        if model.enabled and (model.use_default_model or not model.model.strip()):
+            raise HTTPException(status_code=422, detail=f"启用模型 {model_id} 必须填写显式模型名")
+        if model.capability not in {"low", "medium", "high"}:
+            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的能力配置无效")
+        if model.tool and model.tool not in {"nga", "opencode"}:
+            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的工具覆盖无效")
+        if model.weight <= 0:
+            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的权重必须大于 0")
+        if model.max_concurrency < 1:
+            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的并发数必须大于 0")
+        if model.timeout is not None and model.timeout < 1:
+            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的超时必须大于 0")
+        if model.max_retries is not None and model.max_retries < 0:
+            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的重试次数不能小于 0")
+        for window in model.time_windows:
+            try:
+                start = str(window.get("start") or "")
+                end = str(window.get("end") or "")
+                datetime.strptime(start, "%H:%M")
+                datetime.strptime(end, "%H:%M")
+            except (AttributeError, TypeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"模型 {model_id} 的使用时间窗口必须为 HH:MM-HH:MM",
+                )
+    policies = {
+        "威胁分析": config.threat_analysis.model_policy,
+        "漏洞挖掘": config.vulnerability_mining,
+        "去误报": config.false_positive,
+    }
+    if config.threat_analysis.attack_path_audit_mode not in {"after_analysis", "immediate"}:
+        raise HTTPException(status_code=422, detail="威胁分析的攻击路径审计模式无效")
+    for environment, env_cfg in config.vulnerability_validation.environments.items():
+        if not str(environment).strip():
+            raise HTTPException(status_code=422, detail="验证环境名称不能为空")
+        if env_cfg.concurrency < 1 or env_cfg.concurrency > 64:
+            raise HTTPException(status_code=422, detail=f"验证环境 {environment} 的并发数必须在 1 到 64 之间")
+        if env_cfg.validation_max_retries < 0:
+            raise HTTPException(status_code=422, detail=f"验证环境 {environment} 的整体验证重试不能小于 0")
+        if not any(str(item).strip() for item in env_cfg.supported_vulnerability_types):
+            raise HTTPException(status_code=422, detail=f"验证环境 {environment} 至少需要一个支持的漏洞类型")
+        policies[f"验证环境 {environment}"] = env_cfg.model_policy
+    for label, policy in policies.items():
+        if policy.required_capability not in {"any", "low", "medium", "high"}:
+            raise HTTPException(status_code=422, detail=f"{label}的模型能力无效")
+        if policy.timeout_seconds < 1:
+            raise HTTPException(status_code=422, detail=f"{label}的模型超时必须大于 0")
+        if policy.max_retries < 0:
+            raise HTTPException(status_code=422, detail=f"{label}的模型重试不能小于 0")
+    for label, mcp in (("代码图谱", config.code_graph), ("产品信息", config.product_info)):
+        if mcp.transport not in {"local", "remote"}:
+            raise HTTPException(status_code=422, detail=f"{label} MCP 模式无效")
+        if mcp.enabled and not mcp.name.strip():
+            raise HTTPException(status_code=422, detail=f"{label} MCP 名称不能为空")
+        if mcp.enabled and mcp.name.strip() == "deephole-code":
+            raise HTTPException(status_code=422, detail=f"{label} MCP 名称不能占用 deephole-code")
+        if mcp.timeout_seconds < 1:
+            raise HTTPException(status_code=422, detail=f"{label} MCP 超时必须大于 0")
+        if mcp.enabled and mcp.transport == "local" and not mcp.local.executable.strip():
+            raise HTTPException(status_code=422, detail=f"{label} MCP 可执行文件不能为空")
+        if mcp.enabled and mcp.transport == "remote" and not mcp.remote.url.strip():
+            raise HTTPException(status_code=422, detail=f"{label} MCP 远端 URL 不能为空")
+    if (
+        config.code_graph.enabled
+        and config.product_info.enabled
+        and config.code_graph.name.strip() == config.product_info.name.strip()
+    ):
+        raise HTTPException(status_code=422, detail="代码图谱与产品信息不能使用相同的 MCP 名称")
+    if catalog is not None:
+        registrations = {item.registration_key: item for item in catalog.registrations}
+        for environment, environment_config in config.vulnerability_validation.environments.items():
+            for registration_key, values in environment_config.methods.items():
+                registration = registrations.get(registration_key)
+                if registration is None or registration.environment != environment:
+                    raise HTTPException(status_code=422, detail=f"未知的验证方法配置：{registration_key}")
+                schemas = {field.key: field for field in registration.fields}
+                unknown = sorted(set(values) - set(schemas))
+                if unknown:
+                    raise HTTPException(status_code=422, detail=f"验证方法 {registration.method_label} 包含未知字段：{', '.join(unknown)}")
+                for field in registration.fields:
+                    value = values.get(field.key, field.default)
+                    if field.required and (value is None or value == ""):
+                        raise HTTPException(status_code=422, detail=f"验证方法 {registration.method_label} 缺少必填字段：{field.label}")
+                    if value is None or value == "":
+                        continue
+                    try:
+                        if field.type == "integer":
+                            if isinstance(value, bool):
+                                raise ValueError
+                            parsed_value = int(value)
+                        elif field.type == "number":
+                            if isinstance(value, bool):
+                                raise ValueError
+                            parsed_value = float(value)
+                        elif field.type == "boolean":
+                            if not isinstance(value, bool):
+                                raise ValueError
+                            parsed_value = value
+                        else:
+                            parsed_value = str(value)
+                    except (TypeError, ValueError):
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"验证方法 {registration.method_label} 的字段 {field.label} 类型无效",
+                        )
+                    if field.type == "select" and field.options and parsed_value not in {
+                        str(option) for option in field.options
+                    }:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"验证方法 {registration.method_label} 的字段 {field.label} 选项无效",
+                        )
+                    if field.type in {"integer", "number"}:
+                        if field.min is not None and parsed_value < field.min:
+                            raise HTTPException(
+                                status_code=422,
+                                detail=f"验证方法 {registration.method_label} 的字段 {field.label} 小于最小值",
+                            )
+                        if field.max is not None and parsed_value > field.max:
+                            raise HTTPException(
+                                status_code=422,
+                                detail=f"验证方法 {registration.method_label} 的字段 {field.label} 大于最大值",
+                            )
 
 
 @dataclass(frozen=True)
@@ -132,6 +338,11 @@ def _touch_agent(agent_id: str) -> None:
     agent = _registered_agents.get(agent_id)
     if agent is not None:
         agent.last_seen = datetime.now(timezone.utc).isoformat()
+        if agent.agent_key:
+            try:
+                get_scan_store().touch_agent_record(agent.agent_key, agent_id, agent.last_seen)
+            except (NotImplementedError, AttributeError):
+                pass
 
 
 def _is_agent_online(agent: AgentInfo) -> bool:
@@ -304,7 +515,7 @@ def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: 
         scan.agent_name = agent.name
         scan.agent_online = True
 
-        store.update_scan_agent(scan_id, agent_id, agent.name)
+        store.update_scan_agent(scan_id, agent_id, agent.name, agent.agent_key)
         store.update_scan_progress(
             scan_id,
             status=scan.status,
@@ -375,7 +586,7 @@ def _reattach_active_fp_reviews(agent_id: str, agent: AgentInfo, active_fp_revie
             )
             continue
 
-        store.update_scan_agent(scan_id, agent_id, agent.name)
+        store.update_scan_agent(scan_id, agent_id, agent.name, agent.agent_key)
         logger.info("Reattached active FP review %s from agent %s", review_id, agent_id)
 
 
@@ -426,7 +637,7 @@ def _reattach_active_validations(agent_id: str, agent: AgentInfo, active_validat
             logger.warning("Agent %s reported unknown active validation %s#%s", agent_id, scan_id, vuln_index)
             continue
 
-        store.update_scan_agent(scan_id, agent_id, agent.name)
+        store.update_scan_agent(scan_id, agent_id, agent.name, agent.agent_key)
         if validation.status == "cancelled":
             pending_stops.append({
                 "type": "vulnerability_validation_stop",
@@ -598,7 +809,8 @@ async def agent_websocket(websocket: WebSocket) -> None:
             await websocket.close(code=4000)
             return
 
-        name = msg.get("name") or socket.gethostname()
+        name = str(msg.get("name") or socket.gethostname()).strip()
+        machine_name = str(msg.get("machine_name") or name or socket.gethostname()).strip()
         owner_token = msg.get("owner_token", "")
         agent_id = uuid.uuid4().hex
         ip = websocket.client.host if websocket.client else "unknown"
@@ -612,9 +824,45 @@ async def agent_websocket(websocket: WebSocket) -> None:
             if owner:
                 user_id = owner.user_id
 
+        reported_config = msg.get("config")
+        try:
+            initial_config = AgentRemoteConfig(**reported_config) if isinstance(reported_config, dict) else AgentRemoteConfig()
+        except Exception as exc:
+            logger.warning("Ignoring invalid config reported by agent %s: %s", name, exc)
+            initial_config = AgentRemoteConfig()
+        reported_catalog = msg.get("validator_catalog")
+        try:
+            catalog = (
+                AgentValidatorCatalog(**reported_catalog)
+                if isinstance(reported_catalog, dict)
+                else AgentValidatorCatalog()
+            )
+        except Exception as exc:
+            catalog = AgentValidatorCatalog(errors=[str(exc)])
+
+        store = get_scan_store()
+        existing = store.find_agent_record(user_id, ip, machine_name)
+        stable_key = str(existing.get("agent_key") or "") if existing else uuid.uuid4().hex
+        record = store.upsert_agent_record(
+            agent_key=stable_key,
+            user_id=user_id,
+            ip=ip,
+            machine_name=machine_name,
+            display_name=name,
+            agent_id=agent_id,
+            last_seen=now,
+            initial_config_json=initial_config.model_dump_json(),
+            validator_catalog_json=catalog.model_dump_json(),
+        )
+        stable_key = str(record["agent_key"])
+        cfg = _stored_agent_config(record)
+        _agent_configs[stable_key] = cfg
+
         agent_info = AgentInfo(
             agent_id=agent_id,
+            agent_key=stable_key,
             name=name,
+            machine_name=machine_name,
             ip=ip,
             port=0,
             last_seen=now,
@@ -634,18 +882,11 @@ async def agent_websocket(websocket: WebSocket) -> None:
             msg.get("active_validations") or [],
         )
 
-        reported_config = msg.get("config")
-        if reported_config and name not in _agent_configs:
-            try:
-                _agent_configs[name] = AgentRemoteConfig(**reported_config)
-            except Exception as e:
-                logger.warning("Ignoring invalid config reported by agent %s: %s", name, e)
-
-        cfg = _agent_configs.get(name, AgentRemoteConfig())
         await _send_agent_json(agent_id, {
             "type": "welcome",
             "agent_id": agent_id,
-            "config": cfg.model_dump(exclude_defaults=True),
+            "agent_key": stable_key,
+            "config": cfg.model_dump(),
         })
         for command in pending_validation_stops:
             await send_agent_command(agent_id, command)
@@ -775,7 +1016,7 @@ async def update_agent_opencode_pool(agent_id: str, status: OpenCodePoolStatus) 
     store = get_scan_store()
     if hasattr(store, "upsert_agent_opencode_pool_status"):
         store.upsert_agent_opencode_pool_status(
-            agent_name=agent.name,
+            agent_name=agent.agent_key or agent.name,
             user_id=agent.user_id,
             agent_session_id=status.agent_session_id,
             status=status,
@@ -798,7 +1039,7 @@ async def get_agent_opencode_pool(
     store = get_scan_store()
     if hasattr(store, "get_agent_opencode_pool_status"):
         result = store.get_agent_opencode_pool_status(
-            agent_name=agent.name,
+            agent_name=agent.agent_key or agent.name,
             user_id=agent.user_id,
             agent_id=agent_id,
             agent_session_id=agent.agent_session_id,
@@ -811,6 +1052,7 @@ async def get_agent_opencode_pool(
             agent_session_id=agent.agent_session_id,
             online=online,
         )
+    result.agent_name = agent.name
     latest = _agent_opencode_pool_latest.get(agent_id)
     if online and latest is not None and latest.agent_session_id == agent.agent_session_id:
         live_by_model = {model.id: model for model in latest.models}
@@ -923,10 +1165,12 @@ async def get_agent_config(
     """Return the server-managed config for an agent (defaults if not yet saved)."""
     agent = _registered_agents.get(agent_id)
     if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        record = _authorize_agent_record(get_scan_store().get_agent_record(agent_id), current_user)
+        return _stored_agent_config(record)
     if current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied")
-    return _agent_configs.get(agent.name, AgentRemoteConfig())
+    record = get_scan_store().get_agent_record(agent.agent_key) if agent.agent_key else None
+    return _stored_agent_config(record) if record else _agent_configs.get(agent.name, AgentRemoteConfig())
 
 
 @router.put("/{agent_id}/config")
@@ -935,18 +1179,80 @@ async def update_agent_config(
     body: AgentRemoteConfig,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Save the server-managed config for an agent (keyed by agent name).
-    Also pushes the updated config to the agent via WebSocket if connected."""
+    """Compatibility route for saving the stable Agent-managed config.
+
+    The path may contain the current session id or the stable agent_key.  The
+    stored record is always keyed by IP + machine name identity.
+    """
     agent = _registered_agents.get(agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    if current_user.role != "admin" and agent.user_id != current_user.user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    _agent_configs[agent.name] = body
-    logger.info("Config updated for agent %s (%s)", agent_id, agent.name)
-    # Push update to agent immediately if connected via WebSocket
-    await send_agent_command(agent_id, {"type": "config", "config": body.model_dump()})
+    agent_key = agent.agent_key if agent is not None else agent_id
+    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    _validate_managed_config(body, _stored_validator_catalog(record))
+    get_scan_store().update_agent_config_record(agent_key, body.model_dump_json())
+    _agent_configs[agent_key] = body
+    logger.info("Config updated for stable agent %s", agent_key)
+    live = _live_agent_for_key(agent_key)
+    if live is not None:
+        await send_agent_command(live[0], {"type": "config", "config": body.model_dump()})
     return {"ok": True}
+
+
+@public_router.get("/api/agent-configs/{agent_key}", response_model=AgentRemoteConfig)
+async def get_stable_agent_config(
+    agent_key: str,
+    current_user: User = Depends(get_current_user),
+) -> AgentRemoteConfig:
+    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    return _stored_agent_config(record)
+
+
+@public_router.put("/api/agent-configs/{agent_key}")
+async def update_stable_agent_config(
+    agent_key: str,
+    body: AgentRemoteConfig,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    _validate_managed_config(body, _stored_validator_catalog(record))
+    get_scan_store().update_agent_config_record(agent_key, body.model_dump_json())
+    _agent_configs[agent_key] = body
+    live = _live_agent_for_key(agent_key)
+    applied = False
+    if live is not None:
+        applied = await send_agent_command(live[0], {"type": "config", "config": body.model_dump()})
+    return {"ok": True, "applied": applied}
+
+
+@public_router.get("/api/agent-configs/{agent_key}/validator-catalog", response_model=AgentValidatorCatalog)
+async def get_stable_agent_validator_catalog(
+    agent_key: str,
+    product: str = "",
+    current_user: User = Depends(get_current_user),
+) -> AgentValidatorCatalog:
+    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    catalog = _stored_validator_catalog(record)
+    if not product.strip():
+        return catalog
+    return catalog.model_copy(update={
+        "registrations": [item for item in catalog.registrations if item.product == product.strip()],
+    })
+
+
+@public_router.get("/api/agent-configs/{agent_key}/validation-environments")
+async def get_stable_agent_validation_environments(
+    agent_key: str,
+    product: str = "",
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    catalog = _stored_validator_catalog(record)
+    selected_product = product.strip()
+    environments = sorted({
+        item.environment
+        for item in catalog.registrations
+        if not selected_product or item.product == selected_product
+    })
+    return {"validation_environments": environments}
 
 
 @router.get("/agents")
@@ -964,12 +1270,35 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
     WebSocket agents: online = WebSocket connection is active.
     Legacy HTTP agents: online = last heartbeat < 90 seconds ago.
     """
+    store = get_scan_store()
+    records = store.list_agent_records(None if current_user.role == "admin" else current_user.user_id)
     result = []
-    for a in _registered_agents.values():
-        if current_user.role != "admin" and a.user_id != current_user.user_id:
+    known_keys: set[str] = set()
+    for record in records:
+        agent_key = str(record.get("agent_key") or "")
+        live = _live_agent_for_key(agent_key)
+        agent = live[1] if live else None
+        known_keys.add(agent_key)
+        result.append({
+            "agent_id": live[0] if live else str(record.get("last_agent_id") or ""),
+            "agent_key": agent_key,
+            "name": agent.name if agent else str(record.get("display_name") or ""),
+            "machine_name": agent.machine_name if agent else str(record.get("machine_name") or ""),
+            "ip": agent.ip if agent else str(record.get("ip") or ""),
+            "port": agent.port if agent else 0,
+            "last_seen": agent.last_seen if agent else str(record.get("last_seen") or ""),
+            "user_id": str(record.get("user_id") or ""),
+            "runtime_hash": agent.runtime_hash if agent else "",
+            "agent_session_id": agent.agent_session_id if agent else "",
+            "online": bool(agent and _is_agent_online(agent)),
+        })
+    # Keep legacy HTTP agents visible until they migrate to the stable catalog.
+    for agent in _registered_agents.values():
+        if agent.agent_key in known_keys:
             continue
-        online = _is_agent_online(a)
-        result.append({**a.model_dump(), "online": online})
+        if current_user.role != "admin" and agent.user_id != current_user.user_id:
+            continue
+        result.append({**agent.model_dump(), "online": _is_agent_online(agent)})
     return result
 
 
@@ -1848,7 +2177,10 @@ OpenDeepHole Agent
 
 Setup
 -----
-1. Edit agent.yaml — set server_url and the OpenCode model pool
+1. agent.yaml already contains the server_url and owner_token from the Web UI.
+   Start the Agent once, then use the Web "Agent 配置" page to configure the
+   tool, explicit model pool, phase policies, MCP servers and validation
+   environments. A scan cannot start without an enabled explicit model.
 
 2. Install Python 3.10+ if not already installed
 
@@ -1885,7 +2217,8 @@ Use the "新建扫描" button in the web UI to start a scan.
 Before each scan, the agent checks whether the server has newer runtime code.
 Runtime code updates, including the bundled Windows ctags directory, are
 installed automatically and the scan continues after the agent restarts.
-Checker updates are synced with each scan and do not restart the agent. If
+Checker and product-validator updates are installed with the required Agent
+runtime update. If
 run_agent.sh or run_agent.bat changes, download a new agent package.
 
 Results appear at: <server_url> (the web interface)

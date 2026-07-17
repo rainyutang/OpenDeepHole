@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ScanItemStatus(str, Enum):
@@ -628,7 +628,9 @@ class AgentVulnerabilityValidationUpdate(BaseModel):
 class AgentInfo(BaseModel):
     """Info about a registered agent."""
     agent_id: str
+    agent_key: str = ""
     name: str
+    machine_name: str = ""
     ip: str
     port: int = 0
     last_seen: str
@@ -640,7 +642,9 @@ class AgentInfo(BaseModel):
 class AgentOpenCodeModelConfig(BaseModel):
     id: str = ""
     model: str = ""
-    use_default_model: bool = False
+    # Read-only compatibility for old agent.yaml files.  It is deliberately
+    # omitted from the managed v2 config and never satisfies scan readiness.
+    use_default_model: bool = Field(default=False, exclude=True)
     capability: str = "high"
     weight: float = 1.0
     max_concurrency: int = 1
@@ -664,6 +668,88 @@ class AgentOpenCodeConfig(BaseModel):
     no_proxy: str = ""
 
 
+class AgentBaseConfig(BaseModel):
+    tool: str = "nga"
+    executable: str = "nga"
+    no_proxy: str = "10.0.0.0/8"
+
+
+class AgentModelPoolConfig(BaseModel):
+    global_concurrency: int = 4
+    models: list[AgentOpenCodeModelConfig] = []
+
+
+class AgentModelTaskPolicy(BaseModel):
+    required_capability: str = "high"
+    timeout_seconds: int = 1200
+    max_retries: int = 2
+
+
+class AgentMcpLocalConfig(BaseModel):
+    executable: str = ""
+    args: list[str] = []
+    environment: dict[str, str] = {}
+
+
+class AgentMcpRemoteConfig(BaseModel):
+    url: str = ""
+    headers: dict[str, str] = {}
+
+
+class AgentMcpConfig(BaseModel):
+    enabled: bool = False
+    name: str = ""
+    transport: str = "local"
+    timeout_seconds: int = 300
+    local: AgentMcpLocalConfig = AgentMcpLocalConfig()
+    remote: AgentMcpRemoteConfig = AgentMcpRemoteConfig()
+
+
+class AgentValidationEnvironmentConfig(BaseModel):
+    supported_vulnerability_types: list[str] = ["*"]
+    concurrency: int = 1
+    validation_max_retries: int = 0
+    model_policy: AgentModelTaskPolicy = AgentModelTaskPolicy()
+    # Values are keyed by the stable validator registration key.
+    methods: dict[str, dict[str, object]] = {}
+
+
+class AgentValidatorField(BaseModel):
+    key: str
+    label: str = ""
+    type: str = "string"
+    required: bool = False
+    default: object | None = None
+    options: list[object] = []
+    min: float | None = None
+    max: float | None = None
+    help: str = ""
+    placeholder: str = ""
+
+
+class AgentValidatorRegistration(BaseModel):
+    registration_key: str
+    method_id: str
+    method_label: str = ""
+    product: str
+    environment: str
+    fields: list[AgentValidatorField] = []
+    legacy: bool = False
+
+
+class AgentValidatorCatalog(BaseModel):
+    registrations: list[AgentValidatorRegistration] = []
+    errors: list[str] = []
+    updated_at: str = ""
+
+
+def _safe_policy_int(value: object, default: int, *, minimum: int) -> int:
+    try:
+        return max(minimum, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 class AgentMemoryApiDiscoveryConfig(BaseModel):
     enabled: bool = True
     batch_size: int = 8
@@ -681,10 +767,12 @@ class AgentGitHistoryConfig(BaseModel):
 
 class AgentThreatAnalysisConfig(BaseModel):
     enabled: bool = True
-    implementation: str = "attack_tree"
     attack_path_audit_mode: str = "after_analysis"
-    product_mcp_name: str = "product-info"
-    product_mcp_detection_timeout_seconds: int = 60
+    model_policy: AgentModelTaskPolicy = AgentModelTaskPolicy(
+        required_capability="high",
+        timeout_seconds=1200,
+        max_retries=3,
+    )
 
 
 class AgentPatternFilterConfig(BaseModel):
@@ -693,27 +781,143 @@ class AgentPatternFilterConfig(BaseModel):
 
 
 class AgentVulnerabilityValidationConfig(BaseModel):
-    enabled: bool = True
-    timeout_seconds: int = 7200
+    environments: dict[str, AgentValidationEnvironmentConfig] = {}
 
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    no_proxy: str = "10.0.0.0/8"
-    opencode_concurrency: int = 4
-    opencode: AgentOpenCodeConfig = AgentOpenCodeConfig()
-    fp_review_cli: AgentOpenCodeConfig | None = None
-    memory_api_discovery: AgentMemoryApiDiscoveryConfig = AgentMemoryApiDiscoveryConfig()
-    git_history: AgentGitHistoryConfig = AgentGitHistoryConfig()
+    schema_version: int = 2
+    base: AgentBaseConfig = AgentBaseConfig()
+    model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
-    static_dedup: bool = True
-    pattern_filter: AgentPatternFilterConfig = AgentPatternFilterConfig()
+    code_graph: AgentMcpConfig = AgentMcpConfig(
+        name="codegraph",
+        local=AgentMcpLocalConfig(
+            executable="codegraph",
+            args=["serve", "--mcp"],
+            environment={
+                "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status",
+            },
+        ),
+    )
+    product_info: AgentMcpConfig = AgentMcpConfig(name="product-info")
+    vulnerability_mining: AgentModelTaskPolicy = AgentModelTaskPolicy(
+        required_capability="any",
+    )
+    false_positive: AgentModelTaskPolicy = AgentModelTaskPolicy(
+        required_capability="high",
+    )
     vulnerability_validation: AgentVulnerabilityValidationConfig = AgentVulnerabilityValidationConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy(cls, value):
+        """Accept pre-v2 Agent payloads while emitting only the v2 contract."""
+        if not isinstance(value, dict) or value.get("schema_version") == 2 or "base" in value:
+            return value
+        legacy = dict(value)
+        opencode = legacy.get("opencode") if isinstance(legacy.get("opencode"), dict) else {}
+        fp_cli = legacy.get("fp_review_cli") if isinstance(legacy.get("fp_review_cli"), dict) else {}
+        threat = legacy.get("threat_analysis") if isinstance(legacy.get("threat_analysis"), dict) else {}
+        models = []
+        for raw_model in opencode.get("models") or []:
+            if not isinstance(raw_model, dict):
+                continue
+            migrated_model = dict(raw_model)
+            if migrated_model.pop("use_default_model", False):
+                migrated_model["model"] = ""
+                migrated_model["enabled"] = False
+            models.append(migrated_model)
+        seen_ids = {str(item.get("id") or "") for item in models if isinstance(item, dict)}
+        for item in fp_cli.get("models") or []:
+            if not isinstance(item, dict):
+                continue
+            migrated = dict(item)
+            if migrated.pop("use_default_model", False):
+                migrated["model"] = ""
+                migrated["enabled"] = False
+            model_id = str(migrated.get("id") or "model")
+            if model_id in seen_ids:
+                model_id = f"fp-{model_id}"
+            migrated["id"] = model_id
+            if not any(
+                isinstance(existing, dict)
+                and str(existing.get("model") or "") == str(migrated.get("model") or "")
+                and str(existing.get("tool") or "") == str(migrated.get("tool") or "")
+                for existing in models
+            ):
+                models.append(migrated)
+                seen_ids.add(model_id)
+        timeout = _safe_policy_int(opencode.get("timeout"), 1200, minimum=1)
+        retries = _safe_policy_int(opencode.get("max_retries"), 2, minimum=0)
+        fp_timeout = _safe_policy_int(fp_cli.get("timeout"), timeout, minimum=1)
+        fp_retries = _safe_policy_int(fp_cli.get("max_retries"), retries, minimum=0)
+        product_name = str(threat.get("product_mcp_name") or "product-info")
+        product_timeout = _safe_policy_int(
+            threat.get("product_mcp_detection_timeout_seconds"), 60, minimum=1
+        )
+        return {
+            "schema_version": 2,
+            "base": {
+                "tool": opencode.get("tool", "nga"),
+                "executable": opencode.get("executable", "nga"),
+                "no_proxy": legacy.get("no_proxy") or opencode.get("no_proxy") or "10.0.0.0/8",
+            },
+            "model_pool": {
+                "global_concurrency": legacy.get("opencode_concurrency", 4),
+                "models": models,
+            },
+            "threat_analysis": {
+                "enabled": threat.get("enabled", True),
+                "attack_path_audit_mode": threat.get("attack_path_audit_mode", "after_analysis"),
+                "model_policy": {
+                    "required_capability": "high",
+                    "timeout_seconds": timeout,
+                    "max_retries": 3,
+                },
+            },
+            "product_info": {
+                "enabled": False,
+                "name": product_name,
+                "timeout_seconds": product_timeout,
+            },
+            "vulnerability_mining": {
+                "required_capability": "any",
+                "timeout_seconds": timeout,
+                "max_retries": retries,
+            },
+            "false_positive": {
+                "required_capability": "high",
+                "timeout_seconds": fp_timeout,
+                "max_retries": fp_retries,
+            },
+            "vulnerability_validation": {"environments": {}},
+        }
+
+    @property
+    def no_proxy(self) -> str:
+        return self.base.no_proxy
+
+    @property
+    def opencode_concurrency(self) -> int:
+        return self.model_pool.global_concurrency
+
+    @property
+    def opencode(self) -> AgentOpenCodeConfig:
+        return AgentOpenCodeConfig(
+            tool=self.base.tool,
+            executable=self.base.executable,
+            timeout=self.vulnerability_mining.timeout_seconds,
+            max_retries=self.vulnerability_mining.max_retries,
+            models=self.model_pool.models,
+            no_proxy=self.base.no_proxy,
+        )
 
 
 class CreateScanRequest(BaseModel):
     """Request to create a new scan via a registered agent."""
-    agent_id: str
+    agent_key: str = ""
+    agent_id: str = ""  # compatibility for older callers
     project_path: str
     code_scan_path: str = ""
     scan_name: str = ""
@@ -747,6 +951,7 @@ class ScanMeta(BaseModel):
     scan_mode: str = "full"
     feedback_ids: list[str] = []
     agent_id: str = ""
+    agent_key: str = ""
     agent_name: str = ""
     project_path: str = ""
     code_scan_path: str = ""

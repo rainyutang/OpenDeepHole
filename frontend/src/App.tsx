@@ -3,6 +3,7 @@ import { getStoredUser, isAuthenticated, logout, setPublicScanAccess } from "./a
 import ScanStatusView from "./components/ScanStatus";
 import ScanHistory from "./components/ScanHistory";
 import AgentDownload from "./components/AgentDownload";
+import AgentConfigPage from "./components/AgentConfigPage";
 import NewScanForm from "./components/NewScanForm";
 import LoginPage from "./components/LoginPage";
 import RegisterPage from "./components/RegisterPage";
@@ -11,7 +12,7 @@ import AdminCheckerDashboard from "./components/AdminCheckerDashboard";
 import CheckerCatalogPage from "./components/CheckerCatalogPage";
 import type { User } from "./types";
 
-type Page = "history" | "newScan" | "scanning" | "agent" | "users" | "checkerDashboard" | "checkerCatalog";
+type Page = "history" | "newScan" | "scanning" | "agent" | "agentConfig" | "users" | "checkerDashboard" | "checkerCatalog";
 type AuthPage = "login" | "register";
 
 function parsePublicScanAccess(): { scanId: string; token: string } | null {
@@ -100,6 +101,7 @@ export default function App() {
         <ScanHistory
           onViewScan={handleViewScan}
           onDownloadAgent={() => setPage("agent")}
+          onAgentConfig={() => setPage("agentConfig")}
           onNewScan={() => setPage("newScan")}
           user={user}
           onLogout={handleLogout}
@@ -116,6 +118,9 @@ export default function App() {
       )}
       {page === "agent" && (
         <AgentDownload onBack={handleBack} />
+      )}
+      {page === "agentConfig" && (
+        <AgentConfigPage onBack={handleBack} />
       )}
       {page === "users" && (
         <UserManagement onBack={handleBack} user={user} />

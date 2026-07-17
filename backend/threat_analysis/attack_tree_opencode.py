@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
+from backend.config import get_config
 from backend.models import ThreatAnalysis, ThreatAnalysisSources, ThreatAttackPath
 
 from .attack_paths import (
@@ -646,7 +647,11 @@ async def _invoke_stage(
     task_context = {"task_type": "threat_analysis", "stage": skill_name}
     if planned_task_id:
         task_context["planned_task_id"] = planned_task_id
-    max_attempts = 1 + _STAGE_FAILURE_RETRIES
+    try:
+        stage_retries = max(0, int(get_config().threat_analysis_policy.max_retries))
+    except Exception:
+        stage_retries = _STAGE_FAILURE_RETRIES
+    max_attempts = 1 + stage_retries
     last_error: Exception | None = None
     for stage_attempt in range(1, max_attempts + 1):
         if _cancelled(cancel_event):
@@ -663,11 +668,12 @@ async def _invoke_stage(
             )
         if on_output:
             retry_note = (
-                f" 重试 {stage_attempt - 1}/{_STAGE_FAILURE_RETRIES}"
+                f" 重试 {stage_attempt - 1}/{stage_retries}"
                 if stage_attempt > 1
                 else ""
             )
             on_output(f"[威胁分析] {task_label}{retry_note}")
+        model_completed = False
         try:
             await opencode_runner._invoke_opencode(
                 stage_prompt,
@@ -688,18 +694,21 @@ async def _invoke_stage(
                 },
                 attempt=0,
             )
+            model_completed = True
             _validate_stage_output(skill_name, read_json_object(output_path))
             return
         except asyncio.CancelledError:
             raise
         except opencode_runner.NoAvailableModelError as exc:
             last_error = exc
-            if stage_attempt >= max_attempts:
-                write_json(output_path, {"error": str(exc)})
-                raise
+            write_json(output_path, {"error": str(exc)})
+            raise
         except Exception as exc:
             last_error = exc
-            if stage_attempt >= max_attempts:
+            # OpenCodeTaskService already consumed the configured fresh-session
+            # retries for execution failures.  This outer loop is only for a
+            # completed model call that failed to write valid stage JSON.
+            if not model_completed or stage_attempt >= max_attempts:
                 break
         if on_output:
             on_output(
@@ -709,7 +718,7 @@ async def _invoke_stage(
     failure = str(last_error or "unknown error")
     if on_output:
         on_output(
-            f"[威胁分析] {task_label} 失败，已重试 {_STAGE_FAILURE_RETRIES} 次，"
+            f"[威胁分析] {task_label} 失败，已重试 {stage_retries} 次，"
             f"继续后续可用结果：{failure}"
         )
     write_json(output_path, {"error": failure})

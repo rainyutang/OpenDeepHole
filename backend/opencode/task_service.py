@@ -439,12 +439,14 @@ class OpenCodeTaskService:
         combined_cancel = _CombinedCancelEvent(record.cancel_event, spec.cancel_event)
         cli_config_source = lambda: _task_cli_config(record.execution_context)
         global_concurrency = lambda: configured_global_concurrency(get_config())
+        task_policy = _task_model_policy(record.execution_context)
         configured_retry_count = int(
             _cfg_value(_task_cli_config(record.execution_context), "max_retries", 2) or 0
         )
-        fresh_retry_count = (
-            configured_retry_count if spec.attempt is None else int(spec.attempt)
-        )
+        if task_policy is not None:
+            fresh_retry_count = int(_cfg_value(task_policy, "max_retries", 0) or 0)
+        else:
+            fresh_retry_count = configured_retry_count if spec.attempt is None else int(spec.attempt)
         total_session_attempts = fresh_retry_count + 1
         accumulated_duration = 0.0
         first_session_id = str(spec.session_id or "")
@@ -454,7 +456,8 @@ class OpenCodeTaskService:
         last_model = ""
         last_source = OutputSource()
 
-        for session_attempt in range(1, total_session_attempts + 1):
+        session_attempt = 1
+        while session_attempt <= total_session_attempts:
             lease: ModelLease | None = None
             attempt_started = 0.0
             attempt_outcome = "failure"
@@ -476,7 +479,7 @@ class OpenCodeTaskService:
                 lease = await acquire_model_lease(
                     cli_config_source,
                     global_concurrency=global_concurrency,
-                    required_capability=spec.required_capability,
+                    required_capability=_effective_required_capability(record.execution_context, spec),
                     prefer_high=False,
                     cancel_event=combined_cancel,
                     stats_scope_id=record.execution_context.scan_id,
@@ -501,6 +504,15 @@ class OpenCodeTaskService:
                         duration_seconds=accumulated_duration,
                     )
                     return
+
+                if (
+                    session_attempt == 1
+                    and task_policy is None
+                    and spec.attempt is None
+                    and lease.option.max_retries is not None
+                ):
+                    fresh_retry_count = max(0, int(lease.option.max_retries))
+                    total_session_attempts = fresh_retry_count + 1
 
                 record.status = "running"
                 if not record.started_at:
@@ -542,7 +554,8 @@ class OpenCodeTaskService:
                 system_prompt = _task_system_prompt(record)
                 permissions = _task_permissions(record)
                 timeout_seconds = (
-                    spec.timeout_seconds
+                    (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
+                    or spec.timeout_seconds
                     or lease.option.timeout
                     or int(_cfg_value(_task_cli_config(record.execution_context), "timeout", 1200))
                 )
@@ -564,6 +577,7 @@ class OpenCodeTaskService:
                                 session_id=session_id or None,
                                 session_title=spec.task_name,
                                 mcp_tools=None,
+                                disabled_mcp_tools=_disabled_source_mcp_tools(spec.directory),
                                 system_prompt=system_prompt,
                                 permissions=permissions,
                                 return_details=True,
@@ -706,6 +720,7 @@ class OpenCodeTaskService:
                         f"[session-retry {session_attempt}/{fresh_retry_count}] "
                         f"{retry_reason}; requeueing with a new session"
                     )
+                session_attempt += 1
                 continue
 
             self._finish_record(
@@ -768,7 +783,7 @@ class OpenCodeTaskService:
             model=model,
             use_default_model=bool(lease.option.use_default_model),
             capability=lease.option.capability,
-            required_capability=spec.required_capability,
+            required_capability=_effective_required_capability(record.execution_context, spec),
             task_id=record_task_id(lease),
             attempt=session_attempt,
             started_at=lease.started_at_iso,
@@ -885,6 +900,59 @@ def _task_cli_config(context: OpenCodeExecutionContext) -> Any:
     return config.opencode
 
 
+def _task_model_policy(context: OpenCodeExecutionContext) -> Any | None:
+    """Return the authoritative phase policy for a model-backed task."""
+    config = get_config()
+    task_type = str(context.task_metadata.get("task_type") or "").strip()
+    if task_type == "threat_analysis":
+        return getattr(config, "threat_analysis_policy", None)
+    if task_type in {
+        "audit",
+        "project_audit",
+        "sensitive_clear",
+        "report_audit",
+        "threat_audit",
+    }:
+        return getattr(config, "vulnerability_mining", None)
+    if task_type == "fp_review":
+        return getattr(config, "false_positive", None)
+    if task_type in {"vulnerability_validation", "validation"}:
+        environment = str(context.task_metadata.get("validation_environment") or "").strip()
+        validation = getattr(config, "vulnerability_validation", None)
+        environments = _cfg_value(validation, "environments", {}) or {}
+        env_config = environments.get(environment) if isinstance(environments, dict) else None
+        return _cfg_value(env_config, "model_policy") if env_config is not None else None
+    # Unclassified tasks intentionally retain per-model/task timeout and retry
+    # behavior because the Agent configuration page has no policy for them.
+    return None
+
+
+def _effective_required_capability(
+    context: OpenCodeExecutionContext,
+    spec: OpenCodeTaskSpec,
+) -> str:
+    policy = _task_model_policy(context)
+    if policy is None:
+        return spec.required_capability
+    return str(_cfg_value(policy, "required_capability", spec.required_capability) or "any")
+
+
+def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
+    config = get_config()
+    code_graph = getattr(config, "code_graph", None)
+    name = str(_cfg_value(code_graph, "name", "codegraph") or "codegraph")
+    if not bool(_cfg_value(code_graph, "enabled", False)):
+        return (name,)
+    try:
+        from agent.codegraph import is_codegraph_mcp_available, is_codegraph_ready
+
+        if is_codegraph_mcp_available(config) and is_codegraph_ready(directory):
+            return ("deephole-code",)
+    except Exception:
+        pass
+    return (name,)
+
+
 def _model_pool_task_context(
     record: _TaskRecord,
     *,
@@ -933,6 +1001,12 @@ def _task_system_prompt(record: _TaskRecord) -> str:
     from backend.opencode.feedback_format import format_feedback_experience
 
     sections: list[str] = []
+    if "deephole-code" in _disabled_source_mcp_tools(record.spec.directory):
+        sections.append(
+            "## CodeGraph project scope\n\n"
+            f"CodeGraph is the active source-query MCP. Pass projectPath={record.spec.directory.resolve()} "
+            "to CodeGraph tools whenever the tool accepts a project path."
+        )
     checker = str(record.execution_context.task_metadata.get("checker") or "").strip()
     if checker:
         matching = [

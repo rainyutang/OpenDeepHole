@@ -351,6 +351,23 @@ CREATE TABLE IF NOT EXISTS users (
     created_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agents (
+    agent_key             TEXT PRIMARY KEY,
+    user_id               TEXT NOT NULL DEFAULT '',
+    ip                    TEXT NOT NULL,
+    machine_name          TEXT NOT NULL,
+    display_name          TEXT NOT NULL DEFAULT '',
+    config_json           TEXT NOT NULL DEFAULT '{}',
+    validator_catalog_json TEXT NOT NULL DEFAULT '{}',
+    last_agent_id         TEXT NOT NULL DEFAULT '',
+    last_seen             TEXT NOT NULL DEFAULT '',
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL,
+    UNIQUE(user_id, ip, machine_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_user ON agents(user_id, updated_at);
+
 CREATE TABLE IF NOT EXISTS agent_opencode_pool_models (
     agent_name      TEXT NOT NULL,
     user_id         TEXT NOT NULL DEFAULT '',
@@ -423,6 +440,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN agent_id TEXT DEFAULT ''")
         if "agent_name" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN agent_name TEXT DEFAULT ''")
+        if "agent_key" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN agent_key TEXT DEFAULT ''")
         if "project_path" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN project_path TEXT DEFAULT ''")
         if "code_scan_path" not in cols:
@@ -838,6 +857,7 @@ class SqliteScanStore(ScanStoreBase):
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
+            agent_key=row["agent_key"] if row["agent_key"] is not None else "",
             agent_name=row["agent_name"] if row["agent_name"] is not None else "",
             project_path=row["project_path"] if row["project_path"] is not None else "",
             code_scan_path=row["code_scan_path"] if row["code_scan_path"] is not None else "",
@@ -866,9 +886,9 @@ class SqliteScanStore(ScanStoreBase):
                      progress, total_candidates, processed_candidates,
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
-                     user_id, agent_name, agent_id, project_path, code_scan_path, scan_name,
+                     user_id, agent_name, agent_id, agent_key, project_path, code_scan_path, scan_name,
                      scan_mode, product, validation_environment, public_access_token, opencode_pool)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -888,6 +908,7 @@ class SqliteScanStore(ScanStoreBase):
                     meta.user_id,
                     meta.agent_name,
                     meta.agent_id,
+                    meta.agent_key,
                     meta.project_path,
                     meta.code_scan_path,
                     meta.scan_name,
@@ -1266,13 +1287,20 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(sql, params)
             self._conn.commit()
 
-    def update_scan_agent(self, scan_id: str, agent_id: str, agent_name: str = "") -> None:
+    def update_scan_agent(
+        self,
+        scan_id: str,
+        agent_id: str,
+        agent_name: str = "",
+        agent_key: str = "",
+    ) -> None:
         """Update the agent_id (and optionally agent_name) for a scan."""
         with self._lock:
-            if agent_name:
+            if agent_name or agent_key:
                 self._conn.execute(
-                    "UPDATE scans SET agent_id = ?, agent_name = ? WHERE scan_id = ?",
-                    (agent_id, agent_name, scan_id),
+                    "UPDATE scans SET agent_id = ?, agent_name = CASE WHEN ? != '' THEN ? ELSE agent_name END, "
+                    "agent_key = CASE WHEN ? != '' THEN ? ELSE agent_key END WHERE scan_id = ?",
+                    (agent_id, agent_name, agent_name, agent_key, agent_key, scan_id),
                 )
             else:
                 self._conn.execute(
@@ -2897,6 +2925,110 @@ class SqliteScanStore(ScanStoreBase):
     def list_users(self) -> list[UserInDB]:
         cur = self._conn.execute("SELECT * FROM users ORDER BY created_at")
         return [self._row_to_user(row) for row in cur.fetchall()]
+
+    # -- Persistent Agent catalog/config --
+
+    def find_agent_record(self, user_id: str, ip: str, machine_name: str) -> dict | None:
+        cur = self._conn.execute(
+            "SELECT * FROM agents WHERE user_id = ? AND ip = ? AND machine_name = ?",
+            (user_id or "", ip, machine_name),
+        )
+        row = cur.fetchone()
+        return None if row is None else dict(row)
+
+    def get_agent_record(self, agent_key: str) -> dict | None:
+        cur = self._conn.execute("SELECT * FROM agents WHERE agent_key = ?", (agent_key,))
+        row = cur.fetchone()
+        return None if row is None else dict(row)
+
+    def list_agent_records(self, user_id: str | None = None) -> list[dict]:
+        if user_id is None:
+            cur = self._conn.execute("SELECT * FROM agents ORDER BY updated_at DESC")
+        else:
+            cur = self._conn.execute(
+                "SELECT * FROM agents WHERE user_id = ? ORDER BY updated_at DESC",
+                (user_id,),
+            )
+        return [dict(row) for row in cur.fetchall()]
+
+    def upsert_agent_record(
+        self,
+        *,
+        agent_key: str,
+        user_id: str,
+        ip: str,
+        machine_name: str,
+        display_name: str,
+        agent_id: str,
+        last_seen: str,
+        initial_config_json: str = "{}",
+        validator_catalog_json: str = "{}",
+    ) -> dict:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO agents
+                    (agent_key, user_id, ip, machine_name, display_name, config_json,
+                     validator_catalog_json, last_agent_id, last_seen, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, ip, machine_name) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    last_agent_id = excluded.last_agent_id,
+                    last_seen = excluded.last_seen,
+                    validator_catalog_json = CASE
+                        WHEN excluded.validator_catalog_json = '{}' THEN agents.validator_catalog_json
+                        ELSE excluded.validator_catalog_json
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    agent_key,
+                    user_id or "",
+                    ip,
+                    machine_name,
+                    display_name,
+                    initial_config_json,
+                    validator_catalog_json,
+                    agent_id,
+                    last_seen,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+        record = self.find_agent_record(user_id, ip, machine_name)
+        assert record is not None
+        return record
+
+    def update_agent_config_record(self, agent_key: str, config_json: str) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE agents SET config_json = ?, updated_at = ? WHERE agent_key = ?",
+                (config_json, now, agent_key),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def update_agent_catalog_record(self, agent_key: str, catalog_json: str) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE agents SET validator_catalog_json = ?, updated_at = ? WHERE agent_key = ?",
+                (catalog_json, now, agent_key),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def touch_agent_record(self, agent_key: str, agent_id: str, last_seen: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE agents SET last_agent_id = ?, last_seen = ?, updated_at = ? WHERE agent_key = ?",
+                (agent_id, last_seen, last_seen, agent_key),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
 
     def delete_user(self, user_id: str) -> bool:
         with self._lock:

@@ -342,8 +342,12 @@ def _selected_feedback_entries(scan_id: str, feedback_ids: list[str] | None = No
 
 
 def _resolve_scan_agent_id(meta: ScanMeta) -> str | None:
-    from backend.api.agent import _agent_ws, _registered_agents
+    from backend.api.agent import _agent_ws, _registered_agents, resolve_agent_connection
 
+    if meta.agent_key:
+        resolved = resolve_agent_connection(meta.agent_key)
+        if resolved is not None:
+            return resolved[0]
     agent_id = meta.agent_id
     if agent_id and agent_id in _agent_ws:
         return agent_id
@@ -567,15 +571,34 @@ async def create_agent_scan(
     enforce_agent_owner: bool = True,
 ) -> ScanStartResponse:
     """Create a new scan and dispatch it to the specified agent daemon."""
-    from backend.api.agent import _registered_agents
+    from backend.api.agent import (
+        _registered_agents,
+        agent_config_has_explicit_model,
+        get_managed_agent_config,
+        resolve_agent_connection,
+    )
 
-    agent = _registered_agents.get(body.agent_id)
+    selected_agent_key = body.agent_key.strip()
+    resolved = resolve_agent_connection(selected_agent_key) if selected_agent_key else None
+    if resolved is not None:
+        agent_id, agent = resolved
+    else:
+        agent_id = body.agent_id.strip()
+        agent = _registered_agents.get(agent_id)
+        if agent is not None:
+            selected_agent_key = agent.agent_key
     if agent is None:
-        raise HTTPException(status_code=404, detail=f"Agent '{body.agent_id}' not found or not registered")
+        raise HTTPException(status_code=404, detail="所选 Agent 不在线")
 
     # Verify the agent belongs to this user (or user is admin)
     if enforce_agent_owner and current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Agent does not belong to you")
+    managed_config = get_managed_agent_config(selected_agent_key) if selected_agent_key else None
+    if managed_config is not None and not agent_config_has_explicit_model(managed_config):
+        raise HTTPException(
+            status_code=400,
+            detail="所选 Agent 尚未配置启用的显式模型，请先在 Agent 配置页面手动添加模型",
+        )
 
     scan_mode = _normalize_scan_mode(body.scan_mode)
     selected_checkers = checker_names if checker_names is not None else body.checkers
@@ -596,6 +619,20 @@ async def create_agent_scan(
         body.product,
         body.validation_environment,
     )
+    if selected_agent_key and product and validation_environment:
+        import json as _json
+        record = get_scan_store().get_agent_record(selected_agent_key)
+        try:
+            registrations = (_json.loads(str(record.get("validator_catalog_json") or "{}")) if record else {}).get("registrations", [])
+        except Exception:
+            registrations = []
+        if not any(
+            str(item.get("product") or "") == product
+            and str(item.get("environment") or "") == validation_environment
+            for item in registrations
+            if isinstance(item, dict)
+        ):
+            raise HTTPException(status_code=400, detail=f"所选 Agent 不支持验证环境：{product}/{validation_environment}")
 
     scan = ScanStatus(
         scan_id=scan_id,
@@ -618,7 +655,8 @@ async def create_agent_scan(
         created_at=now,
         scan_mode=scan_mode,
         feedback_ids=body.feedback_ids,
-        agent_id=body.agent_id,
+        agent_id=agent_id,
+        agent_key=selected_agent_key,
         agent_name=agent.name,
         project_path=project_path,
         code_scan_path=code_scan_path,
@@ -637,7 +675,7 @@ async def create_agent_scan(
     # Dispatch to agent via WebSocket
     from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
     feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, body.feedback_ids)]
-    ok = await send_agent_command(body.agent_id, {
+    ok = await send_agent_command(agent_id, {
         "type": "task",
         "scan_id": scan_id,
         "project_path": project_path,
@@ -655,12 +693,12 @@ async def create_agent_scan(
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
         scan.status = ScanItemStatus.ERROR
         _running_scans.pop(scan_id, None)
-        logger.error("Failed to dispatch scan %s: agent %s not connected", scan_id, body.agent_id)
+        logger.error("Failed to dispatch scan %s: agent %s not connected", scan_id, agent_id)
         raise HTTPException(status_code=502, detail="Agent not connected")
 
     logger.info(
         "Created scan %s for project '%s', dispatched to agent %s (%s)",
-        scan_id, scan_name, body.agent_id, agent.ip,
+        scan_id, scan_name, agent_id, agent.ip,
     )
     return ScanStartResponse(scan_id=scan_id)
 
@@ -812,7 +850,7 @@ async def stop_scan(
 
     # Resolve agent_id BEFORE popping from memory
     meta = store.get_scan_meta(scan_id)
-    agent_id = meta.agent_id if meta else ""
+    agent_id = _resolve_scan_agent_id(meta) if meta else ""
 
     # Immediately mark as CANCELLED in DB and in-memory
     store.update_scan_progress(
@@ -846,7 +884,12 @@ async def _continue_scan(
 ) -> ScanStartResponse:
     """Continue all unfinished and retryable work for one scan."""
     _check_scan_owner(scan_id, current_user)
-    from backend.api.agent import _registered_agents
+    from backend.api.agent import (
+        _registered_agents,
+        agent_config_has_explicit_model,
+        get_managed_agent_config,
+        resolve_agent_connection,
+    )
 
     if scan_id in _running_scans:
         raise HTTPException(status_code=400, detail="Scan is already running")
@@ -884,8 +927,12 @@ async def _continue_scan(
         threat_task_ids = [task.task_id for task in incomplete_threat_tasks]
 
     # Only allow resume when the original agent (by name) is online
-    agent_id = meta.agent_id
-    agent = _registered_agents.get(agent_id) if agent_id else None
+    stable = resolve_agent_connection(meta.agent_key) if meta.agent_key else None
+    if stable is not None:
+        agent_id, agent = stable
+    else:
+        agent_id = meta.agent_id
+        agent = _registered_agents.get(agent_id) if agent_id else None
 
     # If original agent_id is stale (reconnected), find it by name
     if agent is None and meta.agent_name:
@@ -903,11 +950,17 @@ async def _continue_scan(
             detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
 
+    if meta.agent_key and not agent_config_has_explicit_model(get_managed_agent_config(meta.agent_key)):
+        raise HTTPException(
+            status_code=400,
+            detail="扫描关联的 Agent 尚未配置启用的显式模型，请先完成 Agent 模型配置",
+        )
+
     # Update scan meta with new agent_id if it changed
     if agent_id != meta.agent_id:
         meta.agent_id = agent_id
         meta.agent_name = agent.name
-        store.update_scan_agent(scan_id, agent_id, agent.name)
+        store.update_scan_agent(scan_id, agent_id, agent.name, agent.agent_key)
 
     total_candidates = scan.total_candidates or len(scan.candidates) or len(scan.vulnerabilities)
     if candidate_payload is None:
@@ -1365,6 +1418,19 @@ async def _trigger_vulnerability_validation(
             status_code=400,
             detail="Scan has no configured product validation target",
         )
+    if meta.agent_key:
+        from backend.api.agent import get_managed_agent_config
+
+        env_config = get_managed_agent_config(meta.agent_key).vulnerability_validation.environments.get(
+            validation_environment
+        )
+        if env_config is not None:
+            supported = {str(item).strip().casefold() for item in env_config.supported_vulnerability_types}
+            if "*" not in supported and vuln.vuln_type.strip().casefold() not in supported:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"验证环境 {validation_environment} 不支持漏洞类型 {vuln.vuln_type}",
+                )
 
     existing = next((item for item in scan.validations if item.vuln_index == idx), None)
     if existing is not None and existing.running:
@@ -1379,7 +1445,7 @@ async def _trigger_vulnerability_validation(
             detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
     if agent_id != meta.agent_id:
-        store.update_scan_agent(scan_id, agent_id, meta.agent_name)
+        store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
 
     now = _now_iso()
     validation = store.upsert_vulnerability_validation(
@@ -1472,7 +1538,7 @@ async def _stop_vulnerability_validation(scan_id: str, idx: int) -> dict:
     agent_id = _resolve_scan_agent_id(meta)
     if active and agent_id is not None:
         if agent_id != meta.agent_id:
-            store.update_scan_agent(scan_id, agent_id, meta.agent_name)
+            store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
         await send_agent_command(agent_id, {
             "type": "vulnerability_validation_stop",
             "scan_id": scan_id,
@@ -1862,7 +1928,7 @@ async def _start_fp_review(
 
     # Update stored agent_id if it changed
     if agent_id != meta.agent_id:
-        store.update_scan_agent(scan_id, agent_id, meta.agent_name)
+        store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
 
     feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
 

@@ -86,6 +86,40 @@ class ThreatAnalysisConfig(BaseModel):
     product_mcp_detection_timeout_seconds: int = 60
 
 
+class ModelTaskPolicyConfig(BaseModel):
+    required_capability: str = "high"
+    timeout_seconds: int = 1200
+    max_retries: int = 2
+
+
+class McpLocalConfig(BaseModel):
+    executable: str = ""
+    args: list[str] = []
+    environment: dict[str, str] = {}
+
+
+class McpRemoteConfig(BaseModel):
+    url: str = ""
+    headers: dict[str, str] = {}
+
+
+class McpConfig(BaseModel):
+    enabled: bool = False
+    name: str = ""
+    transport: str = "local"
+    timeout_seconds: int = 300
+    local: McpLocalConfig = McpLocalConfig()
+    remote: McpRemoteConfig = McpRemoteConfig()
+
+
+class ValidationEnvironmentConfig(BaseModel):
+    supported_vulnerability_types: list[str] = ["*"]
+    concurrency: int = 1
+    validation_max_retries: int = 0
+    model_policy: ModelTaskPolicyConfig = ModelTaskPolicyConfig()
+    methods: dict[str, dict[str, object]] = {}
+
+
 class PatternFilterConfig(BaseModel):
     enabled: bool = True
     scope: str = "directory"        # directory | file | repo
@@ -94,6 +128,7 @@ class PatternFilterConfig(BaseModel):
 class VulnerabilityValidationConfig(BaseModel):
     enabled: bool = True
     timeout_seconds: int = 7200
+    environments: dict[str, ValidationEnvironmentConfig] = {}
 
 
 class StorageConfig(BaseModel):
@@ -127,6 +162,15 @@ class AppConfig(BaseModel):
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
     git_history: GitHistoryConfig = GitHistoryConfig()
     threat_analysis: ThreatAnalysisConfig = ThreatAnalysisConfig()
+    threat_analysis_policy: ModelTaskPolicyConfig = ModelTaskPolicyConfig(
+        required_capability="high", max_retries=3
+    )
+    vulnerability_mining: ModelTaskPolicyConfig = ModelTaskPolicyConfig(
+        required_capability="any"
+    )
+    false_positive: ModelTaskPolicyConfig = ModelTaskPolicyConfig()
+    code_graph: McpConfig = McpConfig(name="codegraph")
+    product_info: McpConfig = McpConfig(name="product-info")
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = PatternFilterConfig()
     vulnerability_validation: VulnerabilityValidationConfig = VulnerabilityValidationConfig()

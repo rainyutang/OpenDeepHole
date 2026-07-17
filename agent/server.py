@@ -28,10 +28,10 @@ _fp_review_cancel_events: dict[str, threading.Event] = {}
 _fp_review_scan_ids: dict[str, str] = {}
 _fp_review_queues: dict[str, deque["_FpReviewQueueItem"]] = {}
 _fp_review_active_items: set[tuple[str, int]] = set()
-_validation_tasks: dict[tuple[str, int], asyncio.Task] = {}
+_validation_tasks: dict[tuple[str, int], asyncio.Future] = {}
 _validation_cancel_events: dict[tuple[str, int], threading.Event] = {}
 _validation_queues: dict[str, deque["_ValidationQueueItem"]] = {}
-_validation_workers: dict[str, asyncio.Task] = {}
+_validation_workers: dict[str, set[asyncio.Task]] = {}
 
 
 @dataclass
@@ -441,7 +441,7 @@ async def handle_vulnerability_validation(
     vulnerability: dict,
     report_markdown: str,
 ) -> None:
-    """Handle a 'vulnerability_validation' command — queue local validation by scan."""
+    """Handle a validation command using the Agent-wide environment queue."""
     await enqueue_vulnerability_validation(
         scan_id=scan_id,
         vuln_index=vuln_index,
@@ -498,14 +498,13 @@ async def enqueue_vulnerability_validation(
     if report_queued:
         await _report_validation_queued(item)
 
-    queue = _validation_queues.setdefault(scan_id, deque())
+    environment_key = validation_environment.strip()
+    queue = _validation_queues.setdefault(environment_key, deque())
     queue.append(item)
-    worker = _validation_workers.get(scan_id)
-    if worker is None or worker.done():
-        worker = asyncio.create_task(_run_validation_worker(scan_id))
-        _validation_workers[scan_id] = worker
-    _validation_tasks[task_key] = worker
+    marker = asyncio.get_running_loop().create_future()
+    _validation_tasks[task_key] = marker
     _validation_cancel_events[task_key] = cancel_event
+    _pump_validation_environment(environment_key)
 
     path_hint = f" ({project_path})" if project_path else ""
     print(f"Queued vulnerability validation {scan_id}#{vuln_index}{path_hint}")
@@ -534,32 +533,100 @@ async def _report_validation_queued(item: _ValidationQueueItem) -> None:
         print(f"Warning: failed to report queued validation {item.scan_id}#{item.vuln_index}: {exc}")
 
 
-async def _run_validation_worker(scan_id: str) -> None:
-    """Run one vulnerability validation at a time for a scan."""
+def _validation_environment_capacity(item: _ValidationQueueItem) -> int:
+    environments = getattr(item.config.vulnerability_validation, "environments", {}) or {}
+    environment = environments.get(item.validation_environment)
+    return max(1, int(getattr(environment, "concurrency", 1) or 1))
+
+
+def _pump_validation_environment(environment_key: str) -> None:
+    queue = _validation_queues.get(environment_key)
+    workers = _validation_workers.setdefault(environment_key, set())
+    workers.difference_update(task for task in workers if task.done())
+    while queue:
+        capacity = _validation_environment_capacity(queue[0])
+        if len(workers) >= capacity:
+            break
+        item = queue.popleft()
+        task_key = (item.scan_id, item.vuln_index)
+        task = asyncio.create_task(
+            _run_validation_item(environment_key, item),
+            name=f"validation-{environment_key}-{item.scan_id}-{item.vuln_index}",
+        )
+        workers.add(task)
+        _validation_tasks[task_key] = task
+        task.add_done_callback(
+            lambda done, env=environment_key, queued=item: asyncio.create_task(
+                _finish_validation_item(env, queued, done)
+            )
+        )
+    if queue is not None and not queue:
+        _validation_queues.pop(environment_key, None)
+
+
+def refresh_validation_scheduling() -> None:
+    """Apply live environment-concurrency changes to pending validations."""
+    for environment_key in list(_validation_queues):
+        _pump_validation_environment(environment_key)
+
+
+async def _run_validation_item(environment_key: str, item: _ValidationQueueItem) -> None:
+    try:
+        if item.cancel_event.is_set():
+            print(f"Skipping cancelled validation {item.scan_id}#{item.vuln_index}")
+            await _report_validation_cancelled(item)
+            return
+        await _run_single_validation(item)
+    except asyncio.CancelledError:
+        item.cancel_event.set()
+        await _report_validation_cancelled(item)
+        raise
+
+
+async def _finish_validation_item(
+    environment_key: str,
+    item: _ValidationQueueItem,
+    task: asyncio.Task,
+) -> None:
+    workers = _validation_workers.get(environment_key)
+    if workers is not None:
+        workers.discard(task)
+        if not workers:
+            _validation_workers.pop(environment_key, None)
+    task_key = (item.scan_id, item.vuln_index)
+    _validation_tasks.pop(task_key, None)
+    _validation_cancel_events.pop(task_key, None)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        print(f"[validation] worker task failed: {exc}")
+    _pump_validation_environment(environment_key)
+
+
+async def _run_validation_worker(queue_key: str) -> None:
+    """Compatibility test/helper for draining one queue sequentially.
+
+    Production scheduling uses the Agent-wide environment pump above.
+    """
     try:
         while True:
-            queue = _validation_queues.get(scan_id)
+            queue = _validation_queues.get(queue_key)
             if not queue:
                 return
             item = queue.popleft()
             task_key = (item.scan_id, item.vuln_index)
             try:
                 if item.cancel_event.is_set():
-                    print(f"Skipping cancelled validation {item.scan_id}#{item.vuln_index}")
                     await _report_validation_cancelled(item)
-                    continue
-                await _run_single_validation(item)
+                else:
+                    await _run_single_validation(item)
             finally:
                 _validation_tasks.pop(task_key, None)
                 _validation_cancel_events.pop(task_key, None)
     finally:
-        queue = _validation_queues.pop(scan_id, None)
-        if queue is not None:
-            for queued in queue:
-                task_key = (queued.scan_id, queued.vuln_index)
-                _validation_tasks.pop(task_key, None)
-                _validation_cancel_events.pop(task_key, None)
-        _validation_workers.pop(scan_id, None)
+        _validation_queues.pop(queue_key, None)
 
 
 async def _report_validation_cancelled(item: _ValidationQueueItem) -> None:

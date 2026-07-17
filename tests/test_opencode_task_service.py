@@ -76,12 +76,15 @@ def _source() -> OutputSource:
     )
 
 
-def _service_patches(manager, *, max_retries: int = 2):
+def _service_patches(manager, *, max_retries: int = 2, runtime_config=None):
     async def acquire(*_args, **kwargs):
         return _lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"])
 
     return (
-        patch("backend.opencode.task_service.get_config", return_value=_config(max_retries=max_retries)),
+        patch(
+            "backend.opencode.task_service.get_config",
+            return_value=runtime_config or _config(max_retries=max_retries),
+        ),
         patch("backend.opencode.task_service.acquire_model_lease", side_effect=acquire),
         patch("backend.opencode.task_service.release_model_lease", new=AsyncMock()),
         patch("backend.opencode.task_service.update_model_lease_context", new=AsyncMock()),
@@ -189,6 +192,63 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert acquire_kwargs["task_context"]["task_type"] == "audit"
         assert acquire_kwargs["task_context"]["session_attempt"] == 1
         assert callable(acquire_kwargs["global_concurrency"])
+
+    asyncio.run(run())
+
+
+def test_phase_policy_overrides_task_and_model_capability_timeout_and_retries(tmp_path: Path) -> None:
+    async def run() -> None:
+        calls: list[dict] = []
+
+        async def run_prompt(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("transient")
+            callback = kwargs["on_session_id"]("ses-policy")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-policy",
+                message_id="msg-policy",
+                lines=["ok"],
+                text="ok",
+                model="provider/model-low",
+            )
+
+        runtime_config = _config(max_retries=9)
+        runtime_config.vulnerability_mining = SimpleNamespace(
+            required_capability="high",
+            timeout_seconds=77,
+            max_retries=1,
+        )
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager, runtime_config=runtime_config)
+        with patches[0], patches[1] as acquire_mock, patches[2], patches[3], patches[4], patches[5]:
+            with bind_opencode_execution_context(
+                task_metadata={"task_type": "threat_audit"},
+            ):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="policy",
+                    prompt="test",
+                    directory=tmp_path,
+                    required_capability="low",
+                    timeout_seconds=12,
+                    attempt=7,
+                    output_retry_count=0,
+                ))
+
+        assert result.status == "success"
+        assert len(calls) == 2
+        assert [call["timeout"] for call in calls] == [77, 77]
+        assert acquire_mock.await_count == 2
+        assert all(
+            call.kwargs["required_capability"] == "high"
+            for call in acquire_mock.await_args_list
+        )
 
     asyncio.run(run())
 

@@ -46,18 +46,17 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 7200)
         self.assertEqual(cfg.opencode_concurrency, 4)
 
-    def test_backend_and_remote_git_history_defaults_are_disabled(self) -> None:
+    def test_backend_and_remote_v2_defaults(self) -> None:
         self.assertFalse(BackendGitHistoryConfig().enabled)
-        self.assertFalse(AgentRemoteConfig().git_history.enabled)
+        self.assertEqual(AgentRemoteConfig().schema_version, 2)
+        self.assertEqual(AgentRemoteConfig().base.no_proxy, "10.0.0.0/8")
         self.assertEqual(AgentRemoteConfig().opencode.tool, "nga")
         self.assertEqual(AgentRemoteConfig().opencode.executable, "nga")
-        self.assertEqual(AgentRemoteConfig().opencode.config_paths, [])
-        self.assertEqual(AgentRemoteConfig().opencode.proxy_url, "")
-        self.assertEqual(AgentRemoteConfig().opencode.no_proxy, "")
+        self.assertEqual(AgentRemoteConfig().model_pool.models, [])
         self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
         self.assertTrue(AgentRemoteConfig().threat_analysis.enabled)
-        self.assertEqual(AgentRemoteConfig().threat_analysis.implementation, "attack_tree")
         self.assertEqual(AgentRemoteConfig().threat_analysis.attack_path_audit_mode, "after_analysis")
+        self.assertEqual(AgentRemoteConfig().threat_analysis.model_policy.max_retries, 3)
 
     def test_full_remote_defaults_do_not_switch_agent_to_opencode(self) -> None:
         cfg = AgentConfig()
@@ -163,40 +162,31 @@ class AgentConfigTests(unittest.TestCase):
 
         remote = remote_config_dict(cfg)
 
-        self.assertEqual(remote["no_proxy"], "10.0.0.0/8")
+        self.assertEqual(remote["schema_version"], 2)
         self.assertNotIn("llm_api", remote)
-        self.assertEqual(remote["opencode"]["executable"], "nga")
-        self.assertEqual(remote["opencode"]["tool"], "nga")
-        self.assertEqual(remote["opencode"]["timeout"], 1200)
-        self.assertEqual(remote["opencode"]["max_retries"], 2)
-        self.assertEqual(remote["opencode_concurrency"], 4)
-        self.assertEqual(remote["opencode"]["models"], [])
-        self.assertEqual(remote["opencode"]["config_paths"], [])
-        self.assertEqual(remote["opencode"]["proxy_url"], "")
-        self.assertEqual(remote["opencode"]["no_proxy"], "")
-        self.assertIsNone(remote["fp_review_cli"])
-        self.assertEqual(remote["memory_api_discovery"]["batch_size"], 8)
-        self.assertEqual(remote["memory_api_discovery"]["max_candidates"], 200)
-        self.assertEqual(
-            remote["git_history"],
-            {"enabled": False, "max_commits": 200, "since": "", "paths": "", "variant_hunt": True},
-        )
+        self.assertEqual(remote["base"], {
+            "tool": "nga",
+            "executable": "nga",
+            "no_proxy": "10.0.0.0/8",
+        })
+        self.assertEqual(remote["model_pool"], {"global_concurrency": 4, "models": []})
         self.assertEqual(
             remote["threat_analysis"],
             {
                 "enabled": True,
-                "implementation": "attack_tree",
                 "attack_path_audit_mode": "after_analysis",
-                "product_mcp_name": "product-info",
-                "product_mcp_detection_timeout_seconds": 60,
+                "model_policy": {
+                    "required_capability": "high",
+                    "timeout_seconds": 1200,
+                    "max_retries": 3,
+                },
             },
         )
-        self.assertTrue(remote["static_dedup"])
-        self.assertEqual(remote["pattern_filter"], {"enabled": True, "scope": "directory"})
-        self.assertEqual(
-            remote["vulnerability_validation"],
-            {"enabled": True, "timeout_seconds": 7200},
-        )
+        self.assertEqual(remote["vulnerability_mining"]["required_capability"], "any")
+        self.assertEqual(remote["false_positive"]["required_capability"], "high")
+        self.assertEqual(remote["vulnerability_validation"], {"environments": {}})
+        self.assertNotIn("git_history", remote)
+        self.assertNotIn("pattern_filter", remote)
 
     def test_save_config_persists_remote_managed_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,40 +207,62 @@ class AgentConfigTests(unittest.TestCase):
             apply_remote_config(
                 cfg,
                 {
-                    "no_proxy": "10.0.0.0/8",
-                    "opencode": {
+                    "schema_version": 2,
+                    "base": {
                         "tool": "opencode",
                         "executable": "opencode",
-                        "timeout": 1200,
-                        "max_retries": 2,
-                        "config_paths": ["/opt/opencode/config.json"],
-                        "proxy_url": "http://127.0.0.1:3131",
-                        "no_proxy": "corp.local,127.0.0.1",
+                        "no_proxy": "10.0.0.0/8",
                     },
-                    "fp_review_cli": {
-                        "tool": "opencode",
-                        "executable": "opencode",
-                        "timeout": 900,
-                        "config_paths": ["/opt/opencode/fp.json"],
-                        "proxy_url": "http://127.0.0.1:3132",
-                        "no_proxy": "fp.local,127.0.0.1",
-                    },
-                    "memory_api_discovery": {"enabled": True, "batch_size": 10, "timeout_seconds": 240},
-                    "git_history": {
-                        "enabled": True,
-                        "max_commits": 12,
-                        "since": "1 year ago",
-                        "paths": "src",
-                        "variant_hunt": False,
+                    "model_pool": {
+                        "global_concurrency": 3,
+                        "models": [{
+                            "id": "primary",
+                            "model": "provider/model",
+                            "capability": "high",
+                            "max_concurrency": 2,
+                        }],
                     },
                     "threat_analysis": {
                         "enabled": False,
-                        "implementation": "custom_impl",
                         "attack_path_audit_mode": "immediate",
+                        "model_policy": {
+                            "required_capability": "medium",
+                            "timeout_seconds": 900,
+                            "max_retries": 4,
+                        },
                     },
-                    "static_dedup": False,
-                    "pattern_filter": {"enabled": False, "scope": "file"},
-                    "vulnerability_validation": {"enabled": True, "timeout_seconds": 600},
+                    "code_graph": {
+                        "enabled": True,
+                        "name": "codegraph",
+                        "transport": "remote",
+                        "timeout_seconds": 30,
+                        "remote": {"url": "http://graph.test/mcp", "headers": {}},
+                    },
+                    "vulnerability_mining": {
+                        "required_capability": "any",
+                        "timeout_seconds": 600,
+                        "max_retries": 1,
+                    },
+                    "false_positive": {
+                        "required_capability": "high",
+                        "timeout_seconds": 700,
+                        "max_retries": 2,
+                    },
+                    "vulnerability_validation": {
+                        "environments": {
+                            "lab": {
+                                "supported_vulnerability_types": ["oob"],
+                                "concurrency": 2,
+                                "validation_max_retries": 1,
+                                "model_policy": {
+                                    "required_capability": "high",
+                                    "timeout_seconds": 800,
+                                    "max_retries": 3,
+                                },
+                                "methods": {"demo:LTE:lab": {"target_ip": "10.0.0.8"}},
+                            },
+                        },
+                    },
                 },
             )
             save_config(cfg)
@@ -258,49 +270,28 @@ class AgentConfigTests(unittest.TestCase):
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["server_url"], "http://example.test")
             self.assertEqual(raw["agent_name"], "local-agent")
-            self.assertEqual(raw["no_proxy"], "10.0.0.0/8")
+            self.assertEqual(raw["schema_version"], 2)
             self.assertNotIn("llm_api", raw)
-            self.assertEqual(raw["opencode"]["tool"], "opencode")
-            self.assertEqual(raw["opencode"]["timeout"], 1200)
-            self.assertEqual(raw["opencode"]["max_retries"], 2)
-            self.assertEqual(raw["opencode"]["models"], [])
-            self.assertEqual(raw["opencode"]["config_paths"], ["/opt/opencode/config.json"])
-            self.assertEqual(raw["opencode"]["proxy_url"], "http://127.0.0.1:3131")
-            self.assertEqual(raw["opencode"]["no_proxy"], "corp.local,127.0.0.1")
-            self.assertEqual(raw["opencode_concurrency"], 4)
-            self.assertEqual(raw["fp_review_cli"]["tool"], "opencode")
-            self.assertEqual(raw["fp_review_cli"]["timeout"], 900)
-            self.assertEqual(raw["fp_review_cli"]["config_paths"], ["/opt/opencode/fp.json"])
-            self.assertEqual(raw["fp_review_cli"]["proxy_url"], "http://127.0.0.1:3132")
-            self.assertEqual(raw["fp_review_cli"]["no_proxy"], "fp.local,127.0.0.1")
-            self.assertTrue(raw["memory_api_discovery"]["enabled"])
-            self.assertEqual(raw["memory_api_discovery"]["batch_size"], 10)
-            self.assertEqual(raw["memory_api_discovery"]["timeout_seconds"], 240)
+            self.assertEqual(raw["base"]["tool"], "opencode")
+            self.assertEqual(raw["base"]["no_proxy"], "10.0.0.0/8")
+            self.assertEqual(raw["model_pool"]["global_concurrency"], 3)
+            self.assertEqual(raw["model_pool"]["models"][0]["model"], "provider/model")
+            self.assertNotIn("use_default_model", raw["model_pool"]["models"][0])
+            self.assertEqual(raw["threat_analysis"]["model_policy"]["max_retries"], 4)
+            self.assertEqual(raw["code_graph"]["remote"]["url"], "http://graph.test/mcp")
+            self.assertEqual(raw["vulnerability_mining"]["timeout_seconds"], 600)
+            self.assertEqual(raw["false_positive"]["timeout_seconds"], 700)
+            self.assertEqual(raw["vulnerability_validation"]["environments"]["lab"]["concurrency"], 2)
             self.assertEqual(
-                raw["git_history"],
-                {
-                    "enabled": True,
-                    "max_commits": 12,
-                    "paths": "src",
-                    "since": "1 year ago",
-                    "variant_hunt": False,
-                },
+                raw["vulnerability_validation"]["environments"]["lab"]["methods"]
+                ["demo:LTE:lab"]["target_ip"],
+                "10.0.0.8",
             )
-            self.assertEqual(
-                raw["threat_analysis"],
-                {
-                    "enabled": False,
-                    "implementation": "custom_impl",
-                    "attack_path_audit_mode": "immediate",
-                    "product_mcp_name": "product-info",
-                    "product_mcp_detection_timeout_seconds": 60,
-                },
-            )
-            self.assertFalse(raw["static_dedup"])
-            self.assertEqual(raw["pattern_filter"], {"enabled": False, "scope": "file"})
-            self.assertNotIn("script_path", raw["vulnerability_validation"])
-            self.assertNotIn("command", raw["vulnerability_validation"])
-            self.assertEqual(raw["vulnerability_validation"]["timeout_seconds"], 600)
+            for legacy_key in (
+                "no_proxy", "opencode", "opencode_concurrency", "fp_review_cli",
+                "memory_api_discovery", "git_history", "static_dedup", "pattern_filter",
+            ):
+                self.assertNotIn(legacy_key, raw)
 
     def test_invalid_pattern_filter_scope_falls_back_to_directory(self) -> None:
         cfg = AgentConfig()
@@ -415,11 +406,34 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.fp_review_cli.models[0].id, "judge")
 
         remote = remote_config_dict(cfg)
-        self.assertEqual(remote["opencode_concurrency"], 4)
-        self.assertTrue(remote["opencode"]["models"][0]["use_default_model"])
-        self.assertEqual(remote["opencode"]["models"][0]["time_windows"][0]["start"], "09:00")
-        self.assertEqual(remote["opencode"]["models"][1]["model"], "deep-model")
-        self.assertEqual(remote["fp_review_cli"]["models"][0]["capability"], "high")
+        self.assertEqual(remote["model_pool"]["global_concurrency"], 4)
+        self.assertFalse(remote["model_pool"]["models"][0]["enabled"])
+        self.assertNotIn("use_default_model", remote["model_pool"]["models"][0])
+        self.assertEqual(remote["model_pool"]["models"][0]["time_windows"][0]["start"], "09:00")
+        self.assertEqual(remote["model_pool"]["models"][1]["model"], "deep-model")
+        self.assertEqual(remote["model_pool"]["models"][2]["capability"], "high")
+        self.assertEqual(remote["model_pool"]["models"][2]["id"], "judge")
+
+    def test_legacy_remote_payload_migrates_to_v2_and_disables_default_model(self) -> None:
+        config = AgentRemoteConfig.model_validate({
+            "no_proxy": "localhost",
+            "opencode_concurrency": 2,
+            "opencode": {
+                "tool": "opencode",
+                "executable": "opencode",
+                "models": [
+                    {"id": "default", "use_default_model": True, "enabled": True},
+                    {"id": "explicit", "model": "provider/model", "enabled": True},
+                ],
+            },
+        })
+
+        self.assertEqual(config.schema_version, 2)
+        self.assertEqual(config.base.no_proxy, "localhost")
+        self.assertEqual(config.model_pool.global_concurrency, 2)
+        self.assertFalse(config.model_pool.models[0].enabled)
+        self.assertEqual(config.model_pool.models[0].model, "")
+        self.assertTrue(config.model_pool.models[1].enabled)
 
     def test_load_config_normalizes_invalid_model_pool_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

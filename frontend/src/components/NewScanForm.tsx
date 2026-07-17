@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getAgents, getCheckers, getValidationTargets, createScan } from "../api/client";
-import type { AgentInfo, CheckerInfo, ValidationTarget } from "../types";
+import { getAgents, getAgentValidatorCatalog, getCheckers, createScan } from "../api/client";
+import type { AgentInfo, AgentValidatorRegistration, CheckerInfo } from "../types";
 
 interface Props {
   onScanStarted: (scanId: string) => void;
@@ -13,7 +13,7 @@ const SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only";
 export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
-  const [validationTargets, setValidationTargets] = useState<ValidationTarget[]>([]);
+  const [validationTargets, setValidationTargets] = useState<AgentValidatorRegistration[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,24 +32,22 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const products = Array.from(new Set(validationTargets.map((target) => target.product))).sort();
   const validationEnvironments = validationTargets
     .filter((target) => target.product === selectedProduct)
-    .map((target) => target.validation_environment);
+    .map((target) => target.environment);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [agentList, checkerList, targets] = await Promise.all([
+        const [agentList, checkerList] = await Promise.all([
           getAgents(),
           getCheckers(),
-          getValidationTargets(),
         ]);
         setAgents(agentList);
         setCheckers(checkerList);
-        setValidationTargets(targets);
         // Pre-select all checkers
         setSelectedCheckers(new Set(checkerList.filter((c) => !c.user_created).map((c) => c.name)));
         // Pre-select first online agent
         const onlineAgent = agentList.find((a) => a.online);
-        if (onlineAgent) setSelectedAgent(onlineAgent.agent_id);
+        if (onlineAgent) setSelectedAgent(onlineAgent.agent_key);
       } catch (e) {
         setError("加载数据失败，请重试");
       } finally {
@@ -58,6 +56,15 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
     };
     load();
   }, []);
+
+  useEffect(() => {
+    if (!selectedAgent) { setValidationTargets([]); return; }
+    getAgentValidatorCatalog(selectedAgent).then((catalog) => {
+      setValidationTargets(catalog.registrations);
+      setSelectedProduct("");
+      setSelectedValidationEnvironment("");
+    }).catch(() => setValidationTargets([]));
+  }, [selectedAgent]);
 
   const toggleChecker = (name: string) => {
     setSelectedCheckers((prev) => {
@@ -104,7 +111,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
     setSubmitting(true);
     try {
       const resp = await createScan({
-        agent_id: selectedAgent,
+        agent_key: selectedAgent,
         project_path: projectPath.trim(),
         code_scan_path: codeScanPath.trim(),
         scan_name: scanName.trim(),
@@ -165,9 +172,11 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 <div className="space-y-2">
                   {agents.map((agent) => (
                     <label
-                      key={agent.agent_id}
-                      className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                        selectedAgent === agent.agent_id
+                      key={agent.agent_key}
+                      className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
+                        agent.online ? "cursor-pointer" : "cursor-not-allowed opacity-60"
+                      } ${
+                        selectedAgent === agent.agent_key
                           ? "border-blue-500 bg-blue-500/10"
                           : "border-slate-600 hover:border-slate-500"
                       }`}
@@ -175,9 +184,10 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                       <input
                         type="radio"
                         name="agent"
-                        value={agent.agent_id}
-                        checked={selectedAgent === agent.agent_id}
-                        onChange={() => setSelectedAgent(agent.agent_id)}
+                        value={agent.agent_key}
+                        checked={selectedAgent === agent.agent_key}
+                        disabled={!agent.online}
+                        onChange={() => setSelectedAgent(agent.agent_key)}
                         className="sr-only"
                       />
                       <span
@@ -186,9 +196,9 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                         }`}
                       />
                       <div className="flex-1 min-w-0">
-                        <span className="text-sm font-medium text-white">{agent.name}</span>
+                        <span className="text-sm font-medium text-white">{agent.machine_name || agent.name}</span>
                         <span className="ml-2 text-xs text-slate-400">
-                          {agent.ip}:{agent.port}
+                          {agent.ip}{agent.name && agent.name !== agent.machine_name ? ` · ${agent.name}` : ""}
                         </span>
                       </div>
                       <span
@@ -314,7 +324,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                   const product = e.target.value;
                   setSelectedProduct(product);
                   setSelectedValidationEnvironment(
-                    validationTargets.find((target) => target.product === product)?.validation_environment || "",
+                    validationTargets.find((target) => target.product === product)?.environment || "",
                   );
                 }}
                 className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"

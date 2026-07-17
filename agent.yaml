@@ -1,96 +1,67 @@
-# OpenDeepHole Agent Configuration
-# Edit this file before running the agent.
+# OpenDeepHole Agent bootstrap and managed configuration.
+# server_url / agent_name / owner_token are local-only; the remaining v2
+# sections are managed by the Web "Agent 配置" page after first connection.
 
-# Web server URL（OpenDeepHole Web 服务地址）
 server_url: "http://your-server:8000"
-
-# Agent 显示名称（显示在新建扫描的下拉列表中），留空则使用主机名
 agent_name: ""
-
-# 用户归属 token（下载 Agent 时自动填入，勿手动修改）
 owner_token: ""
-
-# 代理跳过列表，逗号分隔，如 "localhost,127.0.0.1,10.0.0.0/8"
-no_proxy: "10.0.0.0/8"
-
-# 要运行的检查项，留空则运行全部已启用的检查项
-# 可选值: npd, oob, uaf, intoverflow, memleak
 checkers: []
 
-# OpenCode 审计任务配置。所有模型任务都通过 OpenCode serve/session 执行。
-# tool 可选: nga, opencode
-opencode:
+schema_version: 2
+base:
   tool: "nga"
-  executable: "nga"  # 可执行文件名或完整路径，Windows 示例："C:/tools/nga.cmd"
-  model: ""               # 已废弃兼容字段；模型调度只读取 models
-  timeout: 1200            # 单次调用超时（秒）
-  max_retries: 2           # 非超时错误重试次数
-  proxy_url: ""            # 可选：OpenCode/nga 子进程代理，如 "http://127.0.0.1:3131"
-  no_proxy: ""             # 可选：OpenCode/nga 子进程 no_proxy；留空时使用内网默认列表
-  config_paths: []         # 可选：额外合并的 OpenCode 配置文件；也可用 OPENCODE_CONFIG_PATH 指定
-  # 模型池。空池或全禁用时，任务保持排队，等待配置更新后重新调度。
-  # 如需 CLI 默认模型，必须显式添加 use_default_model: true 的启用行。
-  # models:
-  #   - id: "fast"
-  #     model: "fast-model"
-  #     use_default_model: false
-  #     capability: "low"      # low | medium | high
-  #     weight: 3              # 权重越高，空闲时越优先分配
-  #     max_concurrency: 2
-  #     enabled: true
-  #     time_windows:          # 可选，每日 Agent 本地时间；空数组表示全天可用
-  #       - start: "09:00"
-  #         end: "18:00"
-  #   - id: "default"
-  #     model: ""
-  #     use_default_model: true # 不传 --model，使用 CLI 默认模型
-  #     capability: "high"
-  #     weight: 1
-  #     max_concurrency: 1
-  #     enabled: true
+  executable: "nga"
+  no_proxy: "10.0.0.0/8"
+
+model_pool:
+  global_concurrency: 4
+  # A scan cannot start until at least one enabled row has an explicit model.
   models: []
 
-# OpenCode/兼容 CLI 总并发数；配置 models 后也是所有模型合计运行数的硬上限。
-# 实际并发同时受单模型 max_concurrency 和每日使用时间限制。
-opencode_concurrency: 4
-
-# 静态候选跨规则去重：同 family、同函数只保留一个代表候选。
-static_dedup: true
-
-# AI 审计同模式批量过滤：代表点被 AI 否决后，跳过同模式后续候选。
-pattern_filter:
-  enabled: true
-  scope: "directory"  # directory | file | repo
-
-# 漏洞验证配置。验证方法目录随任务前的 Agent runtime 更新强制同步。
-vulnerability_validation:
-  enabled: true
-  timeout_seconds: 7200
-
-# AI 去误报 OpenCode 配置（可选）
-# 删除或设为 null 时，默认继承上面的 opencode 工具和模型配置。
-# fp_review_cli:
-#   tool: "opencode"
-#   executable: "opencode"
-#   model: ""       # 已废弃兼容字段；模型调度只读取 models
-#   timeout: 1200
-#   max_retries: 2
-#   models: []
-
-# Git 历史安全问题挖掘配置
-# 默认关闭。设为 true 时会分析 git 提交历史，挖掘历史安全问题模式，并对每条模式做全仓同类变体排查；
-# 去误报阶段据此做「历史/校验匹配」直接定级。
-git_history:
-  enabled: false       # 是否启用（非 git 仓库会自动跳过）
-  max_commits: 200     # 最多分析最近 N 条提交
-  since: ""            # git log --since 过滤，如 "6 months ago"（留空不限）
-  paths: ""            # git log 路径过滤，空格分隔（留空不限）
-  variant_hunt: true   # 是否对每条历史问题模式做全仓同类变体排查
-
-# 威胁分析实现配置。新增实现后只需切换 implementation。
 threat_analysis:
   enabled: true
-  implementation: "attack_tree"
-  attack_path_audit_mode: "after_analysis" # after_analysis | immediate
-  product_mcp_name: "product-info"
-  product_mcp_detection_timeout_seconds: 60
+  attack_path_audit_mode: "after_analysis"
+  model_policy:
+    required_capability: "high"
+    timeout_seconds: 1200
+    max_retries: 3
+
+code_graph:
+  enabled: false
+  name: "codegraph"
+  transport: "local"
+  timeout_seconds: 300
+  local:
+    executable: "codegraph"
+    args: ["serve", "--mcp"]
+    environment:
+      CODEGRAPH_MCP_TOOLS: "explore,node,search,callers,callees,impact,files,status"
+  remote:
+    url: ""
+    headers: {}
+
+product_info:
+  enabled: false
+  name: "product-info"
+  transport: "local"
+  timeout_seconds: 300
+  local:
+    executable: "product-info"
+    args: []
+    environment: {}
+  remote:
+    url: ""
+    headers: {}
+
+vulnerability_mining:
+  required_capability: "any"
+  timeout_seconds: 1200
+  max_retries: 2
+
+false_positive:
+  required_capability: "high"
+  timeout_seconds: 1200
+  max_retries: 2
+
+vulnerability_validation:
+  environments: {}

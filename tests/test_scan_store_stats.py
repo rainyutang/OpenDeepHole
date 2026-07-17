@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from backend.models import (
@@ -83,6 +84,49 @@ class VulnerabilityStoreTests(unittest.TestCase):
             self.assertEqual(stored[1].ai_verdict, "confirmed")
             self.assertEqual(stored[1].call_chain, ["entry_fn", "fn2"])
             self.assertEqual(stored[1].vulnerability_report, "# Vulnerability\n\nStored report.")
+
+    def test_agent_identity_config_catalog_and_scan_key_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            first = store.upsert_agent_record(
+                agent_key="stable-1",
+                user_id="user-1",
+                ip="10.0.0.8",
+                machine_name="build-host",
+                display_name="first-name",
+                agent_id="session-1",
+                last_seen="2026-07-17T01:00:00+00:00",
+                initial_config_json=json.dumps({"schema_version": 2, "model_pool": {"models": []}}),
+                validator_catalog_json=json.dumps({"registrations": [{"registration_key": "one"}]}),
+            )
+            self.assertEqual(first["agent_key"], "stable-1")
+
+            store.update_agent_config_record(
+                "stable-1",
+                json.dumps({"schema_version": 2, "base": {"tool": "opencode"}}),
+            )
+            reconnected = store.upsert_agent_record(
+                agent_key="must-not-replace-stable-key",
+                user_id="user-1",
+                ip="10.0.0.8",
+                machine_name="build-host",
+                display_name="renamed",
+                agent_id="session-2",
+                last_seen="2026-07-17T02:00:00+00:00",
+                initial_config_json=json.dumps({"schema_version": 2, "base": {"tool": "nga"}}),
+                validator_catalog_json=json.dumps({"registrations": []}),
+            )
+            self.assertEqual(reconnected["agent_key"], "stable-1")
+            self.assertEqual(reconnected["display_name"], "renamed")
+            self.assertEqual(json.loads(reconnected["config_json"])["base"]["tool"], "opencode")
+            self.assertEqual(json.loads(reconnected["validator_catalog_json"])["registrations"], [])
+
+            scan, meta = _make_scan("stable-scan")
+            meta.agent_key = "stable-1"
+            store.save_scan(scan, meta)
+            loaded = store.load_scan("stable-scan")
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded[1].agent_key, "stable-1")
 
     def test_migrates_vulnerability_audit_index_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
