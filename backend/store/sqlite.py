@@ -359,6 +359,7 @@ CREATE TABLE IF NOT EXISTS agents (
     display_name          TEXT NOT NULL DEFAULT '',
     config_json           TEXT NOT NULL DEFAULT '{}',
     validator_catalog_json TEXT NOT NULL DEFAULT '{}',
+    mcp_probe_json        TEXT NOT NULL DEFAULT '{}',
     last_agent_id         TEXT NOT NULL DEFAULT '',
     last_seen             TEXT NOT NULL DEFAULT '',
     created_at            TEXT NOT NULL,
@@ -460,6 +461,12 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN public_access_token TEXT NOT NULL DEFAULT ''")
         if "opencode_pool" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN opencode_pool TEXT NOT NULL DEFAULT '{}'")
+        agent_cur = self._conn.execute("PRAGMA table_info(agents)")
+        agent_cols = {r[1] for r in agent_cur.fetchall()}
+        if "mcp_probe_json" not in agent_cols:
+            self._conn.execute(
+                "ALTER TABLE agents ADD COLUMN mcp_probe_json TEXT NOT NULL DEFAULT '{}'"
+            )
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
         vuln_cols = {r[1] for r in vuln_cur.fetchall()}
@@ -3017,6 +3024,16 @@ class SqliteScanStore(ScanStoreBase):
             cur = self._conn.execute(
                 "UPDATE agents SET validator_catalog_json = ?, updated_at = ? WHERE agent_key = ?",
                 (catalog_json, now, agent_key),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def update_agent_mcp_probe_record(self, agent_key: str, mcp_probe_json: str) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE agents SET mcp_probe_json = ?, updated_at = ? WHERE agent_key = ?",
+                (mcp_probe_json, now, agent_key),
             )
             self._conn.commit()
         return cur.rowcount > 0

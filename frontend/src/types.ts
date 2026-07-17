@@ -624,6 +624,37 @@ export interface AgentRemoteConfig {
   vulnerability_validation: AgentVulnerabilityValidationConfig;
 }
 
+export type AgentMcpTarget = "code_graph" | "product_info";
+export type AgentMcpRuntimeState = "active" | "reload_pending" | "next_task";
+
+export interface AgentMcpProbeResult {
+  target: AgentMcpTarget;
+  config_fingerprint: string;
+  success: boolean;
+  checked_at: string;
+  transport: string;
+  protocol: string;
+  tool_names: string[];
+  tool_count: number;
+  duration_ms: number;
+  error: string;
+  runtime_state: AgentMcpRuntimeState;
+  active_sessions: number;
+}
+
+export interface AgentMcpTargetStatus {
+  enabled: boolean;
+  stale: boolean;
+  last_probe: AgentMcpProbeResult | null;
+}
+
+export interface AgentMcpStatusResponse {
+  agent_key: string;
+  online: boolean;
+  code_graph: AgentMcpTargetStatus;
+  product_info: AgentMcpTargetStatus;
+}
+
 export interface AgentOpenCodeModelListItem {
   id: string;
   model: string;

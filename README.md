@@ -117,6 +117,10 @@ owner_token: ""
 
 下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、威胁分析、代码图谱 MCP、产品信息 MCP、漏洞挖掘、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
 
+代码图谱和产品信息配置区提供手动 **「检测 MCP」**：检测只在 Agent 上执行 MCP `initialize` 和 `list_tools`，不会调用业务工具，并会展示最近结果、工具列表及 OpenCode 配置加载状态。保存 MCP 后不需要重启 Agent；没有活动 Session 时在下一次模型任务自动加载，有活动 Session 时不会中断当前任务，而是在空闲后的下一次任务加载。检测结果会持久化，Agent 离线时仍可查看带时间戳的历史结果；修改并保存 MCP 配置后，旧结果会标记为需要重新检测。
+
+代码图谱的配置页检测只确认 MCP 服务能够握手并发现工具，不代表某个扫描项目已经生成 `.codegraph/codegraph.db`；项目索引是否就绪仍以对应扫描任务的运行日志和产物为准。
+
 模型池必须至少包含一个已启用且填写明确 `provider/model` 的模型；不再支持“使用 CLI 默认模型”的配置行，没有显式模型时创建和续扫都会被拒绝。阶段级模型能力、模型调用超时和模型重试会覆盖具体模型行的超时/重试；漏洞验证的 `ctx.run_command(timeout=...)` 仍只由该命令自己的超时控制，不受模型超时影响，也没有验证函数整体截止时间。
 
 **第 3 步：确认代码索引工具**
@@ -533,6 +537,8 @@ model_pool:
 ```
 
 `server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v2 字段由 Web **「Agent 配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。
+
+管理配置热更新时会重写 `~/.opendeephole/opencode_workspace/opencode.json` 并将 OpenCode serve 标记为待重载。serve 空闲时由下一次模型任务自动加载；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会为应用 MCP 配置强制终止正在运行的 Session。
 
 OpenCode 调用约定：
 

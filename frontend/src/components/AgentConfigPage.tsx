@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   getAgentConfig,
+  getAgentMcpStatus,
   getAgentOpenCodeModels,
   getAgentOpenCodePool,
   getAgents,
   getAgentValidatorCatalog,
+  probeAgentMcp,
   updateAgentConfig,
 } from "../api/client";
 import type {
   AgentInfo,
   AgentMcpConfig,
+  AgentMcpStatusResponse,
+  AgentMcpTarget,
+  AgentMcpTargetStatus,
   AgentModelTaskPolicy,
   AgentOpenCodeModelConfig,
   AgentOpenCodePoolStatus,
@@ -76,8 +81,91 @@ function PolicyEditor({ value, onChange }: { value: AgentModelTaskPolicy; onChan
   </div>;
 }
 
-function McpEditor({ value, onChange }: { value: AgentMcpConfig; onChange: (value: AgentMcpConfig) => void }) {
+function StatusBadge({ label, tone = "slate" }: { label: string; tone?: "slate" | "green" | "red" | "amber" | "blue" }) {
+  const colors = {
+    slate: "border-slate-600 bg-slate-700/40 text-slate-200",
+    green: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200",
+    red: "border-red-500/40 bg-red-500/10 text-red-200",
+    amber: "border-amber-500/40 bg-amber-500/10 text-amber-200",
+    blue: "border-blue-500/40 bg-blue-500/10 text-blue-200",
+  };
+  return <span className={`rounded-full border px-2.5 py-1 text-xs ${colors[tone]}`}>{label}</span>;
+}
+
+function probeTime(value: string): string {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
+function McpEditor({
+  value, onChange, status, online, unsaved, probing, probeBusy, onProbe,
+}: {
+  value: AgentMcpConfig;
+  onChange: (value: AgentMcpConfig) => void;
+  status: AgentMcpTargetStatus | null;
+  online: boolean;
+  unsaved: boolean;
+  probing: boolean;
+  probeBusy: boolean;
+  onProbe: () => void;
+}) {
+  const lastProbe = status?.last_probe;
+  const connectivity = probing
+    ? { label: "检测中", tone: "blue" as const }
+    : !lastProbe
+      ? { label: "未检测", tone: "slate" as const }
+      : status?.stale
+        ? { label: "已过期", tone: "amber" as const }
+        : lastProbe.success
+          ? { label: "可用", tone: "green" as const }
+          : { label: "不可用", tone: "red" as const };
+  const runtimeLabels = {
+    active: "OpenCode 已加载",
+    reload_pending: "OpenCode 待重载",
+    next_task: "下次任务加载",
+  };
+  const disabledReason = !online
+    ? "Agent 离线"
+    : !value.enabled
+      ? "请先启用并保存 MCP"
+      : unsaved
+        ? "当前 MCP 配置有未保存修改"
+        : probeBusy
+          ? "正在检测"
+          : "";
   return <div className="space-y-5">
+    <div className="space-y-4 rounded-xl border border-slate-700 bg-slate-900/60 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusBadge label={value.enabled ? "配置已启用" : "配置已禁用"} tone={value.enabled ? "green" : "slate"} />
+        <StatusBadge label={connectivity.label} tone={connectivity.tone} />
+        <StatusBadge label={online ? "Agent 在线" : "Agent 离线"} tone={online ? "green" : "amber"} />
+        {lastProbe && <StatusBadge label={runtimeLabels[lastProbe.runtime_state]} tone={lastProbe.runtime_state === "active" ? "green" : "amber"} />}
+        {!online && lastProbe && <StatusBadge label="历史结果" tone="amber" />}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="space-y-1 text-xs text-slate-400">
+          <p>检测只执行 MCP 握手和工具发现，不会调用业务工具。</p>
+          {lastProbe && <p>最近检测：{probeTime(lastProbe.checked_at)} · {lastProbe.duration_ms} ms{lastProbe.protocol ? ` · ${lastProbe.protocol}` : ""}</p>}
+          {lastProbe?.runtime_state === "reload_pending" && lastProbe.active_sessions > 0 && <p>当前有 {lastProbe.active_sessions} 个活动 Session；不会中断，空闲后下一任务自动重载。</p>}
+          {lastProbe?.runtime_state === "reload_pending" && lastProbe.active_sessions === 0 && <p>serve 已标记待重载，将在下一次模型任务开始前加载当前配置。</p>}
+          {unsaved && <p className="text-amber-300">当前 MCP 表单有未保存修改，请先保存再检测。</p>}
+          {!unsaved && status?.stale && <p className="text-amber-300">已保存的 MCP 配置已变更，上次结果仅供参考，请重新检测。</p>}
+        </div>
+        <button
+          type="button"
+          onClick={onProbe}
+          disabled={Boolean(disabledReason)}
+          title={disabledReason}
+          className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+        >{probing ? "检测中…" : lastProbe ? "重新检测 MCP" : "检测 MCP"}</button>
+      </div>
+      {lastProbe && lastProbe.tool_count > 0 && <div className="text-xs text-slate-300">
+        <span className="font-medium text-slate-200">发现 {lastProbe.tool_count} 个工具：</span>
+        <span className="break-words">{lastProbe.tool_names.join("、")}</span>
+      </div>}
+      {lastProbe?.error && <div className="break-words rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">{lastProbe.error}</div>}
+    </div>
     <label className="flex items-center gap-2 text-sm text-slate-200"><input type="checkbox" checked={value.enabled} onChange={(e) => onChange({ ...value, enabled: e.target.checked })} />启用 MCP</label>
     <div className="grid gap-4 md:grid-cols-3">
       <Field label="MCP 名称"><input className={input} value={value.name} onChange={(e) => onChange({ ...value, name: e.target.value })} /></Field>
@@ -111,8 +199,11 @@ export default function AgentConfigPage({ onBack }: Props) {
   const [agentKey, setAgentKey] = useState("");
   const [section, setSection] = useState<Section>("base");
   const [config, setConfig] = useState<AgentRemoteConfig>(defaultConfig);
+  const [savedConfig, setSavedConfig] = useState<AgentRemoteConfig>(defaultConfig);
   const [catalog, setCatalog] = useState<AgentValidatorCatalog>({ registrations: [], errors: [], updated_at: "" });
   const [pool, setPool] = useState<AgentOpenCodePoolStatus | null>(null);
+  const [mcpStatus, setMcpStatus] = useState<AgentMcpStatusResponse | null>(null);
+  const [probingTarget, setProbingTarget] = useState<AgentMcpTarget | null>(null);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -133,8 +224,9 @@ export default function AgentConfigPage({ onBack }: Props) {
   useEffect(() => {
     if (!agentKey) return;
     setLoading(true);
-    Promise.all([getAgentConfig(agentKey), getAgentValidatorCatalog(agentKey)]).then(([next, nextCatalog]) => {
-      setConfig(next); setCatalog(nextCatalog); setDirty(false); setMessage("");
+    setMcpStatus(null);
+    Promise.all([getAgentConfig(agentKey), getAgentValidatorCatalog(agentKey), getAgentMcpStatus(agentKey)]).then(([next, nextCatalog, nextMcpStatus]) => {
+      setConfig(next); setSavedConfig(next); setCatalog(nextCatalog); setMcpStatus(nextMcpStatus); setDirty(false); setMessage("");
       const live = agents.find((item) => item.agent_key === agentKey && item.online);
       if (live) getAgentOpenCodePool(live.agent_id).then(setPool).catch(() => setPool(null)); else setPool(null);
     }).catch(() => setMessage("加载 Agent 配置失败")).finally(() => setLoading(false));
@@ -147,9 +239,39 @@ export default function AgentConfigPage({ onBack }: Props) {
   const save = async () => {
     if (!agentKey) return;
     setSaving(true); setMessage("");
-    try { await updateAgentConfig(agentKey, config); setDirty(false); setMessage(selectedAgent?.online ? "配置已保存并推送到 Agent" : "配置已保存，将在 Agent 重连后生效"); }
+    try {
+      await updateAgentConfig(agentKey, config);
+      setSavedConfig(config); setDirty(false);
+      getAgentMcpStatus(agentKey).then(setMcpStatus).catch(() => undefined);
+      setMessage(selectedAgent?.online ? "配置已保存并推送到 Agent" : "配置已保存，将在 Agent 重连后生效");
+    }
     catch (error: any) { setMessage(error?.response?.data?.detail || "保存失败"); }
     finally { setSaving(false); }
+  };
+
+  const probeMcp = async (target: AgentMcpTarget) => {
+    if (!agentKey || probingTarget) return;
+    setProbingTarget(target); setMessage("");
+    try {
+      const result = await probeAgentMcp(agentKey, target);
+      setMcpStatus((current): AgentMcpStatusResponse => {
+        const base = current || {
+          agent_key: agentKey,
+          online: true,
+          code_graph: { enabled: savedConfig.code_graph.enabled, stale: false, last_probe: null },
+          product_info: { enabled: savedConfig.product_info.enabled, stale: false, last_probe: null },
+        };
+        const targetStatus = { enabled: target === "code_graph" ? savedConfig.code_graph.enabled : savedConfig.product_info.enabled, stale: false, last_probe: result };
+        return target === "code_graph"
+          ? { ...base, online: true, code_graph: targetStatus }
+          : { ...base, online: true, product_info: targetStatus };
+      });
+      setMessage(result.success ? `MCP 检测成功，发现 ${result.tool_count} 个工具` : `MCP 检测失败：${result.error}`);
+    } catch (error: any) {
+      setMessage(error?.response?.data?.detail || "MCP 检测请求失败");
+    } finally {
+      setProbingTarget(null);
+    }
   };
 
   const importModels = async () => {
@@ -191,11 +313,11 @@ export default function AgentConfigPage({ onBack }: Props) {
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4">
         <button onClick={onBack} className="text-sm text-slate-400 hover:text-white">← 返回</button>
         <h1 className="text-lg font-bold">Agent 配置</h1>
-        <select className={`${input} ml-auto max-w-md`} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
+        <select disabled={probingTarget !== null} className={`${input} ml-auto max-w-md disabled:cursor-not-allowed disabled:opacity-60`} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
           {!agents.length && <option value="">暂无 Agent</option>}
           {agents.map((agent) => <option key={agent.agent_key} value={agent.agent_key}>{agent.machine_name || agent.name} / {agent.ip} / {agent.online ? "在线" : "离线"}</option>)}
         </select>
-        <button disabled={!dirty || saving} onClick={save} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:bg-slate-700">{saving ? "保存中…" : "保存配置"}</button>
+        <button disabled={!dirty || saving || probingTarget !== null} onClick={save} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:bg-slate-700">{saving ? "保存中…" : "保存配置"}</button>
       </div>
       {message && <p className="mx-auto mt-3 max-w-7xl text-sm text-amber-300">{message}</p>}
     </header>
@@ -211,8 +333,8 @@ export default function AgentConfigPage({ onBack }: Props) {
           </div>}
           {section === "models" && <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={importModels} pool={pool} />}
           {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, enabled: e.target.checked } })} />启用威胁分析</label><Field label="攻击路径审计模式"><select className={input} value={config.threat_analysis.attack_path_audit_mode} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, attack_path_audit_mode: e.target.value } })}><option value="after_analysis">分析完成后审计</option><option value="immediate">生成后立即审计</option></select></Field><PolicyEditor value={config.threat_analysis.model_policy} onChange={(value) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy: value } })} /></div>}
-          {section === "codegraph" && <McpEditor value={config.code_graph} onChange={(value) => setCfg({ ...config, code_graph: value })} />}
-          {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} />}
+          {section === "codegraph" && <McpEditor value={config.code_graph} onChange={(value) => setCfg({ ...config, code_graph: value })} status={mcpStatus?.code_graph || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)} probing={probingTarget === "code_graph"} probeBusy={probingTarget !== null} onProbe={() => probeMcp("code_graph")} />}
+          {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} status={mcpStatus?.product_info || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info)} probing={probingTarget === "product_info"} probeBusy={probingTarget !== null} onProbe={() => probeMcp("product_info")} />}
           {section === "mining" && <PolicyEditor value={config.vulnerability_mining} onChange={(value) => setCfg({ ...config, vulnerability_mining: value })} />}
           {section === "fp" && <PolicyEditor value={config.false_positive} onChange={(value) => setCfg({ ...config, false_positive: value })} />}
           {section === "validation" && <div className="space-y-6">{catalog.errors.length > 0 && <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">{catalog.errors.join("；")}</div>}{environments.length === 0 ? <p className="text-sm text-slate-400">该 Agent 未安装有效的 validator.yaml。</p> : environments.map((name) => {

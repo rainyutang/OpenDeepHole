@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
+import type { AgentInfo, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -560,6 +560,20 @@ export async function getAgentOpenCodeModels(agentId: string, refresh = false): 
 
 export async function updateAgentConfig(agentKey: string, config: AgentRemoteConfig): Promise<void> {
   await api.put(`/api/agent-configs/${agentKey}`, config);
+}
+
+export async function getAgentMcpStatus(agentKey: string): Promise<AgentMcpStatusResponse> {
+  const { data } = await api.get<AgentMcpStatusResponse>(
+    `/api/agent-configs/${agentKey}/mcp-status`,
+  );
+  return data;
+}
+
+export async function probeAgentMcp(agentKey: string, target: AgentMcpTarget): Promise<AgentMcpProbeResult> {
+  const { data } = await api.post<AgentMcpProbeResult>(
+    `/api/agent-configs/${agentKey}/mcp-probe/${target}`,
+  );
+  return data;
 }
 
 export async function getAgentValidatorCatalog(agentKey: string, product = ""): Promise<AgentValidatorCatalog> {

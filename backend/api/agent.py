@@ -47,6 +47,10 @@ from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
     AgentGitHistory,
+    AgentMcpConfig,
+    AgentMcpProbeResult,
+    AgentMcpStatusResponse,
+    AgentMcpTargetStatus,
     AgentOpenCodePoolStatus,
     AgentInfo,
     AgentRemoteConfig,
@@ -110,6 +114,67 @@ def _stored_validator_catalog(record: dict | None) -> AgentValidatorCatalog:
     except Exception as exc:
         logger.warning("Ignoring invalid persisted validator catalog: %s", exc)
         return AgentValidatorCatalog(errors=[str(exc)])
+
+
+def _stored_mcp_probes(record: dict | None) -> dict[str, AgentMcpProbeResult]:
+    if not record:
+        return {}
+    try:
+        payload = json.loads(str(record.get("mcp_probe_json") or "{}"))
+    except Exception as exc:
+        logger.warning("Ignoring invalid persisted MCP probe results: %s", exc)
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    results: dict[str, AgentMcpProbeResult] = {}
+    for target in ("code_graph", "product_info"):
+        raw = payload.get(target)
+        if not isinstance(raw, dict):
+            continue
+        try:
+            results[target] = AgentMcpProbeResult(**raw)
+        except Exception as exc:
+            logger.warning("Ignoring invalid persisted %s MCP probe result: %s", target, exc)
+    return results
+
+
+def _mcp_config_fingerprint(config: AgentMcpConfig) -> str:
+    payload = json.dumps(
+        config.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _mcp_target_config(config: AgentRemoteConfig, target: str) -> AgentMcpConfig:
+    if target == "code_graph":
+        return config.code_graph
+    if target == "product_info":
+        return config.product_info
+    raise HTTPException(status_code=422, detail="MCP 检测目标只能是 code_graph 或 product_info")
+
+
+def _mcp_target_status(
+    config: AgentMcpConfig,
+    last_probe: AgentMcpProbeResult | None,
+) -> AgentMcpTargetStatus:
+    return AgentMcpTargetStatus(
+        enabled=config.enabled,
+        stale=(
+            last_probe is not None
+            and last_probe.config_fingerprint != _mcp_config_fingerprint(config)
+        ),
+        last_probe=last_probe,
+    )
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _live_agent_for_key(agent_key: str) -> tuple[str, AgentInfo] | None:
@@ -305,6 +370,8 @@ class _RuntimeDownload:
 # Short-lived tokens used by online agents to fetch runtime update archives.
 _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _opencode_model_waiters: dict[str, asyncio.Future] = {}
+_mcp_probe_waiters: dict[str, asyncio.Future] = {}
+_mcp_probe_persist_locks: dict[str, asyncio.Lock] = {}
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
@@ -906,6 +973,12 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 if waiter is not None and not waiter.done():
                     waiter.set_result(incoming)
                 continue
+            if isinstance(incoming, dict) and incoming.get("type") == "mcp_probe_result":
+                request_id = str(incoming.get("request_id") or "")
+                waiter = _mcp_probe_waiters.pop(request_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(incoming)
+                continue
             if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":
                 from backend.api.skills import handle_skill_create_result
 
@@ -1221,6 +1294,117 @@ async def update_stable_agent_config(
     if live is not None:
         applied = await send_agent_command(live[0], {"type": "config", "config": body.model_dump()})
     return {"ok": True, "applied": applied}
+
+
+async def _persist_mcp_probe(agent_key: str, result: AgentMcpProbeResult) -> None:
+    lock = _mcp_probe_persist_locks.setdefault(agent_key, asyncio.Lock())
+    async with lock:
+        store = get_scan_store()
+        record = store.get_agent_record(agent_key)
+        payload: dict = {}
+        if record is not None:
+            try:
+                parsed = json.loads(str(record.get("mcp_probe_json") or "{}"))
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except Exception:
+                pass
+        payload[result.target] = result.model_dump(mode="json")
+        store.update_agent_mcp_probe_record(
+            agent_key,
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        )
+
+
+@public_router.get(
+    "/api/agent-configs/{agent_key}/mcp-status",
+    response_model=AgentMcpStatusResponse,
+)
+async def get_stable_agent_mcp_status(
+    agent_key: str,
+    current_user: User = Depends(get_current_user),
+) -> AgentMcpStatusResponse:
+    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    config = _stored_agent_config(record)
+    probes = _stored_mcp_probes(record)
+    return AgentMcpStatusResponse(
+        agent_key=agent_key,
+        online=_live_agent_for_key(agent_key) is not None,
+        code_graph=_mcp_target_status(config.code_graph, probes.get("code_graph")),
+        product_info=_mcp_target_status(config.product_info, probes.get("product_info")),
+    )
+
+
+@public_router.post(
+    "/api/agent-configs/{agent_key}/mcp-probe/{target}",
+    response_model=AgentMcpProbeResult,
+)
+async def probe_stable_agent_mcp(
+    agent_key: str,
+    target: str,
+    current_user: User = Depends(get_current_user),
+) -> AgentMcpProbeResult:
+    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    config = _stored_agent_config(record)
+    mcp_config = _mcp_target_config(config, target)
+    if not mcp_config.enabled:
+        raise HTTPException(status_code=400, detail="请先启用并保存该 MCP 配置")
+    live = _live_agent_for_key(agent_key)
+    if live is None:
+        raise HTTPException(status_code=409, detail="Agent 离线，无法执行 MCP 检测")
+
+    request_id = uuid.uuid4().hex
+    waiter = asyncio.get_running_loop().create_future()
+    _mcp_probe_waiters[request_id] = waiter
+    sent = await send_agent_command(live[0], {
+        "type": "mcp_probe",
+        "request_id": request_id,
+        "target": target,
+        "mcp_config": mcp_config.model_dump(mode="json"),
+    })
+    if not sent:
+        _mcp_probe_waiters.pop(request_id, None)
+        raise HTTPException(status_code=502, detail="Agent 连接已断开")
+
+    wait_seconds = min(30, max(1, mcp_config.timeout_seconds)) + 5
+    try:
+        incoming = await asyncio.wait_for(waiter, timeout=wait_seconds)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"等待 Agent MCP 检测结果超时（{wait_seconds} 秒）",
+        )
+    finally:
+        _mcp_probe_waiters.pop(request_id, None)
+
+    tool_names = sorted({
+        str(item)[:200]
+        for item in (incoming.get("tool_names") or [])
+        if str(item).strip()
+    })[:200]
+    runtime_state = str(incoming.get("runtime_state") or "next_task")
+    if runtime_state not in {"active", "reload_pending", "next_task"}:
+        runtime_state = "next_task"
+    result = AgentMcpProbeResult(
+        target=target,
+        config_fingerprint=_mcp_config_fingerprint(mcp_config),
+        success=bool(incoming.get("success")),
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        transport=mcp_config.transport,
+        protocol=(
+            str(incoming.get("protocol") or "")
+            if str(incoming.get("protocol") or "") in {"stdio", "streamable_http", "sse"}
+            else ""
+        ),
+        tool_names=tool_names,
+        tool_count=len(tool_names),
+        duration_ms=_nonnegative_int(incoming.get("duration_ms")),
+        error=str(incoming.get("error") or "")[:2000],
+        runtime_state=runtime_state,
+        active_sessions=_nonnegative_int(incoming.get("active_sessions")),
+    )
+    await _persist_mcp_probe(agent_key, result)
+    return result
 
 
 @public_router.get("/api/agent-configs/{agent_key}/validator-catalog", response_model=AgentValidatorCatalog)

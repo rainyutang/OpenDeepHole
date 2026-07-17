@@ -797,6 +797,21 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         }
 
 
+async def handle_mcp_probe(request_id: str, target: str, mcp_config: dict) -> dict:
+    """Probe one saved MCP configuration and report the serve reload state."""
+    from agent.mcp_probe import probe_mcp_config
+    from backend.opencode.serve_client import get_serve_manager
+
+    result = await probe_mcp_config(target, mcp_config if isinstance(mcp_config, dict) else {})
+    result.update(get_serve_manager().config_runtime_status())
+    result.update({
+        "type": "mcp_probe_result",
+        "request_id": request_id,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return result
+
+
 async def handle_skill_create(
     request_id: str,
     name: str,

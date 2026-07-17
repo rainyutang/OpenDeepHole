@@ -705,6 +705,34 @@ class AgentMcpConfig(BaseModel):
     remote: AgentMcpRemoteConfig = AgentMcpRemoteConfig()
 
 
+class AgentMcpProbeResult(BaseModel):
+    target: str
+    config_fingerprint: str = ""
+    success: bool = False
+    checked_at: str = ""
+    transport: str = ""
+    protocol: str = ""
+    tool_names: list[str] = []
+    tool_count: int = 0
+    duration_ms: int = 0
+    error: str = ""
+    runtime_state: str = "next_task"
+    active_sessions: int = 0
+
+
+class AgentMcpTargetStatus(BaseModel):
+    enabled: bool = False
+    stale: bool = False
+    last_probe: AgentMcpProbeResult | None = None
+
+
+class AgentMcpStatusResponse(BaseModel):
+    agent_key: str
+    online: bool = False
+    code_graph: AgentMcpTargetStatus = AgentMcpTargetStatus()
+    product_info: AgentMcpTargetStatus = AgentMcpTargetStatus()
+
+
 class AgentValidationEnvironmentConfig(BaseModel):
     supported_vulnerability_types: list[str] = ["*"]
     concurrency: int = 1

@@ -1683,6 +1683,20 @@ class OpenCodeServeManager:
         # no longer populate the cache.
         self._model_inflight.clear()
 
+    def config_runtime_status(self) -> dict[str, int | str]:
+        """Return whether the current serve has loaded the latest managed config."""
+        running = self._proc is not None and self._proc.poll() is None
+        if running and self._dirty:
+            state = "reload_pending"
+        elif running:
+            state = "active"
+        else:
+            state = "next_task"
+        return {
+            "runtime_state": state,
+            "active_sessions": self._active_sessions,
+        }
+
     async def run_prompt(
         self,
         *,

@@ -185,6 +185,12 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             request_id=msg.get("request_id", ""),
             refresh=bool(msg.get("refresh")),
         )
+    elif cmd_type == "mcp_probe":
+        return await agent_server.handle_mcp_probe(
+            request_id=str(msg.get("request_id") or ""),
+            target=str(msg.get("target") or ""),
+            mcp_config=msg.get("mcp_config") if isinstance(msg.get("mcp_config"), dict) else {},
+        )
     elif cmd_type == "skill_create":
         from agent.updater import ensure_runtime_updated
         await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
