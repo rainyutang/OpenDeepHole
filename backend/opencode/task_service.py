@@ -768,12 +768,21 @@ class OpenCodeTaskService:
             executable=executable,
             cli_config=effective,
         )
+        config_content = runtime_helpers._build_opencode_config_content(
+            config_workspace,
+            tool,
+            base_env=serve_env,
+            writable_paths=None,
+            project_dir=None,
+            executable=executable,
+            cli_config=effective,
+        )
         runtime = _SessionRuntime(
             directory=spec.directory,
             tool=tool,
             executable=executable,
             config_workspace=config_workspace,
-            config_content=serve_env.get("OPENCODE_CONFIG_CONTENT"),
+            config_content=config_content,
             env_overrides=runtime_helpers._opencode_process_env_overrides(serve_env),
         )
         source = OutputSource(

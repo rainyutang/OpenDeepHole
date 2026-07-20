@@ -18,6 +18,7 @@ from backend.opencode.serve_client import (
     _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
     _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
     _EventChannelRuntime,
+    _config_hash,
     _flush_event_state_periodically,
     _handle_serve_event,
     _next_event_reconnect_delay,
@@ -232,7 +233,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             item for item in session_client.posts
             if item["path"] == "/session/session-1/message"
         )
-        expected_hash = hashlib.sha256(config_content.encode("utf-8")).hexdigest()
+        expected_hash = _config_hash(config_content)
         expected_env_overrides = (("HTTPS_PROXY", "http://127.0.0.1:3131"),)
         expected_env_hash = hashlib.sha256(
             json.dumps(expected_env_overrides, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -2201,6 +2202,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         project = tmp_path / "project"
         startup_cwd = project / ".opendeephole" / "opencode" / "serve-test"
         project.mkdir()
+        startup_cwd.mkdir(parents=True)
+        (startup_cwd / "opencode.json").write_text('{"stale": true}', encoding="utf-8")
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
         monkeypatch.delenv("OPENCODE_SERVE_PORT", raising=False)
         monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
@@ -2234,6 +2237,7 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         manager._wait_health_locked = AsyncMock()
         monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9999")
         monkeypatch.setenv("all_proxy", "http://127.0.0.1:9999")
+        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", '{"stale": true}')
 
         await manager._start_locked(OpenCodeServeKey(
             tool="opencode",
@@ -2261,7 +2265,11 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert marker["port"] == 4096
         assert marker["tool"] == "opencode"
         assert marker["config_hash"] == "abc123"
-        assert envs[0]["OPENCODE_CONFIG_CONTENT"] == '{"mcp": {}}'
+        assert "OPENCODE_CONFIG_CONTENT" not in envs[0]
+        assert envs[0]["OPENCODE_CONFIG_DIR"] == str(startup_cwd)
+        runtime_config_path = startup_cwd / "opencode.json"
+        assert json.loads(runtime_config_path.read_text(encoding="utf-8")) == {"mcp": {}}
+        assert runtime_config_path.stat().st_mode & 0o777 == 0o600
         assert envs[0]["HTTP_PROXY"] == "http://127.0.0.1:3131"
         assert envs[0]["HTTPS_PROXY"] == "http://127.0.0.1:3131"
         assert "ALL_PROXY" not in envs[0]
@@ -2287,7 +2295,10 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert "/bin/opencode serve --hostname 127.0.0.1 --port 4096" in log_text
         assert "HTTP_PROXY=http://127.0.0.1:3131" in log_text
         assert "HTTPS_PROXY=http://127.0.0.1:3131" in log_text
-        assert 'OPENCODE_CONFIG_CONTENT={"mcp": {}}' in log_text
+        assert "OPENCODE_CONFIG_CONTENT=(unset)" in log_text
+        assert f"OPENCODE_CONFIG_DIR={startup_cwd}" in log_text
+        assert f"config_file_path={runtime_config_path}" in log_text
+        assert 'config_content_redacted={"mcp": {}}' in log_text
         assert "popen_kwargs={'start_new_session': True}" in log_text
 
     asyncio.run(run())
@@ -3081,7 +3092,7 @@ def test_config_hash_change_restarts_after_active_sessions_drain() -> None:
     asyncio.run(run())
 
 
-def test_config_hash_change_reuses_active_serve_process_without_waiting() -> None:
+def test_config_hash_change_reuses_active_serve_process_without_waiting(tmp_path: Path) -> None:
     async def run() -> None:
         class FakeProc:
             def poll(self):
@@ -3099,18 +3110,21 @@ def test_config_hash_change_reuses_active_serve_process_without_waiting() -> Non
         manager._wait_until_idle_locked = AsyncMock()
         manager._stop_locked = AsyncMock()
         manager._start_locked = AsyncMock()
+        live_config = tmp_path / "opencode.json"
+        live_config.write_text('{"active": true}', encoding="utf-8")
 
         await manager._ensure_started_locked(OpenCodeServeKey(
             tool="opencode",
             executable="opencode",
             config_hash="new",
             config_content='{"mcp": {}}',
-        ))
+        ), startup_cwd=tmp_path)
 
         manager._wait_until_idle_locked.assert_not_awaited()
         manager._stop_locked.assert_not_awaited()
         manager._start_locked.assert_not_awaited()
         assert manager._port == 12345
+        assert live_config.read_text(encoding="utf-8") == '{"active": true}'
 
     asyncio.run(run())
 

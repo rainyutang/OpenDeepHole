@@ -66,6 +66,7 @@ _SERVE_DEBUG_ENV_NAMES = (
     "https_proxy",
     "NO_PROXY",
     "no_proxy",
+    "OPENCODE_CONFIG_DIR",
     "OPENCODE_CONFIG_CONTENT",
 )
 _SERVE_PROXY_ENV_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"}
@@ -237,6 +238,33 @@ def _prepare_serve_startup_cwd(tool: str, startup_cwd: Path | None) -> Path:
     return cwd
 
 
+def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
+    """Atomically publish the resolved config used by the next Serve process."""
+    raw = config_content or "{}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Resolved OpenCode config is invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Resolved OpenCode config must be a JSON object")
+    normalized = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    config_path = cwd / "opencode.json"
+    fd, temporary_name = tempfile.mkstemp(prefix=".opencode.json.", suffix=".tmp", dir=cwd)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(normalized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, config_path)
+        os.chmod(config_path, 0o600)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary_path.unlink()
+    return config_path
+
+
 def _read_serve_startup_log_tail(path: Path | None) -> str:
     if path is None:
         return ""
@@ -324,8 +352,12 @@ def _log_serve_startup_debug(
     startup_log_path: Path,
     popen_kwargs: dict[str, Any],
     marker_path: Path,
+    config_path: Path,
 ) -> None:
-    config_content = env.get("OPENCODE_CONFIG_CONTENT", "")
+    try:
+        config_content = config_path.read_text(encoding="utf-8")
+    except OSError:
+        config_content = key.config_content
     lines = [
         "OpenCode serve startup debug:",
         f"  tool={key.tool}",
@@ -336,7 +368,9 @@ def _log_serve_startup_debug(
         f"  marker_path={marker_path}",
         f"  startup_log_path={startup_log_path}",
         f"  config_hash={key.config_hash or '(none)'}",
+        f"  config_file_path={config_path}",
         f"  config_content_bytes={len(config_content.encode('utf-8')) if config_content else 0}",
+        f"  config_content_redacted={_redacted_config_content(config_content)}",
         f"  argv={json.dumps(cmd, ensure_ascii=False)}",
         f"  shell={_serve_startup_shell_debug(cmd, cwd, env)}",
         "  env_overrides:",
@@ -747,6 +781,15 @@ def _config_hash(config_content: str | None) -> str:
     content = (config_content or "").strip()
     if not content:
         return ""
+    try:
+        content = json.dumps(
+            json.loads(content),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except Exception:
+        pass
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
@@ -3126,19 +3169,20 @@ class OpenCodeServeManager:
             if _port_is_in_use(port):
                 raise RuntimeError(_port_busy_message(port, reclaim))
         prepared_cwd = _prepare_serve_startup_cwd(key.tool, startup_cwd)
+        config_path = _write_serve_config_file(prepared_cwd, key.config_content)
         env = dict(os.environ)
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
-        if key.config_content:
-            env["OPENCODE_CONFIG_CONTENT"] = key.config_content
-        else:
-            env.pop("OPENCODE_CONFIG_CONTENT", None)
         if any(name in _SERVE_PROXY_ENV_NAMES for name, _ in key.env_overrides):
             for name in _SERVE_PROXY_CLEAR_ENV_NAMES:
                 env.pop(name, None)
         for name, value in key.env_overrides:
             env[name] = value
+        # The resolved config is file-backed. Environment overrides are never
+        # allowed to re-introduce content injection or redirect the config dir.
+        env.pop("OPENCODE_CONFIG_CONTENT", None)
+        env["OPENCODE_CONFIG_DIR"] = str(prepared_cwd)
         env.pop("OPENCODE_SERVER_PASSWORD", None)
         env.pop("OPENCODE_SERVER_USERNAME", None)
         cmd = [
@@ -3163,6 +3207,7 @@ class OpenCodeServeManager:
             startup_log_path=startup_log_path,
             popen_kwargs=kwargs,
             marker_path=self._marker_path,
+            config_path=config_path,
         )
         try:
             with startup_log_path.open("ab") as startup_log:

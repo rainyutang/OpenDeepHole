@@ -28,11 +28,12 @@ import type {
 } from "../types";
 
 interface Props { onBack: () => void }
-type Section = "base" | "models" | "threat" | "codegraph" | "product" | "mining" | "fp" | "validation";
+type Section = "base" | "models" | "opencode" | "threat" | "codegraph" | "product" | "mining" | "fp" | "validation";
 
 const sections: { id: Section; label: string }[] = [
   { id: "base", label: "基础配置" },
   { id: "models", label: "模型配置" },
+  { id: "opencode", label: "OpenCode 配置" },
   { id: "threat", label: "威胁分析" },
   { id: "codegraph", label: "代码图谱" },
   { id: "product", label: "产品信息" },
@@ -55,6 +56,7 @@ const emptyMcpRuntime = () => ({
 });
 const defaultConfig = (): AgentRemoteConfig => ({
   schema_version: 2,
+  opencode_config: "{}",
   base: { tool: "nga", executable: "nga", no_proxy: "10.0.0.0/8" },
   model_pool: { global_concurrency: 4, models: [] },
   threat_analysis: { enabled: true, attack_path_audit_mode: "after_analysis", model_policy: policy("high", 3) },
@@ -398,11 +400,16 @@ export default function AgentConfigPage({ onBack }: Props) {
     try {
       const mcpChanged = JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)
         || JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info);
+      const opencodeChanged = config.opencode_config !== savedConfig.opencode_config;
       await updateAgentConfig(agentKey, config);
       setSavedConfig(config); setDirty(false);
       getAgentMcpStatus(agentKey).then(setMcpStatus).catch(() => undefined);
       setMessage(selectedAgent?.online
-        ? (mcpChanged ? "配置已保存，Agent 正在热加载 MCP" : "配置已保存并推送到 Agent")
+        ? (opencodeChanged
+          ? (mcpChanged
+            ? "配置已保存并推送；MCP 正在热加载，OpenCode 配置将在 Serve 空闲后的下一次启动生效"
+            : "配置已保存并推送；OpenCode 配置将在 Serve 空闲后的下一次启动生效")
+          : (mcpChanged ? "配置已保存，Agent 正在热加载 MCP" : "配置已保存并推送到 Agent"))
         : "配置已保存，将在 Agent 重连后生效");
     }
     catch (error: any) { setMessage(error?.response?.data?.detail || "保存失败"); }
@@ -557,6 +564,30 @@ export default function AgentConfigPage({ onBack }: Props) {
             <Field label="代理跳过列表" hint="逗号分隔"><textarea className={input} rows={4} value={config.base.no_proxy} onChange={(e) => setCfg({ ...config, base: { ...config.base, no_proxy: e.target.value } })} /></Field>
           </div>}
           {section === "models" && <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={() => void openModelPicker()} pool={pool} />}
+          {section === "opencode" && <div className="space-y-5">
+            <div className="grid gap-3 text-sm text-slate-300 lg:grid-cols-2">
+              <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
+                <p className="font-medium text-slate-100">运行时文件</p>
+                <p className="mt-2 leading-6">保存后由 Agent 合并并写入 <code className="break-all text-blue-300">~/.opendeephole/opencode_workspace/opencode.json</code>。支持 JSONC 注释和尾随逗号。</p>
+              </div>
+              <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
+                <p className="font-medium text-slate-100">合并优先级</p>
+                <p className="mt-2 leading-6">本机发现的 OpenCode 配置 &lt; 此页配置 &lt; OpenDeepHole 保留字段。已有会话不会中断，新配置在 Serve 空闲后的下一次启动生效。</p>
+              </div>
+            </div>
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm leading-6 text-amber-100">
+              OpenDeepHole 会覆盖运行所需的 <code>$schema</code>、受管 MCP、技能路径、权限以及威胁分析子 Agent 配置。API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 <code>agent.yaml</code> 和运行时配置文件中；运行时文件权限为 0600，请只在可信环境中填写。
+            </div>
+            <Field label="完整 OpenCode JSONC 配置层">
+              <textarea
+                className={`${input} min-h-[32rem] resize-y font-mono text-xs leading-6`}
+                spellCheck={false}
+                value={config.opencode_config}
+                onChange={(e) => setCfg({ ...config, opencode_config: e.target.value })}
+                placeholder={'{\n  // 可使用注释\n  "provider": {}\n}'}
+              />
+            </Field>
+          </div>}
           {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, enabled: e.target.checked } })} />启用威胁分析</label><Field label="攻击路径审计模式"><select className={input} value={config.threat_analysis.attack_path_audit_mode} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, attack_path_audit_mode: e.target.value } })}><option value="after_analysis">分析完成后审计</option><option value="immediate">生成后立即审计</option></select></Field><PolicyEditor value={config.threat_analysis.model_policy} onChange={(value) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy: value } })} /></div>}
           {section === "codegraph" && <McpEditor value={config.code_graph} onChange={(value) => setCfg({ ...config, code_graph: value })} status={mcpStatus?.code_graph || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)} probing={probingTarget === "code_graph"} reloading={reloadingTarget === "code_graph"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("code_graph")} onReload={() => reloadMcp("code_graph")} />}
           {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} status={mcpStatus?.product_info || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info)} probing={probingTarget === "product_info"} reloading={reloadingTarget === "product_info"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("product_info")} onReload={() => reloadMcp("product_info")} />}

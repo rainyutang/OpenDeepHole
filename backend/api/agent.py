@@ -46,6 +46,7 @@ from backend.api.scan import _running_scans, _scan_owners
 from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
+from backend.opencode.config_json import parse_opencode_jsonc
 from backend.models import (
     AgentGitHistory,
     AgentMcpConfig,
@@ -220,6 +221,10 @@ def _validate_managed_config(
     config: AgentRemoteConfig,
     catalog: AgentValidatorCatalog | None = None,
 ) -> None:
+    try:
+        parse_opencode_jsonc(config.opencode_config, source="OpenCode 配置")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if config.base.tool not in {"nga", "opencode"}:
         raise HTTPException(status_code=422, detail="基础配置中的工具只能是 nga 或 opencode")
     if not config.base.executable.strip():
@@ -929,6 +934,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
         reported_config = msg.get("config")
         try:
             initial_config = AgentRemoteConfig(**reported_config) if isinstance(reported_config, dict) else AgentRemoteConfig()
+            _validate_managed_config(initial_config)
         except Exception as exc:
             logger.warning("Ignoring invalid config reported by agent %s: %s", name, exc)
             initial_config = AgentRemoteConfig()

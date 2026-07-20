@@ -128,9 +128,15 @@ def install_attack_tree_threat_analysis_skill(
     workspace: Path,
     skill_path: Path,
     reference_catalog_path: Path,
+    *,
+    config_path: Path | None = None,
 ) -> None:
     """Install the built-in attack-tree threat-analysis skill into a CLI workspace."""
-    from backend.opencode.config import get_workspace_lock
+    from backend.opencode.config import (
+        _write_text_atomic,
+        get_workspace_lock,
+        managed_opencode_config_path,
+    )
 
     skill_path = skill_path.resolve()
     reference_catalog_path = reference_catalog_path.resolve()
@@ -140,7 +146,10 @@ def install_attack_tree_threat_analysis_skill(
         raise FileNotFoundError(f"Attack method reference catalog not found: {reference_catalog_path}")
 
     with get_workspace_lock(workspace):
-        _install_threat_analysis_subagents(workspace)
+        _install_threat_analysis_subagents(
+            config_path or managed_opencode_config_path(workspace),
+            write_text_atomic=_write_text_atomic,
+        )
         skill_dir = workspace / ".opencode" / "skills" / "attack-tree-threat-analysis"
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(skill_path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -163,9 +172,8 @@ def install_attack_tree_threat_analysis_skill(
                 )
 
 
-def _install_threat_analysis_subagents(workspace: Path) -> None:
-    """Register first-step threat-analysis subagents in the task-local OpenCode config."""
-    config_path = workspace / "opencode.json"
+def _install_threat_analysis_subagents(config_path: Path, *, write_text_atomic) -> None:
+    """Register first-step threat-analysis subagents in the managed config layer."""
     try:
         data = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
     except Exception:
@@ -186,5 +194,8 @@ def _install_threat_analysis_subagents(workspace: Path) -> None:
     for name, agent_config in _THREAT_ANALYSIS_SUBAGENTS.items():
         agents[name] = agent_config
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_text_atomic(
+        config_path,
+        json.dumps(data, ensure_ascii=False, indent=2),
+        mode=0o600,
+    )

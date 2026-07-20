@@ -35,7 +35,11 @@ flowchart LR
 ~/.opendeephole/opencode_workspace
 ```
 
-该目录只保存稳定的 `opencode.json`、共享 MCP 网关配置和全局 SKILL 注册。扫描、误报复核和漏洞验证不再创建自己的 `opencode_workspace`，也不再把运行配置复制到被扫项目中。既有旧目录不会被自动删除。
+该目录保存全局 SKILL、OpenDeepHole 私有受管配置层，以及 Serve 实际读取的最终 `opencode.json`。扫描、误报复核和漏洞验证不再创建自己的 `opencode_workspace`，也不再把运行配置复制到被扫项目中。既有旧目录不会被自动删除。
+
+最终配置在 Serve 空闲启动边界按以下优先级生成：本机发现及显式指定的配置 < Agent 配置页保存的完整 JSONC 用户层 < OpenDeepHole 受管字段。受管字段包括 `$schema`、deephole-code 与已启用的受管 MCP、技能路径、权限和威胁分析子 Agent。Serve 管理器是最终 `opencode.json` 的唯一写入者：它使用原子替换和 POSIX `0600` 权限发布文件，通过 `OPENCODE_CONFIG_DIR` 加载，并显式清除 `OPENCODE_CONFIG_CONTENT`。配置更新不会覆盖活动 Serve 正在使用的文件，而是在 Session 全部空闲后的下一次启动生效。
+
+Web JSONC 中的 API Key、Token 等敏感值会以明文进入服务端数据库、Agent 的 `agent.yaml` 和最终运行文件；启动诊断只打印脱敏后的配置内容、路径、哈希和字节数。
 
 OpenDeepHole 自带的 checker、误报复核、Git 历史、变体排查和威胁分析 SKILL 都注册在全局 skill root；OpenCode 按任务 prompt 中的名称自行发现并按需加载，不会把所有 `SKILL.md` 正文同时注入 system prompt。项目自身的标准 SKILL 目录仍由 OpenCode 正常发现。
 

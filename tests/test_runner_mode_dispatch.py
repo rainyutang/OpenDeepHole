@@ -14,10 +14,10 @@ from backend.opencode.runner import (
     _DEFAULT_OPENCODE_NO_PROXY,
     _build_cli_command,
     _build_cli_env,
+    _build_opencode_config_content,
     _cleanup_prompt_file,
     _effective_cli_config,
     _prompt_file_message,
-    _prepare_cli_workspace,
     _run_audit_via_opencode,
     _serve_runtime_namespace,
     _select_cli_cwd,
@@ -28,6 +28,14 @@ from backend.opencode.runner import (
     run_threat_analysis_audit,
     run_threat_audit,
 )
+from backend.opencode.config import managed_opencode_config_path
+
+
+def _write_managed_config(workspace: Path, payload: dict) -> None:
+    managed_opencode_config_path(workspace).write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
 
 
 def _candidate(line: int = 12) -> Candidate:
@@ -62,6 +70,7 @@ def test_effective_cli_config_can_select_cli_default_model() -> None:
         timeout=1200,
         max_retries=2,
         models=[],
+        config_jsonc='{"model": "web/model"}',
     )
     option = SimpleNamespace(
         tool="",
@@ -73,6 +82,7 @@ def test_effective_cli_config_can_select_cli_default_model() -> None:
     )
 
     assert _effective_cli_config(cfg, option)["model"] == ""
+    assert _effective_cli_config(cfg, option)["config_jsonc"] == '{"model": "web/model"}'
     assert "invocation_mode" not in _effective_cli_config(cfg, option)
 
 
@@ -88,22 +98,7 @@ def test_long_prompt_file_reference_is_passed_as_message(tmp_path: Path) -> None
     assert not prompt_path.exists()
 
 
-def test_prepare_cli_workspace_rejects_non_opencode_tools(tmp_path: Path) -> None:
-    (tmp_path / "opencode.json").write_text(
-        '{"mcp":{"deephole-code":{"url":"http://127.0.0.1:9123/mcp"}}}',
-        encoding="utf-8",
-    )
-    skill_dir = tmp_path / ".opencode" / "skills" / "prove-bug"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("fp skill", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Unsupported OpenCode serve tool"):
-        _prepare_cli_workspace(tmp_path, "claude")
-    with pytest.raises(ValueError, match="Unsupported OpenCode serve tool"):
-        _prepare_cli_workspace(tmp_path, "hac")
-
-
-def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(tmp_path: Path) -> None:
+def test_opencode_uses_file_config_and_project_dir_with_isolated_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     project = tmp_path / "project"
     workspace.mkdir()
@@ -112,8 +107,13 @@ def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(t
         "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
         "skills": {"paths": [str(workspace / ".opencode" / "skills")]},
     }
-    (workspace / "opencode.json").write_text(json.dumps(config_payload), encoding="utf-8")
-    env = _build_cli_env(workspace, "opencode", base_env={})
+    _write_managed_config(workspace, config_payload)
+    env = _build_cli_env(
+        workspace,
+        "opencode",
+        base_env={"OPENCODE_CONFIG_CONTENT": '{"stale": true}'},
+    )
+    config_content = _build_opencode_config_content(workspace, "opencode", base_env=env)
 
     assert _build_cli_command("opencode", "opencode", workspace, "hello", "", project)[:4] == [
         "opencode",
@@ -123,7 +123,8 @@ def test_opencode_uses_injected_config_and_project_dir_with_isolated_workspace(t
     ]
     assert _select_cli_cwd(workspace, "opencode", project) == project / ".opendeephole" / "opencode"
     assert (project / ".opendeephole" / "opencode").is_dir()
-    assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == config_payload
+    assert "OPENCODE_CONFIG_CONTENT" not in env
+    assert json.loads(config_content) == config_payload
     assert env["NODE_TLS_REJECT_UNAUTHORIZED"] == "0"
 
 
@@ -503,46 +504,7 @@ def test_threat_audit_prompt_preserves_remote_path_context(tmp_path: Path) -> No
     asyncio.run(run())
 
 
-def test_opencode_runtime_cwd_receives_config_and_fp_skills(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    project = tmp_path / "project"
-    workspace.mkdir()
-    project.mkdir()
-    skills_root = workspace / ".opencode" / "skills"
-    for name in ("prove-bug", "prove-fp", "final-judge"):
-        skill_dir = skills_root / name
-        skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(name, encoding="utf-8")
-    (workspace / "opencode.json").write_text(
-        json.dumps({
-            "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
-            "skills": {"paths": [str(skills_root.resolve())]},
-        }),
-        encoding="utf-8",
-    )
-
-    runtime_cwd = _select_cli_cwd(workspace, "opencode", project)
-    config_workspace = _prepare_cli_workspace(
-        workspace, "opencode", runtime_cwd=runtime_cwd,
-    )
-    env = _build_cli_env(config_workspace, "opencode", base_env={})
-    runtime_config = json.loads((runtime_cwd / "opencode.json").read_text(encoding="utf-8"))
-    env_config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-
-    assert config_workspace == runtime_cwd
-    # Skills should be copied to runtime CWD (opencode walks up from CWD)
-    assert (runtime_cwd / ".opencode" / "skills" / "prove-bug" / "SKILL.md").is_file()
-    assert (runtime_cwd / ".opencode" / "skills" / "prove-fp" / "SKILL.md").is_file()
-    assert (runtime_cwd / ".opencode" / "skills" / "final-judge" / "SKILL.md").is_file()
-    assert runtime_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
-    assert env_config["skills"]["paths"] == runtime_config["skills"]["paths"]
-    plugin_path = runtime_cwd / ".opencode" / "plugins" / "inject-mcp-session.ts"
-    assert not plugin_path.exists()
-    assert all("inject-mcp-session" not in str(value) for value in runtime_config.get("plugin", []))
-    assert all("inject-mcp-session" not in str(value) for value in env_config.get("plugin", []))
-
-
-def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_path: Path) -> None:
+def test_opencode_file_content_merges_user_config_without_early_runtime_write(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     project = tmp_path / "project"
     xdg_config = tmp_path / "xdg"
@@ -587,43 +549,96 @@ def test_opencode_env_merges_user_config_without_writing_provider_secrets(tmp_pa
         """,
         encoding="utf-8",
     )
-    (workspace / "opencode.json").write_text(
-        json.dumps({
+    _write_managed_config(
+        workspace,
+        {
             "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
             "skills": {"paths": [str(skills_root.resolve())]},
             "plugin": ["task-plugin"],
-        }),
-        encoding="utf-8",
+        },
     )
 
-    runtime_cwd = _select_cli_cwd(workspace, "opencode", project)
-    config_workspace = _prepare_cli_workspace(
-        workspace,
-        "opencode",
-        runtime_cwd=runtime_cwd,
-    )
     env = _build_cli_env(
-        config_workspace,
+        workspace,
         "opencode",
         base_env={"XDG_CONFIG_HOME": str(xdg_config)},
         project_dir=project,
     )
-    runtime_config = json.loads((runtime_cwd / "opencode.json").read_text(encoding="utf-8"))
-    env_config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    config_content = _build_opencode_config_content(
+        workspace,
+        "opencode",
+        base_env=env,
+        project_dir=project,
+    )
+    resolved_config = json.loads(config_content)
 
-    assert "provider" not in runtime_config
-    assert runtime_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
-    assert env_config["provider"]["corp"]["options"]["apiKey"] == "global-secret"
-    assert env_config["provider"]["corp"]["options"]["baseURL"] == "https://project.example/v1"
-    assert env_config["model"] == "corp/project-model"
-    assert env_config["mcp"]["other"]["url"] == "http://127.0.0.1:9999/mcp"
-    assert env_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
-    assert env_config["skills"]["paths"] == [str((runtime_cwd / ".opencode" / "skills").resolve())]
-    assert runtime_config["plugin"] == ["task-plugin"]
-    assert env_config["plugin"] == ["global-plugin", "task-plugin"]
+    assert not (workspace / "opencode.json").exists()
+    assert "OPENCODE_CONFIG_CONTENT" not in env
+    assert resolved_config["provider"]["corp"]["options"]["apiKey"] == "global-secret"
+    assert resolved_config["provider"]["corp"]["options"]["baseURL"] == "https://project.example/v1"
+    assert resolved_config["model"] == "corp/project-model"
+    assert resolved_config["mcp"]["other"]["url"] == "http://127.0.0.1:9999/mcp"
+    assert resolved_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
+    assert resolved_config["skills"]["paths"] == [str(skills_root.resolve())]
+    assert resolved_config["plugin"] == ["global-plugin", "task-plugin"]
 
 
-def test_opencode_env_uses_env_config_path_and_strips_schema(tmp_path: Path) -> None:
+def test_web_jsonc_overrides_local_config_but_managed_fields_win(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    project = tmp_path / "project"
+    workspace.mkdir()
+    project.mkdir()
+    (project / "opencode.json").write_text(
+        json.dumps({"model": "corp/local", "custom": {"source": "local"}}),
+        encoding="utf-8",
+    )
+    _write_managed_config(
+        workspace,
+        {
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
+            "permission": {"edit": {"*": "deny"}},
+        },
+    )
+    web_jsonc = """
+    {
+      // Web values are the complete user-owned layer.
+      "model": "corp/web",
+      "custom": {"source": "web",},
+      "mcp": {"deephole-code": {
+        "url": "http://example.invalid/mcp",
+        "headers": {"Authorization": "Bearer should-not-survive"},
+      }},
+      "permission": {"edit": {"*": "allow"}, "bash": {"*": "allow"}},
+    }
+    """
+
+    resolved = json.loads(_build_opencode_config_content(
+        workspace,
+        "opencode",
+        base_env={},
+        project_dir=project,
+        cli_config={"config_jsonc": web_jsonc},
+    ))
+
+    assert resolved["model"] == "corp/web"
+    assert resolved["custom"] == {"source": "web"}
+    assert resolved["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
+    assert "headers" not in resolved["mcp"]["deephole-code"]
+    assert resolved["permission"]["edit"] == {"*": "deny"}
+    assert "bash" not in resolved["permission"]
+
+
+def test_invalid_managed_config_blocks_runtime_config_generation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    managed_opencode_config_path(workspace).write_text('{"mcp": }', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="managed OpenCode config is invalid"):
+        _build_opencode_config_content(workspace, "opencode", base_env={})
+
+
+def test_opencode_file_content_uses_env_config_path_and_keeps_schema(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     explicit_config = tmp_path / "corp-opencode.json"
     workspace.mkdir()
@@ -635,12 +650,12 @@ def test_opencode_env_uses_env_config_path_and_strips_schema(tmp_path: Path) -> 
         }),
         encoding="utf-8",
     )
-    (workspace / "opencode.json").write_text(
-        json.dumps({
+    _write_managed_config(
+        workspace,
+        {
             "$schema": "https://opencode.ai/config.json",
             "mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}},
-        }),
-        encoding="utf-8",
+        },
     )
 
     env = _build_cli_env(
@@ -648,20 +663,24 @@ def test_opencode_env_uses_env_config_path_and_strips_schema(tmp_path: Path) -> 
         "opencode",
         base_env={"OPENCODE_CONFIG_PATH": str(explicit_config)},
     )
-    env_config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    resolved_config = json.loads(_build_opencode_config_content(
+        workspace,
+        "opencode",
+        base_env=env,
+    ))
 
-    assert "$schema" not in env_config
-    assert env_config["provider"]["corp"]["options"]["apiKey"] == "env-secret"
-    assert env_config["model"] == "corp/env-model"
-    assert env_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
+    assert resolved_config["$schema"] == "https://opencode.ai/config.json"
+    assert resolved_config["provider"]["corp"]["options"]["apiKey"] == "env-secret"
+    assert resolved_config["model"] == "corp/env-model"
+    assert resolved_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
 
 
 def test_opencode_proxy_url_populates_child_process_env(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "opencode.json").write_text(
-        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
-        encoding="utf-8",
+    _write_managed_config(
+        workspace,
+        {"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}},
     )
 
     env = _build_cli_env(
@@ -684,9 +703,9 @@ def test_opencode_proxy_url_populates_child_process_env(tmp_path: Path) -> None:
 def test_opencode_proxy_env_prefers_lowercase_local_proxy(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "opencode.json").write_text(
-        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
-        encoding="utf-8",
+    _write_managed_config(
+        workspace,
+        {"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}},
     )
 
     env = _build_cli_env(
@@ -709,9 +728,9 @@ def test_opencode_proxy_env_prefers_lowercase_local_proxy(tmp_path: Path) -> Non
 def test_opencode_proxy_no_proxy_can_be_overridden(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "opencode.json").write_text(
-        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
-        encoding="utf-8",
+    _write_managed_config(
+        workspace,
+        {"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}},
     )
 
     env = _build_cli_env(
@@ -760,9 +779,9 @@ def test_opencode_env_merges_executable_project_and_config_paths(tmp_path: Path)
         }),
         encoding="utf-8",
     )
-    (workspace / "opencode.json").write_text(
-        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
-        encoding="utf-8",
+    _write_managed_config(
+        workspace,
+        {"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}},
     )
 
     env = _build_cli_env(
@@ -773,26 +792,33 @@ def test_opencode_env_merges_executable_project_and_config_paths(tmp_path: Path)
         executable=str(executable_dir / "opencode"),
         cli_config={"config_paths": [str(explicit_config)]},
     )
-    env_config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    resolved_config = json.loads(_build_opencode_config_content(
+        workspace,
+        "opencode",
+        base_env=env,
+        project_dir=project,
+        executable=str(executable_dir / "opencode"),
+        cli_config={"config_paths": [str(explicit_config)]},
+    ))
 
-    assert env_config["provider"]["corp"]["options"]["apiKey"] == "exe-secret"
-    assert env_config["provider"]["corp"]["options"]["baseURL"] == "https://explicit.example/v1"
-    assert env_config["model"] == "corp/explicit-model"
-    assert env_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
+    assert resolved_config["provider"]["corp"]["options"]["apiKey"] == "exe-secret"
+    assert resolved_config["provider"]["corp"]["options"]["baseURL"] == "https://explicit.example/v1"
+    assert resolved_config["model"] == "corp/explicit-model"
+    assert resolved_config["mcp"]["deephole-code"]["url"] == "http://127.0.0.1:9123/mcp"
 
 
-def test_opencode_env_warns_when_injected_config_has_no_model_config(tmp_path: Path, caplog) -> None:
+def test_opencode_file_content_warns_when_resolved_config_has_no_model_config(tmp_path: Path, caplog) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "opencode.json").write_text(
-        json.dumps({"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}}),
-        encoding="utf-8",
+    _write_managed_config(
+        workspace,
+        {"mcp": {"deephole-code": {"url": "http://127.0.0.1:9123/mcp"}}},
     )
 
     caplog.set_level("WARNING")
-    _build_cli_env(workspace, "opencode", base_env={})
+    _build_opencode_config_content(workspace, "opencode", base_env={})
 
-    assert "OPENCODE_CONFIG_CONTENT has no provider/model keys" in caplog.text
+    assert "Resolved OpenCode runtime config has no provider/model keys" in caplog.text
 
 
 def test_project_runtime_cwd_falls_back_to_workspace_when_unavailable(tmp_path: Path) -> None:

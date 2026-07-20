@@ -45,6 +45,7 @@ class OpenCodeConfig:
     config_paths: list[str] = field(default_factory=list)  # optional OpenCode config files to merge
     proxy_url: str = ""           # optional proxy for opencode/nga child processes
     no_proxy: str = ""            # optional no_proxy override for opencode/nga child processes
+    config_jsonc: str = "{}"       # complete JSONC config layer managed by the server
 
 
 @dataclass
@@ -147,6 +148,7 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
         config.config_paths = [path] if path else []
     config.proxy_url = str(getattr(config, "proxy_url", "") or "").strip()
     config.no_proxy = str(getattr(config, "no_proxy", "") or "").strip()
+    config.config_jsonc = str(getattr(config, "config_jsonc", "{}") or "{}")
     if tool not in AI_CLI_TOOLS:
         if tool:
             warnings.warn(
@@ -409,6 +411,8 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
             config.opencode.tool = str(base.get("tool") or "")
         if "executable" in base:
             config.opencode.executable = str(base.get("executable") or "")
+        if "opencode_config" in remote:
+            config.opencode.config_jsonc = str(remote.get("opencode_config") or "{}")
         if isinstance(model_pool.get("models"), list):
             fields = {item.name for item in dataclasses.fields(OpenCodeModelConfig)}
             config.opencode.models = [
@@ -444,6 +448,8 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
 
     if "no_proxy" in remote and remote["no_proxy"] is not None:
         config.no_proxy = remote["no_proxy"]
+    if "opencode_config" in remote:
+        config.opencode.config_jsonc = str(remote.get("opencode_config") or "{}")
     section = remote.get("opencode") or {}
     if isinstance(section, dict) and "tool" not in section and "executable" in section:
         config.opencode.tool = ""
@@ -560,6 +566,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_runtime_models.add(signature)
     return {
         "schema_version": 2,
+        "opencode_config": config.opencode.config_jsonc,
         "base": {
             "tool": config.opencode.tool,
             "executable": config.opencode.executable,
@@ -611,6 +618,8 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     validation_fields = {f.name for f in dataclasses.fields(VulnerabilityValidationConfig)}
 
     oc_raw = {k: v for k, v in raw.get("opencode", {}).items() if k in oc_fields}
+    if "opencode_config" in raw:
+        oc_raw["config_jsonc"] = str(raw.get("opencode_config") or "{}")
     if isinstance(oc_raw.get("models"), list):
         oc_raw["models"] = [
             OpenCodeModelConfig(**{k: v for k, v in item.items() if k in model_fields})
@@ -694,11 +703,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist remotely-managed config sections back to agent.yaml.
-
-    Only overwrites opencode and no_proxy — local fields like
-    server_url, agent_name, and agent_port are preserved as-is.
-    """
+    """Persist v2 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return
@@ -726,6 +731,7 @@ def save_config(config: AgentConfig) -> None:
         "vulnerability_mining",
         "false_positive",
         "schema_version",
+        "opencode_config",
     ):
         raw.pop(key, None)
     raw.update(remote_config_dict(config))

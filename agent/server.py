@@ -749,7 +749,12 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
     """Return models visible to the Agent's OpenCode-compatible serve process."""
     try:
         from backend.opencode.serve_client import get_serve_manager
-        from backend.opencode.runner import _build_cli_env, _opencode_process_env_overrides
+        from backend.opencode.config import get_global_opencode_workspace
+        from backend.opencode.runner import (
+            _build_cli_env,
+            _build_opencode_config_content,
+            _opencode_process_env_overrides,
+        )
 
         if _config is None:
             raise RuntimeError("Agent config is not initialized")
@@ -757,9 +762,18 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         executable = str(getattr(_config.opencode, "executable", "") or tool)
         if tool not in {"opencode", "nga"}:
             raise RuntimeError(f"{tool} does not support serve model listing")
+        config_workspace = get_global_opencode_workspace()
         serve_env = _build_cli_env(
-            Path.cwd(),
+            config_workspace,
             tool,
+            project_dir=Path.cwd(),
+            executable=executable,
+            cli_config=_config.opencode,
+        )
+        config_content = _build_opencode_config_content(
+            config_workspace,
+            tool,
+            base_env=serve_env,
             project_dir=Path.cwd(),
             executable=executable,
             cli_config=_config.opencode,
@@ -767,7 +781,9 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         model_result = await get_serve_manager().list_models(
             tool=tool,
             executable=executable,
-            config_content=serve_env.get("OPENCODE_CONFIG_CONTENT"),
+            directory=Path.cwd(),
+            config_workspace=config_workspace,
+            config_content=config_content,
             env_overrides=_opencode_process_env_overrides(serve_env),
             refresh=refresh,
         )

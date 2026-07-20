@@ -31,6 +31,7 @@ opencode:
   proxy_url: ""  # optional proxy for opencode/nga child processes, e.g. "http://127.0.0.1:3131"
   no_proxy: ""   # optional no_proxy for opencode/nga child processes; empty uses intranet defaults
   config_paths: [] # optional OpenCode config files to merge; OPENCODE_CONFIG_PATH is also supported
+  config_jsonc: "{}" # Web-managed complete JSONC layer; OpenDeepHole reserved fields override it
   models: []     # 空池/全禁用会让任务阻塞排队；默认模型也需显式配置 use_default_model: true
 
 fp_review:

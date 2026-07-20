@@ -153,6 +153,7 @@ def _public_checker_names() -> list[str]:
 async def _sync_agent_config(agent_id: str, config: AgentRemoteConfig) -> None:
     from backend.api import agent as agent_api
 
+    agent_api._validate_managed_config(config)
     agent = agent_api._registered_agents.get(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")

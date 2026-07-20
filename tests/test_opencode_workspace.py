@@ -10,6 +10,8 @@ from agent.fp_reviewer import _create_fp_workspace
 from backend.opencode.config import (
     build_opencode_config,
     get_global_opencode_workspace,
+    managed_opencode_config_path,
+    refresh_global_opencode_config,
     writable_edit_patterns,
 )
 from backend.registry import CheckerEntry
@@ -163,7 +165,10 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
             self.assertEqual(first, workspace_path)
             self.assertEqual(second, first)
-            config = json.loads((first / "opencode.json").read_text(encoding="utf-8"))
+            managed_path = managed_opencode_config_path(first)
+            config = json.loads(managed_path.read_text(encoding="utf-8"))
+            self.assertFalse((first / "opencode.json").exists())
+            self.assertEqual(managed_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(
                 config["mcp"]["deephole-code"]["url"],
                 "http://127.0.0.1:9123/mcp",
@@ -176,6 +181,29 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             skill = (first / ".opencode" / "skills" / "npd" / "SKILL.md").read_text(encoding="utf-8")
             self.assertEqual(skill, "base npd skill")
             self.assertNotIn("历史用户经验", skill)
+
+    def test_global_refresh_does_not_overwrite_live_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "opencode_workspace"
+            fake_config = SimpleNamespace(mcp_server=SimpleNamespace(port=8100))
+            with (
+                patch("backend.opencode.config._GLOBAL_WORKSPACE", workspace_path),
+                patch("backend.opencode.config.get_config", return_value=fake_config),
+                patch("backend.opencode.config.get_registry", return_value={}),
+            ):
+                workspace = get_global_opencode_workspace(mcp_port=9123)
+                live_path = workspace / "opencode.json"
+                live_path.write_text('{"sentinel": true}', encoding="utf-8")
+                refresh_global_opencode_config()
+
+            self.assertEqual(live_path.read_text(encoding="utf-8"), '{"sentinel": true}')
+            managed = json.loads(managed_opencode_config_path(workspace).read_text(encoding="utf-8"))
+            self.assertEqual(
+                managed["mcp"]["deephole-code"]["url"],
+                "http://127.0.0.1:9123/mcp",
+            )
+            self.assertEqual(managed["permission"]["task"], {"*": "allow"})
+            self.assertIn("threat-asset-enumerator", managed["agent"])
 
     def test_api_checker_is_registered_globally_without_feedback_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -228,7 +256,8 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(__file__).resolve().parents[1]
             workspace = Path(tmp)
-            (workspace / "opencode.json").write_text(
+            managed_path = managed_opencode_config_path(workspace)
+            managed_path.write_text(
                 json.dumps(build_opencode_config("http://127.0.0.1:9123/mcp"), ensure_ascii=False),
                 encoding="utf-8",
             )
@@ -239,7 +268,8 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 reference_catalog_path=repo_root / "attack-method-reference-catalog.md",
             )
 
-            config = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+            config = json.loads(managed_path.read_text(encoding="utf-8"))
+            self.assertFalse((workspace / "opencode.json").exists())
             self.assertEqual(config.get("permission", {}).get("task"), {"*": "allow"})
             self.assertTrue((
                 workspace / ".opencode" / "skills" / "threat-base-model-shard-planner" / "SKILL.md"

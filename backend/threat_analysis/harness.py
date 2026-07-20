@@ -166,6 +166,7 @@ def configured_opencode_mcp_names(
             writable_paths=[project_dir / "runs"],
             executable=executable,
             config_paths=getattr(cli_config, "config_paths", []),
+            config_jsonc=getattr(cli_config, "config_jsonc", "{}"),
         )
     except Exception:
         merged = {}

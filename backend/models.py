@@ -674,6 +674,7 @@ class AgentOpenCodeConfig(BaseModel):
     config_paths: list[str] = []
     proxy_url: str = ""
     no_proxy: str = ""
+    config_jsonc: str = "{}"
 
 
 class AgentBaseConfig(BaseModel):
@@ -833,6 +834,7 @@ class AgentVulnerabilityValidationConfig(BaseModel):
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
     schema_version: int = 2
+    opencode_config: str = "{}"
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
@@ -904,6 +906,9 @@ class AgentRemoteConfig(BaseModel):
         )
         return {
             "schema_version": 2,
+            "opencode_config": str(
+                legacy.get("opencode_config") or opencode.get("config_jsonc") or "{}"
+            ),
             "base": {
                 "tool": opencode.get("tool", "nga"),
                 "executable": opencode.get("executable", "nga"),
@@ -957,6 +962,7 @@ class AgentRemoteConfig(BaseModel):
             max_retries=self.vulnerability_mining.max_retries,
             models=self.model_pool.models,
             no_proxy=self.base.no_proxy,
+            config_jsonc=self.opencode_config,
         )
 
 

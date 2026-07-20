@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 _SKILL_RESOURCE_DIRS = {"references", "scripts", "assets"}
 _OBSOLETE_THREAT_AUDIT_SKILL_NAME = "threat-path-audit"
 _GLOBAL_WORKSPACE = Path.home() / ".opendeephole" / "opencode_workspace"
+_MANAGED_CONFIG_FILENAME = ".opendeephole-managed-opencode.json"
 _BUILTIN_AGENT_SKILLS = {
     "history-match": Path("agent/skills/fp_review_match.md"),
     "prove-bug": Path("agent/skills/fp_review.md"),
@@ -44,6 +45,11 @@ def get_workspace_lock(workspace: Path) -> threading.RLock:
         return lock
 
 
+def managed_opencode_config_path(workspace: Path) -> Path:
+    """Return the private OpenDeepHole-owned config layer for one workspace."""
+    return workspace / _MANAGED_CONFIG_FILENAME
+
+
 def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
     """Return and initialize the single Agent-wide OpenCode workspace.
 
@@ -59,7 +65,7 @@ def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
         # its actual port. Without one, keep an existing config intact so a
         # task cannot accidentally replace a dynamically allocated gateway URL
         # with the configured fallback port.
-        config_missing = not (workspace / "opencode.json").is_file()
+        config_missing = not managed_opencode_config_path(workspace).is_file()
         if mcp_port is not None or config_missing:
             _write_opencode_config(workspace, mcp_port=mcp_port)
         resolved_workspace = workspace.resolve()
@@ -77,7 +83,7 @@ def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
 def refresh_global_opencode_config() -> Path:
     """Rewrite managed MCP entries while preserving the active code gateway URL."""
     workspace = get_global_opencode_workspace()
-    config_path = workspace / "opencode.json"
+    config_path = managed_opencode_config_path(workspace)
     mcp_url = f"http://127.0.0.1:{get_config().mcp_server.port}/mcp"
     try:
         existing = json.loads(config_path.read_text(encoding="utf-8"))
@@ -91,15 +97,23 @@ def refresh_global_opencode_config() -> Path:
         _write_text_atomic(
             config_path,
             json.dumps(build_opencode_config(mcp_url, [str(skills_dir)]), indent=2),
+            mode=0o600,
         )
+        # Re-apply config-owned threat-analysis agents after regenerating the
+        # base MCP/permission layer so a live config refresh cannot drop them.
+        _install_builtin_skills(workspace)
     return workspace
 
 
-def _write_text_atomic(path: Path, content: str) -> None:
+def _write_text_atomic(path: Path, content: str, *, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(content, encoding="utf-8")
+    if mode is not None:
+        temporary.chmod(mode)
     os.replace(temporary, path)
+    if mode is not None:
+        path.chmod(mode)
 
 
 def _install_builtin_skills(workspace: Path) -> None:
@@ -128,6 +142,7 @@ def _install_builtin_skills(workspace: Path) -> None:
             workspace,
             skill_path,
             reference_path,
+            config_path=managed_opencode_config_path(workspace),
         )
 
 
@@ -304,16 +319,17 @@ def build_managed_mcp_runtime_specs(runtime_config=None) -> dict[str, dict]:
 
 
 def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None:
-    """Generate opencode.json with MCP server and read-only file permissions."""
+    """Generate the private OpenDeepHole-owned runtime configuration layer."""
     config = get_config()
     port = mcp_port if mcp_port is not None else config.mcp_server.port
     mcp_url = f"http://127.0.0.1:{port}/mcp"
 
-    config_path = workspace / "opencode.json"
+    config_path = managed_opencode_config_path(workspace)
     skills_dir = (workspace / ".opencode" / "skills").resolve()
-    config_path.write_text(
+    _write_text_atomic(
+        config_path,
         json.dumps(build_opencode_config(mcp_url, [str(skills_dir)]), indent=2),
-        encoding="utf-8",
+        mode=0o600,
     )
 
 

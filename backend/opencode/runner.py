@@ -25,6 +25,7 @@ from backend.opencode.model_pool import (
     NoAvailableModelError,
     clear_planned_task,
 )
+from backend.opencode.config_json import dump_opencode_config, parse_opencode_jsonc
 from backend.opencode.output_format import with_local_timestamp
 from backend.opencode.result_json import (
     AUDITED_VULNERABILITY_RESULT_JSON_INSTRUCTION,
@@ -1201,6 +1202,7 @@ def _effective_cli_config(cli_config, model_option) -> dict:
         "max_retries": _cfg_value(cli_config, "max_retries", 2),
         "models": _cfg_value(cli_config, "models", []),
         "config_paths": _cfg_value(cli_config, "config_paths", []),
+        "config_jsonc": _cfg_value(cli_config, "config_jsonc", "{}"),
         "proxy_url": _cfg_value(cli_config, "proxy_url", ""),
         "no_proxy": _cfg_value(cli_config, "no_proxy", ""),
     }
@@ -1310,98 +1312,19 @@ def _invocation_mode(config_obj) -> str:
     return "serve"
 
 
-def _read_opencode_config(workspace: Path) -> dict:
-    try:
-        data = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        return {}
-    return {}
+def _read_managed_opencode_config(workspace: Path) -> dict:
+    from backend.opencode.config import get_workspace_lock, managed_opencode_config_path
 
-
-def _strip_jsonc_comments(text: str) -> str:
-    result: list[str] = []
-    in_string = False
-    quote = ""
-    escaped = False
-    index = 0
-    while index < len(text):
-        char = text[index]
-        next_char = text[index + 1] if index + 1 < len(text) else ""
-        if in_string:
-            result.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                in_string = False
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            in_string = True
-            quote = char
-            result.append(char)
-            index += 1
-            continue
-        if char == "/" and next_char == "/":
-            result.extend("  ")
-            index += 2
-            while index < len(text) and text[index] not in "\r\n":
-                result.append(" ")
-                index += 1
-            continue
-        if char == "/" and next_char == "*":
-            result.extend("  ")
-            index += 2
-            while index < len(text) - 1:
-                if text[index] == "*" and text[index + 1] == "/":
-                    result.extend("  ")
-                    index += 2
-                    break
-                result.append("\n" if text[index] in "\r\n" else " ")
-                index += 1
-            continue
-        result.append(char)
-        index += 1
-    return "".join(result)
-
-
-def _strip_jsonc_trailing_commas(text: str) -> str:
-    result: list[str] = []
-    in_string = False
-    quote = ""
-    escaped = False
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if in_string:
-            result.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                in_string = False
-            index += 1
-            continue
-        if char in {"'", '"'}:
-            in_string = True
-            quote = char
-            result.append(char)
-            index += 1
-            continue
-        if char == ",":
-            lookahead = index + 1
-            while lookahead < len(text) and text[lookahead].isspace():
-                lookahead += 1
-            if lookahead < len(text) and text[lookahead] in "}]":
-                index += 1
-                continue
-        result.append(char)
-        index += 1
-    return "".join(result)
+    path = managed_opencode_config_path(workspace)
+    with get_workspace_lock(workspace):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"OpenDeepHole managed OpenCode config is unavailable: {path}") from exc
+        try:
+            return parse_opencode_jsonc(text, source=str(path))
+        except ValueError as exc:
+            raise RuntimeError(f"OpenDeepHole managed OpenCode config is invalid: {exc}") from exc
 
 
 def _read_opencode_config_file(path: Path) -> dict:
@@ -1409,9 +1332,7 @@ def _read_opencode_config_file(path: Path) -> dict:
         return {}
     try:
         text = path.read_text(encoding="utf-8")
-        if path.suffix.lower() == ".jsonc":
-            text = _strip_jsonc_trailing_commas(_strip_jsonc_comments(text))
-        data = json.loads(text)
+        data = parse_opencode_jsonc(text, source=str(path))
     except Exception as exc:
         logger.warning("Ignoring invalid OpenCode config file %s: %s", path, exc)
         return {}
@@ -1455,6 +1376,25 @@ def _merge_opencode_configs(*configs: dict) -> dict:
     for config in configs:
         if config:
             merged = _deep_merge_dicts(merged, config)
+    return merged
+
+
+def _merge_managed_opencode_config(base: dict, managed: dict) -> dict:
+    """Merge the final system layer without retaining user data in reserved fields."""
+    merged = _merge_opencode_configs(base, managed)
+    for key in ("$schema", "skills", "permission"):
+        if key in managed:
+            merged[key] = copy.deepcopy(managed[key])
+    for section_name in ("mcp", "agent"):
+        managed_section = managed.get(section_name)
+        if not isinstance(managed_section, dict):
+            continue
+        merged_section = merged.setdefault(section_name, {})
+        if not isinstance(merged_section, dict):
+            merged_section = {}
+            merged[section_name] = merged_section
+        for name, value in managed_section.items():
+            merged_section[name] = copy.deepcopy(value)
     return merged
 
 
@@ -1713,60 +1653,6 @@ def _with_writable_paths(config: dict, writable_paths: list[Path] | None) -> dic
     return next_config
 
 
-def _read_mcp_url(workspace: Path) -> str:
-    try:
-        data = _read_opencode_config(workspace)
-        server = data.get("mcp", {}).get("deephole-code", {})
-        return str(server.get("url") or "")
-    except Exception:
-        return ""
-
-
-def _copy_skill_tree(src_root: Path, dst_root: Path) -> None:
-    if not src_root.is_dir():
-        return
-    dst_root.mkdir(parents=True, exist_ok=True)
-    for src in src_root.iterdir():
-        if not src.is_dir():
-            continue
-        dst = dst_root / src.name
-        if dst.is_symlink() or dst.is_file():
-            dst.unlink()
-        elif dst.is_dir():
-            shutil.rmtree(dst)
-        shutil.copytree(src, dst, symlinks=True)
-
-
-def _merge_json_file(path: Path, data: dict) -> None:
-    current: dict = {}
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                current = loaded
-        except Exception:
-            current = {}
-    for key, value in data.items():
-        if isinstance(value, dict) and isinstance(current.get(key), dict):
-            current[key].update(value)
-        else:
-            current[key] = value
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _opencode_config_for_runtime(
-    workspace: Path,
-    skills_dir: Path,
-    writable_paths: list[Path] | None = None,
-) -> dict:
-    config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
-    if not config:
-        return {}
-    config["skills"] = {"paths": [str(skills_dir.resolve())]}
-    return config
-
-
 def _opencode_config_for_env(
     workspace: Path,
     tool: str,
@@ -1775,6 +1661,7 @@ def _opencode_config_for_env(
     writable_paths: list[Path] | None = None,
     executable: str | None = None,
     config_paths: object = None,
+    config_jsonc: str = "{}",
 ) -> dict:
     user_config = _read_user_opencode_config(
         tool,
@@ -1783,77 +1670,43 @@ def _opencode_config_for_env(
         executable=executable,
         config_paths=config_paths,
     )
-    task_config = _with_writable_paths(_read_opencode_config(workspace), writable_paths)
-    merged = _merge_opencode_configs(user_config, task_config)
-    merged.pop("$schema", None)
+    web_config = parse_opencode_jsonc(config_jsonc, source="Web OpenCode 配置")
+    task_config = _with_writable_paths(_read_managed_opencode_config(workspace), writable_paths)
+    merged = _merge_managed_opencode_config(
+        _merge_opencode_configs(user_config, web_config),
+        task_config,
+    )
     if merged and "provider" not in merged and "model" not in merged:
         logger.warning(
-            "OpenCode config injected through OPENCODE_CONFIG_CONTENT has no provider/model keys; "
+            "Resolved OpenCode runtime config has no provider/model keys; "
             "set %s or opencode.config_paths if your CLI relies on a non-standard config file",
             _OPENCODE_CONFIG_PATH_ENV,
         )
     return merged
 
 
-def _write_json_file(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _prepare_opencode_runtime_workspace(
-    workspace: Path,
-    runtime_cwd: Path,
-    writable_paths: list[Path] | None = None,
-) -> Path:
-    """Mirror config/skills into the actual opencode CWD.
-
-    opencode walks up from CWD to the git worktree root looking for
-    ``.opencode/skills/``, so skills are placed under *runtime_cwd*.
-    The runtime ``opencode.json`` written here contains only OpenDeepHole's
-    task-local MCP, permission, and skill wiring. User provider credentials are
-    merged later into ``OPENCODE_CONFIG_CONTENT`` and are not written here.
-    """
-    if runtime_cwd == workspace:
-        runtime_skills = runtime_cwd / ".opencode" / "skills"
-        runtime_config = _opencode_config_for_runtime(
-            workspace,
-            runtime_skills,
-            writable_paths,
-        )
-        if runtime_config:
-            _write_json_file(runtime_cwd / "opencode.json", runtime_config)
-        return workspace
-
-    source_skills = workspace / ".opencode" / "skills"
-    runtime_skills = runtime_cwd / ".opencode" / "skills"
-    _copy_skill_tree(source_skills, runtime_skills)
-
-    runtime_config = _opencode_config_for_runtime(
-        workspace,
-        runtime_skills,
-        writable_paths,
-    )
-    if runtime_config:
-        _write_json_file(runtime_cwd / "opencode.json", runtime_config)
-        return runtime_cwd
-    return workspace
-
-
-def _prepare_cli_workspace(
+def _build_opencode_config_content(
     workspace: Path,
     tool: str,
-    runtime_cwd: Path | None = None,
+    base_env: dict[str, str] | None = None,
     writable_paths: list[Path] | None = None,
-) -> Path:
-    """Create tool-specific MCP and skill files from the canonical opencode files."""
-    if tool in {"nga", "opencode"}:
-        return _prepare_opencode_runtime_workspace(
-            workspace,
-            runtime_cwd or workspace,
-            writable_paths,
-        )
-
-    raise ValueError(f"Unsupported OpenCode serve tool: {tool}")
+    project_dir: Path | None = None,
+    executable: str | None = None,
+    cli_config=None,
+) -> str:
+    """Build the normalized config file content for the next Serve process."""
+    env = dict(os.environ if base_env is None else base_env)
+    config = _opencode_config_for_env(
+        workspace,
+        tool,
+        project_dir,
+        env,
+        writable_paths=writable_paths,
+        executable=executable,
+        config_paths=_cfg_value(cli_config, "config_paths", []) if cli_config is not None else [],
+        config_jsonc=_cfg_value(cli_config, "config_jsonc", "{}") if cli_config is not None else "{}",
+    )
+    return dump_opencode_config(config)
 
 
 def _build_cli_command(
@@ -1963,19 +1816,9 @@ def _build_cli_env(
 ) -> dict[str, str]:
     env = dict(os.environ if base_env is None else base_env)
     env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+    env.pop("OPENCODE_CONFIG_CONTENT", None)
     if tool in {"nga", "opencode"}:
         env.update(_opencode_proxy_env_overrides(cli_config, env))
-        opencode_config = _opencode_config_for_env(
-            workspace,
-            tool,
-            project_dir,
-            env,
-            writable_paths=writable_paths,
-            executable=executable,
-            config_paths=_cfg_value(cli_config, "config_paths", []) if cli_config is not None else [],
-        )
-        if opencode_config:
-            env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config, ensure_ascii=False)
     return env
 
 

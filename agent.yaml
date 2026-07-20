@@ -8,6 +8,8 @@ owner_token: ""
 checkers: []
 
 schema_version: 2
+opencode_config: |
+  {}
 base:
   tool: "nga"
   executable: "nga"

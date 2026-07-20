@@ -104,7 +104,14 @@ async def run_attack_tree_threat_analysis(
         await opencode_runner._clear_planned_task_id(planned_task_id)
         return ThreatAnalysis(schema_version="1.1", analysis_id=f"mock-{project_id}")
 
-    install_attack_tree_threat_analysis_skill(workspace, skill_path, reference_catalog_path)
+    from backend.opencode.config import managed_opencode_config_path
+
+    install_attack_tree_threat_analysis_skill(
+        workspace,
+        skill_path,
+        reference_catalog_path,
+        config_path=managed_opencode_config_path(workspace),
+    )
 
     effective_timeout = timeout if timeout is not None else config.opencode.timeout
     analysis_root = (project_dir or workspace).resolve()

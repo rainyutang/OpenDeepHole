@@ -62,6 +62,7 @@ class OpenCodeConfig(BaseModel):
     config_paths: list[str] = []  # optional OpenCode config files to merge
     proxy_url: str = ""  # optional proxy for opencode/nga child processes
     no_proxy: str = ""  # optional no_proxy override for opencode/nga child processes
+    config_jsonc: str = "{}"  # complete user config layer managed from the Agent page
 
 
 class MemoryApiDiscoveryConfig(BaseModel):

@@ -620,6 +620,7 @@ export interface AgentValidatorCatalog {
 
 export interface AgentRemoteConfig {
   schema_version: 2;
+  opencode_config: string;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;
