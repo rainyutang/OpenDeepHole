@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.models import Candidate, ThreatAuditTask
-from backend.opencode.model_pool import NoAvailableModelError
+from backend.opencode import OpenCodeResult, OpenCodeTaskType
+from backend.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
+from backend.opencode.task_service import (
+    bind_opencode_execution_context,
+    get_opencode_execution_context,
+)
 from backend.opencode.runner import (
     _DEFAULT_OPENCODE_NO_PROXY,
     _build_cli_command,
@@ -45,6 +50,16 @@ def _candidate(line: int = 12) -> Candidate:
         function="leaky",
         description="candidate issue",
         vuln_type="memleak",
+    )
+
+
+def _opencode_success(*, text: str = "", structured=None) -> OpenCodeResult:
+    return OpenCodeResult(
+        session_id="ses-test",
+        status="success",
+        text=text,
+        structured=structured,
+        model="provider/model",
     )
 
 
@@ -146,7 +161,7 @@ def test_runtime_writable_paths_include_windows_slash_variants() -> None:
     config = _with_writable_paths({}, [path])
     edit = config["permission"]["edit"]
 
-    assert "*" not in edit
+    assert edit["*"] == "deny"
     assert edit["C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1/**"] == "allow"
     assert edit[r"C:\Users\26388\.opendeephole\fp_reviews\review\artifacts\1/**"] == "allow"
 
@@ -179,19 +194,29 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
         )
         captured: dict[str, object] = {}
 
-        async def fake_invoke(prompt: str, *args, **kwargs) -> None:
+        async def fake_run(**kwargs) -> OpenCodeResult:
+            prompt = kwargs["prompt"]
+            context = get_opencode_execution_context()
             captured["prompt"] = prompt
-            captured["directory"] = kwargs["directory"]
-            captured["writable_paths"] = kwargs["writable_paths"]
-            captured["task_metadata"] = kwargs["task_metadata"]
-            captured["attempt"] = kwargs["attempt"]
+            captured["project_dir"] = context.project_dir
+            captured["work_dir"] = context.work_dir
+            captured["task_metadata"] = context.task_metadata
+            captured["task_type"] = kwargs["task_type"]
             match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
             assert match is not None
             Path(match.group(1)).write_text("{}", encoding="utf-8")
+            return _opencode_success()
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
-            patch("backend.opencode.runner._invoke_opencode", new=AsyncMock(side_effect=fake_invoke)),
+            patch(
+                "backend.opencode.runner.run_opencode_task",
+                new=AsyncMock(side_effect=fake_run),
+            ),
+            bind_opencode_execution_context(
+                project_dir=project,
+                work_dir=scans_dir / "scan-1",
+            ),
         ):
             analysis = await run_threat_analysis_audit(
                 workspace=workspace,
@@ -203,14 +228,13 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
             )
 
         assert analysis is not None
-        result_path = project / "runs" / "scan-1" / "res.json"
+        result_path = scans_dir / "scan-1" / "threat_analysis" / "res.json"
         assert result_path.is_file()
-        assert (project / "res.json").is_file()
-        assert str(project.resolve()) in str(captured["prompt"])
-        assert captured["directory"] == project.resolve()
-        assert captured["task_metadata"]["task_type"] == "threat_analysis"
-        assert captured["writable_paths"] == [project.resolve() / "runs" / "scan-1"]
-        assert captured["attempt"] == 0
+        assert not (project / "res.json").exists()
+        assert captured["project_dir"] == project.resolve()
+        assert captured["task_metadata"]["stage"]
+        assert captured["work_dir"] == (scans_dir / "scan-1" / "threat_analysis").resolve()
+        assert captured["task_type"] is OpenCodeTaskType.THREAT_ANALYSIS
 
     asyncio.run(run())
 
@@ -266,7 +290,8 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
             assert match is not None
             return json.loads(Path(match.group(1)).read_text(encoding="utf-8"))
 
-        async def fake_invoke(prompt: str, *args, **kwargs) -> None:
+        async def fake_run(**kwargs) -> OpenCodeResult:
+            prompt = kwargs["prompt"]
             output_path = output_path_from_prompt(prompt)
             if "threat-base-model-shard-planner" in prompt:
                 output_path.write_text(
@@ -286,7 +311,7 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     }),
                     encoding="utf-8",
                 )
-                return
+                return _opencode_success()
             if "threat-asset-interface-agent" in prompt:
                 output_path.write_text(
                     json.dumps({
@@ -301,7 +326,7 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     }),
                     encoding="utf-8",
                 )
-                return
+                return _opencode_success()
             if "threat-base-model-gap-review-agent" in prompt:
                 output_path.write_text(
                     json.dumps({
@@ -313,7 +338,7 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     }),
                     encoding="utf-8",
                 )
-                return
+                return _opencode_success()
             if "threat-attack-goal-agent" in prompt:
                 goal_id = input_data_from_prompt(prompt)["attack_goal"]["attack_goal_id"]
                 stage_order.append(f"goal:{goal_id}")
@@ -329,7 +354,7 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     json.dumps({"domains": domains}),
                     encoding="utf-8",
                 )
-                return
+                return _opencode_success()
             if "threat-attack-domain-agent" in prompt:
                 input_data = input_data_from_prompt(prompt)
                 goal_id = input_data["attack_goal"]["attack_goal_id"]
@@ -350,7 +375,7 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     json.dumps({"surfaces": surfaces}),
                     encoding="utf-8",
                 )
-                return
+                return _opencode_success()
             if "threat-attack-surface-agent" in prompt:
                 input_data = input_data_from_prompt(prompt)
                 goal_id = input_data["attack_goal"]["attack_goal_id"]
@@ -378,7 +403,7 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     json.dumps(method_payload),
                     encoding="utf-8",
                 )
-                return
+                return _opencode_success()
             if "threat-method-confirm-agent" in prompt:
                 input_data = input_data_from_prompt(prompt)
                 goal_id = input_data["attack_goal"]["attack_goal_id"]
@@ -390,12 +415,20 @@ def test_attack_tree_threat_analysis_prioritizes_one_tree_pipeline(tmp_path: Pat
                     json.dumps({"attack_paths": []}),
                     encoding="utf-8",
                 )
-                return
+                return _opencode_success()
             output_path.write_text("{}", encoding="utf-8")
+            return _opencode_success()
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
-            patch("backend.opencode.runner._invoke_opencode", new=AsyncMock(side_effect=fake_invoke)),
+            patch(
+                "backend.opencode.runner.run_opencode_task",
+                new=AsyncMock(side_effect=fake_run),
+            ),
+            bind_opencode_execution_context(
+                project_dir=project,
+                work_dir=scans_dir / "scan-1",
+            ),
         ):
             analysis = await run_threat_analysis_audit(
                 workspace=workspace,
@@ -459,12 +492,18 @@ def test_threat_audit_prompt_preserves_remote_path_context(tmp_path: Path) -> No
         scan_root = tmp_path / "project" / "src"
         captured: dict[str, str] = {}
 
-        async def fake_invoke(prompt: str, *args, **kwargs) -> None:
-            captured["prompt"] = prompt
+        async def fake_run(**kwargs) -> OpenCodeResult:
+            captured["prompt"] = kwargs["prompt"]
+            return _opencode_success()
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
-            patch("backend.opencode.runner._invoke_opencode", new=AsyncMock(side_effect=fake_invoke)),
+            patch("backend.opencode.runner.run_opencode_task", new=AsyncMock(side_effect=fake_run)),
+            bind_opencode_execution_context(
+                scan_id="scan-1",
+                project_dir=tmp_path / "project",
+                work_dir=tmp_path / "work",
+            ),
         ):
             results = await run_threat_audit(
                 tmp_path,
@@ -945,7 +984,21 @@ def test_run_audit_via_opencode_returns_failed_result_after_exhausted_errors(tmp
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
-            patch("backend.opencode.runner._invoke_opencode", new=AsyncMock(side_effect=RuntimeError("boom"))),
+            patch(
+                "backend.opencode.runner.run_opencode_task",
+                new=AsyncMock(return_value=OpenCodeResult(
+                    session_id="ses-failed",
+                    status="failure",
+                    text="boom",
+                    structured=None,
+                    model="provider/model",
+                )),
+            ),
+            bind_opencode_execution_context(
+                scan_id="scan-1",
+                project_dir=tmp_path,
+                work_dir=tmp_path / "work",
+            ),
         ):
             result = await _run_audit_via_opencode(tmp_path, candidate, "scan-1")
 
@@ -973,11 +1026,22 @@ def test_run_audit_via_opencode_propagates_no_model_without_retry(tmp_path: Path
             ),
             opencode_concurrency=1,
         )
-        invoke = AsyncMock(side_effect=NoAvailableModelError())
+        invoke = AsyncMock(return_value=OpenCodeResult(
+            session_id="",
+            status="failure",
+            text=NO_AVAILABLE_MODEL_MESSAGE,
+            structured=None,
+            model="",
+        ))
 
         with (
             patch("backend.opencode.runner.get_config", return_value=cfg),
-            patch("backend.opencode.runner._invoke_opencode", new=invoke),
+            patch("backend.opencode.runner.run_opencode_task", new=invoke),
+            bind_opencode_execution_context(
+                scan_id="scan-1",
+                project_dir=tmp_path,
+                work_dir=tmp_path / "work",
+            ),
         ):
             with pytest.raises(NoAvailableModelError):
                 await _run_audit_via_opencode(tmp_path, candidate, "scan-1")

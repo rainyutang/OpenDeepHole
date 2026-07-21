@@ -314,7 +314,7 @@ def _validate_managed_config(
             raise HTTPException(status_code=422, detail=f"验证环境 {environment} 至少需要一个支持的漏洞类型")
         policies[f"验证环境 {environment}"] = env_cfg.model_policy
     for label, policy in policies.items():
-        if policy.required_capability not in {"any", "low", "medium", "high"}:
+        if policy.required_capability not in {"low", "high"}:
             raise HTTPException(status_code=422, detail=f"{label}的模型能力无效")
         if policy.timeout_seconds < 1:
             raise HTTPException(status_code=422, detail=f"{label}的模型超时必须大于 0")

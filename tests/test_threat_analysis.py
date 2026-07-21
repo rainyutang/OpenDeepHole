@@ -25,6 +25,8 @@ from backend.threat_analysis.attack_tree_opencode import (
 )
 from backend.threat_analysis.harness import build_code_index
 from backend.opencode.runner import _read_fresh_threat_analysis_result
+from backend.opencode import OpenCodeResult
+from backend.opencode.task_service import get_opencode_execution_context
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_analysis import (
@@ -226,10 +228,10 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 self.prompts: list[str] = []
                 self.gap_calls = 0
 
-            async def _invoke_opencode(self, *args, **kwargs) -> str:
-                stage = kwargs["task_metadata"]["stage"]
+            async def run_opencode_task(self, **kwargs) -> OpenCodeResult:
+                stage = get_opencode_execution_context().task_metadata["stage"]
                 self.stages.append(stage)
-                prompt = str(args[0])
+                prompt = str(kwargs["prompt"])
                 self.prompts.append(prompt)
                 output_match = re.search(r"将阶段结果写入输出 JSON 文件：`([^`]+)`", prompt)
                 assert output_match is not None
@@ -266,7 +268,7 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                         }),
                         encoding="utf-8",
                     )
-                    return ""
+                    return OpenCodeResult("ses-test", "success", "", None, "provider/model")
                 assert stage == "threat-base-model-gap-review-agent"
                 self.gap_calls += 1
                 current_items = input_data["current_identified_items"]
@@ -334,7 +336,7 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 payload = payloads[self.gap_calls - 1]
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(json.dumps(payload), encoding="utf-8")
-                return ""
+                return OpenCodeResult("ses-test", "success", "", None, "provider/model")
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -721,7 +723,7 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 self.output_path = output_path
                 self.calls = 0
 
-            async def _invoke_opencode(self, *args, **kwargs) -> str:
+            async def run_opencode_task(self, **kwargs) -> OpenCodeResult:
                 self.calls += 1
                 if self.calls <= 3:
                     self.output_path.write_text("{not-json", encoding="utf-8")
@@ -730,7 +732,7 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                         json.dumps({"attack_goal_id": "GOAL-1", "domains": []}),
                         encoding="utf-8",
                     )
-                return ""
+                return OpenCodeResult("ses-test", "success", "", None, "provider/model")
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

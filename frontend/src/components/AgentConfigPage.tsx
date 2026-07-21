@@ -44,7 +44,10 @@ const sections: { id: Section; label: string }[] = [
   { id: "validation", label: "漏洞验证" },
 ];
 
-const policy = (required_capability = "high", max_retries = 2): AgentModelTaskPolicy => ({
+const policy = (
+  required_capability: AgentModelTaskPolicy["required_capability"] = "high",
+  max_retries = 2,
+): AgentModelTaskPolicy => ({
   required_capability, timeout_seconds: 1200, max_retries,
 });
 const mcp = (name: string): AgentMcpConfig => ({
@@ -70,7 +73,7 @@ const defaultConfig = (): AgentRemoteConfig => ({
     },
   },
   product_info: mcp("product-info"),
-  vulnerability_mining: policy("any"),
+  vulnerability_mining: policy("low"),
   false_positive: policy("high"),
   vulnerability_validation: { environments: {} },
 });
@@ -110,8 +113,8 @@ function validateModelTimeWindows(config: AgentRemoteConfig): string {
 
 function PolicyEditor({ value, onChange }: { value: AgentModelTaskPolicy; onChange: (value: AgentModelTaskPolicy) => void }) {
   return <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-    <Field label="需要的模型能力"><select className={input} value={value.required_capability} onChange={(e) => onChange({ ...value, required_capability: e.target.value })}>
-      <option value="any">任意能力</option><option value="low">低能力</option><option value="medium">中能力</option><option value="high">高能力</option>
+    <Field label="需要的模型能力"><select className={input} value={value.required_capability} onChange={(e) => onChange({ ...value, required_capability: e.target.value as AgentModelTaskPolicy["required_capability"] })}>
+      <option value="low">低能力</option><option value="high">高能力</option>
     </select></Field>
     <Field label="模型调用超时（秒）"><input className={input} type="number" min={1} value={value.timeout_seconds} onChange={(e) => onChange({ ...value, timeout_seconds: Number(e.target.value) })} /></Field>
     <Field label="模型调用重试次数"><input className={input} type="number" min={0} value={value.max_retries} onChange={(e) => onChange({ ...value, max_retries: Number(e.target.value) })} /></Field>

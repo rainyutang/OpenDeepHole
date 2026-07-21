@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ScanItemStatus(str, Enum):
@@ -693,6 +693,16 @@ class AgentModelTaskPolicy(BaseModel):
     timeout_seconds: int = 1200
     max_retries: int = 2
 
+    @field_validator("required_capability", mode="before")
+    @classmethod
+    def _normalize_required_capability(cls, value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"medium", "high"}:
+            return "high"
+        if normalized in {"", "any", "low"}:
+            return "low"
+        raise ValueError("required_capability must be low or high")
+
 
 class AgentMcpLocalConfig(BaseModel):
     executable: str = ""
@@ -867,7 +877,7 @@ class AgentRemoteConfig(BaseModel):
     )
     product_info: AgentMcpConfig = AgentMcpConfig(name="product-info")
     vulnerability_mining: AgentModelTaskPolicy = AgentModelTaskPolicy(
-        required_capability="any",
+        required_capability="low",
     )
     false_positive: AgentModelTaskPolicy = AgentModelTaskPolicy(
         required_capability="high",
@@ -950,7 +960,7 @@ class AgentRemoteConfig(BaseModel):
                 "timeout_seconds": product_timeout,
             },
             "vulnerability_mining": {
-                "required_capability": "any",
+                "required_capability": "low",
                 "timeout_seconds": timeout,
                 "max_retries": retries,
             },

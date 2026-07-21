@@ -6,7 +6,7 @@ import warnings
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "OpenDeepHoleData"
@@ -98,6 +98,16 @@ class ModelTaskPolicyConfig(BaseModel):
     timeout_seconds: int = 1200
     max_retries: int = 2
 
+    @field_validator("required_capability", mode="before")
+    @classmethod
+    def _normalize_required_capability(cls, value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"medium", "high"}:
+            return "high"
+        if normalized in {"", "any", "low"}:
+            return "low"
+        raise ValueError("required_capability must be low or high")
+
 
 class McpLocalConfig(BaseModel):
     executable: str = ""
@@ -173,7 +183,7 @@ class AppConfig(BaseModel):
         required_capability="high", max_retries=3
     )
     vulnerability_mining: ModelTaskPolicyConfig = ModelTaskPolicyConfig(
-        required_capability="any"
+        required_capability="low"
     )
     false_positive: ModelTaskPolicyConfig = ModelTaskPolicyConfig()
     code_graph: McpConfig = McpConfig(name="codegraph")

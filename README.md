@@ -557,51 +557,45 @@ OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_
 
 OpenCode 调用约定：
 
-- `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置；API `directory` 始终指向真实代码目录。
-- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。所有内置/checker SKILL 注册到全局 skill root，由 OpenCode 按 prompt 名称加载；MCP 工具默认全部可用。任务权限由 `directory`、当前 `scan_id` 对应的扫描目录和 `writable_paths` 自动计算。
-- `output_schema` 使用普通文本 JSON 约束，不发送 OpenCode 原生 `format`。JSON 不合规时默认在原 session 追加 2 次纠正；`attempt` 表示纠正仍失败或普通执行错误后重新排队并创建新 session 的次数。威胁分析、漏洞挖掘、去误报和验证环境的页面策略会覆盖任务/模型行的能力、超时与重试。
+- `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置。
+- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。组件只调用 `backend.opencode.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录，也不允许调用方传 permission。
+- 每个 Session 可读取 `project_dir`，文件编辑工具只能写当前 `work_dir`，`bash` 全面禁用。所有内置/checker SKILL 注册到全局 skill root，由 OpenCode 按 prompt 名称加载。
+- `output_schema` 使用普通文本 JSON 约束，不发送 OpenCode 原生 `format`。JSON 不合规时默认在原 Session 追加 2 次纠正；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
-- 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个 `OpenCodeTaskService`，复用共享 MCP 网关和项目索引路由；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
+- 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个公共 OpenCode 接口，复用共享 MCP 网关和项目索引路由；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
 
-内部 Python 调用统一使用 `backend.opencode.task_service`：
+内部 Python 调用统一使用 `backend.opencode`：
 
 ```python
-from backend.opencode.task_service import OpenCodeTaskSpec, get_opencode_task_service
+from backend.opencode import OpenCodeTaskType, run_opencode_task
 
-service = get_opencode_task_service()
-handle = service.submit_task(OpenCodeTaskSpec(
+result = await run_opencode_task(
     task_name="candidate audit",
+    task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
     prompt="...",
-    directory=project_path,
-    required_capability="medium",
-    timeout_seconds=1200,
-    priority=60,
+    required_capability="high",
     output_schema={"type": "object", "properties": {}, "additionalProperties": False},
-    output_retry_count=2,
-    attempt=None,
-))
-session_id = await handle.wait_session_id()  # session 创建后即可取得
-result = await handle.result()               # 执行完成后取得文本及本地提取的 JSON
+    invalid_json_retry_count=2,
+)
 
-continued = await service.run_task(OpenCodeTaskSpec(
+continued = await run_opencode_task(
     task_name="candidate follow-up",
+    task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
     prompt="...",
-    directory=project_path,
-    session_id=session_id,
-))
-messages = await service.get_session_messages(session_id)
-await service.delete_session(session_id)
+    required_capability="high",
+    session_id=result.session_id,
+)
 ```
 
 OpenCode 模型池统计：
 
-- 威胁分析、候选点审计、威胁审计、去误报、历史分析、变体排查、SKILL 创建和漏洞验证全部通过 `OpenCodeTaskService`，统一创建/续写 session 并累计模型池统计。
+- 威胁分析、候选点审计、威胁审计、去误报、历史分析、变体排查、SKILL 创建和漏洞验证全部通过唯一公共接口，内部统一创建/续写 Session 并累计模型池统计。
 - 模型必须在 `model_pool.models[]` 中填写明确模型名并启用；不再接受默认模型行。没有显式模型时不能创建或恢复扫描。
 - `model_pool.global_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 配置页的每个模型可添加多段使用时间，每段独立选择周一至周日及起止时间；时间窗口只限制新取得的模型 Lease，不会中断已经运行的任务。
-- 任务优先级范围为 `1..100`，数值越大越先运行，同优先级按 FIFO；低/中能力任务优先用最低足够能力模型，在其不可用时可升级，高能力任务不会降级。
-- 任务超时只计算每条模型消息的执行阶段，不包含排队时间。新 session 重试保持同一 task ID、释放并重新申请模型 Lease；模型池 completed-task 历史只记录一次最终状态。排队中的任务修改能力、优先级或其它参数时保留 task ID、增加 revision 并重新入队。
+- 任务能力只分 `low`、`high`，任务优先级由任务类型自动决定；低能力任务优先用最低足够能力模型并可升级，高能力任务不会降级。模型行本身仍可标记低/中/高能力。
+- 任务超时只计算每条模型消息的执行阶段，不包含排队时间。新 Session 重试释放并重新申请模型 Lease；模型池 completed-task 历史只记录一次最终状态。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。
 

@@ -12,6 +12,12 @@ from uuid import uuid4
 
 from backend.config import get_config
 from backend.models import ThreatAnalysis, ThreatAnalysisSources, ThreatAttackPath
+from backend.opencode import OpenCodeTaskType
+from backend.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
+from backend.opencode.task_service import (
+    bind_opencode_execution_context,
+    get_opencode_execution_context,
+)
 
 from .attack_paths import (
     append_or_merge_attack_path,
@@ -23,7 +29,6 @@ from .harness import (
     build_code_index,
     detect_product_mcp,
     read_json_object,
-    safe_run_id,
     write_json,
 )
 from .parsing import (
@@ -82,6 +87,12 @@ def _readable_stage_label(value: object, fallback: str = "") -> str:
     return fallback
 
 
+def _required_capability() -> str:
+    policy = getattr(get_config(), "threat_analysis_policy", None)
+    value = str(getattr(policy, "required_capability", "high") or "high").strip().lower()
+    return "high" if value in {"medium", "high"} else "low"
+
+
 async def run_attack_tree_threat_analysis(
     workspace: Path,
     project_id: str,
@@ -116,12 +127,14 @@ async def run_attack_tree_threat_analysis(
     effective_timeout = timeout if timeout is not None else config.opencode.timeout
     analysis_root = (project_dir or workspace).resolve()
     target_path = (code_scan_path or analysis_root).resolve()
-    run_dir = analysis_root / "runs" / safe_run_id(project_id)
+    execution_context = get_opencode_execution_context()
+    if execution_context.work_dir is None:
+        raise RuntimeError("threat_analysis requires an Agent-bound OpenCode work_dir")
+    run_dir = execution_context.work_dir / "threat_analysis"
     stream_path = run_dir / "stream" / "attack_paths.jsonl"
     contexts_dir = run_dir / "contexts"
     stages_dir = run_dir / "stages"
     result_path = run_dir / "res.json"
-    legacy_result_path = analysis_root / "res.json"
     scan_scope = build_threat_analysis_scan_scope(analysis_root, target_path)
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -416,7 +429,6 @@ async def run_attack_tree_threat_analysis(
         scan_scope=scan_scope,
     )
     write_threat_analysis_file(result_path, analysis)
-    write_threat_analysis_file(legacy_result_path, analysis)
     if on_output:
         on_output(
             f"[威胁分析] 归并完成：攻击路径 {len(analysis.attack_paths)} 条，"
@@ -651,7 +663,7 @@ async def _invoke_stage(
         output_path=output_path,
         task_label=task_label,
     )
-    task_context = {"task_type": "threat_analysis", "stage": skill_name}
+    task_context = {"stage": skill_name}
     if planned_task_id:
         task_context["planned_task_id"] = planned_task_id
     try:
@@ -682,25 +694,33 @@ async def _invoke_stage(
             on_output(f"[威胁分析] {task_label}{retry_note}")
         model_completed = False
         try:
-            await opencode_runner._invoke_opencode(
-                stage_prompt,
-                timeout,
-                log_path=log_dir / f"{skill_name}-{attempt}-attempt-{stage_attempt}.log",
-                on_line=on_output,
-                cancel_event=cancel_event,
-                directory=analysis_root,
-                writable_paths=[run_dir],
-                model_capability="high",
-                prefer_high_model=True,
-                task_name=f"威胁分析：{task_label}",
+            log_path = log_dir / f"{skill_name}-{attempt}-attempt-{stage_attempt}.log"
+            with bind_opencode_execution_context(
+                project_dir=analysis_root,
+                work_dir=run_dir,
                 task_metadata={
                     **task_context,
                     "stage_ordinal": attempt,
                     "stage_attempt": stage_attempt,
                     "stats_scope_id": stats_scope_id,
                 },
-                attempt=0,
-            )
+                on_output=on_output,
+                cancel_event=cancel_event,
+            ):
+                result = await opencode_runner.run_opencode_task(
+                    task_name=f"威胁分析：{task_label}",
+                    task_type=OpenCodeTaskType.THREAT_ANALYSIS,
+                    prompt=stage_prompt,
+                    required_capability=_required_capability(),
+                )
+            if result.status == "timeout":
+                raise asyncio.TimeoutError(result.text)
+            if result.status == "failure":
+                if result.text == NO_AVAILABLE_MODEL_MESSAGE:
+                    raise opencode_runner.NoAvailableModelError()
+                raise RuntimeError(result.text)
+            if result.text:
+                log_path.write_text(result.text, encoding="utf-8")
             model_completed = True
             _validate_stage_output(skill_name, read_json_object(output_path))
             return

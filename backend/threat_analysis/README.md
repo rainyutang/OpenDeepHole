@@ -41,8 +41,10 @@ threat_analysis:
   同目标下一个攻击域，一个攻击目标处理完后再处理下一个攻击目标。不会先把所有
   攻击目标、攻击域或攻击面同层分解完再进入下一层。
 
-新流程的事实源是 `runs/<scan_id>/stream/attack_paths.jsonl`。最终
-`runs/<scan_id>/res.json` 由 JSONL 归并生成，项目根目录 `res.json` 仅作为旧缓存兼容副本。
+新流程的事实源是当前扫描工作目录下的
+`threat_analysis/stream/attack_paths.jsonl`。最终 `threat_analysis/res.json`
+由 JSONL 归并生成；项目目录保持只读，旧项目根目录或 `runs/*/res.json`
+仅作为历史缓存读取，不再写入。
 
 默认实现会安装以下内置 Skill 到 OpenCode workspace：
 

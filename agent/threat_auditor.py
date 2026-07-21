@@ -329,7 +329,7 @@ async def run_threat_audit_tasks(
     capacity = total_model_capacity(
         config.opencode,
         global_concurrency=config.opencode_concurrency,
-        required_capability="high",
+        required_capability=config.vulnerability_mining.required_capability,
     )
     concurrency = max(1, min(capacity, len(pending)))
     queue: asyncio.Queue[ThreatAuditTask] = asyncio.Queue()

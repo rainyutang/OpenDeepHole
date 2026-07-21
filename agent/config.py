@@ -317,7 +317,7 @@ class AgentConfig:
     ))
     product_info: McpConfig = field(default_factory=lambda: McpConfig(name="product-info"))
     vulnerability_mining: ModelTaskPolicyConfig = field(default_factory=lambda: ModelTaskPolicyConfig(
-        required_capability="any",
+        required_capability="low",
     ))
     false_positive: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
     static_dedup: bool = True
@@ -331,7 +331,10 @@ def _apply_policy(target: ModelTaskPolicyConfig, raw: object) -> None:
     if not isinstance(raw, dict):
         return
     capability = str(raw.get("required_capability") or target.required_capability).strip().lower()
-    target.required_capability = capability if capability in {"any", "low", "medium", "high"} else target.required_capability
+    if capability in {"medium", "high"}:
+        target.required_capability = "high"
+    elif capability in {"any", "low"}:
+        target.required_capability = "low"
     target.timeout_seconds = _bounded_int(raw.get("timeout_seconds"), target.timeout_seconds, 1, 86400)
     target.max_retries = _bounded_int(raw.get("max_retries"), target.max_retries, 0, 20)
 

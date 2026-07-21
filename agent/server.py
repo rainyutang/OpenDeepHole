@@ -937,8 +937,9 @@ async def _run_skill_creator(
         raise RuntimeError("Agent config is not initialized")
 
     from agent.scanner import _configure_backend
+    from backend.opencode import OpenCodeTaskType, run_opencode_task
     from backend.opencode.config import get_global_opencode_workspace, get_workspace_lock
-    from backend.opencode.runner import _invoke_opencode
+    from backend.opencode.task_service import bind_opencode_execution_context
 
     request_dir = Path.home() / ".opendeephole" / "skill_create" / request_id
     if request_dir.exists():
@@ -958,28 +959,35 @@ async def _run_skill_creator(
         if line:
             print(with_local_timestamp(line, prefix="[skill_create]"), flush=True)
 
-    output_text = await _invoke_opencode(
-        prompt,
-        timeout=_config.opencode.timeout,
-        on_line=on_output,
-        directory=request_dir,
-        model_capability="high",
-        prefer_high_model=True,
-        task_name="skill_create",
-        priority=70,
-        task_metadata={"task_type": "skill_create"},
-        output_schema={
-            "type": "object",
-            "properties": {
-                "skill_md": {"type": "string"},
-                "scenarios_md": {"type": "string"},
-                "summary": {"type": "string"},
-            },
-            "required": ["skill_md", "scenarios_md", "summary"],
-            "additionalProperties": False,
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "skill_md": {"type": "string"},
+            "scenarios_md": {"type": "string"},
+            "summary": {"type": "string"},
         },
+        "required": ["skill_md", "scenarios_md", "summary"],
+        "additionalProperties": False,
+    }
+    with bind_opencode_execution_context(
+        project_dir=request_dir,
+        work_dir=request_dir,
+        on_output=on_output,
+    ):
+        result = await run_opencode_task(
+            task_name="skill_create",
+            task_type=OpenCodeTaskType.SKILL_CREATE,
+            prompt=prompt,
+            required_capability="high",
+            output_schema=output_schema,
+        )
+    if result.status == "timeout":
+        raise asyncio.TimeoutError(result.text)
+    if result.status == "failure":
+        raise RuntimeError(result.text)
+    return _parse_skill_creator_output(
+        json.dumps(result.structured, ensure_ascii=False)
     )
-    return _parse_skill_creator_output(output_text)
 
 
 def _write_skill_creator_package(package: dict, skills_root: Path) -> None:

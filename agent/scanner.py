@@ -1139,8 +1139,10 @@ async def run_scan(
     set_scan_feedback_entries(scan_id, feedback_entries or [])
     execution_context_token = set_opencode_execution_context(
         scan_id=scan_id,
-        scan_work_dir=scan_dir,
+        project_dir=project_path,
+        work_dir=scan_dir,
         feedback_entries=feedback_entries or [],
+        cancel_event=cancel_event,
     )
 
     mcp_server = None
@@ -1765,7 +1767,7 @@ async def run_scan(
         audit_capacity = total_model_capacity(
             config.opencode,
             global_concurrency=config.opencode_concurrency,
-            required_capability="any",
+            required_capability=config.vulnerability_mining.required_capability,
         )
         audit_concurrency = max(1, min(audit_capacity, len(remaining) or 1))
         result_lock = asyncio.Lock()

@@ -121,73 +121,68 @@ async def validate(ctx) -> ValidationResult:
 
 ## 4. OpenCode 调用
 
-验证器与威胁分析、候选点审计使用同一个任务服务，直接调用 `get_opencode_task_service().run_task()`。页面的验证环境策略会在任务服务中强制覆盖模型能力、超时和模型重试：
+验证器与其它组件使用同一个公共入口。验证运行时会自动绑定项目目录、当前 `ctx.work_dir`、输出回调、取消事件、模型超时和新 Session 重试策略；验证器只提供任务本身的信息：
 
 ```python
-from backend.opencode.task_service import OpenCodeTaskSpec, get_opencode_task_service
+from backend.opencode import OpenCodeTaskType, run_opencode_task
 
 
-result = await get_opencode_task_service().run_task(
-    OpenCodeTaskSpec(
-        task_name="PoC 设计",
-        prompt=ctx.report_markdown,
-        directory=ctx.project_path,
-        required_capability=ctx.required_capability,
-        timeout_seconds=ctx.model_timeout_seconds,
-        priority=80,
-        output_schema=RESULT_SCHEMA,
-        attempt=ctx.model_max_retries,
-        writable_paths=[ctx.work_dir],
-        on_output=ctx.opencode_output,
-        cancel_event=ctx.cancel_event,
-    )
+result = await run_opencode_task(
+    task_name="PoC 设计",
+    task_type=OpenCodeTaskType.VULNERABILITY_VALIDATION,
+    prompt=ctx.report_markdown,
+    required_capability=ctx.required_capability,
+    output_schema=RESULT_SCHEMA,
 )
-result.raise_for_status()
+if result.status != "success":
+    raise RuntimeError(result.text)
 payload = result.structured
 session_id = result.session_id
 ```
 
-当前验证执行上下文会自动绑定 `scan_id`、验证元数据、共享 MCP 网关和 `ctx.work_dir` 写权限。验证器不要自行创建 OpenCode workspace、MCP Server 或 CLI 子进程，也不要直接执行 `nga`、`opencode`、`hac` 或 `claude`。
+`required_capability` 只允许 `low` 或 `high`。公共结果只包含 `session_id`、`status`、`text`、`structured`、`model`；主动取消直接传播 `asyncio.CancelledError`，不会返回 `cancelled` 状态。验证器不要自行创建 OpenCode workspace、MCP Server 或 CLI 子进程，也不要直接执行 `nga`、`opencode`、`hac` 或 `claude`。
 
 ### 同时创建两个任务
 
-两个独立任务使用两个不带 `session_id` 的 `OpenCodeTaskSpec`，通过 `asyncio.gather` 并发提交；实际并发仍受全局模型池和单模型并发限制：
+两个独立任务不传 `session_id`，通过 `asyncio.gather` 并发提交；实际并发仍受全局模型池和单模型并发限制：
 
 ```python
 import asyncio
 
-service = get_opencode_task_service()
 code_result, exploit_result = await asyncio.gather(
-    service.run_task(OpenCodeTaskSpec(
+    run_opencode_task(
         task_name="代码可达性分析",
+        task_type=OpenCodeTaskType.VULNERABILITY_VALIDATION,
         prompt=code_prompt,
-        directory=ctx.project_path,
+        required_capability=ctx.required_capability,
         output_schema=CODE_SCHEMA,
-        cancel_event=ctx.cancel_event,
-    )),
-    service.run_task(OpenCodeTaskSpec(
+    ),
+    run_opencode_task(
         task_name="利用条件分析",
+        task_type=OpenCodeTaskType.VULNERABILITY_VALIDATION,
         prompt=exploit_prompt,
-        directory=ctx.project_path,
+        required_capability=ctx.required_capability,
         output_schema=EXPLOIT_SCHEMA,
-        cancel_event=ctx.cancel_event,
-    )),
+    ),
 )
-code_result.raise_for_status()
-exploit_result.raise_for_status()
 ```
 
 同一个 `session_id` 表示续写同一会话。不要并发续写同一 session；应按顺序 `await`，因为会话消息具有严格先后关系：
 
 ```python
-first = (await service.run_task(first_spec)).raise_for_status()
-second = await service.run_task(OpenCodeTaskSpec(
+first = await run_opencode_task(
+    task_name="分析利用条件",
+    task_type=OpenCodeTaskType.VULNERABILITY_VALIDATION,
+    prompt=first_prompt,
+    required_capability=ctx.required_capability,
+)
+second = await run_opencode_task(
     task_name="生成 PoC",
+    task_type=OpenCodeTaskType.VULNERABILITY_VALIDATION,
     prompt="根据上一轮结论生成 PoC。",
-    directory=ctx.project_path,
+    required_capability=ctx.required_capability,
     session_id=first.session_id,
-    cancel_event=ctx.cancel_event,
-))
+)
 ```
 
 `ctx.opencode_output` 只把模型流打印到 Agent/调试控制台，不进入后端漏洞验证页面。需要页面展示时，由验证器提取阶段性结论后显式调用 `await ctx.emit_stdout(...)`。
@@ -268,7 +263,7 @@ python -m agent.validation_debug \
 1. `validator.yaml` 的产品/环境对唯一且字段合法。
 2. `validator.py` 只暴露异步 `validate(ctx)`，返回严格 `ValidationResult`。
 3. 所有临时文件写入 `ctx.work_dir`，方法自带只读资源放在 `ctx.validator_dir`。
-4. 模型调用直接使用共享 `OpenCodeTaskService`；并发独立任务用 `asyncio.gather`，同 session 串行。
+4. 模型调用只使用 `backend.opencode.run_opencode_task()`；并发独立任务用 `asyncio.gather`，同 Session 串行。
 5. 页面进度显式 `await ctx.emit_stdout(...)`，产物显式 `await ctx.publish_artifact(...)`。
 6. 外部进程只通过 `await ctx.run_command(...)`。
 7. 本地 debug case 能完整跑通停止、失败和成功路径。

@@ -187,7 +187,7 @@ class AgentConfigTests(unittest.TestCase):
                 },
             },
         )
-        self.assertEqual(remote["vulnerability_mining"]["required_capability"], "any")
+        self.assertEqual(remote["vulnerability_mining"]["required_capability"], "low")
         self.assertEqual(remote["false_positive"]["required_capability"], "high")
         self.assertEqual(remote["vulnerability_validation"], {"environments": {}})
         self.assertNotIn("git_history", remote)
@@ -291,12 +291,14 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["model_pool"]["models"][0]["model"], "provider/model")
             self.assertNotIn("use_default_model", raw["model_pool"]["models"][0])
             self.assertEqual(raw["threat_analysis"]["model_policy"]["max_retries"], 4)
+            self.assertEqual(raw["threat_analysis"]["model_policy"]["required_capability"], "high")
             self.assertEqual(raw["code_graph"]["remote"]["url"], "http://graph.test/mcp")
             self.assertEqual(
                 raw["code_graph"]["remote"]["headers"]["Authorization"],
                 "Bearer test-secret-123",
             )
             self.assertEqual(raw["vulnerability_mining"]["timeout_seconds"], 600)
+            self.assertEqual(raw["vulnerability_mining"]["required_capability"], "low")
             self.assertEqual(raw["false_positive"]["timeout_seconds"], 700)
             self.assertEqual(raw["vulnerability_validation"]["environments"]["lab"]["concurrency"], 2)
             self.assertEqual(

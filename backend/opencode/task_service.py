@@ -1,9 +1,4 @@
-"""Unified OpenCode task queue and durable session facade.
-
-Every model-backed operation in OpenDeepHole is represented by an
-``OpenCodeTaskSpec``.  The service owns model scheduling, execution-stage
-timeouts, OpenCode session creation/continuation and plain-text output.
-"""
+"""Internal OpenCode queue, scheduling, session and permission engine."""
 
 from __future__ import annotations
 
@@ -23,6 +18,7 @@ from uuid import uuid4
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import OutputSource
+from backend.opencode.api import OpenCodeResult, OpenCodeTaskType
 from backend.opencode.llm_json import (
     LLMJsonParseError,
     parse_llm_json,
@@ -59,9 +55,17 @@ class OpenCodeExecutionContext:
     """
 
     scan_id: str = ""
-    scan_work_dir: Path | None = None
+    project_dir: Path | None = None
+    work_dir: Path | None = None
     task_metadata: dict[str, Any] = field(default_factory=dict)
     feedback_entries: tuple[dict[str, Any], ...] = ()
+    on_output: Callable[[str], Any] | None = field(default=None, compare=False, repr=False)
+    on_invocation_metadata: Callable[[OutputSource], Any] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
+    cancel_event: Any = field(default=None, compare=False, repr=False)
 
 
 _execution_context: ContextVar[OpenCodeExecutionContext] = ContextVar(
@@ -91,27 +95,33 @@ def _feedback_snapshot(entries: Any) -> tuple[dict[str, Any], ...]:
 def set_opencode_execution_context(
     *,
     scan_id: str | None = None,
-    scan_work_dir: Path | None | object = _INHERIT_CONTEXT_VALUE,
+    project_dir: Path | None | object = _INHERIT_CONTEXT_VALUE,
+    work_dir: Path | None | object = _INHERIT_CONTEXT_VALUE,
     task_metadata: dict[str, Any] | None = None,
     feedback_entries: Any = None,
+    on_output: Callable[[str], Any] | None | object = _INHERIT_CONTEXT_VALUE,
+    on_invocation_metadata: Callable[[OutputSource], Any] | None | object = _INHERIT_CONTEXT_VALUE,
+    cancel_event: Any = _INHERIT_CONTEXT_VALUE,
 ) -> Token[OpenCodeExecutionContext]:
     """Bind Agent-owned scope for the current async execution tree.
 
-    ``scan_id=None`` inherits the current scope. Pass an empty ``scan_id`` to
-    clear the scope and its inherited work directory, or
-    ``scan_work_dir=None`` to clear only that directory. The returned token
-    must be reset by the owner.
+    ``scan_id=None`` inherits the current scope. Paths and runtime hooks inherit
+    when omitted and clear when explicitly set to ``None``.
     """
     current = _execution_context.get()
     next_scan_id = current.scan_id if scan_id is None else str(scan_id or "").strip()
-    if scan_work_dir is _INHERIT_CONTEXT_VALUE:
-        next_work_dir = current.scan_work_dir
-        if scan_id is not None and not next_scan_id:
+    def resolved_path(value: Path | None | object, current_value: Path | None) -> Path | None:
+        if value is _INHERIT_CONTEXT_VALUE:
+            return current_value
+        return None if value is None else Path(value).resolve()
+
+    next_project_dir = resolved_path(project_dir, current.project_dir)
+    next_work_dir = resolved_path(work_dir, current.work_dir)
+    if scan_id is not None and not next_scan_id:
+        if project_dir is _INHERIT_CONTEXT_VALUE:
+            next_project_dir = None
+        if work_dir is _INHERIT_CONTEXT_VALUE:
             next_work_dir = None
-    elif scan_work_dir is None:
-        next_work_dir = None
-    else:
-        next_work_dir = Path(scan_work_dir).resolve()
     metadata = dict(current.task_metadata)
     if task_metadata:
         metadata.update(task_metadata)
@@ -122,9 +132,19 @@ def set_opencode_execution_context(
     )
     return _execution_context.set(OpenCodeExecutionContext(
         scan_id=next_scan_id,
-        scan_work_dir=next_work_dir,
+        project_dir=next_project_dir,
+        work_dir=next_work_dir,
         task_metadata=metadata,
         feedback_entries=feedback,
+        on_output=current.on_output if on_output is _INHERIT_CONTEXT_VALUE else on_output,
+        on_invocation_metadata=(
+            current.on_invocation_metadata
+            if on_invocation_metadata is _INHERIT_CONTEXT_VALUE
+            else on_invocation_metadata
+        ),
+        cancel_event=(
+            current.cancel_event if cancel_event is _INHERIT_CONTEXT_VALUE else cancel_event
+        ),
     ))
 
 
@@ -161,10 +181,32 @@ def _snapshot_execution_context() -> OpenCodeExecutionContext:
     feedback = _scan_feedback_entries.get(current.scan_id, current.feedback_entries)
     return OpenCodeExecutionContext(
         scan_id=current.scan_id,
-        scan_work_dir=current.scan_work_dir,
+        project_dir=current.project_dir,
+        work_dir=current.work_dir,
         task_metadata=dict(current.task_metadata),
         feedback_entries=tuple(dict(entry) for entry in feedback),
+        on_output=current.on_output,
+        on_invocation_metadata=current.on_invocation_metadata,
+        cancel_event=current.cancel_event,
     )
+
+
+def _required_project_dir(context: OpenCodeExecutionContext) -> Path:
+    if context.project_dir is None:
+        raise RuntimeError(
+            "OpenCode project_dir is not bound; component execution must bind it before calling "
+            "run_opencode_task()"
+        )
+    return context.project_dir.resolve()
+
+
+def _required_work_dir(context: OpenCodeExecutionContext) -> Path:
+    if context.work_dir is None:
+        raise RuntimeError(
+            "OpenCode work_dir is not bound; component execution must bind it before calling "
+            "run_opencode_task()"
+        )
+    return context.work_dir.resolve()
 
 
 @dataclass(frozen=True)
@@ -178,15 +220,7 @@ class OpenCodeTaskSpec:
     output_schema: dict[str, Any] | None = None
     output_retry_count: int = 2
     session_id: str | None = None
-    writable_paths: list[Path] = field(default_factory=list)
     attempt: int | None = None
-    on_output: Callable[[str], Any] | None = field(default=None, compare=False, repr=False)
-    on_invocation_metadata: Callable[[OutputSource], Any] | None = field(
-        default=None,
-        compare=False,
-        repr=False,
-    )
-    cancel_event: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -306,6 +340,7 @@ class OpenCodeTaskService:
     def __init__(self) -> None:
         self._records: dict[str, _TaskRecord] = {}
         self._session_directories: dict[str, Path] = {}
+        self._session_work_directories: dict[str, Path] = {}
         self._session_runtimes: dict[str, _SessionRuntime] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._active_session_tasks: dict[str, str] = {}
@@ -339,7 +374,6 @@ class OpenCodeTaskService:
             output_retry_count=output_retry_count,
             attempt=None if attempt is None else int(attempt),
             session_id=str(spec.session_id or "").strip() or None,
-            writable_paths=[Path(path).resolve() for path in spec.writable_paths],
         )
 
     def submit_task(self, spec: OpenCodeTaskSpec) -> OpenCodeTaskHandle:
@@ -350,6 +384,13 @@ class OpenCodeTaskService:
                 raise ValueError(
                     f"OpenCode session {normalized.session_id} is bound to {existing}; "
                     f"continuation directory cannot change to {normalized.directory}"
+                )
+            work_dir = _required_work_dir(_snapshot_execution_context())
+            existing_work_dir = self._session_work_directories.get(normalized.session_id)
+            if existing_work_dir is not None and existing_work_dir != work_dir:
+                raise ValueError(
+                    f"OpenCode session {normalized.session_id} is bound to work directory "
+                    f"{existing_work_dir}; continuation work directory cannot change to {work_dir}"
                 )
         loop = asyncio.get_running_loop()
         task_id = uuid4().hex
@@ -366,6 +407,10 @@ class OpenCodeTaskService:
         if normalized.session_id:
             record.session_future.set_result(normalized.session_id)
             self._session_directories.setdefault(normalized.session_id, normalized.directory)
+            self._session_work_directories.setdefault(
+                normalized.session_id,
+                _required_work_dir(record.execution_context),
+            )
         self._records[task_id] = record
         record.worker = asyncio.create_task(
             self._run_record(record),
@@ -407,6 +452,13 @@ class OpenCodeTaskService:
                     f"OpenCode session {next_spec.session_id} is bound to {existing}; "
                     f"continuation directory cannot change to {next_spec.directory}"
                 )
+            next_work_dir = _required_work_dir(record.execution_context)
+            existing_work_dir = self._session_work_directories.get(next_spec.session_id)
+            if existing_work_dir is not None and existing_work_dir != next_work_dir:
+                raise ValueError(
+                    f"OpenCode session {next_spec.session_id} is bound to work directory "
+                    f"{existing_work_dir}; continuation work directory cannot change to {next_work_dir}"
+                )
         record.requeue_requested = True
         record.cancel_event.set()
         if record.worker is not None:
@@ -436,7 +488,8 @@ class OpenCodeTaskService:
 
     async def _run_record(self, record: _TaskRecord) -> None:
         spec = record.spec
-        combined_cancel = _CombinedCancelEvent(record.cancel_event, spec.cancel_event)
+        context = record.execution_context
+        combined_cancel = _CombinedCancelEvent(record.cancel_event, context.cancel_event)
         cli_config_source = lambda: _task_cli_config(record.execution_context)
         global_concurrency = lambda: configured_global_concurrency(get_config())
         task_policy = _task_model_policy(record.execution_context)
@@ -524,8 +577,8 @@ class OpenCodeTaskService:
                     session_attempt=session_attempt,
                 )
                 source.attempt = session_attempt
-                if spec.on_invocation_metadata:
-                    spec.on_invocation_metadata(source)
+                if context.on_invocation_metadata:
+                    context.on_invocation_metadata(source)
 
                 async def record_session(value: str) -> None:
                     nonlocal session_id, final_session_id
@@ -534,6 +587,7 @@ class OpenCodeTaskService:
                     if not session_id or runtime is None:
                         return
                     self._session_directories[session_id] = spec.directory
+                    self._session_work_directories[session_id] = _required_work_dir(context)
                     self._session_runtimes[session_id] = runtime
                     # Alias a newly-created task lock to its durable session
                     # before exposing it to callers.
@@ -570,7 +624,7 @@ class OpenCodeTaskService:
                                 prompt=prompt,
                                 model=model,
                                 timeout=timeout_seconds,
-                                on_line=spec.on_output,
+                                on_line=context.on_output,
                                 on_session_id=record_session,
                                 on_response_model=record_model,
                                 cancel_event=combined_cancel,
@@ -596,8 +650,8 @@ class OpenCodeTaskService:
                                     f"({spec.output_retry_count}) without matching the target schema"
                                 )
                             prompt = _json_correction_prompt(spec.output_schema)
-                            if spec.on_output:
-                                spec.on_output(
+                            if context.on_output:
+                                context.on_output(
                                     "[json-correction "
                                     f"{output_attempt + 1}/{spec.output_retry_count}] "
                                     "requesting schema-compliant JSON in the same session"
@@ -723,8 +777,8 @@ class OpenCodeTaskService:
 
             if retry_reason and session_attempt < total_session_attempts:
                 record.status = "queued"
-                if spec.on_output:
-                    spec.on_output(
+                if context.on_output:
+                    context.on_output(
                         f"[session-retry {session_attempt}/{fresh_retry_count}] "
                         f"{retry_reason}; requeueing with a new session"
                     )
@@ -893,6 +947,7 @@ class OpenCodeTaskService:
         runtime = self._runtime_for_session(session_id)
         result = await get_serve_manager().delete_session(session_id, **runtime.kwargs())
         self._session_directories.pop(session_id, None)
+        self._session_work_directories.pop(session_id, None)
         self._session_runtimes.pop(session_id, None)
         self._session_locks.pop(session_id, None)
         return result
@@ -948,10 +1003,8 @@ def _effective_required_capability(
     context: OpenCodeExecutionContext,
     spec: OpenCodeTaskSpec,
 ) -> str:
-    policy = _task_model_policy(context)
-    if policy is None:
-        return spec.required_capability
-    return str(_cfg_value(policy, "required_capability", spec.required_capability) or "any")
+    del context
+    return spec.required_capability
 
 
 def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
@@ -1051,24 +1104,13 @@ def _permission_path_patterns(path: Path) -> list[str]:
 
 
 def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
-    """Compute session permissions from directory, scan scope and escape paths.
-
-    Bash intentionally remains fully allowed, per the runtime contract. The
-    read-only guarantee for ``directory`` therefore applies to OpenCode's file
-    editing tools; shell commands can still write there.
-    """
+    """Allow project reads and restrict all model writes to the bound work dir."""
     spec = record.spec
     context = record.execution_context
     from backend.opencode.config import get_global_opencode_workspace
 
-    external_roots = [spec.directory, get_global_opencode_workspace()]
-    write_roots: list[Path] = []
-    if context.scan_work_dir is not None:
-        external_roots.append(context.scan_work_dir)
-        write_roots.append(context.scan_work_dir)
-    for path in spec.writable_paths:
-        external_roots.append(path)
-        write_roots.append(path)
+    work_dir = _required_work_dir(context)
+    external_roots = [spec.directory, work_dir, get_global_opencode_workspace()]
 
     rules: list[dict[str, str]] = []
 
@@ -1091,14 +1133,10 @@ def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
                 seen_external.add(pattern)
 
     add("edit", "*", "deny")
-    seen_write: set[str] = set()
-    for root in write_roots:
-        for pattern in _permission_path_patterns(root):
-            if pattern not in seen_write:
-                add("edit", pattern, "allow")
-                seen_write.add(pattern)
+    for pattern in _permission_path_patterns(work_dir):
+        add("edit", pattern, "allow")
 
-    add("bash", "*", "allow")
+    add("bash", "*", "deny")
     add("skill", "*", "allow")
     return rules
 
@@ -1125,10 +1163,99 @@ def _message_model(info: dict[str, Any]) -> str:
     return model if model.startswith(f"{provider}/") else f"{provider}/{model}"
 
 
+def _task_priority(task_type: OpenCodeTaskType) -> int:
+    if task_type is OpenCodeTaskType.VULNERABILITY_VALIDATION:
+        return 80
+    if task_type is OpenCodeTaskType.SKILL_CREATE:
+        return 70
+    return 50
+
+
+def _task_timeout_seconds(
+    task_type: OpenCodeTaskType,
+    context: OpenCodeExecutionContext,
+) -> int:
+    policy = _task_model_policy(context)
+    if policy is not None:
+        value = int(_cfg_value(policy, "timeout_seconds", 0) or 0)
+        if value > 0:
+            return value
+    config = get_config()
+    if task_type is OpenCodeTaskType.MEMORY_API_DISCOVERY:
+        value = int(
+            _cfg_value(
+                getattr(config, "memory_api_discovery", None),
+                "timeout_seconds",
+                0,
+            )
+            or 0
+        )
+        if value > 0:
+            return value
+    return int(_cfg_value(_task_cli_config(context), "timeout", 1200) or 1200)
+
+
+async def _run_component_task(
+    *,
+    task_name: str,
+    task_type: OpenCodeTaskType,
+    prompt: str,
+    required_capability: str,
+    output_schema: dict[str, Any] | None,
+    invalid_json_retry_count: int,
+    session_id: str | None,
+) -> OpenCodeResult:
+    """Translate the public contract into the internal scheduling record."""
+    with bind_opencode_execution_context(task_metadata={"task_type": task_type.value}):
+        context = _snapshot_execution_context()
+        project_dir = _required_project_dir(context)
+        _required_work_dir(context)
+        result = await _get_opencode_task_service().run_task(
+            OpenCodeTaskSpec(
+                task_name=task_name,
+                prompt=prompt,
+                directory=project_dir,
+                required_capability=required_capability,
+                timeout_seconds=_task_timeout_seconds(task_type, context),
+                priority=_task_priority(task_type),
+                output_schema=output_schema,
+                output_retry_count=invalid_json_retry_count,
+                session_id=session_id,
+                attempt=None,
+            )
+        )
+
+    if result.status == "cancelled":
+        raise asyncio.CancelledError(result.error or "OpenCode task cancelled")
+    if result.status == "success":
+        return OpenCodeResult(
+            session_id=result.session_id,
+            status="success",
+            text=result.text,
+            structured=result.structured if output_schema is not None else None,
+            model=result.model,
+        )
+    if result.status == "timeout":
+        return OpenCodeResult(
+            session_id=result.session_id,
+            status="timeout",
+            text=result.error or "OpenCode task timed out",
+            structured=None,
+            model=result.model,
+        )
+    return OpenCodeResult(
+        session_id=result.session_id,
+        status="failure",
+        text=result.error or result.text or "OpenCode task failed",
+        structured=None,
+        model=result.model,
+    )
+
+
 _service: OpenCodeTaskService | None = None
 
 
-def get_opencode_task_service() -> OpenCodeTaskService:
+def _get_opencode_task_service() -> OpenCodeTaskService:
     global _service
     if _service is None:
         _service = OpenCodeTaskService()

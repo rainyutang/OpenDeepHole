@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
+import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args, get_type_hints
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from backend.models import OutputSource
+from backend.opencode import OpenCodeResult, OpenCodeTaskType, run_opencode_task
 from backend.opencode.model_pool import ModelLease, ModelOption
 from backend.opencode.serve_client import OpenCodePromptResult
 from backend.opencode.task_service import (
     OpenCodeTaskError,
+    OpenCodeTaskResult,
     OpenCodeTaskService,
     OpenCodeTaskSpec,
     _SessionRuntime,
@@ -76,6 +81,14 @@ def _source() -> OutputSource:
     )
 
 
+def _task_context(tmp_path: Path, **kwargs):
+    return bind_opencode_execution_context(
+        project_dir=tmp_path,
+        work_dir=tmp_path / "work",
+        **kwargs,
+    )
+
+
 def _service_patches(manager, *, max_retries: int = 2, runtime_config=None):
     async def acquire(*_args, **kwargs):
         return _lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"])
@@ -96,35 +109,200 @@ def _service_patches(manager, *, max_retries: int = 2, runtime_config=None):
     )
 
 
-def test_task_spec_public_contract_is_small_and_agent_owned_fields_are_absent() -> None:
-    names = [item.name for item in dataclasses.fields(OpenCodeTaskSpec)]
+def test_public_contract_contains_only_component_owned_fields() -> None:
+    names = list(inspect.signature(run_opencode_task).parameters)
     assert names == [
         "task_name",
+        "task_type",
         "prompt",
-        "directory",
         "required_capability",
-        "timeout_seconds",
-        "priority",
         "output_schema",
-        "output_retry_count",
+        "invalid_json_retry_count",
         "session_id",
-        "writable_paths",
-        "attempt",
-        "on_output",
-        "on_invocation_metadata",
-        "cancel_event",
     ]
-    for removed in (
-        "workspace",
-        "scope_id",
-        "task_context",
-        "mcp_tools",
-        "skills",
-        "permissions",
-        "cli_config",
-        "global_concurrency",
-    ):
-        assert removed not in names
+    assert [item.name for item in dataclasses.fields(OpenCodeResult)] == [
+        "session_id",
+        "status",
+        "text",
+        "structured",
+        "model",
+    ]
+    assert "cancelled" not in get_args(get_type_hints(OpenCodeResult)["status"])
+    assert OpenCodeTaskType.VULNERABILITY_VALIDATION.value == "vulnerability_validation"
+
+
+def test_public_interface_uses_bound_directories_and_returns_only_public_result(tmp_path: Path) -> None:
+    async def run() -> None:
+        internal = OpenCodeTaskResult(
+            task_id="task-1",
+            session_id="ses-1",
+            message_id="msg-1",
+            status="success",
+            text='{"answer": 7}',
+            structured={"answer": 7},
+            model="provider/model",
+        )
+        service = SimpleNamespace(run_task=AsyncMock(return_value=internal))
+        with (
+            patch("backend.opencode.task_service._get_opencode_task_service", return_value=service),
+            patch("backend.opencode.task_service.get_config", return_value=_config()),
+            _task_context(tmp_path, task_metadata={"checker": "npd"}),
+        ):
+            result = await run_opencode_task(
+                task_name="public task",
+                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                prompt="return json",
+                required_capability="high",
+                output_schema=SCHEMA,
+                invalid_json_retry_count=4,
+                session_id="ses-existing",
+            )
+
+        assert result == OpenCodeResult(
+            session_id="ses-1",
+            status="success",
+            text='{"answer": 7}',
+            structured={"answer": 7},
+            model="provider/model",
+        )
+        spec = service.run_task.await_args.args[0]
+        assert spec.directory == tmp_path.resolve()
+        assert spec.required_capability == "high"
+        assert spec.output_retry_count == 4
+        assert spec.session_id == "ses-existing"
+
+        service.run_task.reset_mock()
+        with (
+            patch("backend.opencode.task_service._get_opencode_task_service", return_value=service),
+            patch("backend.opencode.task_service.get_config", return_value=_config()),
+            _task_context(tmp_path),
+        ):
+            plain = await run_opencode_task(
+                task_name="plain text",
+                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                prompt="return text",
+                required_capability="low",
+            )
+        assert plain.structured is None
+
+    asyncio.run(run())
+
+
+def test_public_interface_requires_context_and_propagates_cancellation(tmp_path: Path) -> None:
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="project_dir is not bound"):
+            await run_opencode_task(
+                task_name="missing context",
+                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                prompt="test",
+                required_capability="low",
+            )
+
+        cancelled = OpenCodeTaskResult(
+            task_id="task-cancelled",
+            session_id="ses-cancelled",
+            message_id="",
+            status="cancelled",
+            error="stopped",
+        )
+        service = SimpleNamespace(run_task=AsyncMock(return_value=cancelled))
+        with (
+            patch("backend.opencode.task_service._get_opencode_task_service", return_value=service),
+            patch("backend.opencode.task_service.get_config", return_value=_config()),
+            _task_context(tmp_path),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await run_opencode_task(
+                task_name="cancelled",
+                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                prompt="test",
+                required_capability="low",
+            )
+
+    asyncio.run(run())
+
+
+def test_external_cancellation_stops_same_session_json_correction_and_retries(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        manager = SimpleNamespace()
+        correction_started = asyncio.Event()
+        external_cancel = threading.Event()
+        calls = 0
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            callback = kwargs["on_session_id"]("ses-correction")
+            if hasattr(callback, "__await__"):
+                await callback
+            if calls == 1:
+                return OpenCodePromptResult(
+                    session_id="ses-correction",
+                    message_id="msg-invalid",
+                    lines=["not json"],
+                    text="not json",
+                    model="provider/model-low",
+                )
+            correction_started.set()
+            while not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.005)
+            raise asyncio.CancelledError
+
+        manager.run_prompt = run_prompt
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patch("backend.opencode.task_service._get_opencode_task_service", return_value=service),
+            _task_context(tmp_path, cancel_event=external_cancel),
+        ):
+            caller = asyncio.create_task(run_opencode_task(
+                task_name="cancel corrections",
+                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                prompt="return json",
+                required_capability="low",
+                output_schema=SCHEMA,
+                invalid_json_retry_count=2,
+            ))
+            await correction_started.wait()
+            external_cancel.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(caller, timeout=1)
+
+        assert calls == 2
+        assert next(iter(service._records.values())).status == "cancelled"
+
+    asyncio.run(run())
+
+
+def test_public_interface_rejects_legacy_capabilities_and_string_task_types() -> None:
+    async def run() -> None:
+        with pytest.raises(ValueError, match="low.*high"):
+            await run_opencode_task(
+                task_name="legacy capability",
+                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                prompt="test",
+                required_capability="medium",  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError, match="task_type"):
+            await run_opencode_task(
+                task_name="string type",
+                task_type="audit",  # type: ignore[arg-type]
+                prompt="test",
+                required_capability="low",
+            )
+
+    asyncio.run(run())
 
 
 def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: Path) -> None:
@@ -158,7 +336,8 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
             scan_dir = tmp_path / ".opendeephole" / "scans" / "scan-7"
             with bind_opencode_execution_context(
                 scan_id="scan-7",
-                scan_work_dir=scan_dir,
+                project_dir=tmp_path,
+                work_dir=scan_dir,
                 task_metadata={"task_type": "audit", "checker": "oob"},
             ):
                 result = await service.run_task(OpenCodeTaskSpec(
@@ -183,10 +362,13 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
             (rule["permission"], rule["pattern"], rule["action"])
             for rule in captured["permissions"]
         }
-        assert ("bash", "*", "allow") in permission_tuples
+        assert ("bash", "*", "deny") in permission_tuples
         assert ("skill", "*", "allow") in permission_tuples
         assert ("edit", "*", "deny") in permission_tuples
         assert ("edit", str(scan_dir.resolve()), "allow") in permission_tuples
+        assert ("edit", str(tmp_path.resolve()), "allow") not in permission_tuples
+        assert ("external_directory", str(tmp_path.resolve()), "allow") in permission_tuples
+        assert ("external_directory", str(scan_dir.resolve()), "allow") in permission_tuples
         acquire_kwargs = acquire_mock.await_args.kwargs
         assert acquire_kwargs["stats_scope_id"] == "scan-7"
         assert acquire_kwargs["task_context"]["task_type"] == "audit"
@@ -196,7 +378,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
     asyncio.run(run())
 
 
-def test_phase_policy_overrides_task_and_model_capability_timeout_and_retries(tmp_path: Path) -> None:
+def test_phase_policy_controls_timeout_and_retries_but_not_explicit_capability(tmp_path: Path) -> None:
     async def run() -> None:
         calls: list[dict] = []
 
@@ -229,6 +411,8 @@ def test_phase_policy_overrides_task_and_model_capability_timeout_and_retries(tm
         patches = _service_patches(manager, runtime_config=runtime_config)
         with patches[0], patches[1] as acquire_mock, patches[2], patches[3], patches[4], patches[5]:
             with bind_opencode_execution_context(
+                project_dir=tmp_path,
+                work_dir=tmp_path / "work",
                 task_metadata={"task_type": "threat_audit"},
             ):
                 result = await service.run_task(OpenCodeTaskSpec(
@@ -246,7 +430,7 @@ def test_phase_policy_overrides_task_and_model_capability_timeout_and_retries(tm
         assert [call["timeout"] for call in calls] == [77, 77]
         assert acquire_mock.await_count == 2
         assert all(
-            call.kwargs["required_capability"] == "high"
+            call.kwargs["required_capability"] == "low"
             for call in acquire_mock.await_args_list
         )
 
@@ -277,14 +461,15 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
         with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
-            result = await service.run_task(OpenCodeTaskSpec(
-                task_name="correct json",
-                prompt="initial prompt",
-                directory=tmp_path,
-                output_schema=SCHEMA,
-                output_retry_count=2,
-                attempt=0,
-            ))
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="correct json",
+                    prompt="initial prompt",
+                    directory=tmp_path,
+                    output_schema=SCHEMA,
+                    output_retry_count=2,
+                    attempt=0,
+                ))
 
         assert result.status == "success"
         assert result.structured == {"answer": 9}
@@ -330,17 +515,17 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
         service._runtime_for_task = AsyncMock(side_effect=runtime_for_task)
         patches = _service_patches(manager)
         with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
-            handle = service.submit_task(OpenCodeTaskSpec(
-                task_name="fresh session retry",
-                prompt="initial",
-                directory=tmp_path,
-                output_schema=SCHEMA,
-                output_retry_count=1,
-                attempt=1,
-                on_invocation_metadata=sources.append,
-            ))
-            result = await handle.result()
-            first_session_id = await handle.wait_session_id()
+            with _task_context(tmp_path, on_invocation_metadata=sources.append):
+                handle = service.submit_task(OpenCodeTaskSpec(
+                    task_name="fresh session retry",
+                    prompt="initial",
+                    directory=tmp_path,
+                    output_schema=SCHEMA,
+                    output_retry_count=1,
+                    attempt=1,
+                ))
+                result = await handle.result()
+                first_session_id = await handle.wait_session_id()
 
         assert result.status == "success"
         assert result.task_id == handle.task_id
@@ -394,12 +579,13 @@ def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
             patches[4],
             patches[5],
         ):
-            result = await service.run_task(OpenCodeTaskSpec(
-                task_name="retry execution",
-                prompt="run",
-                directory=tmp_path,
-                attempt=1,
-            ))
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="retry execution",
+                    prompt="run",
+                    directory=tmp_path,
+                    attempt=1,
+                ))
 
         assert result.status == "success"
         assert result.session_id == "ses_success"
@@ -443,12 +629,13 @@ def test_failed_fresh_retry_keeps_last_created_session_in_pool_context(tmp_path:
             patches[4],
             patches[5],
         ):
-            result = await service.run_task(OpenCodeTaskSpec(
-                task_name="failed retry session history",
-                prompt="run",
-                directory=tmp_path,
-                attempt=1,
-            ))
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="failed retry session history",
+                    prompt="run",
+                    directory=tmp_path,
+                    attempt=1,
+                ))
 
         assert result.status == "failure"
         assert result.session_id == "ses_first"
@@ -485,14 +672,15 @@ def test_exhausted_json_retries_fail_and_keep_last_text(tmp_path: Path) -> None:
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-            result = await service.run_task(OpenCodeTaskSpec(
-                task_name="bad forever",
-                prompt="json",
-                directory=tmp_path,
-                output_schema=SCHEMA,
-                output_retry_count=0,
-                attempt=1,
-            ))
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="bad forever",
+                    prompt="json",
+                    directory=tmp_path,
+                    output_schema=SCHEMA,
+                    output_retry_count=0,
+                    attempt=1,
+                ))
 
         assert result.status == "failure"
         assert result.session_id == "ses_2"
@@ -512,12 +700,13 @@ def test_timeout_is_terminal_and_does_not_use_fresh_session_retry(tmp_path: Path
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
         with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
-            result = await service.run_task(OpenCodeTaskSpec(
-                task_name="timeout",
-                prompt="slow",
-                directory=tmp_path,
-                attempt=5,
-            ))
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="timeout",
+                    prompt="slow",
+                    directory=tmp_path,
+                    attempt=5,
+                ))
 
         assert result.status == "timeout"
         assert acquire_mock.await_count == 1
@@ -562,23 +751,24 @@ def test_new_session_and_immediate_continuation_are_serialized(tmp_path: Path) -
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-            first = service.submit_task(OpenCodeTaskSpec(
-                task_name="first", prompt="first", directory=tmp_path, attempt=0,
-            ))
-            session_id = await asyncio.wait_for(first.wait_session_id(), timeout=1)
-            await first_started.wait()
-            second = service.submit_task(OpenCodeTaskSpec(
-                task_name="second",
-                prompt="second",
-                directory=tmp_path,
-                session_id=session_id,
-                attempt=0,
-            ))
-            await asyncio.sleep(0.03)
-            assert calls == [("first", None)]
-            first_can_finish.set()
-            assert (await first.result()).status == "success"
-            assert (await second.result()).status == "success"
+            with _task_context(tmp_path):
+                first = service.submit_task(OpenCodeTaskSpec(
+                    task_name="first", prompt="first", directory=tmp_path, attempt=0,
+                ))
+                session_id = await asyncio.wait_for(first.wait_session_id(), timeout=1)
+                await first_started.wait()
+                second = service.submit_task(OpenCodeTaskSpec(
+                    task_name="second",
+                    prompt="second",
+                    directory=tmp_path,
+                    session_id=session_id,
+                    attempt=0,
+                ))
+                await asyncio.sleep(0.03)
+                assert calls == [("first", None)]
+                first_can_finish.set()
+                assert (await first.result()).status == "success"
+                assert (await second.result()).status == "success"
 
         assert calls == [("first", None), ("second", "ses_shared")]
         assert max_active == 1
@@ -654,18 +844,19 @@ def test_queued_task_update_keeps_id_and_requeues_new_revision(tmp_path: Path) -
             patch("backend.opencode.task_service.get_serve_manager", return_value=manager),
             patch("backend.opencode.config.get_global_opencode_workspace", return_value=tmp_path),
         ):
-            handle = service.submit_task(OpenCodeTaskSpec(
-                task_name="before", prompt="old prompt", directory=tmp_path, priority=10,
-            ))
-            await first_queued.wait()
-            updated = await service.update_queued_task(
-                handle.task_id,
-                task_name="after",
-                prompt="updated prompt",
-                priority=90,
-                attempt=0,
-            )
-            result = await updated.result()
+            with _task_context(tmp_path):
+                handle = service.submit_task(OpenCodeTaskSpec(
+                    task_name="before", prompt="old prompt", directory=tmp_path, priority=10,
+                ))
+                await first_queued.wait()
+                updated = await service.update_queued_task(
+                    handle.task_id,
+                    task_name="after",
+                    prompt="updated prompt",
+                    priority=90,
+                    attempt=0,
+                )
+                result = await updated.result()
 
         assert updated.task_id == handle.task_id == result.task_id
         assert updated.revision == result.revision == 2
@@ -694,13 +885,14 @@ def test_run_task_cancellation_cancels_queued_service_task(tmp_path: Path) -> No
             patch("backend.opencode.task_service.acquire_model_lease", side_effect=acquire),
             patch("backend.opencode.task_service.release_model_lease", new=AsyncMock()),
         ):
-            caller = asyncio.create_task(service.run_task(OpenCodeTaskSpec(
-                task_name="cancel me", prompt="wait", directory=tmp_path,
-            )))
-            await queued.wait()
-            caller.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await caller
+            with _task_context(tmp_path):
+                caller = asyncio.create_task(service.run_task(OpenCodeTaskSpec(
+                    task_name="cancel me", prompt="wait", directory=tmp_path,
+                )))
+                await queued.wait()
+                caller.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await caller
 
         assert captured_task_id
         assert service.get_task(captured_task_id).status == "cancelled"

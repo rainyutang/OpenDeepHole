@@ -185,7 +185,7 @@ def build_opencode_config(
     writable_paths: list[str] | None = None,
 ) -> dict:
     """Build the canonical opencode.json content for OpenDeepHole workspaces."""
-    edit_permissions = {"*": "deny"} if not writable_paths else {}
+    edit_permissions = {"*": "deny"}
     for path in writable_paths or []:
         normalized = str(Path(path).resolve())
         for pattern in writable_edit_patterns(path) + writable_edit_patterns(normalized):
@@ -204,8 +204,9 @@ def build_opencode_config(
             "list": {"*": "allow"},
             "glob": {"*": "allow"},
             "grep": {"*": "allow"},
-            "external_directory": {"*": "allow"},
+            "external_directory": {"*": "deny"},
             "edit": edit_permissions,
+            "bash": {"*": "deny"},
         },
     }
     for spec in build_managed_mcp_runtime_specs(get_config()).values():

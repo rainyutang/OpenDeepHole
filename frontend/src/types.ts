@@ -557,7 +557,7 @@ export interface AgentModelPoolConfig {
 }
 
 export interface AgentModelTaskPolicy {
-  required_capability: "any" | "low" | "medium" | "high" | string;
+  required_capability: "low" | "high";
   timeout_seconds: number;
   max_retries: number;
 }

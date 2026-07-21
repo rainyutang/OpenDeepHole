@@ -56,7 +56,7 @@ product_info:
     headers: {}
 
 vulnerability_mining:
-  required_capability: "any"
+  required_capability: "low"
   timeout_seconds: 1200
   max_retries: 2
 

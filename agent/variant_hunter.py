@@ -17,7 +17,12 @@ from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
 from backend.models import Candidate, HistoryPattern
+from backend.opencode import OpenCodeTaskType, run_opencode_task
 from backend.opencode.output_format import with_local_timestamp
+from backend.opencode.task_service import (
+    bind_opencode_execution_context,
+    get_opencode_execution_context,
+)
 
 EmitFn = Callable[[str, str], Awaitable[None]]
 
@@ -83,8 +88,12 @@ async def hunt_variants(
     emit: EmitFn,
 ) -> list[Candidate]:
     """对每条历史问题模式做全仓同类变体排查，返回命中候选列表。"""
-    from backend.opencode.runner import _invoke_opencode, _result_payloads
-    from backend.opencode.model_pool import NoAvailableModelError, total_model_capacity
+    from backend.opencode.runner import _result_payloads
+    from backend.opencode.model_pool import (
+        NO_AVAILABLE_MODEL_MESSAGE,
+        NoAvailableModelError,
+        total_model_capacity,
+    )
 
     if not patterns:
         return []
@@ -95,13 +104,17 @@ async def hunt_variants(
     lock = asyncio.Lock()
     processed = 0
     valid_types = set(checker_types)
-    scan_dir = Path.home() / ".opendeephole" / "scans" / scan_id / "logs"
+    execution_context = get_opencode_execution_context()
+    if execution_context.work_dir is None:
+        raise RuntimeError("variant_hunt requires an Agent-bound OpenCode work_dir")
+    scan_root = execution_context.work_dir
+    scan_dir = scan_root / "logs"
     scan_dir.mkdir(parents=True, exist_ok=True)
 
     capacity = total_model_capacity(
         config.opencode,
         global_concurrency=config.opencode_concurrency,
-        required_capability="any",
+        required_capability="low",
     )
     concurrency = max(1, min(capacity, len(patterns)))
 
@@ -118,24 +131,30 @@ async def hunt_variants(
         log_path = scan_dir / f"variant_hunt_{attempt_id}.log"
 
         try:
-            output_text = await _invoke_opencode(
-                prompt,
-                int(getattr(config.opencode, "timeout", 1200) or 1200),
-                log_path=log_path,
-                on_line=lambda line: print(
+            with bind_opencode_execution_context(
+                project_dir=project_path,
+                work_dir=scan_root,
+                task_metadata={"pattern_source": pattern.source},
+                on_output=lambda line: print(
                     with_local_timestamp(line, prefix="[variant_hunt]"),
                     flush=True,
                 ),
                 cancel_event=cancel_event,
-                directory=project_path,
-                model_capability="any",
-                task_name=f"同类变体排查 {pattern.source or pattern.pattern[:30]}",
-                task_metadata={
-                    "task_type": "variant_hunt",
-                    "pattern_source": pattern.source,
-                },
-                output_schema=_VARIANT_FINDINGS_JSON_SCHEMA,
-            )
+            ):
+                result = await run_opencode_task(
+                    task_name=f"同类变体排查 {pattern.source or pattern.pattern[:30]}",
+                    task_type=OpenCodeTaskType.VARIANT_HUNT,
+                    prompt=prompt,
+                    required_capability="low",
+                    output_schema=_VARIANT_FINDINGS_JSON_SCHEMA,
+                )
+            if result.status == "timeout":
+                raise asyncio.TimeoutError(result.text)
+            if result.status == "failure":
+                if result.text == NO_AVAILABLE_MODEL_MESSAGE:
+                    raise NoAvailableModelError()
+                raise RuntimeError(result.text)
+            payload = result.structured if isinstance(result.structured, dict) else {}
         except asyncio.CancelledError:
             raise
         except NoAvailableModelError:
@@ -148,12 +167,6 @@ async def hunt_variants(
                 log_path.unlink(missing_ok=True)
             except Exception:
                 pass
-
-        try:
-            import json
-            payload = json.loads(output_text)
-        except Exception:
-            payload = {}
 
         variant_ref = (
             f"{pattern.pattern}（出处：{pattern.source}）" if pattern.source else pattern.pattern

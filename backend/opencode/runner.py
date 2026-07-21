@@ -11,7 +11,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +20,8 @@ from datetime import datetime, timezone
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import Candidate, OutputSource, ThreatAnalysis, ThreatAuditTask, Vulnerability
+from backend.opencode import OpenCodeResult, OpenCodeTaskType, run_opencode_task
+from backend.opencode.task_service import bind_opencode_execution_context
 from backend.opencode.model_pool import (
     NoAvailableModelError,
     clear_planned_task,
@@ -250,18 +251,25 @@ async def _run_audit_via_opencode(
         effective_timeout,
     )
     try:
-        output_text = await _invoke_opencode(
-            prompt,
-            effective_timeout,
-            log_path=log_path,
-            on_line=on_output,
-            cancel_event=cancel_event,
-            directory=project_dir or workspace,
-            model_capability=getattr(checker_entry, "model_capability", "any"),
-            on_invocation_metadata=capture_source,
-            task_name=f"候选点审计 {candidate.vuln_type}",
+        with bind_opencode_execution_context(
+            project_dir=_required_task_project_dir(project_dir),
+            work_dir=log_path.parent.parent,
             task_metadata=_candidate_task_context(candidate),
+            on_output=on_output,
+            on_invocation_metadata=capture_source,
+            cancel_event=cancel_event,
+        ):
+            result = await run_opencode_task(
+                task_name=f"候选点审计 {candidate.vuln_type}",
+                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                prompt=prompt,
+                required_capability=_mining_required_capability(),
+                output_schema=AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA,
+            )
+        output_text = _opencode_result_text(
+            result,
             output_schema=AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA,
+            log_path=log_path,
         )
     except asyncio.TimeoutError:
         logger.error(
@@ -355,18 +363,25 @@ async def run_project_audit(
         effective_timeout,
     )
     try:
-        output_text = await _invoke_opencode(
-            prompt,
-            effective_timeout,
-            log_path=log_path,
-            on_line=on_output,
-            cancel_event=cancel_event,
-            directory=project_dir or workspace,
-            model_capability=getattr(checker_entry, "model_capability", "any"),
-            on_invocation_metadata=capture_source,
-            task_name=f"项目审计 {candidate.vuln_type}",
+        with bind_opencode_execution_context(
+            project_dir=_required_task_project_dir(project_dir),
+            work_dir=log_path.parent.parent,
             task_metadata=_candidate_task_context(candidate, "project_audit"),
+            on_output=on_output,
+            on_invocation_metadata=capture_source,
+            cancel_event=cancel_event,
+        ):
+            result = await run_opencode_task(
+                task_name=f"项目审计 {candidate.vuln_type}",
+                task_type=OpenCodeTaskType.PROJECT_AUDIT,
+                prompt=prompt,
+                required_capability=_mining_required_capability(),
+                output_schema=AUDITED_VULNERABILITY_RESULTS_JSON_SCHEMA,
+            )
+        output_text = _opencode_result_text(
+            result,
             output_schema=AUDITED_VULNERABILITY_RESULTS_JSON_SCHEMA,
+            log_path=log_path,
         )
     except asyncio.TimeoutError:
         logger.error(
@@ -566,18 +581,25 @@ async def run_sensitive_clear_audit(
         effective_timeout,
     )
     try:
-        output_text = await _invoke_opencode(
-            prompt,
-            effective_timeout,
-            log_path=log_path,
-            on_line=on_output,
-            cancel_event=cancel_event,
-            directory=project_dir or workspace,
-            model_capability=getattr(checker_entry, "model_capability", "any"),
-            on_invocation_metadata=capture_source,
-            task_name=f"敏感信息清理审计 {candidate.function}",
+        with bind_opencode_execution_context(
+            project_dir=_required_task_project_dir(project_dir),
+            work_dir=log_path.parent.parent,
             task_metadata=_candidate_task_context(candidate, "sensitive_clear"),
+            on_output=on_output,
+            on_invocation_metadata=capture_source,
+            cancel_event=cancel_event,
+        ):
+            result = await run_opencode_task(
+                task_name=f"敏感信息清理审计 {candidate.function}",
+                task_type=OpenCodeTaskType.SENSITIVE_CLEAR,
+                prompt=prompt,
+                required_capability=_mining_required_capability(),
+                output_schema=_SENSITIVE_CLEAR_RESULT_JSON_SCHEMA,
+            )
+        output_text = _opencode_result_text(
+            result,
             output_schema=_SENSITIVE_CLEAR_RESULT_JSON_SCHEMA,
+            log_path=log_path,
         )
     except asyncio.TimeoutError:
         logger.error("%s sensitive_clear audit timed out for %s", tool, candidate.file)
@@ -738,18 +760,25 @@ async def run_project_report_audit(
         report_dir,
     )
     try:
-        output_text = await _invoke_opencode(
-            prompt,
-            effective_timeout,
-            log_path=log_path,
-            on_line=on_output,
-            cancel_event=cancel_event,
-            directory=project_dir or workspace,
-            model_capability=getattr(checker_entry, "model_capability", "any"),
-            on_invocation_metadata=capture_source,
-            task_name=f"报告审计 {candidate.vuln_type}",
+        with bind_opencode_execution_context(
+            project_dir=_required_task_project_dir(project_dir),
+            work_dir=log_path.parent.parent,
             task_metadata=_candidate_task_context(candidate, "report_audit"),
+            on_output=on_output,
+            on_invocation_metadata=capture_source,
+            cancel_event=cancel_event,
+        ):
+            result = await run_opencode_task(
+                task_name=f"报告审计 {candidate.vuln_type}",
+                task_type=OpenCodeTaskType.REPORT_AUDIT,
+                prompt=prompt,
+                required_capability=_mining_required_capability(),
+                output_schema=_MARKDOWN_REPORTS_JSON_SCHEMA,
+            )
+        output_text = _opencode_result_text(
+            result,
             output_schema=_MARKDOWN_REPORTS_JSON_SCHEMA,
+            log_path=log_path,
         )
     except asyncio.TimeoutError:
         logger.error(
@@ -874,7 +903,10 @@ async def run_threat_audit(
         if attempt > 1:
             prompt += _json_result_retry_message(multiple=True)
         prompt = _with_json_result_instruction(prompt, multiple=True)
-        log_path = workspace / f"opencode_threat_audit_{attempt_id}.log"
+        log_path = _scan_task_log_path(
+            project_id,
+            f"opencode_threat_audit_{attempt_id}.log",
+        )
 
         if on_output:
             on_output(f"[{tool}] 威胁审计提示词:\n{prompt}")
@@ -900,20 +932,25 @@ async def run_threat_audit(
             task_metadata["planned_task_id"] = planned_task_id
 
         try:
-            output_text = await _invoke_opencode(
-                prompt,
-                effective_timeout,
-                log_path=log_path,
-                on_line=on_output,
-                cancel_event=cancel_event,
-                directory=project_dir or workspace,
-                model_capability="high",
-                prefer_high_model=True,
-                on_invocation_metadata=capture_source,
-                task_name=f"威胁审计 {task.task_id}",
+            with bind_opencode_execution_context(
+                project_dir=_required_task_project_dir(project_dir),
+                work_dir=log_path.parent.parent,
                 task_metadata=task_metadata,
-                attempt=0,
+                on_output=on_output,
+                on_invocation_metadata=capture_source,
+                cancel_event=cancel_event,
+            ):
+                result = await run_opencode_task(
+                    task_name=f"威胁审计 {task.task_id}",
+                    task_type=OpenCodeTaskType.THREAT_AUDIT,
+                    prompt=prompt,
+                    required_capability=_mining_required_capability(),
+                    output_schema=AUDITED_VULNERABILITY_RESULTS_JSON_SCHEMA,
+                )
+            output_text = _opencode_result_text(
+                result,
                 output_schema=AUDITED_VULNERABILITY_RESULTS_JSON_SCHEMA,
+                log_path=log_path,
             )
         except asyncio.TimeoutError:
             logger.error("%s threat audit timed out for %s", tool, task.task_id)
@@ -1177,20 +1214,62 @@ def _scan_task_log_path(scan_id: str, filename: str) -> Path:
     from backend.opencode.task_service import get_opencode_execution_context
 
     context = get_opencode_execution_context()
-    if context.scan_work_dir is not None and (
-        not scan_id or not context.scan_id or context.scan_id == scan_id
-    ):
-        root = context.scan_work_dir / "logs"
-    else:
-        configured = _cfg_value(_cfg_value(get_config(), "storage", None), "scans_dir", "")
-        if configured:
-            scans_root = Path(str(configured))
-            scan_root = scans_root if scans_root.name == scan_id else scans_root / scan_id
-            root = scan_root / "logs"
-        else:
-            root = Path(tempfile.gettempdir()) / "opendeephole" / "scans" / str(scan_id or "unscoped") / "logs"
+    if context.work_dir is None:
+        raise RuntimeError("OpenCode work_dir is not bound for the current component")
+    if scan_id and context.scan_id and context.scan_id != scan_id:
+        raise RuntimeError(
+            f"OpenCode scan context mismatch: expected {scan_id}, got {context.scan_id}"
+        )
+    root = context.work_dir / "logs"
     root.mkdir(parents=True, exist_ok=True)
     return root / filename
+
+
+def _required_task_project_dir(project_dir: Path | None) -> Path:
+    from backend.opencode.task_service import get_opencode_execution_context
+
+    context = get_opencode_execution_context()
+    resolved = Path(project_dir).resolve() if project_dir is not None else context.project_dir
+    if resolved is None:
+        raise RuntimeError("OpenCode project_dir is not bound for the current component")
+    return resolved.resolve()
+
+
+def _opencode_result_text(
+    result: OpenCodeResult,
+    *,
+    output_schema: dict | None,
+    log_path: Path | None,
+) -> str:
+    if result.status == "timeout":
+        raise asyncio.TimeoutError(result.text)
+    if result.status == "failure":
+        from backend.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
+
+        if result.text == NO_AVAILABLE_MODEL_MESSAGE:
+            raise NoAvailableModelError()
+        raise RuntimeError(result.text)
+    output_text = (
+        json.dumps(result.structured, ensure_ascii=False)
+        if output_schema is not None and result.structured is not None
+        else result.text
+    )
+    if log_path and output_text:
+        try:
+            log_path.write_text(output_text, encoding="utf-8")
+        except Exception:
+            pass
+    return output_text
+
+
+def _public_required_capability(value: object) -> str:
+    return "high" if str(value or "").strip().lower() in {"medium", "high"} else "low"
+
+
+def _mining_required_capability() -> str:
+    return _public_required_capability(
+        _cfg_value(getattr(get_config(), "vulnerability_mining", None), "required_capability", "low")
+    )
 
 
 def _effective_cli_config(cli_config, model_option) -> dict:
@@ -1640,7 +1719,7 @@ def _with_writable_paths(config: dict, writable_paths: list[Path] | None) -> dic
 
     next_config = json.loads(json.dumps(config))
     permission = next_config.setdefault("permission", {})
-    edit = {}
+    edit = {"*": "deny"}
     for path in writable_paths:
         raw = str(path)
         try:
@@ -1922,79 +2001,6 @@ async def _wait_for_stream_exit_after_termination(
             "%s output reader did not exit within %.1fs after process termination",
             tool, grace_seconds,
         )
-
-
-async def _invoke_opencode(
-    prompt: str,
-    timeout: int,
-    log_path: Path | None = None,
-    on_line=None,
-    cancel_event=None,
-    directory: Path | None = None,
-    writable_paths: list[Path] | None = None,
-    model_capability: str = "any",
-    prefer_high_model: bool = False,
-    on_invocation_metadata=None,
-    *,
-    task_name: str = "",
-    priority: int = 50,
-    output_schema: dict | None = None,
-    output_retry_count: int = 2,
-    attempt: int | None = None,
-    session_id: str | None = None,
-    task_metadata: dict | None = None,
-) -> str:
-    """Internal prompt facade backed exclusively by ``OpenCodeTaskService``."""
-    from backend.opencode.task_service import (
-        OpenCodeTaskSpec,
-        bind_opencode_execution_context,
-        get_opencode_task_service,
-    )
-
-    context = dict(task_metadata or {})
-    inferred_task_name = (
-        str(task_name or "").strip()
-        or str(context.get("task_name") or "").strip()
-        or str(context.get("task_type") or "").strip()
-        or "OpenDeepHole task"
-    )
-    required_capability = model_capability
-    if prefer_high_model and str(model_capability or "").strip().lower() in {"", "any", "low"}:
-        required_capability = "high"
-    with bind_opencode_execution_context(task_metadata=context):
-        result = await get_opencode_task_service().run_task(OpenCodeTaskSpec(
-            task_name=inferred_task_name,
-            prompt=prompt,
-            directory=(directory or Path.cwd()).resolve(),
-            required_capability=required_capability,
-            timeout_seconds=timeout,
-            priority=priority,
-            output_schema=output_schema,
-            output_retry_count=output_retry_count,
-            session_id=session_id,
-            writable_paths=list(writable_paths or []),
-            attempt=attempt,
-            on_output=on_line,
-            on_invocation_metadata=on_invocation_metadata,
-            cancel_event=cancel_event,
-        ))
-    output_text = (
-        json.dumps(result.structured, ensure_ascii=False)
-        if output_schema is not None and result.structured is not None
-        else result.text
-    )
-    if log_path and output_text:
-        try:
-            log_path.write_text(output_text, encoding="utf-8")
-        except Exception:
-            pass
-    if result.status == "failure":
-        from backend.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
-
-        if result.error == NO_AVAILABLE_MODEL_MESSAGE:
-            raise NoAvailableModelError()
-    result.raise_for_status()
-    return output_text
 
 
 def _parse_result_from_text(text: str, candidate: Candidate) -> Vulnerability | None:

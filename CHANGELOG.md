@@ -2,6 +2,9 @@
 
 ## 2026-07-21
 
+- **变更** 所有 Agent 组件和 validator 统一改用唯一公共入口 `backend.opencode.run_opencode_task()`；调用参数只保留任务名称、受控任务类型、提示词、低/高能力、输出 Schema、非法 JSON 纠正次数和可选 Session ID，返回只保留 Session ID、`success/failure/timeout`、文本、结构化值和实际模型
+- **变更** OpenCode 的项目目录、工作目录、超时、优先级、模型重试、输出回调和取消信号全部由 Agent 执行上下文及任务策略提供；旧 `any` 任务能力自动迁移为 `low`，旧 `medium` 自动迁移为 `high`，任务策略配置页只保留低/高两档
+- **安全** 每个 OpenCode Session 自动获得项目目录只读权限，并只允许文件工具写当前 `.opendeephole` 工作目录；全局及 Session 级 `bash` 均禁用，主动取消直接传播 `asyncio.CancelledError` 并终止排队、当前请求、JSON 纠正和后续重试，不再暴露公共 `cancelled` 结果
 - **新增** Agent 配置页的「OpenCode 配置」改为优先展示 Agent 当前实际生成的 `~/.opendeephole/opencode_workspace/opencode.json`，完整覆盖本机原配置、Web 自定义层和 OpenDeepHole 添加的 MCP、技能、权限及子 Agent 字段；页面区分在线当前文件、Serve 待重载、未运行和离线历史快照，并保留手动刷新、文件时间、哈希与大小信息
 - **安全** 当前 OpenCode 运行文件默认遮罩 API Key、Token、Authorization、Header、Password 等敏感字段，只有显式操作后才返回并复制完整原文；响应禁止缓存且配置内容不写入日志，最近一次完整快照按稳定 Agent 身份持久化以供离线查看
 - **变更** OpenCode JSONC 修改区降级为折叠的「自定义配置（次要）」；保存后页面继续展示当前实际文件并明确标记等待 Serve 重载，不再把待生效的 Web 配置层误认为当前 `opencode.json`

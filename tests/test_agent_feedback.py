@@ -10,6 +10,7 @@ from agent import fp_reviewer
 from agent.config import AgentConfig, OpenCodeConfig
 from agent.scanner import _build_function_source_cache, _attach_function_source
 from backend.models import Candidate, Vulnerability
+from backend.opencode import OpenCodeResult
 
 
 def _valid_issue_report() -> str:
@@ -43,6 +44,16 @@ def _write_stage_artifact_from_prompt(prompt: str, content: str = "# Stage\n\nan
     matches = re.findall(r"`([^`]+\.md)`", prompt)
     if matches:
         Path(matches[-1]).write_text(content, encoding="utf-8")
+
+
+def _opencode_result(structured=None) -> OpenCodeResult:
+    return OpenCodeResult(
+        session_id="ses-test",
+        status="success",
+        text="",
+        structured=structured,
+        model="provider/model",
+    )
 
 
 def _stage_json_result(
@@ -201,8 +212,10 @@ class AgentFeedbackTests(unittest.TestCase):
             config = AgentConfig(opencode=OpenCodeConfig(timeout=1, max_retries=0))
             invoke = AsyncMock()
 
-            async def invoke_side_effect(prompt, timeout, **kwargs):
+            async def invoke_side_effect(**kwargs):
+                prompt = kwargs["prompt"]
                 _write_stage_artifact_from_prompt(prompt)
+                return _opencode_result()
 
             invoke.side_effect = invoke_side_effect
             with tempfile.TemporaryDirectory() as tmp:
@@ -212,7 +225,7 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
-                    patch("backend.opencode.runner._invoke_opencode", new=invoke),
+                    patch("agent.fp_reviewer.run_opencode_task", new=invoke),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -300,9 +313,10 @@ class AgentFeedbackTests(unittest.TestCase):
                 "{}",
             ]
 
-            async def invoke_side_effect(prompt, timeout, **kwargs):
+            async def invoke_side_effect(**kwargs):
+                prompt = kwargs["prompt"]
                 _write_stage_artifact_from_prompt(prompt)
-                return outputs.pop(0)
+                return _opencode_result(json.loads(outputs.pop(0)))
 
             invoke.side_effect = invoke_side_effect
             with tempfile.TemporaryDirectory() as tmp:
@@ -312,7 +326,7 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
-                    patch("backend.opencode.runner._invoke_opencode", new=invoke),
+                    patch("agent.fp_reviewer.run_opencode_task", new=invoke),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,
@@ -383,14 +397,15 @@ class AgentFeedbackTests(unittest.TestCase):
             config = AgentConfig(opencode=OpenCodeConfig(timeout=1, max_retries=0))
             invoke = AsyncMock()
 
-            async def invoke_side_effect(prompt, timeout, **kwargs):
+            async def invoke_side_effect(**kwargs):
+                prompt = kwargs["prompt"]
                 _write_stage_artifact_from_prompt(prompt)
-                return _stage_json_result(
+                return _opencode_result(json.loads(_stage_json_result(
                     confirmed=False,
                     severity="low",
                     description="prove-bug fp",
                     ai_analysis="NOT_PROVEN",
-                )
+                )))
 
             invoke.side_effect = invoke_side_effect
             with tempfile.TemporaryDirectory() as tmp:
@@ -400,7 +415,7 @@ class AgentFeedbackTests(unittest.TestCase):
                     patch("agent.mcp_registry.lookup", return_value=(7000, "scan-1")),
                     patch.object(fp_reviewer, "_create_fp_workspace", return_value=workspace),
                     patch("backend.config.get_config", return_value=SimpleNamespace()),
-                    patch("backend.opencode.runner._invoke_opencode", new=invoke),
+                    patch("agent.fp_reviewer.run_opencode_task", new=invoke),
                 ):
                     await fp_reviewer.run_fp_review(
                         config=config,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from agent.vulnerability_validation import ValidationResult
-from backend.opencode.task_service import OpenCodeTaskSpec, get_opencode_task_service
+from backend.opencode import OpenCodeTaskType, run_opencode_task
 
 
 RESULT_SCHEMA = {
@@ -33,21 +33,15 @@ async def validate(ctx) -> ValidationResult:
         f"{ctx.report_markdown}"
     )
     try:
-        result = await get_opencode_task_service().run_task(
-            OpenCodeTaskSpec(
-                task_name=f"漏洞验证 {ctx.vulnerability_type}",
-                prompt=prompt,
-                directory=ctx.project_path,
-                required_capability=ctx.required_capability,
-                timeout_seconds=ctx.model_timeout_seconds,
-                priority=80,
-                output_schema=RESULT_SCHEMA,
-                attempt=ctx.model_max_retries,
-                on_output=ctx.opencode_output,
-                cancel_event=ctx.cancel_event,
-            )
+        result = await run_opencode_task(
+            task_name=f"漏洞验证 {ctx.vulnerability_type}",
+            task_type=OpenCodeTaskType.VULNERABILITY_VALIDATION,
+            prompt=prompt,
+            required_capability=ctx.required_capability,
+            output_schema=RESULT_SCHEMA,
         )
-        result.raise_for_status()
+        if result.status != "success":
+            raise RuntimeError(result.text)
     except Exception as exc:
         return ValidationResult(
             validation_success=False,

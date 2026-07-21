@@ -19,8 +19,10 @@ from typing import Any, Callable
 
 from backend.config import get_config
 from backend.logger import get_logger
+from backend.opencode import OpenCodeTaskType, run_opencode_task
 from backend.opencode.model_pool import configured_global_concurrency
 from backend.opencode.output_format import with_local_timestamp
+from backend.opencode.task_service import bind_opencode_execution_context
 
 logger = get_logger(__name__)
 
@@ -462,8 +464,6 @@ async def _run_memory_api_batch(
         )
         return
 
-    from backend.opencode.runner import _invoke_opencode
-
     prompt = _build_batch_prompt(
         project_id=project_id,
         batch=batch,
@@ -472,24 +472,31 @@ async def _run_memory_api_batch(
         output_path=output_path,
     )
     log_path = output_path.with_suffix(".log")
-    output_text = await _invoke_opencode(
-        prompt,
-        timeout,
-        log_path=log_path,
-        on_line=on_line,
-        cancel_event=cancel_event,
-        directory=project_root,
-        model_capability="any",
+    with bind_opencode_execution_context(
+        project_dir=project_root,
+        work_dir=output_path.parent,
         task_metadata={
-            "task_type": "memory_api_discovery",
             "batch_index": batch_index,
             "batch_count": batch_count,
         },
-        task_name=f"内存 API 识别 {batch_index}/{batch_count}",
-        output_schema=_MEMORY_API_BATCH_JSON_SCHEMA,
-    )
+        on_output=on_line,
+        cancel_event=cancel_event,
+    ):
+        result = await run_opencode_task(
+            task_name=f"内存 API 识别 {batch_index}/{batch_count}",
+            task_type=OpenCodeTaskType.MEMORY_API_DISCOVERY,
+            prompt=prompt,
+            required_capability="low",
+            output_schema=_MEMORY_API_BATCH_JSON_SCHEMA,
+        )
+    if result.status == "timeout":
+        raise asyncio.TimeoutError(result.text)
+    if result.status == "failure":
+        raise RuntimeError(result.text)
+    payload = result.structured if isinstance(result.structured, dict) else {}
+    log_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     output_path.write_text(
-        json.dumps(json.loads(output_text), ensure_ascii=False, indent=2),
+        json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 

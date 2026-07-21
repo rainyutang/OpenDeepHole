@@ -389,7 +389,8 @@ async def _run_audits(
     scan_id = f"checker-test-{uuid4().hex[:12]}"
     execution_context_token = set_opencode_execution_context(
         scan_id=scan_id,
-        scan_work_dir=Path.home() / ".opendeephole" / "scans" / scan_id,
+        project_dir=project_path,
+        work_dir=Path.home() / ".opendeephole" / "scans" / scan_id,
     )
     mcp_server = LocalMCPServer(project_dir=agent_project_dir, project_id=scan_id)
     workspace: Path | None = None

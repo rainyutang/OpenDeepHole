@@ -20,7 +20,12 @@ from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
 from backend.models import HistoryPattern
+from backend.opencode import OpenCodeTaskType, run_opencode_task
 from backend.opencode.output_format import with_local_timestamp
+from backend.opencode.task_service import (
+    bind_opencode_execution_context,
+    get_opencode_execution_context,
+)
 
 # 单条提交 diff 注入 prompt 的字符上限，避免超长提交撑爆上下文
 _DIFF_CHAR_LIMIT = 16000
@@ -158,8 +163,11 @@ async def mine_history(
 
     返回去重后的 HistoryPattern 列表。非 git 仓库或无提交时返回 []。
     """
-    from backend.opencode.runner import _invoke_opencode
-    from backend.opencode.model_pool import NoAvailableModelError, total_model_capacity
+    from backend.opencode.model_pool import (
+        NO_AVAILABLE_MODEL_MESSAGE,
+        NoAvailableModelError,
+        total_model_capacity,
+    )
 
     gh = config.git_history
     if not is_git_repo(project_path):
@@ -182,7 +190,7 @@ async def mine_history(
     capacity = total_model_capacity(
         config.opencode,
         global_concurrency=config.opencode_concurrency,
-        required_capability="any",
+        required_capability="low",
     )
     concurrency = max(1, min(capacity, len(commits)))
 
@@ -190,7 +198,11 @@ async def mine_history(
     for c in commits:
         queue.put_nowait(c)
 
-    scan_dir = Path.home() / ".opendeephole" / "scans" / scan_id / "logs"
+    execution_context = get_opencode_execution_context()
+    if execution_context.work_dir is None:
+        raise RuntimeError("git_history requires an Agent-bound OpenCode work_dir")
+    scan_root = execution_context.work_dir
+    scan_dir = scan_root / "logs"
     scan_dir.mkdir(parents=True, exist_ok=True)
 
     async def _mine_one(commit: _Commit) -> None:
@@ -203,24 +215,30 @@ async def mine_history(
         log_path = scan_dir / f"git_history_{commit.hash[:10]}_{attempt_id}.log"
 
         try:
-            output_text = await _invoke_opencode(
-                prompt,
-                int(getattr(config.opencode, "timeout", 1200) or 1200),
-                log_path=log_path,
-                on_line=lambda line: print(
+            with bind_opencode_execution_context(
+                project_dir=project_path,
+                work_dir=scan_root,
+                task_metadata={"commit": commit.hash},
+                on_output=lambda line: print(
                     with_local_timestamp(line, prefix="[git_history]"),
                     flush=True,
                 ),
                 cancel_event=cancel_event,
-                directory=project_path,
-                model_capability="any",
-                task_name=f"Git 历史审计 {commit.hash[:10]}",
-                task_metadata={
-                    "task_type": "git_history",
-                    "commit": commit.hash,
-                },
-                output_schema=_HISTORY_PATTERN_JSON_SCHEMA,
-            )
+            ):
+                result = await run_opencode_task(
+                    task_name=f"Git 历史审计 {commit.hash[:10]}",
+                    task_type=OpenCodeTaskType.GIT_HISTORY,
+                    prompt=prompt,
+                    required_capability="low",
+                    output_schema=_HISTORY_PATTERN_JSON_SCHEMA,
+                )
+            if result.status == "timeout":
+                raise asyncio.TimeoutError(result.text)
+            if result.status == "failure":
+                if result.text == NO_AVAILABLE_MODEL_MESSAGE:
+                    raise NoAvailableModelError()
+                raise RuntimeError(result.text)
+            payload = result.structured if isinstance(result.structured, dict) else {}
         except asyncio.CancelledError:
             raise
         except NoAvailableModelError:
@@ -233,12 +251,6 @@ async def mine_history(
                 log_path.unlink(missing_ok=True)
             except Exception:
                 pass
-
-        try:
-            import json
-            payload = json.loads(output_text)
-        except Exception:
-            payload = {}
 
         async with lock:
             processed += 1

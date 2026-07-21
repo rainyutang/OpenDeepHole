@@ -20,9 +20,11 @@ from backend.threat_analysis.workspace import install_attack_tree_threat_analysi
 
 def assert_opencode_read_permissions(testcase: unittest.TestCase, config: dict) -> None:
     permission = config.get("permission", {})
-    for key in ("read", "list", "glob", "grep", "external_directory"):
+    for key in ("read", "list", "glob", "grep"):
         testcase.assertEqual(permission.get(key), {"*": "allow"})
+    testcase.assertEqual(permission.get("external_directory"), {"*": "deny"})
     testcase.assertEqual(permission.get("edit"), {"*": "deny"})
+    testcase.assertEqual(permission.get("bash"), {"*": "deny"})
 
 
 class OpencodeWorkspaceTests(unittest.TestCase):
@@ -41,7 +43,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             writable_paths=[str(path)],
         )
         edit = config["permission"]["edit"]
-        self.assertNotIn("*", edit)
+        self.assertEqual(edit["*"], "deny")
         self.assertEqual(
             edit["C:/Users/26388/.opendeephole/fp_reviews/review/artifacts/1/**"],
             "allow",

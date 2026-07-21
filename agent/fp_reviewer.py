@@ -20,11 +20,13 @@ from typing import Optional
 from uuid import uuid4
 
 from backend.models import OutputSource, ScanEvent
-from backend.opencode.model_pool import NoAvailableModelError
+from backend.opencode import OpenCodeTaskType, run_opencode_task
+from backend.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
 from backend.opencode.output_format import with_local_timestamp
 from backend.opencode.result_json import (
     VULNERABILITY_RESULT_JSON_SCHEMA,
 )
+from backend.opencode.task_service import bind_opencode_execution_context
 from agent.config import effective_fp_review_cli_config
 
 
@@ -47,6 +49,14 @@ _ISSUE_REPORT_HEADINGS = (
     "Impact",
     "Evidence",
 )
+
+
+def _required_capability() -> str:
+    from backend.config import get_config
+
+    policy = getattr(get_config(), "false_positive", None)
+    value = str(getattr(policy, "required_capability", "high") or "high").strip().lower()
+    return "high" if value in {"medium", "high"} else "low"
 
 _FP_STAGE_JSON_SCHEMA = {
     "type": "object",
@@ -208,8 +218,10 @@ async def run_fp_review(
     )
     execution_context_token = set_opencode_execution_context(
         scan_id=scan_id,
-        scan_work_dir=Path.home() / ".opendeephole" / "scans" / scan_id,
+        project_dir=project,
+        work_dir=review_dir,
         feedback_entries=feedback_entries or [],
+        cancel_event=cancel_event,
     )
     processed_reviews = 0
 
@@ -655,7 +667,6 @@ async def _run_fp_review_stage(
     variant_of: str = "",
 ) -> _FpStageResult | None:
     from backend.opencode.runner import (
-        _invoke_opencode,
         _session_id_from_output_source,
         _vulnerability_from_payload,
     )
@@ -681,29 +692,18 @@ async def _run_fp_review_stage(
         variant_of=variant_of,
     )
     log_path = review_dir / f"fp_{stage}_{uuid4().hex}.log"
+    task_session_id = ""
+    payload: dict = {}
     try:
         try:
             if output_markdown_path.exists():
                 output_markdown_path.unlink()
         except OSError:
             pass
-        output_text = await _invoke_opencode(
-            prompt,
-            timeout,
-            log_path=log_path,
-            on_line=lambda line: print(
-                with_local_timestamp(line, prefix=f"[fp_{stage}]"),
-                flush=True,
-            ),
-            cancel_event=cancel_event,
-            directory=project,
-            writable_paths=[artifact_dir],
-            model_capability="high",
-            prefer_high_model=True,
-            on_invocation_metadata=capture_source,
-            task_name=f"去误报复核 {stage}",
+        with bind_opencode_execution_context(
+            project_dir=project,
+            work_dir=review_dir,
             task_metadata={
-                "task_type": "fp_review",
                 "review_id": review_id,
                 "stage": stage,
                 "vuln_index": vuln_index,
@@ -712,8 +712,30 @@ async def _run_fp_review_stage(
                 "line": vuln.get("line", 0),
                 "function": vuln.get("function", ""),
             },
-            output_schema=_FP_STAGE_JSON_SCHEMA,
-        )
+            on_output=lambda line: print(
+                with_local_timestamp(line, prefix=f"[fp_{stage}]"),
+                flush=True,
+            ),
+            on_invocation_metadata=capture_source,
+            cancel_event=cancel_event,
+        ):
+            task_result = await run_opencode_task(
+                task_name=f"去误报复核 {stage}",
+                task_type=OpenCodeTaskType.FP_REVIEW,
+                prompt=prompt,
+                required_capability=_required_capability(),
+                output_schema=_FP_STAGE_JSON_SCHEMA,
+            )
+        task_session_id = task_result.session_id
+        if task_result.status == "timeout":
+            raise asyncio.TimeoutError(task_result.text)
+        if task_result.status == "failure":
+            if task_result.text == NO_AVAILABLE_MODEL_MESSAGE:
+                raise NoAvailableModelError()
+            raise RuntimeError(task_result.text)
+        payload = task_result.structured if isinstance(task_result.structured, dict) else {}
+        if payload:
+            log_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except asyncio.CancelledError:
         raise
     except NoAvailableModelError:
@@ -721,16 +743,14 @@ async def _run_fp_review_stage(
     except Exception as exc:
         raise _FpStageFailure(
             stage=stage,
-            session_id=_session_id_from_output_source(output_source),
+            session_id=task_session_id or _session_id_from_output_source(output_source),
             artifact_path=output_markdown_path,
             log_path=log_path,
             reason=f"OpenCode stage failed after configured session retries: {exc}",
             output_source=output_source,
         ) from exc
 
-    payload: dict = {}
     try:
-        payload = json.loads(output_text)
         result = _vulnerability_from_payload(payload, candidate)
     except Exception:
         result = None
@@ -748,7 +768,7 @@ async def _run_fp_review_stage(
             output_source=output_source,
         )
     return _FpStageResult(
-        session_id=_session_id_from_output_source(output_source),
+        session_id=task_session_id or _session_id_from_output_source(output_source),
         result=result,
         payload=payload,
         markdown=markdown,
