@@ -25,6 +25,10 @@ from urllib.parse import quote
 import httpx
 
 from backend.logger import get_logger
+from backend.opencode.config_json import (
+    is_sensitive_opencode_config_key,
+    redact_opencode_config_content,
+)
 
 logger = get_logger(__name__)
 
@@ -47,10 +51,6 @@ _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
 _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
-_SENSITIVE_CONFIG_KEY_RE = re.compile(
-    r"(api[_-]?key|apikey|token|secret|password|authorization|cookie|credential|headers?)",
-    re.IGNORECASE,
-)
 _SENSITIVE_EVENT_KEY_RE = re.compile(
     r"(api[_-]?key|apikey|token|secret|password|authorization|cookie|credential|"
     r"prompt|content|body)",
@@ -284,38 +284,11 @@ def _with_serve_startup_log(message: str, path: Path | None) -> str:
     return f"{message}\n\nOpenCode serve startup output:\n{tail}"
 
 
-def _redact_sensitive_config(value: Any, *, parent_key: str = "") -> Any:
-    if parent_key and _SENSITIVE_CONFIG_KEY_RE.search(parent_key):
-        return "***"
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if _SENSITIVE_CONFIG_KEY_RE.search(key_text):
-                redacted[key] = "***"
-            else:
-                redacted[key] = _redact_sensitive_config(item, parent_key=key_text)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_sensitive_config(item, parent_key=parent_key) for item in value]
-    return value
-
-
-def _redacted_config_content(config_content: str) -> str:
-    if not config_content:
-        return ""
-    try:
-        data = json.loads(config_content)
-    except Exception:
-        return f"<redacted invalid config content bytes={len(config_content.encode('utf-8'))}>"
-    return json.dumps(_redact_sensitive_config(data), ensure_ascii=False)
-
-
 def _serve_debug_env_value(name: str, value: str | None) -> str | None:
     if value is None:
         return None
     if name == "OPENCODE_CONFIG_CONTENT":
-        return _redacted_config_content(value)
+        return redact_opencode_config_content(value)
     return value
 
 
@@ -370,7 +343,7 @@ def _log_serve_startup_debug(
         f"  config_hash={key.config_hash or '(none)'}",
         f"  config_file_path={config_path}",
         f"  config_content_bytes={len(config_content.encode('utf-8')) if config_content else 0}",
-        f"  config_content_redacted={_redacted_config_content(config_content)}",
+        f"  config_content_redacted={redact_opencode_config_content(config_content)}",
         f"  argv={json.dumps(cmd, ensure_ascii=False)}",
         f"  shell={_serve_startup_shell_debug(cmd, cwd, env)}",
         "  env_overrides:",
@@ -1869,7 +1842,7 @@ class OpenCodeServeManager:
             secrets.update(str(item) for item in mapping.values() if str(item))
             for name, item in mapping.items():
                 parts = str(item).split(None, 1)
-                if _SENSITIVE_CONFIG_KEY_RE.search(str(name)) and len(parts) == 2:
+                if is_sensitive_opencode_config_key(name) and len(parts) == 2:
                     secrets.add(parts[1])
         if secrets:
             for secret in sorted(

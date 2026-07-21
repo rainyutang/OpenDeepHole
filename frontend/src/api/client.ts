@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
+import type { AgentInfo, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -554,6 +554,18 @@ export async function getAgentOpenCodeModels(agentId: string, refresh = false): 
   const { data } = await api.get<AgentOpenCodeModelsResult>(
     `/api/agent/${agentId}/opencode/models`,
     { params: { refresh } },
+  );
+  return data;
+}
+
+export async function getAgentOpenCodeRuntimeConfig(
+  agentKey: string,
+  refresh = true,
+  includeSecrets = false,
+): Promise<AgentOpenCodeRuntimeConfig> {
+  const { data } = await api.get<AgentOpenCodeRuntimeConfig>(
+    `/api/agent-configs/${agentKey}/opencode-runtime-config`,
+    { params: { refresh, include_secrets: includeSecrets } },
   );
   return data;
 }

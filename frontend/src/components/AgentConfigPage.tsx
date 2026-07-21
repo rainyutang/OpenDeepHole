@@ -4,6 +4,7 @@ import {
   getAgentMcpStatus,
   getAgentOpenCodeModels,
   getAgentOpenCodePool,
+  getAgentOpenCodeRuntimeConfig,
   getAgents,
   getAgentValidatorCatalog,
   probeAgentMcp,
@@ -21,6 +22,7 @@ import type {
   AgentOpenCodeModelConfig,
   AgentOpenCodeModelListItem,
   AgentOpenCodePoolStatus,
+  AgentOpenCodeRuntimeConfig,
   AgentRemoteConfig,
   AgentValidationEnvironmentConfig,
   AgentValidatorCatalog,
@@ -325,6 +327,70 @@ function DynamicField({ schema, value, onChange }: { schema: AgentValidatorField
   return <Field label={`${schema.label}${schema.required ? " *" : ""}`} hint={schema.help}><input className={input} type={type} min={schema.min ?? undefined} max={schema.max ?? undefined} step={schema.type === "number" ? "any" : undefined} placeholder={schema.placeholder} value={String(value ?? "")} onChange={(e) => onChange(type === "number" && e.target.value !== "" ? Number(e.target.value) : e.target.value)} /></Field>;
 }
 
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function OpenCodeRuntimeViewer({
+  value, loading, error, revealed, onRefresh, onToggleReveal, onCopy,
+}: {
+  value: AgentOpenCodeRuntimeConfig | null;
+  loading: boolean;
+  error: string;
+  revealed: boolean;
+  onRefresh: () => void;
+  onToggleReveal: () => void;
+  onCopy: () => void;
+}) {
+  const runtimeBadges: Record<string, { label: string; tone: "slate" | "green" | "amber" }> = {
+    active: { label: "Serve 当前生效", tone: "green" },
+    reload_pending: { label: "等待 Serve 重载", tone: "amber" },
+    next_task: { label: "Serve 未运行", tone: "slate" },
+  };
+  const runtime = runtimeBadges[value?.runtime_state || "next_task"] || runtimeBadges.next_task;
+  return <div className="space-y-4">
+    <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-3">
+          <div>
+            <h3 className="font-medium text-slate-100">Agent 当前 opencode.json</h3>
+            <p className="mt-1 text-xs leading-5 text-slate-400">直接读取 Agent 磁盘上的最终运行文件，包含本机原配置、网页自定义层以及 OpenDeepHole 添加的 MCP、技能、权限和子 Agent 配置。</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {!value ? <StatusBadge label="正在读取" tone="blue" /> : <>
+              <StatusBadge label={value.online ? "Agent 在线" : "Agent 离线"} tone={value.online ? "green" : "amber"} />
+              <StatusBadge label={value.source === "live" ? "当前文件" : value.source === "snapshot" ? "历史快照" : "尚无快照"} tone={value.source === "live" ? "blue" : value.source === "snapshot" ? "amber" : "slate"} />
+              <StatusBadge label={runtime.label} tone={runtime.tone} />
+              {value.exists && <StatusBadge label={revealed ? "完整内容" : "敏感字段已遮罩"} tone={revealed ? "amber" : "slate"} />}
+            </>}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" disabled={loading} onClick={onRefresh} className="rounded-lg border border-blue-500/50 px-3 py-2 text-xs text-blue-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500">{loading ? "读取中…" : "刷新当前文件"}</button>
+          <button type="button" disabled={loading || !value?.exists} onClick={onToggleReveal} className="rounded-lg border border-amber-500/50 px-3 py-2 text-xs text-amber-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500">{revealed ? "隐藏敏感内容" : "显示完整内容"}</button>
+          <button type="button" disabled={loading || !value?.exists || !value.content} onClick={onCopy} className="rounded-lg border border-slate-600 px-3 py-2 text-xs text-slate-200 disabled:cursor-not-allowed disabled:text-slate-500">复制{revealed ? "完整" : "脱敏"}内容</button>
+        </div>
+      </div>
+      {value?.warning && <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-100">{value.warning}</div>}
+      {value?.runtime_state === "reload_pending" && <p className="mt-3 text-xs leading-5 text-amber-300">当前文件仍对应正在运行的 Serve；新配置会在活动 Session 结束后的下一次 Serve 启动时写入。</p>}
+      {value?.runtime_state === "next_task" && value.exists && <p className="mt-3 text-xs leading-5 text-slate-400">Serve 当前未运行，显示的是最近一次生成的文件；下次启动会重新合并并写入。</p>}
+      {error && <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">{error}</div>}
+      {value?.exists && <div className="mt-4 grid gap-2 text-xs text-slate-400 md:grid-cols-2">
+        <p className="break-all"><span className="text-slate-300">文件：</span>{value.path}</p>
+        <p><span className="text-slate-300">文件时间：</span>{probeTime(value.modified_at) || "未知"}</p>
+        <p><span className="text-slate-300">读取时间：</span>{probeTime(value.captured_at) || "未知"}</p>
+        <p><span className="text-slate-300">大小：</span>{formatBytes(value.size_bytes)}{value.active_sessions > 0 ? ` · ${value.active_sessions} 个活动 Session` : ""}</p>
+        <p className="break-all md:col-span-2"><span className="text-slate-300">SHA-256：</span>{value.sha256}</p>
+      </div>}
+    </div>
+    {loading && !value ? <div className="flex min-h-[24rem] items-center justify-center rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-400">正在从 Agent 读取当前文件…</div>
+      : value?.exists ? <pre className="max-h-[42rem] min-h-[24rem] overflow-auto whitespace-pre rounded-xl border border-slate-700 bg-slate-950 p-4 font-mono text-xs leading-6 text-slate-200">{value.content}</pre>
+        : <div className="flex min-h-[18rem] items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950/60 px-6 text-center text-sm text-slate-400">{value?.source === "live" ? "该 Agent 尚未启动过 OpenCode Serve，当前没有 opencode.json。" : "还没有可显示的 opencode.json 快照。"}</div>}
+  </div>;
+}
+
 export default function AgentConfigPage({ onBack }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [agentKey, setAgentKey] = useState("");
@@ -334,6 +400,11 @@ export default function AgentConfigPage({ onBack }: Props) {
   const [catalog, setCatalog] = useState<AgentValidatorCatalog>({ registrations: [], errors: [], updated_at: "" });
   const [pool, setPool] = useState<AgentOpenCodePoolStatus | null>(null);
   const [mcpStatus, setMcpStatus] = useState<AgentMcpStatusResponse | null>(null);
+  const [runtimeConfig, setRuntimeConfig] = useState<AgentOpenCodeRuntimeConfig | null>(null);
+  const [runtimeConfigLoading, setRuntimeConfigLoading] = useState(false);
+  const [runtimeConfigError, setRuntimeConfigError] = useState("");
+  const [runtimeConfigRevealed, setRuntimeConfigRevealed] = useState(false);
+  const runtimeConfigRequest = useRef(0);
   const [probingTarget, setProbingTarget] = useState<AgentMcpTarget | null>(null);
   const [reloadingTarget, setReloadingTarget] = useState<AgentMcpTarget | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -352,6 +423,33 @@ export default function AgentConfigPage({ onBack }: Props) {
   const selectedAgent = agents.find((agent) => agent.agent_key === agentKey);
   const setCfg = (next: AgentRemoteConfig) => { setConfig(next); setDirty(true); setMessage(""); };
 
+  const loadOpenCodeRuntimeConfig = async (refresh = true, includeSecrets = false) => {
+    if (!agentKey) return;
+    const targetAgentKey = agentKey;
+    const requestId = ++runtimeConfigRequest.current;
+    setRuntimeConfigLoading(true);
+    setRuntimeConfigError("");
+    if (!includeSecrets) {
+      setRuntimeConfig(null);
+      setRuntimeConfigRevealed(false);
+    }
+    try {
+      const next = await getAgentOpenCodeRuntimeConfig(targetAgentKey, refresh, includeSecrets);
+      if (requestId !== runtimeConfigRequest.current) return;
+      setRuntimeConfig(next);
+      if (includeSecrets) {
+        setRuntimeConfigRevealed(true);
+      } else {
+        setRuntimeConfigRevealed(false);
+      }
+    } catch (error: any) {
+      if (requestId !== runtimeConfigRequest.current) return;
+      setRuntimeConfigError(error?.response?.data?.detail || "读取 Agent 当前 opencode.json 失败");
+    } finally {
+      if (requestId === runtimeConfigRequest.current) setRuntimeConfigLoading(false);
+    }
+  };
+
   useEffect(() => {
     getAgents().then((items) => {
       setAgents(items);
@@ -365,12 +463,21 @@ export default function AgentConfigPage({ onBack }: Props) {
     if (!agentKey) return;
     setLoading(true);
     setMcpStatus(null);
+    runtimeConfigRequest.current += 1;
+    setRuntimeConfig(null);
+    setRuntimeConfigError("");
+    setRuntimeConfigRevealed(false);
     Promise.all([getAgentConfig(agentKey), getAgentValidatorCatalog(agentKey), getAgentMcpStatus(agentKey)]).then(([next, nextCatalog, nextMcpStatus]) => {
       setConfig(next); setSavedConfig(next); setCatalog(nextCatalog); setMcpStatus(nextMcpStatus); setDirty(false); setMessage("");
       const live = agents.find((item) => item.agent_key === agentKey && item.online);
       if (live) getAgentOpenCodePool(live.agent_id).then(setPool).catch(() => setPool(null)); else setPool(null);
     }).catch(() => setMessage("加载 Agent 配置失败")).finally(() => setLoading(false));
   }, [agentKey, agents]);
+
+  useEffect(() => {
+    if (!agentKey || section !== "opencode") return;
+    void loadOpenCodeRuntimeConfig(true, false);
+  }, [agentKey, section]);
 
   useEffect(() => {
     if (!agentKey || !selectedAgent?.online || !["codegraph", "product"].includes(section)) return;
@@ -404,6 +511,7 @@ export default function AgentConfigPage({ onBack }: Props) {
       await updateAgentConfig(agentKey, config);
       setSavedConfig(config); setDirty(false);
       getAgentMcpStatus(agentKey).then(setMcpStatus).catch(() => undefined);
+      if (section === "opencode" || opencodeChanged) void loadOpenCodeRuntimeConfig(true, false);
       setMessage(selectedAgent?.online
         ? (opencodeChanged
           ? (mcpChanged
@@ -414,6 +522,28 @@ export default function AgentConfigPage({ onBack }: Props) {
     }
     catch (error: any) { setMessage(error?.response?.data?.detail || "保存失败"); }
     finally { setSaving(false); }
+  };
+
+  const toggleRuntimeConfigSecrets = () => {
+    if (runtimeConfigRevealed) {
+      runtimeConfigRequest.current += 1;
+      setRuntimeConfig(null);
+      setRuntimeConfigLoading(false);
+      setRuntimeConfigRevealed(false);
+      void loadOpenCodeRuntimeConfig(true, false);
+      return;
+    }
+    void loadOpenCodeRuntimeConfig(true, true);
+  };
+
+  const copyRuntimeConfig = async () => {
+    if (!runtimeConfig?.content) return;
+    try {
+      await navigator.clipboard.writeText(runtimeConfig.content);
+      setMessage(runtimeConfigRevealed ? "已复制完整 opencode.json" : "已复制脱敏后的 opencode.json");
+    } catch {
+      setMessage("复制 opencode.json 失败，请手动选择文本复制");
+    }
   };
 
   const probeMcp = async (target: AgentMcpTarget) => {
@@ -564,29 +694,43 @@ export default function AgentConfigPage({ onBack }: Props) {
             <Field label="代理跳过列表" hint="逗号分隔"><textarea className={input} rows={4} value={config.base.no_proxy} onChange={(e) => setCfg({ ...config, base: { ...config.base, no_proxy: e.target.value } })} /></Field>
           </div>}
           {section === "models" && <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={() => void openModelPicker()} pool={pool} />}
-          {section === "opencode" && <div className="space-y-5">
-            <div className="grid gap-3 text-sm text-slate-300 lg:grid-cols-2">
-              <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
-                <p className="font-medium text-slate-100">运行时文件</p>
-                <p className="mt-2 leading-6">保存后由 Agent 合并并写入 <code className="break-all text-blue-300">~/.opendeephole/opencode_workspace/opencode.json</code>。支持 JSONC 注释和尾随逗号。</p>
+          {section === "opencode" && <div className="space-y-6">
+            <OpenCodeRuntimeViewer
+              value={runtimeConfig}
+              loading={runtimeConfigLoading}
+              error={runtimeConfigError}
+              revealed={runtimeConfigRevealed}
+              onRefresh={() => void loadOpenCodeRuntimeConfig(true, false)}
+              onToggleReveal={toggleRuntimeConfigSecrets}
+              onCopy={() => void copyRuntimeConfig()}
+            />
+            <details className="rounded-xl border border-slate-700 bg-slate-900/40">
+              <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium text-slate-200">自定义配置（次要）</summary>
+              <div className="space-y-4 border-t border-slate-700 p-4">
+                <div className="grid gap-3 text-sm text-slate-300 lg:grid-cols-2">
+                  <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-4">
+                    <p className="font-medium text-slate-100">自定义层</p>
+                    <p className="mt-2 leading-6">这里编辑的不是上方最终文件，而是参与下一次合并的 Web JSONC 配置层。支持注释和尾随逗号。</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-700 bg-slate-950/60 p-4">
+                    <p className="font-medium text-slate-100">合并优先级</p>
+                    <p className="mt-2 leading-6">本机发现的 OpenCode 配置 &lt; 此页自定义层 &lt; OpenDeepHole 保留字段。保存不会中断已有 Session。</p>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm leading-6 text-amber-100">
+                  OpenDeepHole 会覆盖运行所需的 <code>$schema</code>、受管 MCP、技能路径、权限以及威胁分析子 Agent 配置。完整运行时快照会以明文保存在服务端数据库，Agent 文件权限为 0600；页面默认遮罩敏感字段，请只在可信环境中使用“显示完整内容”。
+                </div>
+                <Field label="OpenCode JSONC 自定义配置层">
+                  <textarea
+                    className={`${input} min-h-[28rem] resize-y font-mono text-xs leading-6`}
+                    spellCheck={false}
+                    value={config.opencode_config}
+                    onChange={(e) => setCfg({ ...config, opencode_config: e.target.value })}
+                    placeholder={'{\n  // 可使用注释\n  "provider": {}\n}'}
+                  />
+                </Field>
               </div>
-              <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
-                <p className="font-medium text-slate-100">合并优先级</p>
-                <p className="mt-2 leading-6">本机发现的 OpenCode 配置 &lt; 此页配置 &lt; OpenDeepHole 保留字段。已有会话不会中断，新配置在 Serve 空闲后的下一次启动生效。</p>
-              </div>
-            </div>
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm leading-6 text-amber-100">
-              OpenDeepHole 会覆盖运行所需的 <code>$schema</code>、受管 MCP、技能路径、权限以及威胁分析子 Agent 配置。API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 <code>agent.yaml</code> 和运行时配置文件中；运行时文件权限为 0600，请只在可信环境中填写。
-            </div>
-            <Field label="完整 OpenCode JSONC 配置层">
-              <textarea
-                className={`${input} min-h-[32rem] resize-y font-mono text-xs leading-6`}
-                spellCheck={false}
-                value={config.opencode_config}
-                onChange={(e) => setCfg({ ...config, opencode_config: e.target.value })}
-                placeholder={'{\n  // 可使用注释\n  "provider": {}\n}'}
-              />
-            </Field>
+            </details>
           </div>}
           {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, enabled: e.target.checked } })} />启用威胁分析</label><Field label="攻击路径审计模式"><select className={input} value={config.threat_analysis.attack_path_audit_mode} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, attack_path_audit_mode: e.target.value } })}><option value="after_analysis">分析完成后审计</option><option value="immediate">生成后立即审计</option></select></Field><PolicyEditor value={config.threat_analysis.model_policy} onChange={(value) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy: value } })} /></div>}
           {section === "codegraph" && <McpEditor value={config.code_graph} onChange={(value) => setCfg({ ...config, code_graph: value })} status={mcpStatus?.code_graph || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)} probing={probingTarget === "code_graph"} reloading={reloadingTarget === "code_graph"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("code_graph")} onReload={() => reloadMcp("code_graph")} />}

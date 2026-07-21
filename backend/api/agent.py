@@ -46,7 +46,7 @@ from backend.api.scan import _running_scans, _scan_owners
 from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
-from backend.opencode.config_json import parse_opencode_jsonc
+from backend.opencode.config_json import parse_opencode_jsonc, redact_opencode_config_content
 from backend.models import (
     AgentGitHistory,
     AgentMcpConfig,
@@ -55,6 +55,7 @@ from backend.models import (
     AgentMcpStatusResponse,
     AgentMcpTargetStatus,
     AgentOpenCodePoolStatus,
+    AgentOpenCodeRuntimeConfigResponse,
     AgentInfo,
     AgentRemoteConfig,
     AgentValidatorCatalog,
@@ -140,6 +141,21 @@ def _stored_mcp_probes(record: dict | None) -> dict[str, AgentMcpProbeResult]:
         except Exception as exc:
             logger.warning("Ignoring invalid persisted %s MCP probe result: %s", target, exc)
     return results
+
+
+def _stored_opencode_runtime_config(record: dict | None) -> dict | None:
+    if not record:
+        return None
+    try:
+        payload = json.loads(str(record.get("opencode_runtime_config_json") or "{}"))
+    except Exception as exc:
+        logger.warning("Ignoring invalid persisted OpenCode runtime config metadata: %s", exc)
+        return None
+    if not isinstance(payload, dict) or not payload.get("exists"):
+        return None
+    if not isinstance(payload.get("content"), str):
+        return None
+    return payload
 
 
 def _mcp_config_fingerprint(config: AgentMcpConfig) -> str:
@@ -408,6 +424,7 @@ class _RuntimeDownload:
 # Short-lived tokens used by online agents to fetch runtime update archives.
 _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _opencode_model_waiters: dict[str, asyncio.Future] = {}
+_opencode_runtime_config_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_waiters: dict[str, asyncio.Future] = {}
 _mcp_status_waiters: dict[str, asyncio.Future] = {}
 _mcp_reload_waiters: dict[str, asyncio.Future] = {}
@@ -1014,6 +1031,12 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 if waiter is not None and not waiter.done():
                     waiter.set_result(incoming)
                 continue
+            if isinstance(incoming, dict) and incoming.get("type") == "opencode_runtime_config_result":
+                request_id = str(incoming.get("request_id") or "")
+                waiter = _opencode_runtime_config_waiters.pop(request_id, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(incoming)
+                continue
             if isinstance(incoming, dict) and incoming.get("type") == "mcp_probe_result":
                 request_id = str(incoming.get("request_id") or "")
                 waiter = _mcp_probe_waiters.pop(request_id, None)
@@ -1347,6 +1370,162 @@ async def update_stable_agent_config(
     if live is not None:
         applied = await send_agent_command(live[0], {"type": "config", "config": body.model_dump()})
     return {"ok": True, "applied": applied}
+
+
+_OPENCODE_RUNTIME_STATES = {"active", "reload_pending", "next_task"}
+
+
+def _opencode_runtime_snapshot(incoming: dict) -> dict:
+    content = str(incoming.get("content") or "")
+    raw = content.encode("utf-8")
+    runtime_state = str(incoming.get("runtime_state") or "next_task")
+    if runtime_state not in _OPENCODE_RUNTIME_STATES:
+        runtime_state = "next_task"
+    return {
+        "exists": bool(incoming.get("exists")),
+        "content": content,
+        "path": str(incoming.get("path") or ""),
+        "captured_at": str(incoming.get("captured_at") or datetime.now(timezone.utc).isoformat()),
+        "modified_at": str(incoming.get("modified_at") or ""),
+        "sha256": hashlib.sha256(raw).hexdigest() if incoming.get("exists") else "",
+        "size_bytes": len(raw) if incoming.get("exists") else 0,
+        "runtime_state": runtime_state,
+        "active_sessions": _nonnegative_int(incoming.get("active_sessions")),
+    }
+
+
+def _opencode_runtime_response(
+    *,
+    agent_key: str,
+    online: bool,
+    source: str,
+    snapshot: dict | None,
+    include_secrets: bool,
+    warning: str = "",
+) -> AgentOpenCodeRuntimeConfigResponse:
+    payload = snapshot or {}
+    exists = bool(payload.get("exists"))
+    raw_content = str(payload.get("content") or "") if exists else ""
+    content = (
+        raw_content
+        if include_secrets
+        else redact_opencode_config_content(raw_content, pretty=True)
+    )
+    runtime_state = str(payload.get("runtime_state") or "next_task")
+    if runtime_state not in _OPENCODE_RUNTIME_STATES:
+        runtime_state = "next_task"
+    return AgentOpenCodeRuntimeConfigResponse(
+        agent_key=agent_key,
+        online=online,
+        exists=exists,
+        source=source,
+        content=content,
+        redacted=not include_secrets,
+        path=str(payload.get("path") or ""),
+        captured_at=str(payload.get("captured_at") or ""),
+        modified_at=str(payload.get("modified_at") or ""),
+        sha256=str(payload.get("sha256") or ""),
+        size_bytes=_nonnegative_int(payload.get("size_bytes")),
+        runtime_state=runtime_state,
+        active_sessions=_nonnegative_int(payload.get("active_sessions")),
+        warning=str(warning or "")[:2000],
+    )
+
+
+async def _request_agent_opencode_runtime_config(
+    agent_key: str,
+) -> tuple[dict | None, str]:
+    live = _live_agent_for_key(agent_key)
+    if live is None:
+        return None, "Agent 已离线"
+    request_id = uuid.uuid4().hex
+    waiter = asyncio.get_running_loop().create_future()
+    _opencode_runtime_config_waiters[request_id] = waiter
+    try:
+        sent = await send_agent_command(live[0], {
+            "type": "opencode_runtime_config",
+            "request_id": request_id,
+        })
+        if not sent:
+            return None, "无法向 Agent 发送 OpenCode 配置读取请求"
+        incoming = await asyncio.wait_for(waiter, timeout=5.0)
+        if not isinstance(incoming, dict):
+            return None, "Agent 返回了无效的 OpenCode 配置读取结果"
+        return incoming, ""
+    except asyncio.TimeoutError:
+        return None, "读取 Agent 当前 opencode.json 超时"
+    except Exception as exc:
+        logger.debug("Unable to query OpenCode runtime config for %s: %s", agent_key, exc)
+        return None, "读取 Agent 当前 opencode.json 失败"
+    finally:
+        _opencode_runtime_config_waiters.pop(request_id, None)
+
+
+@public_router.get(
+    "/api/agent-configs/{agent_key}/opencode-runtime-config",
+    response_model=AgentOpenCodeRuntimeConfigResponse,
+)
+async def get_stable_agent_opencode_runtime_config(
+    agent_key: str,
+    response: Response,
+    refresh: bool = True,
+    include_secrets: bool = False,
+    current_user: User = Depends(get_current_user),
+) -> AgentOpenCodeRuntimeConfigResponse:
+    """Return the exact resolved opencode.json, or the latest persisted snapshot."""
+    store = get_scan_store()
+    record = _authorize_agent_record(store.get_agent_record(agent_key), current_user)
+    response.headers["Cache-Control"] = "no-store"
+    online = _live_agent_for_key(agent_key) is not None
+    warning = ""
+
+    if refresh and online:
+        incoming, warning = await _request_agent_opencode_runtime_config(agent_key)
+        if incoming is not None and bool(incoming.get("ok")):
+            snapshot = _opencode_runtime_snapshot(incoming)
+            if snapshot["exists"]:
+                store.update_agent_opencode_runtime_config_record(
+                    agent_key,
+                    json.dumps(snapshot, ensure_ascii=False),
+                )
+            else:
+                warning = str(incoming.get("message") or "OpenCode Serve 尚未生成 opencode.json")
+            return _opencode_runtime_response(
+                agent_key=agent_key,
+                online=True,
+                source="live",
+                snapshot=snapshot,
+                include_secrets=include_secrets,
+                warning=warning,
+            )
+        if incoming is not None:
+            warning = str(incoming.get("message") or "读取 Agent 当前 opencode.json 失败")
+
+    snapshot = _stored_opencode_runtime_config(record)
+    if snapshot is not None:
+        if not warning and not online:
+            warning = "Agent 已离线，当前显示最近一次成功读取的历史快照"
+        elif warning:
+            warning = f"{warning}；当前显示最近一次成功读取的历史快照"
+        return _opencode_runtime_response(
+            agent_key=agent_key,
+            online=online,
+            source="snapshot",
+            snapshot=snapshot,
+            include_secrets=include_secrets,
+            warning=warning,
+        )
+
+    if not warning:
+        warning = "尚未保存过该 Agent 的 opencode.json 快照"
+    return _opencode_runtime_response(
+        agent_key=agent_key,
+        online=online,
+        source="none",
+        snapshot=None,
+        include_secrets=include_secrets,
+        warning=warning,
+    )
 
 
 async def _persist_mcp_probe(agent_key: str, result: AgentMcpProbeResult) -> None:

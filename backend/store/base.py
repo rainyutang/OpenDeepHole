@@ -415,6 +415,13 @@ class ScanStoreBase(ABC):
     def update_agent_mcp_probe_record(self, agent_key: str, mcp_probe_json: str) -> bool:
         raise NotImplementedError
 
+    def update_agent_opencode_runtime_config_record(
+        self,
+        agent_key: str,
+        runtime_config_json: str,
+    ) -> bool:
+        raise NotImplementedError
+
     def touch_agent_record(self, agent_key: str, agent_id: str, last_seen: str) -> bool:
         raise NotImplementedError
 

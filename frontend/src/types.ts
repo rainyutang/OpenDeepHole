@@ -672,6 +672,25 @@ export interface AgentMcpStatusResponse {
   product_info: AgentMcpTargetStatus;
 }
 
+export type AgentOpenCodeRuntimeSource = "live" | "snapshot" | "none";
+
+export interface AgentOpenCodeRuntimeConfig {
+  agent_key: string;
+  online: boolean;
+  exists: boolean;
+  source: AgentOpenCodeRuntimeSource;
+  content: string;
+  redacted: boolean;
+  path: string;
+  captured_at: string;
+  modified_at: string;
+  sha256: string;
+  size_bytes: number;
+  runtime_state: AgentMcpRuntimeState;
+  active_sessions: number;
+  warning: string;
+}
+
 export interface AgentOpenCodeModelListItem {
   id: string;
   model: string;

@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-07-21
+
+- **新增** Agent 配置页的「OpenCode 配置」改为优先展示 Agent 当前实际生成的 `~/.opendeephole/opencode_workspace/opencode.json`，完整覆盖本机原配置、Web 自定义层和 OpenDeepHole 添加的 MCP、技能、权限及子 Agent 字段；页面区分在线当前文件、Serve 待重载、未运行和离线历史快照，并保留手动刷新、文件时间、哈希与大小信息
+- **安全** 当前 OpenCode 运行文件默认遮罩 API Key、Token、Authorization、Header、Password 等敏感字段，只有显式操作后才返回并复制完整原文；响应禁止缓存且配置内容不写入日志，最近一次完整快照按稳定 Agent 身份持久化以供离线查看
+- **变更** OpenCode JSONC 修改区降级为折叠的「自定义配置（次要）」；保存后页面继续展示当前实际文件并明确标记等待 Serve 重载，不再把待生效的 Web 配置层误认为当前 `opencode.json`
+
 ## 2026-07-20
 
 - **新增** 扫描详情首页的 OpenCode 任务队列在展开任务后显示完整 Session ID；成功、失败、超时和取消任务均持久保留最后一个已创建的 Session，即使最终重试在新 Session 创建前失败也不会丢失上一 Session

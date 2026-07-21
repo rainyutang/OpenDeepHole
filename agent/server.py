@@ -813,6 +813,48 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         }
 
 
+async def handle_opencode_runtime_config(request_id: str) -> dict:
+    """Read the exact Agent-wide opencode.json currently present on disk."""
+    from backend.opencode.config import opencode_runtime_config_path
+    from backend.opencode.serve_client import get_serve_manager
+
+    config_path = opencode_runtime_config_path()
+    checked_at = datetime.now(timezone.utc).isoformat()
+    result: dict[str, object] = {
+        "type": "opencode_runtime_config_result",
+        "request_id": request_id,
+        "ok": True,
+        "exists": False,
+        "path": str(config_path),
+        "content": "",
+        "captured_at": checked_at,
+        "modified_at": "",
+        "sha256": "",
+        "size_bytes": 0,
+        "message": "",
+    }
+    try:
+        raw = config_path.read_bytes()
+        stat = config_path.stat()
+        content = raw.decode("utf-8")
+        result.update({
+            "exists": True,
+            "content": content,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+        })
+    except FileNotFoundError:
+        result["message"] = "OpenCode Serve 尚未生成 opencode.json"
+    except Exception as exc:
+        result.update({
+            "ok": False,
+            "message": f"读取当前 opencode.json 失败：{exc}",
+        })
+    result.update(get_serve_manager().config_runtime_status())
+    return result
+
+
 async def handle_mcp_probe(request_id: str, target: str, mcp_config: dict) -> dict:
     """Probe one saved MCP configuration and report the serve reload state."""
     from agent.mcp_probe import probe_mcp_config

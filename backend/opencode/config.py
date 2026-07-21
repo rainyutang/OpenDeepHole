@@ -50,6 +50,11 @@ def managed_opencode_config_path(workspace: Path) -> Path:
     return workspace / _MANAGED_CONFIG_FILENAME
 
 
+def opencode_runtime_config_path() -> Path:
+    """Return the Agent-wide resolved Serve config path without initializing it."""
+    return _GLOBAL_WORKSPACE / "opencode.json"
+
+
 def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
     """Return and initialize the single Agent-wide OpenCode workspace.
 

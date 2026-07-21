@@ -360,6 +360,7 @@ CREATE TABLE IF NOT EXISTS agents (
     config_json           TEXT NOT NULL DEFAULT '{}',
     validator_catalog_json TEXT NOT NULL DEFAULT '{}',
     mcp_probe_json        TEXT NOT NULL DEFAULT '{}',
+    opencode_runtime_config_json TEXT NOT NULL DEFAULT '{}',
     last_agent_id         TEXT NOT NULL DEFAULT '',
     last_seen             TEXT NOT NULL DEFAULT '',
     created_at            TEXT NOT NULL,
@@ -466,6 +467,10 @@ class SqliteScanStore(ScanStoreBase):
         if "mcp_probe_json" not in agent_cols:
             self._conn.execute(
                 "ALTER TABLE agents ADD COLUMN mcp_probe_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "opencode_runtime_config_json" not in agent_cols:
+            self._conn.execute(
+                "ALTER TABLE agents ADD COLUMN opencode_runtime_config_json TEXT NOT NULL DEFAULT '{}'"
             )
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
@@ -3034,6 +3039,20 @@ class SqliteScanStore(ScanStoreBase):
             cur = self._conn.execute(
                 "UPDATE agents SET mcp_probe_json = ?, updated_at = ? WHERE agent_key = ?",
                 (mcp_probe_json, now, agent_key),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def update_agent_opencode_runtime_config_record(
+        self,
+        agent_key: str,
+        runtime_config_json: str,
+    ) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE agents SET opencode_runtime_config_json = ?, updated_at = ? WHERE agent_key = ?",
+                (runtime_config_json, now, agent_key),
             )
             self._conn.commit()
         return cur.rowcount > 0

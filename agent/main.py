@@ -185,6 +185,10 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             request_id=msg.get("request_id", ""),
             refresh=bool(msg.get("refresh")),
         )
+    elif cmd_type == "opencode_runtime_config":
+        return await agent_server.handle_opencode_runtime_config(
+            request_id=str(msg.get("request_id") or ""),
+        )
     elif cmd_type == "mcp_probe":
         return await agent_server.handle_mcp_probe(
             request_id=str(msg.get("request_id") or ""),

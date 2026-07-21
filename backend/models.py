@@ -752,6 +752,23 @@ class AgentMcpStatusResponse(BaseModel):
     product_info: AgentMcpTargetStatus = AgentMcpTargetStatus()
 
 
+class AgentOpenCodeRuntimeConfigResponse(BaseModel):
+    agent_key: str
+    online: bool = False
+    exists: bool = False
+    source: str = "none"
+    content: str = ""
+    redacted: bool = True
+    path: str = ""
+    captured_at: str = ""
+    modified_at: str = ""
+    sha256: str = ""
+    size_bytes: int = 0
+    runtime_state: str = "next_task"
+    active_sessions: int = 0
+    warning: str = ""
+
+
 class AgentValidationEnvironmentConfig(BaseModel):
     supported_vulnerability_types: list[str] = ["*"]
     concurrency: int = 1
