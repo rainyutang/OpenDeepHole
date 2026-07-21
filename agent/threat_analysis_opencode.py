@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from backend.config import get_config
 from backend.models import ThreatAnalysis, ThreatAnalysisSources, ThreatAttackPath
-from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode import run_opencode_task
 from agent.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
 from agent.opencode.task_service import (
     bind_opencode_execution_context,
@@ -767,7 +767,7 @@ async def _invoke_stage(
             ):
                 result = await task_runner(
                     task_name=f"威胁分析：{task_label}",
-                    task_type=OpenCodeTaskType.THREAT_ANALYSIS,
+                    task_type="threat_analysis",
                     prompt=stage_prompt,
                     required_capability=_required_capability(),
                 )

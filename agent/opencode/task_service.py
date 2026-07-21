@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from .api import OpenCodeResult, OpenCodeTaskType
+from .api import OpenCodeResult
 from .host import (
     OpenCodeInvocationMetadata as OutputSource,
     OpenCodeSessionRuntime as _SessionRuntime,
@@ -1166,16 +1166,16 @@ def _message_model(info: dict[str, Any]) -> str:
     return model if model.startswith(f"{provider}/") else f"{provider}/{model}"
 
 
-def _task_priority(task_type: OpenCodeTaskType) -> int:
-    if task_type is OpenCodeTaskType.VULNERABILITY_VALIDATION:
+def _task_priority(task_type: str) -> int:
+    if task_type == "vulnerability_validation":
         return 80
-    if task_type is OpenCodeTaskType.SKILL_CREATE:
+    if task_type == "skill_create":
         return 70
     return 50
 
 
 def _task_timeout_seconds(
-    task_type: OpenCodeTaskType,
+    task_type: str,
     context: OpenCodeExecutionContext,
 ) -> int:
     policy = _task_model_policy(context)
@@ -1184,7 +1184,7 @@ def _task_timeout_seconds(
         if value > 0:
             return value
     config = get_config()
-    if task_type is OpenCodeTaskType.MEMORY_API_DISCOVERY:
+    if task_type == "memory_api_discovery":
         value = int(
             _cfg_value(
                 getattr(config, "memory_api_discovery", None),
@@ -1201,7 +1201,7 @@ def _task_timeout_seconds(
 async def _run_component_task(
     *,
     task_name: str,
-    task_type: OpenCodeTaskType,
+    task_type: str,
     prompt: str,
     required_capability: str,
     output_schema: dict[str, Any] | None,
@@ -1209,7 +1209,7 @@ async def _run_component_task(
     session_id: str | None,
 ) -> OpenCodeResult:
     """Translate the public contract into the internal scheduling record."""
-    with bind_opencode_execution_context(task_metadata={"task_type": task_type.value}):
+    with bind_opencode_execution_context(task_metadata={"task_type": task_type}):
         context = _snapshot_execution_context()
         project_dir = _required_project_dir(context)
         _required_work_dir(context)

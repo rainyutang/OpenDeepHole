@@ -74,7 +74,7 @@ def test_component_directory_can_be_imported_as_an_extracted_package(tmp_path: P
     try:
         extracted = importlib.import_module("extracted_opencode")
         assert callable(extracted.run_opencode_task)
-        assert extracted.OpenCodeTaskType.CANDIDATE_AUDIT.value == "audit"
+        assert not hasattr(extracted, "OpenCodeTaskType")
     finally:
         sys.path.remove(str(tmp_path))
         for name in list(sys.modules):
@@ -163,7 +163,7 @@ def test_first_public_task_creates_both_lazy_singletons(tmp_path: Path) -> None:
             ):
                 result = await opencode.run_opencode_task(
                     task_name="lazy lifecycle",
-                    task_type=opencode.OpenCodeTaskType.CANDIDATE_AUDIT,
+                    task_type="audit",
                     prompt="run",
                     required_capability="high",
                 )

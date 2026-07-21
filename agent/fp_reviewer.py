@@ -20,7 +20,7 @@ from typing import Optional
 from uuid import uuid4
 
 from backend.models import OutputSource, ScanEvent
-from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode import run_opencode_task
 from agent.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
 from agent.opencode.output_format import with_local_timestamp
 from agent.opencode.result_json import (
@@ -722,7 +722,7 @@ async def _run_fp_review_stage(
         ):
             task_result = await run_opencode_task(
                 task_name=f"去误报复核 {stage}",
-                task_type=OpenCodeTaskType.FP_REVIEW,
+                task_type="fp_review",
                 prompt=prompt,
                 required_capability=_required_capability(),
                 output_schema=_FP_STAGE_JSON_SCHEMA,

@@ -1,6 +1,6 @@
 """Self-contained OpenCode task and serve management component."""
 
-from .api import OpenCodeResult, OpenCodeTaskType, run_opencode_task
+from .api import OpenCodeResult, run_opencode_task
 from .host import OpenCodeHostBindings, OpenCodeSessionRuntime, configure_opencode
 
 
@@ -17,7 +17,6 @@ __all__ = [
     "OpenCodeHostBindings",
     "OpenCodeResult",
     "OpenCodeSessionRuntime",
-    "OpenCodeTaskType",
     "configure_opencode",
     "run_opencode_task",
     "shutdown_opencode",

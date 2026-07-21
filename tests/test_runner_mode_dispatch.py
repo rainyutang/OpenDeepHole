@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.models import Candidate, ThreatAuditTask
-from agent.opencode import OpenCodeResult, OpenCodeTaskType
+from agent.opencode import OpenCodeResult
 from agent.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
 from agent.opencode.task_service import (
     bind_opencode_execution_context,
@@ -234,7 +234,7 @@ def test_threat_analysis_result_uses_project_root(tmp_path: Path) -> None:
         assert captured["project_dir"] == project.resolve()
         assert captured["task_metadata"]["stage"]
         assert captured["work_dir"] == (scans_dir / "scan-1" / "threat_analysis").resolve()
-        assert captured["task_type"] is OpenCodeTaskType.THREAT_ANALYSIS
+        assert captured["task_type"] == "threat_analysis"
 
     asyncio.run(run())
 

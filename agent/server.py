@@ -937,7 +937,7 @@ async def _run_skill_creator(
         raise RuntimeError("Agent config is not initialized")
 
     from agent.scanner import _configure_backend
-    from agent.opencode import OpenCodeTaskType, run_opencode_task
+    from agent.opencode import run_opencode_task
     from agent.opencode_integration import get_global_opencode_workspace, get_workspace_lock
     from agent.opencode.task_service import bind_opencode_execution_context
 
@@ -976,7 +976,7 @@ async def _run_skill_creator(
     ):
         result = await run_opencode_task(
             task_name="skill_create",
-            task_type=OpenCodeTaskType.SKILL_CREATE,
+            task_type="skill_create",
             prompt=prompt,
             required_capability="high",
             output_schema=output_schema,

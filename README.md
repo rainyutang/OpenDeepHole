@@ -568,11 +568,11 @@ OpenCode 调用约定：
 内部 Python 调用统一使用自包含的 `agent.opencode` 组件。调用方不启动 CLI 或 Serve；首次 `run_opencode_task()` 会惰性创建任务服务和 Serve 管理单例，并在发送任务前完成 Serve 的启动、兼容进程复用或异常恢复：
 
 ```python
-from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode import run_opencode_task
 
 result = await run_opencode_task(
     task_name="candidate audit",
-    task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+    task_type="audit",
     prompt="...",
     required_capability="high",
     output_schema={"type": "object", "properties": {}, "additionalProperties": False},
@@ -581,7 +581,7 @@ result = await run_opencode_task(
 
 continued = await run_opencode_task(
     task_name="candidate follow-up",
-    task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+    task_type="audit",
     prompt="...",
     required_capability="high",
     session_id=result.session_id,

@@ -17,7 +17,7 @@ from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
 from backend.models import Candidate, HistoryPattern
-from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode import run_opencode_task
 from agent.opencode.output_format import with_local_timestamp
 from agent.opencode.task_service import (
     bind_opencode_execution_context,
@@ -143,7 +143,7 @@ async def hunt_variants(
             ):
                 result = await run_opencode_task(
                     task_name=f"同类变体排查 {pattern.source or pattern.pattern[:30]}",
-                    task_type=OpenCodeTaskType.VARIANT_HUNT,
+                    task_type="variant_hunt",
                     prompt=prompt,
                     required_capability="low",
                     output_schema=_VARIANT_FINDINGS_JSON_SCHEMA,

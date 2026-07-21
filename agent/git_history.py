@@ -20,7 +20,7 @@ from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
 from backend.models import HistoryPattern
-from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode import run_opencode_task
 from agent.opencode.output_format import with_local_timestamp
 from agent.opencode.task_service import (
     bind_opencode_execution_context,
@@ -227,7 +227,7 @@ async def mine_history(
             ):
                 result = await run_opencode_task(
                     task_name=f"Git 历史审计 {commit.hash[:10]}",
-                    task_type=OpenCodeTaskType.GIT_HISTORY,
+                    task_type="git_history",
                     prompt=prompt,
                     required_capability="low",
                     output_schema=_HISTORY_PATTERN_JSON_SCHEMA,

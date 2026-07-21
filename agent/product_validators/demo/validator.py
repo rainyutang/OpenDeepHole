@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agent.validation_debug import prepare_validator_debug
 from agent.vulnerability_validation import ValidationResult
-from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode import run_opencode_task
 
 
 RESULT_SCHEMA = {
@@ -49,7 +49,7 @@ async def validate(**kwargs) -> ValidationResult:
     try:
         result = await run_opencode_task(
             task_name=f"漏洞验证 {vulnerability_type}",
-            task_type=OpenCodeTaskType.VULNERABILITY_VALIDATION,
+            task_type="vulnerability_validation",
             prompt=prompt,
             required_capability=required_capability,
             output_schema=RESULT_SCHEMA,

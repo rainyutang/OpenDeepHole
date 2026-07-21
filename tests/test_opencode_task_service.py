@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.models import OutputSource
-from agent.opencode import OpenCodeResult, OpenCodeTaskType, run_opencode_task
+from agent.opencode import OpenCodeResult, run_opencode_task
 from agent.opencode.model_pool import (
     NO_AVAILABLE_MODEL_MESSAGE,
     ModelLease,
@@ -135,8 +135,8 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "structured",
         "model",
     ]
+    assert get_type_hints(run_opencode_task)["task_type"] is str
     assert "cancelled" not in get_args(get_type_hints(OpenCodeResult)["status"])
-    assert OpenCodeTaskType.VULNERABILITY_VALIDATION.value == "vulnerability_validation"
 
 
 def test_public_interface_uses_bound_directories_and_returns_only_public_result(tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         ):
             result = await run_opencode_task(
                 task_name="public task",
-                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                task_type="audit",
                 prompt="return json",
                 required_capability="high",
                 output_schema=SCHEMA,
@@ -187,7 +187,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         ):
             plain = await run_opencode_task(
                 task_name="plain text",
-                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                task_type="audit",
                 prompt="return text",
                 required_capability="low",
             )
@@ -201,7 +201,7 @@ def test_public_interface_requires_context_and_propagates_cancellation(tmp_path:
         with pytest.raises(RuntimeError, match="project_dir is not bound"):
             await run_opencode_task(
                 task_name="missing context",
-                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                task_type="audit",
                 prompt="test",
                 required_capability="low",
             )
@@ -222,7 +222,7 @@ def test_public_interface_requires_context_and_propagates_cancellation(tmp_path:
         ):
             await run_opencode_task(
                 task_name="cancelled",
-                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                task_type="audit",
                 prompt="test",
                 required_capability="low",
             )
@@ -276,7 +276,7 @@ def test_external_cancellation_stops_same_session_json_correction_and_retries(
         ):
             caller = asyncio.create_task(run_opencode_task(
                 task_name="cancel corrections",
-                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                task_type="audit",
                 prompt="return json",
                 required_capability="low",
                 output_schema=SCHEMA,
@@ -293,19 +293,19 @@ def test_external_cancellation_stops_same_session_json_correction_and_retries(
     asyncio.run(run())
 
 
-def test_public_interface_rejects_legacy_capabilities_and_string_task_types() -> None:
+def test_public_interface_rejects_legacy_capabilities_and_unknown_task_types() -> None:
     async def run() -> None:
         with pytest.raises(ValueError, match="low.*high"):
             await run_opencode_task(
                 task_name="legacy capability",
-                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                task_type="audit",
                 prompt="test",
                 required_capability="medium",  # type: ignore[arg-type]
             )
         with pytest.raises(ValueError, match="task_type"):
             await run_opencode_task(
-                task_name="string type",
-                task_type="audit",  # type: ignore[arg-type]
+                task_name="unknown type",
+                task_type="unknown",
                 prompt="test",
                 required_capability="low",
             )

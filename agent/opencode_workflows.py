@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import Candidate, OutputSource, ThreatAnalysis, ThreatAuditTask, Vulnerability
-from agent.opencode import OpenCodeResult, OpenCodeTaskType, run_opencode_task
+from agent.opencode import OpenCodeResult, run_opencode_task
 from agent.opencode.task_service import bind_opencode_execution_context
 from agent.opencode.model_pool import (
     NoAvailableModelError,
@@ -275,7 +275,7 @@ async def _run_audit_via_opencode(
         ):
             result = await run_opencode_task(
                 task_name=f"候选点审计 {candidate.vuln_type}",
-                task_type=OpenCodeTaskType.CANDIDATE_AUDIT,
+                task_type="audit",
                 prompt=prompt,
                 required_capability=_mining_required_capability(),
                 output_schema=AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA,
@@ -387,7 +387,7 @@ async def run_project_audit(
         ):
             result = await run_opencode_task(
                 task_name=f"项目审计 {candidate.vuln_type}",
-                task_type=OpenCodeTaskType.PROJECT_AUDIT,
+                task_type="project_audit",
                 prompt=prompt,
                 required_capability=_mining_required_capability(),
                 output_schema=AUDITED_VULNERABILITY_RESULTS_JSON_SCHEMA,
@@ -605,7 +605,7 @@ async def run_sensitive_clear_audit(
         ):
             result = await run_opencode_task(
                 task_name=f"敏感信息清理审计 {candidate.function}",
-                task_type=OpenCodeTaskType.SENSITIVE_CLEAR,
+                task_type="sensitive_clear",
                 prompt=prompt,
                 required_capability=_mining_required_capability(),
                 output_schema=_SENSITIVE_CLEAR_RESULT_JSON_SCHEMA,
@@ -784,7 +784,7 @@ async def run_project_report_audit(
         ):
             result = await run_opencode_task(
                 task_name=f"报告审计 {candidate.vuln_type}",
-                task_type=OpenCodeTaskType.REPORT_AUDIT,
+                task_type="report_audit",
                 prompt=prompt,
                 required_capability=_mining_required_capability(),
                 output_schema=_MARKDOWN_REPORTS_JSON_SCHEMA,
@@ -956,7 +956,7 @@ async def run_threat_audit(
             ):
                 result = await run_opencode_task(
                     task_name=f"威胁审计 {task.task_id}",
-                    task_type=OpenCodeTaskType.THREAT_AUDIT,
+                    task_type="threat_audit",
                     prompt=prompt,
                     required_capability=_mining_required_capability(),
                     output_schema=AUDITED_VULNERABILITY_RESULTS_JSON_SCHEMA,

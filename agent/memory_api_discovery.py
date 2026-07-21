@@ -26,7 +26,7 @@ from backend.preprocess.memory_api_artifact import (
     memory_allocator_names,
     memory_deallocator_names,
 )
-from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode import run_opencode_task
 from agent.opencode.model_pool import configured_global_concurrency
 from agent.opencode.output_format import with_local_timestamp
 from agent.opencode.task_service import bind_opencode_execution_context
@@ -464,7 +464,7 @@ async def _run_memory_api_batch(
     ):
         result = await run_opencode_task(
             task_name=f"内存 API 识别 {batch_index}/{batch_count}",
-            task_type=OpenCodeTaskType.MEMORY_API_DISCOVERY,
+            task_type="memory_api_discovery",
             prompt=prompt,
             required_capability="low",
             output_schema=_MEMORY_API_BATCH_JSON_SCHEMA,

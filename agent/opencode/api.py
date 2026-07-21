@@ -3,23 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Literal
 
 
-class OpenCodeTaskType(str, Enum):
-    CANDIDATE_AUDIT = "audit"
-    PROJECT_AUDIT = "project_audit"
-    SENSITIVE_CLEAR = "sensitive_clear"
-    REPORT_AUDIT = "report_audit"
-    THREAT_ANALYSIS = "threat_analysis"
-    THREAT_AUDIT = "threat_audit"
-    FP_REVIEW = "fp_review"
-    VULNERABILITY_VALIDATION = "vulnerability_validation"
-    GIT_HISTORY = "git_history"
-    VARIANT_HUNT = "variant_hunt"
-    MEMORY_API_DISCOVERY = "memory_api_discovery"
-    SKILL_CREATE = "skill_create"
+_SUPPORTED_TASK_TYPES = frozenset({
+    "audit",
+    "project_audit",
+    "sensitive_clear",
+    "report_audit",
+    "threat_analysis",
+    "threat_audit",
+    "fp_review",
+    "vulnerability_validation",
+    "git_history",
+    "variant_hunt",
+    "memory_api_discovery",
+    "skill_create",
+})
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class OpenCodeResult:
 async def run_opencode_task(
     *,
     task_name: str,
-    task_type: OpenCodeTaskType,
+    task_type: str,
     prompt: str,
     required_capability: Literal["low", "high"],
     output_schema: dict[str, Any] | None = None,
@@ -48,7 +48,8 @@ async def run_opencode_task(
         raise ValueError("OpenCode task_name is required")
     if not normalized_prompt.strip():
         raise ValueError("OpenCode prompt is required")
-    if not isinstance(task_type, OpenCodeTaskType):
+    normalized_task_type = task_type.strip() if isinstance(task_type, str) else ""
+    if normalized_task_type not in _SUPPORTED_TASK_TYPES:
         raise ValueError(f"Unsupported OpenCode task_type: {task_type!r}")
     capability = str(required_capability or "").strip().lower()
     if capability not in {"low", "high"}:
@@ -63,7 +64,7 @@ async def run_opencode_task(
 
     return await _run_component_task(
         task_name=normalized_name,
-        task_type=task_type,
+        task_type=normalized_task_type,
         prompt=normalized_prompt,
         required_capability=capability,
         output_schema=output_schema,

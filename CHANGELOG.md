@@ -2,6 +2,7 @@
 
 ## 2026-07-21
 
+- **变更** OpenCode 公共接口移除 `OpenCodeTaskType` 枚举，`task_type` 改为文档约束并由运行时白名单校验的字符串；所有 Agent 阶段和 validator 直接传 `audit`、`threat_analysis`、`vulnerability_validation` 等稳定值
 - **重构** OpenCode 的任务队列、模型调度、Session、权限、JSON 纠错和 `opencode/nga serve` 生命周期从后端迁入自包含的 `agent/opencode/` 组件；业务阶段统一只调用 `agent.opencode.run_opencode_task()`，首次任务会惰性创建并启动共享 Serve 单例，后续任务继续复用现有的重启、恢复和 Session 机制，不新增独立 CLI
 - **变更** OpenCode 的 `output_schema` 约束改为以中文自动追加到首次用户提示词末尾，不再放入 system prompt；同 Session JSON 纠错、CodeGraph 项目范围和扫描反馈等任务服务自动提示也统一改为中文，任务队列记录实际发送的完整提示词
 - **变更** 产品漏洞验证入口由平台上下文对象改为严格的 `async def validate(**kwargs) -> ValidationResult`；漏洞、路径、模型策略、输出/产物/命令函数以及 manifest 动态配置全部按名称平铺注入，旧 `validate(ctx)` 签名会在加载时明确拒绝
