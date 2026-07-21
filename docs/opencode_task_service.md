@@ -151,13 +151,13 @@ from backend.opencode import OpenCodeTaskType, run_opencode_task
 result = await run_opencode_task(
     task_name="PoC 设计",
     task_type=OpenCodeTaskType.VULNERABILITY_VALIDATION,
-    prompt=ctx.report_markdown,
-    required_capability=ctx.required_capability,
+    prompt=kwargs["report_markdown"],
+    required_capability=kwargs["required_capability"],
     output_schema=RESULT_SCHEMA,
 )
 ```
 
-validator 不创建 OpenCode workspace、MCP Server 或 CLI 子进程，也不直接执行 `nga`、`opencode`、`hac` 或 `claude`。OpenCode 流只进入 Agent/调试控制台；需要在验证页面展示的内容应显式调用 `await ctx.emit_stdout(...)`。
+validator 不创建 OpenCode workspace、MCP Server 或 CLI 子进程，也不直接执行 `nga`、`opencode`、`hac` 或 `claude`。OpenCode 流只进入 Agent/调试控制台；需要在验证页面展示的内容应显式调用 `await kwargs["emit_stdout"](...)`。
 
 ## 内部职责
 

@@ -217,7 +217,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
     def test_runtime_install_replaces_product_validators_but_preserves_local_validation_dir(self) -> None:
         files = [
             ("agent/main.py", b"print('server snapshot')\n"),
-            ("agent/product_validators/demo/validator.py", b"async def validate(ctx):\n    pass\n"),
+            ("agent/product_validators/demo/validator.py", b"async def validate(**kwargs):\n    pass\n"),
             ("agent/product_validators/demo/validator.yaml", b"schema_version: 1\nproduct: LTE\nvalidation_environment: lab\n"),
             ("agent/server.py", b"# server\n"),
             ("backend/api.py", b"# api\n"),
@@ -231,7 +231,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             root = Path(tmp)
             (root / "agent" / "product_validators" / "custom").mkdir(parents=True)
             (root / "agent" / "product_validators" / "custom" / "validator.py").write_text(
-                "async def validate(ctx):\n    pass\n",
+                "async def validate(**kwargs):\n    pass\n",
                 encoding="utf-8",
             )
             (root / "agent" / "vulnerability_validation").mkdir(parents=True)

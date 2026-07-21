@@ -129,7 +129,8 @@ class PatternFilterConfig:
 class VulnerabilityValidationConfig:
     enabled: bool = True
     # Deprecated compatibility value.  Validation no longer has an overall
-    # deadline; model calls and ctx.run_command own their separate timeouts.
+    # deadline; model calls and the injected run_command helper own their
+    # separate timeouts.
     timeout_seconds: int = 7200
     environments: dict[str, ValidationEnvironmentConfig] = field(default_factory=dict)
 
