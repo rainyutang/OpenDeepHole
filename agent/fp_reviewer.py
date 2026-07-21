@@ -20,13 +20,13 @@ from typing import Optional
 from uuid import uuid4
 
 from backend.models import OutputSource, ScanEvent
-from backend.opencode import OpenCodeTaskType, run_opencode_task
-from backend.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
-from backend.opencode.output_format import with_local_timestamp
-from backend.opencode.result_json import (
+from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE, NoAvailableModelError
+from agent.opencode.output_format import with_local_timestamp
+from agent.opencode.result_json import (
     VULNERABILITY_RESULT_JSON_SCHEMA,
 )
-from backend.opencode.task_service import bind_opencode_execution_context
+from agent.opencode.task_service import bind_opencode_execution_context
 from agent.config import effective_fp_review_cli_config
 
 
@@ -212,7 +212,7 @@ async def run_fp_review(
     review_dir = Path.home() / ".opendeephole" / "fp_reviews" / review_id
     review_dir.mkdir(parents=True, exist_ok=True)
     set_fp_review_feedback(scan_id, feedback_entries or [])
-    from backend.opencode.task_service import (
+    from agent.opencode.task_service import (
         reset_opencode_execution_context,
         set_opencode_execution_context,
     )
@@ -621,7 +621,7 @@ async def run_fp_review(
         except Exception:
             pass
         try:
-            from backend.opencode.model_pool import clear_completed_tasks
+            from agent.opencode.model_pool import clear_completed_tasks
             await clear_completed_tasks(scan_id)
         except Exception:
             pass
@@ -666,8 +666,9 @@ async def _run_fp_review_stage(
     history_patterns: list[dict] | None = None,
     variant_of: str = "",
 ) -> _FpStageResult | None:
-    from backend.opencode.runner import (
+    from agent.opencode_workflows import (
         _session_id_from_output_source,
+        _to_output_source,
         _vulnerability_from_payload,
     )
 
@@ -675,7 +676,7 @@ async def _run_fp_review_stage(
 
     def capture_source(source: OutputSource) -> None:
         nonlocal output_source
-        output_source = source
+        output_source = _to_output_source(source)
 
     prompt = _build_fp_review_prompt(
         stage=stage,
@@ -1052,6 +1053,6 @@ def _create_fp_workspace(
     mcp_port: int,
 ) -> Path:
     """Return the Agent-wide workspace where FP skills are pre-registered."""
-    from backend.opencode.config import get_global_opencode_workspace
+    from agent.opencode_integration import get_global_opencode_workspace
 
     return get_global_opencode_workspace(mcp_port=mcp_port)

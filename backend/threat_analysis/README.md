@@ -68,5 +68,5 @@ threat_analysis:
 ## 单独运行
 
 ```bash
-python -m backend.threat_analysis.cli --project /path/to/project --implementation attack_tree
+python -m agent.threat_analysis_cli --project /path/to/project --implementation attack_tree
 ```

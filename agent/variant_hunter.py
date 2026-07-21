@@ -17,9 +17,9 @@ from typing import Awaitable, Callable, Optional
 from uuid import uuid4
 
 from backend.models import Candidate, HistoryPattern
-from backend.opencode import OpenCodeTaskType, run_opencode_task
-from backend.opencode.output_format import with_local_timestamp
-from backend.opencode.task_service import (
+from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode.output_format import with_local_timestamp
+from agent.opencode.task_service import (
     bind_opencode_execution_context,
     get_opencode_execution_context,
 )
@@ -88,8 +88,8 @@ async def hunt_variants(
     emit: EmitFn,
 ) -> list[Candidate]:
     """对每条历史问题模式做全仓同类变体排查，返回命中候选列表。"""
-    from backend.opencode.runner import _result_payloads
-    from backend.opencode.model_pool import (
+    from agent.opencode_workflows import _result_payloads
+    from agent.opencode.model_pool import (
         NO_AVAILABLE_MODEL_MESSAGE,
         NoAvailableModelError,
         total_model_capacity,

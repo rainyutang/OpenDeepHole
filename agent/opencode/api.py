@@ -59,7 +59,7 @@ async def run_opencode_task(
     if retry_count < 0:
         raise ValueError("OpenCode invalid_json_retry_count cannot be negative")
 
-    from backend.opencode.task_service import _run_component_task
+    from .task_service import _run_component_task
 
     return await _run_component_task(
         task_name=normalized_name,

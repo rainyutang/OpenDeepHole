@@ -2,7 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from backend.preprocess import memory_api_discovery as discovery
+from agent import memory_api_discovery as discovery
 
 
 class FakeDb:

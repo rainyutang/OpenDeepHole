@@ -26,8 +26,8 @@ from backend.models import (
     ThreatAttackPath,
     Vulnerability,
 )
-from backend.opencode.model_pool import NoAvailableModelError
-from backend.opencode.output_format import with_local_timestamp
+from agent.opencode.model_pool import NoAvailableModelError
+from agent.opencode.output_format import with_local_timestamp
 from backend.registry import CHECKERS_DIR_ENV
 from backend.source_filter import source_path_has_ignored_dir
 
@@ -107,7 +107,7 @@ async def _wait_for_opencode_pool_pipeline_work(
     timeout_seconds: float = OPENCODE_POOL_TERMINAL_DRAIN_TIMEOUT_SECONDS,
 ) -> None:
     """Wait briefly for scan-pipeline OpenCode work to leave the model pool."""
-    from backend.opencode.model_pool import model_pool_snapshot, wait_for_model_pool_update
+    from agent.opencode.model_pool import model_pool_snapshot, wait_for_model_pool_update
 
     deadline = time.monotonic() + max(0.0, timeout_seconds)
     snapshot = model_pool_snapshot(scan_id)
@@ -137,7 +137,7 @@ async def _drain_opencode_pool_before_finish(
 ) -> None:
     """Clear planned scan work and publish the final pool snapshot before finish_scan."""
     try:
-        from backend.opencode.model_pool import clear_planned_tasks
+        from agent.opencode.model_pool import clear_planned_tasks
         await clear_planned_tasks(scan_id, task_types)
     except Exception:
         pass
@@ -155,7 +155,7 @@ async def _drain_opencode_pool_before_finish(
 
 async def _clear_finished_opencode_pool_history(scan_id: str) -> None:
     try:
-        from backend.opencode.model_pool import clear_completed_tasks
+        from agent.opencode.model_pool import clear_completed_tasks
         await clear_completed_tasks(scan_id)
     except Exception:
         pass
@@ -718,6 +718,7 @@ async def _run_threat_analysis_phase(
             maybe = emit("threat_analysis", f"开始{implementation.label}...")
             if asyncio.iscoroutine(maybe):
                 await maybe
+            from agent.opencode_workflows import execute_threat_analysis_context
             analysis = await implementation.run(
                 ThreatAnalysisRunContext(
                     scan_id=scan_id,
@@ -734,6 +735,7 @@ async def _run_threat_analysis_phase(
                     ),
                     on_attack_paths=_handle_streamed_attack_paths,
                     cancel_event=cancel_event,
+                    execute=execute_threat_analysis_context,
                 )
             )
         if analysis is not None:
@@ -785,7 +787,7 @@ async def _run_threat_analysis_phase(
             await maybe
     finally:
         if planned_task_id:
-            from backend.opencode.model_pool import clear_planned_task
+            from agent.opencode.model_pool import clear_planned_task
             await clear_planned_task(planned_task_id)
 
 
@@ -1099,6 +1101,11 @@ def _configure_backend(config: AgentConfig, scan_dir: Path) -> None:
     _reg._registry = None
     _reg._registry_dirs = None
 
+    # Register host callbacks only; the OpenCode manager and Serve process stay
+    # lazy until the first run_opencode_task() call.
+    from agent.opencode_integration import configure_opencode_component
+    configure_opencode_component()
+
 
 async def run_scan(
     config: AgentConfig,
@@ -1130,7 +1137,7 @@ async def run_scan(
     scan_dir = Path.home() / ".opendeephole" / "scans" / scan_id
     scan_dir.mkdir(parents=True, exist_ok=True)
 
-    from backend.opencode.task_service import (
+    from agent.opencode.task_service import (
         clear_scan_feedback_entries,
         reset_opencode_execution_context,
         set_opencode_execution_context,
@@ -1414,7 +1421,7 @@ async def run_scan(
             await emit("mcp_ready", f"Local MCP server ready on port {mcp_port}")
 
         # --- Phase 4: Refresh the single Agent-wide OpenCode workspace ---
-        from backend.opencode.config import get_global_opencode_workspace
+        from agent.opencode_integration import get_global_opencode_workspace
         workspace = await asyncio.to_thread(
             get_global_opencode_workspace,
             mcp_port=mcp_port,
@@ -1763,7 +1770,7 @@ async def run_scan(
             await emit("auditing", f"Audit order: {_audit_order_summary(remaining)}")
 
         cancelled = False
-        from backend.opencode.model_pool import total_model_capacity
+        from agent.opencode.model_pool import total_model_capacity
         audit_capacity = total_model_capacity(
             config.opencode,
             global_concurrency=config.opencode_concurrency,
@@ -1911,7 +1918,7 @@ async def run_scan(
                     if isinstance(candidate.metadata, dict):
                         planned_task_id = str(candidate.metadata.get("_opencode_planned_task_id") or "")
                     if planned_task_id:
-                        from backend.opencode.model_pool import clear_planned_task
+                        from agent.opencode.model_pool import clear_planned_task
                         await clear_planned_task(planned_task_id)
                     vuln = Vulnerability(
                         file=candidate.file,
@@ -1956,7 +1963,7 @@ async def run_scan(
                     and isinstance(candidate.metadata, dict)
                     and candidate.metadata.get("kind") == "sensitive_clear_function"
                 ):
-                    from backend.opencode.runner import run_sensitive_clear_audit
+                    from agent.opencode_workflows import run_sensitive_clear_audit
                     sensitive_result = await run_sensitive_clear_audit(
                         workspace,
                         candidate,
@@ -1973,7 +1980,7 @@ async def run_scan(
                         project_vulns = None
                 elif is_project_level_candidate(candidate):
                     if checker_entry is not None and checker_entry.result_mode == "markdown_reports":
-                        from backend.opencode.runner import run_project_report_audit
+                        from agent.opencode_workflows import run_project_report_audit
                         report_dir = scan_dir / "skill_report_workspace" / candidate.vuln_type / "reports"
                         markdown_reports = await run_project_report_audit(
                             workspace,
@@ -1986,7 +1993,7 @@ async def run_scan(
                             project_dir=project_path,
                         )
                     else:
-                        from backend.opencode.runner import run_project_audit
+                        from agent.opencode_workflows import run_project_audit
                         project_vulns = await run_project_audit(
                             workspace,
                             candidate,
@@ -1997,7 +2004,7 @@ async def run_scan(
                             project_dir=project_path,
                         )
                 else:
-                    from backend.opencode.runner import run_audit
+                    from agent.opencode_workflows import run_audit
                     vuln = await run_audit(
                         workspace,
                         candidate,

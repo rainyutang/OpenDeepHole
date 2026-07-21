@@ -13,14 +13,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.models import OutputSource
-from backend.opencode import OpenCodeResult, OpenCodeTaskType, run_opencode_task
-from backend.opencode.model_pool import (
+from agent.opencode import OpenCodeResult, OpenCodeTaskType, run_opencode_task
+from agent.opencode.model_pool import (
     NO_AVAILABLE_MODEL_MESSAGE,
     ModelLease,
     ModelOption,
 )
-from backend.opencode.serve_client import OpenCodePromptResult
-from backend.opencode.task_service import (
+from agent.opencode.serve_client import OpenCodePromptResult
+from agent.opencode.task_service import (
     OpenCodeTaskError,
     OpenCodeTaskResult,
     OpenCodeTaskService,
@@ -100,16 +100,19 @@ def _service_patches(manager, *, max_retries: int = 2, runtime_config=None):
 
     return (
         patch(
-            "backend.opencode.task_service.get_config",
+            "agent.opencode.task_service.get_config",
             return_value=runtime_config or _config(max_retries=max_retries),
         ),
-        patch("backend.opencode.task_service.acquire_model_lease", side_effect=acquire),
-        patch("backend.opencode.task_service.release_model_lease", new=AsyncMock()),
-        patch("backend.opencode.task_service.update_model_lease_context", new=AsyncMock()),
-        patch("backend.opencode.task_service.get_serve_manager", return_value=manager),
+        patch("agent.opencode.task_service.acquire_model_lease", side_effect=acquire),
+        patch("agent.opencode.task_service.release_model_lease", new=AsyncMock()),
+        patch("agent.opencode.task_service.update_model_lease_context", new=AsyncMock()),
+        patch("agent.opencode.task_service.get_serve_manager", return_value=manager),
         patch(
-            "backend.opencode.config.get_global_opencode_workspace",
-            side_effect=lambda **_kwargs: Path("/tmp/opendeephole-global").resolve(),
+            "agent.opencode.task_service.get_host_bindings",
+            return_value=SimpleNamespace(
+                get_workspace=lambda: Path("/tmp/opendeephole-global").resolve(),
+                disabled_source_mcp_tools=lambda _directory: (),
+            ),
         ),
     )
 
@@ -149,8 +152,8 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         )
         service = SimpleNamespace(run_task=AsyncMock(return_value=internal))
         with (
-            patch("backend.opencode.task_service._get_opencode_task_service", return_value=service),
-            patch("backend.opencode.task_service.get_config", return_value=_config()),
+            patch("agent.opencode.task_service._get_opencode_task_service", return_value=service),
+            patch("agent.opencode.task_service.get_config", return_value=_config()),
             _task_context(tmp_path, task_metadata={"checker": "npd"}),
         ):
             result = await run_opencode_task(
@@ -178,8 +181,8 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
 
         service.run_task.reset_mock()
         with (
-            patch("backend.opencode.task_service._get_opencode_task_service", return_value=service),
-            patch("backend.opencode.task_service.get_config", return_value=_config()),
+            patch("agent.opencode.task_service._get_opencode_task_service", return_value=service),
+            patch("agent.opencode.task_service.get_config", return_value=_config()),
             _task_context(tmp_path),
         ):
             plain = await run_opencode_task(
@@ -212,8 +215,8 @@ def test_public_interface_requires_context_and_propagates_cancellation(tmp_path:
         )
         service = SimpleNamespace(run_task=AsyncMock(return_value=cancelled))
         with (
-            patch("backend.opencode.task_service._get_opencode_task_service", return_value=service),
-            patch("backend.opencode.task_service.get_config", return_value=_config()),
+            patch("agent.opencode.task_service._get_opencode_task_service", return_value=service),
+            patch("agent.opencode.task_service.get_config", return_value=_config()),
             _task_context(tmp_path),
             pytest.raises(asyncio.CancelledError),
         ):
@@ -268,7 +271,7 @@ def test_external_cancellation_stops_same_session_json_correction_and_retries(
             patches[3],
             patches[4],
             patches[5],
-            patch("backend.opencode.task_service._get_opencode_task_service", return_value=service),
+            patch("agent.opencode.task_service._get_opencode_task_service", return_value=service),
             _task_context(tmp_path, cancel_event=external_cancel),
         ):
             caller = asyncio.create_task(run_opencode_task(
@@ -347,7 +350,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
             patches[4],
             patches[5],
             patch(
-                "backend.opencode.task_service._disabled_source_mcp_tools",
+                "agent.opencode.task_service._disabled_source_mcp_tools",
                 return_value=("deephole-code",),
             ),
         ):
@@ -435,8 +438,8 @@ def test_validation_debug_empty_model_pool_fails_without_starting_serve(tmp_path
         output: list[str] = []
 
         with (
-            patch("backend.opencode.task_service.get_config", return_value=_config()),
-            patch("backend.opencode.task_service.get_serve_manager", return_value=manager),
+            patch("agent.opencode.task_service.get_config", return_value=_config()),
+            patch("agent.opencode.task_service.get_serve_manager", return_value=manager),
             bind_opencode_execution_context(
                 scan_id="debug-scan",
                 project_dir=tmp_path,
@@ -895,7 +898,7 @@ def test_session_query_result_and_delete_use_saved_runtime(tmp_path: Path) -> No
             }]),
             delete_session=AsyncMock(return_value=True),
         )
-        with patch("backend.opencode.task_service.get_serve_manager", return_value=manager):
+        with patch("agent.opencode.task_service.get_serve_manager", return_value=manager):
             assert (await service.get_session("ses_existing"))["id"] == "ses_existing"
             result = await service.get_session_result("ses_existing")
             assert result is not None
@@ -937,12 +940,13 @@ def test_queued_task_update_keeps_id_and_requeues_new_revision(tmp_path: Path) -
         manager = SimpleNamespace(run_prompt=run_prompt)
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         with (
-            patch("backend.opencode.task_service.get_config", return_value=_config()),
-            patch("backend.opencode.task_service.acquire_model_lease", side_effect=acquire),
-            patch("backend.opencode.task_service.release_model_lease", new=AsyncMock()),
-            patch("backend.opencode.task_service.update_model_lease_context", new=AsyncMock()),
-            patch("backend.opencode.task_service.get_serve_manager", return_value=manager),
-            patch("backend.opencode.config.get_global_opencode_workspace", return_value=tmp_path),
+            patch("agent.opencode.task_service.get_config", return_value=_config()),
+            patch("agent.opencode.task_service.acquire_model_lease", side_effect=acquire),
+            patch("agent.opencode.task_service.release_model_lease", new=AsyncMock()),
+            patch("agent.opencode.task_service.update_model_lease_context", new=AsyncMock()),
+            patch("agent.opencode.task_service.get_serve_manager", return_value=manager),
+            patch("agent.opencode.task_service.get_global_opencode_workspace", return_value=tmp_path),
+            patch("agent.opencode.task_service._disabled_source_mcp_tools", return_value=()),
         ):
             with _task_context(tmp_path):
                 handle = service.submit_task(OpenCodeTaskSpec(
@@ -981,9 +985,9 @@ def test_run_task_cancellation_cancels_queued_service_task(tmp_path: Path) -> No
             return None
 
         with (
-            patch("backend.opencode.task_service.get_config", return_value=_config()),
-            patch("backend.opencode.task_service.acquire_model_lease", side_effect=acquire),
-            patch("backend.opencode.task_service.release_model_lease", new=AsyncMock()),
+            patch("agent.opencode.task_service.get_config", return_value=_config()),
+            patch("agent.opencode.task_service.acquire_model_lease", side_effect=acquire),
+            patch("agent.opencode.task_service.release_model_lease", new=AsyncMock()),
         ):
             with _task_context(tmp_path):
                 caller = asyncio.create_task(service.run_task(OpenCodeTaskSpec(

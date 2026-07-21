@@ -51,7 +51,7 @@ from backend.models import (
     User,
     VulnerabilityValidation,
 )
-from backend.opencode.feedback_format import build_feedback_section
+from backend.feedback_format import build_feedback_section
 from backend.scan_metrics import (
     calculate_issue_metrics,
     is_effective_fp_review_result,

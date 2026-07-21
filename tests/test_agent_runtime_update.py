@@ -217,6 +217,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
     def test_runtime_install_replaces_product_validators_but_preserves_local_validation_dir(self) -> None:
         files = [
             ("agent/main.py", b"print('server snapshot')\n"),
+            ("agent/opencode/api.py", b"async def run_opencode_task(**kwargs):\n    pass\n"),
             ("agent/product_validators/demo/validator.py", b"async def validate(**kwargs):\n    pass\n"),
             ("agent/product_validators/demo/validator.yaml", b"schema_version: 1\nproduct: LTE\nvalidation_environment: lab\n"),
             ("agent/server.py", b"# server\n"),
@@ -243,6 +244,11 @@ class AgentRuntimePackageTests(unittest.TestCase):
             (root / "agent" / "stale.py").write_text("# stale\n", encoding="utf-8")
             (root / "backend").mkdir()
             (root / "backend" / "old.py").write_text("# old\n", encoding="utf-8")
+            (root / "backend" / "opencode").mkdir()
+            (root / "backend" / "opencode" / "serve_client.py").write_text(
+                "# stale OpenCode client\n",
+                encoding="utf-8",
+            )
             (root / "requirements-agent.txt").write_text("old\n", encoding="utf-8")
 
             with patch("agent.updater.runtime_root", return_value=root):
@@ -256,6 +262,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
             )
             self.assertFalse((root / "agent" / "stale.py").exists())
             self.assertFalse((root / "backend" / "old.py").exists())
+            self.assertFalse((root / "backend" / "opencode").exists())
+            self.assertTrue((root / "agent" / "opencode" / "api.py").is_file())
             self.assertEqual(
                 (root / "agent" / "main.py").read_text(encoding="utf-8"),
                 "print('server snapshot')\n",

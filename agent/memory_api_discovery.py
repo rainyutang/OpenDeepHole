@@ -19,14 +19,20 @@ from typing import Any, Callable
 
 from backend.config import get_config
 from backend.logger import get_logger
-from backend.opencode import OpenCodeTaskType, run_opencode_task
-from backend.opencode.model_pool import configured_global_concurrency
-from backend.opencode.output_format import with_local_timestamp
-from backend.opencode.task_service import bind_opencode_execution_context
+from backend.preprocess.memory_api_artifact import (
+    ARTIFACT_FILENAME,
+    artifact_path,
+    load_memory_api_artifact,
+    memory_allocator_names,
+    memory_deallocator_names,
+)
+from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode.model_pool import configured_global_concurrency
+from agent.opencode.output_format import with_local_timestamp
+from agent.opencode.task_service import bind_opencode_execution_context
 
 logger = get_logger(__name__)
 
-ARTIFACT_FILENAME = "memory_api_pairs.json"
 SCHEMA_VERSION = 1
 
 _MEMORY_API_BATCH_JSON_SCHEMA: dict[str, Any] = {
@@ -149,32 +155,6 @@ class MemoryApiDiscoveryReport:
     pairs: int = 0
     unresolved: int = 0
     message: str = ""
-
-
-def artifact_path(project_root: Path) -> Path:
-    return Path(project_root).resolve() / ARTIFACT_FILENAME
-
-
-def load_memory_api_artifact(project_root: Path) -> dict[str, Any]:
-    path = artifact_path(project_root)
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("Failed to read memory API artifact: %s", path)
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def memory_allocator_names(project_root: Path) -> set[str]:
-    data = load_memory_api_artifact(project_root)
-    return _names_from_items(data.get("allocators"))
-
-
-def memory_deallocator_names(project_root: Path) -> set[str]:
-    data = load_memory_api_artifact(project_root)
-    return _names_from_items(data.get("deallocators"))
 
 
 async def ensure_memory_api_artifact(
@@ -762,19 +742,6 @@ def _chunked(items: list[MemoryApiCandidate], size: int) -> list[list[MemoryApiC
     if not items:
         return []
     return [items[index:index + size] for index in range(0, len(items), size)]
-
-
-def _names_from_items(items: Any) -> set[str]:
-    if not isinstance(items, list):
-        return set()
-    names = set()
-    for item in items:
-        if isinstance(item, dict):
-            name = str(item.get("name") or "").strip()
-            if name:
-                names.add(name)
-                names.add(name.rsplit("::", 1)[-1])
-    return names
 
 
 def _bounded_int(value: Any, minimum: int, maximum: int, default: int) -> int:

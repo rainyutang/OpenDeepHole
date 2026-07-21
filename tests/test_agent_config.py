@@ -508,7 +508,7 @@ class AgentConfigTests(unittest.TestCase):
 
     def test_managed_config_accepts_bearer_authorization_header(self) -> None:
         from backend.api.agent import _validate_managed_config
-        from backend.opencode.config import managed_mcp_config_fingerprint
+        from agent.opencode_integration import managed_mcp_config_fingerprint
 
         config = AgentRemoteConfig()
         config.product_info.enabled = True

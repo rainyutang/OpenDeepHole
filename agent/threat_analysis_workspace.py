@@ -1,4 +1,4 @@
-"""Workspace helpers for threat-analysis implementations."""
+"""Agent-side workspace helpers for threat-analysis implementations."""
 
 from __future__ import annotations
 
@@ -129,7 +129,7 @@ def install_attack_tree_threat_analysis_skill(
     config_path: Path | None = None,
 ) -> None:
     """Install the built-in attack-tree threat-analysis skill into a CLI workspace."""
-    from backend.opencode.config import (
+    from agent.opencode_integration import (
         _write_text_atomic,
         get_workspace_lock,
         managed_opencode_config_path,

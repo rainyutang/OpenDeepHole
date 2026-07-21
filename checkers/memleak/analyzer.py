@@ -988,7 +988,7 @@ class Analyzer(BaseAnalyzer):
         files = _collect_source_files(project_path)
         total = len(files)
         try:
-            from backend.preprocess.memory_api_discovery import memory_deallocator_names
+            from backend.preprocess.memory_api_artifact import memory_deallocator_names
             extra_free_funcs = memory_deallocator_names(project_path)
         except Exception:
             extra_free_funcs = set()

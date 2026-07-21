@@ -109,7 +109,7 @@ async def _probe_local(config: dict[str, Any]) -> tuple[str, list[str]]:
     if isinstance(configured_environment, dict):
         environment.update({str(key): str(value) for key, value in configured_environment.items()})
 
-    from backend.opencode.config import get_global_opencode_workspace
+    from agent.opencode_integration import get_global_opencode_workspace
 
     parameters = StdioServerParameters(
         command=_resolve_local_executable(executable),

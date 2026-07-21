@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agent.validation_debug import prepare_validator_debug
 from agent.vulnerability_validation import ValidationResult
-from backend.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode import OpenCodeTaskType, run_opencode_task
 
 
 RESULT_SCHEMA = {

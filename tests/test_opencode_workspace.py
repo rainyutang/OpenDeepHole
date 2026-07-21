@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from agent import codegraph as codegraph_runtime
 from agent.fp_reviewer import _create_fp_workspace
-from backend.opencode.config import (
+from agent.opencode_integration import (
     build_opencode_config,
     get_global_opencode_workspace,
     managed_opencode_config_path,
@@ -15,7 +15,7 @@ from backend.opencode.config import (
     writable_edit_patterns,
 )
 from backend.registry import CheckerEntry
-from backend.threat_analysis.workspace import install_attack_tree_threat_analysis_skill
+from agent.threat_analysis_workspace import install_attack_tree_threat_analysis_skill
 
 
 def assert_opencode_read_permissions(testcase: unittest.TestCase, config: dict) -> None:
@@ -78,8 +78,8 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             ),
         )
         with (
-            patch("backend.opencode.config.get_config", return_value=fake_config),
-            patch("backend.opencode.config.shutil.which", return_value="/usr/bin/codegraph"),
+            patch("agent.opencode_integration.get_config", return_value=fake_config),
+            patch("agent.opencode_integration.shutil.which", return_value="/usr/bin/codegraph"),
         ):
             config = build_opencode_config("http://127.0.0.1:9123/mcp")
 
@@ -132,9 +132,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             codegraph_runtime._ready_projects.clear()
             with (
                 patch("agent.codegraph.shutil.which", return_value=None),
-                patch("backend.opencode.task_service.get_config", return_value=runtime),
+                patch("agent.opencode_integration.get_config", return_value=runtime),
             ):
-                from backend.opencode.task_service import _disabled_source_mcp_tools
+                from agent.opencode_integration import _disabled_source_mcp_tools
 
                 self.assertFalse(codegraph_runtime.is_codegraph_mcp_available(runtime))
                 self.assertEqual(_disabled_source_mcp_tools(root), ("codegraph",))
@@ -158,9 +158,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             )
             fake_config = SimpleNamespace(mcp_server=SimpleNamespace(port=8100))
             with (
-                patch("backend.opencode.config._GLOBAL_WORKSPACE", workspace_path),
-                patch("backend.opencode.config.get_config", return_value=fake_config),
-                patch("backend.opencode.config.get_registry", return_value={"npd": entry}),
+                patch("agent.opencode_integration._GLOBAL_WORKSPACE", workspace_path),
+                patch("agent.opencode_integration.get_config", return_value=fake_config),
+                patch("agent.opencode_integration.get_registry", return_value={"npd": entry}),
             ):
                 first = get_global_opencode_workspace(mcp_port=9123)
                 second = get_global_opencode_workspace(mcp_port=9123)
@@ -189,9 +189,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             workspace_path = Path(tmp) / "opencode_workspace"
             fake_config = SimpleNamespace(mcp_server=SimpleNamespace(port=8100))
             with (
-                patch("backend.opencode.config._GLOBAL_WORKSPACE", workspace_path),
-                patch("backend.opencode.config.get_config", return_value=fake_config),
-                patch("backend.opencode.config.get_registry", return_value={}),
+                patch("agent.opencode_integration._GLOBAL_WORKSPACE", workspace_path),
+                patch("agent.opencode_integration.get_config", return_value=fake_config),
+                patch("agent.opencode_integration.get_registry", return_value={}),
             ):
                 workspace = get_global_opencode_workspace(mcp_port=9123)
                 live_path = workspace / "opencode.json"
@@ -229,9 +229,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             )
             fake_config = SimpleNamespace(mcp_server=SimpleNamespace(port=8100))
             with (
-                patch("backend.opencode.config._GLOBAL_WORKSPACE", workspace_path),
-                patch("backend.opencode.config.get_config", return_value=fake_config),
-                patch("backend.opencode.config.get_registry", return_value={"memleak": entry}),
+                patch("agent.opencode_integration._GLOBAL_WORKSPACE", workspace_path),
+                patch("agent.opencode_integration.get_config", return_value=fake_config),
+                patch("agent.opencode_integration.get_registry", return_value={"memleak": entry}),
             ):
                 workspace = get_global_opencode_workspace(mcp_port=9123)
 
@@ -247,9 +247,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             (stale / "SKILL.md").write_text("obsolete", encoding="utf-8")
             fake_config = SimpleNamespace(mcp_server=SimpleNamespace(port=8100))
             with (
-                patch("backend.opencode.config._GLOBAL_WORKSPACE", workspace_path),
-                patch("backend.opencode.config.get_config", return_value=fake_config),
-                patch("backend.opencode.config.get_registry", return_value={}),
+                patch("agent.opencode_integration._GLOBAL_WORKSPACE", workspace_path),
+                patch("agent.opencode_integration.get_config", return_value=fake_config),
+                patch("agent.opencode_integration.get_registry", return_value={}),
             ):
                 workspace = get_global_opencode_workspace(mcp_port=9123)
             self.assertFalse((workspace / ".opencode" / "skills" / "threat-path-audit").exists())
@@ -310,9 +310,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             workspace_path = Path(tmp) / "opencode_workspace"
             fake_config = SimpleNamespace(mcp_server=SimpleNamespace(port=8100))
             with (
-                patch("backend.opencode.config._GLOBAL_WORKSPACE", workspace_path),
-                patch("backend.opencode.config.get_config", return_value=fake_config),
-                patch("backend.opencode.config.get_registry", return_value={}),
+                patch("agent.opencode_integration._GLOBAL_WORKSPACE", workspace_path),
+                patch("agent.opencode_integration.get_config", return_value=fake_config),
+                patch("agent.opencode_integration.get_registry", return_value={}),
             ):
                 workspace = _create_fp_workspace(9123)
             self.assertEqual(workspace, workspace_path)

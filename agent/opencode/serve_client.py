@@ -24,13 +24,14 @@ from urllib.parse import quote
 
 import httpx
 
-from backend.logger import get_logger
-from backend.opencode.config_json import (
+import logging
+
+from .config_json import (
     is_sensitive_opencode_config_key,
     redact_opencode_config_content,
 )
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 _SERVE_START_TIMEOUT_SECONDS = 30.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
@@ -3417,7 +3418,7 @@ class OpenCodeServeManager:
                 _remove_file(startup_log_path)
 
 
-_manager = OpenCodeServeManager()
+_manager: OpenCodeServeManager | None = None
 
 
 def _serve_context_params(
@@ -3436,8 +3437,22 @@ def _serve_context_headers(directory: Path | None) -> dict[str, str]:
 
 
 def get_serve_manager() -> OpenCodeServeManager:
+    """Return the process singleton without starting the Serve child yet."""
+    global _manager
+    if _manager is None:
+        _manager = OpenCodeServeManager()
     return _manager
 
 
 def mark_serve_config_dirty() -> None:
-    _manager.mark_dirty()
+    if _manager is not None:
+        _manager.mark_dirty()
+
+
+async def shutdown_serve_manager() -> None:
+    """Stop and discard the singleton so a later task can recreate it."""
+    global _manager
+    manager = _manager
+    _manager = None
+    if manager is not None:
+        await manager.shutdown()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Awaitable, Callable, Protocol
 
 from backend.models import ThreatAnalysis, ThreatAttackPath
 
@@ -32,6 +32,7 @@ class ThreatAnalysisRunContext:
     on_output: Callable[[str], object] | None = None
     on_attack_paths: Callable[[list[ThreatAttackPath]], object] | None = None
     cancel_event: object | None = None
+    execute: Callable[["ThreatAnalysisRunContext"], Awaitable[ThreatAnalysis | None]] | None = None
 
 
 class ThreatAnalysisImplementation(Protocol):

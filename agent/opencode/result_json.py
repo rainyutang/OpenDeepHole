@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.opencode.llm_json import parse_llm_json
+from .llm_json import parse_llm_json
 
 
 VULNERABILITY_RESULT_SCHEMA: dict[str, Any] = {

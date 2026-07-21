@@ -1,4 +1,4 @@
-"""opencode workspace and configuration generation."""
+"""OpenDeepHole integration for the self-contained OpenCode component."""
 
 from __future__ import annotations
 
@@ -34,6 +34,83 @@ _workspace_locks_guard = threading.Lock()
 _initialized_workspace: Path | None = None
 
 
+def _config_value(value, name: str, default=None):
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
+    """Choose the source MCP disabled for one project using Agent state."""
+    config = get_config()
+    code_graph = getattr(config, "code_graph", None)
+    name = str(_config_value(code_graph, "name", "codegraph") or "codegraph")
+    if not bool(_config_value(code_graph, "enabled", False)):
+        return (name,)
+    try:
+        from agent.codegraph import is_codegraph_mcp_available, is_codegraph_ready
+
+        if is_codegraph_mcp_available(config) and is_codegraph_ready(directory):
+            return ("deephole-code",)
+    except Exception:
+        pass
+    return (name,)
+
+
+def _build_session_runtime(cli_config, model_option, directory: Path):
+    """Resolve the existing OpenDeepHole Serve configuration for the component."""
+    from agent.opencode import OpenCodeSessionRuntime
+    from agent import opencode_workflows as runtime_helpers
+
+    effective = runtime_helpers._effective_cli_config(cli_config, model_option)
+    tool = runtime_helpers._normalize_tool(effective)
+    if tool not in {"opencode", "nga"}:
+        raise ValueError(f"Unsupported OpenCode serve tool: {tool}")
+    if runtime_helpers._invocation_mode(effective) != "serve":
+        raise ValueError("OpenCode tasks require serve invocation mode")
+    executable = runtime_helpers._resolve_cli_executable(effective)
+    model = str(_config_value(effective, "model", "") or "")
+    workspace = get_global_opencode_workspace()
+    serve_env = runtime_helpers._build_cli_env(
+        workspace,
+        tool,
+        writable_paths=None,
+        project_dir=None,
+        executable=executable,
+        cli_config=effective,
+    )
+    config_content = runtime_helpers._build_opencode_config_content(
+        workspace,
+        tool,
+        base_env=serve_env,
+        writable_paths=None,
+        project_dir=None,
+        executable=executable,
+        cli_config=effective,
+    )
+    return OpenCodeSessionRuntime(
+        directory=Path(directory).resolve(),
+        tool=tool,
+        executable=executable,
+        model=model,
+        config_workspace=workspace,
+        config_content=config_content,
+        env_overrides=runtime_helpers._opencode_process_env_overrides(serve_env),
+    )
+
+
+def configure_opencode_component() -> None:
+    """Register OpenDeepHole host bindings without starting OpenCode Serve."""
+    from agent.opencode import OpenCodeHostBindings, configure_opencode
+
+    configure_opencode(OpenCodeHostBindings(
+        get_config=get_config,
+        get_workspace=get_global_opencode_workspace,
+        build_session_runtime=_build_session_runtime,
+        disabled_source_mcp_tools=_disabled_source_mcp_tools,
+    ))
+
+
 def get_workspace_lock(workspace: Path) -> threading.RLock:
     """Return a process-local lock for opencode files in one workspace."""
     key = str(workspace.resolve())
@@ -60,7 +137,7 @@ def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
 
     The workspace contains stable MCP/skill configuration only. Scan-specific
     state (scope, selected feedback and writable roots) is attached to each
-    task by :mod:`backend.opencode.task_service` and is never written here.
+    task by :mod:`agent.opencode.task_service` and is never written here.
     """
     global _initialized_workspace
     workspace = _GLOBAL_WORKSPACE
@@ -123,7 +200,7 @@ def _write_text_atomic(path: Path, content: str, *, mode: int | None = None) -> 
 
 def _install_builtin_skills(workspace: Path) -> None:
     """Materialize every repository-owned skill in the global skill root."""
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[1]
     skills_root = workspace / ".opencode" / "skills"
     for skill_name, relative_source in _BUILTIN_AGENT_SKILLS.items():
         source = repo_root / relative_source
@@ -138,7 +215,7 @@ def _install_builtin_skills(workspace: Path) -> None:
     # The attack-tree workflow owns a main skill, six stage skills and shared
     # reference material. Register all of them up front; OpenCode discovers the
     # catalog and loads only a skill selected by the task prompt.
-    from backend.threat_analysis.workspace import install_attack_tree_threat_analysis_skill
+    from agent.threat_analysis_workspace import install_attack_tree_threat_analysis_skill
 
     skill_path = repo_root / "attack-tree-threat-analysis.md"
     reference_path = repo_root / "attack-method-reference-catalog.md"

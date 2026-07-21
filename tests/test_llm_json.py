@@ -1,6 +1,6 @@
 import pytest
 
-from backend.opencode.llm_json import (
+from agent.opencode.llm_json import (
     LLMJsonParseError,
     parse_llm_json,
     parse_llm_json_schema,

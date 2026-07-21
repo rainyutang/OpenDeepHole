@@ -8,8 +8,8 @@ from pathlib import Path
 
 from backend.config import load_config
 
-from .base import ThreatAnalysisRunContext
-from .registry import get_threat_analysis_implementation
+from backend.threat_analysis.base import ThreatAnalysisRunContext
+from backend.threat_analysis.registry import get_threat_analysis_implementation
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -26,6 +26,8 @@ def _parser() -> argparse.ArgumentParser:
 
 async def _run(args: argparse.Namespace) -> int:
     config = load_config(args.config or None)
+    from agent.opencode_integration import configure_opencode_component
+    configure_opencode_component()
     if args.implementation:
         config.threat_analysis.implementation = args.implementation
     implementation = get_threat_analysis_implementation(config)
@@ -38,7 +40,9 @@ async def _run(args: argparse.Namespace) -> int:
         else project_path / ".opendeephole-threat-workspace"
     )
     workspace.mkdir(parents=True, exist_ok=True)
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parent.parent
+
+    from agent.opencode_workflows import execute_threat_analysis_context
 
     analysis = await implementation.run(
         ThreatAnalysisRunContext(
@@ -50,6 +54,7 @@ async def _run(args: argparse.Namespace) -> int:
             product=args.product,
             timeout=config.opencode.timeout,
             on_output=lambda line: print(line, flush=True),
+            execute=execute_threat_analysis_context,
         )
     )
     if analysis is None:

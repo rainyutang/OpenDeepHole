@@ -46,7 +46,7 @@ from backend.api.scan import _running_scans, _scan_owners
 from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
-from backend.opencode.config_json import parse_opencode_jsonc, redact_opencode_config_content
+from backend.opencode_config import parse_opencode_jsonc, redact_opencode_config_content
 from backend.models import (
     AgentGitHistory,
     AgentMcpConfig,
@@ -159,7 +159,7 @@ def _stored_opencode_runtime_config(record: dict | None) -> dict | None:
 
 
 def _mcp_config_fingerprint(config: AgentMcpConfig) -> str:
-    from backend.opencode.config import managed_mcp_config_fingerprint
+    from backend.opencode_config import managed_mcp_config_fingerprint
 
     return managed_mcp_config_fingerprint(config)
 

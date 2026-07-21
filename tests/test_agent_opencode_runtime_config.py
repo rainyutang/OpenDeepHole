@@ -15,8 +15,8 @@ from agent import main as agent_main
 from agent import server as agent_server
 from backend.api import agent as agent_api
 from backend.models import AgentInfo, AgentRemoteConfig, User
-from backend.opencode import config as opencode_config
-from backend.opencode import serve_client
+import agent.opencode_integration as opencode_config
+from agent.opencode import serve_client
 from backend.store.sqlite import SqliteScanStore
 
 

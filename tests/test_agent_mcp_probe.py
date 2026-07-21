@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from agent import mcp_probe
 from backend.api import agent as agent_api
 from backend.models import AgentInfo, AgentRemoteConfig, User
-from backend.opencode.serve_client import OpenCodeServeManager
+from agent.opencode.serve_client import OpenCodeServeManager
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -33,7 +33,7 @@ def _mcp_config(**overrides) -> dict:
 def test_local_stdio_probe_initializes_and_lists_tools(tmp_path: Path, monkeypatch) -> None:
     server = Path(__file__).parent / "fixtures" / "mcp_probe_server.py"
     monkeypatch.setattr(
-        "backend.opencode.config.get_global_opencode_workspace",
+        "agent.opencode_integration.get_global_opencode_workspace",
         lambda: tmp_path,
     )
     config = _mcp_config(local={

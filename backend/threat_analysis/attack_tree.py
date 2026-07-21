@@ -80,20 +80,7 @@ class AttackTreeThreatAnalysis:
         )
 
     async def run(self, context: ThreatAnalysisRunContext) -> ThreatAnalysis | None:
-        """Run the legacy OpenCode attack-tree implementation through the stable adapter."""
-        from backend.opencode.runner import run_threat_analysis_audit
-
-        return await run_threat_analysis_audit(
-            workspace=context.workspace,
-            project_id=context.scan_id,
-            skill_path=context.repo_root / self.skill_filename,
-            reference_catalog_path=context.repo_root / self.reference_catalog_filename,
-            on_output=context.on_output,
-            cancel_event=context.cancel_event,
-            timeout=context.timeout,
-            project_dir=context.project_path,
-            code_scan_path=context.code_scan_path,
-            product=context.product,
-            planned_task_id=context.planned_task_id,
-            on_attack_paths=context.on_attack_paths,
-        )
+        """Delegate execution to the client-supplied runtime adapter."""
+        if context.execute is None:
+            raise RuntimeError("Threat-analysis execution adapter is not configured")
+        return await context.execute(context)

@@ -12,7 +12,7 @@ from agent.scanner import (
     _streaming_threat_analysis_id,
 )
 from agent.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
-from backend.threat_analysis.attack_tree_opencode import (
+from agent.threat_analysis_opencode import (
     _attack_goals_from_base_output,
     _base_model_agent_shards,
     _invoke_stage,
@@ -24,9 +24,9 @@ from backend.threat_analysis.attack_tree_opencode import (
     _with_method_confirmation_task_defaults,
 )
 from backend.threat_analysis.harness import build_code_index
-from backend.opencode.runner import _read_fresh_threat_analysis_result
-from backend.opencode import OpenCodeResult
-from backend.opencode.task_service import get_opencode_execution_context
+from agent.opencode_workflows import _read_fresh_threat_analysis_result
+from agent.opencode import OpenCodeResult
+from agent.opencode.task_service import get_opencode_execution_context
 from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_analysis import (

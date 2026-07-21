@@ -49,7 +49,7 @@ from backend.models import (
     ThreatAuditTask,
     User,
 )
-from backend.opencode.model_pool import NoAvailableModelError
+from agent.opencode.model_pool import NoAvailableModelError
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_analysis import apply_threat_analysis_scan_scope, parse_threat_analysis_data
 
@@ -299,7 +299,7 @@ class AgentScanPathTests(unittest.TestCase):
                     schema_version="1.0",
                     analysis_id="threat-1",
                 ))
-                with patch("backend.opencode.runner.run_threat_analysis_audit", runner):
+                with patch("agent.opencode_workflows.run_threat_analysis_audit", runner):
                     await _run_threat_analysis_phase(
                         config=AgentConfig(),
                         project_path=project.resolve(),
@@ -333,7 +333,7 @@ class AgentScanPathTests(unittest.TestCase):
                     return None
 
                 with patch(
-                    "backend.opencode.runner.run_threat_analysis_audit",
+                    "agent.opencode_workflows.run_threat_analysis_audit",
                     new=AsyncMock(side_effect=NoAvailableModelError()),
                 ):
                     await _run_threat_analysis_phase(
@@ -370,13 +370,13 @@ class AgentScanPathTests(unittest.TestCase):
             with (
                 patch("agent.threat_auditor.build_threat_audit_tasks", return_value=[task]),
                 patch(
-                    "backend.opencode.model_pool.register_planned_task",
+                    "agent.opencode.model_pool.register_planned_task",
                     new=AsyncMock(return_value="planned-1"),
                 ),
-                patch("backend.opencode.model_pool.total_model_capacity", return_value=1),
-                patch("backend.opencode.model_pool.clear_planned_task", new=AsyncMock()),
+                patch("agent.opencode.model_pool.total_model_capacity", return_value=1),
+                patch("agent.opencode.model_pool.clear_planned_task", new=AsyncMock()),
                 patch(
-                    "backend.opencode.runner.run_threat_audit",
+                    "agent.opencode_workflows.run_threat_audit",
                     new=AsyncMock(side_effect=NoAvailableModelError()),
                 ) as runner,
             ):
@@ -434,7 +434,7 @@ class AgentScanPathTests(unittest.TestCase):
                     schema_version="1.0",
                     analysis_id="new-threat",
                 ))
-                with patch("backend.opencode.runner.run_threat_analysis_audit", runner):
+                with patch("agent.opencode_workflows.run_threat_analysis_audit", runner):
                     await _run_threat_analysis_phase(
                         config=AgentConfig(),
                         project_path=project.resolve(),
@@ -477,7 +477,7 @@ class AgentScanPathTests(unittest.TestCase):
                 )
                 auditor = AsyncMock()
                 with (
-                    patch("backend.opencode.runner.run_threat_analysis_audit", AsyncMock()) as runner,
+                    patch("agent.opencode_workflows.run_threat_analysis_audit", AsyncMock()) as runner,
                     patch("agent.threat_auditor.run_threat_audit_tasks", auditor),
                 ):
                     await _run_threat_analysis_phase(
@@ -552,7 +552,7 @@ class AgentScanPathTests(unittest.TestCase):
                 auditor = AsyncMock()
                 with (
                     patch(
-                        "backend.opencode.runner.run_threat_analysis_audit",
+                        "agent.opencode_workflows.run_threat_analysis_audit",
                         new=AsyncMock(side_effect=fake_runner),
                     ),
                     patch("agent.threat_auditor.run_threat_audit_tasks", auditor),
@@ -616,7 +616,7 @@ class AgentScanPathTests(unittest.TestCase):
                     schema_version="1.0",
                     analysis_id="new-threat",
                 ))
-                with patch("backend.opencode.runner.run_threat_analysis_audit", runner):
+                with patch("agent.opencode_workflows.run_threat_analysis_audit", runner):
                     await _run_threat_analysis_phase(
                         config=AgentConfig(),
                         project_path=project.resolve(),

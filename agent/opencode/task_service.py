@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import re
 import time
 from contextlib import contextmanager
@@ -15,16 +16,18 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from backend.config import get_config
-from backend.logger import get_logger
-from backend.models import OutputSource
-from backend.opencode.api import OpenCodeResult, OpenCodeTaskType
-from backend.opencode.llm_json import (
+from .api import OpenCodeResult, OpenCodeTaskType
+from .host import (
+    OpenCodeInvocationMetadata as OutputSource,
+    OpenCodeSessionRuntime as _SessionRuntime,
+    get_host_bindings,
+)
+from .llm_json import (
     LLMJsonParseError,
     parse_llm_json,
     parse_llm_json_schema,
 )
-from backend.opencode.model_pool import (
+from .model_pool import (
     ModelLease,
     NoAvailableModelError,
     acquire_model_lease,
@@ -34,11 +37,21 @@ from backend.opencode.model_pool import (
     release_model_lease,
     update_model_lease_context,
 )
-from backend.opencode.serve_client import OpenCodePromptResult, get_serve_manager
+from .serve_client import OpenCodePromptResult, get_serve_manager
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 TERMINAL_TASK_STATUSES = {"success", "failure", "timeout", "cancelled"}
+
+
+def get_config() -> Any:
+    """Resolve host configuration through the component boundary."""
+    return get_host_bindings().get_config()
+
+
+def get_global_opencode_workspace() -> Path:
+    """Resolve the host-owned OpenCode workspace through its binding."""
+    return get_host_bindings().get_workspace()
 
 
 def _now_iso() -> str:
@@ -287,26 +300,6 @@ class _TaskRecord:
     requeue_requested: bool = False
 
 
-@dataclass(frozen=True)
-class _SessionRuntime:
-    directory: Path
-    tool: str
-    executable: str
-    config_workspace: Path | None
-    config_content: str | None
-    env_overrides: dict[str, str]
-
-    def kwargs(self) -> dict[str, Any]:
-        return {
-            "tool": self.tool,
-            "executable": self.executable,
-            "directory": self.directory,
-            "config_workspace": self.config_workspace,
-            "config_content": self.config_content,
-            "env_overrides": self.env_overrides,
-        }
-
-
 class OpenCodeTaskHandle:
     def __init__(self, service: "OpenCodeTaskService", record: _TaskRecord) -> None:
         self._service = service
@@ -516,7 +509,9 @@ class OpenCodeTaskService:
         validation_debug = self._validation_debug_enabled(record)
         combined_cancel = _CombinedCancelEvent(record.cancel_event, context.cancel_event)
         cli_config_source = lambda: _task_cli_config(record.execution_context)
-        global_concurrency = lambda: configured_global_concurrency(get_config())
+        global_concurrency = lambda: configured_global_concurrency(
+            get_config()
+        )
         task_policy = _task_model_policy(record.execution_context)
         configured_retry_count = int(
             _cfg_value(_task_cli_config(record.execution_context), "max_retries", 2) or 0
@@ -841,50 +836,17 @@ class OpenCodeTaskService:
         session_attempt: int,
     ) -> tuple[_SessionRuntime, str, OutputSource]:
         """Build a stable serve runtime from the Agent-wide workspace."""
-        from backend.opencode import runner as runtime_helpers
-        from backend.opencode.config import get_global_opencode_workspace
-
         spec = record.spec
         cli_config = _task_cli_config(record.execution_context)
-        effective = runtime_helpers._effective_cli_config(cli_config, lease.option)
-        tool = runtime_helpers._normalize_tool(effective)
-        if tool not in {"opencode", "nga"}:
-            raise ValueError(f"Unsupported OpenCode serve tool: {tool}")
-        if runtime_helpers._invocation_mode(effective) != "serve":
-            raise ValueError("OpenCode tasks require serve invocation mode")
-        executable = runtime_helpers._resolve_cli_executable(effective)
-        model = str(_cfg_value(effective, "model", "") or "")
-        config_workspace = get_global_opencode_workspace()
-        serve_env = runtime_helpers._build_cli_env(
-            config_workspace,
-            tool,
-            # Task-specific access is carried by session permissions, keeping
-            # the serve config hash stable across directories and retries.
-            writable_paths=None,
-            project_dir=None,
-            executable=executable,
-            cli_config=effective,
+        runtime = get_host_bindings().build_session_runtime(
+            cli_config,
+            lease.option,
+            spec.directory,
         )
-        config_content = runtime_helpers._build_opencode_config_content(
-            config_workspace,
-            tool,
-            base_env=serve_env,
-            writable_paths=None,
-            project_dir=None,
-            executable=executable,
-            cli_config=effective,
-        )
-        runtime = _SessionRuntime(
-            directory=spec.directory,
-            tool=tool,
-            executable=executable,
-            config_workspace=config_workspace,
-            config_content=config_content,
-            env_overrides=runtime_helpers._opencode_process_env_overrides(serve_env),
-        )
+        model = runtime.model
         source = OutputSource(
             backend="opencode",
-            tool=tool,
+            tool=runtime.tool,
             model_id=lease.option.id,
             model=model,
             use_default_model=bool(lease.option.use_default_model),
@@ -1056,19 +1018,7 @@ def _effective_required_capability(
 
 
 def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
-    config = get_config()
-    code_graph = getattr(config, "code_graph", None)
-    name = str(_cfg_value(code_graph, "name", "codegraph") or "codegraph")
-    if not bool(_cfg_value(code_graph, "enabled", False)):
-        return (name,)
-    try:
-        from agent.codegraph import is_codegraph_mcp_available, is_codegraph_ready
-
-        if is_codegraph_mcp_available(config) and is_codegraph_ready(directory):
-            return ("deephole-code",)
-    except Exception:
-        pass
-    return (name,)
+    return tuple(get_host_bindings().disabled_source_mcp_tools(directory))
 
 
 def _model_pool_task_context(
@@ -1122,7 +1072,7 @@ def _json_correction_prompt(schema: dict[str, Any]) -> str:
 
 
 def _task_system_prompt(record: _TaskRecord) -> str:
-    from backend.opencode.feedback_format import format_feedback_experience
+    from .feedback_format import format_feedback_experience
 
     sections: list[str] = []
     if "deephole-code" in _disabled_source_mcp_tools(record.spec.directory):
@@ -1150,17 +1100,18 @@ def _task_system_prompt(record: _TaskRecord) -> str:
 
 
 def _permission_path_patterns(path: Path) -> list[str]:
-    from backend.opencode.config import writable_edit_patterns
-
-    return writable_edit_patterns(str(path.resolve()))
+    normalized = str(path.resolve())
+    variants = [normalized]
+    for candidate in (normalized.replace("\\", "/"), normalized.replace("/", "\\")):
+        if candidate not in variants:
+            variants.append(candidate)
+    return [pattern for value in variants for pattern in (value, f"{value}/**")]
 
 
 def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
     """Allow project reads and restrict all model writes to the bound work dir."""
     spec = record.spec
     context = record.execution_context
-    from backend.opencode.config import get_global_opencode_workspace
-
     work_dir = _required_work_dir(context)
     external_roots = [spec.directory, work_dir, get_global_opencode_workspace()]
 
@@ -1312,3 +1263,9 @@ def _get_opencode_task_service() -> OpenCodeTaskService:
     if _service is None:
         _service = OpenCodeTaskService()
     return _service
+
+
+def reset_opencode_task_service() -> None:
+    """Discard the lazy task-service singleton after host shutdown."""
+    global _service
+    _service = None

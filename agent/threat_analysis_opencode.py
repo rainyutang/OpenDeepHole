@@ -1,10 +1,11 @@
-"""OpenCode runner for the built-in attack-tree threat-analysis implementation."""
+"""Agent-side OpenCode runner for attack-tree threat analysis."""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -12,31 +13,30 @@ from uuid import uuid4
 
 from backend.config import get_config
 from backend.models import ThreatAnalysis, ThreatAnalysisSources, ThreatAttackPath
-from backend.opencode import OpenCodeTaskType
-from backend.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
-from backend.opencode.task_service import (
+from agent.opencode import OpenCodeTaskType, run_opencode_task
+from agent.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
+from agent.opencode.task_service import (
     bind_opencode_execution_context,
     get_opencode_execution_context,
 )
 
-from .attack_paths import (
+from backend.threat_analysis.attack_paths import (
     append_or_merge_attack_path,
     build_analysis_from_attack_paths,
     parse_attack_path_data,
     read_attack_paths_jsonl,
 )
-from .harness import (
+from backend.threat_analysis.harness import (
     build_code_index,
-    detect_product_mcp,
     read_json_object,
     write_json,
 )
-from .parsing import (
+from backend.threat_analysis.parsing import (
     build_threat_analysis_scan_scope,
     parse_threat_analysis_file,
     write_threat_analysis_file,
 )
-from .workspace import install_attack_tree_threat_analysis_skill
+from agent.threat_analysis_workspace import install_attack_tree_threat_analysis_skill
 
 
 _MAX_GOALS = 30
@@ -62,6 +62,63 @@ _CPP_CODE_EXTENSIONS = {
     ".ipp",
     ".inl",
 }
+
+
+def _configured_opencode_mcp_names(*, workspace: Path, project_dir: Path) -> list[str]:
+    from agent import opencode_workflows as opencode_runner
+
+    config = opencode_runner.get_config()
+    cli_config = config.opencode
+    env = os.environ.copy()
+    try:
+        tool = opencode_runner._normalize_tool(cli_config)
+        executable = opencode_runner._resolve_cli_executable(cli_config)
+        merged = opencode_runner._opencode_config_for_env(
+            workspace,
+            tool,
+            project_dir,
+            env,
+            executable=executable,
+            config_paths=getattr(cli_config, "config_paths", []),
+            config_jsonc=getattr(cli_config, "config_jsonc", "{}"),
+        )
+    except Exception:
+        merged = {}
+    names: list[str] = []
+    for key in ("mcp", "mcpServers"):
+        section = merged.get(key)
+        if isinstance(section, dict):
+            for name in section:
+                normalized = str(name or "").strip()
+                if normalized and normalized not in names:
+                    names.append(normalized)
+    return names
+
+
+def _detect_product_mcp(
+    *,
+    workspace: Path,
+    project_dir: Path,
+    run_dir: Path,
+    product_mcp_name: str,
+    timeout_seconds: int = 60,
+) -> dict[str, Any]:
+    requested = str(product_mcp_name or "").strip()
+    available_names = _configured_opencode_mcp_names(
+        workspace=workspace,
+        project_dir=project_dir,
+    )
+    result = {
+        "requested_name": requested,
+        "available_mcp_names": available_names,
+        "mcp_available": bool(requested and requested in available_names),
+        "detection_method": "opencode_config",
+        "timeout_seconds": int(timeout_seconds or 0),
+    }
+    write_json(run_dir / "product_mcp_detection.json", result)
+    return result
+
+
 _GENERATED_THREAT_ID_PATTERN = re.compile(
     r"^(?:METHOD|NODE|AP|ASSET|RISK|GOAL|DOMAIN|SURFACE|TREE)-[A-Z0-9][A-Z0-9-]*$",
     re.IGNORECASE,
@@ -108,14 +165,14 @@ async def run_attack_tree_threat_analysis(
     on_attack_paths: Callable[[list[ThreatAttackPath]], object] | None = None,
 ) -> ThreatAnalysis | None:
     """Run the layered threat-analysis harness and return normalized results."""
-    from backend.opencode import runner as opencode_runner
+    from agent import opencode_workflows as opencode_runner
 
     config = opencode_runner.get_config()
     if config.opencode.mock:
         await opencode_runner._clear_planned_task_id(planned_task_id)
         return ThreatAnalysis(schema_version="1.1", analysis_id=f"mock-{project_id}")
 
-    from backend.opencode.config import managed_opencode_config_path
+    from agent.opencode_integration import managed_opencode_config_path
 
     install_attack_tree_threat_analysis_skill(
         workspace,
@@ -159,7 +216,7 @@ async def run_attack_tree_threat_analysis(
     product_mcp_detection_timeout = int(
         getattr(threat_config, "product_mcp_detection_timeout_seconds", 60) or 60
     )
-    mcp_detection = detect_product_mcp(
+    mcp_detection = _detect_product_mcp(
         workspace=workspace,
         project_dir=analysis_root,
         run_dir=run_dir,
@@ -654,6 +711,7 @@ async def _invoke_stage(
 ) -> None:
     if _cancelled(cancel_event):
         return
+    task_runner = getattr(opencode_runner, "run_opencode_task", run_opencode_task)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     log_dir = run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -707,7 +765,7 @@ async def _invoke_stage(
                 on_output=on_output,
                 cancel_event=cancel_event,
             ):
-                result = await opencode_runner.run_opencode_task(
+                result = await task_runner(
                     task_name=f"威胁分析：{task_label}",
                     task_type=OpenCodeTaskType.THREAT_ANALYSIS,
                     prompt=stage_prompt,

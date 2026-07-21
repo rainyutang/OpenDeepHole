@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from backend.opencode.serve_client import (
+from agent.opencode.serve_client import (
     OpenCodeModelInfo,
     OpenCodeModelListResult,
     OpenCodePromptResult,
@@ -32,7 +32,7 @@ from backend.opencode.serve_client import (
 @pytest.fixture(autouse=True)
 def _short_event_drain_for_tests(monkeypatch) -> None:
     monkeypatch.setattr(
-        "backend.opencode.serve_client._SERVE_EVENT_DRAIN_TIMEOUT_SECONDS",
+        "agent.opencode.serve_client._SERVE_EVENT_DRAIN_TIMEOUT_SECONDS",
         0.05,
     )
 
@@ -181,7 +181,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
         _FakeAsyncClient.event_lines = []
         _FakeAsyncClient.tool_ids = ["read", "grep", "mcp__deephole-code__view_function_code"]
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -291,7 +291,7 @@ def test_run_prompt_emits_debug_serve_status(
         _FakeAsyncClient.tool_ids = ["read"]
         _FakeAsyncClient.message_info = None
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
         monkeypatch.setenv("OPENCODE_SERVE_PORT", "12345")
@@ -375,7 +375,7 @@ def test_run_prompt_continues_session_without_native_format_and_with_selected_mc
             "modelID": "actual",
         }
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
         manager = OpenCodeServeManager()
@@ -430,7 +430,7 @@ def test_session_management_methods_use_durable_session_routes(monkeypatch, tmp_
     async def run() -> None:
         _FakeAsyncClient.instances = []
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
         manager = OpenCodeServeManager()
@@ -469,7 +469,7 @@ def test_run_prompt_reports_actual_response_model_for_default_request(monkeypatc
             "modelID": "claude-sonnet",
         }
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -529,7 +529,7 @@ def test_run_prompt_ignores_missing_or_invalid_response_model_info(
         _FakeAsyncClient.tool_ids = []
         _FakeAsyncClient.message_info = message_info
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -577,7 +577,7 @@ def test_run_prompt_omits_tools_field_when_tool_discovery_fails(monkeypatch, tmp
         _FakeAsyncClient.event_lines = []
         _FakeAsyncClient.tool_ids = RuntimeError("tool endpoint unavailable")
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -629,7 +629,7 @@ def test_run_prompt_logs_discovered_mcp_tool_names(monkeypatch, tmp_path: Path) 
             "mcp__deephole-code__view_struct_code",
         ]
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
         manager = OpenCodeServeManager()
@@ -672,7 +672,7 @@ def test_list_models_uses_project_directory_context(monkeypatch, tmp_path: Path)
             "/config/providers": {"providers": []},
         }
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeModelAsyncClient,
         )
 
@@ -738,7 +738,7 @@ def test_fetch_models_uses_complete_provider_response_without_config_fallback(
             },
         }
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeModelAsyncClient,
         )
 
@@ -783,7 +783,7 @@ def test_fetch_models_falls_back_when_provider_request_fails(monkeypatch) -> Non
             },
         }
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeModelAsyncClient,
         )
 
@@ -824,7 +824,7 @@ def test_fetch_models_falls_back_for_missing_connected_provider(monkeypatch) -> 
             },
         }
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeModelAsyncClient,
         )
 
@@ -948,7 +948,7 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
             "",
         ]
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -997,7 +997,7 @@ def test_run_prompt_compacts_final_text_when_sse_has_no_text(monkeypatch, tmp_pa
         monkeypatch.setattr(_FakeAsyncClient, "tool_ids", [])
         monkeypatch.setattr(_FakeAsyncClient, "message_text", "first line\nsecond line")
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -1040,7 +1040,7 @@ def test_run_prompt_streams_sync_session_events(monkeypatch, tmp_path: Path) -> 
             "",
         ]
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -1085,7 +1085,7 @@ def test_run_prompt_uses_ended_text_when_no_delta(monkeypatch, tmp_path: Path) -
             "",
         ]
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -1127,7 +1127,7 @@ def test_message_part_delta_survives_non_text_session_next_event(monkeypatch, tm
             "",
         ]
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -1163,7 +1163,7 @@ def test_final_text_prints_when_event_stream_only_has_reasoning(monkeypatch, tmp
             "",
         ]
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -1200,7 +1200,7 @@ def test_run_prompt_reconciles_only_missing_sse_text_tail(monkeypatch, tmp_path:
         ]
         monkeypatch.setattr(_FakeAsyncClient, "message_text", "prefix-tail")
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
         )
 
@@ -1284,7 +1284,7 @@ def test_run_prompt_final_fallback_does_not_log_tool_output_body(
 
     async def run() -> None:
         monkeypatch.setattr(
-            "backend.opencode.serve_client.httpx.AsyncClient",
+            "agent.opencode.serve_client.httpx.AsyncClient",
             ToolBodyClient,
         )
         manager = OpenCodeServeManager()
@@ -1752,7 +1752,7 @@ def test_open_source_tool_parts_and_key_statuses_are_visible_without_tool_body()
 def test_no_newline_delta_is_flushed_periodically(monkeypatch) -> None:
     async def run() -> None:
         monkeypatch.setattr(
-            "backend.opencode.serve_client._SERVE_EVENT_FLUSH_INTERVAL_SECONDS",
+            "agent.opencode.serve_client._SERVE_EVENT_FLUSH_INTERVAL_SECONDS",
             0.01,
         )
         output: list[str] = []
@@ -1809,7 +1809,7 @@ def test_event_failure_logs_are_aggregated_and_recovery_is_single(monkeypatch) -
     )
     clock = {"now": 100.0}
     monkeypatch.setattr(
-        "backend.opencode.serve_client.time.monotonic",
+        "agent.opencode.serve_client.time.monotonic",
         lambda: clock["now"],
     )
 
@@ -1898,8 +1898,8 @@ def test_server_connected_then_immediate_eof_does_not_log_false_recovery(
             if len(delays) >= 3:
                 raise asyncio.CancelledError()
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", Client)
-        monkeypatch.setattr("backend.opencode.serve_client.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("agent.opencode.serve_client.asyncio.sleep", fake_sleep)
         manager = OpenCodeServeManager()
         manager._port = 12345
         output: list[str] = []
@@ -1971,7 +1971,7 @@ def test_global_event_hub_is_shared_and_routes_wrapped_sessions(
                 self.stream_calls.append((path, kwargs))
                 return StreamContext()
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", Client)
         manager = OpenCodeServeManager()
         manager._port = 12345
         directory = tmp_path / "project"
@@ -2062,7 +2062,7 @@ def test_global_event_unsupported_falls_back_to_one_legacy_stream_per_directory(
                 self.paths.append(path)
                 return StreamContext(Response(404 if path == "/global/event" else 200))
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", Client)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", Client)
         manager = OpenCodeServeManager()
         manager._port = 12345
         directory = tmp_path / "project"
@@ -2089,7 +2089,7 @@ def test_snapshot_polling_fills_text_reasoning_and_tool_state_then_pauses_on_rec
 ) -> None:
     async def run() -> None:
         monkeypatch.setattr(
-            "backend.opencode.serve_client._SERVE_EVENT_POLL_INTERVAL_SECONDS",
+            "agent.opencode.serve_client._SERVE_EVENT_POLL_INTERVAL_SECONDS",
             0.01,
         )
         manager = OpenCodeServeManager()
@@ -2212,16 +2212,16 @@ def test_serve_port_accepts_env_override(monkeypatch) -> None:
 
 
 def test_pid_is_running_uses_windows_fallback(monkeypatch) -> None:
-    from backend.opencode import serve_client
+    from agent.opencode import serve_client
 
-    monkeypatch.setattr("backend.opencode.serve_client.sys.platform", "win32")
-    monkeypatch.setattr("backend.opencode.serve_client._windows_pid_is_running", lambda pid: False)
+    monkeypatch.setattr("agent.opencode.serve_client.sys.platform", "win32")
+    monkeypatch.setattr("agent.opencode.serve_client._windows_pid_is_running", lambda pid: False)
 
     assert serve_client._pid_is_running(12345) is False
 
 
 def test_terminate_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
-    from backend.opencode import serve_client
+    from agent.opencode import serve_client
 
     running = {"alive": True}
     commands: list[list[str]] = []
@@ -2230,9 +2230,9 @@ def test_terminate_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
         commands.append(cmd)
         running["alive"] = False
 
-    monkeypatch.setattr("backend.opencode.serve_client.sys.platform", "win32")
-    monkeypatch.setattr("backend.opencode.serve_client._pid_is_running", lambda pid: running["alive"])
-    monkeypatch.setattr("backend.opencode.serve_client.subprocess.run", fake_run)
+    monkeypatch.setattr("agent.opencode.serve_client.sys.platform", "win32")
+    monkeypatch.setattr("agent.opencode.serve_client._pid_is_running", lambda pid: running["alive"])
+    monkeypatch.setattr("agent.opencode.serve_client.subprocess.run", fake_run)
 
     serve_client._terminate_process_tree(12345)
 
@@ -2240,7 +2240,7 @@ def test_terminate_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
 
 
 def test_parse_listener_pids_handles_windows_and_ipv6_netstat() -> None:
-    from backend.opencode import serve_client
+    from agent.opencode import serve_client
 
     output = """
   Proto  Local Address          Foreign Address        State           PID
@@ -2255,7 +2255,7 @@ def test_parse_listener_pids_handles_windows_and_ipv6_netstat() -> None:
 
 
 def test_parse_listener_pids_handles_ss_output_without_queue_numbers() -> None:
-    from backend.opencode import serve_client
+    from agent.opencode import serve_client
 
     output = """
 State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
@@ -2287,10 +2287,10 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         (startup_cwd / "opencode.json").write_text('{"stale": true}', encoding="utf-8")
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
         monkeypatch.delenv("OPENCODE_SERVE_PORT", raising=False)
-        monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
-        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: False)
+        monkeypatch.setattr("agent.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
+        monkeypatch.setattr("agent.opencode.serve_client._port_is_in_use", lambda port: False)
         monkeypatch.setattr(
-            "backend.opencode.serve_client._new_serve_startup_log_path",
+            "agent.opencode.serve_client._new_serve_startup_log_path",
             lambda tool, port: startup_log_path,
         )
 
@@ -2307,10 +2307,10 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
             (cwd / ".git").mkdir(parents=True)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", fake_popen)
-        monkeypatch.setattr("backend.opencode.serve_client.subprocess.run", fake_run)
+        monkeypatch.setattr("agent.opencode.serve_client.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("agent.opencode.serve_client.subprocess.run", fake_run)
         monkeypatch.setattr(
-            "backend.opencode.serve_client.logger.info",
+            "agent.opencode.serve_client.logger.info",
             lambda message, *args: startup_logs.append(message % args if args else str(message)),
         )
 
@@ -2431,11 +2431,11 @@ def test_start_locked_uses_bootstrap_cwd_without_runtime_workspace(monkeypatch, 
         marker_path = tmp_path / "serve-marker.json"
         startup_log_path = tmp_path / "serve-startup.log"
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
-        monkeypatch.setattr("backend.opencode.serve_client._serve_bootstrap_cwd", lambda tool: bootstrap_cwd)
-        monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
-        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: False)
+        monkeypatch.setattr("agent.opencode.serve_client._serve_bootstrap_cwd", lambda tool: bootstrap_cwd)
+        monkeypatch.setattr("agent.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
+        monkeypatch.setattr("agent.opencode.serve_client._port_is_in_use", lambda port: False)
         monkeypatch.setattr(
-            "backend.opencode.serve_client._new_serve_startup_log_path",
+            "agent.opencode.serve_client._new_serve_startup_log_path",
             lambda tool, port: startup_log_path,
         )
 
@@ -2450,8 +2450,8 @@ def test_start_locked_uses_bootstrap_cwd_without_runtime_workspace(monkeypatch, 
             popen_kwargs.append(kwargs)
             return FakeProc()
 
-        monkeypatch.setattr("backend.opencode.serve_client.subprocess.run", fake_run)
-        monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("agent.opencode.serve_client.subprocess.run", fake_run)
+        monkeypatch.setattr("agent.opencode.serve_client.subprocess.Popen", fake_popen)
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
@@ -2534,8 +2534,8 @@ def test_wait_health_polls_once_per_second_after_unhealthy_attempts(monkeypatch)
         async def fake_sleep(delay: float) -> None:
             sleeps.append(delay)
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", FakeHealthClient)
-        monkeypatch.setattr("backend.opencode.serve_client.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", FakeHealthClient)
+        monkeypatch.setattr("agent.opencode.serve_client.asyncio.sleep", fake_sleep)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 4096
@@ -2561,7 +2561,7 @@ def test_wait_health_timeout_reports_startup_output(monkeypatch, tmp_path: Path)
 
         startup_log = tmp_path / "startup.log"
         startup_log.write_text("provider failed to load\n", encoding="utf-8")
-        monkeypatch.setattr("backend.opencode.serve_client._SERVE_START_TIMEOUT_SECONDS", 0.0)
+        monkeypatch.setattr("agent.opencode.serve_client._SERVE_START_TIMEOUT_SECONDS", 0.0)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 4096
@@ -2602,13 +2602,13 @@ def test_start_locked_stops_previous_agent_owned_marker(monkeypatch, tmp_path: P
             return func(*args, **kwargs)
 
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
-        monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
-        monkeypatch.setattr("backend.opencode.serve_client._pid_is_running", lambda pid: pid == 11111)
-        monkeypatch.setattr("backend.opencode.serve_client._marker_matches_serve_process", lambda marker: True)
-        monkeypatch.setattr("backend.opencode.serve_client._terminate_process_tree", lambda pid: terminated.append(pid))
-        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: False)
-        monkeypatch.setattr("backend.opencode.serve_client.asyncio.to_thread", fake_to_thread)
-        monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+        monkeypatch.setattr("agent.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
+        monkeypatch.setattr("agent.opencode.serve_client._pid_is_running", lambda pid: pid == 11111)
+        monkeypatch.setattr("agent.opencode.serve_client._marker_matches_serve_process", lambda marker: True)
+        monkeypatch.setattr("agent.opencode.serve_client._terminate_process_tree", lambda pid: terminated.append(pid))
+        monkeypatch.setattr("agent.opencode.serve_client._port_is_in_use", lambda port: False)
+        monkeypatch.setattr("agent.opencode.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("agent.opencode.serve_client.subprocess.Popen", lambda *args, **kwargs: FakeProc())
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
@@ -2652,13 +2652,13 @@ def test_start_locked_reclaims_stale_child_listener_after_marker_parent_exits(mo
             port_state["in_use"] = False
 
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
-        monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
-        monkeypatch.setattr("backend.opencode.serve_client._pid_is_running", lambda pid: False)
-        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: port_state["in_use"])
-        monkeypatch.setattr("backend.opencode.serve_client._listener_pids_for_port", lambda port: {22222})
-        monkeypatch.setattr("backend.opencode.serve_client._terminate_process_tree", fake_terminate)
-        monkeypatch.setattr("backend.opencode.serve_client.asyncio.to_thread", fake_to_thread)
-        monkeypatch.setattr("backend.opencode.serve_client.subprocess.Popen", lambda *args, **kwargs: FakeProc())
+        monkeypatch.setattr("agent.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
+        monkeypatch.setattr("agent.opencode.serve_client._pid_is_running", lambda pid: False)
+        monkeypatch.setattr("agent.opencode.serve_client._port_is_in_use", lambda port: port_state["in_use"])
+        monkeypatch.setattr("agent.opencode.serve_client._listener_pids_for_port", lambda port: {22222})
+        monkeypatch.setattr("agent.opencode.serve_client._terminate_process_tree", fake_terminate)
+        monkeypatch.setattr("agent.opencode.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("agent.opencode.serve_client.subprocess.Popen", lambda *args, **kwargs: FakeProc())
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
@@ -2708,8 +2708,8 @@ def test_stop_locked_terminates_process_tree_and_removes_marker(monkeypatch, tmp
             wait(0.01)
 
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
-        monkeypatch.setattr("backend.opencode.serve_client._terminate_process_tree", fake_terminate)
-        monkeypatch.setattr("backend.opencode.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("agent.opencode.serve_client._terminate_process_tree", fake_terminate)
+        monkeypatch.setattr("agent.opencode.serve_client.asyncio.to_thread", fake_to_thread)
 
         proc = FakeProc()
         manager = OpenCodeServeManager()
@@ -2754,10 +2754,10 @@ def test_stop_locked_reclaims_listener_when_parent_already_exited(monkeypatch, t
             port_state["in_use"] = False
 
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
-        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: port_state["in_use"])
-        monkeypatch.setattr("backend.opencode.serve_client._listener_pids_for_port", lambda port: {44444})
-        monkeypatch.setattr("backend.opencode.serve_client._terminate_process_tree", fake_terminate)
-        monkeypatch.setattr("backend.opencode.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("agent.opencode.serve_client._port_is_in_use", lambda port: port_state["in_use"])
+        monkeypatch.setattr("agent.opencode.serve_client._listener_pids_for_port", lambda port: {44444})
+        monkeypatch.setattr("agent.opencode.serve_client._terminate_process_tree", fake_terminate)
+        monkeypatch.setattr("agent.opencode.serve_client.asyncio.to_thread", fake_to_thread)
 
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
@@ -2787,9 +2787,9 @@ def test_stop_owned_serve_removes_stale_marker_without_terminating(monkeypatch, 
         terminated: list[int] = []
 
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
-        monkeypatch.setattr("backend.opencode.serve_client._pid_is_running", lambda pid: False)
-        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: False)
-        monkeypatch.setattr("backend.opencode.serve_client._terminate_process_tree", lambda pid: terminated.append(pid))
+        monkeypatch.setattr("agent.opencode.serve_client._pid_is_running", lambda pid: False)
+        monkeypatch.setattr("agent.opencode.serve_client._port_is_in_use", lambda port: False)
+        monkeypatch.setattr("agent.opencode.serve_client._terminate_process_tree", lambda pid: terminated.append(pid))
 
         manager = OpenCodeServeManager()
         await manager._stop_owned_serve_on_port(4096)
@@ -2808,12 +2808,12 @@ def test_start_locked_reports_listener_pid_when_reclaim_fails(monkeypatch, tmp_p
             return func(*args, **kwargs)
 
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(tmp_path / "missing-marker.json"))
-        monkeypatch.setattr("backend.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
-        monkeypatch.setattr("backend.opencode.serve_client._port_is_in_use", lambda port: True)
-        monkeypatch.setattr("backend.opencode.serve_client._listener_pids_for_port", lambda port: {22222})
-        monkeypatch.setattr("backend.opencode.serve_client._terminate_process_tree", lambda pid: terminated.append(pid))
-        monkeypatch.setattr("backend.opencode.serve_client._wait_port_released", lambda port: False)
-        monkeypatch.setattr("backend.opencode.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr("agent.opencode.serve_client._resolve_executable", lambda name: "/bin/opencode")
+        monkeypatch.setattr("agent.opencode.serve_client._port_is_in_use", lambda port: True)
+        monkeypatch.setattr("agent.opencode.serve_client._listener_pids_for_port", lambda port: {22222})
+        monkeypatch.setattr("agent.opencode.serve_client._terminate_process_tree", lambda pid: terminated.append(pid))
+        monkeypatch.setattr("agent.opencode.serve_client._wait_port_released", lambda port: False)
+        monkeypatch.setattr("agent.opencode.serve_client.asyncio.to_thread", fake_to_thread)
 
         manager = OpenCodeServeManager()
 
@@ -3236,7 +3236,7 @@ def test_managed_mcp_hot_loads_live_directory_with_auth_headers(
                 name = str((kwargs.get("json") or {}).get("name") or "")
                 return _FakeResponse({name: {"status": "connected"}})
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", McpClient)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 12345
@@ -3309,7 +3309,7 @@ def test_managed_mcp_rename_connects_new_name_and_disconnects_old(
                     return _FakeResponse({name: {"status": "connected"}})
                 return _FakeResponse(True)
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", McpClient)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 12345
@@ -3379,7 +3379,7 @@ def test_managed_mcp_config_change_during_connect_cleans_up_stale_server(
                     return _FakeResponse({name: {"status": "connected"}})
                 return _FakeResponse(True)
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", McpClient)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 12345
@@ -3453,7 +3453,7 @@ def test_managed_mcp_reload_queues_forced_retry_while_sync_is_running(
                     return _FakeResponse({name: {"status": "connected"}})
                 return _FakeResponse(True)
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", McpClient)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 12345
@@ -3510,7 +3510,7 @@ def test_managed_mcp_failure_redacts_authorization_value(
                     error=RuntimeError("authentication failed for test-secret-123"),
                 )
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", McpClient)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 12345
@@ -3617,7 +3617,7 @@ def test_managed_mcp_live_status_refresh_aggregates_directories_and_redacts_auth
                     }
                 return _FakeResponse({"product-info": state})
 
-        monkeypatch.setattr("backend.opencode.serve_client.httpx.AsyncClient", McpClient)
+        monkeypatch.setattr("agent.opencode.serve_client.httpx.AsyncClient", McpClient)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 12345

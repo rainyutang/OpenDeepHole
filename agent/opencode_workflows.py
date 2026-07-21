@@ -1,4 +1,4 @@
-"""Business prompts and compatibility facade for unified OpenCode tasks."""
+"""OpenDeepHole-specific workflows built on the OpenCode component."""
 
 import asyncio
 import copy
@@ -20,15 +20,15 @@ from datetime import datetime, timezone
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import Candidate, OutputSource, ThreatAnalysis, ThreatAuditTask, Vulnerability
-from backend.opencode import OpenCodeResult, OpenCodeTaskType, run_opencode_task
-from backend.opencode.task_service import bind_opencode_execution_context
-from backend.opencode.model_pool import (
+from agent.opencode import OpenCodeResult, OpenCodeTaskType, run_opencode_task
+from agent.opencode.task_service import bind_opencode_execution_context
+from agent.opencode.model_pool import (
     NoAvailableModelError,
     clear_planned_task,
 )
-from backend.opencode.config_json import dump_opencode_config, parse_opencode_jsonc
-from backend.opencode.output_format import with_local_timestamp
-from backend.opencode.result_json import (
+from agent.opencode.config_json import dump_opencode_config, parse_opencode_jsonc
+from agent.opencode.output_format import with_local_timestamp
+from agent.opencode.result_json import (
     AUDITED_VULNERABILITY_RESULT_JSON_INSTRUCTION,
     AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA,
     AUDITED_VULNERABILITY_RESULTS_JSON_INSTRUCTION,
@@ -52,6 +52,20 @@ _DEFAULT_EXECUTABLES = {
     "nga": "nga",
     "opencode": "opencode",
 }
+
+
+def _to_output_source(source) -> OutputSource:
+    if isinstance(source, OutputSource):
+        return source
+    if hasattr(source, "model_dump"):
+        value = source.model_dump()
+        if isinstance(value, dict):
+            return OutputSource(**value)
+    if isinstance(source, dict):
+        return OutputSource(**source)
+    return OutputSource()
+
+
 _GLOBAL_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
 _PROJECT_OPENCODE_CONFIG_FILENAMES = ("config.json", "opencode.json", "opencode.jsonc")
 _OPENCODE_CONFIG_PATH_ENV = "OPENCODE_CONFIG_PATH"
@@ -229,7 +243,7 @@ async def _run_audit_via_opencode(
 
     def capture_source(source: OutputSource) -> None:
         nonlocal output_source
-        output_source = source
+        output_source = _to_output_source(source)
 
     prompt = _with_json_result_instruction((
         f"使用 `{skill_name}` 技能，分析位于 "
@@ -344,7 +358,7 @@ async def run_project_audit(
 
     def capture_source(source: OutputSource) -> None:
         nonlocal output_source
-        output_source = source
+        output_source = _to_output_source(source)
 
     prompt = _with_json_result_instruction((
         f"使用 `{skill_name}` 技能，审计代码扫描路径 `{candidate.file}` 对应的目标代码。"
@@ -566,7 +580,7 @@ async def run_sensitive_clear_audit(
 
     def capture_source(source: OutputSource) -> None:
         nonlocal output_source
-        output_source = source
+        output_source = _to_output_source(source)
 
     prompt = _with_json_result_instruction(
         _sensitive_clear_prompt(skill_name, candidate, project_id)
@@ -733,7 +747,7 @@ async def run_project_report_audit(
 
     def capture_source(source: OutputSource) -> None:
         nonlocal output_source
-        output_source = source
+        output_source = _to_output_source(source)
 
     for old_report in report_dir.glob("*.md"):
         try:
@@ -879,8 +893,8 @@ async def run_threat_audit(
 
         def capture_source(source: OutputSource) -> None:
             nonlocal attempt_source, last_source
-            attempt_source = source
-            last_source = source
+            attempt_source = _to_output_source(source)
+            last_source = attempt_source
 
         surface_label = _threat_display_label(task.surface_name, "相关攻击面")
         method_label = _threat_display_label(task.method_name, "相关攻击方式")
@@ -1055,7 +1069,7 @@ async def run_threat_analysis_audit(
     on_attack_paths=None,
 ) -> ThreatAnalysis | None:
     """Compatibility wrapper for the default attack-tree threat-analysis implementation."""
-    from backend.threat_analysis.attack_tree_opencode import run_attack_tree_threat_analysis
+    from agent.threat_analysis_opencode import run_attack_tree_threat_analysis
 
     return await run_attack_tree_threat_analysis(
         workspace=workspace,
@@ -1070,6 +1084,24 @@ async def run_threat_analysis_audit(
         product=product,
         planned_task_id=planned_task_id,
         on_attack_paths=on_attack_paths,
+    )
+
+
+async def execute_threat_analysis_context(context) -> ThreatAnalysis | None:
+    """Adapt the backend's pure threat-analysis context to Agent execution."""
+    return await run_threat_analysis_audit(
+        workspace=context.workspace,
+        project_id=context.scan_id,
+        skill_path=context.repo_root / "attack-tree-threat-analysis.md",
+        reference_catalog_path=context.repo_root / "attack-method-reference-catalog.md",
+        on_output=context.on_output,
+        cancel_event=context.cancel_event,
+        timeout=context.timeout,
+        project_dir=context.project_path,
+        code_scan_path=context.code_scan_path,
+        product=context.product,
+        planned_task_id=context.planned_task_id,
+        on_attack_paths=context.on_attack_paths,
     )
 
 
@@ -1211,7 +1243,7 @@ def _failure_reason(log_path: Path | None, fallback: str) -> str:
 
 
 def _scan_task_log_path(scan_id: str, filename: str) -> Path:
-    from backend.opencode.task_service import get_opencode_execution_context
+    from agent.opencode.task_service import get_opencode_execution_context
 
     context = get_opencode_execution_context()
     if context.work_dir is None:
@@ -1226,7 +1258,7 @@ def _scan_task_log_path(scan_id: str, filename: str) -> Path:
 
 
 def _required_task_project_dir(project_dir: Path | None) -> Path:
-    from backend.opencode.task_service import get_opencode_execution_context
+    from agent.opencode.task_service import get_opencode_execution_context
 
     context = get_opencode_execution_context()
     resolved = Path(project_dir).resolve() if project_dir is not None else context.project_dir
@@ -1244,7 +1276,7 @@ def _opencode_result_text(
     if result.status == "timeout":
         raise asyncio.TimeoutError(result.text)
     if result.status == "failure":
-        from backend.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
+        from agent.opencode.model_pool import NO_AVAILABLE_MODEL_MESSAGE
 
         if result.text == NO_AVAILABLE_MODEL_MESSAGE:
             raise NoAvailableModelError()
@@ -1392,7 +1424,7 @@ def _invocation_mode(config_obj) -> str:
 
 
 def _read_managed_opencode_config(workspace: Path) -> dict:
-    from backend.opencode.config import get_workspace_lock, managed_opencode_config_path
+    from agent.opencode_integration import get_workspace_lock, managed_opencode_config_path
 
     path = managed_opencode_config_path(workspace)
     with get_workspace_lock(workspace):
@@ -1715,7 +1747,7 @@ def _read_user_opencode_config(
 def _with_writable_paths(config: dict, writable_paths: list[Path] | None) -> dict:
     if not writable_paths:
         return config
-    from backend.opencode.config import writable_edit_patterns
+    from agent.opencode_integration import writable_edit_patterns
 
     next_config = json.loads(json.dumps(config))
     permission = next_config.setdefault("permission", {})

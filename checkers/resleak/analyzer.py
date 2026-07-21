@@ -506,7 +506,7 @@ class Analyzer(BaseAnalyzer):
         artifact_allocs: set[str] = set()
         artifact_frees: set[str] = set()
         try:
-            from backend.preprocess.memory_api_discovery import load_memory_api_artifact
+            from backend.preprocess.memory_api_artifact import load_memory_api_artifact
             artifact = load_memory_api_artifact(project_path)
             for item in artifact.get("allocators") or []:
                 if isinstance(item, dict) and item.get("name"):
