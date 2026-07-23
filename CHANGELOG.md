@@ -2,6 +2,7 @@
 
 ## 2026-07-23
 
+- **修复** OpenCode Session 的动态目录权限在 Windows 下同时生成原生反斜杠和正斜杠子路径规则，使威胁分析可读取 `.opendeephole/scans/<scan_id>/threat_analysis` 中的阶段 JSON；全局外部目录默认拒绝、源码只读、仅任务工作目录可写及禁用 `bash` 的边界保持不变
 - **重构** 将 `ThreatAnalysis/src/threat_analysis_harness` 原样平铺为 `deephole_client/threat_analysis/`；平台异步门面外移至 `deephole_client/threat_analysis_runner.py`，不再向原生目录添加 runner、README 或 `__main__.py`
 - **新增** `task_agent.run_sync_component()` 支持异步过程门面安全调用同步实现，并让同步实现内部的 `run_opencode_task()` 回到所属事件循环；过程私有 `skill_paths` 和 `task_agent_config` 可按任务绑定，不污染全局工作区
 - **变更** 威胁分析入口直接返回原生 `result/value_asset_path/attack_tree_path/high_risk_modules_path`，Agent 仅在上报时收集为透明 artifact bundle，后端按原 JSON 存储，前端直接展示原生价值资产、高风险模块、内部节点和攻击树

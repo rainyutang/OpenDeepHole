@@ -5,7 +5,7 @@ import dataclasses
 import inspect
 import json
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import get_args, get_type_hints
 from unittest.mock import AsyncMock, patch
@@ -26,6 +26,7 @@ from task_agent.task_service import (
     OpenCodeTaskService,
     OpenCodeTaskSpec,
     _SessionRuntime,
+    _permission_path_patterns,
     _runtime_with_skill_paths,
     bind_opencode_execution_context,
 )
@@ -37,6 +38,22 @@ SCHEMA = {
     "required": ["answer"],
     "additionalProperties": False,
 }
+
+
+def test_permission_path_patterns_include_native_windows_descendants() -> None:
+    work_dir = PureWindowsPath(
+        r"C:\Users\26388\.opendeephole\scans\scan-1\threat_analysis"
+    )
+
+    patterns = _permission_path_patterns(work_dir)
+
+    assert str(work_dir) in patterns
+    assert f"{work_dir}\\**" in patterns
+    assert (
+        "C:/Users/26388/.opendeephole/scans/scan-1/threat_analysis/**"
+        in patterns
+    )
+    assert f"{work_dir}/**" not in patterns
 
 
 @pytest.fixture(autouse=True)

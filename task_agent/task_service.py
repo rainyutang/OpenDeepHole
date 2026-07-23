@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -1174,13 +1174,25 @@ def _task_system_prompt(record: _TaskRecord) -> str:
     return "\n\n".join(sections)
 
 
-def _permission_path_patterns(path: Path) -> list[str]:
-    normalized = str(path.resolve())
+def _permission_path_patterns(path: Path | PurePath) -> list[str]:
+    normalized = str(path.resolve() if isinstance(path, Path) else path)
     variants = [normalized]
     for candidate in (normalized.replace("\\", "/"), normalized.replace("/", "\\")):
         if candidate not in variants:
             variants.append(candidate)
-    return [pattern for value in variants for pattern in (value, f"{value}/**")]
+
+    patterns: list[str] = []
+    for value in variants:
+        separator = "\\" if "\\" in value and "/" not in value else "/"
+        descendant = (
+            f"{value}**"
+            if value.endswith(("/", "\\"))
+            else f"{value}{separator}**"
+        )
+        for pattern in (value, descendant):
+            if pattern not in patterns:
+                patterns.append(pattern)
+    return patterns
 
 
 def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
