@@ -9,6 +9,7 @@ from backend.auth import get_current_user
 from backend.models import CheckerCatalogItem, CheckerInfo, User
 from backend.registry import CHECKER_VISIBILITY_ADMIN, CHECKER_VISIBILITY_PUBLIC, CHECKERS_DIR
 from backend.registry import checker_category_label, checker_modified_sort_key, normalize_checker_category
+from backend.registry import checker_manifest_path
 from backend.registry import current_checker_dirs
 from backend.registry import refresh_registry
 
@@ -90,7 +91,7 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
             if not checker_dir.is_dir():
                 continue
 
-            yaml_path = checker_dir / "checker.yaml"
+            yaml_path = checker_manifest_path(checker_dir)
             if not yaml_path.is_file():
                 continue
 

@@ -1,7 +1,11 @@
 from pathlib import Path
 
-from backend.analyzers.base import in_scope, scope_prefix, scoped_functions
-from code_parser.code_database import CodeDatabase
+from deephole_client.static_analysis.base import (
+    in_scope,
+    scope_prefix,
+    scoped_functions,
+)
+from deephole_client.code_graph_build.code_database import CodeDatabase
 
 
 def _insert_function(db: CodeDatabase, file_path: str, name: str, line: int) -> None:

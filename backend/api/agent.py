@@ -75,7 +75,7 @@ from backend.models import (
     VulnerabilityValidation,
 )
 from backend.store import get_scan_store
-from backend.threat_analysis import parse_threat_analysis_data
+from backend.threat_data import parse_threat_analysis_data
 
 router = APIRouter(prefix="/api/agent")
 public_router = APIRouter()  # Routes not under /api/agent prefix
@@ -2531,20 +2531,15 @@ async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
 # Agent package download
 # ---------------------------------------------------------------------------
 
-_AGENT_DIRS = ["deephole_client", "task_agent", "checkers", "code_parser", "mcp_server", "backend"]
-_AGENT_RUNTIME_DIRS = ["deephole_client", "task_agent", "code_parser", "mcp_server", "backend"]
+_AGENT_DIRS = ["deephole_client", "task_agent", "mcp_server", "backend"]
+_AGENT_RUNTIME_DIRS = ["deephole_client", "task_agent", "mcp_server", "backend"]
 _AGENT_TOOL_DIRS = ["ctags-p6.2.20260517.0-x64"]
-_AGENT_THREAT_ANALYSIS_FILES = [
-    "attack-tree-threat-analysis.md",
-    "attack-method-reference-catalog.md",
-]
-_AGENT_RUNTIME_ROOT_FILES = ["requirements-agent.txt", *_AGENT_THREAT_ANALYSIS_FILES]
+_AGENT_RUNTIME_ROOT_FILES = ["requirements-agent.txt"]
 _AGENT_ROOT_FILES = [
     "agent.yaml",
     "run_agent.sh",
     "run_agent.bat",
     "requirements-agent.txt",
-    *_AGENT_THREAT_ANALYSIS_FILES,
 ]
 _AGENT_DOWNLOAD_SKIP_DIRS = {
     "__pycache__",

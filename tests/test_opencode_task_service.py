@@ -136,6 +136,7 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "required_capability",
         "output_schema",
         "invalid_json_retry_count",
+        "invalid_json_retry_prompt",
         "session_id",
         "config_path",
         "output",
@@ -177,6 +178,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                 required_capability="high",
                 output_schema=SCHEMA,
                 invalid_json_retry_count=4,
+                invalid_json_retry_prompt="  custom retry prompt  ",
                 session_id="ses-existing",
             )
 
@@ -192,6 +194,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         assert spec.directory == tmp_path.resolve()
         assert spec.required_capability == "high"
         assert spec.output_retry_count == 4
+        assert spec.output_retry_prompt == "  custom retry prompt  "
         assert spec.session_id == "ses-existing"
 
         service.run_task.reset_mock()
@@ -373,6 +376,29 @@ def test_public_interface_rejects_legacy_capabilities_and_unknown_task_types() -
     asyncio.run(run())
 
 
+def test_public_interface_rejects_invalid_json_retry_prompts() -> None:
+    async def run() -> None:
+        with pytest.raises(TypeError, match="invalid_json_retry_prompt.*string"):
+            await run_opencode_task(
+                task_name="invalid retry prompt type",
+                task_type="audit",
+                prompt="test",
+                required_capability="low",
+                invalid_json_retry_prompt=123,  # type: ignore[arg-type]
+            )
+        for value in ("", " \n\t "):
+            with pytest.raises(ValueError, match="invalid_json_retry_prompt.*empty"):
+                await run_opencode_task(
+                    task_name="empty retry prompt",
+                    task_type="audit",
+                    prompt="test",
+                    required_capability="low",
+                    invalid_json_retry_prompt=value,
+                )
+
+    asyncio.run(run())
+
+
 def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
@@ -430,9 +456,10 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
                 },),
                 on_output=output.append,
             ):
+                original_prompt = " \nreturn an answer exactly as written\n "
                 result = await service.run_task(OpenCodeTaskSpec(
                     task_name="schema task",
-                    prompt="return an answer",
+                    prompt=original_prompt,
                     directory=tmp_path,
                     timeout_seconds=12,
                     priority=87,
@@ -448,11 +475,8 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert captured["return_details"] is True
         assert captured["show_serve_status"] is True
         assert captured["log_stage"] == "audit"
-        schema_text = json.dumps(SCHEMA, ensure_ascii=False, indent=2)
-        assert captured["prompt"].startswith("return an answer\n\n")
-        assert "请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回" in captured["prompt"]
-        assert captured["prompt"].endswith(schema_text)
-        assert captured["prompt"].count(schema_text) == 1
+        assert captured["prompt"] == original_prompt
+        assert "JSON Schema" not in captured["prompt"]
         assert "JSON Schema" not in captured["system_prompt"]
         assert "## CodeGraph 项目范围" in captured["system_prompt"]
         assert f"projectPath={tmp_path.resolve()}" in captured["system_prompt"]
@@ -632,16 +656,66 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         assert release_mock.await_count == 1
         assert [session for _prompt, session in calls] == [None, "ses_same", "ses_same"]
         schema_text = json.dumps(SCHEMA, ensure_ascii=False, indent=2)
-        assert calls[0][0].startswith("initial prompt\n\n")
-        assert "请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回" in calls[0][0]
-        assert calls[0][0].endswith(schema_text)
+        assert calls[0][0] == "initial prompt"
         assert all(
             "你上一次的回复不是符合目标 JSON Schema 的合法 JSON" in prompt
             for prompt, _ in calls[1:]
         )
         assert all(prompt.endswith(schema_text) for prompt, _ in calls[1:])
-        assert all(prompt.count(schema_text) == 1 for prompt, _ in calls)
+        assert calls[0][0].count(schema_text) == 0
+        assert all(prompt.count(schema_text) == 1 for prompt, _ in calls[1:])
         assert all("Your previous response" not in prompt for prompt, _ in calls)
+
+    asyncio.run(run())
+
+
+def test_custom_json_correction_prompt_is_repeated_verbatim(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[str] = []
+        responses = ["not json", '{"answer":"wrong type"}', '{"answer":9}']
+
+        async def run_prompt(**kwargs):
+            calls.append(kwargs["prompt"])
+            callback = kwargs["on_session_id"]("ses_custom")
+            if hasattr(callback, "__await__"):
+                await callback
+            text = responses[len(calls) - 1]
+            return OpenCodePromptResult(
+                session_id="ses_custom",
+                message_id=f"msg_{len(calls)}",
+                lines=[text],
+                text=text,
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        custom_prompt = " \n只按我写的方式重新输出\n "
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            _task_context(tmp_path),
+        ):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name="custom correction",
+                prompt="original prompt",
+                directory=tmp_path,
+                output_schema=SCHEMA,
+                output_retry_count=2,
+                output_retry_prompt=custom_prompt,
+                attempt=0,
+            ))
+
+        assert result.status == "success"
+        assert calls == ["original prompt", custom_prompt, custom_prompt]
 
     asyncio.run(run())
 
@@ -685,6 +759,7 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
                     directory=tmp_path,
                     output_schema=SCHEMA,
                     output_retry_count=1,
+                    output_retry_prompt="custom retry",
                     attempt=1,
                 ))
                 result = await handle.result()
@@ -698,6 +773,7 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
         assert [source.attempt for source in sources] == [1, 2]
         assert acquire_mock.await_count == 2
         assert [call[1] for call in calls] == [None, "ses_first", None]
+        assert [call[0] for call in calls] == ["initial", "custom retry", "initial"]
         first_release = release_mock.await_args_list[0].kwargs
         final_release = release_mock.await_args_list[1].kwargs
         assert first_release["record_completion"] is False

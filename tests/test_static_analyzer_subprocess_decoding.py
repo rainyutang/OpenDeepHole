@@ -4,8 +4,10 @@ from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
-from checkers.inf_loop.analyzer import Analyzer as InfLoopAnalyzer
-from checkers.resleak import analyzer as resleak_analyzer
+from deephole_client.static_analysis.rules.inf_loop.analyzer import (
+    Analyzer as InfLoopAnalyzer,
+)
+from deephole_client.static_analysis.rules.resleak import analyzer as resleak_analyzer
 
 
 def test_inf_loop_semgrep_output_uses_utf8_replace(tmp_path: Path) -> None:
@@ -21,7 +23,7 @@ def test_inf_loop_semgrep_output_uses_utf8_replace(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         assert list(InfLoopAnalyzer().find_candidates(tmp_path)) == []
 
@@ -44,7 +46,7 @@ def test_inf_loop_uses_semgrep_json_file_after_timeout(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(InfLoopAnalyzer().find_candidates(tmp_path))
 
@@ -66,7 +68,10 @@ def test_resleak_cppcheck_output_uses_utf8_replace(tmp_path: Path) -> None:
         assert str(tmp_path) not in cmd
         return CompletedProcess(cmd, 0, stdout="", stderr="<results><errors /></results>")
 
-    with patch("checkers.resleak.analyzer.subprocess.run", side_effect=fake_run):
+    with patch(
+        "deephole_client.static_analysis.rules.resleak.analyzer.subprocess.run",
+        side_effect=fake_run,
+    ):
         assert list(resleak_analyzer._run_cppcheck(tmp_path, "cppcheck")) == []
 
 
@@ -83,7 +88,7 @@ def test_inf_loop_uses_function_name_from_semgrep_message(tmp_path: Path) -> Non
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(InfLoopAnalyzer().find_candidates(tmp_path))
 
@@ -114,7 +119,7 @@ def test_inf_loop_matches_windows_semgrep_path_to_code_database(tmp_path: Path) 
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(InfLoopAnalyzer().find_candidates(project, FakeDb()))
 
@@ -144,7 +149,7 @@ def test_inf_loop_resolves_windows_semgrep_path_for_tree_sitter(tmp_path: Path) 
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(InfLoopAnalyzer().find_candidates(project))
 

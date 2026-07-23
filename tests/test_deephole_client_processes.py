@@ -7,18 +7,21 @@ import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from code_parser import CodeDatabase
+from deephole_client.code_graph_build.code_database import CodeDatabase
 from task_agent import OpenCodeResult
 
 from deephole_client.candidate_audit import run_candidate_audit
+from deephole_client.code_graph_build import run_code_graph_build
 from deephole_client.fp_review import run_fp_review
 from deephole_client.static_analysis import run_static_analysis
 from deephole_client.threat_analysis import run_threat_analysis
 from deephole_client.threat_audit import run_threat_audit
 from deephole_client.vulnerability_validation import run_vulnerability_validation
+from deephole_client.threat_analysis.parsing import parse_threat_analysis_data
 
 
 PROCESS_FUNCTIONS = (
+    run_code_graph_build,
     run_threat_analysis,
     run_static_analysis,
     run_candidate_audit,
@@ -55,7 +58,8 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         project = root / "project"
         project.mkdir()
         events: list[dict] = []
-        threat_result = _task_result({
+        threat_result = parse_threat_analysis_data({
+            "schema_version": "1.1",
             "assets": [],
             "high_risk_external_interfaces": [],
             "attack_trees": [],
@@ -68,7 +72,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             "code_path_mappings": [],
         })
         with patch(
-            "deephole_client.threat_analysis.runner.run_opencode_task",
+            "deephole_client.threat_analysis.runner.run_attack_tree_threat_analysis",
             new=AsyncMock(return_value=threat_result),
         ):
             analysis = await run_threat_analysis(
@@ -89,7 +93,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         with patch(
             "deephole_client.threat_audit.runner.run_opencode_task",
             new=AsyncMock(return_value=audit_task_result),
-        ):
+        ) as run_task:
             audit = await run_threat_audit(
                 project_path=project,
                 work_dir=root / "audit",
@@ -98,6 +102,8 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             )
         assert audit["status"] == "success"
         assert audit["vulnerabilities"][0]["analysis_source"] == "threat_audit"
+        assert "JSON Schema" in run_task.await_args.kwargs["prompt"]
+        assert '"vulnerabilities"' in run_task.await_args.kwargs["prompt"]
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))
@@ -112,16 +118,15 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         index_path = project / "code_index.db"
         database = CodeDatabase(index_path)
         database.close()
-        checker_root = root / "checkers"
-        checker = checker_root / "demo"
-        checker.mkdir(parents=True)
-        (checker / "checker.yaml").write_text(
+        static_root = root / "static-rules"
+        static_checker = static_root / "demo"
+        static_checker.mkdir(parents=True)
+        (static_checker / "checker.yaml").write_text(
             "name: demo\nlabel: Demo\nenabled: true\nmode: opencode\n",
             encoding="utf-8",
         )
-        (checker / "SKILL.md").write_text("Audit the candidate.", encoding="utf-8")
-        (checker / "analyzer.py").write_text(
-            "from deephole_client.static_analysis.base import BaseAnalyzer, Candidate\n"
+        (static_checker / "analyzer.py").write_text(
+            "from ...base import BaseAnalyzer, Candidate\n"
             "class Analyzer(BaseAnalyzer):\n"
             "    vuln_type = 'demo'\n"
             "    def find_candidates(self, project_path, db=None):\n"
@@ -129,10 +134,22 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
             "description='candidate', vuln_type='demo')]\n",
             encoding="utf-8",
         )
+        audit_root = root / "audit-rules"
+        audit_checker = audit_root / "demo"
+        audit_checker.mkdir(parents=True)
+        (audit_checker / "audit.yaml").write_text(
+            "name: demo\nlabel: Demo\nresult_mode: vulnerabilities\n",
+            encoding="utf-8",
+        )
+        (audit_checker / "SKILL.md").write_text(
+            "Audit the candidate.",
+            encoding="utf-8",
+        )
         static = await asyncio.wait_for(run_static_analysis(
             project_path=project,
+            work_dir=root / "static",
             index_db_path=index_path,
-            checker_dirs=[checker_root],
+            checker_dirs=[static_root],
         ), timeout=5)
         assert static["status"] == "success"
         assert static["stats"]["total"] == 1
@@ -148,17 +165,19 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         with patch(
             "deephole_client.candidate_audit.runner.run_opencode_task",
             new=AsyncMock(return_value=model_result),
-        ):
+        ) as run_task:
             audited = await asyncio.wait_for(run_candidate_audit(
                 project_path=project,
                 work_dir=root / "candidate-audit",
                 scan_id="scan-1",
                 candidates=static["candidates"],
-                checker_dirs=[checker_root],
+                checker_dirs=[audit_root],
                 index_db_path=index_path,
             ), timeout=5)
         assert audited["status"] == "success"
         assert audited["vulnerabilities"][0]["ai_verdict"] == "not_confirmed"
+        assert "JSON Schema" in run_task.await_args.kwargs["prompt"]
+        assert '"markdown_reports"' in run_task.await_args.kwargs["prompt"]
         assert audited["processed_keys"] == [{
             "file": "sample.c", "line": 1, "function": "bad", "vuln_type": "demo",
         }]
@@ -182,7 +201,7 @@ def test_fp_review_and_validation_processes_run_in_batches() -> None:
                 "verdict": "false_positive", "reason": "guarded", "evidence": ["check"],
                 "revised_severity": "low",
             })),
-        ):
+        ) as run_task:
             reviewed = await run_fp_review(
                 project_path=project,
                 work_dir=root / "fp",
@@ -192,6 +211,12 @@ def test_fp_review_and_validation_processes_run_in_batches() -> None:
             )
         assert reviewed["processed"] == 1
         assert reviewed["results"][0]["verdict"] == "false_positive"
+        assert run_task.await_count > 0
+        assert all(
+            "JSON Schema" in call.kwargs["prompt"]
+            and '"verdict"' in call.kwargs["prompt"]
+            for call in run_task.await_args_list
+        )
 
         validators = root / "validators"
         validator = validators / "demo"
@@ -201,7 +226,7 @@ def test_fp_review_and_validation_processes_run_in_batches() -> None:
             encoding="utf-8",
         )
         (validator / "validator.py").write_text(
-            "from deephole_client.vulnerability_validation import ValidationResult\n"
+            "from ...sdk import ValidationResult\n"
             "async def validate(**kwargs):\n"
             "    await kwargs['emit_stdout']('validation', 'ran')\n"
             "    return ValidationResult(True, True, summary='verified')\n",

@@ -11,20 +11,25 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 from uuid import uuid4
 
 from backend.models import Candidate, HistoryPattern
-from task_agent import run_opencode_task
+from task_agent import opencode_task_context, run_opencode_task
 from task_agent.output_format import with_local_timestamp
-from task_agent.task_service import (
-    bind_opencode_execution_context,
-    get_opencode_execution_context,
-)
 
 EmitFn = Callable[[str, str], Awaitable[None]]
+
+
+def _result_payloads(data: Any) -> list[dict]:
+    if isinstance(data, dict) and isinstance(data.get("results"), list):
+        return [item for item in data["results"] if isinstance(item, dict)]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return [data] if isinstance(data, dict) else []
 
 _VARIANT_FINDINGS_JSON_SCHEMA = {
     "type": "object",
@@ -88,7 +93,6 @@ async def hunt_variants(
     emit: EmitFn,
 ) -> list[Candidate]:
     """对每条历史问题模式做全仓同类变体排查，返回命中候选列表。"""
-    from deephole_client.opencode_workflows import _result_payloads
     from task_agent.model_pool import (
         NO_AVAILABLE_MODEL_MESSAGE,
         NoAvailableModelError,
@@ -104,10 +108,7 @@ async def hunt_variants(
     lock = asyncio.Lock()
     processed = 0
     valid_types = set(checker_types)
-    execution_context = get_opencode_execution_context()
-    if execution_context.work_dir is None:
-        raise RuntimeError("variant_hunt requires an Agent-bound OpenCode work_dir")
-    scan_root = execution_context.work_dir
+    scan_root = Path.home() / ".opendeephole" / "scans" / scan_id
     scan_dir = scan_root / "logs"
     scan_dir.mkdir(parents=True, exist_ok=True)
 
@@ -128,14 +129,23 @@ async def hunt_variants(
             return
         attempt_id = uuid4().hex
         prompt = _build_prompt(pattern, checker_types, scan_id)
+        prompt += (
+            "\n\n请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
+            "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，"
+            "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
+            + json.dumps(
+                _VARIANT_FINDINGS_JSON_SCHEMA,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         log_path = scan_dir / f"variant_hunt_{attempt_id}.log"
 
         try:
-            with bind_opencode_execution_context(
+            with opencode_task_context(
                 project_dir=project_path,
                 work_dir=scan_root,
-                task_metadata={"pattern_source": pattern.source},
-                on_output=lambda line: print(
+                output=lambda line: print(
                     with_local_timestamp(line, prefix="[variant_hunt]"),
                     flush=True,
                 ),

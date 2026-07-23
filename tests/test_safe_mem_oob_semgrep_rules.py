@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from checkers.safe_mem_oob.analyzer import Analyzer as SafeMemOobAnalyzer
+from deephole_client.static_analysis.rules.safe_mem_oob.analyzer import (
+    Analyzer as SafeMemOobAnalyzer,
+)
 
 
 pytestmark = pytest.mark.skipif(

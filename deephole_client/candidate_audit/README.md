@@ -8,7 +8,7 @@
 | `work_dir` | 是 | path | 过程工作目录 |
 | `scan_id` | 是 | str | 扫描标识 |
 | `candidates` | 是 | `list[dict]` | 静态候选点 |
-| `checker_dirs` | 是 | `list[path]` | checker 根目录 |
+| `checker_dirs` | 否 | `list[path]` | 审计规则根目录，默认本目录 `rules/` |
 | `index_db_path` | 是 | path | 代码索引路径 |
 | `checker_names` | 否 | `list[str]` | 只审计指定 checker |
 | `concurrency` | 否 | int | 并发数，默认 1 |
@@ -24,6 +24,6 @@
 ```bash
 python -m deephole_client.candidate_audit --project-path /src/project \
   --work-dir /tmp/audit --candidates candidates.json \
-  --checker-dir ./checkers --index-db-path code_index.db \
+  --checker-dir ./rules --index-db-path code_index.db \
   --task-agent-config ./task-agent.yaml
 ```

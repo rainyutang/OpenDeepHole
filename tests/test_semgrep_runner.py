@@ -3,7 +3,10 @@ from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
-from backend.analyzers.semgrep_runner import SEMGREP_INTERNAL_EXCLUDES, run_semgrep
+from deephole_client.static_analysis.semgrep_runner import (
+    SEMGREP_INTERNAL_EXCLUDES,
+    run_semgrep,
+)
 
 
 def test_semgrep_runner_sets_noninteractive_env(tmp_path: Path) -> None:
@@ -32,7 +35,7 @@ def test_semgrep_runner_sets_noninteractive_env(tmp_path: Path) -> None:
         assert kwargs["env"]["XDG_CACHE_HOME"].endswith("cache")
         return CompletedProcess(cmd, 0, stdout='{"results":[]}', stderr="")
 
-    with patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run):
+    with patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run):
         result = run_semgrep(tmp_path, rule_file=rule_file, checker_name="unit", timeout=3)
 
     assert result is not None
@@ -47,7 +50,7 @@ def test_semgrep_runner_returns_none_when_timeout_has_no_json(tmp_path: Path) ->
     def fake_run(cmd, **kwargs):
         raise TimeoutExpired(cmd, kwargs["timeout"], output="", stderr="still running")
 
-    with patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run):
+    with patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run):
         result = run_semgrep(tmp_path, rule_file=rule_file, checker_name="unit", timeout=1)
 
     assert result is None
@@ -73,8 +76,8 @@ def test_semgrep_runner_prints_heartbeat_when_enabled(tmp_path: Path, capsys) ->
             self.returncode = -9
 
     with (
-        patch("backend.analyzers.semgrep_runner.subprocess.Popen", side_effect=FakePopen),
-        patch("backend.analyzers.semgrep_runner.time.monotonic", side_effect=[0.0, 0.0, 0.2, 0.2]),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.Popen", side_effect=FakePopen),
+        patch("deephole_client.static_analysis.semgrep_runner.time.monotonic", side_effect=[0.0, 0.0, 0.2, 0.2]),
     ):
         result = run_semgrep(
             tmp_path,

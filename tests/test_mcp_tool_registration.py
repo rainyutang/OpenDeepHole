@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from code_parser import CodeDatabase
+from deephole_client.code_graph_build.code_database import CodeDatabase
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools.base import Tool
 from mcp_server.factory import MCP_SERVER_INSTRUCTIONS, create_mcp_server

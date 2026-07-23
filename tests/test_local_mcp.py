@@ -5,7 +5,7 @@ import re
 from datetime import timedelta
 
 import pytest
-from code_parser import CodeDatabase
+from deephole_client.code_graph_build.code_database import CodeDatabase
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 

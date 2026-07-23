@@ -85,6 +85,13 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                 patch("backend.api.scan.refresh_registry", return_value=registry),
                 patch("backend.api.integration.refresh_registry", return_value=registry),
                 patch("backend.api.scan.build_checker_packages", return_value=[]),
+                patch(
+                    "backend.validation_catalog.find_validation_target",
+                    return_value=SimpleNamespace(
+                        product="LTE",
+                        validation_environment="仿真UBBPi板环境",
+                    ),
+                ),
                 patch("backend.api.agent.send_agent_command", send),
             ):
                 result = asyncio.run(

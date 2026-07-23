@@ -17,12 +17,10 @@ from typing import Any
 import httpx
 
 
-RUNTIME_DIRS = ("deephole_client", "task_agent", "code_parser", "mcp_server", "backend")
+RUNTIME_DIRS = ("deephole_client", "task_agent", "mcp_server", "backend")
 RUNTIME_TOOL_DIRS = ("ctags-p6.2.20260517.0-x64",)
 RUNTIME_ROOT_FILES = (
     "requirements-agent.txt",
-    "attack-tree-threat-analysis.md",
-    "attack-method-reference-catalog.md",
 )
 SKIP_DIRS = {
     "__pycache__",

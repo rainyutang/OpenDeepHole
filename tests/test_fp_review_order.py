@@ -33,6 +33,27 @@ class FpReviewOrderTests(unittest.TestCase):
         scan_api._running_scans.clear()
         scan_api._scan_owners.clear()
 
+    def test_fp_review_skill_preview_reads_process_owned_skills(self) -> None:
+        scan_api._scan_owners["scan-1"] = "user-1"
+        with patch(
+            "backend.api.scan._selected_feedback_entries",
+            return_value=[],
+        ):
+            result = asyncio.run(
+                scan_api.get_fp_review_skill(
+                    "scan-1",
+                    current_user=User(
+                        user_id="user-1",
+                        username="alice",
+                        role="user",
+                    ),
+                )
+            )
+
+        self.assertIn("# Prove Bug Skill", result["content"])
+        self.assertIn("# Prove False Positive Skill", result["content"])
+        self.assertIn("# Final Judge Skill", result["content"])
+
     def test_unreviewed_findings_are_reviewed_before_existing_results(self) -> None:
         scan = ScanStatus(
             scan_id="scan-1",

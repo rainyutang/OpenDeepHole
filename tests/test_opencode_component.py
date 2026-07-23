@@ -42,7 +42,7 @@ def _bindings(tmp_path: Path) -> OpenCodeHostBindings:
 
 def test_component_has_no_opendeephole_package_imports() -> None:
     component_dir = Path(task_agent.__file__).resolve().parent
-    forbidden = {"agent", "backend", "code_parser", "mcp_server"}
+    forbidden = {"agent", "backend", "code_parser", "deephole_client", "mcp_server"}
     violations: list[str] = []
     for source_path in component_dir.glob("*.py"):
         tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))

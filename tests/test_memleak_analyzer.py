@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from checkers.memleak.analyzer import Analyzer, _collect_source_files
+from deephole_client.static_analysis.rules.memleak.analyzer import (
+    Analyzer,
+    _collect_source_files,
+)
 
 MEMLEAK_CASES_DIR = Path(__file__).parent / "test_data" / "memleak_cases"
 

@@ -1,49 +1,65 @@
-"""Server-side catalog of deployable product validation targets."""
+"""Server-side view of validation targets reported by connected clients."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
 
-from deephole_client.vulnerability_validation.runtime import (
-    PRODUCT_VALIDATORS_DIR,
-    discover_validator_manifests,
-)
-from backend.logger import get_logger
 from backend.models import ValidationTarget
+from backend.store import get_scan_store
 
 
-logger = get_logger(__name__)
-_catalog: tuple[ValidationTarget, ...] | None = None
-
-
-def refresh_validation_catalog(
-    validators_dir: Path = PRODUCT_VALIDATORS_DIR,
-) -> list[ValidationTarget]:
-    global _catalog
-    manifests, errors = discover_validator_manifests(validators_dir)
-    for error in errors:
-        logger.error("Invalid product validator excluded from catalog: %s", error)
-    _catalog = tuple(
-        ValidationTarget(
-            validator_id=item.validator_id,
-            product=item.product,
-            validation_environment=item.validation_environment,
-            timeout_seconds=item.timeout_seconds,
-        )
-        for item in manifests
+def refresh_validation_catalog() -> list[ValidationTarget]:
+    """Aggregate normalized product/environment pairs from client metadata."""
+    targets: dict[tuple[str, str], ValidationTarget] = {}
+    for record in get_scan_store().list_agent_records():
+        try:
+            catalog = json.loads(
+                str(record.get("validator_catalog_json") or "{}"),
+            )
+        except (TypeError, ValueError):
+            continue
+        for registration in catalog.get("registrations") or []:
+            if not isinstance(registration, dict):
+                continue
+            product = str(registration.get("product") or "").strip()
+            environment = str(registration.get("environment") or "").strip()
+            if not product or not environment:
+                continue
+            targets.setdefault(
+                (product, environment),
+                ValidationTarget(
+                    validator_id=str(
+                        registration.get("method_id")
+                        or registration.get("registration_key")
+                        or ""
+                    ),
+                    product=product,
+                    validation_environment=environment,
+                    timeout_seconds=registration.get("timeout_seconds"),
+                ),
+            )
+    return sorted(
+        targets.values(),
+        key=lambda item: (
+            item.product,
+            item.validation_environment,
+            item.validator_id,
+        ),
     )
-    logger.info("Loaded %d product validation target(s)", len(_catalog))
-    return list(_catalog)
 
 
 def get_validation_catalog() -> list[ValidationTarget]:
-    if _catalog is None:
-        return refresh_validation_catalog()
-    return list(_catalog)
+    return refresh_validation_catalog()
 
 
-def find_validation_target(product: str, validation_environment: str) -> ValidationTarget | None:
-    key = (str(product or "").strip(), str(validation_environment or "").strip())
+def find_validation_target(
+    product: str,
+    validation_environment: str,
+) -> ValidationTarget | None:
+    key = (
+        str(product or "").strip(),
+        str(validation_environment or "").strip(),
+    )
     return next(
         (
             item

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -212,6 +213,16 @@ async def mine_history(
         diff = await asyncio.to_thread(_commit_diff, project_path, commit.hash)
         attempt_id = uuid4().hex
         prompt = _build_prompt(commit, diff)
+        prompt += (
+            "\n\n请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
+            "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，"
+            "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
+            + json.dumps(
+                _HISTORY_PATTERN_JSON_SCHEMA,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         log_path = scan_dir / f"git_history_{commit.hash[:10]}_{attempt_id}.log"
 
         try:

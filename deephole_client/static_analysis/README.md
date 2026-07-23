@@ -6,8 +6,9 @@
 | key | 必填 | 类型 | 说明 |
 |---|---:|---|---|
 | `project_path` | 是 | path | 项目根目录 |
+| `work_dir` | 是 | path | 过程工作目录 |
 | `index_db_path` | 是 | path | 已存在的 `code_index.db` |
-| `checker_dirs` | 是 | `list[path]` | checker 根目录列表 |
+| `checker_dirs` | 否 | `list[path]` | 静态规则根目录列表，默认本目录 `rules/` |
 | `code_scan_path` | 否 | path | 扫描子目录，默认项目根目录 |
 | `checker_names` | 否 | `list[str]` | 只运行指定 checker |
 | `deduplicate` | 否 | bool | 是否按位置、函数和类型去重，默认 `true` |
@@ -19,8 +20,9 @@
 ```bash
 python -m deephole_client.static_analysis \
   --project-path /src/project \
+  --work-dir /tmp/static-analysis \
   --index-db-path /src/project/code_index.db \
-  --checker-dir ./checkers
+  --checker-dir ./rules
 ```
 
 事件写入 stderr，最终 JSON 写入 stdout；可用 `--output-file` 同时保存结果。

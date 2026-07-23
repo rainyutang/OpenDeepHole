@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from checkers.intoverflow.analyzer import Analyzer as IntOverflowAnalyzer
+from deephole_client.static_analysis.rules.intoverflow.analyzer import (
+    Analyzer as IntOverflowAnalyzer,
+)
 
 
 pytestmark = pytest.mark.skipif(

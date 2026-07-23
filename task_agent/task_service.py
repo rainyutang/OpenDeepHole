@@ -233,6 +233,7 @@ class OpenCodeTaskSpec:
     priority: int = 50
     output_schema: dict[str, Any] | None = None
     output_retry_count: int = 2
+    output_retry_prompt: str | None = None
     session_id: str | None = None
     attempt: int | None = None
 
@@ -389,6 +390,14 @@ class OpenCodeTaskService:
         output_retry_count = int(spec.output_retry_count)
         if output_retry_count < 0:
             raise ValueError("OpenCode output_retry_count cannot be negative")
+        output_retry_prompt = spec.output_retry_prompt
+        if output_retry_prompt is not None:
+            if not isinstance(output_retry_prompt, str):
+                raise TypeError(
+                    "OpenCode output_retry_prompt must be a string or None"
+                )
+            if not output_retry_prompt.strip():
+                raise ValueError("OpenCode output_retry_prompt cannot be empty")
         attempt = spec.attempt
         if attempt is not None and int(attempt) < 0:
             raise ValueError("OpenCode attempt cannot be negative")
@@ -401,6 +410,7 @@ class OpenCodeTaskService:
             priority=normalize_priority(spec.priority),
             timeout_seconds=None if timeout is None else int(timeout),
             output_retry_count=output_retry_count,
+            output_retry_prompt=output_retry_prompt,
             attempt=None if attempt is None else int(attempt),
             session_id=str(spec.session_id or "").strip() or None,
         )
@@ -659,7 +669,7 @@ class OpenCodeTaskService:
                 )
                 lock_key = session_id or f"new:{record.task_id}:{session_attempt}"
                 session_lock = self._session_locks.setdefault(lock_key, asyncio.Lock())
-                prompt = _initial_user_prompt(spec)
+                prompt = spec.prompt
                 try:
                     async with session_lock:
                         for output_attempt in range(spec.output_retry_count + 1):
@@ -697,7 +707,11 @@ class OpenCodeTaskService:
                                     "OpenCode exhausted same-session JSON corrections "
                                     f"({spec.output_retry_count}) without matching the target schema"
                                 )
-                            prompt = _json_correction_prompt(spec.output_schema)
+                            prompt = (
+                                spec.output_retry_prompt
+                                if spec.output_retry_prompt is not None
+                                else _json_correction_prompt(spec.output_schema)
+                            )
                             self._emit_task_progress(
                                 record,
                                 f"JSON_CORRECTION {output_attempt + 1}/{spec.output_retry_count} "
@@ -1051,7 +1065,7 @@ def _model_pool_task_context(
     total_session_attempts: int,
 ) -> dict[str, Any]:
     spec = record.spec
-    prompt = _initial_user_prompt(spec)
+    prompt = spec.prompt
     context = {
         **record.execution_context.task_metadata,
         "task_name": spec.task_name,
@@ -1068,21 +1082,6 @@ def _model_pool_task_context(
     if session_attempt > 1:
         context.pop("planned_task_id", None)
     return context
-
-
-def _json_result_rule(schema: dict[str, Any]) -> str:
-    return (
-        "请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
-        "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，也不要附加任何解释。"
-        "应用程序会自行解析回复文本。\nJSON Schema：\n"
-        + json.dumps(schema, ensure_ascii=False, indent=2)
-    )
-
-
-def _initial_user_prompt(spec: OpenCodeTaskSpec) -> str:
-    if spec.output_schema is None:
-        return spec.prompt
-    return spec.prompt + "\n\n" + _json_result_rule(spec.output_schema)
 
 
 def _json_correction_prompt(schema: dict[str, Any]) -> str:
@@ -1229,6 +1228,7 @@ async def _run_component_task(
     required_capability: str,
     output_schema: dict[str, Any] | None,
     invalid_json_retry_count: int,
+    invalid_json_retry_prompt: str | None,
     session_id: str | None,
 ) -> OpenCodeResult:
     """Translate the public contract into the internal scheduling record."""
@@ -1246,6 +1246,7 @@ async def _run_component_task(
                 priority=_task_priority(task_type),
                 output_schema=output_schema,
                 output_retry_count=invalid_json_retry_count,
+                output_retry_prompt=invalid_json_retry_prompt,
                 session_id=session_id,
                 attempt=None,
             )

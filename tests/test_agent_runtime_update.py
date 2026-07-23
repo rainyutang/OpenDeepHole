@@ -26,8 +26,14 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         self.assertIn("deephole_client/main.py", names)
         self.assertIn("requirements-agent.txt", names)
-        self.assertIn("attack-tree-threat-analysis.md", names)
-        self.assertIn("attack-method-reference-catalog.md", names)
+        self.assertIn(
+            "deephole_client/threat_analysis/attack-tree-threat-analysis.md",
+            names,
+        )
+        self.assertIn(
+            "deephole_client/threat_analysis/attack-method-reference-catalog.md",
+            names,
+        )
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
         self.assertFalse(any(name.startswith("checkers/") for name in names))
         self.assertNotIn("agent.yaml", names)
@@ -51,9 +57,20 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("run_agent.sh", names)
         self.assertIn("run_agent.bat", names)
         self.assertIn("requirements-agent.txt", names)
-        self.assertIn("attack-tree-threat-analysis.md", names)
-        self.assertIn("attack-method-reference-catalog.md", names)
-        self.assertTrue(any(name.startswith("checkers/") for name in names))
+        self.assertIn(
+            "deephole_client/threat_analysis/attack-tree-threat-analysis.md",
+            names,
+        )
+        self.assertIn(
+            "deephole_client/threat_analysis/attack-method-reference-catalog.md",
+            names,
+        )
+        self.assertTrue(
+            any(name.startswith("deephole_client/static_analysis/rules/") for name in names)
+        )
+        self.assertTrue(
+            any(name.startswith("deephole_client/candidate_audit/rules/") for name in names)
+        )
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
         self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.yaml", names)
         self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.py", names)
@@ -121,7 +138,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertEqual(compute_runtime_hash(root), agent_api._agent_runtime_hash())
 
     def test_runtime_hash_scope_includes_top_level_task_agent(self) -> None:
-        expected_dirs = ["deephole_client", "task_agent", "code_parser", "mcp_server", "backend"]
+        expected_dirs = ["deephole_client", "task_agent", "mcp_server", "backend"]
         self.assertEqual(updater.runtime_hash_scope()["version"], 3)
         self.assertEqual(updater.runtime_hash_scope()["dirs"], expected_dirs)
         self.assertEqual(agent_api._agent_runtime_hash_scope(), updater.runtime_hash_scope())
@@ -139,12 +156,16 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
             self.assertNotEqual(before, compute_runtime_hash(root))
 
-    def test_runtime_hash_ignores_checker_changes(self) -> None:
+    def test_runtime_hash_includes_process_rule_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "deephole_client").mkdir()
-            (root / "deephole_client" / "main.py").write_text("print('agent')\n", encoding="utf-8")
-            checker_dir = root / "checkers" / "demo"
+            checker_dir = (
+                root
+                / "deephole_client"
+                / "static_analysis"
+                / "rules"
+                / "demo"
+            )
             checker_dir.mkdir(parents=True)
             (checker_dir / "checker.yaml").write_text("name: demo\n", encoding="utf-8")
 
@@ -154,7 +175,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(before, compute_runtime_hash(root))
+            self.assertNotEqual(before, compute_runtime_hash(root))
 
     def test_runtime_hash_ignores_system_skill_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

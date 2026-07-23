@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING
 from .models import Candidate
 
 if TYPE_CHECKING:
-    from code_parser import CodeDatabase
+    from .index_reader import CodeIndexReader
 
 __all__ = ["BaseAnalyzer", "Candidate", "in_scope", "scope_prefix", "scoped_functions"]
 
 
-def scope_prefix(db: "CodeDatabase", project_path: Path) -> str | None:
+def scope_prefix(db: "CodeIndexReader", project_path: Path) -> str | None:
     db_path = getattr(db, "db_path", None)
     if not db_path:
         return None
@@ -35,7 +35,7 @@ def in_scope(file_path: str, prefix: str | None) -> bool:
     return normalized == prefix or normalized.startswith(f"{prefix}/")
 
 
-def scoped_functions(db: "CodeDatabase", project_path: Path) -> list:
+def scoped_functions(db: "CodeIndexReader", project_path: Path) -> list:
     prefix = scope_prefix(db, project_path)
     if prefix is None:
         return db.get_all_functions()
@@ -56,6 +56,6 @@ class BaseAnalyzer(ABC):
     def find_candidates(
         self,
         project_path: Path,
-        db: "CodeDatabase | None" = None,
+        db: "CodeIndexReader | None" = None,
     ) -> Iterable[Candidate]:
         """Return candidate locations under ``project_path``."""

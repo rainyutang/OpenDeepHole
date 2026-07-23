@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.models import Candidate
-from deephole_client.opencode_workflows import _sensitive_clear_prompt
-from checkers.sensitive_clear.analyzer import Analyzer
+from deephole_client.candidate_audit.runner import _candidate_prompt
+from deephole_client.static_analysis.rules.sensitive_clear.analyzer import Analyzer
 
 
 class _FakeDb:
@@ -111,20 +111,21 @@ class SensitiveClearFunctionTests(unittest.TestCase):
         self.assertNotIn("unsigned char session_key", candidates[1].description)
 
     def test_sensitive_clear_prompt_only_exposes_function_name_not_variable_names(self) -> None:
-        prompt = _sensitive_clear_prompt(
-            "sensitive-variable-clear-check",
-            _candidate(),
-            "project-1",
+        prompt = _candidate_prompt(
+            {
+                "name": "sensitive_clear",
+                "skill": "# Sensitive Clear\n\n读取目标函数并判断敏感数据是否清零。",
+            },
+            _candidate().model_dump(mode="json"),
+            "scan-1",
         )
 
         self.assertIn("`src/auth.c` 文件中的 `login` 函数敏感信息未清0问题", prompt)
-        self.assertIn("project_id: `project-1`", prompt)
+        self.assertIn("scan_id: `scan-1`", prompt)
         self.assertNotIn("result_id", prompt)
-        self.assertNotIn("初始提示词只提供函数名", prompt)
-        self.assertNotIn("Markdown", prompt)
         self.assertNotIn("password", prompt)
         self.assertNotIn("char *password", prompt)
-        self.assertNotIn("变量清单", prompt)
+        self.assertNotIn("suspicious_variables", prompt)
 
 
 if __name__ == "__main__":

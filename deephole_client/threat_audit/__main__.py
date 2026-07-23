@@ -16,6 +16,11 @@ def main() -> None:
     parser.add_argument("--scan-id", default="standalone")
     parser.add_argument("--threat-analysis", required=True, help="Threat-analysis JSON file")
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument(
+        "--required-capability",
+        choices=("low", "high"),
+        default="high",
+    )
     parser.add_argument("--task-agent-config")
     parser.add_argument("--include-task-id", action="append", dest="include_task_ids")
     parser.add_argument("--exclude-task-id", action="append", dest="exclude_task_ids")
@@ -29,6 +34,7 @@ def main() -> None:
     result = asyncio.run(run_threat_audit(
         project_path=args.project_path, work_dir=args.work_dir, scan_id=args.scan_id,
         threat_analysis=analysis, concurrency=args.concurrency,
+        required_capability=args.required_capability,
         task_agent_config=args.task_agent_config, include_task_ids=args.include_task_ids,
         exclude_task_ids=args.exclude_task_ids, output=event_output,
     ))

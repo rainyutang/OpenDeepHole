@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from checkers.loop_mut_idx_oob.analyzer import Analyzer as LoopMutIdxOobAnalyzer
+from deephole_client.static_analysis.rules.loop_mut_idx_oob.analyzer import (
+    Analyzer as LoopMutIdxOobAnalyzer,
+)
 
 
 pytestmark = pytest.mark.skipif(

@@ -6,13 +6,21 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.analyzers.semgrep_locations import function_from_db_location
-from backend.analyzers.semgrep_runner import SemgrepRunResult
-from checkers.bufoverflow import analyzer as bufoverflow_analyzer
-from checkers.double_free import analyzer as double_free_analyzer
-from checkers.inf_loop import analyzer as inf_loop_analyzer
-from checkers.mp_npd import analyzer as mp_npd_analyzer
-from checkers.mp_resouce_leak import analyzer as mp_resouce_leak_analyzer
+from deephole_client.static_analysis.semgrep_locations import (
+    function_from_db_location,
+)
+from deephole_client.static_analysis.semgrep_runner import SemgrepRunResult
+from deephole_client.static_analysis.rules.bufoverflow import (
+    analyzer as bufoverflow_analyzer,
+)
+from deephole_client.static_analysis.rules.double_free import (
+    analyzer as double_free_analyzer,
+)
+from deephole_client.static_analysis.rules.inf_loop import analyzer as inf_loop_analyzer
+from deephole_client.static_analysis.rules.mp_npd import analyzer as mp_npd_analyzer
+from deephole_client.static_analysis.rules.mp_resouce_leak import (
+    analyzer as mp_resouce_leak_analyzer,
+)
 
 
 @pytest.mark.parametrize(

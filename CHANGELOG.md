@@ -1,5 +1,14 @@
 # 更新日志
 
+## 2026-07-23
+
+- **重构** 最终将代码图谱构建也抽成第七个独立过程 `deephole_client/code_graph_build/`；它只公开异步 `run_code_graph_build(**kwargs)`，自带 CLI 和完整 key 文档，静态分析与 MCP 分别通过自己的只读索引接口消费结果
+- **重构** 静态规则分析与候选点审计彻底拆为 `static_analysis/rules/` 和 `candidate_audit/rules/` 两棵资源目录；传输包使用明确的 `static/`、`audit/` 根，静态过程不读取 SKILL，审计过程不加载 Analyzer
+- **重构** `deephole_client/scanner.py` 收敛为七个过程的调度和平台上报适配器；后端只保留 API、配置、存储、DTO 与规则元数据，不再导入或执行代码图谱、静态分析、威胁分析等客户端过程
+- **变更** 威胁分析 CLI、技能、参考资料及去误报技能等过程专属文件全部迁入各自目录，删除 `code_parser/`、`checkers/` 和客户端顶层旧业务模块，不提供兼容导入
+- **变更** `task_agent.run_opencode_task()` 首次发送给 OpenCode 的用户 Prompt 改为严格使用调用方原文，不再根据 `output_schema` 自动追加 JSON Schema；现有结构化业务调用和示例改为在调用点显式组装完整 Prompt
+- **新增** `run_opencode_task()` 增加可选 `invalid_json_retry_prompt`：自定义值在每次同 Session JSON 纠错时原样发送，未传时继续使用当前包含完整 Schema 的中文默认纠错提示词
+
 ## 2026-07-22
 
 - **重构** 本地 Python 包由 `agent` 直接切换为 `deephole_client`；界面/API 的 Agent 名称、`/api/agent`、`agent.yaml` 和启动脚本名称保持不变，旧 Python 导入路径不提供兼容层

@@ -12,8 +12,9 @@ from .runner import run_static_analysis
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run OpenDeepHole static analysis without the backend")
     parser.add_argument("--project-path", required=True)
+    parser.add_argument("--work-dir", required=True)
     parser.add_argument("--index-db-path", required=True)
-    parser.add_argument("--checker-dir", action="append", required=True, dest="checker_dirs")
+    parser.add_argument("--checker-dir", action="append", dest="checker_dirs")
     parser.add_argument("--code-scan-path")
     parser.add_argument("--checker", action="append", dest="checker_names")
     parser.add_argument("--no-deduplicate", action="store_true")
@@ -25,6 +26,7 @@ def main() -> None:
 
     result = asyncio.run(run_static_analysis(
         project_path=args.project_path,
+        work_dir=args.work_dir,
         index_db_path=args.index_db_path,
         checker_dirs=args.checker_dirs,
         code_scan_path=args.code_scan_path or args.project_path,

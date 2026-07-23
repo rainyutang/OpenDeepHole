@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import importlib.util
 import sys
 from dataclasses import dataclass
@@ -51,6 +52,18 @@ def discover_checkers(
                 continue
             if name in result:
                 continue
+            analyzer = _load_analyzer(directory, name)
+            analyzer_vuln_type = (
+                getattr(analyzer, "vuln_type", None)
+                if analyzer is not None
+                else None
+            )
+            if analyzer is not None and analyzer_vuln_type != name:
+                raise ValueError(
+                    f"{directory / 'analyzer.py'}: Analyzer.vuln_type "
+                    f"{analyzer_vuln_type!r} does not match checker name "
+                    f"{name!r}"
+                )
             result[name] = Checker(
                 name=name,
                 label=str(raw.get("label") or name),
@@ -60,7 +73,7 @@ def discover_checkers(
                 result_mode=str(raw.get("result_mode") or "vulnerabilities").strip(),
                 skill_path=directory / "SKILL.md",
                 directory=directory.resolve(),
-                analyzer=_load_analyzer(directory, name),
+                analyzer=analyzer,
             )
     missing = selected - set(result)
     if missing:
@@ -73,7 +86,13 @@ def _load_analyzer(directory: Path, checker_name: str) -> BaseAnalyzer | None:
     if not analyzer_path.is_file():
         return None
     digest = hashlib.sha256(str(directory.resolve()).encode()).hexdigest()[:16]
-    package_name = f"_opendeephole_checker_{digest}"
+    rules_package = f"{__package__}.rules"
+    importlib.import_module(rules_package)
+    safe_name = "".join(
+        character if character.isalnum() or character == "_" else "_"
+        for character in checker_name
+    )
+    package_name = f"{rules_package}.{safe_name}_{digest}"
     module_name = f"{package_name}.analyzer"
     package = ModuleType(package_name)
     package.__path__ = [str(directory)]  # type: ignore[attr-defined]

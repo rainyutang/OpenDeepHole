@@ -11,27 +11,14 @@ from pathlib import Path
 
 from backend.config import get_config
 from backend.logger import get_logger
-from backend.registry import get_registry
 
 logger = get_logger(__name__)
 
-# Subdirectories in checker dirs that should be symlinked into the workspace
-_SKILL_RESOURCE_DIRS = {"references", "scripts", "assets"}
-_OBSOLETE_THREAT_AUDIT_SKILL_NAME = "threat-path-audit"
 _GLOBAL_WORKSPACE = Path.home() / ".opendeephole" / "opencode_workspace"
 _MANAGED_CONFIG_FILENAME = ".opendeephole-managed-opencode.json"
-_BUILTIN_AGENT_SKILLS = {
-    "history-match": Path("deephole_client/skills/fp_review_match.md"),
-    "prove-bug": Path("deephole_client/skills/fp_review.md"),
-    "prove-fp": Path("deephole_client/skills/fp_review_discriminator.md"),
-    "final-judge": Path("deephole_client/skills/fp_review_final.md"),
-    "git-history-mine": Path("deephole_client/skills/git_history_mine.md"),
-    "variant-hunt": Path("deephole_client/skills/variant_hunt.md"),
-}
 
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
-_initialized_workspace: Path | None = None
 
 
 def _config_value(value, name: str, default=None):
@@ -60,33 +47,21 @@ def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
 def _build_session_runtime(cli_config, model_option, directory: Path):
     """Resolve the existing OpenDeepHole Serve configuration for the component."""
     from task_agent import OpenCodeSessionRuntime
-    from deephole_client import opencode_workflows as runtime_helpers
-
-    effective = runtime_helpers._effective_cli_config(cli_config, model_option)
-    tool = runtime_helpers._normalize_tool(effective)
+    effective = _effective_model_config(cli_config, model_option)
+    tool = str(effective["tool"] or "opencode").strip().lower()
     if tool not in {"opencode", "nga"}:
         raise ValueError(f"Unsupported OpenCode serve tool: {tool}")
-    if runtime_helpers._invocation_mode(effective) != "serve":
-        raise ValueError("OpenCode tasks require serve invocation mode")
-    executable = runtime_helpers._resolve_cli_executable(effective)
-    model = str(_config_value(effective, "model", "") or "")
+    executable = str(effective["executable"] or tool).strip()
+    resolved_executable = shutil.which(executable)
+    if resolved_executable:
+        executable = resolved_executable
+    model = str(effective["model"] or "")
     workspace = get_global_opencode_workspace()
-    serve_env = runtime_helpers._build_cli_env(
+    serve_env = _runtime_environment(effective)
+    config_content = _runtime_config_content(
         workspace,
-        tool,
-        writable_paths=None,
-        project_dir=None,
-        executable=executable,
-        cli_config=effective,
-    )
-    config_content = runtime_helpers._build_opencode_config_content(
-        workspace,
-        tool,
-        base_env=serve_env,
-        writable_paths=None,
-        project_dir=None,
-        executable=executable,
-        cli_config=effective,
+        effective,
+        Path(directory).resolve(),
     )
     return OpenCodeSessionRuntime(
         directory=Path(directory).resolve(),
@@ -95,8 +70,139 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
         model=model,
         config_workspace=workspace,
         config_content=config_content,
-        env_overrides=runtime_helpers._opencode_process_env_overrides(serve_env),
+        env_overrides={
+            key: serve_env[key]
+            for key in (
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "NO_PROXY",
+                "no_proxy",
+                "NODE_TLS_REJECT_UNAUTHORIZED",
+            )
+            if key in serve_env
+        },
     )
+
+
+def build_opencode_session_runtime(
+    cli_config,
+    model_option=None,
+    directory: Path | None = None,
+):
+    """Build the generic Serve runtime used by task scheduling and model listing."""
+    return _build_session_runtime(
+        cli_config,
+        model_option,
+        Path(directory or Path.cwd()).resolve(),
+    )
+
+
+def _effective_model_config(cli_config, model_option) -> dict:
+    def choose(name: str, default=None):
+        override = _config_value(model_option, name, None)
+        return override if override not in (None, "") else _config_value(
+            cli_config,
+            name,
+            default,
+        )
+
+    use_default_model = bool(_config_value(model_option, "use_default_model", False))
+    return {
+        "tool": choose("tool", "opencode"),
+        "executable": choose("executable", ""),
+        "model": "" if use_default_model else choose("model", ""),
+        "config_paths": _config_value(cli_config, "config_paths", []) or [],
+        "config_jsonc": str(_config_value(cli_config, "config_jsonc", "{}") or "{}"),
+        "proxy_url": str(_config_value(cli_config, "proxy_url", "") or ""),
+        "no_proxy": str(_config_value(cli_config, "no_proxy", "") or ""),
+    }
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    merged = json.loads(json.dumps(base))
+    for key, value in override.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = json.loads(json.dumps(value))
+    return merged
+
+
+def _read_runtime_config(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    from task_agent.config_json import parse_opencode_jsonc
+
+    try:
+        value = parse_opencode_jsonc(
+            path.read_text(encoding="utf-8"),
+            source=str(path),
+        )
+    except Exception as exc:
+        logger.warning("Ignoring invalid OpenCode config %s: %s", path, exc)
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _runtime_config_content(
+    workspace: Path,
+    effective: dict,
+    project_dir: Path,
+) -> str:
+    from task_agent.config_json import dump_opencode_config, parse_opencode_jsonc
+
+    merged: dict = {}
+    raw_paths = effective.get("config_paths") or []
+    if isinstance(raw_paths, str):
+        raw_paths = [raw_paths]
+    for raw_path in raw_paths:
+        path = Path(str(raw_path)).expanduser()
+        candidates = (
+            [path / "opencode.json", path / "opencode.jsonc"]
+            if path.is_dir()
+            else [path]
+        )
+        for candidate in candidates:
+            merged = _deep_merge(merged, _read_runtime_config(candidate))
+    for candidate in (
+        project_dir / "opencode.json",
+        project_dir / "opencode.jsonc",
+        project_dir / ".opencode" / "opencode.json",
+        project_dir / ".opencode" / "opencode.jsonc",
+    ):
+        merged = _deep_merge(merged, _read_runtime_config(candidate))
+    web_config = parse_opencode_jsonc(
+        str(effective.get("config_jsonc") or "{}"),
+        source="Agent OpenCode config",
+    )
+    if isinstance(web_config, dict):
+        merged = _deep_merge(merged, web_config)
+    merged = _deep_merge(
+        merged,
+        _read_runtime_config(managed_opencode_config_path(workspace)),
+    )
+    return dump_opencode_config(merged)
+
+
+def _runtime_environment(effective: dict) -> dict[str, str]:
+    env = dict(os.environ)
+    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+    proxy = str(effective.get("proxy_url") or "").strip()
+    if proxy and "://" not in proxy:
+        proxy = f"http://{proxy}"
+    if proxy:
+        no_proxy = str(effective.get("no_proxy") or "").strip()
+        env.update({
+            "HTTP_PROXY": proxy,
+            "HTTPS_PROXY": proxy,
+            "http_proxy": proxy,
+            "https_proxy": proxy,
+            "NO_PROXY": no_proxy,
+            "no_proxy": no_proxy,
+        })
+    return env
 
 
 def configure_opencode_component() -> None:
@@ -139,7 +245,6 @@ def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
     state (scope, selected feedback and writable roots) is attached to each
     task by :mod:`task_agent.task_service` and is never written here.
     """
-    global _initialized_workspace
     workspace = _GLOBAL_WORKSPACE
     workspace.mkdir(parents=True, exist_ok=True)
     with get_workspace_lock(workspace):
@@ -150,15 +255,6 @@ def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
         config_missing = not managed_opencode_config_path(workspace).is_file()
         if mcp_port is not None or config_missing:
             _write_opencode_config(workspace, mcp_port=mcp_port)
-        resolved_workspace = workspace.resolve()
-        if (
-            mcp_port is not None
-            or config_missing
-            or _initialized_workspace != resolved_workspace
-        ):
-            _link_skills(workspace)
-            _install_builtin_skills(workspace)
-            _initialized_workspace = resolved_workspace
     return workspace
 
 
@@ -181,9 +277,6 @@ def refresh_global_opencode_config() -> Path:
             json.dumps(build_opencode_config(mcp_url, [str(skills_dir)]), indent=2),
             mode=0o600,
         )
-        # Re-apply config-owned threat-analysis agents after regenerating the
-        # base MCP/permission layer so a live config refresh cannot drop them.
-        _install_builtin_skills(workspace)
     return workspace
 
 
@@ -196,47 +289,6 @@ def _write_text_atomic(path: Path, content: str, *, mode: int | None = None) -> 
     os.replace(temporary, path)
     if mode is not None:
         path.chmod(mode)
-
-
-def _install_builtin_skills(workspace: Path) -> None:
-    """Materialize every repository-owned skill in the global skill root."""
-    repo_root = Path(__file__).resolve().parents[1]
-    skills_root = workspace / ".opencode" / "skills"
-    for skill_name, relative_source in _BUILTIN_AGENT_SKILLS.items():
-        source = repo_root / relative_source
-        if not source.is_file():
-            logger.warning("Built-in OpenCode skill source missing: %s", source)
-            continue
-        _write_text_atomic(
-            skills_root / skill_name / "SKILL.md",
-            source.read_text(encoding="utf-8"),
-        )
-
-    # The attack-tree workflow owns a main skill, six stage skills and shared
-    # reference material. Register all of them up front; OpenCode discovers the
-    # catalog and loads only a skill selected by the task prompt.
-    from deephole_client.threat_analysis_workspace import install_attack_tree_threat_analysis_skill
-
-    skill_path = repo_root / "attack-tree-threat-analysis.md"
-    reference_path = repo_root / "attack-method-reference-catalog.md"
-    if skill_path.is_file() and reference_path.is_file():
-        install_attack_tree_threat_analysis_skill(
-            workspace,
-            skill_path,
-            reference_path,
-            config_path=managed_opencode_config_path(workspace),
-        )
-
-
-def _link_skill_resources(entry, link_dir: Path) -> None:
-    """Symlink checker resource directories into a generated skill directory."""
-    for dir_name in _SKILL_RESOURCE_DIRS:
-        src = entry.directory / dir_name
-        if src.is_dir():
-            link_dest = link_dir / dir_name
-            if link_dest.exists() or link_dest.is_symlink():
-                os.remove(link_dest)
-            link_dest.symlink_to(src.resolve())
 
 
 def writable_edit_patterns(path: str | os.PathLike[str]) -> list[str]:
@@ -414,79 +466,3 @@ def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None
         json.dumps(build_opencode_config(mcp_url, [str(skills_dir)]), indent=2),
         mode=0o600,
     )
-
-
-def _link_skills(
-    workspace: Path,
-) -> None:
-    """Register stable definitions from all checkers in the global workspace."""
-    skills_target = workspace / ".opencode" / "skills"
-    skills_target.mkdir(parents=True, exist_ok=True)
-
-    # Interrupted scans can leave the retired dedicated threat-audit skill in
-    # their persistent workspace. Remove it whenever skills are refreshed so a
-    # later continuation cannot load the stale copy.
-    obsolete_threat_skill = skills_target / _OBSOLETE_THREAT_AUDIT_SKILL_NAME
-    if obsolete_threat_skill.is_symlink() or obsolete_threat_skill.is_file():
-        obsolete_threat_skill.unlink()
-    elif obsolete_threat_skill.is_dir():
-        shutil.rmtree(obsolete_threat_skill)
-
-    registry = get_registry()
-    for name, entry in registry.items():
-        link_dir = skills_target / name
-        link_dir.mkdir(exist_ok=True)
-
-        # API 模式：将 prompt.txt（合并反馈）写入 PROMPT.md
-        if entry.mode == "api":
-            if entry.prompt_path and entry.prompt_path.is_file():
-                prompt_dest = link_dir / "PROMPT.md"
-                if prompt_dest.exists():
-                    os.remove(prompt_dest)
-                original = entry.prompt_path.read_text(encoding="utf-8")
-                prompt_dest.write_text(original, encoding="utf-8")
-            # Legacy API checkers are executed only through OpenCode now.  Keep
-            # prompt.txt compatibility by materializing a temporary SKILL.
-            if entry.skill_path.is_file():
-                skill_dest = link_dir / "SKILL.md"
-                if skill_dest.exists():
-                    os.remove(skill_dest)
-                original = entry.skill_path.read_text(encoding="utf-8")
-                skill_dest.write_text(original, encoding="utf-8")
-            else:
-                logger.warning(
-                    "Checker %s uses deprecated mode=api; wrapping prompt.txt as a temporary OpenCode SKILL",
-                    name,
-                )
-                prompt_text = (
-                    entry.prompt_path.read_text(encoding="utf-8")
-                    if entry.prompt_path and entry.prompt_path.is_file()
-                    else ""
-                )
-                skill_dest = link_dir / "SKILL.md"
-                skill_dest.write_text(
-                    "---\n"
-                    f"name: {name}\n"
-                    "description: Legacy prompt.txt checker wrapped for OpenCode execution.\n"
-                    "---\n\n"
-                    + prompt_text,
-                    encoding="utf-8",
-                )
-            _link_skill_resources(entry, link_dir)
-            continue
-
-        # opencode 模式：原有 SKILL.md 逻辑
-        if not entry.skill_path.is_file():
-            logger.warning("SKILL.md not found for checker %s", name)
-            continue
-
-        skill_dest = link_dir / "SKILL.md"
-        if skill_dest.exists():
-            os.remove(skill_dest)
-
-        original = entry.skill_path.read_text(encoding="utf-8")
-        skill_dest.write_text(original, encoding="utf-8")
-
-        _link_skill_resources(entry, link_dir)
-
-    logger.debug("Linked skills for %d checkers", len(registry))

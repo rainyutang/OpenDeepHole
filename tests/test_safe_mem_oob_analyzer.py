@@ -6,7 +6,9 @@ from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
-from checkers.safe_mem_oob.analyzer import Analyzer as SafeMemOobAnalyzer
+from deephole_client.static_analysis.rules.safe_mem_oob.analyzer import (
+    Analyzer as SafeMemOobAnalyzer,
+)
 
 
 def test_safe_mem_oob_skips_when_semgrep_missing(tmp_path: Path) -> None:
@@ -28,7 +30,7 @@ def test_safe_mem_oob_semgrep_output_uses_utf8_replace(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         assert list(SafeMemOobAnalyzer().find_candidates(tmp_path)) == []
 
@@ -59,7 +61,7 @@ def test_safe_mem_oob_prefers_json_output_file(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 
@@ -89,7 +91,7 @@ def test_safe_mem_oob_uses_semgrep_json_file_after_timeout(tmp_path: Path) -> No
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 
@@ -102,7 +104,7 @@ def test_safe_mem_oob_skips_tool_errors_and_bad_json(tmp_path: Path) -> None:
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "backend.analyzers.semgrep_runner.subprocess.run",
+            "deephole_client.static_analysis.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 2, stdout="", stderr="bad config"),
         ),
     ):
@@ -111,7 +113,7 @@ def test_safe_mem_oob_skips_tool_errors_and_bad_json(tmp_path: Path) -> None:
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "backend.analyzers.semgrep_runner.subprocess.run",
+            "deephole_client.static_analysis.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 0, stdout="not-json", stderr=""),
         ),
     ):
@@ -151,7 +153,7 @@ def test_safe_mem_oob_deduplicates_same_rule_and_destination(tmp_path: Path) -> 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "backend.analyzers.semgrep_runner.subprocess.run",
+            "deephole_client.static_analysis.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 1, stdout=json.dumps(payload), stderr=""),
         ),
     ):
@@ -179,7 +181,7 @@ def test_safe_mem_oob_describes_pointer_sizeof_dst(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 
@@ -207,7 +209,7 @@ def test_safe_mem_oob_describes_three_argument_string_call_without_count(tmp_pat
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("backend.analyzers.semgrep_runner.subprocess.run", return_value=output),
+        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(SafeMemOobAnalyzer().find_candidates(tmp_path))
 

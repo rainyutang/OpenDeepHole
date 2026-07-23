@@ -11,9 +11,13 @@ from unittest.mock import patch
 
 from backend.api.checkers import list_checkers
 from backend.api.scan import _validated_checker_names
-from backend.checker_sync import build_checker_packages, unpack_checker_packages
+from backend.checker_sync import build_checker_packages
 from backend.models import User
 from backend.registry import discover_checkers, refresh_registry
+from deephole_client.rule_packages import unpack_rule_packages
+from deephole_client.static_analysis.registry import (
+    discover_checkers as discover_static_checkers,
+)
 
 
 class CheckerHotReloadTests(unittest.TestCase):
@@ -73,18 +77,28 @@ class CheckerHotReloadTests(unittest.TestCase):
     def test_checker_package_loads_with_relative_imports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_root = Path(tmp) / "source"
-            target_root = Path(tmp) / "target"
+            static_root = Path(tmp) / "static"
+            audit_root = Path(tmp) / "audit"
             self._write_checker(source_root, "relcheck", with_analyzer=True)
             registry = discover_checkers(source_root)
             packages = build_checker_packages(registry, ["relcheck"])
 
-            unpacked = unpack_checker_packages(packages, target_root)
-            synced_registry = refresh_registry(target_root)
+            unpacked = unpack_rule_packages(
+                packages,
+                static_root,
+                audit_root,
+            )
+            synced_registry = discover_static_checkers(
+                [static_root],
+                ["relcheck"],
+            )
 
         self.assertEqual(unpacked, ["relcheck"])
         self.assertIn("relcheck", synced_registry)
         self.assertIsNotNone(synced_registry["relcheck"].analyzer)
         self.assertEqual(getattr(synced_registry["relcheck"].analyzer, "marker", ""), "relative-ok")
+        self.assertFalse((static_root / "relcheck" / "SKILL.md").exists())
+        self.assertFalse((audit_root / "relcheck" / "analyzer.py").exists())
 
     def test_refresh_registry_discovers_user_skill_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,7 +132,11 @@ class CheckerHotReloadTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
-                unpack_checker_packages([package], Path(tmp))
+                unpack_rule_packages(
+                    [package],
+                    Path(tmp) / "static",
+                    Path(tmp) / "audit",
+                )
 
     def _write_checker(
         self,
@@ -151,9 +169,10 @@ class CheckerHotReloadTests(unittest.TestCase):
         if with_analyzer:
             (checker_dir / "helper.py").write_text("MARKER = 'relative-ok'\n", encoding="utf-8")
             (checker_dir / "analyzer.py").write_text(
-                "from backend.analyzers.base import BaseAnalyzer\n"
+                "from ...base import BaseAnalyzer\n"
                 "from .helper import MARKER\n\n"
                 "class Analyzer(BaseAnalyzer):\n"
+                f"    vuln_type = {name!r}\n"
                 "    def __init__(self):\n"
                 "        self.marker = MARKER\n"
                 "    def find_candidates(self, project_path, db=None):\n"

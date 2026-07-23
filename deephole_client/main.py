@@ -163,10 +163,9 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             feedback_entries=msg.get("feedback_entries", []),
         )
     elif cmd_type == "feedback_update":
-        entry = msg.get("entry")
-        if entry:
-            from deephole_client.fp_reviewer import update_local_feedback
-            update_local_feedback(entry)
+        # Feedback is persisted by the backend and supplied explicitly in each
+        # candidate-audit or FP-review call.
+        return None
     elif cmd_type == "config":
         from deephole_client.config import apply_remote_config, save_config
         if msg.get("config"):
@@ -226,7 +225,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
 async def _apply_live_config_update(config) -> None:
     """Apply server-managed model/API config to already loaded backend state."""
     from deephole_client.config import apply_network_env
-    from deephole_client.scanner import refresh_backend_runtime_config
+    from deephole_client.platform_runtime import refresh_platform_runtime_config
     from task_agent.model_pool import (
         notify_model_pool_config_changed,
         refresh_configured_model_pool,
@@ -234,7 +233,7 @@ async def _apply_live_config_update(config) -> None:
     from task_agent.serve_client import get_serve_manager, mark_serve_config_dirty
 
     apply_network_env(config)
-    refresh_backend_runtime_config(config)
+    refresh_platform_runtime_config(config)
     from deephole_client.opencode_integration import (
         build_managed_mcp_runtime_specs,
         configure_opencode_component,
@@ -262,7 +261,9 @@ async def _ws_loop(config, task_manager, reporter) -> None:
     import websockets
     import deephole_client.server as agent_server
     from deephole_client.config import apply_network_env, apply_remote_config, remote_config_dict
-    from deephole_client.vulnerability_validation.runtime import build_validator_catalog
+    from deephole_client.vulnerability_validation import (
+        run_vulnerability_validation,
+    )
     from deephole_client.updater import compute_runtime_hash, load_pending_commands, pending_scan_snapshots
 
     name = config.agent_name or socket.gethostname()
@@ -284,12 +285,15 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 ping_timeout=ping_timeout,
             ) as ws:
                 # Handshake
+                validator_result = await run_vulnerability_validation(
+                    operation="catalog",
+                )
                 hello_msg = {
                     "type": "hello",
                     "name": name,
                     "machine_name": socket.gethostname(),
                     "config": remote_config_dict(config),
-                    "validator_catalog": build_validator_catalog().model_dump(),
+                    "validator_catalog": validator_result["catalog"],
                     "runtime_hash": compute_runtime_hash(),
                     "agent_session_id": reporter.agent_session_id,
                     "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),

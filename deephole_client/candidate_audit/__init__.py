@@ -1,4 +1,4 @@
-"""Standalone candidate-audit process."""
+"""Public API for the independent candidate-audit process."""
 
 from .runner import run_candidate_audit
 

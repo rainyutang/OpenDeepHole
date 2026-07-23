@@ -20,6 +20,12 @@ def main() -> None:
     parser.add_argument("--history")
     parser.add_argument("--processed-offset", type=int, default=0)
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument(
+        "--required-capability",
+        choices=("low", "high"),
+        default="high",
+    )
+    parser.add_argument("--invalid-json-retry-count", type=int, default=2)
     parser.add_argument("--task-agent-config")
     parser.add_argument("--output-file")
     args = parser.parse_args()
@@ -35,6 +41,8 @@ def main() -> None:
         review_id=args.review_id, vulnerabilities=load(args.vulnerabilities),
         feedback_entries=load(args.feedback), history=load(args.history),
         processed_offset=args.processed_offset, concurrency=args.concurrency,
+        required_capability=args.required_capability,
+        invalid_json_retry_count=args.invalid_json_retry_count,
         task_agent_config=args.task_agent_config, output=event_output,
     ))
     text = json.dumps(result, ensure_ascii=False, indent=2)

@@ -1,13 +1,12 @@
 """Upload API — handles source code zip file uploads."""
 
 import json
-import os
 import shutil
 import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, UploadFile
 
 from backend.config import get_config
 from backend.logger import get_logger
@@ -17,63 +16,6 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB chunks
-
-
-def _remove_sqlite_files(path: Path) -> None:
-    for suffix in ("", "-wal", "-shm"):
-        try:
-            path.with_name(path.name + suffix).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-def _replace_sqlite_db(temp_path: Path, final_path: Path) -> None:
-    for suffix in ("-wal", "-shm"):
-        try:
-            final_path.with_name(final_path.name + suffix).unlink(missing_ok=True)
-        except OSError:
-            pass
-    os.replace(temp_path, final_path)
-    _remove_sqlite_files(temp_path)
-
-
-def _parse_project(project_id: str, project_dir: Path) -> None:
-    """Background task: index C/C++ source and populate code_index.db."""
-    from code_parser import CodeDatabase, CppAnalyzer
-
-    status_path = project_dir / "parse_status.json"
-    db_path = project_dir / "code_index.db"
-    temp_db_path = project_dir / f"code_index.{project_id}.tmp.db"
-    db = None
-
-    status_path.write_text(json.dumps({"status": "parsing", "parsed_files": 0, "total_files": 0}))
-    try:
-        _remove_sqlite_files(temp_db_path)
-        db = CodeDatabase(temp_db_path)
-        analyzer = CppAnalyzer(db)
-
-        def _on_progress(current: int, total: int) -> None:
-            status_path.write_text(json.dumps({
-                "status": "parsing",
-                "parsed_files": current,
-                "total_files": total,
-            }))
-
-        analyzer.analyze_directory(project_dir, on_progress=_on_progress)
-        db.mark_index_complete()
-        db.checkpoint()
-        db.close()
-        _replace_sqlite_db(temp_db_path, db_path)
-        status_path.write_text(json.dumps({"status": "done"}))
-        logger.info("Project %s: code index built at %s", project_id, db_path)
-    except Exception as exc:
-        logger.exception("Project %s: code indexing failed", project_id)
-        try:
-            db.close()
-        except Exception:
-            pass
-        _remove_sqlite_files(temp_db_path)
-        status_path.write_text(json.dumps({"status": "error", "error": str(exc)}))
 
 
 @router.get("/api/project/{project_id}/index-status")
@@ -92,7 +34,8 @@ async def get_index_status(project_id: str) -> dict:
         if scan.project_id == project_id and scan_id in _scan_index_statuses:
             return _scan_index_statuses[scan_id]
 
-    # Server-hosted upload scans: read the file-based status
+    # Uploaded source is storage only. Code-graph construction is exclusively
+    # coordinated by deephole_client, so the backend never executes a process.
     config = get_config()
     project_dir = Path(config.storage.projects_dir) / project_id
     status_path = project_dir / "parse_status.json"
@@ -105,8 +48,8 @@ async def get_index_status(project_id: str) -> dict:
 
 
 @router.post("/api/upload", response_model=UploadResponse)
-async def upload_source(file: UploadFile, background_tasks: BackgroundTasks) -> UploadResponse:
-    """Upload a source code zip file for analysis.
+async def upload_source(file: UploadFile) -> UploadResponse:
+    """Upload and extract a source-code zip without executing analysis.
 
     Accepts a .zip file, streams it to disk in chunks to avoid
     loading the entire file into memory, and returns a project_id
@@ -164,5 +107,4 @@ async def upload_source(file: UploadFile, background_tasks: BackgroundTasks) -> 
         zip_path.unlink(missing_ok=True)
 
     logger.info("Uploaded project %s (%d bytes)", project_id, total_written)
-    background_tasks.add_task(_parse_project, project_id, project_dir)
     return UploadResponse(project_id=project_id)

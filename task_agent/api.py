@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from os import PathLike
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 
@@ -51,6 +53,7 @@ async def run_opencode_task(
     required_capability: Literal["low", "high"],
     output_schema: dict[str, Any] | None = None,
     invalid_json_retry_count: int = 2,
+    invalid_json_retry_prompt: str | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -74,6 +77,13 @@ async def run_opencode_task(
     retry_count = int(invalid_json_retry_count)
     if retry_count < 0:
         raise ValueError("OpenCode invalid_json_retry_count cannot be negative")
+    if invalid_json_retry_prompt is not None:
+        if not isinstance(invalid_json_retry_prompt, str):
+            raise TypeError(
+                "OpenCode invalid_json_retry_prompt must be a string or None"
+            )
+        if not invalid_json_retry_prompt.strip():
+            raise ValueError("OpenCode invalid_json_retry_prompt cannot be empty")
     if output is not _UNSET and output is not None and not callable(output):
         raise TypeError("OpenCode output must be callable or None")
 
@@ -90,6 +100,7 @@ async def run_opencode_task(
             required_capability=capability,
             output_schema=output_schema,
             invalid_json_retry_count=retry_count,
+            invalid_json_retry_prompt=invalid_json_retry_prompt,
             session_id=str(session_id or "").strip() or None,
         )
 
@@ -116,3 +127,27 @@ async def run_opencode_task(
         cancel_event=standalone_cancel_event,
     ):
         return await run()
+
+
+@contextmanager
+def opencode_task_context(
+    *,
+    project_dir: str | PathLike[str],
+    work_dir: str | PathLike[str],
+    scan_id: str = "",
+    feedback_entries: list[dict[str, Any]] | None = None,
+    output: Callable[[str], Any] | None = None,
+    cancel_event: Any = None,
+):
+    """Bind generic host context for one or more component task calls."""
+    from .task_service import bind_opencode_execution_context
+
+    with bind_opencode_execution_context(
+        project_dir=Path(project_dir).expanduser().resolve(),
+        work_dir=Path(work_dir).expanduser().resolve(),
+        scan_id=str(scan_id or ""),
+        feedback_entries=list(feedback_entries or []),
+        on_output=output,
+        cancel_event=cancel_event,
+    ):
+        yield

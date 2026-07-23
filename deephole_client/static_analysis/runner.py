@@ -6,18 +6,18 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-from code_parser import CodeDatabase
-
+from .index_reader import CodeIndexReader
 from .models import Candidate
 from .registry import Checker, discover_checkers
 from .source_filter import source_path_has_ignored_dir
 
 PROCESS_NAME = "static_analysis"
 _ALLOWED_KEYS = {
-    "project_path", "index_db_path", "checker_dirs", "code_scan_path",
-    "checker_names", "deduplicate", "output", "cancel_event",
+    "project_path", "work_dir", "index_db_path", "checker_dirs",
+    "code_scan_path", "checker_names", "deduplicate", "output",
+    "cancel_event",
 }
-_REQUIRED_KEYS = {"project_path", "index_db_path", "checker_dirs"}
+_REQUIRED_KEYS = {"project_path", "work_dir", "index_db_path"}
 PROJECT_LEVEL_FUNCTION = "__project__"
 
 
@@ -89,13 +89,23 @@ async def run_static_analysis(**kwargs: Any) -> dict[str, Any]:
         raise TypeError(f"run_static_analysis() missing required key(s): {', '.join(missing)}")
 
     project = _path(kwargs["project_path"], "project_path", directory=True)
+    work_dir = Path(kwargs["work_dir"]).expanduser().resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
     scan_root = _path(kwargs.get("code_scan_path") or project, "code_scan_path", directory=True)
     try:
         scan_root.relative_to(project)
     except ValueError as exc:
         raise ValueError("code_scan_path must be inside project_path") from exc
     index_path = _path(kwargs["index_db_path"], "index_db_path")
-    checker_dirs = [_path(item, "checker_dirs", directory=True) for item in kwargs["checker_dirs"]]
+    raw_checker_dirs = kwargs.get("checker_dirs")
+    if raw_checker_dirs is None:
+        raw_checker_dirs = [Path(__file__).resolve().parent / "rules"]
+    if not isinstance(raw_checker_dirs, (list, tuple)):
+        raise TypeError("checker_dirs must be a list or tuple")
+    checker_dirs = [
+        _path(item, "checker_dirs", directory=True)
+        for item in raw_checker_dirs
+    ]
     checker_names = kwargs.get("checker_names")
     if checker_names is not None and not isinstance(checker_names, list):
         raise TypeError("checker_names must be a list or None")
@@ -111,7 +121,7 @@ async def run_static_analysis(**kwargs: Any) -> dict[str, Any]:
         return {"status": "cancelled", "candidates": [], "stats": {"total": 0, "checkers": {}}}
 
     def execute() -> tuple[list[Candidate], dict[str, int], bool]:
-        database = CodeDatabase(index_path)
+        database = CodeIndexReader(index_path)
         candidates: list[Candidate] = []
         counts: dict[str, int] = {}
         try:

@@ -390,7 +390,7 @@ async def _run_single_fp_review_item(item: _FpReviewQueueItem, processed_offset:
     from deephole_client.config import apply_network_env, apply_remote_config
     from deephole_client.fp_review import run_fp_review
     from task_agent.model_pool import clear_planned_task
-    from task_agent.task_service import bind_opencode_execution_context
+    from task_agent import opencode_task_context
     from backend.models import OutputSource, ScanEvent
 
     if item.planned_task_id:
@@ -424,7 +424,7 @@ async def _run_single_fp_review_item(item: _FpReviewQueueItem, processed_offset:
                 ScanEvent.create("fp_review", message),
             )
 
-    with bind_opencode_execution_context(
+    with opencode_task_context(
         scan_id=item.scan_id,
         project_dir=project,
         work_dir=review_dir,
@@ -458,6 +458,13 @@ async def _run_single_fp_review_item(item: _FpReviewQueueItem, processed_offset:
         verdict_value = str(review.get("verdict") or "uncertain")
         verdict = "fp" if verdict_value == "false_positive" else "tp"
         source = OutputSource(**dict(review.get("output_source") or {}))
+        stage_sources = {
+            str(stage): OutputSource(**dict(raw_source or {}))
+            for stage, raw_source in (
+                review.get("stage_output_sources") or {}
+            ).items()
+            if isinstance(raw_source, dict)
+        }
         await item.reporter.push_fp_result(
             item.scan_id,
             item.review_id,
@@ -465,9 +472,15 @@ async def _run_single_fp_review_item(item: _FpReviewQueueItem, processed_offset:
             verdict,
             str(review.get("revised_severity") or item.vulnerability.get("severity") or "unknown"),
             str(review.get("reason") or ""),
-            str(item.vulnerability.get("vulnerability_report") or ""),
-            stage_outputs={"final_judge": str(review.get("reason") or "")},
-            stage_output_sources={"final_judge": source},
+            str(
+                review.get("vulnerability_report")
+                or item.vulnerability.get("vulnerability_report")
+                or ""
+            ),
+            stage_outputs=dict(review.get("stage_outputs") or {}),
+            match_reference=str(review.get("match_reference") or ""),
+            match_type=str(review.get("match_type") or ""),
+            stage_output_sources=stage_sources,
             output_source=source,
         )
     return int(result.get("processed") or 0)
@@ -719,12 +732,11 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
     import dataclasses
 
     from deephole_client.config import apply_network_env, apply_remote_config
-    from deephole_client.vulnerability_validation.runtime import (
-        PRODUCT_VALIDATORS_DIR,
+    from deephole_client.vulnerability_validation import (
         run_vulnerability_validation,
     )
     from backend.models import ScanEvent, VulnerabilityValidation
-    from task_agent.task_service import bind_opencode_execution_context
+    from task_agent import opencode_task_context
 
     if item.reporter is not None and _agent_id is not None:
         try:
@@ -762,7 +774,7 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
 
         project = Path(item.project_path).expanduser().resolve()
         validation_work_dir = work_root / "validation" / f"vuln-{item.vuln_index}"
-        with bind_opencode_execution_context(
+        with opencode_task_context(
             scan_id=item.scan_id,
             project_dir=project,
             work_dir=validation_work_dir,
@@ -780,7 +792,6 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
                     "vulnerability": item.vulnerability,
                     "report_markdown": item.report_markdown,
                 }],
-                validators_dir=PRODUCT_VALIDATORS_DIR,
                 environment_config=environment_config,
                 output=process_output,
                 cancel_event=item.cancel_event,
@@ -842,21 +853,14 @@ async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[
         task = _task_manager.get(scan_id)
         if task is not None:
             task.feedback_entries = feedback_entries
-    from task_agent.task_service import set_scan_feedback_entries
-    set_scan_feedback_entries(scan_id, feedback_entries)
-    from deephole_client.fp_reviewer import set_fp_review_feedback
-    set_fp_review_feedback(scan_id, feedback_entries)
 
 
 async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict:
     """Return models visible to the Agent's OpenCode-compatible serve process."""
     try:
         from task_agent.serve_client import get_serve_manager
-        from deephole_client.opencode_integration import get_global_opencode_workspace
-        from deephole_client.opencode_workflows import (
-            _build_cli_env,
-            _build_opencode_config_content,
-            _opencode_process_env_overrides,
+        from deephole_client.opencode_integration import (
+            build_opencode_session_runtime,
         )
 
         if _config is None:
@@ -865,29 +869,17 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         executable = str(getattr(_config.opencode, "executable", "") or tool)
         if tool not in {"opencode", "nga"}:
             raise RuntimeError(f"{tool} does not support serve model listing")
-        config_workspace = get_global_opencode_workspace()
-        serve_env = _build_cli_env(
-            config_workspace,
-            tool,
-            project_dir=Path.cwd(),
-            executable=executable,
-            cli_config=_config.opencode,
-        )
-        config_content = _build_opencode_config_content(
-            config_workspace,
-            tool,
-            base_env=serve_env,
-            project_dir=Path.cwd(),
-            executable=executable,
-            cli_config=_config.opencode,
+        runtime = build_opencode_session_runtime(
+            _config.opencode,
+            directory=Path.cwd(),
         )
         model_result = await get_serve_manager().list_models(
-            tool=tool,
-            executable=executable,
-            directory=Path.cwd(),
-            config_workspace=config_workspace,
-            config_content=config_content,
-            env_overrides=_opencode_process_env_overrides(serve_env),
+            tool=runtime.tool,
+            executable=runtime.executable,
+            directory=runtime.directory,
+            config_workspace=runtime.config_workspace,
+            config_content=runtime.config_content,
+            env_overrides=runtime.env_overrides,
             refresh=refresh,
         )
         return {
@@ -1039,10 +1031,9 @@ async def _run_skill_creator(
     if _config is None:
         raise RuntimeError("Agent config is not initialized")
 
-    from deephole_client.scanner import _configure_backend
-    from task_agent import run_opencode_task
+    from deephole_client.platform_runtime import configure_platform_runtime
+    from task_agent import opencode_task_context, run_opencode_task
     from deephole_client.opencode_integration import get_global_opencode_workspace, get_workspace_lock
-    from task_agent.task_service import bind_opencode_execution_context
 
     request_dir = Path.home() / ".opendeephole" / "skill_create" / request_id
     if request_dir.exists():
@@ -1055,7 +1046,7 @@ async def _run_skill_creator(
             workspace / ".opencode" / "skills",
         )
 
-    _configure_backend(_config, request_dir)
+    configure_platform_runtime(_config, request_dir)
     prompt = _skill_creator_prompt(name, description, user_input)
 
     def on_output(line: str) -> None:
@@ -1072,10 +1063,16 @@ async def _run_skill_creator(
         "required": ["skill_md", "scenarios_md", "summary"],
         "additionalProperties": False,
     }
-    with bind_opencode_execution_context(
+    prompt += (
+        "\n\n请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
+        "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，"
+        "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
+        + json.dumps(output_schema, ensure_ascii=False, indent=2)
+    )
+    with opencode_task_context(
         project_dir=request_dir,
         work_dir=request_dir,
-        on_output=on_output,
+        output=on_output,
     ):
         result = await run_opencode_task(
             task_name="skill_create",

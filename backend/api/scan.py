@@ -2335,11 +2335,16 @@ async def get_fp_review_skill(
 ) -> dict:
     """Return the FP review skill content, merged with user feedback for this scan."""
     _check_scan_owner(scan_id, current_user)
-    skills_dir = Path(__file__).resolve().parent.parent.parent / "agent" / "skills"
+    skills_dir = (
+        Path(__file__).resolve().parent.parent.parent
+        / "deephole_client"
+        / "fp_review"
+        / "skills"
+    )
     skill_paths = [
-        ("prove-bug", skills_dir / "fp_review.md"),
-        ("prove-fp", skills_dir / "fp_review_discriminator.md"),
-        ("final-judge", skills_dir / "fp_review_final.md"),
+        ("prove-bug", skills_dir / "prove_bug.md"),
+        ("prove-fp", skills_dir / "prove_fp.md"),
+        ("final-judge", skills_dir / "final_judge.md"),
     ]
     missing = [path.name for _, path in skill_paths if not path.is_file()]
     if missing:

@@ -71,7 +71,7 @@ class SkillMarketTests(unittest.TestCase):
             self.assertEqual(registry["custom_audit"].mode, "opencode")
             self.assertEqual(registry["custom_audit"].result_mode, "markdown_reports")
             self.assertEqual(registry["custom_audit"].timeout_seconds, 2400)
-            self.assertIsNone(registry["custom_audit"].analyzer)
+            self.assertEqual(registry["custom_audit"].directory, checker_dir.resolve())
             checker_yaml = (checker_dir / "checker.yaml").read_text(encoding="utf-8")
             self.assertIn("created_by_user_id: user-1", checker_yaml)
             self.assertIn("created_by_username: alice", checker_yaml)

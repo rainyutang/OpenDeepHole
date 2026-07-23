@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-import code_parser.cpp_analyzer as cpp_analyzer
-from code_parser import CodeDatabase
-from code_parser.cpp_analyzer import CppAnalyzer
-from code_parser.cpp_analyzer import CodeIndexToolError
+import deephole_client.code_graph_build.cpp_analyzer as cpp_analyzer
+from deephole_client.code_graph_build.code_database import CodeDatabase
+from deephole_client.code_graph_build.cpp_analyzer import CppAnalyzer
+from deephole_client.code_graph_build.cpp_analyzer import CodeIndexToolError
 
 
 def _index_source(

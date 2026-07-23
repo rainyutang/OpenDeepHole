@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from checkers.atoi_read_oob.analyzer import Analyzer
+from deephole_client.static_analysis.rules.atoi_read_oob.analyzer import Analyzer
 
 
 class _FakeDb:

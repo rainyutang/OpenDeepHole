@@ -17,6 +17,22 @@ def main() -> None:
     parser.add_argument("--scan-id", default="standalone")
     parser.add_argument("--product", default="")
     parser.add_argument("--task-agent-config")
+    parser.add_argument(
+        "--required-capability",
+        choices=("low", "high"),
+        default="high",
+    )
+    parser.add_argument("--timeout-seconds", type=int, default=1200)
+    parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--opencode-config-path")
+    parser.add_argument("--configured-mcp-name", action="append", default=[])
+    parser.add_argument("--product-mcp-name", default="product-info")
+    parser.add_argument(
+        "--product-mcp-detection-timeout-seconds",
+        type=int,
+        default=60,
+    )
+    parser.add_argument("--mock", action="store_true")
     parser.add_argument("--result-path")
     parser.add_argument("--no-reuse-cache", action="store_true")
     parser.add_argument("--output-file")
@@ -32,6 +48,16 @@ def main() -> None:
         scan_id=args.scan_id,
         product=args.product,
         task_agent_config=args.task_agent_config,
+        required_capability=args.required_capability,
+        timeout_seconds=args.timeout_seconds,
+        max_retries=args.max_retries,
+        opencode_config_path=args.opencode_config_path,
+        configured_mcp_names=args.configured_mcp_name,
+        product_mcp_name=args.product_mcp_name,
+        product_mcp_detection_timeout_seconds=(
+            args.product_mcp_detection_timeout_seconds
+        ),
+        mock=args.mock,
         result_path=args.result_path,
         reuse_cache=not args.no_reuse_cache,
         output=event_output,

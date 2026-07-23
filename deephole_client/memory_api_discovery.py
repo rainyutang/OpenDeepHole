@@ -451,6 +451,16 @@ async def _run_memory_api_batch(
         batch_count=batch_count,
         output_path=output_path,
     )
+    prompt += (
+        "\n\n请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
+        "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，"
+        "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
+        + json.dumps(
+            _MEMORY_API_BATCH_JSON_SCHEMA,
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     log_path = output_path.with_suffix(".log")
     with bind_opencode_execution_context(
         project_dir=project_root,

@@ -808,6 +808,7 @@ class AgentValidatorRegistration(BaseModel):
     product: str
     environment: str
     fields: list[AgentValidatorField] = []
+    timeout_seconds: int | None = None
     legacy: bool = False
 
 

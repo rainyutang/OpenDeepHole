@@ -20,7 +20,7 @@ _ALLOWED_KEYS = {
     "audit_index_offset", "task_agent_config", "output", "cancel_event",
 }
 _REQUIRED_KEYS = {
-    "project_path", "work_dir", "scan_id", "candidates", "checker_dirs", "index_db_path",
+    "project_path", "work_dir", "scan_id", "candidates", "index_db_path",
 }
 _RESULT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -68,16 +68,18 @@ def _checker_catalog(roots: list[Path]) -> dict[str, dict[str, Any]]:
         if not root.is_dir():
             raise FileNotFoundError(f"checker directory does not exist: {root}")
         for directory in sorted(root.iterdir()):
-            manifest = directory / "checker.yaml"
-            if not directory.is_dir() or not manifest.is_file():
+            manifest = directory / "audit.yaml"
+            skill_path = directory / "SKILL.md"
+            if not directory.is_dir() or not skill_path.is_file():
                 continue
-            raw = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                continue
+            raw: dict[str, Any] = {}
+            if manifest.is_file():
+                loaded = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    raw = loaded
             name = str(raw.get("name") or directory.name).strip()
             if name in result:
                 continue
-            skill_path = directory / "SKILL.md"
             result[name] = {
                 "name": name,
                 "label": str(raw.get("label") or name),
@@ -139,6 +141,42 @@ def _pattern_key(candidate: dict[str, Any], scope: str) -> tuple[str, ...]:
     return (str(candidate.get("vuln_type")), str(candidate.get("function")))
 
 
+def _candidate_prompt(
+    checker: dict[str, Any],
+    candidate: dict[str, Any],
+    scan_id: str,
+) -> str:
+    metadata = candidate.get("metadata")
+    if (
+        str(candidate.get("vuln_type") or "") == "sensitive_clear"
+        and isinstance(metadata, dict)
+        and metadata.get("kind") == "sensitive_clear_function"
+    ):
+        function_name = str(
+            metadata.get("function_name")
+            or candidate.get("function")
+            or "",
+        )
+        file_path = str(metadata.get("file") or candidate.get("file") or "")
+        target = (
+            f"分析 `{file_path}` 文件中的 `{function_name}` 函数敏感信息未清0问题。"
+            f"scan_id: `{scan_id}`。"
+        )
+    else:
+        target = (
+            "候选点：\n"
+            + json.dumps(candidate, ensure_ascii=False, indent=2)
+        )
+    return (
+        "请依据以下 checker 规则审计静态候选点。必须读取当前项目真实代码并验证完整数据流。\n"
+        "如果不成立要明确返回 not_confirmed；不要仅复述候选描述。\n\n"
+        "Checker 规则：\n"
+        + str(checker.get("skill") or "")
+        + "\n\n"
+        + target
+    )
+
+
 async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
     """Audit a whole candidate batch and return vulnerabilities and checkpoints."""
     unknown = sorted(set(kwargs) - _ALLOWED_KEYS)
@@ -166,7 +204,15 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
             else:
                 raise TypeError(f"candidates[{index}] must be a dict")
         normalized_candidates.append(dict(candidate))
-    checker_dirs = [Path(item).expanduser().resolve() for item in kwargs["checker_dirs"]]
+    raw_checker_dirs = kwargs.get("checker_dirs")
+    if raw_checker_dirs is None:
+        raw_checker_dirs = [Path(__file__).resolve().parent / "rules"]
+    if not isinstance(raw_checker_dirs, (list, tuple)):
+        raise TypeError("checker_dirs must be a list or tuple")
+    checker_dirs = [
+        Path(item).expanduser().resolve()
+        for item in raw_checker_dirs
+    ]
     catalog = _checker_catalog(checker_dirs)
     selected = {str(item) for item in kwargs.get("checker_names") or []}
     if selected:
@@ -215,13 +261,19 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
                     processed_keys.append({name: candidate.get(name) for name in ("file", "line", "function", "vuln_type")})
                 return
             checker = catalog[str(candidate.get("vuln_type"))]
-            prompt = """请依据以下 checker 规则审计静态候选点。必须读取当前项目真实代码并验证完整数据流。
-如果不成立要明确返回 not_confirmed；不要仅复述候选描述。
-
-Checker 规则：
-""" + checker["skill"] + "\n\n候选点：\n" + json.dumps(candidate, ensure_ascii=False, indent=2)
+            prompt = _candidate_prompt(
+                checker,
+                candidate,
+                str(kwargs["scan_id"]),
+            )
             if feedback:
                 prompt += "\n\n历史人工反馈（只作判定参考）：\n" + json.dumps(feedback, ensure_ascii=False, indent=2)
+            prompt += (
+                "\n\n请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
+                "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，"
+                "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
+                + json.dumps(_RESULT_SCHEMA, ensure_ascii=False, indent=2)
+            )
             await _emit(output, "progress", f"Auditing candidate {audit_index + 1}", audit_index=audit_index)
             task_result = await run_opencode_task(
                 task_name=f"candidate-audit-{kwargs['scan_id']}-{audit_index}",

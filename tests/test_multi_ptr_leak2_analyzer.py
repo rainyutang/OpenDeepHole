@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from checkers.multi_ptr_leak2.analyzer import Analyzer, _collect_source_files
+from deephole_client.static_analysis.rules.multi_ptr_leak2.analyzer import (
+    Analyzer,
+    _collect_source_files,
+)
 
 
 def _write_source(tmp_path: Path, content: str, name: str = "sample.c") -> None:

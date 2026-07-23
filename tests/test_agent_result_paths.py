@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 from deephole_client.config import AgentConfig
-from deephole_client.scanner import _configure_backend
+from deephole_client.platform_runtime import configure_platform_runtime
 
 
 class AgentResultPathTests(unittest.TestCase):
@@ -17,7 +17,7 @@ class AgentResultPathTests(unittest.TestCase):
                 scan_dir = Path(tmp) / "scans" / "scan-123"
                 scan_dir.mkdir(parents=True)
 
-                _configure_backend(AgentConfig(), scan_dir)
+                configure_platform_runtime(AgentConfig(), scan_dir)
 
                 raw = yaml.safe_load((scan_dir / "config.yaml").read_text(encoding="utf-8"))
                 self.assertEqual(raw["storage"]["scans_dir"], str(scan_dir))

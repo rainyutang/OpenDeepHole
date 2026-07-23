@@ -120,11 +120,11 @@ def _cached_db_is_usable(entry, db_path: Path) -> bool:
 def _open_complete_db(cache_key: str, db_path: Path):
     if not db_path.exists():
         return None
-    from code_parser import CodeDatabase
+    from mcp_server.index_reader import CodeIndexReader
 
     db = None
     try:
-        db = CodeDatabase(db_path)
+        db = CodeIndexReader(db_path)
         if not db.is_index_complete():
             db.close()
             return None

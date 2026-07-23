@@ -14,6 +14,7 @@
 | `processed_offset` | 否 | int | 已处理数量偏移 |
 | `concurrency` | 否 | int | 并发数，默认 1 |
 | `required_capability` | 否 | `low\|high` | 默认 `high` |
+| `invalid_json_retry_count` | 否 | int | JSON 结果解析重试次数，默认 `2` |
 | `task_agent_config` | 否 | path | 独立 Task Agent 配置 |
 | `output` | 否 | callable | 同步或异步事件回调 |
 | `cancel_event` | 否 | event | 提供 `is_set()` 的取消信号 |
@@ -23,3 +24,7 @@ python -m deephole_client.fp_review --project-path /src/project \
   --work-dir /tmp/fp --scan-id scan-1 --review-id review-1 \
   --vulnerabilities vulnerabilities.json --task-agent-config ./task-agent.yaml
 ```
+
+过程保留四阶段语义：可选 `history_match`，随后是 `prove_bug`、`prove_fp` 和
+`final_judge`；历史匹配命中或正方无法证明问题时会提前结束。各阶段 JSON/Markdown
+产物保存在 `<work_dir>/artifacts/<vuln_index>/`。

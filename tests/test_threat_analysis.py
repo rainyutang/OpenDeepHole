@@ -3,16 +3,9 @@ import json
 import re
 import tempfile
 import unittest
-import time
 from pathlib import Path
 
-from deephole_client.scanner import (
-    _is_streaming_threat_analysis,
-    _opencode_pool_has_pipeline_work,
-    _streaming_threat_analysis_id,
-)
-from deephole_client.threat_auditor import _scan_path_from_analysis, build_threat_audit_tasks
-from deephole_client.threat_analysis_opencode import (
+from deephole_client.threat_analysis.opencode_pipeline import (
     _attack_goals_from_base_output,
     _base_model_agent_shards,
     _invoke_stage,
@@ -23,22 +16,33 @@ from deephole_client.threat_analysis_opencode import (
     _with_attack_path_defaults,
     _with_method_confirmation_task_defaults,
 )
-from backend.threat_analysis.harness import build_code_index
-from deephole_client.opencode_workflows import _read_fresh_threat_analysis_result
-from task_agent import OpenCodeResult
-from task_agent.task_service import get_opencode_execution_context
-from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
-from backend.store.sqlite import SqliteScanStore
-from backend.threat_analysis import (
+from deephole_client.threat_analysis.attack_paths import (
     append_or_merge_attack_path,
-    apply_threat_analysis_scan_scope,
     build_analysis_from_attack_paths,
-    parse_threat_analysis_data,
     parse_attack_path_data,
+)
+from deephole_client.threat_analysis.harness import build_code_index
+from deephole_client.threat_analysis.parsing import (
+    apply_threat_analysis_scan_scope,
+    parse_threat_analysis_data,
     parse_threat_analysis_file,
     threat_analysis_scope_matches,
     write_threat_analysis_file,
 )
+from deephole_client.threat_audit.runner import _tasks as _build_task_data
+from task_agent import OpenCodeResult
+from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask, Vulnerability
+from backend.store.sqlite import SqliteScanStore
+
+
+def build_threat_audit_tasks(scan_id: str, analysis) -> list[ThreatAuditTask]:
+    return [
+        ThreatAuditTask.model_validate(item)
+        for item in _build_task_data(
+            scan_id,
+            analysis.model_dump(mode="json"),
+        )
+    ]
 
 
 def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
@@ -64,47 +68,6 @@ def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
 
 
 class ThreatAnalysisParserTests(unittest.TestCase):
-    def test_opencode_pool_pipeline_work_ignores_post_scan_fp_review(self) -> None:
-        self.assertFalse(
-            _opencode_pool_has_pipeline_work(
-                {
-                    "planned_tasks": [{"task_type": "fp_review"}],
-                    "queued_tasks": [],
-                    "models": [
-                        {
-                            "active_tasks": [
-                                {"task_type": "fp_review"},
-                            ],
-                        },
-                    ],
-                }
-            )
-        )
-        self.assertTrue(
-            _opencode_pool_has_pipeline_work(
-                {
-                    "planned_tasks": [],
-                    "queued_tasks": [{"task_type": "threat_analysis"}],
-                    "models": [],
-                }
-            )
-        )
-        self.assertTrue(
-            _opencode_pool_has_pipeline_work(
-                {
-                    "planned_tasks": [],
-                    "queued_tasks": [],
-                    "models": [
-                        {
-                            "active_tasks": [
-                                {"task_type": "threat_audit"},
-                            ],
-                        },
-                    ],
-                }
-            )
-        )
-
     def test_stage_prompt_requires_chinese_display_text(self) -> None:
         prompt = _stage_prompt(
             skill_name="threat-attack-surface-agent",
@@ -227,9 +190,15 @@ class ThreatAnalysisParserTests(unittest.TestCase):
                 self.stages: list[str] = []
                 self.prompts: list[str] = []
                 self.gap_calls = 0
+                self.required_capability = "high"
+                self.max_retries = 3
 
             async def run_opencode_task(self, **kwargs) -> OpenCodeResult:
-                stage = get_opencode_execution_context().task_metadata["stage"]
+                stage = (
+                    "threat-base-model-gap-review-agent"
+                    if "遗漏追问" in str(kwargs["task_name"])
+                    else "threat-asset-interface-agent"
+                )
                 self.stages.append(stage)
                 prompt = str(kwargs["prompt"])
                 self.prompts.append(prompt)
@@ -722,6 +691,8 @@ class ThreatAnalysisParserTests(unittest.TestCase):
             def __init__(self, output_path: Path) -> None:
                 self.output_path = output_path
                 self.calls = 0
+                self.required_capability = "high"
+                self.max_retries = 3
 
             async def run_opencode_task(self, **kwargs) -> OpenCodeResult:
                 self.calls += 1
@@ -760,19 +731,6 @@ class ThreatAnalysisParserTests(unittest.TestCase):
             self.assertEqual(runner.calls, 4)
             self.assertEqual(json.loads(output_path.read_text(encoding="utf-8"))["domains"], [])
             self.assertTrue(any("重试 3/3" in line for line in logs))
-
-    def test_streaming_threat_analysis_marker(self) -> None:
-        streaming = parse_threat_analysis_data({
-            "analysis_id": _streaming_threat_analysis_id("scan-1"),
-            "assets": [],
-        })
-        final = parse_threat_analysis_data({
-            "analysis_id": "ATA-FINAL",
-            "assets": [],
-        })
-
-        self.assertTrue(_is_streaming_threat_analysis(streaming))
-        self.assertFalse(_is_streaming_threat_analysis(final))
 
     def test_parse_attack_tree_res_json_shape(self) -> None:
         analysis = parse_threat_analysis_data({
@@ -1109,22 +1067,6 @@ class ThreatAnalysisParserTests(unittest.TestCase):
             self.assertTrue(threat_analysis_scope_matches(scoped, project, scan_root))
             self.assertFalse(threat_analysis_scope_matches(scoped, project, project))
 
-    def test_threat_audit_scan_path_uses_analysis_scan_scope(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project = Path(tmp) / "project"
-            scan_root = project / "src"
-            scan_root.mkdir(parents=True)
-            analysis = apply_threat_analysis_scan_scope(
-                parse_threat_analysis_data({"schema_version": "1.0", "assets": []}),
-                project,
-                scan_root,
-            )
-
-            self.assertEqual(
-                _scan_path_from_analysis(analysis, project),
-                scan_root.resolve().as_posix(),
-            )
-
     def test_write_scan_scope_to_result_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "project"
@@ -1142,29 +1084,6 @@ class ThreatAnalysisParserTests(unittest.TestCase):
 
             self.assertEqual(loaded.analysis_id, "ATA-SCOPE")
             self.assertEqual(loaded.scan_scope.code_scan_relative_path, "src")
-
-    def test_runner_read_result_writes_scan_scope_to_file(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project = Path(tmp) / "project"
-            scan_root = project / "src"
-            scan_root.mkdir(parents=True)
-            result_path = project / "res.json"
-            result_path.write_text('{"analysis_id":"ATA-RUNNER","assets":[]}', encoding="utf-8")
-
-            analysis = _read_fresh_threat_analysis_result(
-                result_path,
-                None,
-                time.time(),
-                None,
-                project_dir=project,
-                code_scan_path=scan_root,
-            )
-            loaded = parse_threat_analysis_file(result_path)
-
-            self.assertIsNotNone(analysis)
-            self.assertEqual(analysis.scan_scope.code_scan_relative_path, "src")
-            self.assertEqual(loaded.scan_scope.code_scan_relative_path, "src")
-
 
 class ThreatAnalysisStoreTests(unittest.TestCase):
     def test_replace_and_get_threat_analysis(self) -> None:
