@@ -2,6 +2,7 @@
 
 ## 2026-07-24
 
+- **新增** `run_opencode_task()` 在传入 `output_schema` 时可从当前消息成功写入的内置文件中回退解析 JSON；文本 JSON 保持优先且 `OpenCodeResult.text` 始终返回 LLM 最后一次文本，新建临时文件解析后自动删除，`file_write_allowlist` 可按 `work_dir` 内的文件或目录保留明确要求的产物而不扩大写权限
 - **修复** OpenCode/nga Serve 启动不再读取、继承或注入系统及运行时配置中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和小写形式；仅保留 `NO_PROXY/no_proxy` 绕过列表，启动诊断与实际子进程环境保持一致
 - **修复** Windows 下 OpenCode Serve 启动健康检查会校验监听 PID 属于本次启动进程树，并在启动器退出但受管监听子进程仍健康时接管该监听进程；不再把旧端口响应误判为新 Serve 已就绪，也不会因此回收仍在服务的 4096 监听并触发并发任务 `ReadError` / `ConnectError` 连锁重启
 - **修复** OpenCode 受管配置在 Serve 启动前将 `~/.opendeephole/scans` 加入只读外部目录白名单，并自动迁移缺少该规则的旧配置且保留动态 MCP URL；Session 显式拒绝写 `project_dir`、仅允许写当前 `work_dir`，解决 Windows 威胁分析无法读取阶段 JSON 的问题

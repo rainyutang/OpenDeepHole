@@ -114,6 +114,15 @@ class OpenCodePromptResult:
     raw: Any = field(default=None, repr=False, compare=False)
 
 
+@dataclass(frozen=True)
+class OpenCodeFileWrite:
+    """One file successfully written by a completed OpenCode tool call."""
+
+    call_id: str
+    path: str
+    created: bool = False
+
+
 @dataclass
 class _EventChannelRuntime:
     key: str
@@ -1521,6 +1530,73 @@ def _tool_call_details(tool_name: object, input_value: object) -> str:
     return " ".join(details)
 
 
+def _path_text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _completed_file_writes(
+    part: dict[str, Any],
+    state: dict[str, Any],
+) -> list[OpenCodeFileWrite]:
+    tool_name = str(part.get("tool") or "").strip().casefold().replace("-", "_")
+    call_id = str(part.get("callID") or part.get("id") or tool_name or "unknown")
+    input_value = state.get("input")
+    input_value = input_value if isinstance(input_value, dict) else {}
+    metadata: dict[str, Any] = {}
+    for value in (part.get("metadata"), state.get("metadata")):
+        if isinstance(value, dict):
+            metadata.update(value)
+
+    if tool_name in {"write", "edit"}:
+        file_diff = metadata.get("filediff")
+        file_diff = file_diff if isinstance(file_diff, dict) else {}
+        path = (
+            _path_text(metadata.get("filepath"))
+            or _path_text(metadata.get("filePath"))
+            or _path_text(file_diff.get("file"))
+            or _path_text(input_value.get("filePath"))
+            or _path_text(input_value.get("file_path"))
+            or _path_text(input_value.get("path"))
+        )
+        if not path:
+            return []
+        if tool_name == "write":
+            created = metadata.get("exists") is False
+        else:
+            old_string = _tool_input_value(input_value, "oldString", "old_string")
+            created = old_string == ""
+        return [OpenCodeFileWrite(call_id=call_id, path=path, created=created)]
+
+    if tool_name not in {"apply_patch", "patch"}:
+        return []
+    files = metadata.get("files")
+    if not isinstance(files, list):
+        return []
+    writes: list[OpenCodeFileWrite] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        change_type = str(item.get("type") or "").strip().casefold()
+        if change_type == "delete":
+            continue
+        if change_type == "move":
+            path = _path_text(item.get("movePath")) or _path_text(item.get("move_path"))
+        else:
+            path = (
+                _path_text(item.get("filePath"))
+                or _path_text(item.get("file_path"))
+                or _path_text(item.get("file"))
+            )
+        if not path:
+            continue
+        writes.append(OpenCodeFileWrite(
+            call_id=call_id,
+            path=path,
+            created=change_type == "add",
+        ))
+    return writes
+
+
 def _event_session_id(props: dict[str, Any]) -> str:
     session_id = props.get("sessionID")
     if isinstance(session_id, str) and session_id:
@@ -1587,11 +1663,15 @@ class _ServeEventState:
         session_id: str,
         on_line,
         *,
+        on_file_write=None,
+        ignored_file_message_ids: tuple[str, ...] = (),
         log_stage: str = "opencode",
     ) -> None:
         self.tool = tool
         self.session_id = session_id
         self.on_line = on_line
+        self.on_file_write = on_file_write
+        self.ignored_file_message_ids = frozenset(ignored_file_message_ids)
         self.log_stage = task_output_stage(log_stage)
         self.emitted_text = False
         self.emitted_response_text = False
@@ -1613,6 +1693,7 @@ class _ServeEventState:
         self.tool_calls_emitted: set[str] = set()
         self.tool_call_metadata: dict[str, tuple[str, object]] = {}
         self.tool_results_emitted: set[tuple[str, str]] = set()
+        self.file_writes: dict[tuple[str, str], OpenCodeFileWrite] = {}
         self.session_errors_emitted: set[str] = set()
         self.event_ids_seen: set[str] = set()
         self.last_session_status = ""
@@ -1624,6 +1705,8 @@ class _ServeEventState:
         self.session_terminal = False
 
     def emit(self, category: str, message: object) -> None:
+        if self.on_line is None:
+            return
         self.on_line(
             format_task_output(
                 self.log_stage,
@@ -1632,6 +1715,35 @@ class _ServeEventState:
                 message,
             )
         )
+
+    def record_file_write(
+        self,
+        value: OpenCodeFileWrite,
+        *,
+        replay: bool = False,
+    ) -> None:
+        key = (value.call_id, value.path)
+        previous = self.file_writes.get(key)
+        if previous is not None:
+            value = OpenCodeFileWrite(
+                call_id=value.call_id,
+                path=value.path,
+                created=previous.created or value.created,
+            )
+            if value == previous and not replay:
+                return
+        if replay:
+            self.file_writes.pop(key, None)
+        self.file_writes[key] = value
+        if self.on_file_write is None:
+            return
+        try:
+            self.on_file_write(value)
+        except Exception:
+            logger.exception(
+                "Failed to record OpenCode file write for session %s",
+                self.session_id,
+            )
 
     def flush(self) -> None:
         text_flushed = self.text.flush()
@@ -1837,6 +1949,7 @@ class _ServeEventState:
         if not isinstance(info, dict) or str(info.get("role") or "") != "assistant":
             return
         self.record_message(info)
+        message_id = str(info.get("id") or "")
         parts = message.get("parts")
         if not isinstance(parts, list):
             return
@@ -1850,6 +1963,8 @@ class _ServeEventState:
                 if isinstance(text, str):
                     snapshots[part_type].append(text)
                 continue
+            if message_id and not part.get("messageID"):
+                part = {**part, "messageID": message_id}
             self.handle_part(part)
         for kind, values in snapshots.items():
             if values:
@@ -1932,6 +2047,10 @@ class _ServeEventState:
         if status in {"pending", "running"}:
             self.emit_tool_call(**common)
         elif status == "completed":
+            message_id = str(part.get("messageID") or "")
+            if not message_id or message_id not in self.ignored_file_message_ids:
+                for value in _completed_file_writes(part, state):
+                    self.record_file_write(value)
             self.emit_tool_result(status="success", summary=_tool_state_summary(state), **common)
         elif status == "error":
             error = _error_summary(state.get("error") or "")
@@ -2645,6 +2764,7 @@ class OpenCodeServeManager:
         on_line=None,
         on_session_id=None,
         on_response_model=None,
+        on_file_write=None,
         cancel_event=None,
         env_overrides: dict[str, str] | None = None,
         session_id: str | None = None,
@@ -2760,15 +2880,36 @@ class OpenCodeServeManager:
                         f"START mode={session_mode} directory={directory}{config_note}",
                     )
                     session_started = True
+                ignored_file_message_ids: tuple[str, ...] = ()
+                if on_file_write is not None and session_mode == "continued":
+                    baseline_params = dict(params)
+                    baseline_params["limit"] = "2"
+                    baseline_response = await client.get(
+                        f"/session/{active_session_id}/message",
+                        params=baseline_params,
+                        headers=headers,
+                    )
+                    baseline_response.raise_for_status()
+                    baseline_message = _latest_assistant_message(
+                        baseline_response.json(),
+                        active_session_id,
+                    )
+                    baseline_message_id = _response_message_id(baseline_message)
+                    if baseline_message_id:
+                        ignored_file_message_ids = (baseline_message_id,)
+                if on_line is not None or on_file_write is not None:
                     event_state = _ServeEventState(
                         tool,
                         active_session_id,
                         on_line,
+                        on_file_write=on_file_write,
+                        ignored_file_message_ids=ignored_file_message_ids,
                         log_stage=normalized_log_stage,
                     )
-                    event_flush_task = asyncio.create_task(
-                        _flush_event_state_periodically(event_state)
-                    )
+                    if on_line is not None:
+                        event_flush_task = asyncio.create_task(
+                            _flush_event_state_periodically(event_state)
+                        )
                     await self._register_event_state(active_session_id, directory, event_state)
                     event_registered = True
                 payload: dict[str, Any] = {
@@ -2860,13 +3001,30 @@ class OpenCodeServeManager:
                 if event_state:
                     if isinstance(response_data, dict):
                         event_state.record_message(response_data.get("info"))
+                        response_message_id = _response_message_id(response_data)
                         response_parts = response_data.get("parts")
                         if isinstance(response_parts, list):
                             for part in response_parts:
+                                if (
+                                    isinstance(part, dict)
+                                    and response_message_id
+                                    and not part.get("messageID")
+                                ):
+                                    part = {
+                                        **part,
+                                        "messageID": response_message_id,
+                                    }
                                 if not isinstance(part, dict) or part.get("type") not in {
                                     "text",
                                     "reasoning",
                                 }:
+                                    state = part.get("state") if isinstance(part, dict) else None
+                                    if (
+                                        isinstance(state, dict)
+                                        and state.get("status") == "completed"
+                                    ):
+                                        for value in _completed_file_writes(part, state):
+                                            event_state.record_file_write(value, replay=True)
                                     event_state.handle_part(part)
                     event_state.reconcile_text("text", "".join(response_text))
                     event_state.flush()

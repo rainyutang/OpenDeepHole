@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -39,7 +40,7 @@ from .model_pool import (
     update_model_lease_context,
 )
 from .output_format import format_task_output, task_output_stage
-from .serve_client import OpenCodePromptResult, get_serve_manager
+from .serve_client import OpenCodeFileWrite, OpenCodePromptResult, get_serve_manager
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,7 @@ class OpenCodeTaskSpec:
     output_schema: dict[str, Any] | None = None
     output_retry_count: int = 2
     output_retry_prompt: str | None = None
+    file_write_allowlist: tuple[Path, ...] = ()
     session_id: str | None = None
     attempt: int | None = None
 
@@ -418,6 +420,9 @@ class OpenCodeTaskService:
                 )
             if not output_retry_prompt.strip():
                 raise ValueError("OpenCode output_retry_prompt cannot be empty")
+        file_write_allowlist = tuple(
+            dict.fromkeys(Path(path).resolve() for path in spec.file_write_allowlist)
+        )
         attempt = spec.attempt
         if attempt is not None and int(attempt) < 0:
             raise ValueError("OpenCode attempt cannot be negative")
@@ -431,6 +436,7 @@ class OpenCodeTaskService:
             timeout_seconds=None if timeout is None else int(timeout),
             output_retry_count=output_retry_count,
             output_retry_prompt=output_retry_prompt,
+            file_write_allowlist=file_write_allowlist,
             attempt=None if attempt is None else int(attempt),
             session_id=str(spec.session_id or "").strip() or None,
         )
@@ -694,52 +700,86 @@ class OpenCodeTaskService:
                 try:
                     async with session_lock:
                         for output_attempt in range(spec.output_retry_count + 1):
-                            details = await get_serve_manager().run_prompt(
-                                **runtime.kwargs(),
-                                prompt=prompt,
-                                model=model,
-                                timeout=timeout_seconds,
-                                on_line=context.on_output,
-                                on_session_id=record_session,
-                                on_response_model=record_model,
-                                cancel_event=combined_cancel,
-                                session_id=session_id or None,
-                                session_title=spec.task_name,
-                                mcp_tools=None,
-                                disabled_mcp_tools=_disabled_source_mcp_tools(spec.directory),
-                                system_prompt=system_prompt,
-                                permissions=permissions,
-                                return_details=True,
-                                show_serve_status=self._task_progress_enabled(record),
-                                log_stage=task_output_stage(
-                                    record.execution_context.task_metadata.get("task_type")
-                                ),
-                            )
-                            assert isinstance(details, OpenCodePromptResult)
-                            session_id = details.session_id
-                            final_session_id = session_id
-                            message_id = details.message_id
-                            text = details.text or "\n".join(details.lines)
-                            structured = _parse_text_json(text, spec.output_schema)
-                            if spec.output_schema is None or structured is not None:
-                                break
-                            if output_attempt >= spec.output_retry_count:
-                                raise _InvalidStructuredOutput(
-                                    "OpenCode exhausted same-session JSON corrections "
-                                    f"({spec.output_retry_count}) without matching the target schema"
+                            message_writes: dict[
+                                tuple[str, str], OpenCodeFileWrite
+                            ] = {}
+
+                            def record_file_write(value: OpenCodeFileWrite) -> None:
+                                key = (value.call_id, value.path)
+                                previous = message_writes.pop(key, None)
+                                if previous is not None:
+                                    value = OpenCodeFileWrite(
+                                        call_id=value.call_id,
+                                        path=value.path,
+                                        created=previous.created or value.created,
+                                    )
+                                message_writes[key] = value
+
+                            try:
+                                details = await get_serve_manager().run_prompt(
+                                    **runtime.kwargs(),
+                                    prompt=prompt,
+                                    model=model,
+                                    timeout=timeout_seconds,
+                                    on_line=context.on_output,
+                                    on_session_id=record_session,
+                                    on_response_model=record_model,
+                                    on_file_write=(
+                                        record_file_write
+                                        if spec.output_schema is not None
+                                        else None
+                                    ),
+                                    cancel_event=combined_cancel,
+                                    session_id=session_id or None,
+                                    session_title=spec.task_name,
+                                    mcp_tools=None,
+                                    disabled_mcp_tools=_disabled_source_mcp_tools(spec.directory),
+                                    system_prompt=system_prompt,
+                                    permissions=permissions,
+                                    return_details=True,
+                                    show_serve_status=self._task_progress_enabled(record),
+                                    log_stage=task_output_stage(
+                                        record.execution_context.task_metadata.get("task_type")
+                                    ),
                                 )
-                            prompt = (
-                                spec.output_retry_prompt
-                                if spec.output_retry_prompt is not None
-                                else _json_correction_prompt(spec.output_schema)
-                            )
-                            self._emit_task_progress(
-                                record,
-                                f"JSON_RETRY {output_attempt + 1}/{spec.output_retry_count} "
-                                "reason=invalid_json next_session=same",
-                                session_id=session_id,
-                                category="session",
-                            )
+                                assert isinstance(details, OpenCodePromptResult)
+                                session_id = details.session_id
+                                final_session_id = session_id
+                                message_id = details.message_id
+                                text = details.text or "\n".join(details.lines)
+                                structured = _parse_text_json(text, spec.output_schema)
+                                if spec.output_schema is not None and structured is None:
+                                    structured = _parse_written_file_json(
+                                        message_writes.values(),
+                                        _required_work_dir(context),
+                                        spec.output_schema,
+                                    )
+                                if spec.output_schema is None or structured is not None:
+                                    break
+                                if output_attempt >= spec.output_retry_count:
+                                    raise _InvalidStructuredOutput(
+                                        "OpenCode exhausted same-session JSON corrections "
+                                        f"({spec.output_retry_count}) without matching the target schema"
+                                    )
+                                prompt = (
+                                    spec.output_retry_prompt
+                                    if spec.output_retry_prompt is not None
+                                    else _json_correction_prompt(spec.output_schema)
+                                )
+                                self._emit_task_progress(
+                                    record,
+                                    f"JSON_RETRY {output_attempt + 1}/{spec.output_retry_count} "
+                                    "reason=invalid_json next_session=same",
+                                    session_id=session_id,
+                                    category="session",
+                                )
+                            finally:
+                                if spec.output_schema is not None:
+                                    _cleanup_written_files(
+                                        message_writes.values(),
+                                        _required_work_dir(context),
+                                        spec.file_write_allowlist,
+                                    )
                 finally:
                     if lock_key.startswith("new:"):
                         self._session_locks.pop(lock_key, None)
@@ -1249,6 +1289,93 @@ def _parse_text_json(text: str, schema: dict[str, Any] | None = None) -> Any:
         return None
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _normalize_file_write_allowlist_paths(
+    entries: tuple[str, ...],
+    work_dir: Path,
+) -> tuple[Path, ...]:
+    resolved_work_dir = work_dir.resolve()
+    paths: list[Path] = []
+    for entry in entries:
+        try:
+            path = Path(entry).expanduser()
+            if not path.is_absolute():
+                path = resolved_work_dir / path
+            path = path.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                f"Invalid OpenCode file_write_allowlist entry: {entry!r}"
+            ) from exc
+        if not _path_is_within(path, resolved_work_dir):
+            raise ValueError(
+                "OpenCode file_write_allowlist entries must resolve within work_dir: "
+                f"{entry!r}"
+            )
+        paths.append(path)
+    return tuple(dict.fromkeys(paths))
+
+
+def _resolve_written_path(raw_path: str, work_dir: Path) -> Path | None:
+    resolved_work_dir = work_dir.resolve()
+    try:
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = resolved_work_dir / path
+        path = path.resolve()
+    except (OSError, RuntimeError):
+        return None
+    return path if _path_is_within(path, resolved_work_dir) else None
+
+
+def _parse_written_file_json(
+    writes: Iterable[OpenCodeFileWrite],
+    work_dir: Path,
+    schema: dict[str, Any],
+) -> Any:
+    seen: set[Path] = set()
+    for write in reversed(tuple(writes)):
+        path = _resolve_written_path(write.path, work_dir)
+        if path is None or path in seen:
+            continue
+        seen.add(path)
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        structured = _parse_text_json(content, schema)
+        if structured is not None:
+            return structured
+    return None
+
+
+def _cleanup_written_files(
+    writes: Iterable[OpenCodeFileWrite],
+    work_dir: Path,
+    allowlist: tuple[Path, ...],
+) -> None:
+    cleanup_paths: set[Path] = set()
+    for write in writes:
+        if not write.created:
+            continue
+        path = _resolve_written_path(write.path, work_dir)
+        if path is None:
+            continue
+        cleanup_paths.add(path)
+
+    for path in cleanup_paths:
+        if any(_path_is_within(path, allowed) for allowed in allowlist):
+            continue
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except IsADirectoryError:
+            continue
+
+
 def record_task_id(lease: ModelLease) -> str:
     return str(lease.task_id or "")
 
@@ -1302,13 +1429,18 @@ async def _run_component_task(
     output_schema: dict[str, Any] | None,
     invalid_json_retry_count: int,
     invalid_json_retry_prompt: str | None,
+    file_write_allowlist: tuple[str, ...],
     session_id: str | None,
 ) -> OpenCodeResult:
     """Translate the public contract into the internal scheduling record."""
     with bind_opencode_execution_context(task_metadata={"task_type": task_type}):
         context = _snapshot_execution_context()
         project_dir = _required_project_dir(context)
-        _required_work_dir(context)
+        work_dir = _required_work_dir(context)
+        allowlist = _normalize_file_write_allowlist_paths(
+            file_write_allowlist,
+            work_dir,
+        )
         result = await _get_opencode_task_service().run_task(
             OpenCodeTaskSpec(
                 task_name=task_name,
@@ -1320,6 +1452,7 @@ async def _run_component_task(
                 output_schema=output_schema,
                 output_retry_count=invalid_json_retry_count,
                 output_retry_prompt=invalid_json_retry_prompt,
+                file_write_allowlist=allowlist,
                 session_id=session_id,
                 attempt=None,
             )

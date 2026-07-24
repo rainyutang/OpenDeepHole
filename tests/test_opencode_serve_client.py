@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from task_agent.serve_client import (
+    OpenCodeFileWrite,
     OpenCodeModelInfo,
     OpenCodeModelListResult,
     OpenCodePromptResult,
@@ -37,6 +38,11 @@ def _short_event_drain_for_tests(monkeypatch) -> None:
         "task_agent.serve_client._SERVE_EVENT_DRAIN_TIMEOUT_SECONDS",
         0.05,
     )
+    _FakeAsyncClient.message_parts = None
+    _FakeAsyncClient.session_messages = []
+    yield
+    _FakeAsyncClient.message_parts = None
+    _FakeAsyncClient.session_messages = []
 
 
 class _FakeResponse:
@@ -87,6 +93,8 @@ class _FakeAsyncClient:
     tool_ids: list[str] | Exception = ["read", "grep", "mcp__deephole-code__view_function_code"]
     message_text = "done"
     message_info: object | None = None
+    message_parts: list[dict] | None = None
+    session_messages: list[dict] = []
 
     def __init__(self, *args, **kwargs) -> None:
         self.init_options.append(dict(kwargs))
@@ -111,6 +119,8 @@ class _FakeAsyncClient:
             if isinstance(self.tool_ids, Exception):
                 return _FakeResponse([], error=self.tool_ids)
             return _FakeResponse(self.tool_ids)
+        if path.startswith("/session/") and path.endswith("/message"):
+            return _FakeResponse(self.session_messages)
         return _FakeResponse({})
 
     async def post(self, path: str, **kwargs):
@@ -119,7 +129,13 @@ class _FakeAsyncClient:
             return _FakeResponse({"id": "session-1"})
         if path.startswith("/session/") and path.endswith("/message"):
             await asyncio.sleep(0)
-            data = {"parts": [{"type": "text", "text": self.message_text}]}
+            data = {
+                "parts": (
+                    self.message_parts
+                    if self.message_parts is not None
+                    else [{"type": "text", "text": self.message_text}]
+                )
+            }
             if self.message_info is not None:
                 data["info"] = self.message_info
             self.message_response = _FakeResponse(data)
@@ -325,6 +341,155 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             "providerID": "anthropic",
             "modelID": "claude-sonnet",
         }
+
+    asyncio.run(run())
+
+
+def test_run_prompt_tracks_final_response_file_writes_without_output_callback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["write"]
+        _FakeAsyncClient.message_info = None
+        _FakeAsyncClient.message_parts = [
+            {
+                "id": "part-write",
+                "type": "tool",
+                "callID": "call-write",
+                "tool": "write",
+                "state": {
+                    "status": "completed",
+                    "input": {
+                        "filePath": "result.json",
+                        "content": '{"answer": 1}',
+                    },
+                    "metadata": {
+                        "filepath": "result.json",
+                        "exists": False,
+                    },
+                },
+            },
+            {"type": "text", "text": "done"},
+        ]
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        writes: list[OpenCodeFileWrite] = []
+
+        details = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="write json",
+            model="provider/model",
+            timeout=30,
+            on_file_write=writes.append,
+            return_details=True,
+        )
+
+        assert isinstance(details, OpenCodePromptResult)
+        assert details.text == "done"
+        assert writes == [
+            OpenCodeFileWrite(
+                call_id="call-write",
+                path="result.json",
+                created=True,
+            )
+        ]
+        assert manager._event_states == {}
+
+    asyncio.run(run())
+
+
+def test_continued_prompt_ignores_previous_message_file_writes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        old_tool_part = {
+            "id": "part-old-write",
+            "type": "tool",
+            "callID": "call-old-write",
+            "tool": "write",
+            "state": {
+                "status": "completed",
+                "input": {"filePath": "old.json", "content": "{}"},
+                "metadata": {"filepath": "old.json", "exists": False},
+            },
+        }
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["write"]
+        _FakeAsyncClient.session_messages = [{
+            "info": {
+                "id": "message-old",
+                "sessionID": "session-1",
+                "role": "assistant",
+            },
+            "parts": [old_tool_part],
+        }]
+        _FakeAsyncClient.message_info = {
+            "id": "message-current",
+            "sessionID": "session-1",
+            "role": "assistant",
+        }
+        _FakeAsyncClient.message_parts = [{
+            "id": "part-current-write",
+            "type": "tool",
+            "callID": "call-current-write",
+            "tool": "write",
+            "state": {
+                "status": "completed",
+                "input": {"filePath": "current.json", "content": "{}"},
+                "metadata": {"filepath": "current.json", "exists": False},
+            },
+        }]
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        writes: list[OpenCodeFileWrite] = []
+
+        await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="continue",
+            model="provider/model",
+            timeout=30,
+            session_id="session-1",
+            on_file_write=writes.append,
+        )
+
+        assert writes == [
+            OpenCodeFileWrite(
+                call_id="call-current-write",
+                path="current.json",
+                created=True,
+            )
+        ]
+        session_client = _FakeAsyncClient.instances[0]
+        assert any(
+            item["path"] == "/session/session-1/message"
+            and item["params"]["limit"] == "2"
+            for item in session_client.gets
+        )
 
     asyncio.run(run())
 
@@ -2052,6 +2217,124 @@ def test_write_tool_logs_path_without_content() -> None:
         "name=write path=reports/result.json content_chars=18",
     ]
     assert "private write body" not in "\n".join(output)
+
+
+def test_completed_builtin_file_tools_report_written_paths_once() -> None:
+    writes: list[OpenCodeFileWrite] = []
+    state = _ServeEventState(
+        "opencode",
+        "session-1",
+        None,
+        on_file_write=writes.append,
+        ignored_file_message_ids=("message-old",),
+    )
+    state.ingest_message_snapshot({
+        "info": {
+            "id": "message-old",
+            "sessionID": "session-1",
+            "role": "assistant",
+        },
+        "parts": [{
+            "id": "part-old",
+            "type": "tool",
+            "callID": "call-old",
+            "tool": "write",
+            "state": {
+                "status": "completed",
+                "input": {"filePath": "old.json", "content": "{}"},
+                "metadata": {"filepath": "old.json", "exists": False},
+            },
+        }],
+    })
+    parts = [
+        {
+            "id": "part-write",
+            "type": "tool",
+            "callID": "call-write",
+            "tool": "write",
+            "state": {
+                "status": "completed",
+                "input": {"filePath": "write.json", "content": "{}"},
+                "metadata": {"filepath": "write.json", "exists": False},
+            },
+        },
+        {
+            "id": "part-edit-existing",
+            "type": "tool",
+            "callID": "call-edit-existing",
+            "tool": "edit",
+            "state": {
+                "status": "completed",
+                "input": {
+                    "filePath": "existing.json",
+                    "oldString": "before",
+                    "newString": "after",
+                },
+                "metadata": {"filediff": {"file": "existing.json"}},
+            },
+        },
+        {
+            "id": "part-edit-new",
+            "type": "tool",
+            "callID": "call-edit-new",
+            "tool": "edit",
+            "state": {
+                "status": "completed",
+                "input": {
+                    "filePath": "edit-created.json",
+                    "oldString": "",
+                    "newString": "{}",
+                },
+                "metadata": {"filediff": {"file": "edit-created.json"}},
+            },
+        },
+        {
+            "id": "part-patch",
+            "type": "tool",
+            "callID": "call-patch",
+            "tool": "apply_patch",
+            "state": {
+                "status": "completed",
+                "input": {"patchText": "private patch body"},
+                "metadata": {
+                    "files": [
+                        {"filePath": "added.json", "type": "add"},
+                        {"filePath": "updated.json", "type": "update"},
+                        {"filePath": "deleted.json", "type": "delete"},
+                        {
+                            "filePath": "old-name.json",
+                            "movePath": "new-name.json",
+                            "type": "move",
+                        },
+                    ]
+                },
+            },
+        },
+        {
+            "id": "part-custom",
+            "type": "tool",
+            "callID": "call-custom",
+            "tool": "mcp__custom__write",
+            "state": {
+                "status": "completed",
+                "input": {"filePath": "unknown.json"},
+                "metadata": {"filepath": "unknown.json", "exists": False},
+            },
+        },
+    ]
+
+    for part in parts:
+        state.handle_part(part)
+        state.handle_part(part)
+
+    assert writes == [
+        OpenCodeFileWrite("call-write", "write.json", created=True),
+        OpenCodeFileWrite("call-edit-existing", "existing.json", created=False),
+        OpenCodeFileWrite("call-edit-new", "edit-created.json", created=True),
+        OpenCodeFileWrite("call-patch", "added.json", created=True),
+        OpenCodeFileWrite("call-patch", "updated.json", created=False),
+        OpenCodeFileWrite("call-patch", "new-name.json", created=False),
+    ]
 
 
 @pytest.mark.parametrize(

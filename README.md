@@ -569,7 +569,7 @@ OpenCode 调用约定：
 - `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置。
 - `nga` / `opencode` 只通过 serve API 调用。Agent 优先使用 `base.opencode_serve_port`，未配置时兼容 `OPENCODE_SERVE_PORT`，两者都没有时由操作系统分配一个空闲端口；自动端口在同一 Agent 进程内跨 Serve 重启复用，Agent 重启后重新选择。配置更新在活动 Session 结束后的安全重启边界生效。standalone `task-agent.yaml` 继续使用显式 `serve.port`（默认 `4096`）。组件只调用 `task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录，也不允许调用方传 permission。
 - 每个 Session 可读取 `project_dir`，文件编辑工具只能写当前 `work_dir`，`bash` 全面禁用。公共内置/checker SKILL 注册到全局 skill root；过程私有 SKILL 由过程门面按任务追加，由 OpenCode 按 prompt 名称加载。
-- `output_schema` 只用于普通文本 JSON 的本地解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。JSON 不合规时默认在原 Session 追加 2 次包含 Schema 的中文纠正，也可通过 `invalid_json_retry_prompt` 提供原样发送的自定义纠正提示词；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
+- `output_schema` 只用于本地 JSON 解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。最终文本 JSON 优先；若模型改用内置文件工具写 JSON，Task Agent 会从当前消息最后写入的合法文件填充 `structured`，但 `text` 仍保留 LLM 最后一次文本输出。确认由本条消息新建的临时文件在解析后自动删除；必须保留的文件或目录可传 `file_write_allowlist`，该白名单只控制清理且不能扩大 `work_dir` 写权限。JSON 仍不合规时默认在原 Session 追加 2 次包含 Schema 的中文纠正，也可通过 `invalid_json_retry_prompt` 提供原样发送的自定义纠正提示词；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
 - 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个公共 OpenCode 接口，复用共享 MCP 网关和项目索引路由；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。

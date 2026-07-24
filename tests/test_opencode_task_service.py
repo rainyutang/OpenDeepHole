@@ -19,7 +19,7 @@ from task_agent.model_pool import (
     ModelLease,
     ModelOption,
 )
-from task_agent.serve_client import OpenCodePromptResult
+from task_agent.serve_client import OpenCodeFileWrite, OpenCodePromptResult
 from task_agent.task_service import (
     OpenCodeTaskError,
     OpenCodeTaskResult,
@@ -167,6 +167,34 @@ def _service_patches(manager, *, max_retries: int = 2, runtime_config=None):
     )
 
 
+async def _run_service_task(
+    tmp_path: Path,
+    run_prompt,
+    spec: OpenCodeTaskSpec,
+    *,
+    work_dir: Path | None = None,
+) -> OpenCodeTaskResult:
+    manager = SimpleNamespace(run_prompt=run_prompt)
+    service = OpenCodeTaskService()
+    service._runtime_for_task = AsyncMock(
+        return_value=(_runtime(tmp_path), "provider/model-low", _source())
+    )
+    patches = _service_patches(manager)
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        bind_opencode_execution_context(
+            project_dir=tmp_path,
+            work_dir=work_dir or tmp_path / "work",
+        ),
+    ):
+        return await service.run_task(spec)
+
+
 def test_public_contract_contains_only_component_owned_fields() -> None:
     names = list(inspect.signature(run_opencode_task).parameters)
     assert names == [
@@ -177,6 +205,7 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "output_schema",
         "invalid_json_retry_count",
         "invalid_json_retry_prompt",
+        "file_write_allowlist",
         "session_id",
         "config_path",
         "output",
@@ -219,6 +248,10 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                 output_schema=SCHEMA,
                 invalid_json_retry_count=4,
                 invalid_json_retry_prompt="  custom retry prompt  ",
+                file_write_allowlist=[
+                    "keep.json",
+                    tmp_path / "work" / "reports",
+                ],
                 session_id="ses-existing",
             )
 
@@ -235,6 +268,10 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         assert spec.required_capability == "high"
         assert spec.output_retry_count == 4
         assert spec.output_retry_prompt == "  custom retry prompt  "
+        assert spec.file_write_allowlist == (
+            (tmp_path / "work" / "keep.json").resolve(),
+            (tmp_path / "work" / "reports").resolve(),
+        )
         assert spec.session_id == "ses-existing"
 
         service.run_task.reset_mock()
@@ -435,6 +472,42 @@ def test_public_interface_rejects_invalid_json_retry_prompts() -> None:
                     required_capability="low",
                     invalid_json_retry_prompt=value,
                 )
+
+    asyncio.run(run())
+
+
+def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None:
+    async def run() -> None:
+        with pytest.raises(TypeError, match="file_write_allowlist.*sequence"):
+            await run_opencode_task(
+                task_name="scalar allowlist",
+                task_type="audit",
+                prompt="test",
+                required_capability="low",
+                output_schema=SCHEMA,
+                file_write_allowlist="keep.json",  # type: ignore[arg-type]
+            )
+        with pytest.raises(TypeError, match="entries.*strings or PathLike"):
+            await run_opencode_task(
+                task_name="invalid allowlist entry",
+                task_type="audit",
+                prompt="test",
+                required_capability="low",
+                output_schema=SCHEMA,
+                file_write_allowlist=[123],  # type: ignore[list-item]
+            )
+        with (
+            _task_context(tmp_path),
+            pytest.raises(ValueError, match="resolve within work_dir"),
+        ):
+            await run_opencode_task(
+                task_name="outside allowlist",
+                task_type="audit",
+                prompt="test",
+                required_capability="low",
+                output_schema=SCHEMA,
+                file_write_allowlist=["../outside.json"],
+            )
 
     asyncio.run(run())
 
@@ -652,6 +725,344 @@ def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) ->
             call.kwargs["wait_when_unavailable"] is True
             for call in acquire_mock.await_args_list
         )
+
+    asyncio.run(run())
+
+
+def test_json_file_fallback_keeps_last_text_and_removes_new_file(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_file = work_dir / "result.json"
+        calls = 0
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            output_file.write_text('{"answer": 41}', encoding="utf-8")
+            kwargs["on_file_write"](OpenCodeFileWrite(
+                call_id="write-result",
+                path=str(output_file),
+                created=True,
+            ))
+            callback = kwargs["on_session_id"]("ses-file-json")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-file-json",
+                message_id="msg-file-json",
+                lines=["JSON 已写入 result.json"],
+                text="JSON 已写入 result.json",
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="file json fallback",
+                prompt="return json",
+                directory=tmp_path,
+                output_schema=SCHEMA,
+                output_retry_count=2,
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert result.text == "JSON 已写入 result.json"
+        assert result.structured == {"answer": 41}
+        assert calls == 1
+        assert not output_file.exists()
+
+    asyncio.run(run())
+
+
+def test_text_json_stays_primary_over_written_json(tmp_path: Path) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_file = work_dir / "secondary.json"
+
+        async def run_prompt(**kwargs):
+            output_file.write_text('{"answer": 99}', encoding="utf-8")
+            kwargs["on_file_write"](OpenCodeFileWrite(
+                call_id="write-secondary",
+                path=str(output_file),
+                created=True,
+            ))
+            callback = kwargs["on_session_id"]("ses-text-primary")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-text-primary",
+                message_id="msg-text-primary",
+                lines=['{"answer": 7}'],
+                text='{"answer": 7}',
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="text json primary",
+                prompt="return json",
+                directory=tmp_path,
+                output_schema=SCHEMA,
+                output_retry_count=0,
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert result.text == '{"answer": 7}'
+        assert result.structured == {"answer": 7}
+        assert not output_file.exists()
+
+    asyncio.run(run())
+
+
+def test_latest_valid_written_json_wins_and_allowlist_retains_files(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        retained_dir = work_dir / "reports"
+        retained_dir.mkdir(parents=True)
+        temporary = work_dir / "temporary.json"
+        retained_file = work_dir / "keep.json"
+        retained_in_dir = retained_dir / "latest.json"
+
+        async def run_prompt(**kwargs):
+            writes = (
+                (temporary, 1, "write-temporary"),
+                (retained_file, 2, "write-retained-file"),
+                (retained_in_dir, 3, "write-retained-dir"),
+            )
+            for path, answer, call_id in writes:
+                path.write_text(json.dumps({"answer": answer}), encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id=call_id,
+                    path=str(path),
+                    created=True,
+                ))
+            callback = kwargs["on_session_id"]("ses-latest-file")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-latest-file",
+                message_id="msg-latest-file",
+                lines=["files written"],
+                text="files written",
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="latest file",
+                prompt="return json",
+                directory=tmp_path,
+                output_schema=SCHEMA,
+                output_retry_count=0,
+                file_write_allowlist=(retained_file, retained_dir),
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert result.structured == {"answer": 3}
+        assert not temporary.exists()
+        assert retained_file.read_text(encoding="utf-8") == '{"answer": 2}'
+        assert retained_in_dir.read_text(encoding="utf-8") == '{"answer": 3}'
+
+    asyncio.run(run())
+
+
+def test_preexisting_written_file_is_never_deleted(tmp_path: Path) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_file = work_dir / "existing.json"
+        output_file.write_text('{"answer": 1}', encoding="utf-8")
+
+        async def run_prompt(**kwargs):
+            output_file.write_text('{"answer": 8}', encoding="utf-8")
+            kwargs["on_file_write"](OpenCodeFileWrite(
+                call_id="edit-existing",
+                path=str(output_file),
+                created=False,
+            ))
+            callback = kwargs["on_session_id"]("ses-existing-file")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-existing-file",
+                message_id="msg-existing-file",
+                lines=["updated"],
+                text="updated",
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="existing file",
+                prompt="return json",
+                directory=tmp_path,
+                output_schema=SCHEMA,
+                output_retry_count=0,
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert result.structured == {"answer": 8}
+        assert output_file.read_text(encoding="utf-8") == '{"answer": 8}'
+
+    asyncio.run(run())
+
+
+def test_file_tracking_and_cleanup_are_disabled_without_schema(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_file = work_dir / "requested.txt"
+
+        async def run_prompt(**kwargs):
+            assert kwargs["on_file_write"] is None
+            output_file.write_text("keep me", encoding="utf-8")
+            callback = kwargs["on_session_id"]("ses-no-schema")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-no-schema",
+                message_id="msg-no-schema",
+                lines=["done"],
+                text="done",
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="no schema",
+                prompt="write a file",
+                directory=tmp_path,
+                output_retry_count=0,
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert result.structured is None
+        assert output_file.read_text(encoding="utf-8") == "keep me"
+
+    asyncio.run(run())
+
+
+def test_invalid_written_json_is_removed_before_same_session_retry(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        invalid_file = work_dir / "invalid.json"
+        calls = 0
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            callback = kwargs["on_session_id"]("ses-file-retry")
+            if hasattr(callback, "__await__"):
+                await callback
+            if calls == 1:
+                invalid_file.write_text('{"answer":"wrong"}', encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id="write-invalid",
+                    path=str(invalid_file),
+                    created=True,
+                ))
+                text = "written"
+            else:
+                assert not invalid_file.exists()
+                text = '{"answer": 12}'
+            return OpenCodePromptResult(
+                session_id="ses-file-retry",
+                message_id=f"msg-file-retry-{calls}",
+                lines=[text],
+                text=text,
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="file retry",
+                prompt="return json",
+                directory=tmp_path,
+                output_schema=SCHEMA,
+                output_retry_count=1,
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert result.text == '{"answer": 12}'
+        assert result.structured == {"answer": 12}
+        assert calls == 2
+        assert not invalid_file.exists()
+
+    asyncio.run(run())
+
+
+def test_new_written_file_is_cleaned_when_prompt_fails(tmp_path: Path) -> None:
+    async def run() -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_file = work_dir / "failed.json"
+
+        async def run_prompt(**kwargs):
+            output_file.write_text('{"answer": 5}', encoding="utf-8")
+            kwargs["on_file_write"](OpenCodeFileWrite(
+                call_id="write-before-failure",
+                path=str(output_file),
+                created=True,
+            ))
+            raise RuntimeError("prompt failed")
+
+        result = await _run_service_task(
+            tmp_path,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="failed prompt cleanup",
+                prompt="return json",
+                directory=tmp_path,
+                output_schema=SCHEMA,
+                output_retry_count=0,
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "failure"
+        assert "prompt failed" in result.error
+        assert not output_file.exists()
 
     asyncio.run(run())
 

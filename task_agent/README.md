@@ -35,6 +35,7 @@ result = await run_opencode_task(
     output_schema=RESULT_SCHEMA,
     invalid_json_retry_count=2,
     invalid_json_retry_prompt=retry_prompt,
+    file_write_allowlist=None,
     session_id=None,
     config_path=None,
     output=None,
@@ -50,15 +51,16 @@ result = await run_opencode_task(
 | `task_type` | `str` | 必填 | 任务类型，用于选择对应的模型策略、调度优先级和超时配置；仅接受下文列出的值。 |
 | `prompt` | `str` | 必填 | 发送给模型的任务提示词，不能是空字符串或只包含空白。组件会原样发送该字符串，不会因 `output_schema` 自动追加或改写内容。 |
 | `required_capability` | `Literal["low", "high"]` | 必填 | 模型池所需的能力等级，只接受 `low` 或 `high`。 |
-| `output_schema` | `dict[str, Any]` 或 `None` | `None` | 可选的 JSON Schema。传入后，组件会解析并校验模型返回的纯文本 JSON，将结果写入 `result.structured`；它不会修改首次 `prompt`。不传时 `result.structured` 为 `None`。 |
+| `output_schema` | `dict[str, Any]` 或 `None` | `None` | 可选的 JSON Schema。传入后，组件会先解析模型最终文本，必要时再检查本次消息由内置文件工具写入的文件，并将匹配值写入 `result.structured`；它不会修改首次 `prompt`。不传时 `result.structured` 为 `None`。 |
 | `invalid_json_retry_count` | `int` | `2` | 首次结果不符合 `output_schema` 时，在同一会话中要求模型修正 JSON 的最大次数，必须大于或等于 `0`。该参数不控制新会话重试次数。 |
 | `invalid_json_retry_prompt` | `str` 或 `None` | `None` | JSON 校验失败后的可选纠正提示词。传入非空字符串时，每次纠错都原样重复发送；`None` 使用组件当前包含完整 Schema 的中文默认提示词。 |
+| `file_write_allowlist` | 路径序列或 `None` | `None` | `output_schema` 生效时，需要保留的模型写入文件或目录。相对路径以当前 `work_dir` 为基准，绝对路径也必须位于其中；目录项同时匹配自身及所有后代。它只阻止自动清理，不增加写权限。 |
 | `session_id` | `str` 或 `None` | `None` | 传入已有 Serve 会话 ID 以续接会话；省略、传入 `None` 或空字符串时创建新会话。同一组件生命周期内，续接会话不能切换项目目录或可写工作目录。 |
 | `config_path` | `str`、`PathLike[str]` 或 `None` | `None` | 独立运行时使用的 YAML 配置文件路径。未传入时依次读取 `TASK_AGENT_CONFIG` 和当前目录下的 `task-agent.yaml`。宿主配置已注册时不能再传入此参数。 |
 | `output` | callable 或 `None` | 使用当前执行上下文 | 可选的本次调用输出覆盖；传 `None` 可关闭 Task Agent 控制台流。 |
 | `cancel_event` | 提供 `is_set()` 的对象 | 使用当前执行上下文 | 可选的本次调用取消信号覆盖。 |
 
-返回的 `OpenCodeResult` 包含 `session_id`、`status`、`text`、`structured`、`model` 和可直接 JSON 序列化的 `output_source`。
+返回的 `OpenCodeResult` 包含 `session_id`、`status`、`text`、`structured`、`model` 和可直接 JSON 序列化的 `output_source`。即使 `structured` 来自文件，`text` 也始终是 LLM 最后一次文本输出，不会替换成文件内容。
 
 已有业务实现若提供同步入口，不需要为了接入平台改成异步，也不要在同步代码里感知宿主事件
 循环。外层异步门面使用 `await run_sync_component(sync_entry, **kwargs)` 即可；该桥会在独立
@@ -70,6 +72,8 @@ result = await run_opencode_task(
 任务的 Serve 配置，不会写入 Agent 全局工作区。
 
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
+
+传入 `output_schema` 后，每条消息仍以最终文本中的合法 JSON 为第一选择。文本不匹配时，组件会按实际成功写入顺序倒序检查当前消息的内置 `write`、`edit`、`apply_patch`/`patch` 文件，最后一个匹配 Schema 的文件作为 `structured`。本次消息确认新建且不在 `file_write_allowlist` 中的文件会在解析后删除，包括执行失败或进入同 Session 纠错时；已有文件即使被模型修改也不会删除或恢复。未传 Schema 时不跟踪、解析或清理文件；自定义 MCP 的未知文件副作用也不纳入该机制。
 
 `task_type` 是文档约定的字符串，而不是导出的枚举。支持的值包括 `audit`、`project_audit`、`sensitive_clear`、`report_audit`、`threat_analysis`、`threat_audit`、`fp_review`、`vulnerability_validation`、`git_history`、`variant_hunt`、`memory_api_discovery` 和 `skill_create`；未知值会在提交前被拒绝。
 
