@@ -98,6 +98,7 @@ class AttackTreeStage:
                 resume=resume,
                 timeout=timeout,
                 progress_reporter=progress_reporter,
+                validate_existing_output_schema=True,
             )
         )
         normalized_outputs = [
@@ -197,17 +198,16 @@ def _normalize_tree_nodes(
                 )
             continue
 
-        if node.get("is_high_risk_module") is True:
-            module = _require_high_risk_module(
-                match,
-                "High-risk internal node",
-                node.get("module_name") or node.get("node_name"),
-            )
-            _apply_high_risk_module_to_node(node, module)
+        if match is None:
+            if node.get("node_type") == "内部节点":
+                _normalize_unmatched_internal_node(node)
             continue
 
-        if match is not None:
+        if node.get("is_high_risk_module") is True:
             _apply_high_risk_module_to_node(node, match)
+            continue
+
+        _apply_high_risk_module_to_node(node, match)
 
 
 def _normalize_attack_paths(
@@ -292,6 +292,12 @@ def _apply_high_risk_module_to_node(node: dict[str, Any], module: dict[str, Any]
     node["module_name"] = module_name
     node["is_high_risk_module"] = True
     node["external_exposure"] = _is_external_module(module)
+
+
+def _normalize_unmatched_internal_node(node: dict[str, Any]) -> None:
+    node["is_high_risk_module"] = False
+    node["external_exposure"] = False
+    node["external_interface_description"] = None
 
 
 def _canonical_attack_tree_asset(asset: dict[str, Any]) -> dict[str, str]:

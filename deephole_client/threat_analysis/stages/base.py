@@ -7,7 +7,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Protocol, Sequence
 
-from threat_analysis_harness.errors import StageExecutionError
+from threat_analysis_harness.errors import (
+    OutputSchemaValidationError,
+    StageExecutionError,
+)
+from threat_analysis_harness.output_validation import validate_json_schema
 
 TaskJson = Dict[str, Any]
 TaskResultJson = Dict[str, Any]
@@ -42,7 +46,11 @@ def require_all_success(results: Iterable[TaskResultJson]) -> list[TaskResultJso
     return [require_success(result) for result in results]
 
 
-def existing_success_result(task: TaskJson) -> TaskResultJson | None:
+def existing_success_result(
+    task: TaskJson,
+    *,
+    validate_output_schema: bool = False,
+) -> TaskResultJson | None:
     output_path = str(task["output_path"])
     if not Path(output_path).exists():
         return None
@@ -50,6 +58,8 @@ def existing_success_result(task: TaskJson) -> TaskResultJson | None:
     try:
         output = json.loads(Path(output_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return None
+    if validate_output_schema and not _matches_task_output_schema(output, task):
         return None
 
     now = time.time()
@@ -73,11 +83,13 @@ def run_or_resume_tasks(
     resume: bool = False,
     timeout: float | None = None,
     progress_reporter: ProgressReporter | None = None,
+    validate_existing_output_schema: bool = False,
 ) -> list[TaskResultJson]:
     results, pending, pending_indexes = resume_existing_tasks(
         tasks,
         resume=resume,
         progress_reporter=progress_reporter,
+        validate_existing_output_schema=validate_existing_output_schema,
     )
 
     if pending:
@@ -94,6 +106,7 @@ def run_or_resume_task(
     resume: bool = False,
     timeout: float | None = None,
     progress_reporter: ProgressReporter | None = None,
+    validate_existing_output_schema: bool = False,
 ) -> TaskResultJson:
     return run_or_resume_tasks(
         submit_tasks=submit_tasks,
@@ -101,6 +114,7 @@ def run_or_resume_task(
         resume=resume,
         timeout=timeout,
         progress_reporter=progress_reporter,
+        validate_existing_output_schema=validate_existing_output_schema,
     )[0]
 
 
@@ -109,13 +123,21 @@ def resume_existing_tasks(
     *,
     resume: bool = False,
     progress_reporter: ProgressReporter | None = None,
+    validate_existing_output_schema: bool = False,
 ) -> tuple[list[TaskResultJson | None], list[TaskJson], list[int]]:
     results: list[TaskResultJson | None] = [None] * len(tasks)
     pending: list[TaskJson] = []
     pending_indexes: list[int] = []
 
     for index, task in enumerate(tasks):
-        existing = existing_success_result(task) if resume else None
+        existing = (
+            existing_success_result(
+                task,
+                validate_output_schema=validate_existing_output_schema,
+            )
+            if resume
+            else None
+        )
         if existing is not None:
             results[index] = existing
             if progress_reporter is not None:
@@ -141,3 +163,14 @@ def fill_pending_results(
 
 def completed_results(results: list[TaskResultJson | None]) -> list[TaskResultJson]:
     return [result for result in results if result is not None]
+
+
+def _matches_task_output_schema(output: Any, task: TaskJson) -> bool:
+    schema = task.get("output_schema")
+    if not isinstance(schema, dict):
+        return True
+    try:
+        validate_json_schema(output, schema)
+    except OutputSchemaValidationError:
+        return False
+    return True

@@ -114,6 +114,7 @@ ATTACK_TREE_SCHEMA: dict[str, Any] = {
     "properties": {
         "attack_trees": {
             "type": "array",
+            "minItems": 1,
             "items": {
                 "type": "object",
                 "required": ["tree_id", "value_asset", "nodes", "edges", "attack_paths"],
@@ -140,6 +141,7 @@ ATTACK_TREE_SCHEMA: dict[str, Any] = {
                     },
                     "nodes": {
                         "type": "array",
+                        "minItems": 2,
                         "items": {
                             "type": "object",
                             "required": [
@@ -170,6 +172,7 @@ ATTACK_TREE_SCHEMA: dict[str, Any] = {
                     },
                     "edges": {
                         "type": "array",
+                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "required": [
@@ -194,6 +197,7 @@ ATTACK_TREE_SCHEMA: dict[str, Any] = {
                     },
                     "attack_paths": {
                         "type": "array",
+                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "required": [
@@ -208,11 +212,20 @@ ATTACK_TREE_SCHEMA: dict[str, Any] = {
                             "properties": {
                                 "path_id": NON_EMPTY_STRING,
                                 "path_name": NON_EMPTY_STRING,
-                                "node_ids": {"type": "array", "items": NON_EMPTY_STRING},
-                                "edge_ids": {"type": "array", "items": NON_EMPTY_STRING},
+                                "node_ids": {
+                                    "type": "array",
+                                    "minItems": 2,
+                                    "items": NON_EMPTY_STRING,
+                                },
+                                "edge_ids": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": NON_EMPTY_STRING,
+                                },
                                 "path_description": NON_EMPTY_STRING,
                                 "related_high_risk_modules": {
                                     "type": "array",
+                                    "minItems": 1,
                                     "items": RELATED_HIGH_RISK_MODULE_SCHEMA,
                                 },
                                 "attack_patterns": {
