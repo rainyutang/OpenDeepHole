@@ -298,6 +298,7 @@ def _validate_managed_config(
     policies = {
         "漏洞挖掘": config.vulnerability_mining,
         "去误报": config.false_positive,
+        "威胁分析": config.threat_analysis.model_policy,
     }
     for environment, env_cfg in config.vulnerability_validation.environments.items():
         if not str(environment).strip():

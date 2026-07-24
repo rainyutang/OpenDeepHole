@@ -25,8 +25,9 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.no_proxy, "10.0.0.0/8")
         self.assertEqual(cfg.opencode.tool, "nga")
         self.assertEqual(cfg.opencode.executable, "nga")
-        self.assertEqual(cfg.opencode.timeout, 1200)
+        self.assertEqual(cfg.opencode.timeout, 3600)
         self.assertEqual(cfg.opencode.max_retries, 2)
+        self.assertIsNone(cfg.opencode.serve_port)
         self.assertEqual(cfg.opencode.config_paths, [])
         self.assertEqual(cfg.opencode.proxy_url, "")
         self.assertEqual(cfg.opencode.no_proxy, "")
@@ -34,10 +35,14 @@ class AgentConfigTests(unittest.TestCase):
         self.assertIsNone(cfg.fp_review_cli)
         self.assertTrue(cfg.memory_api_discovery.enabled)
         self.assertEqual(cfg.memory_api_discovery.batch_size, 8)
+        self.assertEqual(cfg.memory_api_discovery.timeout_seconds, 3600)
         self.assertFalse(cfg.git_history.enabled)
         self.assertEqual(cfg.git_history.max_commits, 200)
         self.assertTrue(cfg.git_history.variant_hunt)
         self.assertTrue(cfg.threat_analysis.enabled)
+        self.assertEqual(cfg.threat_analysis.model_policy.required_capability, "high")
+        self.assertEqual(cfg.threat_analysis.model_policy.timeout_seconds, 3600)
+        self.assertEqual(cfg.threat_analysis.model_policy.max_retries, 2)
         self.assertTrue(cfg.static_dedup)
         self.assertTrue(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
@@ -45,17 +50,22 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 7200)
         self.assertEqual(cfg.opencode_concurrency, 4)
 
-    def test_backend_and_remote_v2_defaults(self) -> None:
+    def test_backend_and_remote_v3_defaults(self) -> None:
         self.assertFalse(BackendGitHistoryConfig().enabled)
-        self.assertEqual(AgentRemoteConfig().schema_version, 2)
+        self.assertEqual(AgentRemoteConfig().schema_version, 3)
         self.assertEqual(AgentRemoteConfig().opencode_config, "{}")
         self.assertEqual(AgentRemoteConfig().base.no_proxy, "10.0.0.0/8")
+        self.assertIsNone(AgentRemoteConfig().base.opencode_serve_port)
         self.assertEqual(AgentRemoteConfig().opencode.tool, "nga")
         self.assertEqual(AgentRemoteConfig().opencode.executable, "nga")
         self.assertEqual(AgentRemoteConfig().opencode.config_jsonc, "{}")
         self.assertEqual(AgentRemoteConfig().model_pool.models, [])
         self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
         self.assertTrue(AgentRemoteConfig().threat_analysis.enabled)
+        self.assertEqual(
+            AgentRemoteConfig().threat_analysis.model_policy.timeout_seconds,
+            3600,
+        )
 
     def test_full_remote_defaults_do_not_switch_agent_to_opencode(self) -> None:
         cfg = AgentConfig()
@@ -67,6 +77,108 @@ class AgentConfigTests(unittest.TestCase):
 
         self.assertEqual(cfg.opencode.tool, "nga")
         self.assertEqual(cfg.opencode.executable, "nga")
+
+    def test_v2_stage_defaults_migrate_once_without_touching_model_rows(self) -> None:
+        config = AgentRemoteConfig.model_validate({
+            "schema_version": 2,
+            "base": {"tool": "nga", "executable": "nga", "no_proxy": ""},
+            "model_pool": {
+                "models": [{
+                    "id": "legacy-low",
+                    "model": "provider/model",
+                    "capability": "low",
+                    "timeout": 1200,
+                }],
+            },
+            "threat_analysis": {
+                "enabled": True,
+                "model_policy": {
+                    "required_capability": "low",
+                    "timeout_seconds": 1200,
+                    "max_retries": 3,
+                },
+            },
+            "vulnerability_mining": {
+                "required_capability": "any",
+                "timeout_seconds": 1200,
+                "max_retries": 4,
+            },
+            "false_positive": {
+                "required_capability": "low",
+                "timeout_seconds": 777,
+                "max_retries": 1,
+            },
+            "vulnerability_validation": {
+                "environments": {
+                    "lab": {
+                        "model_policy": {
+                            "required_capability": "low",
+                            "timeout_seconds": 1200,
+                            "max_retries": 5,
+                        },
+                    },
+                },
+            },
+        })
+
+        self.assertEqual(config.schema_version, 3)
+        self.assertEqual(config.vulnerability_mining.required_capability, "high")
+        self.assertEqual(config.vulnerability_mining.timeout_seconds, 3600)
+        self.assertEqual(config.vulnerability_mining.max_retries, 4)
+        self.assertEqual(config.false_positive.required_capability, "high")
+        self.assertEqual(config.false_positive.timeout_seconds, 777)
+        self.assertEqual(config.threat_analysis.model_policy.timeout_seconds, 3600)
+        self.assertEqual(config.threat_analysis.model_policy.max_retries, 2)
+        self.assertEqual(
+            config.vulnerability_validation.environments["lab"].model_policy.timeout_seconds,
+            3600,
+        )
+        self.assertEqual(config.model_pool.models[0].capability, "low")
+        self.assertEqual(config.model_pool.models[0].timeout, 1200)
+
+    def test_v3_manual_low_capability_and_custom_timeout_are_preserved(self) -> None:
+        config = AgentRemoteConfig.model_validate({
+            "schema_version": 3,
+            "base": {
+                "opencode_serve_port": 4317,
+            },
+            "threat_analysis": {
+                "model_policy": {
+                    "required_capability": "low",
+                    "timeout_seconds": 901,
+                    "max_retries": 6,
+                },
+            },
+            "vulnerability_mining": {
+                "required_capability": "low",
+                "timeout_seconds": 902,
+                "max_retries": 7,
+            },
+        })
+
+        self.assertEqual(config.base.opencode_serve_port, 4317)
+        self.assertEqual(config.threat_analysis.model_policy.required_capability, "low")
+        self.assertEqual(config.threat_analysis.model_policy.timeout_seconds, 901)
+        self.assertEqual(config.threat_analysis.model_policy.max_retries, 6)
+        self.assertEqual(config.vulnerability_mining.required_capability, "low")
+        self.assertEqual(config.vulnerability_mining.timeout_seconds, 902)
+
+        agent_config = AgentConfig()
+        apply_remote_config(agent_config, config.model_dump(mode="json"))
+        self.assertEqual(agent_config.opencode.serve_port, 4317)
+        self.assertEqual(
+            agent_config.threat_analysis.model_policy.required_capability,
+            "low",
+        )
+        self.assertEqual(agent_config.vulnerability_mining.timeout_seconds, 902)
+
+    def test_managed_serve_port_must_be_valid(self) -> None:
+        for port in (0, 65536):
+            with self.subTest(port=port), self.assertRaises(ValueError):
+                AgentRemoteConfig.model_validate({
+                    "schema_version": 3,
+                    "base": {"opencode_serve_port": port},
+                })
 
     def test_apply_remote_config_overwrites_falsey_values(self) -> None:
         cfg = AgentConfig()
@@ -124,7 +236,7 @@ class AgentConfigTests(unittest.TestCase):
 
         self.assertEqual(cfg.no_proxy, "")
         self.assertEqual(cfg.opencode.max_retries, 0)
-        self.assertEqual(cfg.opencode.timeout, 1200)
+        self.assertEqual(cfg.opencode.timeout, 3600)
         self.assertEqual(cfg.opencode.tool, "nga")
         self.assertEqual(cfg.opencode.config_paths, ["/opt/opencode/config.json"])
         self.assertEqual(cfg.opencode.proxy_url, "http://127.0.0.1:3131")
@@ -158,20 +270,28 @@ class AgentConfigTests(unittest.TestCase):
 
         remote = remote_config_dict(cfg)
 
-        self.assertEqual(remote["schema_version"], 2)
+        self.assertEqual(remote["schema_version"], 3)
         self.assertEqual(remote["opencode_config"], cfg.opencode.config_jsonc)
         self.assertNotIn("llm_api", remote)
         self.assertEqual(remote["base"], {
             "tool": "nga",
             "executable": "nga",
             "no_proxy": "10.0.0.0/8",
+            "opencode_serve_port": None,
         })
         self.assertEqual(remote["model_pool"], {"global_concurrency": 4, "models": []})
         self.assertEqual(
             remote["threat_analysis"],
-            {"enabled": True},
+            {
+                "enabled": True,
+                "model_policy": {
+                    "required_capability": "high",
+                    "timeout_seconds": 3600,
+                    "max_retries": 2,
+                },
+            },
         )
-        self.assertEqual(remote["vulnerability_mining"]["required_capability"], "low")
+        self.assertEqual(remote["vulnerability_mining"]["required_capability"], "high")
         self.assertEqual(remote["false_positive"]["required_capability"], "high")
         self.assertEqual(remote["vulnerability_validation"], {"environments": {}})
         self.assertNotIn("git_history", remote)
@@ -257,7 +377,7 @@ class AgentConfigTests(unittest.TestCase):
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["server_url"], "http://example.test")
             self.assertEqual(raw["agent_name"], "local-agent")
-            self.assertEqual(raw["schema_version"], 2)
+            self.assertEqual(raw["schema_version"], 3)
             self.assertEqual(
                 raw["opencode_config"],
                 '{\n  // managed on the Web\n  "model": "provider/model",\n}',
@@ -268,14 +388,21 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["model_pool"]["global_concurrency"], 3)
             self.assertEqual(raw["model_pool"]["models"][0]["model"], "provider/model")
             self.assertNotIn("use_default_model", raw["model_pool"]["models"][0])
-            self.assertEqual(raw["threat_analysis"], {"enabled": False})
+            self.assertEqual(raw["threat_analysis"], {
+                "enabled": False,
+                "model_policy": {
+                    "required_capability": "high",
+                    "timeout_seconds": 3600,
+                    "max_retries": 2,
+                },
+            })
             self.assertEqual(raw["code_graph"]["remote"]["url"], "http://graph.test/mcp")
             self.assertEqual(
                 raw["code_graph"]["remote"]["headers"]["Authorization"],
                 "Bearer test-secret-123",
             )
             self.assertEqual(raw["vulnerability_mining"]["timeout_seconds"], 600)
-            self.assertEqual(raw["vulnerability_mining"]["required_capability"], "low")
+            self.assertEqual(raw["vulnerability_mining"]["required_capability"], "high")
             self.assertEqual(raw["false_positive"]["timeout_seconds"], 700)
             self.assertEqual(raw["vulnerability_validation"]["environments"]["lab"]["concurrency"], 2)
             self.assertEqual(
@@ -519,7 +646,7 @@ class AgentConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(HTTPException, error_text):
                     _validate_managed_config(config)
 
-    def test_legacy_remote_payload_migrates_to_v2_and_disables_default_model(self) -> None:
+    def test_legacy_remote_payload_migrates_to_v3_and_disables_default_model(self) -> None:
         config = AgentRemoteConfig.model_validate({
             "no_proxy": "localhost",
             "opencode_concurrency": 2,
@@ -534,7 +661,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 2)
+        self.assertEqual(config.schema_version, 3)
         self.assertEqual(config.base.no_proxy, "localhost")
         self.assertEqual(config.opencode_config, '{"model": "legacy/model"}')
         self.assertEqual(config.model_pool.global_concurrency, 2)

@@ -25,8 +25,8 @@ mcp_server:
 opencode:
   executable: "opencode"  # opencode 可执行文件名或完整路径，如 "myopencode" 或 "C:/tools/opencode.cmd"
   model: ""       # 已废弃兼容字段；模型调度只读取 models
-  timeout: 1200  # seconds per candidate analysis
-  max_retries: 2  # retry on transient errors (not timeout)
+  timeout: 3600  # seconds per model message
+  max_retries: 2  # fresh-Session retries for timeout and retryable failures
   mock: false    # set to false when opencode is configured
   proxy_url: ""  # optional proxy for opencode/nga child processes, e.g. "http://127.0.0.1:3131"
   no_proxy: ""   # optional no_proxy for opencode/nga child processes; empty uses intranet defaults

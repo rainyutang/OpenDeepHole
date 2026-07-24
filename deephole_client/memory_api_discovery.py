@@ -128,7 +128,7 @@ class MemoryApiCandidate:
 class MemoryApiDiscoveryOptions:
     enabled: bool = True
     batch_size: int = 8
-    timeout_seconds: int = 1200
+    timeout_seconds: int = 3600
     max_candidates: int = 200
 
     @classmethod
@@ -139,7 +139,7 @@ class MemoryApiDiscoveryOptions:
         return cls(
             enabled=bool(getattr(section, "enabled", True)),
             batch_size=_bounded_int(getattr(section, "batch_size", 8), 5, 10, 8),
-            timeout_seconds=_bounded_int(getattr(section, "timeout_seconds", 1200), 30, 7200, 1200),
+            timeout_seconds=_bounded_int(getattr(section, "timeout_seconds", 3600), 30, 7200, 3600),
             max_candidates=max(0, _safe_int(getattr(section, "max_candidates", 200), 200)),
         )
 
@@ -476,7 +476,7 @@ async def _run_memory_api_batch(
             task_name=f"内存 API 识别 {batch_index}/{batch_count}",
             task_type="memory_api_discovery",
             prompt=prompt,
-            required_capability="low",
+            required_capability="high",
             output_schema=_MEMORY_API_BATCH_JSON_SCHEMA,
         )
     if result.status == "timeout":

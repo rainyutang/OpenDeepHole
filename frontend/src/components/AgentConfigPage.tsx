@@ -48,7 +48,7 @@ const policy = (
   required_capability: AgentModelTaskPolicy["required_capability"] = "high",
   max_retries = 2,
 ): AgentModelTaskPolicy => ({
-  required_capability, timeout_seconds: 1200, max_retries,
+  required_capability, timeout_seconds: 3600, max_retries,
 });
 const mcp = (name: string): AgentMcpConfig => ({
   enabled: false, name, transport: "local", timeout_seconds: 300,
@@ -60,11 +60,11 @@ const emptyMcpRuntime = () => ({
   loaded_directories: 0, total_directories: 0,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
-  schema_version: 2,
+  schema_version: 3,
   opencode_config: "{}",
-  base: { tool: "nga", executable: "nga", no_proxy: "10.0.0.0/8" },
+  base: { tool: "nga", executable: "nga", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
   model_pool: { global_concurrency: 4, models: [] },
-  threat_analysis: { enabled: true },
+  threat_analysis: { enabled: true, model_policy: policy("high", 2) },
   code_graph: {
     ...mcp("codegraph"),
     local: {
@@ -73,7 +73,7 @@ const defaultConfig = (): AgentRemoteConfig => ({
     },
   },
   product_info: mcp("product-info"),
-  vulnerability_mining: policy("low"),
+  vulnerability_mining: policy("high"),
   false_positive: policy("high"),
   vulnerability_validation: { environments: {} },
 });
@@ -694,6 +694,7 @@ export default function AgentConfigPage({ onBack }: Props) {
           {section === "base" && <div className="grid gap-5 md:grid-cols-2">
             <Field label="工具"><select className={input} value={config.base.tool} onChange={(e) => setCfg({ ...config, base: { ...config.base, tool: e.target.value } })}><option value="nga">nga</option><option value="opencode">opencode</option></select></Field>
             <Field label="工具可执行文件名或完整路径"><input className={input} value={config.base.executable} onChange={(e) => setCfg({ ...config, base: { ...config.base, executable: e.target.value } })} /></Field>
+            <Field label="OpenCode Serve 端口" hint="留空时，本次 Agent 进程自动选择一个空闲端口"><input className={input} type="number" min={1} max={65535} value={config.base.opencode_serve_port ?? ""} onChange={(e) => setCfg({ ...config, base: { ...config.base, opencode_serve_port: e.target.value === "" ? null : Number(e.target.value) } })} /></Field>
             <Field label="代理跳过列表" hint="逗号分隔"><textarea className={input} rows={4} value={config.base.no_proxy} onChange={(e) => setCfg({ ...config, base: { ...config.base, no_proxy: e.target.value } })} /></Field>
           </div>}
           {section === "models" && <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={() => void openModelPicker()} pool={pool} />}
@@ -735,7 +736,7 @@ export default function AgentConfigPage({ onBack }: Props) {
               </div>
             </details>
           </div>}
-          {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { enabled: e.target.checked } })} />启用威胁分析</label><p className="text-sm text-slate-400">威胁分析过程的任务拆分、能力要求和重试策略由其目录内的原生实现负责。</p></div>}
+          {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, enabled: e.target.checked } })} />启用威胁分析</label><PolicyEditor value={config.threat_analysis.model_policy} onChange={(model_policy) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy } })} /><p className="text-sm text-slate-400">这里的超时与重试由统一任务服务执行；原生威胁分析实现无需接收超时参数。</p></div>}
           {section === "codegraph" && <McpEditor value={config.code_graph} onChange={(value) => setCfg({ ...config, code_graph: value })} status={mcpStatus?.code_graph || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)} probing={probingTarget === "code_graph"} reloading={reloadingTarget === "code_graph"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("code_graph")} onReload={() => reloadMcp("code_graph")} />}
           {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} status={mcpStatus?.product_info || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info)} probing={probingTarget === "product_info"} reloading={reloadingTarget === "product_info"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("product_info")} onReload={() => reloadMcp("product_info")} />}
           {section === "mining" && <PolicyEditor value={config.vulnerability_mining} onChange={(value) => setCfg({ ...config, vulnerability_mining: value })} />}

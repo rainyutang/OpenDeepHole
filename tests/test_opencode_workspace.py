@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path, PureWindowsPath
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from deephole_client import codegraph as codegraph_runtime
 from deephole_client.opencode_integration import (
+    _resolved_serve_port,
     build_opencode_config,
     get_global_opencode_workspace,
     managed_opencode_config_path,
@@ -36,6 +38,27 @@ def assert_opencode_read_permissions(
 
 
 class OpencodeWorkspaceTests(unittest.TestCase):
+    def test_agent_serve_port_precedence_and_auto_port_reuse(self) -> None:
+        with patch.dict(os.environ, {"OPENCODE_SERVE_PORT": "4100"}, clear=False):
+            self.assertEqual(_resolved_serve_port(4200), 4200)
+            self.assertEqual(_resolved_serve_port(None), 4100)
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("deephole_client.opencode_integration._auto_serve_port", None),
+            patch("deephole_client.opencode_integration.socket.socket") as socket_factory,
+        ):
+            socket_factory.return_value.__enter__.return_value.getsockname.return_value = (
+                "127.0.0.1",
+                43123,
+            )
+            first = _resolved_serve_port(None)
+            second = _resolved_serve_port(None)
+
+        self.assertGreaterEqual(first, 1)
+        self.assertLessEqual(first, 65535)
+        self.assertEqual(second, first)
+
     def test_writable_edit_patterns_include_windows_slash_variants(self) -> None:
         path = PureWindowsPath(
             "C:/Users/demo/.opendeephole/fp_reviews/review/artifacts/1"

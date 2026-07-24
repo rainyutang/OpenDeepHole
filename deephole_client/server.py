@@ -758,7 +758,7 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
                 "required_capability", "high"
             )
             environment_config["timeout_seconds"] = model_policy.get(
-                "timeout_seconds", 1200
+                "timeout_seconds", 3600
             )
             environment_config["model_max_retries"] = model_policy.get(
                 "max_retries", 2

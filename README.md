@@ -533,13 +533,15 @@ server_url: "http://your-server:8000"
 agent_name: ""
 owner_token: ""
 checkers: []
-schema_version: 2
+schema_version: 3
 opencode_config: |
   {}
 base:
   tool: "nga"
   executable: "nga"
   no_proxy: "10.0.0.0/8"
+  # null 时由 Agent 进程自动选择并复用一个空闲端口
+  opencode_serve_port: null
 model_pool:
   global_concurrency: 4
   models:
@@ -554,7 +556,7 @@ model_pool:
           end: "06:00"
 ```
 
-`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v2 字段由 Web **「Agent 配置」** 页面管理并写回。`opencode_config` 是完整 JSONC 用户配置层，支持注释和尾随逗号。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。
+`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v3 字段由 Web **「Agent 配置」** 页面管理并写回。`opencode_config` 是完整 JSONC 用户配置层，支持注释和尾随逗号。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
@@ -565,7 +567,7 @@ OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_
 OpenCode 调用约定：
 
 - `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置。
-- `nga` / `opencode` 只通过 serve API 调用，默认端口为 `4096`，可用 `OPENCODE_SERVE_PORT` 覆盖。组件只调用 `task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录，也不允许调用方传 permission。
+- `nga` / `opencode` 只通过 serve API 调用。Agent 优先使用 `base.opencode_serve_port`，未配置时兼容 `OPENCODE_SERVE_PORT`，两者都没有时由操作系统分配一个空闲端口；自动端口在同一 Agent 进程内跨 Serve 重启复用，Agent 重启后重新选择。配置更新在活动 Session 结束后的安全重启边界生效。standalone `task-agent.yaml` 继续使用显式 `serve.port`（默认 `4096`）。组件只调用 `task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录，也不允许调用方传 permission。
 - 每个 Session 可读取 `project_dir`，文件编辑工具只能写当前 `work_dir`，`bash` 全面禁用。公共内置/checker SKILL 注册到全局 skill root；过程私有 SKILL 由过程门面按任务追加，由 OpenCode 按 prompt 名称加载。
 - `output_schema` 只用于普通文本 JSON 的本地解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。JSON 不合规时默认在原 Session 追加 2 次包含 Schema 的中文纠正，也可通过 `invalid_json_retry_prompt` 提供原样发送的自定义纠正提示词；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
@@ -622,8 +624,8 @@ OpenCode 模型池统计：
 - 模型必须在 `model_pool.models[]` 中填写明确模型名并启用；不再接受默认模型行。没有显式模型时不能创建或恢复扫描。
 - `model_pool.global_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 配置页的每个模型可添加多段使用时间，每段独立选择周一至周日及起止时间；时间窗口只限制新取得的模型 Lease，不会中断已经运行的任务。
-- 任务能力只分 `low`、`high`，任务优先级由任务类型自动决定；低能力任务优先用最低足够能力模型并可升级，高能力任务不会降级。模型行本身仍可标记低/中/高能力。
-- 任务超时只计算每条模型消息的执行阶段，不包含排队时间。新 Session 重试释放并重新申请模型 Lease；模型池 completed-task 历史只记录一次最终状态。
+- 任务能力只分 `low`、`high`，各内置阶段默认并实际配置为 `high`，任务优先级由任务类型自动决定；v3 中手工配置为低能力的阶段仍会优先使用最低足够能力模型。模型行本身仍可标记低/中/高能力。
+- 模型调用默认超时为 `3600` 秒，只计算每条模型消息的执行阶段，不包含排队时间。超时、普通执行错误和同 Session JSON 纠正耗尽都会消费统一的新 Session 重试预算；默认重试 2 次，即最多 3 个 Session。新 Session 重试会释放并重新申请模型 Lease，最终超时保留最后 Session ID，模型池 completed-task 历史只记录一次最终状态。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import os
 import warnings
@@ -39,8 +40,9 @@ class OpenCodeConfig:
     tool: str = "nga"
     executable: str = "nga"  # CLI executable name or full path
     model: str = ""
-    timeout: int = 1200
-    max_retries: int = 2          # retry on transient errors (not timeout)
+    timeout: int = 3600
+    max_retries: int = 2          # fresh-Session retries for timeout and retryable failures
+    serve_port: int | None = None
     models: list[OpenCodeModelConfig] = field(default_factory=list)
     config_paths: list[str] = field(default_factory=list)  # optional OpenCode config files to merge
     proxy_url: str = ""           # optional proxy for opencode/nga child processes
@@ -52,7 +54,7 @@ class OpenCodeConfig:
 class MemoryApiDiscoveryConfig:
     enabled: bool = True
     batch_size: int = 8
-    timeout_seconds: int = 300
+    timeout_seconds: int = 3600
     max_candidates: int = 200
 
 
@@ -67,15 +69,20 @@ class GitHistoryConfig:
 
 
 @dataclass
-class ThreatAnalysisConfig:
-    enabled: bool = True
+class ModelTaskPolicyConfig:
+    required_capability: str = "high"
+    timeout_seconds: int = 3600
+    max_retries: int = 2
 
 
 @dataclass
-class ModelTaskPolicyConfig:
-    required_capability: str = "high"
-    timeout_seconds: int = 1200
-    max_retries: int = 2
+class ThreatAnalysisConfig:
+    enabled: bool = True
+    model_policy: ModelTaskPolicyConfig = field(default_factory=lambda: ModelTaskPolicyConfig(
+        required_capability="high",
+        timeout_seconds=3600,
+        max_retries=2,
+    ))
 
 
 @dataclass
@@ -141,6 +148,16 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     config.proxy_url = str(getattr(config, "proxy_url", "") or "").strip()
     config.no_proxy = str(getattr(config, "no_proxy", "") or "").strip()
     config.config_jsonc = str(getattr(config, "config_jsonc", "{}") or "{}")
+    raw_serve_port = getattr(config, "serve_port", None)
+    if raw_serve_port in (None, ""):
+        config.serve_port = None
+    else:
+        try:
+            config.serve_port = int(raw_serve_port)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("opencode serve_port must be an integer") from exc
+        if not 1 <= config.serve_port <= 65535:
+            raise ValueError("opencode serve_port must be between 1 and 65535")
     if tool not in AI_CLI_TOOLS:
         if tool:
             warnings.warn(
@@ -267,6 +284,12 @@ def _normalize_git_history_config(config: GitHistoryConfig) -> None:
 
 def _normalize_threat_analysis_config(config: ThreatAnalysisConfig) -> None:
     config.enabled = _bool_value(config.enabled, True)
+    if not isinstance(config.model_policy, ModelTaskPolicyConfig):
+        policy = ModelTaskPolicyConfig()
+        _apply_policy(policy, config.model_policy)
+        config.model_policy = policy
+    else:
+        _apply_policy(config.model_policy, dataclasses.asdict(config.model_policy))
 
 
 @dataclass
@@ -294,9 +317,7 @@ class AgentConfig:
         ),
     ))
     product_info: McpConfig = field(default_factory=lambda: McpConfig(name="product-info"))
-    vulnerability_mining: ModelTaskPolicyConfig = field(default_factory=lambda: ModelTaskPolicyConfig(
-        required_capability="low",
-    ))
+    vulnerability_mining: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
     false_positive: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = field(default_factory=PatternFilterConfig)
@@ -315,6 +336,88 @@ def _apply_policy(target: ModelTaskPolicyConfig, raw: object) -> None:
         target.required_capability = "low"
     target.timeout_seconds = _bounded_int(raw.get("timeout_seconds"), target.timeout_seconds, 1, 86400)
     target.max_retries = _bounded_int(raw.get("max_retries"), target.max_retries, 0, 20)
+
+
+def _upgrade_managed_policy(
+    value: object,
+    *,
+    migrate_threat_retry_default: bool = False,
+) -> dict[str, object]:
+    policy = dict(value) if isinstance(value, dict) else {}
+    timeout = _bounded_int(policy.get("timeout_seconds"), 3600, 1, 86400)
+    if timeout == 1200:
+        timeout = 3600
+    retries = _bounded_int(policy.get("max_retries"), 2, 0, 20)
+    if migrate_threat_retry_default and retries == 3:
+        retries = 2
+    policy.update({
+        "required_capability": "high",
+        "timeout_seconds": timeout,
+        "max_retries": retries,
+    })
+    return policy
+
+
+def _upgrade_managed_remote(remote: dict) -> dict:
+    """Upgrade managed v2 defaults while preserving explicit v3 choices."""
+    try:
+        schema_version = int(remote.get("schema_version", 0) or 0)
+    except (TypeError, ValueError):
+        schema_version = 0
+    if schema_version >= 3:
+        return remote
+    if not (
+        schema_version == 2
+        or isinstance(remote.get("base"), dict)
+        or isinstance(remote.get("model_pool"), dict)
+    ):
+        migrated = copy.deepcopy(remote)
+        for key in ("opencode", "fp_review_cli"):
+            section = migrated.get(key)
+            if (
+                isinstance(section, dict)
+                and str(section.get("timeout") or "").strip() == "1200"
+            ):
+                section["timeout"] = 3600
+        threat = migrated.get("threat_analysis")
+        if isinstance(threat, dict) and "model_policy" in threat:
+            threat["model_policy"] = _upgrade_managed_policy(
+                threat.get("model_policy"),
+                migrate_threat_retry_default=True,
+            )
+        return migrated
+
+    migrated = copy.deepcopy(remote)
+    migrated["schema_version"] = 3
+    base = migrated.get("base")
+    if not isinstance(base, dict):
+        base = {}
+        migrated["base"] = base
+    base.setdefault("opencode_serve_port", None)
+    for key in ("vulnerability_mining", "false_positive"):
+        migrated[key] = _upgrade_managed_policy(migrated.get(key))
+    threat = migrated.get("threat_analysis")
+    if not isinstance(threat, dict):
+        threat = {}
+        migrated["threat_analysis"] = threat
+    threat["model_policy"] = _upgrade_managed_policy(
+        threat.get("model_policy"),
+        migrate_threat_retry_default=True,
+    )
+    validation = migrated.get("vulnerability_validation")
+    if not isinstance(validation, dict):
+        validation = {}
+        migrated["vulnerability_validation"] = validation
+    environments = validation.get("environments")
+    if not isinstance(environments, dict):
+        environments = {}
+        validation["environments"] = environments
+    for raw_environment in environments.values():
+        if isinstance(raw_environment, dict):
+            raw_environment["model_policy"] = _upgrade_managed_policy(
+                raw_environment.get("model_policy")
+            )
+    return migrated
 
 
 def _mcp_config(raw: object, default: McpConfig) -> McpConfig:
@@ -383,6 +486,7 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     falsey values like stream=false. server_url, agent_port, and agent_name
     are never overwritten because they are local-only settings.
     """
+    remote = _upgrade_managed_remote(remote)
     if isinstance(remote.get("base"), dict) or isinstance(remote.get("model_pool"), dict):
         base = remote.get("base") if isinstance(remote.get("base"), dict) else {}
         model_pool = remote.get("model_pool") if isinstance(remote.get("model_pool"), dict) else {}
@@ -392,6 +496,8 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
             config.opencode.tool = str(base.get("tool") or "")
         if "executable" in base:
             config.opencode.executable = str(base.get("executable") or "")
+        if "opencode_serve_port" in base:
+            config.opencode.serve_port = base.get("opencode_serve_port")
         if "opencode_config" in remote:
             config.opencode.config_jsonc = str(remote.get("opencode_config") or "{}")
         if isinstance(model_pool.get("models"), list):
@@ -410,6 +516,7 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         threat = remote.get("threat_analysis") if isinstance(remote.get("threat_analysis"), dict) else {}
         if "enabled" in threat:
             config.threat_analysis.enabled = _bool_value(threat.get("enabled"), True)
+        _apply_policy(config.threat_analysis.model_policy, threat.get("model_policy"))
         _normalize_threat_analysis_config(config.threat_analysis)
         _apply_policy(config.vulnerability_mining, remote.get("vulnerability_mining"))
         _apply_policy(config.false_positive, remote.get("false_positive"))
@@ -461,8 +568,13 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     section = remote.get("threat_analysis") or {}
     if isinstance(section, dict):
         for f in dataclasses.fields(config.threat_analysis):
-            if f.name in section and section[f.name] is not None:
+            if (
+                f.name != "model_policy"
+                and f.name in section
+                and section[f.name] is not None
+            ):
                 setattr(config.threat_analysis, f.name, section[f.name])
+        _apply_policy(config.threat_analysis.model_policy, section.get("model_policy"))
         _normalize_threat_analysis_config(config.threat_analysis)
     if "static_dedup" in remote and remote["static_dedup"] is not None:
         config.static_dedup = _bool_value(remote["static_dedup"], True)
@@ -516,7 +628,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
                 for key, value in dataclasses.asdict(model).items()
                 if key != "use_default_model"
             }
-            # v2 has no implicit/default-model row.  Keep a legacy row visible
+            # Managed config has no implicit/default-model row. Keep a legacy row visible
             # for manual repair, but never advertise it as enabled capacity.
             if model.use_default_model:
                 item["enabled"] = False
@@ -541,12 +653,13 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "opencode_config": config.opencode.config_jsonc,
         "base": {
             "tool": config.opencode.tool,
             "executable": config.opencode.executable,
             "no_proxy": config.no_proxy,
+            "opencode_serve_port": config.opencode.serve_port,
         },
         "model_pool": {
             "global_concurrency": config.opencode_concurrency,
@@ -554,6 +667,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
         },
         "threat_analysis": {
             "enabled": config.threat_analysis.enabled,
+            "model_policy": dataclasses.asdict(config.threat_analysis.model_policy),
         },
         "code_graph": dataclasses.asdict(config.code_graph),
         "product_info": dataclasses.asdict(config.product_info),
@@ -592,6 +706,12 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     validation_fields = {f.name for f in dataclasses.fields(VulnerabilityValidationConfig)}
 
     oc_raw = {k: v for k, v in raw.get("opencode", {}).items() if k in oc_fields}
+    try:
+        schema_version = int(raw.get("schema_version", 0) or 0)
+    except (TypeError, ValueError):
+        schema_version = 0
+    if schema_version < 3 and str(oc_raw.get("timeout") or "").strip() == "1200":
+        oc_raw["timeout"] = 3600
     if "opencode_config" in raw:
         oc_raw["config_jsonc"] = str(raw.get("opencode_config") or "{}")
     if isinstance(oc_raw.get("models"), list):
@@ -609,9 +729,14 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         k: v for k, v in raw.get("git_history", {}).items()
         if k in git_history_fields
     }
+    threat_section = (
+        raw.get("threat_analysis")
+        if isinstance(raw.get("threat_analysis"), dict)
+        else {}
+    )
     threat_analysis_fields = {f.name for f in dataclasses.fields(ThreatAnalysisConfig)}
     threat_analysis_raw = {
-        k: v for k, v in raw.get("threat_analysis", {}).items()
+        k: v for k, v in threat_section.items()
         if k in threat_analysis_fields and k != "model_policy"
     }
     pattern_filter_raw = {
@@ -628,6 +753,8 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     fp_cfg = None
     if isinstance(fp_raw, dict):
         fp_values = {k: v for k, v in fp_raw.items() if k in oc_fields}
+        if schema_version < 3 and str(fp_values.get("timeout") or "").strip() == "1200":
+            fp_values["timeout"] = 3600
         if isinstance(fp_values.get("models"), list):
             fp_values["models"] = [
                 OpenCodeModelConfig(**{k: v for k, v in item.items() if k in model_fields})
@@ -670,6 +797,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         86400,
     )
     _normalize_git_history_config(cfg.git_history)
+    _apply_policy(cfg.threat_analysis.model_policy, threat_section.get("model_policy"))
     _normalize_threat_analysis_config(cfg.threat_analysis)
     if isinstance(raw.get("base"), dict) or isinstance(raw.get("model_pool"), dict):
         apply_remote_config(cfg, raw)
@@ -677,7 +805,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v2 remotely-managed fields while preserving local bootstrap fields."""
+    """Persist v3 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return

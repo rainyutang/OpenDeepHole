@@ -1,5 +1,5 @@
 # OpenDeepHole Agent bootstrap and managed configuration.
-# server_url / agent_name / owner_token are local-only; the remaining v2
+# server_url / agent_name / owner_token are local-only; the remaining v3
 # sections are managed by the Web "Agent 配置" page after first connection.
 
 server_url: "http://your-server:8000"
@@ -7,13 +7,15 @@ agent_name: ""
 owner_token: ""
 checkers: []
 
-schema_version: 2
+schema_version: 3
 opencode_config: |
   {}
 base:
   tool: "opencode"
   executable: "opencode"
   no_proxy: "10.0.0.0/8"
+  # null = choose one free local port once for this Agent process.
+  opencode_serve_port: null
 
 model_pool:
   global_concurrency: 4
@@ -44,6 +46,10 @@ model_pool:
 
 threat_analysis:
   enabled: true
+  model_policy:
+    required_capability: "high"
+    timeout_seconds: 3600
+    max_retries: 2
 
 code_graph:
   enabled: false
@@ -73,13 +79,13 @@ product_info:
     headers: {}
 
 vulnerability_mining:
-  required_capability: "low"
-  timeout_seconds: 1200
+  required_capability: "high"
+  timeout_seconds: 3600
   max_retries: 2
 
 false_positive:
   required_capability: "high"
-  timeout_seconds: 1200
+  timeout_seconds: 3600
   max_retries: 2
 
 vulnerability_validation:

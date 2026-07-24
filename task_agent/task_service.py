@@ -247,7 +247,7 @@ class OpenCodeTaskSpec:
     task_name: str
     prompt: str
     directory: Path
-    required_capability: str = "low"
+    required_capability: str = "high"
     timeout_seconds: int | None = None
     priority: int = 50
     output_schema: dict[str, Any] | None = None
@@ -473,7 +473,8 @@ class OpenCodeTaskService:
         self._emit_task_progress(
             record,
             f"QUEUED task={task_id} name={normalized.task_name} "
-            f"capability={normalized.required_capability} priority={normalized.priority}",
+            f"capability={_effective_required_capability(record.execution_context, normalized)} "
+            f"priority={normalized.priority}",
         )
         record.worker = asyncio.create_task(
             self._run_record(record),
@@ -684,7 +685,7 @@ class OpenCodeTaskService:
                     (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
                     or spec.timeout_seconds
                     or lease.option.timeout
-                    or int(_cfg_value(_task_cli_config(record.execution_context), "timeout", 1200))
+                    or int(_cfg_value(_task_cli_config(record.execution_context), "timeout", 3600))
                 )
                 lock_key = session_id or f"new:{record.task_id}:{session_attempt}"
                 session_lock = self._session_locks.setdefault(lock_key, asyncio.Lock())
@@ -765,19 +766,13 @@ class OpenCodeTaskService:
                 return
             except asyncio.TimeoutError as exc:
                 attempt_outcome = "timeout"
+                retry_reason = str(exc) or "OpenCode task timed out"
+                if message_id:
+                    last_message_id = message_id
+                if text:
+                    last_text = text
+                last_model = source.model or model or last_model
                 last_source = source
-                self._finish_record(
-                    record,
-                    status="timeout",
-                    session_id=final_session_id or session_id,
-                    message_id=message_id or last_message_id,
-                    text=text or last_text,
-                    model=source.model or model or last_model,
-                    source=source,
-                    error=str(exc) or "OpenCode task timed out",
-                    duration_seconds=accumulated_duration + _elapsed(attempt_started),
-                )
-                return
             except asyncio.CancelledError:
                 if record.requeue_requested:
                     return
@@ -869,7 +864,7 @@ class OpenCodeTaskService:
 
             self._finish_record(
                 record,
-                status="failure",
+                status="timeout" if attempt_outcome == "timeout" else "failure",
                 session_id=final_session_id or session_id,
                 message_id=last_message_id,
                 text=last_text,
@@ -1086,6 +1081,9 @@ def _task_model_policy(context: OpenCodeExecutionContext) -> Any | None:
         "threat_audit",
     }:
         return getattr(config, "vulnerability_mining", None)
+    if task_type == "threat_analysis":
+        threat_analysis = getattr(config, "threat_analysis", None)
+        return _cfg_value(threat_analysis, "model_policy")
     if task_type == "fp_review":
         return getattr(config, "false_positive", None)
     if task_type in {"vulnerability_validation", "validation"}:
@@ -1103,7 +1101,11 @@ def _effective_required_capability(
     context: OpenCodeExecutionContext,
     spec: OpenCodeTaskSpec,
 ) -> str:
-    del context
+    policy = _task_model_policy(context)
+    if policy is not None:
+        return normalize_requirement(
+            _cfg_value(policy, "required_capability", spec.required_capability)
+        )
     return spec.required_capability
 
 
@@ -1285,7 +1287,7 @@ def _task_timeout_seconds(
         )
         if value > 0:
             return value
-    return int(_cfg_value(_task_cli_config(context), "timeout", 1200) or 1200)
+    return int(_cfg_value(_task_cli_config(context), "timeout", 3600) or 3600)
 
 
 async def _run_component_task(

@@ -55,8 +55,9 @@ class OpenCodeConfig(BaseModel):
     tool: str = "opencode"
     executable: str = "opencode"  # CLI executable name or full path
     model: str = "anthropic/claude-sonnet-4-20250514"
-    timeout: int = 1200
-    max_retries: int = 2  # retry on transient errors (not timeout)
+    timeout: int = 3600
+    max_retries: int = 2  # fresh-Session retries for timeout and retryable failures
+    serve_port: int | None = Field(default=None, ge=1, le=65535)
     mock: bool = False  # When True, skip real opencode and return fake results
     models: list[OpenCodeModelConfig] = []
     config_paths: list[str] = []  # optional OpenCode config files to merge
@@ -68,7 +69,7 @@ class OpenCodeConfig(BaseModel):
 class MemoryApiDiscoveryConfig(BaseModel):
     enabled: bool = True
     batch_size: int = 8
-    timeout_seconds: int = 300
+    timeout_seconds: int = 3600
     max_candidates: int = 200
 
 
@@ -85,13 +86,9 @@ class GitHistoryConfig(BaseModel):
     variant_hunt: bool = True       # 是否对每条历史模式做全仓同类变体排查
 
 
-class ThreatAnalysisConfig(BaseModel):
-    enabled: bool = True
-
-
 class ModelTaskPolicyConfig(BaseModel):
     required_capability: str = "high"
-    timeout_seconds: int = 1200
+    timeout_seconds: int = 3600
     max_retries: int = 2
 
     @field_validator("required_capability", mode="before")
@@ -103,6 +100,15 @@ class ModelTaskPolicyConfig(BaseModel):
         if normalized in {"", "any", "low"}:
             return "low"
         raise ValueError("required_capability must be low or high")
+
+
+class ThreatAnalysisConfig(BaseModel):
+    enabled: bool = True
+    model_policy: ModelTaskPolicyConfig = ModelTaskPolicyConfig(
+        required_capability="high",
+        timeout_seconds=3600,
+        max_retries=2,
+    )
 
 
 class McpLocalConfig(BaseModel):
@@ -175,9 +181,7 @@ class AppConfig(BaseModel):
     memory_api_discovery: MemoryApiDiscoveryConfig = MemoryApiDiscoveryConfig()
     git_history: GitHistoryConfig = GitHistoryConfig()
     threat_analysis: ThreatAnalysisConfig = ThreatAnalysisConfig()
-    vulnerability_mining: ModelTaskPolicyConfig = ModelTaskPolicyConfig(
-        required_capability="low"
-    )
+    vulnerability_mining: ModelTaskPolicyConfig = ModelTaskPolicyConfig()
     false_positive: ModelTaskPolicyConfig = ModelTaskPolicyConfig()
     code_graph: McpConfig = McpConfig(name="codegraph")
     product_info: McpConfig = McpConfig(name="product-info")

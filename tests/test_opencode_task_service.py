@@ -593,7 +593,7 @@ def test_validation_debug_empty_model_pool_fails_without_starting_serve(tmp_path
     asyncio.run(run())
 
 
-def test_phase_policy_controls_timeout_and_retries_but_not_explicit_capability(tmp_path: Path) -> None:
+def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) -> None:
     async def run() -> None:
         calls: list[dict] = []
 
@@ -645,7 +645,7 @@ def test_phase_policy_controls_timeout_and_retries_but_not_explicit_capability(t
         assert [call["timeout"] for call in calls] == [77, 77]
         assert acquire_mock.await_count == 2
         assert all(
-            call.kwargs["required_capability"] == "low"
+            call.kwargs["required_capability"] == "high"
             for call in acquire_mock.await_args_list
         )
         assert all(
@@ -973,10 +973,19 @@ def test_exhausted_json_retries_fail_and_keep_last_text(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_timeout_is_terminal_and_does_not_use_fresh_session_retry(tmp_path: Path) -> None:
+def test_timeout_uses_fresh_session_retry_budget_for_unclassified_tasks(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
-        manager = SimpleNamespace(run_prompt=AsyncMock(side_effect=asyncio.TimeoutError("slow")))
+        session_ids: list[str | None] = []
+
+        async def run_prompt(**kwargs):
+            session_ids.append(kwargs["session_id"])
+            callback = kwargs["on_session_id"](f"ses_timeout_{len(session_ids)}")
+            if hasattr(callback, "__await__"):
+                await callback
+            raise asyncio.TimeoutError("slow")
+
+        manager = SimpleNamespace(run_prompt=AsyncMock(side_effect=run_prompt))
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
         with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
@@ -985,13 +994,64 @@ def test_timeout_is_terminal_and_does_not_use_fresh_session_retry(tmp_path: Path
                     task_name="timeout",
                     prompt="slow",
                     directory=tmp_path,
-                    attempt=5,
+                    attempt=2,
                 ))
 
         assert result.status == "timeout"
-        assert acquire_mock.await_count == 1
-        assert release_mock.await_count == 1
+        assert result.session_id == "ses_timeout_3"
+        assert session_ids == [None, None, None]
+        assert acquire_mock.await_count == 3
+        assert release_mock.await_count == 3
+        assert [
+            call.kwargs["record_completion"]
+            for call in release_mock.await_args_list
+        ] == [False, False, True]
         assert release_mock.await_args.kwargs["outcome"] == "timeout"
+
+    asyncio.run(run())
+
+
+def test_threat_analysis_policy_defaults_apply_without_caller_timeout(tmp_path: Path) -> None:
+    async def run() -> None:
+        runtime_config = _config(max_retries=9)
+        runtime_config.threat_analysis = SimpleNamespace(
+            model_policy=SimpleNamespace(
+                required_capability="high",
+                timeout_seconds=3600,
+                max_retries=2,
+            )
+        )
+        timeouts: list[int] = []
+
+        async def run_prompt(**kwargs):
+            timeouts.append(kwargs["timeout"])
+            raise asyncio.TimeoutError("threat timeout")
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager, runtime_config=runtime_config)
+        with patches[0], patches[1] as acquire_mock, patches[2], patches[3], patches[4], patches[5]:
+            with _task_context(
+                tmp_path,
+                task_metadata={"task_type": "threat_analysis"},
+            ):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="threat",
+                    prompt="analyze",
+                    directory=tmp_path,
+                    required_capability="low",
+                ))
+
+        assert result.status == "timeout"
+        assert timeouts == [3600, 3600, 3600]
+        assert acquire_mock.await_count == 3
+        assert all(
+            call.kwargs["required_capability"] == "high"
+            for call in acquire_mock.await_args_list
+        )
 
     asyncio.run(run())
 

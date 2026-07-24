@@ -327,7 +327,7 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         timeout=_integer(
             serve.get("timeout"),
             name="serve.timeout",
-            default=1200,
+            default=3600,
             minimum=1,
         ),
         max_retries=_integer(

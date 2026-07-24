@@ -534,6 +534,7 @@ export interface AgentBaseConfig {
   tool: "nga" | "opencode" | string;
   executable: string;
   no_proxy: string;
+  opencode_serve_port: number | null;
 }
 
 export interface AgentModelPoolConfig {
@@ -558,6 +559,7 @@ export interface AgentMcpConfig {
 
 export interface AgentThreatAnalysisConfig {
   enabled: boolean;
+  model_policy: AgentModelTaskPolicy;
 }
 
 export interface AgentValidationEnvironmentConfig {
@@ -602,7 +604,7 @@ export interface AgentValidatorCatalog {
 }
 
 export interface AgentRemoteConfig {
-  schema_version: 2;
+  schema_version: 3;
   opencode_config: string;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;

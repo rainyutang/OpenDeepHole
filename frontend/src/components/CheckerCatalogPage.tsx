@@ -188,7 +188,7 @@ function SkillCreatePage({
   const [skillId, setSkillId] = useState("");
   const [description, setDescription] = useState("");
   const [input, setInput] = useState("");
-  const [timeoutSeconds, setTimeoutSeconds] = useState(1200);
+  const [timeoutSeconds, setTimeoutSeconds] = useState(3600);
   const [job, setJob] = useState<SkillCreateJob | null>(null);
   const [skillMd, setSkillMd] = useState("");
   const [scenariosMd, setScenariosMd] = useState("");
@@ -210,7 +210,7 @@ function SkillCreatePage({
     setSkillId("");
     setDescription("");
     setInput("");
-    setTimeoutSeconds(1200);
+    setTimeoutSeconds(3600);
     setJob(null);
     setSkillMd("");
     setScenariosMd("");

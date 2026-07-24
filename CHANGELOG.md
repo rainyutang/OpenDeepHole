@@ -5,6 +5,13 @@
 - **修复** OpenCode 受管配置在 Serve 启动前将 `~/.opendeephole/scans` 加入只读外部目录白名单，并自动迁移缺少该规则的旧配置且保留动态 MCP URL；Session 显式拒绝写 `project_dir`、仅允许写当前 `work_dir`，解决 Windows 威胁分析无法读取阶段 JSON 的问题
 - **变更** Task Agent 控制台移除 OpenCode 内部 `step` START/STOP/FAIL 噪音，第三段日志类别改为 `task|session|tool|skill`；Tool/SKILL 调用只在发生时打印一次，成功静默、失败追加脱敏 ERROR，威胁分析不再叠加重复的外层阶段前缀
 
+## 2026-07-24
+
+- **新增** Agent 全局配置增加 OpenCode Serve 端口；显式端口优先于旧 `OPENCODE_SERVE_PORT`，未配置时每个 Agent 进程自动选择并跨 Serve 重启复用一个空闲端口，在线修改仍在 Session 空闲边界安全生效
+- **变更** Agent 管理配置升级为 v3，威胁分析恢复独立模型策略，威胁分析及其它内置模型阶段默认使用 `high`、单次模型调用超时统一为 `3600` 秒、新 Session 重试统一为 2 次；v2 旧阶段默认值自动迁移且不改模型行能力与显式超时
+- **修复** `run_opencode_task()` 的任何模型消息超时都会消费统一的新 Session 重试预算；预算耗尽后才返回 `timeout`，并保留最后创建的 Session，取消和无可用模型仍立即终止
+- **重构** 威胁分析策略由外部任务服务按 `task_type=threat_analysis` 应用，不向原生 harness 传超时参数，也不修改 `deephole_client/threat_analysis/` 镜像
+
 ## 2026-07-23
 
 - **修复** OpenCode Session 的动态目录权限在 Windows 下同时生成原生反斜杠和正斜杠子路径规则，使威胁分析可读取 `.opendeephole/scans/<scan_id>/threat_analysis` 中的阶段 JSON；全局外部目录默认拒绝、源码只读、仅任务工作目录可写及禁用 `bash` 的边界保持不变

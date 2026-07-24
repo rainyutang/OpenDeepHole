@@ -191,7 +191,7 @@ async def mine_history(
     capacity = total_model_capacity(
         config.opencode,
         global_concurrency=config.opencode_concurrency,
-        required_capability="low",
+        required_capability="high",
     )
     concurrency = max(1, min(capacity, len(commits)))
 
@@ -240,7 +240,7 @@ async def mine_history(
                     task_name=f"Git 历史审计 {commit.hash[:10]}",
                     task_type="git_history",
                     prompt=prompt,
-                    required_capability="low",
+                    required_capability="high",
                     output_schema=_HISTORY_PATTERN_JSON_SCHEMA,
                 )
             if result.status == "timeout":

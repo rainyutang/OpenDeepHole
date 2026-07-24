@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import threading
 from pathlib import Path
 
@@ -24,6 +25,8 @@ _SCANS_EXTERNAL_PATTERNS = (
 
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
+_auto_serve_port: int | None = None
+_auto_serve_port_guard = threading.Lock()
 
 
 def _config_value(value, name: str, default=None):
@@ -63,6 +66,9 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
     model = str(effective["model"] or "")
     workspace = get_global_opencode_workspace()
     serve_env = _runtime_environment(effective)
+    serve_env["OPENCODE_SERVE_PORT"] = str(
+        _resolved_serve_port(effective.get("serve_port"))
+    )
     config_content = _runtime_config_content(
         workspace,
         effective,
@@ -85,6 +91,7 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
                 "NO_PROXY",
                 "no_proxy",
                 "NODE_TLS_REJECT_UNAUTHORIZED",
+                "OPENCODE_SERVE_PORT",
             )
             if key in serve_env
         },
@@ -122,7 +129,35 @@ def _effective_model_config(cli_config, model_option) -> dict:
         "config_jsonc": str(_config_value(cli_config, "config_jsonc", "{}") or "{}"),
         "proxy_url": str(_config_value(cli_config, "proxy_url", "") or ""),
         "no_proxy": str(_config_value(cli_config, "no_proxy", "") or ""),
+        "serve_port": _config_value(cli_config, "serve_port", None),
     }
+
+
+def _resolved_serve_port(configured_port: object = None) -> int:
+    """Resolve one Agent-wide Serve port, choosing an auto port once per process."""
+    raw = configured_port
+    if raw in (None, ""):
+        raw = os.environ.get("OPENCODE_SERVE_PORT", "")
+    if raw not in (None, ""):
+        try:
+            port = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"OPENCODE_SERVE_PORT must be an integer port: {raw!r}"
+            ) from exc
+        if not 1 <= port <= 65535:
+            raise ValueError(
+                f"OPENCODE_SERVE_PORT must be between 1 and 65535: {raw!r}"
+            )
+        return port
+
+    global _auto_serve_port
+    with _auto_serve_port_guard:
+        if _auto_serve_port is None:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+                _auto_serve_port = int(sock.getsockname()[1])
+        return _auto_serve_port
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

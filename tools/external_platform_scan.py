@@ -31,7 +31,7 @@ AGENT_CONFIG: dict[str, Any] = {
         "tool": "opencode",
         "executable": "opencode",
         "model": "anthropic/claude-sonnet-4-20250514",
-        "timeout": 1200,
+        "timeout": 3600,
         "max_retries": 2,
         "models": [{
             "id": "anthropic/claude-sonnet-4-20250514",

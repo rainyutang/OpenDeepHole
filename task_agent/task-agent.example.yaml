@@ -9,7 +9,7 @@ serve:
   tool: opencode
   executable: opencode
   port: 4096
-  timeout: 1200
+  timeout: 3600
   max_retries: 2
   # 模型服务需要代理时在这里显式提供；按实际环境同时设置大小写变量。
   # environment:

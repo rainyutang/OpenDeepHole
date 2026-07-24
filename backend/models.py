@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -177,7 +178,7 @@ class SkillCreateRequest(BaseModel):
     name: str
     description: str
     input: str
-    timeout_seconds: int = 1200
+    timeout_seconds: int = 3600
 
 
 class SkillCreateJob(BaseModel):
@@ -204,7 +205,7 @@ class SkillImportFile(BaseModel):
 class SkillImportRequest(BaseModel):
     skill_md: str
     scenarios_md: str = ""
-    timeout_seconds: int = 1200
+    timeout_seconds: int = 3600
     files: list[SkillImportFile] = []
 
 
@@ -546,7 +547,7 @@ class AgentOpenCodeModelConfig(BaseModel):
     id: str = ""
     model: str = ""
     # Read-only compatibility for old agent.yaml files.  It is deliberately
-    # omitted from the managed v2 config and never satisfies scan readiness.
+    # omitted from managed config and never satisfies scan readiness.
     use_default_model: bool = Field(default=False, exclude=True)
     capability: str = "high"
     weight: float = 1.0
@@ -563,8 +564,9 @@ class AgentOpenCodeConfig(BaseModel):
     tool: str = "nga"
     executable: str = "nga"
     model: str = ""
-    timeout: int = 1200
+    timeout: int = 3600
     max_retries: int = 2
+    serve_port: int | None = None
     models: list[AgentOpenCodeModelConfig] = []
     config_paths: list[str] = []
     proxy_url: str = ""
@@ -576,6 +578,7 @@ class AgentBaseConfig(BaseModel):
     tool: str = "nga"
     executable: str = "nga"
     no_proxy: str = "10.0.0.0/8"
+    opencode_serve_port: int | None = Field(default=None, ge=1, le=65535)
 
 
 class AgentModelPoolConfig(BaseModel):
@@ -585,7 +588,7 @@ class AgentModelPoolConfig(BaseModel):
 
 class AgentModelTaskPolicy(BaseModel):
     required_capability: str = "high"
-    timeout_seconds: int = 1200
+    timeout_seconds: int = 3600
     max_retries: int = 2
 
     @field_validator("required_capability", mode="before")
@@ -720,10 +723,73 @@ def _safe_policy_int(value: object, default: int, *, minimum: int) -> int:
         return default
 
 
+def _upgrade_agent_policy(
+    value: object,
+    *,
+    default_retries: int = 2,
+    migrate_threat_retry_default: bool = False,
+) -> dict[str, object]:
+    policy = dict(value) if isinstance(value, dict) else {}
+    timeout = _safe_policy_int(policy.get("timeout_seconds"), 3600, minimum=1)
+    if timeout == 1200:
+        timeout = 3600
+    retries = _safe_policy_int(
+        policy.get("max_retries"),
+        default_retries,
+        minimum=0,
+    )
+    if migrate_threat_retry_default and retries == 3:
+        retries = 2
+    policy.update({
+        "required_capability": "high",
+        "timeout_seconds": timeout,
+        "max_retries": retries,
+    })
+    return policy
+
+
+def _upgrade_agent_v2_config(value: dict) -> dict:
+    """Migrate managed v2 stage defaults without touching model rows."""
+    migrated = copy.deepcopy(value)
+    migrated["schema_version"] = 3
+    base = migrated.get("base")
+    if not isinstance(base, dict):
+        base = {}
+        migrated["base"] = base
+    base.setdefault("opencode_serve_port", None)
+
+    for key in ("vulnerability_mining", "false_positive"):
+        migrated[key] = _upgrade_agent_policy(migrated.get(key))
+
+    threat = migrated.get("threat_analysis")
+    if not isinstance(threat, dict):
+        threat = {}
+        migrated["threat_analysis"] = threat
+    threat["model_policy"] = _upgrade_agent_policy(
+        threat.get("model_policy"),
+        migrate_threat_retry_default=True,
+    )
+
+    validation = migrated.get("vulnerability_validation")
+    if not isinstance(validation, dict):
+        validation = {}
+        migrated["vulnerability_validation"] = validation
+    environments = validation.get("environments")
+    if not isinstance(environments, dict):
+        environments = {}
+        validation["environments"] = environments
+    for raw_environment in environments.values():
+        if isinstance(raw_environment, dict):
+            raw_environment["model_policy"] = _upgrade_agent_policy(
+                raw_environment.get("model_policy")
+            )
+    return migrated
+
+
 class AgentMemoryApiDiscoveryConfig(BaseModel):
     enabled: bool = True
     batch_size: int = 8
-    timeout_seconds: int = 300
+    timeout_seconds: int = 3600
     max_candidates: int = 200
 
 
@@ -737,6 +803,11 @@ class AgentGitHistoryConfig(BaseModel):
 
 class AgentThreatAnalysisConfig(BaseModel):
     enabled: bool = True
+    model_policy: AgentModelTaskPolicy = AgentModelTaskPolicy(
+        required_capability="high",
+        timeout_seconds=3600,
+        max_retries=2,
+    )
 
 
 class AgentPatternFilterConfig(BaseModel):
@@ -750,7 +821,7 @@ class AgentVulnerabilityValidationConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: int = 2
+    schema_version: int = 3
     opencode_config: str = "{}"
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
@@ -766,9 +837,7 @@ class AgentRemoteConfig(BaseModel):
         ),
     )
     product_info: AgentMcpConfig = AgentMcpConfig(name="product-info")
-    vulnerability_mining: AgentModelTaskPolicy = AgentModelTaskPolicy(
-        required_capability="low",
-    )
+    vulnerability_mining: AgentModelTaskPolicy = AgentModelTaskPolicy()
     false_positive: AgentModelTaskPolicy = AgentModelTaskPolicy(
         required_capability="high",
     )
@@ -777,9 +846,17 @@ class AgentRemoteConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
-        """Accept pre-v2 Agent payloads while emitting only the v2 contract."""
-        if not isinstance(value, dict) or value.get("schema_version") == 2 or "base" in value:
+        """Accept older Agent payloads while emitting only the v3 contract."""
+        if not isinstance(value, dict):
             return value
+        try:
+            schema_version = int(value.get("schema_version", 0) or 0)
+        except (TypeError, ValueError):
+            schema_version = 0
+        if schema_version >= 3:
+            return value
+        if schema_version == 2 or "base" in value or "model_pool" in value:
+            return _upgrade_agent_v2_config(value)
         legacy = dict(value)
         opencode = legacy.get("opencode") if isinstance(legacy.get("opencode"), dict) else {}
         fp_cli = legacy.get("fp_review_cli") if isinstance(legacy.get("fp_review_cli"), dict) else {}
@@ -813,11 +890,15 @@ class AgentRemoteConfig(BaseModel):
             ):
                 models.append(migrated)
                 seen_ids.add(model_id)
-        timeout = _safe_policy_int(opencode.get("timeout"), 1200, minimum=1)
+        timeout = _safe_policy_int(opencode.get("timeout"), 3600, minimum=1)
+        if timeout == 1200:
+            timeout = 3600
         retries = _safe_policy_int(opencode.get("max_retries"), 2, minimum=0)
         fp_timeout = _safe_policy_int(fp_cli.get("timeout"), timeout, minimum=1)
+        if fp_timeout == 1200:
+            fp_timeout = 3600
         fp_retries = _safe_policy_int(fp_cli.get("max_retries"), retries, minimum=0)
-        return {
+        migrated = {
             "schema_version": 2,
             "opencode_config": str(
                 legacy.get("opencode_config") or opencode.get("config_jsonc") or "{}"
@@ -826,6 +907,7 @@ class AgentRemoteConfig(BaseModel):
                 "tool": opencode.get("tool", "nga"),
                 "executable": opencode.get("executable", "nga"),
                 "no_proxy": legacy.get("no_proxy") or opencode.get("no_proxy") or "10.0.0.0/8",
+                "opencode_serve_port": None,
             },
             "model_pool": {
                 "global_concurrency": legacy.get("opencode_concurrency", 4),
@@ -833,13 +915,14 @@ class AgentRemoteConfig(BaseModel):
             },
             "threat_analysis": {
                 "enabled": threat.get("enabled", True),
+                "model_policy": threat.get("model_policy"),
             },
             "product_info": {
                 "enabled": False,
                 "name": "product-info",
             },
             "vulnerability_mining": {
-                "required_capability": "low",
+                "required_capability": "high",
                 "timeout_seconds": timeout,
                 "max_retries": retries,
             },
@@ -850,6 +933,7 @@ class AgentRemoteConfig(BaseModel):
             },
             "vulnerability_validation": {"environments": {}},
         }
+        return _upgrade_agent_v2_config(migrated)
 
     @property
     def no_proxy(self) -> str:
@@ -866,6 +950,7 @@ class AgentRemoteConfig(BaseModel):
             executable=self.base.executable,
             timeout=self.vulnerability_mining.timeout_seconds,
             max_retries=self.vulnerability_mining.max_retries,
+            serve_port=self.base.opencode_serve_port,
             models=self.model_pool.models,
             no_proxy=self.base.no_proxy,
             config_jsonc=self.opencode_config,

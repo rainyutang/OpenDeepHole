@@ -16,12 +16,23 @@ class AgentResultPathTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 scan_dir = Path(tmp) / "scans" / "scan-123"
                 scan_dir.mkdir(parents=True)
+                agent_config = AgentConfig()
+                agent_config.opencode.serve_port = 4317
 
-                configure_platform_runtime(AgentConfig(), scan_dir)
+                configure_platform_runtime(agent_config, scan_dir)
 
                 raw = yaml.safe_load((scan_dir / "config.yaml").read_text(encoding="utf-8"))
                 self.assertEqual(raw["storage"]["scans_dir"], str(scan_dir))
                 self.assertEqual(raw["storage"]["projects_dir"], str(scan_dir.parent))
+                self.assertEqual(raw["opencode"]["serve_port"], 4317)
+                self.assertEqual(
+                    raw["threat_analysis"]["model_policy"],
+                    {
+                        "required_capability": "high",
+                        "timeout_seconds": 3600,
+                        "max_retries": 2,
+                    },
+                )
         finally:
             if old_config_path is None:
                 os.environ.pop("CONFIG_PATH", None)

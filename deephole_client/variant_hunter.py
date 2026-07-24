@@ -115,7 +115,7 @@ async def hunt_variants(
     capacity = total_model_capacity(
         config.opencode,
         global_concurrency=config.opencode_concurrency,
-        required_capability="low",
+        required_capability="high",
     )
     concurrency = max(1, min(capacity, len(patterns)))
 
@@ -155,7 +155,7 @@ async def hunt_variants(
                     task_name=f"同类变体排查 {pattern.source or pattern.pattern[:30]}",
                     task_type="variant_hunt",
                     prompt=prompt,
-                    required_capability="low",
+                    required_capability="high",
                     output_schema=_VARIANT_FINDINGS_JSON_SCHEMA,
                 )
             if result.status == "timeout":
