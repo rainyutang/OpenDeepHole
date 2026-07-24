@@ -1443,15 +1443,82 @@ def _skill_name(input_value: object) -> str:
     )
 
 
-def _tool_file_path(tool_name: object, input_value: object) -> str:
-    normalized = str(tool_name or "").strip().casefold().replace("-", "_")
-    if normalized not in {"read", "write"} or not isinstance(input_value, dict):
+def _tool_input_value(input_value: dict[str, Any], *keys: str) -> object | None:
+    for key in keys:
+        if key in input_value and input_value[key] is not None:
+            return input_value[key]
+    return None
+
+
+def _tool_detail_value(value: object, *, full_string: bool = False) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    if full_string:
+        # Keep the complete command while escaping physical line breaks so the
+        # shared task formatter can still emit exactly one console line.
+        return json.dumps(text, ensure_ascii=False)
+    preview = _one_line_preview(text)
+    if not preview:
         return ""
-    for key in ("filePath", "file_path", "path"):
-        value = input_value.get(key)
-        if isinstance(value, str) and value.strip():
-            return _one_line_preview(value)
-    return ""
+    if any(char.isspace() for char in preview):
+        return json.dumps(preview, ensure_ascii=False)
+    return preview
+
+
+def _tool_call_details(tool_name: object, input_value: object) -> str:
+    if not isinstance(input_value, dict):
+        return ""
+    normalized = str(tool_name or "").strip().casefold().replace("-", "_")
+    details: list[str] = []
+
+    def add(
+        label: str,
+        *keys: str,
+        full_string: bool = False,
+    ) -> None:
+        value = _tool_input_value(input_value, *keys)
+        if value is None:
+            return
+        formatted = _tool_detail_value(value, full_string=full_string)
+        if formatted:
+            details.append(f"{label}={formatted}")
+
+    def add_chars(label: str, *keys: str) -> None:
+        value = _tool_input_value(input_value, *keys)
+        if isinstance(value, str):
+            details.append(f"{label}={len(value)}")
+
+    if normalized == "read":
+        add("path", "filePath", "file_path", "path")
+        add("offset", "offset")
+        add("limit", "limit")
+    elif normalized == "write":
+        add("path", "filePath", "file_path", "path")
+        add_chars("content_chars", "content")
+    elif normalized == "edit":
+        add("path", "filePath", "file_path", "path")
+        add_chars("old_chars", "oldString", "old_string")
+        add_chars("new_chars", "newString", "new_string")
+        add("replace_all", "replaceAll", "replace_all")
+    elif normalized in {"bash", "shell"}:
+        add("command", "command", "cmd", full_string=True)
+        add("workdir", "workdir", "cwd")
+        add("timeout", "timeout")
+        add("description", "description")
+    elif normalized == "grep":
+        add("pattern", "pattern")
+        add("path", "path")
+        add("include", "include")
+    elif normalized == "glob":
+        add("pattern", "pattern")
+        add("path", "path")
+    elif normalized == "list":
+        add("path", "path")
+
+    return " ".join(details)
 
 
 def _event_session_id(props: dict[str, Any]) -> str:
@@ -1806,9 +1873,9 @@ class _ServeEventState:
         if _is_skill_tool(name):
             self.emit("skill", f"name={_skill_name(input_value)}")
         else:
-            path = _tool_file_path(name, input_value)
-            path_note = f" path={path}" if path else ""
-            self.emit("tool", f"name={name or 'unknown'}{path_note}")
+            details = _tool_call_details(name, input_value)
+            details_note = f" {details}" if details else ""
+            self.emit("tool", f"name={name or 'unknown'}{details_note}")
 
     def emit_tool_result(
         self,

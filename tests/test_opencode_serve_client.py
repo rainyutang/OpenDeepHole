@@ -1141,7 +1141,7 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
             "",
             'data: {"type":"session.next.reasoning.delta","properties":{"sessionID":"session-1","delta":"reasoning\\nstep\\n"}}',
             "",
-            'data: {"type":"session.next.tool.called","properties":{"sessionID":"session-1","callID":"call-1","tool":"read","input":{"filePath":"src/main.c"}}}',
+            'data: {"type":"session.next.tool.called","properties":{"sessionID":"session-1","callID":"call-1","tool":"read","input":{"filePath":"src/main.c","offset":10,"limit":20}}}',
             "",
             'data: {"type":"session.next.tool.success","properties":{"sessionID":"session-1","callID":"call-1","content":[{"type":"text","text":"secret source body"}]}}',
             "",
@@ -1176,6 +1176,7 @@ def test_run_prompt_streams_session_events_without_tool_result_body(monkeypatch,
         assert (
             output.count(
                 "[opencode][session-1][tool] name=read path=src/main.c"
+                " offset=10 limit=20"
             )
             == 1
         )
@@ -2048,9 +2049,123 @@ def test_write_tool_logs_path_without_content() -> None:
 
     assert output == [
         "[opencode][session-1][tool] "
-        "name=write path=reports/result.json",
+        "name=write path=reports/result.json content_chars=18",
     ]
     assert "private write body" not in "\n".join(output)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "input_value", "expected"),
+    [
+        (
+            "read",
+            {"file_path": "src/with spaces.c", "offset": 0, "limit": 50},
+            'name=read path="src/with spaces.c" offset=0 limit=50',
+        ),
+        (
+            "edit",
+            {
+                "filePath": "src/main.c",
+                "oldString": "private old text",
+                "newString": "private replacement",
+                "replaceAll": False,
+            },
+            "name=edit path=src/main.c old_chars=16 new_chars=19 "
+            "replace_all=false",
+        ),
+        (
+            "grep",
+            {"pattern": "unsafe call", "path": "src", "include": "*.c"},
+            'name=grep pattern="unsafe call" path=src include=*.c',
+        ),
+        (
+            "glob",
+            {"pattern": "**/*.py", "path": "task agent"},
+            'name=glob pattern=**/*.py path="task agent"',
+        ),
+        (
+            "list",
+            {"path": "src"},
+            "name=list path=src",
+        ),
+        (
+            "mcp__example__lookup",
+            {"path": "secret.c", "query": "private query"},
+            "name=mcp__example__lookup",
+        ),
+    ],
+)
+def test_common_tool_calls_log_selected_details_without_bodies(
+    tool_name: str,
+    input_value: dict[str, object],
+    expected: str,
+) -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+
+    state.emit_tool_call(
+        call_id=f"{tool_name}-1",
+        tool_name=tool_name,
+        input_value=input_value,
+    )
+
+    assert output == [f"[opencode][session-1][tool] {expected}"]
+    logged = "\n".join(output)
+    assert "private old text" not in logged
+    assert "private replacement" not in logged
+    assert "private query" not in logged
+
+
+def test_bash_tool_logs_complete_unredacted_command_as_one_line() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+    command = (
+        "API_TOKEN=top-secret python3 - <<'PY'\n"
+        f"print({'x' * 600!r})\n"
+        "PY"
+    )
+
+    state.emit_tool_call(
+        call_id="bash-1",
+        tool_name="bash",
+        input_value={
+            "command": command,
+            "workdir": "/tmp/task work",
+            "timeout": 900000,
+            "description": "run validation command",
+        },
+    )
+
+    assert output == [
+        "[opencode][session-1][tool] name=bash "
+        f"command={json.dumps(command, ensure_ascii=False)} "
+        'workdir="/tmp/task work" timeout=900000 '
+        'description="run validation command"',
+    ]
+    assert "\\n" in output[0]
+    assert "top-secret" in output[0]
+    assert "x" * 600 in output[0]
+    assert "[truncated" not in output[0]
+    assert "\n" not in output[0]
+
+
+def test_shell_tool_supports_legacy_command_and_workdir_field_aliases() -> None:
+    output: list[str] = []
+    state = _ServeEventState("opencode", "session-1", output.append)
+
+    state.emit_tool_call(
+        call_id="shell-1",
+        tool_name="shell",
+        input_value={
+            "cmd": "pwd",
+            "cwd": "/tmp/project",
+        },
+    )
+
+    assert output == [
+        '[opencode][session-1][tool] name=shell command="pwd" '
+        "workdir=/tmp/project",
+    ]
 
 
 def test_no_newline_delta_is_flushed_periodically(monkeypatch) -> None:
