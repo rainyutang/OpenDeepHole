@@ -2252,9 +2252,8 @@ function scanQueueTaskTitle(task: Record<string, unknown>): string {
   const stage = task.stage ? `/${String(task.stage)}` : "";
   const checker = task.checker ? String(task.checker) : "";
   const vulnType = task.vuln_type ? String(task.vuln_type) : "";
-  const priority = task.priority != null ? `P${String(task.priority)}` : "";
   const revision = Number(task.revision || 1) > 1 ? `r${String(task.revision)}` : "";
-  return [priority, revision, type + stage, checker || vulnType].filter(Boolean).join(" · ");
+  return [revision, type + stage, checker || vulnType].filter(Boolean).join(" · ");
 }
 
 function scanQueueTaskTarget(task: Record<string, unknown>): string {
@@ -4048,10 +4047,9 @@ function modelTaskLabel(task: Record<string, unknown> | undefined): string {
   const line = task.line ? `:${String(task.line)}` : "";
   const target = file ? `${file}${line}` : checker;
   const session = task.serve_session_id ? String(task.serve_session_id) : "";
-  const priority = task.priority != null ? `P${String(task.priority)}` : "";
   const revision = Number(task.revision || 1) > 1 ? `r${String(task.revision)}` : "";
   const blocked = task.blocked_reason ? "阻塞" : "";
-  return [priority, revision, taskType + stage, target, session, blocked].filter(Boolean).join(" ");
+  return [revision, taskType + stage, target, session, blocked].filter(Boolean).join(" ");
 }
 
 function ModelTaskList({ tasks }: { tasks?: Record<string, unknown>[] }) {
