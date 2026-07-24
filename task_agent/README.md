@@ -69,7 +69,8 @@ result = await run_opencode_task(
 
 过程门面还可以通过 `opencode_task_context(..., config_path=..., skill_paths=[...])` 绑定独立
 配置和过程私有 SKILL 根。绑定值会被内部 `run_opencode_task()` 继承，SKILL 路径仅合并到该
-任务的 Serve 配置，不会写入 Agent 全局工作区。
+任务的 Serve 配置，不会写入 Agent 全局工作区；这些根及其 `references/`、`assets/`、
+`scripts/` 等资源会加入当前 Session 的只读外部目录白名单，写入仍只允许在 `work_dir`。
 
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
 

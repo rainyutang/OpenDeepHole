@@ -1246,7 +1246,12 @@ def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
     context = record.execution_context
     project_dir = spec.directory.resolve()
     work_dir = _required_work_dir(context)
-    external_roots = [project_dir, work_dir, get_global_opencode_workspace()]
+    external_roots = [
+        project_dir,
+        work_dir,
+        get_global_opencode_workspace(),
+        *context.skill_paths,
+    ]
 
     rules: list[dict[str, str]] = []
 

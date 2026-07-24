@@ -2,6 +2,7 @@
 
 ## 2026-07-24
 
+- **修复** Task Agent 将过程通过 `skill_paths` 绑定的私有 SKILL 根及其 `references/`、`assets/`、`scripts/` 等资源加入当前 OpenCode Session 的只读外部目录白名单，解决威胁分析能够加载 `attack-tree-by-asset` SKILL 但无法读取内置 `references/attack_mode.json` 的问题；模型写入仍仅限当前 `work_dir`
 - **优化** 扫描详情任务队列及模型池任务标签不再展示 `P50.xxx` 形式的内部调度优先级；后端优先级数据和队列调度顺序保持不变
 - **新增** `run_opencode_task()` 在传入 `output_schema` 时可从当前消息成功写入的内置文件中回退解析 JSON；文本 JSON 保持优先且 `OpenCodeResult.text` 始终返回 LLM 最后一次文本，新建临时文件解析后自动删除，`file_write_allowlist` 可按 `work_dir` 内的文件或目录保留明确要求的产物而不扩大写权限
 - **修复** OpenCode/nga Serve 启动不再读取、继承或注入系统及运行时配置中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和小写形式；仅保留 `NO_PROXY/no_proxy` 绕过列表，启动诊断与实际子进程环境保持一致

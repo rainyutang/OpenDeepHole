@@ -171,6 +171,21 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
     assert captured["project_dir"] == project.resolve()
     assert captured["work_dir"] == output_path.resolve()
     assert len(captured["skill_paths"]) == 3
+    attack_mode_path = (
+        Path(__file__).resolve().parents[1]
+        / "deephole_client"
+        / "threat_analysis"
+        / "skills"
+        / "attack-trees"
+        / "attack-tree-by-asset"
+        / "references"
+        / "attack_mode.json"
+    ).resolve()
+    assert attack_mode_path.is_file()
+    assert any(
+        skill_root in attack_mode_path.parents
+        for skill_root in captured["skill_paths"]
+    )
     assert events[0]["process"] == "threat_analysis"
     assert events[-1]["kind"] == "artifact"
 

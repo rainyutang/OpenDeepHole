@@ -518,6 +518,18 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         manager = SimpleNamespace()
         captured: dict = {}
         output: list[str] = []
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        scan_dir = tmp_path / ".opendeephole" / "scans" / "scan-7"
+        skill_root = tmp_path / "component-skills"
+        reference_path = (
+            skill_root
+            / "attack-tree-by-asset"
+            / "references"
+            / "attack_mode.json"
+        )
+        reference_path.parent.mkdir(parents=True)
+        reference_path.write_text("[]", encoding="utf-8")
 
         async def run_prompt(**kwargs):
             captured.update(kwargs)
@@ -552,11 +564,11 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
                 return_value=("deephole-code",),
             ),
         ):
-            scan_dir = tmp_path / ".opendeephole" / "scans" / "scan-7"
             with bind_opencode_execution_context(
                 scan_id="scan-7",
-                project_dir=tmp_path,
+                project_dir=project_dir,
                 work_dir=scan_dir,
+                skill_paths=(skill_root,),
                 task_metadata={
                     "task_type": "audit",
                     "checker": "oob",
@@ -573,7 +585,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
                 result = await service.run_task(OpenCodeTaskSpec(
                     task_name="schema task",
                     prompt=original_prompt,
-                    directory=tmp_path,
+                    directory=project_dir,
                     timeout_seconds=12,
                     priority=87,
                     output_schema=SCHEMA,
@@ -592,7 +604,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert "JSON Schema" not in captured["prompt"]
         assert "JSON Schema" not in captured["system_prompt"]
         assert "## CodeGraph 项目范围" in captured["system_prompt"]
-        assert f"projectPath={tmp_path.resolve()}" in captured["system_prompt"]
+        assert f"projectPath={project_dir.resolve()}" in captured["system_prompt"]
         assert "## 已选择的扫描反馈" in captured["system_prompt"]
         assert "仍需核验当前代码" in captured["system_prompt"]
         assert "用户理由：边界检查缺失" in captured["system_prompt"]
@@ -605,11 +617,18 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert ("bash", "*", "deny") in permission_tuples
         assert ("skill", "*", "allow") in permission_tuples
         assert ("edit", "*", "deny") in permission_tuples
-        assert ("edit", str(tmp_path.resolve()), "deny") in permission_tuples
+        assert ("edit", str(project_dir.resolve()), "deny") in permission_tuples
         assert ("edit", str(scan_dir.resolve()), "allow") in permission_tuples
-        assert ("edit", str(tmp_path.resolve()), "allow") not in permission_tuples
-        assert ("external_directory", str(tmp_path.resolve()), "allow") in permission_tuples
+        assert ("edit", str(project_dir.resolve()), "allow") not in permission_tuples
+        assert (
+            "external_directory",
+            str(project_dir.resolve()),
+            "allow",
+        ) in permission_tuples
         assert ("external_directory", str(scan_dir.resolve()), "allow") in permission_tuples
+        for pattern in _permission_path_patterns(skill_root):
+            assert ("external_directory", pattern, "allow") in permission_tuples
+            assert ("edit", pattern, "allow") not in permission_tuples
         acquire_kwargs = acquire_mock.await_args.kwargs
         assert acquire_kwargs["stats_scope_id"] == "scan-7"
         assert acquire_kwargs["task_context"]["task_type"] == "audit"
