@@ -2697,6 +2697,28 @@ LISTEN 0      4096   127.0.0.1:4097    0.0.0.0:*     users:(("node",pid=2222,fd=
     assert serve_client._parse_listener_pids(output, 4097) == {2222}
 
 
+def test_owned_listener_pids_only_accept_launcher_process_tree(monkeypatch) -> None:
+    from task_agent import serve_client
+
+    monkeypatch.setattr(
+        "task_agent.serve_client._listener_pids_for_port",
+        lambda port: {1111, 2222},
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._pid_descends_from",
+        lambda pid, launcher_pid: pid == 2222,
+    )
+
+    listeners, owned, verified = serve_client._owned_listener_pids_for_launcher(
+        4096,
+        3333,
+    )
+
+    assert listeners == {1111, 2222}
+    assert owned == {2222}
+    assert verified is True
+
+
 def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         class FakeProc:
@@ -2935,6 +2957,204 @@ def test_wait_health_reports_startup_output_on_early_exit(tmp_path: Path) -> Non
     asyncio.run(run())
 
 
+def test_wait_health_records_owned_listener_pid(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        from task_agent import serve_client
+
+        class FakeProc:
+            pid = 11111
+            returncode = None
+
+            def poll(self):
+                return None
+
+        class FakeHealthClient:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def get(self, path: str):
+                return _FakeResponse({"healthy": True})
+
+        marker_path = tmp_path / "serve-marker.json"
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", FakeHealthClient)
+        monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr(
+            "task_agent.serve_client._owned_listener_pids_for_launcher",
+            lambda port, launcher_pid: ({22222}, {22222}, True),
+        )
+
+        key = OpenCodeServeKey(tool="opencode", executable="opencode")
+        proc = FakeProc()
+        manager = OpenCodeServeManager()
+        manager._proc = proc
+        manager._key = key
+        manager._port = 4096
+        serve_client._write_marker(
+            marker_path,
+            proc=proc,
+            key=key,
+            port=4096,
+        )
+
+        await manager._wait_health_locked()
+
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert manager._listener_pids == {22222}
+        assert marker["pid"] == 11111
+        assert marker["launcher_pid"] == 11111
+        assert marker["listener_pids"] == [22222]
+
+    asyncio.run(run())
+
+
+def test_wait_health_rejects_foreign_listener_response(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        class FakeProc:
+            pid = 11111
+
+            def __init__(self) -> None:
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+        class FakeHealthClient:
+            requests: list[str] = []
+
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def get(self, path: str):
+                self.requests.append(path)
+                return _FakeResponse({"healthy": True})
+
+        proc = FakeProc()
+
+        async def fake_sleep(delay: float) -> None:
+            proc.returncode = 1
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv(
+            "OPENCODE_SERVE_MARKER",
+            str(tmp_path / "missing-serve-marker.json"),
+        )
+        monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", FakeHealthClient)
+        monkeypatch.setattr("task_agent.serve_client.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr(
+            "task_agent.serve_client._owned_listener_pids_for_launcher",
+            lambda port, launcher_pid: ({22222}, set(), True),
+        )
+        manager = OpenCodeServeManager()
+        manager._proc = proc
+        manager._port = 4096
+
+        with pytest.raises(RuntimeError, match="exited during startup with code 1"):
+            await manager._wait_health_locked()
+
+        assert FakeHealthClient.requests == ["/global/health"]
+
+    asyncio.run(run())
+
+
+def test_ensure_started_adopts_healthy_listener_after_launcher_exit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        from task_agent import serve_client
+
+        class FakeProc:
+            pid = 11111
+            returncode = 0
+
+            def poll(self):
+                return 0
+
+        marker_path = tmp_path / "serve-marker.json"
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {22222},
+        )
+        registered: list[int] = []
+        unregistered: list[int] = []
+        monkeypatch.setattr(
+            "task_agent.serve_client._register_owned_serve_process",
+            lambda proc, path: registered.append(proc.pid),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._unregister_owned_serve_process",
+            lambda pid: unregistered.append(pid),
+        )
+
+        key = OpenCodeServeKey(tool="opencode", executable="opencode")
+        proc = FakeProc()
+        manager = OpenCodeServeManager()
+        manager._proc = proc
+        manager._key = key
+        manager._port = 4096
+        manager._listener_pids = {22222}
+        manager._serve_health_ready = AsyncMock(return_value=True)
+        manager._reset_managed_mcp_process_state = AsyncMock()
+        manager._stop_event_hub = AsyncMock()
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+        serve_client._write_marker(
+            marker_path,
+            proc=proc,
+            key=key,
+            port=4096,
+            listener_pids={22222},
+        )
+
+        mode = await manager._ensure_started_locked(key)
+
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert mode == "reused"
+        assert manager._proc is not proc
+        assert manager._proc.pid == 22222
+        assert manager._proc.poll() is None
+        assert manager._listener_pids == {22222}
+        assert marker["pid"] == 22222
+        assert marker["launcher_pid"] == 11111
+        assert marker["listener_pids"] == [22222]
+        assert registered == [22222]
+        assert unregistered == [11111]
+        manager._reset_managed_mcp_process_state.assert_not_awaited()
+        manager._stop_event_hub.assert_not_awaited()
+        manager._stop_locked.assert_not_awaited()
+        manager._start_locked.assert_not_awaited()
+
+    monkeypatch.setattr(
+        "task_agent.serve_client._pid_is_running",
+        lambda pid: pid == 22222,
+    )
+    asyncio.run(run())
+
+
 def test_wait_health_polls_once_per_second_after_unhealthy_attempts(monkeypatch) -> None:
     async def run() -> None:
         class FakeProc:
@@ -2976,8 +3196,12 @@ def test_wait_health_polls_once_per_second_after_unhealthy_attempts(monkeypatch)
         async def fake_sleep(delay: float) -> None:
             sleeps.append(delay)
 
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
         monkeypatch.setattr("task_agent.serve_client.httpx.AsyncClient", FakeHealthClient)
         monkeypatch.setattr("task_agent.serve_client.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 4096

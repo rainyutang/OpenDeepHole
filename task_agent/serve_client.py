@@ -36,7 +36,7 @@ from .output_format import format_task_output, task_output_stage
 
 logger = logging.getLogger(__name__)
 
-_SERVE_START_TIMEOUT_SECONDS =60.0
+_SERVE_START_TIMEOUT_SECONDS = 60.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS = 5.0
@@ -472,6 +472,144 @@ def _listener_pids_for_port(port: int) -> set[int]:
     return _posix_listener_pids_for_port(port)
 
 
+def _windows_process_parent_map() -> dict[int, int]:
+    """Return a best-effort Windows PID -> parent PID snapshot."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return {}
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    create_snapshot = kernel32.CreateToolhelp32Snapshot
+    create_snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    create_snapshot.restype = wintypes.HANDLE
+    process_first = kernel32.Process32FirstW
+    process_first.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    process_first.restype = wintypes.BOOL
+    process_next = kernel32.Process32NextW
+    process_next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    process_next.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    snapshot = create_snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    invalid_handle = ctypes.c_void_p(-1).value
+    snapshot_value = (
+        snapshot
+        if isinstance(snapshot, int)
+        else ctypes.cast(snapshot, ctypes.c_void_p).value
+    )
+    if not snapshot_value or snapshot_value == invalid_handle:
+        return {}
+    parents: dict[int, int] = {}
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        if not process_first(snapshot, ctypes.byref(entry)):
+            return {}
+        while True:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            if not process_next(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        close_handle(snapshot)
+    return parents
+
+
+def _posix_process_parent_pid(pid: int) -> int | None:
+    try:
+        raw = (Path("/proc") / str(pid) / "stat").read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception:
+        return None
+    close_paren = raw.rfind(")")
+    if close_paren < 0:
+        return None
+    fields = raw[close_paren + 1:].split()
+    if len(fields) < 2:
+        return None
+    try:
+        return int(fields[1])
+    except ValueError:
+        return None
+
+
+def _pid_descends_from(pid: int, ancestor_pid: int) -> bool | None:
+    """Return whether ``pid`` belongs to ``ancestor_pid``'s process tree.
+
+    ``None`` means the platform did not expose enough ancestry information to
+    decide. That distinction lets startup retain the old health-only fallback
+    on restricted systems without accepting a listener proven to be unrelated.
+    """
+    pid = int(pid)
+    ancestor_pid = int(ancestor_pid)
+    if pid <= 0 or ancestor_pid <= 0:
+        return False
+    if pid == ancestor_pid:
+        return True
+
+    parents = _windows_process_parent_map() if sys.platform == "win32" else None
+    current = pid
+    visited: set[int] = set()
+    for _ in range(64):
+        if current in visited:
+            return False
+        visited.add(current)
+        if parents is not None:
+            if current not in parents:
+                return None
+            parent = parents[current]
+        else:
+            parent = _posix_process_parent_pid(current)
+            if parent is None:
+                return None
+        if parent == ancestor_pid:
+            return True
+        if parent <= 0 or parent == current:
+            return False
+        current = parent
+    return False
+
+
+def _owned_listener_pids_for_launcher(
+    port: int,
+    launcher_pid: int,
+) -> tuple[set[int], set[int], bool]:
+    """Return all listeners, owned listeners, and whether ownership was decidable."""
+    listeners = {
+        int(pid)
+        for pid in _listener_pids_for_port(port)
+        if int(pid) > 0
+    }
+    owned: set[int] = set()
+    ownership_verified = False
+    for pid in listeners:
+        relation = _pid_descends_from(pid, launcher_pid)
+        if relation is not None:
+            ownership_verified = True
+        if relation:
+            owned.add(pid)
+    return listeners, owned, ownership_verified
+
+
 @dataclass(frozen=True)
 class _PortReclaimResult:
     attempted: bool
@@ -541,10 +679,26 @@ def _read_marker(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _write_marker(path: Path, *, proc: subprocess.Popen, key: OpenCodeServeKey, port: int) -> None:
+def _write_marker(
+    path: Path,
+    *,
+    proc: Any,
+    key: OpenCodeServeKey,
+    port: int,
+    launcher_pid: int | None = None,
+    listener_pids: set[int] | tuple[int, ...] = (),
+) -> None:
+    pid = int(getattr(proc, "pid", 0) or 0)
     data = {
         "owner": _SERVE_MARKER_OWNER,
-        "pid": int(proc.pid),
+        "agent_pid": os.getpid(),
+        "pid": pid,
+        "launcher_pid": int(launcher_pid or pid),
+        "listener_pids": sorted({
+            int(listener_pid)
+            for listener_pid in listener_pids
+            if int(listener_pid) > 0
+        }),
         "port": int(port),
         "tool": key.tool,
         "executable": key.executable,
@@ -571,7 +725,11 @@ def _remove_marker_for_pid(path: Path, pid: int | None) -> None:
     marker = _read_marker(path)
     if marker is None:
         return
-    if pid is None or int(marker.get("pid") or 0) == int(pid):
+    if (
+        pid is None
+        or int(marker.get("pid") or 0) == int(pid)
+        or int(marker.get("launcher_pid") or 0) == int(pid)
+    ):
         _remove_marker(path)
 
 
@@ -747,8 +905,32 @@ class _OwnedServeProcess:
 
     owner_pid: int
     pid: int
-    proc: subprocess.Popen
+    proc: Any
     marker_path: Path
+
+
+class _AdoptedServeProcess:
+    """Popen-compatible handle for an owned listener surviving its launcher."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = int(pid)
+        self.args = ["opencode", "serve"]
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self.returncode is not None:
+            return self.returncode
+        if _pid_is_running(self.pid):
+            return None
+        self.returncode = 0
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        wait_timeout = _SERVE_STOP_TIMEOUT_SECONDS if timeout is None else max(0.0, float(timeout))
+        if _wait_process_exit(self.pid, wait_timeout):
+            self.returncode = 0
+            return self.returncode
+        raise subprocess.TimeoutExpired(self.args, wait_timeout)
 
 
 _OWNED_SERVE_PROCESS_LOCK = threading.RLock()
@@ -789,9 +971,9 @@ def _restore_serve_signal_handlers_if_idle() -> None:
 def _cleanup_owned_serve_processes(reason: str = "process exit") -> None:
     """Synchronously terminate every Serve child started by this process.
 
-    This path deliberately uses the in-memory Popen object instead of port
-    discovery.  It therefore cannot terminate an unrelated process which has
-    subsequently acquired the configured Serve port.
+    A live launcher is terminated through its exact in-memory process handle.
+    If a launcher already exited after handing the socket to a child, cleanup
+    only targets listener PIDs recorded and ownership-checked during startup.
     """
     owner_pid = os.getpid()
     with _OWNED_SERVE_PROCESS_LOCK:
@@ -822,6 +1004,36 @@ def _cleanup_owned_serve_processes(reason: str = "process exit") -> None:
                     else None
                 )
                 _terminate_process_tree(record.pid, wait=wait)
+            else:
+                marker = _read_marker(record.marker_path)
+                if (
+                    marker is not None
+                    and marker.get("owner") == _SERVE_MARKER_OWNER
+                    and int(marker.get("agent_pid") or owner_pid) == owner_pid
+                    and int(marker.get("launcher_pid") or marker.get("pid") or 0)
+                    == record.pid
+                ):
+                    port = int(marker.get("port") or 0)
+                    raw_listener_pids = marker.get("listener_pids")
+                    known_listener_pids = {
+                        int(pid)
+                        for pid in raw_listener_pids
+                        if str(pid).isdigit() and int(pid) > 0
+                    } if isinstance(raw_listener_pids, list) else set()
+                    current_listener_pids = (
+                        _listener_pids_for_port(port)
+                        if port > 0 and known_listener_pids
+                        else set()
+                    )
+                    for listener_pid in sorted(
+                        known_listener_pids & current_listener_pids
+                    ):
+                        logger.info(
+                            "Stopping adopted OpenCode Serve listener pid %s during %s",
+                            listener_pid,
+                            reason,
+                        )
+                        _terminate_process_tree(listener_pid)
         except BaseException:
             # Signal and interpreter-exit cleanup must remain best effort and
             # must never suppress the host process's original exit semantics.
@@ -902,7 +1114,7 @@ def _install_serve_exit_hooks() -> None:
             logger.debug("Failed to install process signal handler %s", signum, exc_info=True)
 
 
-def _register_owned_serve_process(proc: subprocess.Popen, marker_path: Path) -> None:
+def _register_owned_serve_process(proc: Any, marker_path: Path) -> None:
     """Register a freshly spawned Serve child for process-exit cleanup."""
     pid = int(getattr(proc, "pid", 0) or 0)
     if pid <= 0:
@@ -1868,9 +2080,10 @@ class OpenCodeServeManager:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._idle = asyncio.Condition()
-        self._proc: subprocess.Popen | None = None
+        self._proc: subprocess.Popen | _AdoptedServeProcess | None = None
         self._key: OpenCodeServeKey | None = None
         self._port: int | None = None
+        self._listener_pids: set[int] = set()
         self._startup_log_path: Path | None = None
         self._startup_cwd: Path | None = None
         self._marker_path = _serve_marker_path()
@@ -3319,13 +3532,15 @@ class OpenCodeServeManager:
         """Acquire a short-lived serve operation and report a deferred reload."""
         async with self._lock:
             if self._proc is not None and self._proc.poll() is not None:
-                _unregister_owned_serve_process(getattr(self._proc, "pid", None))
-                await self._reset_managed_mcp_process_state()
-                await self._stop_event_hub()
-                self._proc = None
-                self._key = None
-                self._port = None
-                self._startup_cwd = None
+                if not await self._try_adopt_owned_listener_locked():
+                    _unregister_owned_serve_process(getattr(self._proc, "pid", None))
+                    await self._reset_managed_mcp_process_state()
+                    await self._stop_event_hub()
+                    self._proc = None
+                    self._key = None
+                    self._port = None
+                    self._listener_pids.clear()
+                    self._startup_cwd = None
 
             refresh_deferred = False
             compatible_process = (
@@ -3402,6 +3617,117 @@ class OpenCodeServeManager:
         with contextlib.suppress(BaseException):
             await request
 
+    @staticmethod
+    async def _serve_health_ready(port: int) -> bool:
+        try:
+            async with httpx.AsyncClient(
+                base_url=f"http://127.0.0.1:{int(port)}",
+                timeout=2.0,
+                trust_env=False,
+            ) as client:
+                response = await client.get("/global/health")
+                return response.status_code < 500
+        except Exception:
+            return False
+
+    def _record_owned_listener_pids(
+        self,
+        *,
+        launcher_pid: int,
+        listener_pids: set[int],
+    ) -> None:
+        if (
+            self._proc is None
+            or self._key is None
+            or self._port is None
+            or not listener_pids
+        ):
+            return
+        self._listener_pids = {
+            int(pid)
+            for pid in listener_pids
+            if int(pid) > 0
+        }
+        _write_marker(
+            self._marker_path,
+            proc=self._proc,
+            key=self._key,
+            port=self._port,
+            launcher_pid=launcher_pid,
+            listener_pids=self._listener_pids,
+        )
+
+    async def _try_adopt_owned_listener_locked(self) -> bool:
+        """Adopt a healthy listener left behind by an exited launcher process."""
+        proc = self._proc
+        key = self._key
+        port = self._port
+        if proc is None or key is None or port is None or proc.poll() is None:
+            return False
+        launcher_pid = int(getattr(proc, "pid", 0) or 0)
+        if launcher_pid <= 0:
+            return False
+
+        marker = _read_marker(self._marker_path)
+        if marker is None or marker.get("owner") != _SERVE_MARKER_OWNER:
+            return False
+        marker_agent_pid = int(marker.get("agent_pid") or 0)
+        if marker_agent_pid not in {0, os.getpid()}:
+            return False
+        if int(marker.get("port") or 0) != port:
+            return False
+        if launcher_pid not in {
+            int(marker.get("pid") or 0),
+            int(marker.get("launcher_pid") or 0),
+        }:
+            return False
+
+        current_listeners = await asyncio.to_thread(_listener_pids_for_port, port)
+        known_listeners = set(self._listener_pids)
+        raw_marker_listeners = marker.get("listener_pids")
+        if isinstance(raw_marker_listeners, list):
+            known_listeners.update(
+                int(pid)
+                for pid in raw_marker_listeners
+                if str(pid).isdigit() and int(pid) > 0
+            )
+        candidates = {
+            int(pid)
+            for pid in current_listeners
+            if int(pid) in known_listeners
+        }
+        if not candidates:
+            _, candidates, _ = await asyncio.to_thread(
+                _owned_listener_pids_for_launcher,
+                port,
+                launcher_pid,
+            )
+        if not candidates or not await self._serve_health_ready(port):
+            return False
+
+        listener_pid = min(candidates)
+        _unregister_owned_serve_process(launcher_pid)
+        adopted = _AdoptedServeProcess(listener_pid)
+        self._proc = adopted
+        self._listener_pids = set(candidates)
+        _register_owned_serve_process(adopted, self._marker_path)
+        _write_marker(
+            self._marker_path,
+            proc=adopted,
+            key=key,
+            port=port,
+            launcher_pid=launcher_pid,
+            listener_pids=self._listener_pids,
+        )
+        logger.info(
+            "OpenCode serve launcher pid %s exited; adopted healthy owned listener pid %s "
+            "on 127.0.0.1:%s",
+            launcher_pid,
+            listener_pid,
+            port,
+        )
+        return True
+
     async def _ensure_started(
         self,
         key: OpenCodeServeKey,
@@ -3417,13 +3743,15 @@ class OpenCodeServeManager:
     ) -> str:
         had_process = self._proc is not None
         if self._proc is not None and self._proc.poll() is not None:
-            _unregister_owned_serve_process(getattr(self._proc, "pid", None))
-            await self._reset_managed_mcp_process_state()
-            await self._stop_event_hub()
-            self._proc = None
-            self._key = None
-            self._port = None
-            self._startup_cwd = None
+            if not await self._try_adopt_owned_listener_locked():
+                _unregister_owned_serve_process(getattr(self._proc, "pid", None))
+                await self._reset_managed_mcp_process_state()
+                await self._stop_event_hub()
+                self._proc = None
+                self._key = None
+                self._port = None
+                self._listener_pids.clear()
+                self._startup_cwd = None
         if self._proc is not None and self._key == key and not self._dirty:
             return "reused"
         if self._proc is not None and self._same_process_key(self._key, key) and self._active_sessions > 0:
@@ -3523,6 +3851,7 @@ class OpenCodeServeManager:
             self._startup_log_path = None
             _remove_file(startup_log_path)
             raise
+        self._listener_pids.clear()
         _register_owned_serve_process(self._proc, self._marker_path)
         self._key = key
         self._port = port
@@ -3574,6 +3903,8 @@ class OpenCodeServeManager:
         deadline = time.monotonic() + _SERVE_START_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             if self._proc is not None and self._proc.poll() is not None:
+                if await self._try_adopt_owned_listener_locked():
+                    return
                 cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
                 raise RuntimeError(_with_serve_startup_log(
                     f"OpenCode serve exited during startup with code {self._proc.returncode}{cwd_note}",
@@ -3587,9 +3918,61 @@ class OpenCodeServeManager:
                 ) as client:
                     response = await client.get("/global/health")
                     if response.status_code < 500:
-                        return
+                        proc = self._proc
+                        launcher_pid = int(getattr(proc, "pid", 0) or 0)
+                        ownership_mismatch = False
+                        if launcher_pid > 0 and self._port is not None:
+                            listeners, owned, ownership_verified = await asyncio.to_thread(
+                                _owned_listener_pids_for_launcher,
+                                self._port,
+                                launcher_pid,
+                            )
+                            ownership_mismatch = (
+                                bool(listeners)
+                                and ownership_verified
+                                and not owned
+                            )
+                            if owned:
+                                self._record_owned_listener_pids(
+                                    launcher_pid=launcher_pid,
+                                    listener_pids=owned,
+                                )
+                        if ownership_mismatch:
+                            logger.debug(
+                                "Ignoring OpenCode health response on 127.0.0.1:%s "
+                                "because its listener is outside launcher pid %s's process tree",
+                                self._port,
+                                launcher_pid,
+                            )
+                        else:
+                            if self._proc is not None and self._proc.poll() is not None:
+                                if await self._try_adopt_owned_listener_locked():
+                                    return
+                                cwd_note = (
+                                    f" startup_cwd={self._startup_cwd}"
+                                    if self._startup_cwd
+                                    else ""
+                                )
+                                raise RuntimeError(_with_serve_startup_log(
+                                    "OpenCode serve exited during startup with code "
+                                    f"{self._proc.returncode}{cwd_note}",
+                                    startup_log_path,
+                                ))
+                            return
             except Exception:
-                pass
+                if self._proc is not None and self._proc.poll() is not None:
+                    if await self._try_adopt_owned_listener_locked():
+                        return
+                    cwd_note = (
+                        f" startup_cwd={self._startup_cwd}"
+                        if self._startup_cwd
+                        else ""
+                    )
+                    raise RuntimeError(_with_serve_startup_log(
+                        "OpenCode serve exited during startup with code "
+                        f"{self._proc.returncode}{cwd_note}",
+                        startup_log_path,
+                    ))
             await asyncio.sleep(_SERVE_HEALTH_POLL_INTERVAL_SECONDS)
         cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
         raise TimeoutError(_with_serve_startup_log(
@@ -3669,6 +4052,7 @@ class OpenCodeServeManager:
         self._proc = None
         self._port = None
         self._key = None
+        self._listener_pids.clear()
         self._startup_log_path = None
         self._startup_cwd = None
         if proc is None:
