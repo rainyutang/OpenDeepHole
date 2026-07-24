@@ -627,6 +627,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         ) in permission_tuples
         assert ("external_directory", str(scan_dir.resolve()), "allow") in permission_tuples
         for pattern in _permission_path_patterns(skill_root):
+            assert ("read", pattern, "allow") in permission_tuples
             assert ("external_directory", pattern, "allow") in permission_tuples
             assert ("edit", pattern, "allow") not in permission_tuples
         acquire_kwargs = acquire_mock.await_args.kwargs

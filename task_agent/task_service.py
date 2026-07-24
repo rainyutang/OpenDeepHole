@@ -1264,6 +1264,9 @@ def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
 
     for permission in ("read", "list", "glob", "grep"):
         add(permission, "*", "allow")
+    for skill_root in context.skill_paths:
+        for pattern in _permission_path_patterns(skill_root):
+            add("read", pattern, "allow")
 
     add("external_directory", "*", "deny")
     seen_external: set[str] = set()
