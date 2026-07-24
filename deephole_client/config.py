@@ -45,7 +45,7 @@ class OpenCodeConfig:
     serve_port: int | None = None
     models: list[OpenCodeModelConfig] = field(default_factory=list)
     config_paths: list[str] = field(default_factory=list)  # optional OpenCode config files to merge
-    proxy_url: str = ""           # optional proxy for opencode/nga child processes
+    proxy_url: str = ""           # legacy compatibility; Serve ignores proxy URL injection
     no_proxy: str = ""            # optional no_proxy override for opencode/nga child processes
     config_jsonc: str = "{}"       # complete JSONC config layer managed by the server
 

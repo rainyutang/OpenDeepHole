@@ -68,13 +68,14 @@ _SERVE_DEBUG_ENV_NAMES = (
     "HTTPS_PROXY",
     "http_proxy",
     "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
     "NO_PROXY",
     "no_proxy",
     "OPENCODE_CONFIG_DIR",
     "OPENCODE_CONFIG_CONTENT",
 )
-_SERVE_PROXY_ENV_NAMES = {"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"}
-_SERVE_PROXY_CLEAR_ENV_NAMES = ("ALL_PROXY", "all_proxy")
+_SERVE_PROXY_ENV_NAMES = {"http_proxy", "https_proxy", "all_proxy"}
 
 
 @dataclass(frozen=True)
@@ -1184,6 +1185,8 @@ def _normalized_env_overrides(env_overrides: dict[str, str] | None) -> tuple[tup
     for key, value in env_overrides.items():
         name = str(key).strip()
         if not name:
+            continue
+        if name.lower() in _SERVE_PROXY_ENV_NAMES:
             continue
         normalized.append((name, str(value)))
     return tuple(sorted(normalized))
@@ -3797,14 +3800,17 @@ class OpenCodeServeManager:
                 raise RuntimeError(_port_busy_message(port, reclaim))
         prepared_cwd = _prepare_serve_startup_cwd(key.tool, startup_cwd)
         config_path = _write_serve_config_file(prepared_cwd, key.config_content)
-        env = dict(os.environ)
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if name.lower() not in _SERVE_PROXY_ENV_NAMES
+        }
         env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
-        if any(name in _SERVE_PROXY_ENV_NAMES for name, _ in key.env_overrides):
-            for name in _SERVE_PROXY_CLEAR_ENV_NAMES:
-                env.pop(name, None)
         for name, value in key.env_overrides:
+            if name.lower() in _SERVE_PROXY_ENV_NAMES:
+                continue
             env[name] = value
         # The resolved config is file-backed. Environment overrides are never
         # allowed to re-introduce content injection or redirect the config dir.

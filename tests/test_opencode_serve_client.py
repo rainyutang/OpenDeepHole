@@ -253,7 +253,10 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             prompt="hello",
             model="anthropic/claude-sonnet",
             timeout=30,
-            env_overrides={"HTTPS_PROXY": "http://127.0.0.1:3131"},
+            env_overrides={
+                "HTTPS_PROXY": "http://127.0.0.1:3131",
+                "NO_PROXY": "127.0.0.1,localhost",
+            },
         )
 
         assert lines == ["done"]
@@ -268,7 +271,10 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             model="",
             timeout=30,
             on_session_id=sessions.append,
-            env_overrides={"HTTPS_PROXY": "http://127.0.0.1:3131"},
+            env_overrides={
+                "HTTPS_PROXY": "http://127.0.0.1:3131",
+                "NO_PROXY": "127.0.0.1,localhost",
+            },
         )
         assert sessions == ["session-1"]
         assert manager.ensure_managed_mcp.await_count == 2
@@ -282,7 +288,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             if item["path"] == "/session/session-1/message"
         )
         expected_hash = _config_hash(config_content)
-        expected_env_overrides = (("HTTPS_PROXY", "http://127.0.0.1:3131"),)
+        expected_env_overrides = (("NO_PROXY", "127.0.0.1,localhost"),)
         expected_env_hash = hashlib.sha256(
             json.dumps(expected_env_overrides, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -2775,6 +2781,10 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
 
         manager = OpenCodeServeManager()
         manager._wait_health_locked = AsyncMock()
+        monkeypatch.setenv("HTTP_PROXY", "http://system.example:8080")
+        monkeypatch.setenv("HTTPS_PROXY", "http://system.example:8080")
+        monkeypatch.setenv("http_proxy", "http://system.example:8080")
+        monkeypatch.setenv("https_proxy", "http://system.example:8080")
         monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9999")
         monkeypatch.setenv("all_proxy", "http://127.0.0.1:9999")
         monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", '{"stale": true}')
@@ -2786,8 +2796,12 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
             config_hash="abc123",
             config_content='{"mcp": {}}',
             env_overrides=(
-                ("HTTP_PROXY", "http://127.0.0.1:3131"),
-                ("HTTPS_PROXY", "http://127.0.0.1:3131"),
+                ("HTTP_PROXY", "http://configured.example:8080"),
+                ("HTTPS_PROXY", "http://configured.example:8080"),
+                ("http_proxy", "http://configured.example:8080"),
+                ("https_proxy", "http://configured.example:8080"),
+                ("ALL_PROXY", "socks5://configured.example:1080"),
+                ("all_proxy", "socks5://configured.example:1080"),
                 ("NO_PROXY", "127.0.0.1,localhost"),
             ),
         ), startup_cwd=startup_cwd)
@@ -2811,10 +2825,15 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         runtime_config_path = startup_cwd / "opencode.json"
         assert json.loads(runtime_config_path.read_text(encoding="utf-8")) == {"mcp": {}}
         assert runtime_config_path.stat().st_mode & 0o777 == 0o600
-        assert envs[0]["HTTP_PROXY"] == "http://127.0.0.1:3131"
-        assert envs[0]["HTTPS_PROXY"] == "http://127.0.0.1:3131"
-        assert "ALL_PROXY" not in envs[0]
-        assert "all_proxy" not in envs[0]
+        for proxy_name in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ):
+            assert proxy_name not in envs[0]
         assert envs[0]["NO_PROXY"] == "127.0.0.1,localhost"
         assert envs[0]["PYTHONIOENCODING"] == "utf-8"
         assert envs[0]["PYTHONUTF8"] == "1"
@@ -2834,8 +2853,15 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert 'argv=["/bin/opencode", "serve", "--hostname", "127.0.0.1", "--port", "4096"]' in log_text
         assert "shell=cd " in log_text
         assert "/bin/opencode serve --hostname 127.0.0.1 --port 4096" in log_text
-        assert "HTTP_PROXY=http://127.0.0.1:3131" in log_text
-        assert "HTTPS_PROXY=http://127.0.0.1:3131" in log_text
+        assert "HTTP_PROXY=(unset)" in log_text
+        assert "HTTPS_PROXY=(unset)" in log_text
+        assert "http_proxy=(unset)" in log_text
+        assert "https_proxy=(unset)" in log_text
+        assert "ALL_PROXY=(unset)" in log_text
+        assert "all_proxy=(unset)" in log_text
+        assert "system.example" not in log_text
+        assert "configured.example" not in log_text
+        assert "NO_PROXY=127.0.0.1,localhost" in log_text
         assert "OPENCODE_CONFIG_CONTENT=(unset)" in log_text
         assert f"OPENCODE_CONFIG_DIR={startup_cwd}" in log_text
         assert f"config_file_path={runtime_config_path}" in log_text
@@ -3710,7 +3736,7 @@ def test_refresh_with_active_session_fetches_live_without_reload_or_deferred_mes
         {
             "tool": "opencode",
             "executable": "opencode",
-            "env_overrides": {"HTTPS_PROXY": "http://127.0.0.1:3131"},
+            "env_overrides": {"NO_PROXY": "127.0.0.1,localhost"},
         },
     ],
     ids=["tool", "executable", "environment"],

@@ -11,12 +11,8 @@ serve:
   port: 4096
   timeout: 3600
   max_retries: 2
-  # 模型服务需要代理时在这里显式提供；按实际环境同时设置大小写变量。
+  # Serve 不继承 HTTP/HTTPS/ALL 代理变量；代理相关变量只允许绕过列表。
   # environment:
-  #   HTTP_PROXY: http://127.0.0.1:7890
-  #   HTTPS_PROXY: http://127.0.0.1:7890
-  #   http_proxy: http://127.0.0.1:7890
-  #   https_proxy: http://127.0.0.1:7890
   #   NO_PROXY: 127.0.0.1,localhost
   #   no_proxy: 127.0.0.1,localhost
   environment: {}

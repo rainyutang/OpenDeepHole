@@ -107,10 +107,10 @@ serve:
   timeout: 3600
   # 超时、普通执行错误或 JSON 纠正耗尽后，创建全新 Session 的重试次数。
   max_retries: 2
-  # 传给 Serve 子进程的环境变量。值必须是标量，加载后统一转成字符串。
+  # 传给 Serve 子进程的环境变量。实际代理变量会被清除，只保留绕过列表。
   environment:
-    HTTPS_PROXY: http://127.0.0.1:7890
     NO_PROXY: 127.0.0.1,localhost
+    no_proxy: 127.0.0.1,localhost
 
   # 这里是原样交给 OpenCode 的原生配置对象，不属于 Task Agent 固定 Schema。
   opencode_config:
@@ -190,7 +190,7 @@ model_pool:
 | `serve.port` | 默认 `4096`，范围 `1..65535` | 本机 Serve 监听端口。该值会成为最终的 `OPENCODE_SERVE_PORT`，覆盖 `serve.environment` 中的同名值。 |
 | `serve.timeout` | 默认 `3600`，最小 `1` | 默认单次模型消息执行超时，单位为秒；排队等待模型 Lease 的时间不计入。 |
 | `serve.max_retries` | 默认 `2`，最小 `0` | 首次 Session 之外最多创建多少个全新 Session 进行重试；不等同于同 Session 的 JSON 纠正次数。 |
-| `serve.environment` | 默认 `{}` | 附加或覆盖到 Serve 子进程的环境变量。键转为字符串，值必须是标量并会转为字符串；常用于代理或 Provider 环境变量。 |
+| `serve.environment` | 默认 `{}` | 附加或覆盖到 Serve 子进程的环境变量。键转为字符串，值必须是标量并会转为字符串；`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式会被忽略并从父进程环境清除，只允许 `NO_PROXY`/`no_proxy` 代理绕过变量。 |
 | `serve.opencode_config` | 默认 `{}` | 必须是可 JSON 序列化的映射；运行时原样写入 `workspace_dir/opencode.json` 并交给 OpenCode。 |
 
 `serve.opencode_config` 可以包含 OpenCode 当前版本支持的 `$schema`、Provider、Agent、MCP、Skill 等原生配置。Task Agent 不校验这些子字段，也不保证不同 OpenCode 版本的原生字段兼容；Session 的读写和 `bash` 权限仍由 Task Agent 在运行时收紧，不能依赖这里的 `permission` 放宽任务边界。

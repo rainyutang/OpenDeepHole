@@ -84,10 +84,6 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
         env_overrides={
             key: serve_env[key]
             for key in (
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "http_proxy",
-                "https_proxy",
                 "NO_PROXY",
                 "no_proxy",
                 "NODE_TLS_REJECT_UNAUTHORIZED",
@@ -227,21 +223,11 @@ def _runtime_config_content(
 
 
 def _runtime_environment(effective: dict) -> dict[str, str]:
-    env = dict(os.environ)
-    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
-    proxy = str(effective.get("proxy_url") or "").strip()
-    if proxy and "://" not in proxy:
-        proxy = f"http://{proxy}"
-    if proxy:
-        no_proxy = str(effective.get("no_proxy") or "").strip()
-        env.update({
-            "HTTP_PROXY": proxy,
-            "HTTPS_PROXY": proxy,
-            "http_proxy": proxy,
-            "https_proxy": proxy,
-            "NO_PROXY": no_proxy,
-            "no_proxy": no_proxy,
-        })
+    env = {"NODE_TLS_REJECT_UNAUTHORIZED": "0"}
+    no_proxy = str(effective.get("no_proxy") or "").strip()
+    if no_proxy:
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
     return env
 
 

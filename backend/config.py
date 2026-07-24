@@ -61,7 +61,7 @@ class OpenCodeConfig(BaseModel):
     mock: bool = False  # When True, skip real opencode and return fake results
     models: list[OpenCodeModelConfig] = []
     config_paths: list[str] = []  # optional OpenCode config files to merge
-    proxy_url: str = ""  # optional proxy for opencode/nga child processes
+    proxy_url: str = ""  # legacy compatibility; Serve ignores proxy URL injection
     no_proxy: str = ""  # optional no_proxy override for opencode/nga child processes
     config_jsonc: str = "{}"  # complete user config layer managed from the Agent page
 

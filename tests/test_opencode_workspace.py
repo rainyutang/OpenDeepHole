@@ -9,6 +9,7 @@ from unittest.mock import patch
 from deephole_client import codegraph as codegraph_runtime
 from deephole_client.opencode_integration import (
     _resolved_serve_port,
+    _runtime_environment,
     build_opencode_config,
     get_global_opencode_workspace,
     managed_opencode_config_path,
@@ -38,6 +39,27 @@ def assert_opencode_read_permissions(
 
 
 class OpencodeWorkspaceTests(unittest.TestCase):
+    def test_runtime_environment_only_adds_no_proxy(self) -> None:
+        system_proxies = {
+            "HTTP_PROXY": "http://system.example:8080",
+            "HTTPS_PROXY": "http://system.example:8080",
+            "http_proxy": "http://system.example:8080",
+            "https_proxy": "http://system.example:8080",
+            "ALL_PROXY": "socks5://system.example:1080",
+            "all_proxy": "socks5://system.example:1080",
+        }
+        with patch.dict(os.environ, system_proxies, clear=True):
+            env = _runtime_environment({
+                "proxy_url": "http://configured.example:8080",
+                "no_proxy": "127.0.0.1,localhost",
+            })
+
+        self.assertEqual(env, {
+            "NODE_TLS_REJECT_UNAUTHORIZED": "0",
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+        })
+
     def test_agent_serve_port_precedence_and_auto_port_reuse(self) -> None:
         with patch.dict(os.environ, {"OPENCODE_SERVE_PORT": "4100"}, clear=False):
             self.assertEqual(_resolved_serve_port(4200), 4200)
