@@ -17,9 +17,13 @@ serve:
   #   no_proxy: 127.0.0.1,localhost
   environment: {}
   # OpenCode 的完整配置直接写在这里；MCP 服务名可以自行定义。
+  # standalone 不会自动安装 Skill；如需使用，请在这里注册实际绝对路径。
   # 下列远程和本地示例默认关闭。替换占位配置后，将 enabled 改为 true。
   # timeout 的单位是毫秒。
   opencode_config:
+    # skills:
+    #   paths:
+    #     - /absolute/path/to/opencode-workspace/.opencode/skills
     mcp:
       remote-example:
         type: remote

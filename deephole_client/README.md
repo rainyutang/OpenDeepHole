@@ -25,10 +25,13 @@
 接入已有实现时，实现可以直接占用对应过程目录，平台适配器放在目录外，只负责参数校验、
 上下文绑定和调用。已有入口是同步函数也不需要修改实现，可由异步门面调用
 `task_agent.run_sync_component()`；同步实现内部仍可正常使用
-`task_agent.run_opencode_task()`。实现自己的 SKILL 目录通过门面的 `skill_paths` 上下文按任务
-合并，不需要安装到 Agent 全局工作区。`threat_analysis/` 与来源
+`task_agent.run_opencode_task()`。通用过程仍可通过门面的 `skill_paths` 上下文临时合并自己的
+SKILL；内置威胁分析不使用这条路径：完整 Agent 会把它的四个 SKILL 及 reference 同步到
+`~/.opendeephole/opencode_workspace/.opencode/skills`，脱离 Agent 时则只读取
+`task-agent.yaml` 的 `serve.opencode_config.skills.paths`。`threat_analysis/` 与来源
 `ThreatAnalysis/src/threat_analysis_harness` 逐文件一致；相邻的
-`threat_analysis_runner.py` 将它按原包名加载，不修改原生绝对导入。
+`threat_analysis_runner.py` 将它按原包名加载，不修改原生绝对导入，也不会把安装目录加入
+Task Agent 的 `skill_paths`。
 
 ## 威胁分析入口
 

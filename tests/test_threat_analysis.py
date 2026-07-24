@@ -79,6 +79,7 @@ def test_flattened_harness_contains_only_native_files_and_private_skills() -> No
         "artifacts.py",
         "errors.py",
         "main.py",
+        "output_validation.py",
         "pipeline.py",
         "schemas.py",
         "skills/attack-trees/attack-tree-by-asset/SKILL.md",
@@ -119,8 +120,10 @@ def test_adapter_loads_flattened_harness_under_native_package_name() -> None:
     assert callable(module.run_threat_analysis)
 
 
+@pytest.mark.parametrize("use_standalone_config", [False, True])
 def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
     tmp_path: Path,
+    use_standalone_config: bool,
 ) -> None:
     project = tmp_path / "project"
     output_path = tmp_path / "output"
@@ -140,11 +143,17 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
             "kwargs": kwargs,
             "project_dir": context.project_dir,
             "work_dir": context.work_dir,
+            "config_path": context.config_path,
             "skill_paths": context.skill_paths,
         })
         return native_result
 
     async def scenario() -> dict:
+        task_agent_config = (
+            tmp_path / "task-agent.yaml"
+            if use_standalone_config
+            else None
+        )
         with patch(
             "deephole_client.threat_analysis_runner._load_implementation",
             return_value=SimpleNamespace(run_threat_analysis=native_entry),
@@ -155,6 +164,7 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
                 is_resume=True,
                 product_mcp="product-info",
                 attack_modes={"network": True},
+                task_agent_config=task_agent_config,
                 output=events.append,
             )
 
@@ -170,22 +180,12 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
     }
     assert captured["project_dir"] == project.resolve()
     assert captured["work_dir"] == output_path.resolve()
-    assert len(captured["skill_paths"]) == 3
-    attack_mode_path = (
-        Path(__file__).resolve().parents[1]
-        / "deephole_client"
-        / "threat_analysis"
-        / "skills"
-        / "attack-trees"
-        / "attack-tree-by-asset"
-        / "references"
-        / "attack_mode.json"
-    ).resolve()
-    assert attack_mode_path.is_file()
-    assert any(
-        skill_root in attack_mode_path.parents
-        for skill_root in captured["skill_paths"]
+    assert captured["config_path"] == (
+        (tmp_path / "task-agent.yaml").resolve()
+        if use_standalone_config
+        else None
     )
+    assert captured["skill_paths"] == ()
     assert events[0]["process"] == "threat_analysis"
     assert events[-1]["kind"] == "artifact"
 

@@ -70,6 +70,7 @@ class OpenCodeHostBindings:
     get_workspace: Callable[[], Path]
     build_session_runtime: Callable[[Any, Any, Path], OpenCodeSessionRuntime]
     disabled_source_mcp_tools: Callable[[Path], tuple[str, ...]] = lambda _directory: ()
+    writable_roots: Callable[[], tuple[Path, ...]] = lambda: ()
 
 
 _bindings: OpenCodeHostBindings | None = None

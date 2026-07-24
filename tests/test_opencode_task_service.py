@@ -21,6 +21,7 @@ from task_agent.model_pool import (
 )
 from task_agent.serve_client import OpenCodeFileWrite, OpenCodePromptResult
 from task_agent.task_service import (
+    OpenCodeExecutionContext,
     OpenCodeTaskError,
     OpenCodeTaskResult,
     OpenCodeTaskService,
@@ -28,6 +29,7 @@ from task_agent.task_service import (
     _SessionRuntime,
     _permission_path_patterns,
     _runtime_with_skill_paths,
+    _task_permissions,
     bind_opencode_execution_context,
 )
 
@@ -54,6 +56,37 @@ def test_permission_path_patterns_include_native_windows_descendants() -> None:
         in patterns
     )
     assert f"{work_dir}/**" not in patterns
+
+
+def test_host_writable_root_allows_windows_scan_tree(tmp_path: Path) -> None:
+    scans_root = PureWindowsPath(r"C:\Users\demo\.opendeephole\scans")
+    context = OpenCodeExecutionContext(
+        project_dir=tmp_path,
+        work_dir=tmp_path / "work",
+    )
+    record = SimpleNamespace(
+        spec=SimpleNamespace(directory=tmp_path),
+        execution_context=context,
+    )
+    bindings = SimpleNamespace(
+        get_workspace=lambda: tmp_path / "workspace",
+        writable_roots=lambda: (scans_root,),
+    )
+
+    with patch(
+        "task_agent.task_service.get_host_bindings",
+        return_value=bindings,
+    ):
+        rules = _task_permissions(record, _runtime(tmp_path))
+
+    permission_tuples = {
+        (rule["permission"], rule["pattern"], rule["action"])
+        for rule in rules
+    }
+    for pattern in _permission_path_patterns(scans_root):
+        assert ("read", pattern, "allow") in permission_tuples
+        assert ("external_directory", pattern, "allow") in permission_tuples
+        assert ("edit", pattern, "allow") in permission_tuples
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +177,13 @@ def test_component_skill_paths_are_merged_into_runtime_config(
     assert runtime.config_content == '{"skills":{"paths":["/existing"]}}'
 
 
-def _service_patches(manager, *, max_retries: int = 2, runtime_config=None):
+def _service_patches(
+    manager,
+    *,
+    max_retries: int = 2,
+    runtime_config=None,
+    writable_roots=(),
+):
     async def acquire(*_args, **kwargs):
         return _lease(kwargs["task_id"], scope_id=kwargs["stats_scope_id"])
 
@@ -162,6 +201,7 @@ def _service_patches(manager, *, max_retries: int = 2, runtime_config=None):
             return_value=SimpleNamespace(
                 get_workspace=lambda: Path("/tmp/opendeephole-global").resolve(),
                 disabled_source_mcp_tools=lambda _directory: (),
+                writable_roots=lambda: tuple(writable_roots),
             ),
         ),
     )
@@ -520,8 +560,10 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         output: list[str] = []
         project_dir = tmp_path / "project"
         project_dir.mkdir()
-        scan_dir = tmp_path / ".opendeephole" / "scans" / "scan-7"
+        scans_root = tmp_path / ".opendeephole" / "scans"
+        scan_dir = scans_root / "scan-7"
         skill_root = tmp_path / "component-skills"
+        configured_skill_root = tmp_path / "configured-skills"
         reference_path = (
             skill_root
             / "attack-tree-by-asset"
@@ -530,6 +572,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         )
         reference_path.parent.mkdir(parents=True)
         reference_path.write_text("[]", encoding="utf-8")
+        configured_skill_root.mkdir()
 
         async def run_prompt(**kwargs):
             captured.update(kwargs)
@@ -546,12 +589,21 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
             )
 
         manager.run_prompt = run_prompt
-        service._runtime_for_task = AsyncMock(return_value=(
+        runtime = dataclasses.replace(
             _runtime(tmp_path),
+            config_content=json.dumps({
+                "skills": {"paths": [str(configured_skill_root)]},
+            }),
+        )
+        service._runtime_for_task = AsyncMock(return_value=(
+            runtime,
             "provider/model-low",
             _source(),
         ))
-        patches = _service_patches(manager)
+        patches = _service_patches(
+            manager,
+            writable_roots=(scans_root,),
+        )
         with (
             patches[0],
             patches[1] as acquire_mock,
@@ -619,6 +671,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert ("edit", "*", "deny") in permission_tuples
         assert ("edit", str(project_dir.resolve()), "deny") in permission_tuples
         assert ("edit", str(scan_dir.resolve()), "allow") in permission_tuples
+        assert ("edit", str(scans_root.resolve()), "allow") in permission_tuples
         assert ("edit", str(project_dir.resolve()), "allow") not in permission_tuples
         assert (
             "external_directory",
@@ -630,6 +683,14 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
             assert ("read", pattern, "allow") in permission_tuples
             assert ("external_directory", pattern, "allow") in permission_tuples
             assert ("edit", pattern, "allow") not in permission_tuples
+        for pattern in _permission_path_patterns(configured_skill_root):
+            assert ("read", pattern, "allow") in permission_tuples
+            assert ("external_directory", pattern, "allow") in permission_tuples
+            assert ("edit", pattern, "allow") not in permission_tuples
+        global_workspace = Path("/tmp/opendeephole-global").resolve()
+        for pattern in _permission_path_patterns(global_workspace):
+            assert ("read", pattern, "allow") in permission_tuples
+            assert ("external_directory", pattern, "allow") in permission_tuples
         acquire_kwargs = acquire_mock.await_args.kwargs
         assert acquire_kwargs["stats_scope_id"] == "scan-7"
         assert acquire_kwargs["task_context"]["task_type"] == "audit"

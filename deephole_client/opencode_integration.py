@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import socket
+import tempfile
 import threading
 from pathlib import Path
 
@@ -22,6 +23,29 @@ _SCANS_EXTERNAL_PATTERNS = (
     _SCANS_EXTERNAL_ROOT,
     f"{_SCANS_EXTERNAL_ROOT}/**",
 )
+_THREAT_ANALYSIS_SKILLS_ROOT = (
+    Path(__file__).resolve().parent / "threat_analysis" / "skills"
+)
+_MANAGED_THREAT_ANALYSIS_SKILLS = {
+    "value-asset-map": (
+        _THREAT_ANALYSIS_SKILLS_ROOT / "value-assets" / "value-asset-map"
+    ),
+    "high-risk-module-map": (
+        _THREAT_ANALYSIS_SKILLS_ROOT
+        / "high-risk-modules"
+        / "high-risk-module-map"
+    ),
+    "high-risk-module-merge": (
+        _THREAT_ANALYSIS_SKILLS_ROOT
+        / "high-risk-modules"
+        / "high-risk-module-merge"
+    ),
+    "attack-tree-by-asset": (
+        _THREAT_ANALYSIS_SKILLS_ROOT
+        / "attack-trees"
+        / "attack-tree-by-asset"
+    ),
+}
 
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
@@ -240,7 +264,13 @@ def configure_opencode_component() -> None:
         get_workspace=get_global_opencode_workspace,
         build_session_runtime=_build_session_runtime,
         disabled_source_mcp_tools=_disabled_source_mcp_tools,
+        writable_roots=_agent_writable_roots,
     ))
+
+
+def _agent_writable_roots() -> tuple[Path, ...]:
+    """Return stable Agent-owned roots that every Session may edit."""
+    return ((Path.home() / ".opendeephole" / "scans").resolve(),)
 
 
 def get_workspace_lock(workspace: Path) -> threading.RLock:
@@ -264,17 +294,87 @@ def opencode_runtime_config_path() -> Path:
     return _GLOBAL_WORKSPACE / "opencode.json"
 
 
+def _directory_manifest(root: Path) -> dict[str, str] | None:
+    """Return a content manifest, including unexpected stale files."""
+    if root.is_symlink() or not root.is_dir():
+        return None
+    manifest: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            manifest[relative] = f"symlink:{os.readlink(path)}"
+        elif path.is_dir():
+            manifest[relative] = "directory"
+        elif path.is_file():
+            manifest[relative] = (
+                "file:" + hashlib.sha256(path.read_bytes()).hexdigest()
+            )
+        else:
+            manifest[relative] = "other"
+    return manifest
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _replace_directory(source: Path, destination: Path) -> None:
+    """Replace one managed directory without exposing a partially copied tree."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_root = Path(tempfile.mkdtemp(
+        prefix=f".{destination.name}.sync-",
+        dir=destination.parent,
+    ))
+    staged = temporary_root / "next"
+    backup = temporary_root / "previous"
+    had_destination = destination.exists() or destination.is_symlink()
+    try:
+        shutil.copytree(source, staged)
+        if had_destination:
+            os.replace(destination, backup)
+        try:
+            os.replace(staged, destination)
+        except BaseException:
+            if had_destination and not (
+                destination.exists() or destination.is_symlink()
+            ):
+                os.replace(backup, destination)
+            raise
+        _remove_path(backup)
+    finally:
+        _remove_path(temporary_root)
+
+
+def _sync_managed_threat_analysis_skills(workspace: Path) -> Path:
+    """Synchronize the four bundled threat-analysis Skills into the workspace."""
+    skills_dir = workspace / ".opencode" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    for name, source in _MANAGED_THREAT_ANALYSIS_SKILLS.items():
+        if not (source / "SKILL.md").is_file():
+            raise FileNotFoundError(
+                f"Bundled threat-analysis Skill is missing: {source / 'SKILL.md'}"
+            )
+        destination = skills_dir / name
+        if _directory_manifest(source) != _directory_manifest(destination):
+            _replace_directory(source, destination)
+    return skills_dir
+
+
 def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
     """Return and initialize the single Agent-wide OpenCode workspace.
 
-    The workspace contains stable MCP/skill configuration and a read-only
+    The workspace contains stable MCP/skill configuration and a writable
     external-directory grant for the Agent scan store. Scan-specific state
-    (scope, selected feedback and writable roots) is attached to each task by
-    :mod:`task_agent.task_service` and is never written here.
+    (scope and selected feedback) is attached to each task by
+    :mod:`task_agent.task_service`.
     """
     workspace = _GLOBAL_WORKSPACE
     workspace.mkdir(parents=True, exist_ok=True)
     with get_workspace_lock(workspace):
+        _sync_managed_threat_analysis_skills(workspace)
         # A caller that owns/has just joined the Agent-wide MCP gateway provides
         # its actual port. Stale managed permissions are migrated before the
         # next Serve acquisition; without an explicit port, the writer keeps
@@ -354,10 +454,7 @@ def build_opencode_config(
     edit_permissions = {"*": "deny"}
     for pattern in _SCANS_EXTERNAL_PATTERNS:
         external_permissions[pattern] = "allow"
-        # OpenCode external roots inherit normal workspace permissions. Keep
-        # the stable scan-store grant read-only; the current task work_dir is
-        # allowed later by its Session permission rules.
-        edit_permissions[pattern] = "deny"
+        edit_permissions[pattern] = "allow"
     for path in writable_paths or []:
         normalized = str(Path(path).resolve())
         patterns = (
@@ -405,7 +502,7 @@ def _has_managed_scan_permissions(config_path: Path) -> bool:
             and edit.get("*") == "deny"
             and all(
                 external.get(pattern) == "allow"
-                and edit.get(pattern) == "deny"
+                and edit.get(pattern) == "allow"
                 for pattern in _SCANS_EXTERNAL_PATTERNS
             )
         )

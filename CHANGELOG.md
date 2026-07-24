@@ -2,12 +2,13 @@
 
 ## 2026-07-24
 
-- **修复** Task Agent 将过程通过 `skill_paths` 绑定的私有 SKILL 根及其子路径加入当前 OpenCode Session 的外部目录白名单，并显式下发 `read: allow`，解决威胁分析能够加载 `attack-tree-by-asset` SKILL 但无法读取内置 `references/attack_mode.json` 的问题；模型写入仍仅限当前 `work_dir`
+- **修复** 完整 Agent 在初始化 `~/.opendeephole/opencode_workspace` 时同步原生威胁分析的四个 SKILL 及 `references/attack_mode.json`，威胁分析入口不再把 Agent 安装目录追加到 `skill_paths`；Task Agent 同时从最终配置的 `skills.paths` 推导显式读取与外部目录权限，standalone 只使用 `task-agent.yaml` 中声明的 Skill 路径
+- **变更** OpenCode 受管配置和每个 Agent Session 都允许文件工具读写整个 `~/.opendeephole/scans`；旧的 scans `edit: deny` 配置会自动迁移并保留动态 MCP URL，scans 外的项目源码仍保持只读且 `bash` 继续禁用
 - **优化** 扫描详情任务队列及模型池任务标签不再展示 `P50.xxx` 形式的内部调度优先级；后端优先级数据和队列调度顺序保持不变
 - **新增** `run_opencode_task()` 在传入 `output_schema` 时可从当前消息成功写入的内置文件中回退解析 JSON；文本 JSON 保持优先且 `OpenCodeResult.text` 始终返回 LLM 最后一次文本，新建临时文件解析后自动删除，`file_write_allowlist` 可按 `work_dir` 内的文件或目录保留明确要求的产物而不扩大写权限
 - **修复** OpenCode/nga Serve 启动不再读取、继承或注入系统及运行时配置中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和小写形式；仅保留 `NO_PROXY/no_proxy` 绕过列表，启动诊断与实际子进程环境保持一致
 - **修复** Windows 下 OpenCode Serve 启动健康检查会校验监听 PID 属于本次启动进程树，并在启动器退出但受管监听子进程仍健康时接管该监听进程；不再把旧端口响应误判为新 Serve 已就绪，也不会因此回收仍在服务的 4096 监听并触发并发任务 `ReadError` / `ConnectError` 连锁重启
-- **修复** OpenCode 受管配置在 Serve 启动前将 `~/.opendeephole/scans` 加入只读外部目录白名单，并自动迁移缺少该规则的旧配置且保留动态 MCP URL；Session 显式拒绝写 `project_dir`、仅允许写当前 `work_dir`，解决 Windows 威胁分析无法读取阶段 JSON 的问题
+- **修复** OpenCode 受管配置在 Serve 启动前将 `~/.opendeephole/scans` 加入外部目录白名单，并自动迁移缺少该规则的旧配置且保留动态 MCP URL，解决 Windows 威胁分析无法访问不同阶段 JSON 的问题
 - **变更** Task Agent 控制台移除 OpenCode 内部 `step` START/STOP/FAIL 噪音，第三段日志类别改为 `task|session|tool|skill`；Tool/SKILL 调用只在发生时打印一次，成功静默、失败追加脱敏 ERROR，威胁分析不再叠加重复的外层阶段前缀
 - **优化** Task Agent 的单行工具日志为 `read`、`write`、`edit`、`bash`/`shell`、`grep`、`glob`、`list` 增加定制参数摘要；Bash 命令完整记录且不截断、不脱敏，write/edit 正文、工具返回及模型 text/reasoning 仍保持隐藏；新 Session 重试与同 Session JSON 纠错明确使用 `[session] RETRY`、`[session] JSON_RETRY`
 

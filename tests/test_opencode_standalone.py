@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -255,6 +256,23 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
     from task_agent import serve_client, task_service
 
     config_path = _write_config(tmp_path, port=4318)
+    skill_root = tmp_path / "standalone-skills"
+    reference = (
+        skill_root
+        / "attack-tree-by-asset"
+        / "references"
+        / "attack_mode.json"
+    )
+    reference.parent.mkdir(parents=True)
+    reference.write_text("[]", encoding="utf-8")
+    raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw_config["serve"]["opencode_config"]["skills"] = {
+        "paths": [str(skill_root)],
+    }
+    config_path.write_text(
+        yaml.safe_dump(raw_config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
     lease = ModelLease(
         option=ModelOption(
             id="provider/model",
@@ -331,6 +349,20 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
             assert first_call["directory"] == (tmp_path / "project").resolve()
             assert first_call["config_workspace"] == (tmp_path / "workspace").resolve()
             assert first_call["env_overrides"]["OPENCODE_SERVE_PORT"] == "4318"
+            assert json.loads(first_call["config_content"])["skills"]["paths"] == [
+                str(skill_root)
+            ]
+            permission_tuples = {
+                (rule["permission"], rule["pattern"], rule["action"])
+                for rule in first_call["permissions"]
+            }
+            assert ("read", str(skill_root.resolve()), "allow") in permission_tuples
+            assert (
+                "external_directory",
+                str(skill_root.resolve()),
+                "allow",
+            ) in permission_tuples
+            assert ("edit", str(skill_root.resolve()), "allow") not in permission_tuples
             assert second_call["session_id"] == "ses-standalone"
             service = task_service._get_opencode_task_service()
             assert service._session_work_directories["ses-standalone"] == (

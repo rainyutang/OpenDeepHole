@@ -17,11 +17,6 @@ from task_agent import opencode_task_context, run_sync_component
 PROCESS_NAME = "threat_analysis"
 _IMPLEMENTATION_PACKAGE = "threat_analysis_harness"
 _IMPLEMENTATION_ROOT = Path(__file__).resolve().parent / "threat_analysis"
-_SKILL_ROOTS = (
-    _IMPLEMENTATION_ROOT / "skills" / "value-assets",
-    _IMPLEMENTATION_ROOT / "skills" / "high-risk-modules",
-    _IMPLEMENTATION_ROOT / "skills" / "attack-trees",
-)
 _ALLOWED_KEYS = {
     "code_path",
     "output_path",
@@ -167,7 +162,6 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
             project_dir=code_path,
             work_dir=output_path,
             config_path=task_agent_config,
-            skill_paths=[str(path) for path in _SKILL_ROOTS],
             task_metadata={"standalone_console": True},
             output=task_output,
             cancel_event=kwargs.get("cancel_event"),

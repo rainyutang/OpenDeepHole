@@ -560,7 +560,7 @@ model_pool:
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_config` < OpenDeepHole 受管字段”合并。受管字段包括 `$schema`、deephole-code 与已启用的受管 MCP、公共技能路径和运行权限；这些值不能从 Web 配置覆盖。过程私有 SKILL（例如原生威胁分析 harness 的三个 SKILL 根）只在对应任务的运行配置中临时合并，不安装到 Agent 全局工作区。API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
+OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_config` < OpenDeepHole 受管字段”合并。受管字段包括 `$schema`、deephole-code 与已启用的受管 MCP、公共技能路径和运行权限；这些值不能从 Web 配置覆盖。Agent 每次初始化全局 workspace 时，会把原生威胁分析 harness 的四个 SKILL 连同 `references/attack_mode.json` 同步到 `~/.opendeephole/opencode_workspace/.opencode/skills`；威胁分析任务只使用该全局路径，不再把 Agent 安装目录临时追加到 `skills.paths`。API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
 
 配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），设置 `OPENCODE_CONFIG_DIR` 并显式清除 `OPENCODE_CONFIG_CONTENT`；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。
 
@@ -568,7 +568,7 @@ OpenCode 调用约定：
 
 - `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置。
 - `nga` / `opencode` 只通过 serve API 调用。Agent 优先使用 `base.opencode_serve_port`，未配置时兼容 `OPENCODE_SERVE_PORT`，两者都没有时由操作系统分配一个空闲端口；自动端口在同一 Agent 进程内跨 Serve 重启复用，Agent 重启后重新选择。配置更新在活动 Session 结束后的安全重启边界生效。standalone `task-agent.yaml` 继续使用显式 `serve.port`（默认 `4096`）。组件只调用 `task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录，也不允许调用方传 permission。
-- 每个 Session 可读取 `project_dir`，文件编辑工具只能写当前 `work_dir`，`bash` 全面禁用。公共内置/checker SKILL 注册到全局 skill root；过程私有 SKILL 由过程门面按任务追加，由 OpenCode 按 prompt 名称加载。
+- 每个 Session 可读取 `project_dir`、全局 workspace 和最终配置中注册的 SKILL 根；完整 Agent 的文件编辑工具可写当前 `work_dir` 及整个 `~/.opendeephole/scans`，scans 之外的源码目录保持只读，`bash` 全面禁用。威胁分析 SKILL 注册到全局 skill root；脱离 Agent 运行时只从 `task-agent.yaml` 的 `serve.opencode_config.skills.paths` 加载。
 - `output_schema` 只用于本地 JSON 解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。最终文本 JSON 优先；若模型改用内置文件工具写 JSON，Task Agent 会从当前消息最后写入的合法文件填充 `structured`，但 `text` 仍保留 LLM 最后一次文本输出。确认由本条消息新建的临时文件在解析后自动删除；必须保留的文件或目录可传 `file_write_allowlist`，该白名单只控制清理且不能扩大 `work_dir` 写权限。JSON 仍不合规时默认在原 Session 追加 2 次包含 Schema 的中文纠正，也可通过 `invalid_json_retry_prompt` 提供原样发送的自定义纠正提示词；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。

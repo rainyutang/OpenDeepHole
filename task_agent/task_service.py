@@ -687,7 +687,7 @@ class OpenCodeTaskService:
                         source.model = str(value)
 
                 system_prompt = _task_system_prompt(record)
-                permissions = _task_permissions(record)
+                permissions = _task_permissions(record, runtime)
                 timeout_seconds = (
                     (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
                     or spec.timeout_seconds
@@ -1093,6 +1093,40 @@ def _runtime_with_skill_paths(
     )
 
 
+def _runtime_skill_paths(runtime: _SessionRuntime) -> tuple[Path, ...]:
+    """Resolve Skill roots declared by the effective OpenCode config."""
+    if not runtime.config_content:
+        return ()
+    config = parse_opencode_jsonc(
+        runtime.config_content,
+        source="OpenCode component runtime config",
+    )
+    skills = config.get("skills")
+    if not isinstance(skills, dict):
+        return ()
+    configured = skills.get("paths")
+    if isinstance(configured, str):
+        raw_paths = [configured]
+    elif isinstance(configured, list):
+        raw_paths = configured
+    else:
+        return ()
+
+    base_dir = Path(runtime.config_workspace or runtime.directory).resolve()
+    paths: list[Path] = []
+    for raw_path in raw_paths:
+        value = str(raw_path or "").strip()
+        if not value:
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = base_dir / path
+        resolved = path.resolve()
+        if resolved not in paths:
+            paths.append(resolved)
+    return tuple(paths)
+
+
 def _cfg_value(config_obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(config_obj, dict):
         return config_obj.get(key, default)
@@ -1154,6 +1188,24 @@ def _effective_required_capability(
 
 def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
     return tuple(get_host_bindings().disabled_source_mcp_tools(directory))
+
+
+def _host_writable_roots() -> tuple[Path | PurePath, ...]:
+    """Resolve optional stable writable roots declared by the embedding host."""
+    callback = getattr(get_host_bindings(), "writable_roots", None)
+    if not callable(callback):
+        return ()
+    roots: list[Path | PurePath] = []
+    for raw_root in callback() or ():
+        if isinstance(raw_root, Path):
+            root: Path | PurePath = raw_root.expanduser().resolve()
+        elif isinstance(raw_root, PurePath):
+            root = raw_root
+        else:
+            root = Path(raw_root).expanduser().resolve()
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots)
 
 
 def _model_pool_task_context(
@@ -1240,17 +1292,24 @@ def _permission_path_patterns(path: Path | PurePath) -> list[str]:
     return patterns
 
 
-def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
-    """Allow project reads and restrict all model writes to the bound work dir."""
+def _task_permissions(
+    record: _TaskRecord,
+    runtime: _SessionRuntime,
+) -> list[dict[str, str]]:
+    """Allow configured reads and writes only to task/host-owned roots."""
     spec = record.spec
     context = record.execution_context
     project_dir = spec.directory.resolve()
     work_dir = _required_work_dir(context)
+    configured_skill_paths = _runtime_skill_paths(runtime)
+    host_writable_roots = _host_writable_roots()
     external_roots = [
         project_dir,
         work_dir,
         get_global_opencode_workspace(),
+        *configured_skill_paths,
         *context.skill_paths,
+        *host_writable_roots,
     ]
 
     rules: list[dict[str, str]] = []
@@ -1264,9 +1323,12 @@ def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
 
     for permission in ("read", "list", "glob", "grep"):
         add(permission, "*", "allow")
-    for skill_root in context.skill_paths:
-        for pattern in _permission_path_patterns(skill_root):
-            add("read", pattern, "allow")
+    seen_read: set[str] = set()
+    for root in external_roots:
+        for pattern in _permission_path_patterns(root):
+            if pattern not in seen_read:
+                add("read", pattern, "allow")
+                seen_read.add(pattern)
 
     add("external_directory", "*", "deny")
     seen_external: set[str] = set()
@@ -1281,6 +1343,9 @@ def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
         add("edit", pattern, "deny")
     for pattern in _permission_path_patterns(work_dir):
         add("edit", pattern, "allow")
+    for root in host_writable_roots:
+        for pattern in _permission_path_patterns(root):
+            add("edit", pattern, "allow")
 
     add("bash", "*", "deny")
     add("skill", "*", "allow")

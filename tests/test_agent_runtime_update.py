@@ -35,6 +35,11 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "attack-tree-by-asset/SKILL.md",
             names,
         )
+        self.assertIn(
+            "deephole_client/threat_analysis/skills/attack-trees/"
+            "attack-tree-by-asset/references/attack_mode.json",
+            names,
+        )
         self.assertIn("deephole_client/threat_analysis_runner.py", names)
         self.assertNotIn(
             "deephole_client/threat_analysis/__main__.py",
@@ -70,6 +75,11 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn(
             "deephole_client/threat_analysis/skills/attack-trees/"
             "attack-tree-by-asset/SKILL.md",
+            names,
+        )
+        self.assertIn(
+            "deephole_client/threat_analysis/skills/attack-trees/"
+            "attack-tree-by-asset/references/attack_mode.json",
             names,
         )
         self.assertIn("deephole_client/threat_analysis_runner.py", names)

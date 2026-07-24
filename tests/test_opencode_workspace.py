@@ -11,6 +11,7 @@ from deephole_client.opencode_integration import (
     _resolved_serve_port,
     _runtime_environment,
     build_opencode_config,
+    configure_opencode_component,
     get_global_opencode_workspace,
     managed_opencode_config_path,
     refresh_global_opencode_config,
@@ -32,13 +33,25 @@ def assert_opencode_read_permissions(
     })
     testcase.assertEqual(permission.get("edit"), {
         "*": "deny",
-        "~/.opendeephole/scans": "deny",
-        "~/.opendeephole/scans/**": "deny",
+        "~/.opendeephole/scans": "allow",
+        "~/.opendeephole/scans/**": "allow",
     })
     testcase.assertEqual(permission.get("bash"), {"*": "deny"})
 
 
 class OpencodeWorkspaceTests(unittest.TestCase):
+    def test_agent_host_binding_exposes_entire_scans_root_as_writable(
+        self,
+    ) -> None:
+        with patch("task_agent.configure_opencode") as configure:
+            configure_opencode_component()
+
+        bindings = configure.call_args.args[0]
+        self.assertEqual(
+            bindings.writable_roots(),
+            ((Path.home() / ".opendeephole" / "scans").resolve(),),
+        )
+
     def test_runtime_environment_only_adds_no_proxy(self) -> None:
         system_proxies = {
             "HTTP_PROXY": "http://system.example:8080",
@@ -182,7 +195,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             self.assertTrue(codegraph_runtime.is_codegraph_ready(nested))
             self.assertIn(root.resolve(), codegraph_runtime._ready_projects)
 
-    def test_global_workspace_contains_only_generic_managed_config(self) -> None:
+    def test_global_workspace_syncs_threat_analysis_skills_and_references(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace_path = Path(tmp) / "opencode_workspace"
             fake_config = SimpleNamespace(
@@ -216,7 +231,79 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             )
             assert_opencode_read_permissions(self, config)
             self.assertNotIn("agent", config)
-            self.assertFalse((workspace / ".opencode" / "skills").exists())
+            skills_dir = workspace / ".opencode" / "skills"
+            for name in (
+                "value-asset-map",
+                "high-risk-module-map",
+                "high-risk-module-merge",
+                "attack-tree-by-asset",
+            ):
+                installed = skills_dir / name
+                self.assertFalse(installed.is_symlink())
+                self.assertTrue((installed / "SKILL.md").is_file())
+            source_reference = (
+                Path(__file__).resolve().parents[1]
+                / "deephole_client"
+                / "threat_analysis"
+                / "skills"
+                / "attack-trees"
+                / "attack-tree-by-asset"
+                / "references"
+                / "attack_mode.json"
+            )
+            installed_reference = (
+                skills_dir
+                / "attack-tree-by-asset"
+                / "references"
+                / "attack_mode.json"
+            )
+            self.assertEqual(
+                installed_reference.read_bytes(),
+                source_reference.read_bytes(),
+            )
+
+    def test_global_workspace_replaces_stale_managed_skill_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "opencode_workspace"
+            skills_dir = workspace_path / ".opencode" / "skills"
+            managed = skills_dir / "attack-tree-by-asset"
+            unrelated = skills_dir / "user-owned-skill"
+            managed.mkdir(parents=True)
+            unrelated.mkdir()
+            (managed / "stale.txt").write_text("stale", encoding="utf-8")
+            (managed / "stale-empty-directory").mkdir()
+            (unrelated / "SKILL.md").write_text("user-owned", encoding="utf-8")
+            fake_config = SimpleNamespace(
+                mcp_server=SimpleNamespace(port=8100),
+                code_graph=SimpleNamespace(enabled=False, name="codegraph"),
+                product_info=SimpleNamespace(
+                    enabled=False,
+                    name="product-info",
+                ),
+            )
+            with (
+                patch(
+                    "deephole_client.opencode_integration._GLOBAL_WORKSPACE",
+                    workspace_path,
+                ),
+                patch(
+                    "deephole_client.opencode_integration.get_config",
+                    return_value=fake_config,
+                ),
+            ):
+                get_global_opencode_workspace(mcp_port=9123)
+
+            self.assertFalse((managed / "stale.txt").exists())
+            self.assertFalse((managed / "stale-empty-directory").exists())
+            self.assertTrue((managed / "SKILL.md").is_file())
+            self.assertEqual(
+                (unrelated / "SKILL.md").read_text(encoding="utf-8"),
+                "user-owned",
+            )
+            self.assertFalse(any(
+                path.name.startswith(".attack-tree-by-asset.sync-")
+                for path in skills_dir.iterdir()
+            ))
 
     def test_stale_permissions_are_refreshed_without_replacing_live_mcp_url(
         self,
@@ -235,8 +322,16 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                         },
                     },
                     "permission": {
-                        "external_directory": {"*": "deny"},
-                        "edit": {"*": "deny"},
+                        "external_directory": {
+                            "*": "deny",
+                            "~/.opendeephole/scans": "allow",
+                            "~/.opendeephole/scans/**": "allow",
+                        },
+                        "edit": {
+                            "*": "deny",
+                            "~/.opendeephole/scans": "deny",
+                            "~/.opendeephole/scans/**": "deny",
+                        },
                     },
                 }),
                 encoding="utf-8",
