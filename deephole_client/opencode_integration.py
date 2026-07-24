@@ -16,6 +16,11 @@ logger = get_logger(__name__)
 
 _GLOBAL_WORKSPACE = Path.home() / ".opendeephole" / "opencode_workspace"
 _MANAGED_CONFIG_FILENAME = ".opendeephole-managed-opencode.json"
+_SCANS_EXTERNAL_ROOT = "~/.opendeephole/scans"
+_SCANS_EXTERNAL_PATTERNS = (
+    _SCANS_EXTERNAL_ROOT,
+    f"{_SCANS_EXTERNAL_ROOT}/**",
+)
 
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
@@ -241,19 +246,26 @@ def opencode_runtime_config_path() -> Path:
 def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
     """Return and initialize the single Agent-wide OpenCode workspace.
 
-    The workspace contains stable MCP/skill configuration only. Scan-specific
-    state (scope, selected feedback and writable roots) is attached to each
-    task by :mod:`task_agent.task_service` and is never written here.
+    The workspace contains stable MCP/skill configuration and a read-only
+    external-directory grant for the Agent scan store. Scan-specific state
+    (scope, selected feedback and writable roots) is attached to each task by
+    :mod:`task_agent.task_service` and is never written here.
     """
     workspace = _GLOBAL_WORKSPACE
     workspace.mkdir(parents=True, exist_ok=True)
     with get_workspace_lock(workspace):
         # A caller that owns/has just joined the Agent-wide MCP gateway provides
-        # its actual port. Without one, keep an existing config intact so a
-        # task cannot accidentally replace a dynamically allocated gateway URL
-        # with the configured fallback port.
-        config_missing = not managed_opencode_config_path(workspace).is_file()
-        if mcp_port is not None or config_missing:
+        # its actual port. Stale managed permissions are migrated before the
+        # next Serve acquisition; without an explicit port, the writer keeps
+        # the current gateway URL instead of replacing a dynamically allocated
+        # port with the configured fallback.
+        config_path = managed_opencode_config_path(workspace)
+        config_missing = not config_path.is_file()
+        permissions_stale = (
+            not config_missing
+            and not _has_managed_scan_permissions(config_path)
+        )
+        if mcp_port is not None or config_missing or permissions_stale:
             _write_opencode_config(workspace, mcp_port=mcp_port)
     return workspace
 
@@ -262,14 +274,10 @@ def refresh_global_opencode_config() -> Path:
     """Rewrite managed MCP entries while preserving the active code gateway URL."""
     workspace = get_global_opencode_workspace()
     config_path = managed_opencode_config_path(workspace)
-    mcp_url = f"http://127.0.0.1:{get_config().mcp_server.port}/mcp"
-    try:
-        existing = json.loads(config_path.read_text(encoding="utf-8"))
-        current_url = existing.get("mcp", {}).get("deephole-code", {}).get("url")
-        if current_url:
-            mcp_url = str(current_url)
-    except Exception:
-        pass
+    current_url = _current_deephole_code_url(config_path)
+    mcp_url = current_url or (
+        f"http://127.0.0.1:{get_config().mcp_server.port}/mcp"
+    )
     skills_dir = (workspace / ".opencode" / "skills").resolve()
     with get_workspace_lock(workspace):
         _write_text_atomic(
@@ -303,8 +311,15 @@ def writable_edit_patterns(path: str | os.PathLike[str]) -> list[str]:
 
     patterns: list[str] = []
     for variant in variants:
-        patterns.append(variant)
-        patterns.append(f"{variant}/**")
+        separator = "\\" if "\\" in variant and "/" not in variant else "/"
+        descendant = (
+            f"{variant}**"
+            if variant.endswith(("/", "\\"))
+            else f"{variant}{separator}**"
+        )
+        for pattern in (variant, descendant):
+            if pattern not in patterns:
+                patterns.append(pattern)
     return patterns
 
 
@@ -314,10 +329,21 @@ def build_opencode_config(
     writable_paths: list[str] | None = None,
 ) -> dict:
     """Build the canonical opencode.json content for OpenDeepHole workspaces."""
+    external_permissions = {"*": "deny"}
     edit_permissions = {"*": "deny"}
+    for pattern in _SCANS_EXTERNAL_PATTERNS:
+        external_permissions[pattern] = "allow"
+        # OpenCode external roots inherit normal workspace permissions. Keep
+        # the stable scan-store grant read-only; the current task work_dir is
+        # allowed later by its Session permission rules.
+        edit_permissions[pattern] = "deny"
     for path in writable_paths or []:
         normalized = str(Path(path).resolve())
-        for pattern in writable_edit_patterns(path) + writable_edit_patterns(normalized):
+        patterns = (
+            writable_edit_patterns(path)
+            + writable_edit_patterns(normalized)
+        )
+        for pattern in patterns:
             edit_permissions[pattern] = "allow"
     data = {
         "$schema": "https://opencode.ai/config.json",
@@ -333,7 +359,7 @@ def build_opencode_config(
             "list": {"*": "allow"},
             "glob": {"*": "allow"},
             "grep": {"*": "allow"},
-            "external_directory": {"*": "deny"},
+            "external_directory": external_permissions,
             "edit": edit_permissions,
             "bash": {"*": "deny"},
         },
@@ -345,6 +371,36 @@ def build_opencode_config(
     if skills_paths:
         data["skills"] = {"paths": skills_paths}
     return data
+
+
+def _has_managed_scan_permissions(config_path: Path) -> bool:
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        permission = data.get("permission", {})
+        external = permission.get("external_directory", {})
+        edit = permission.get("edit", {})
+        return (
+            external.get("*") == "deny"
+            and edit.get("*") == "deny"
+            and all(
+                external.get(pattern) == "allow"
+                and edit.get(pattern) == "deny"
+                for pattern in _SCANS_EXTERNAL_PATTERNS
+            )
+        )
+    except Exception:
+        return False
+
+
+def _current_deephole_code_url(config_path: Path) -> str | None:
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        value = data.get("mcp", {}).get("deephole-code", {}).get("url")
+        if value is None:
+            return None
+        return str(value).strip() or None
+    except Exception:
+        return None
 
 
 def _managed_mcp_value(value, name: str, default=None):
@@ -457,9 +513,10 @@ def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None
     """Generate the private OpenDeepHole-owned runtime configuration layer."""
     config = get_config()
     port = mcp_port if mcp_port is not None else config.mcp_server.port
-    mcp_url = f"http://127.0.0.1:{port}/mcp"
-
     config_path = managed_opencode_config_path(workspace)
+    mcp_url = f"http://127.0.0.1:{port}/mcp"
+    if mcp_port is None:
+        mcp_url = _current_deephole_code_url(config_path) or mcp_url
     skills_dir = (workspace / ".opencode" / "skills").resolve()
     _write_text_atomic(
         config_path,

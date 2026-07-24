@@ -532,6 +532,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert ("bash", "*", "deny") in permission_tuples
         assert ("skill", "*", "allow") in permission_tuples
         assert ("edit", "*", "deny") in permission_tuples
+        assert ("edit", str(tmp_path.resolve()), "deny") in permission_tuples
         assert ("edit", str(scan_dir.resolve()), "allow") in permission_tuples
         assert ("edit", str(tmp_path.resolve()), "allow") not in permission_tuples
         assert ("external_directory", str(tmp_path.resolve()), "allow") in permission_tuples

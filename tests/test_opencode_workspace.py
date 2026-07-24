@@ -22,8 +22,16 @@ def assert_opencode_read_permissions(
     permission = config.get("permission", {})
     for key in ("read", "list", "glob", "grep"):
         testcase.assertEqual(permission.get(key), {"*": "allow"})
-    testcase.assertEqual(permission.get("external_directory"), {"*": "deny"})
-    testcase.assertEqual(permission.get("edit"), {"*": "deny"})
+    testcase.assertEqual(permission.get("external_directory"), {
+        "*": "deny",
+        "~/.opendeephole/scans": "allow",
+        "~/.opendeephole/scans/**": "allow",
+    })
+    testcase.assertEqual(permission.get("edit"), {
+        "*": "deny",
+        "~/.opendeephole/scans": "deny",
+        "~/.opendeephole/scans/**": "deny",
+    })
     testcase.assertEqual(permission.get("bash"), {"*": "deny"})
 
 
@@ -35,6 +43,10 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         patterns = writable_edit_patterns(path)
         self.assertIn(
             r"C:\Users\demo\.opendeephole\fp_reviews\review\artifacts\1",
+            patterns,
+        )
+        self.assertIn(
+            r"C:\Users\demo\.opendeephole\fp_reviews\review\artifacts\1\**",
             patterns,
         )
         self.assertIn(
@@ -63,6 +75,10 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         self.assertEqual(
             edit["C:/Users/demo/.opendeephole/work/review/**"],
             "allow",
+        )
+        self.assertGreater(
+            list(edit).index("C:/Users/demo/.opendeephole/work/review/**"),
+            list(edit).index("~/.opendeephole/scans/**"),
         )
 
     def test_build_opencode_config_includes_managed_mcp_entries(self) -> None:
@@ -156,6 +172,60 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             assert_opencode_read_permissions(self, config)
             self.assertNotIn("agent", config)
             self.assertFalse((workspace / ".opencode" / "skills").exists())
+
+    def test_stale_permissions_are_refreshed_without_replacing_live_mcp_url(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "opencode_workspace"
+            workspace_path.mkdir()
+            config_path = managed_opencode_config_path(workspace_path)
+            config_path.write_text(
+                json.dumps({
+                    "mcp": {
+                        "deephole-code": {
+                            "type": "remote",
+                            "url": "http://127.0.0.1:58507/mcp",
+                            "enabled": True,
+                        },
+                    },
+                    "permission": {
+                        "external_directory": {"*": "deny"},
+                        "edit": {"*": "deny"},
+                    },
+                }),
+                encoding="utf-8",
+            )
+            fake_config = SimpleNamespace(
+                mcp_server=SimpleNamespace(port=8100),
+                code_graph=SimpleNamespace(enabled=False, name="codegraph"),
+                product_info=SimpleNamespace(
+                    enabled=False,
+                    name="product-info",
+                ),
+            )
+            with (
+                patch(
+                    "deephole_client.opencode_integration._GLOBAL_WORKSPACE",
+                    workspace_path,
+                ),
+                patch(
+                    "deephole_client.opencode_integration.get_config",
+                    return_value=fake_config,
+                ),
+            ):
+                workspace = get_global_opencode_workspace()
+
+            config = json.loads(
+                managed_opencode_config_path(workspace).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                config["mcp"]["deephole-code"]["url"],
+                "http://127.0.0.1:58507/mcp",
+            )
+            assert_opencode_read_permissions(self, config)
 
     def test_global_refresh_does_not_overwrite_live_runtime_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

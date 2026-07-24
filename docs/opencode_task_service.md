@@ -177,7 +177,7 @@ model_pool:
 
 三个路径都支持 `~`。绝对路径直接使用；相对路径以 `task-agent.yaml` 所在目录为基准，而不是以启动 Python 的当前目录为基准。`project_dir` 必须预先存在；`work_dir` 和 `workspace_dir` 会自动递归创建。创建或续写 Session 后，模型可以读取这三个目录，文件编辑工具只能写 `work_dir`，`bash` 始终禁用。
 
-嵌入完整 Agent 时，`work_dir` 会随扫描或验证任务动态变化，因此不会写进全局 `opencode.json`。全局配置继续保持 `external_directory: deny`；Task Agent 在创建或续写 Session 时通过 Session `permission` 动态放行当前 `project_dir`、`work_dir` 和 `workspace_dir`。Windows 下会同时下发原生反斜杠和正斜杠兼容规则。
+嵌入完整 Agent 时，`work_dir` 会随扫描或验证任务动态变化，因此不会把单个任务目录写进全局 `opencode.json`。受管配置默认拒绝外部目录，但会在 Serve 启动前把稳定的 `~/.opendeephole/scans` 根目录加入只读白名单，确保 Windows 上的威胁分析 Session 可以读取不同阶段生成的 JSON；该根目录同时带有显式 `edit: deny`，不会因为允许外部访问而获得写权限。Task Agent 在创建或续写 Session 时仍通过 Session `permission` 动态放行当前 `project_dir`、`work_dir` 和 `workspace_dir` 的读取，并显式拒绝写 `project_dir`，最后只允许文件编辑工具写当前 `work_dir`。Windows 下的动态目录规则会同时下发原生反斜杠和正斜杠兼容形式，`bash` 始终禁用。
 
 `workspace_dir` 中生成的 `opencode.json` 包含 `serve.opencode_config` 的实际内容，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。
 

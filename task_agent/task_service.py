@@ -1199,8 +1199,9 @@ def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
     """Allow project reads and restrict all model writes to the bound work dir."""
     spec = record.spec
     context = record.execution_context
+    project_dir = spec.directory.resolve()
     work_dir = _required_work_dir(context)
-    external_roots = [spec.directory, work_dir, get_global_opencode_workspace()]
+    external_roots = [project_dir, work_dir, get_global_opencode_workspace()]
 
     rules: list[dict[str, str]] = []
 
@@ -1223,6 +1224,8 @@ def _task_permissions(record: _TaskRecord) -> list[dict[str, str]]:
                 seen_external.add(pattern)
 
     add("edit", "*", "deny")
+    for pattern in _permission_path_patterns(project_dir):
+        add("edit", pattern, "deny")
     for pattern in _permission_path_patterns(work_dir):
         add("edit", pattern, "allow")
 
