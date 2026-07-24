@@ -785,6 +785,51 @@ def test_run_prompt_continues_session_without_native_format_and_with_selected_mc
         _FakeAsyncClient.message_info = None
 
 
+def test_run_prompt_continues_without_permissions_does_not_patch_session(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["read"]
+        _FakeAsyncClient.message_info = {
+            "id": "msg_global_permissions",
+            "providerID": "provider",
+            "modelID": "actual",
+        }
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+
+        details = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="continue with global permissions",
+            model="provider/requested",
+            timeout=30,
+            session_id="session-existing",
+            return_details=True,
+        )
+
+        assert isinstance(details, OpenCodePromptResult)
+        client = _FakeAsyncClient.instances[0]
+        assert client.patches == []
+        assert all(item["path"] != "/session" for item in client.posts)
+
+    try:
+        asyncio.run(run())
+    finally:
+        _FakeAsyncClient.message_info = None
+
+
 def test_session_management_methods_use_durable_session_routes(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []

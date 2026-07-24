@@ -55,7 +55,7 @@ result = await run_opencode_task(
 | `output` | callable 或 `None` | 当前执行上下文 | 覆盖本次任务的流式输出回调；显式 `None` 表示关闭 |
 | `cancel_event` | 提供 `is_set()` 的对象 | 当前执行上下文 | 覆盖本次任务的取消信号 |
 
-不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、permission、额外可写路径或 CLI 配置对象等参数。`file_write_allowlist` 只决定本次新建文件是否在 JSON 检查后保留，不会把路径加入 Session 写权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
+不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、permission、额外可写路径或 CLI 配置对象等参数。`file_write_allowlist` 只决定本次新建文件是否在 JSON 检查后保留，不会把路径加入最终配置的写权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
 
 返回的 `OpenCodeResult.output_source` 是可 JSON 序列化的 dict，用于由客户端协调器原样上报实际模型和 Session 来源。
 
@@ -177,9 +177,9 @@ model_pool:
 | `context.work_dir` | 必填，不存在时创建 | 本次独立组件固定的可写任务目录。模型生成的补丁、PoC、报告等任务产物应写在这里。 |
 | `context.workspace_dir` | 必填，不存在时创建 | Serve 的稳定启动目录和组件 workspace。运行时会在这里生成 `opencode.json`，也适合保存共享 Skill；不要把每次任务的业务产物写在这里。 |
 
-三个路径都支持 `~`。绝对路径直接使用；相对路径以 `task-agent.yaml` 所在目录为基准，而不是以启动 Python 的当前目录为基准。`project_dir` 必须预先存在；`work_dir` 和 `workspace_dir` 会自动递归创建。standalone 创建或续写 Session 后，模型可以读取这三个目录，文件编辑工具只能写 `work_dir`，`bash` 始终禁用。
+三个路径都支持 `~`。绝对路径直接使用；相对路径以 `task-agent.yaml` 所在目录为基准，而不是以启动 Python 的当前目录为基准。`project_dir` 必须预先存在；`work_dir` 和 `workspace_dir` 会自动递归创建。standalone 的最终 `workspace_dir/opencode.json` 允许读取项目工作目录、`work_dir`、`workspace_dir/.opencode` 和已注册的 Skill 根；文件编辑工具只能写 `work_dir`，`bash` 始终禁用。
 
-嵌入完整 Agent 时，`work_dir` 会随扫描或验证任务动态变化，因此不会把单个任务目录写进全局 `opencode.json`。受管配置默认拒绝其它外部目录，但会在 Serve 启动前把稳定的 `~/.opendeephole/scans` 根目录加入读写白名单。Task Agent 在创建或续写 Session 时也会下发该绝对路径的 `read`、`external_directory` 和 `edit: allow` 规则，因此同一扫描流程的不同阶段可以读写 scans 树中的产物；当前 `work_dir` 仍单独允许写入，scans 之外的 `project_dir` 保持只读。Windows 下的动态目录规则会同时下发原生反斜杠和正斜杠兼容形式，`bash` 始终禁用。
+嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，`bash` 始终禁用。创建或续写 Session 时不再下发 Session 级权限。
 
 `workspace_dir` 中生成的 `opencode.json` 包含 `serve.opencode_config` 的实际内容，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。
 
@@ -193,9 +193,9 @@ model_pool:
 | `serve.timeout` | 默认 `3600`，最小 `1` | 默认单次模型消息执行超时，单位为秒；排队等待模型 Lease 的时间不计入。 |
 | `serve.max_retries` | 默认 `2`，最小 `0` | 首次 Session 之外最多创建多少个全新 Session 进行重试；不等同于同 Session 的 JSON 纠正次数。 |
 | `serve.environment` | 默认 `{}` | 附加或覆盖到 Serve 子进程的环境变量。键转为字符串，值必须是标量并会转为字符串；`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式会被忽略并从父进程环境清除，只允许 `NO_PROXY`/`no_proxy` 代理绕过变量。 |
-| `serve.opencode_config` | 默认 `{}` | 必须是可 JSON 序列化的映射；运行时原样写入 `workspace_dir/opencode.json` 并交给 OpenCode。 |
+| `serve.opencode_config` | 默认 `{}` | 必须是可 JSON 序列化的映射；运行时与 Task Agent 受管权限合并后写入 `workspace_dir/opencode.json` 并交给 OpenCode。 |
 
-`serve.opencode_config` 可以包含 OpenCode 当前版本支持的 `$schema`、Provider、Agent、MCP、Skill 等原生配置。Task Agent 不校验这些子字段，也不保证不同 OpenCode 版本的原生字段兼容；Session 的读写和 `bash` 权限仍由 Task Agent 在运行时收紧，不能依赖这里的 `permission` 放宽任务边界。
+`serve.opencode_config` 可以包含 OpenCode 当前版本支持的 `$schema`、Provider、Agent、MCP、Skill 等原生配置。Task Agent 不校验这些子字段，也不保证不同 OpenCode 版本的原生字段兼容；最终配置中的 `read`、`list`、`glob`、`grep`、`external_directory`、`edit`、`bash` 和 `skill` 会由 Task Agent 覆盖为受管边界，不能依赖这里的 `permission` 放宽任务边界。
 
 MCP 直接写在 `serve.opencode_config.mcp` 下。远程 MCP 通常使用 `type: remote`、`url`、`headers` 和 `oauth`；本地 MCP 使用 `type: local`、命令数组 `command` 以及可选的 `environment`。两种 MCP 的 `timeout` 都由 OpenCode 解释，单位为毫秒；这与 `serve.timeout` 的秒不同。
 
@@ -217,7 +217,7 @@ Skill 有两种常用放置方式：
 1. 项目专用 Skill 放在 `<project_dir>/.opencode/skills/<skill-name>/SKILL.md`，由以 `project_dir` 为 Session 目录的 OpenCode 按项目发现。
 2. 多个任务共享的 standalone Skill 推荐放在 `<workspace_dir>/.opencode/skills/<skill-name>/SKILL.md`，并将 `<workspace_dir>/.opencode/skills` 的绝对路径写入 `serve.opencode_config.skills.paths`。
 
-standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导 Session 的显式读取和外部目录权限，使 Skill 内的 `references/`、`assets/`、`scripts/` 一并可读。嵌入完整 OpenDeepHole Agent 时，`deephole_client/opencode_integration.py` 会在每次初始化全局 workspace 时，将安装包内的 `value-asset-map`、`high-risk-module-map`、`high-risk-module-merge`、`attack-tree-by-asset` 及其资源同步到 `~/.opendeephole/opencode_workspace/.opencode/skills` 并生成全局 `skills.paths`；威胁分析入口不会再把 Agent 安装目录追加为任务级 Skill 路径。
+standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导全局配置中的显式读取和外部目录权限，使 Skill 内的 `references/`、`assets/`、`scripts/` 一并可读。嵌入完整 OpenDeepHole Agent 时，`deephole_client/opencode_integration.py` 会在每次初始化全局 workspace 时，将安装包内的 `value-asset-map`、`high-risk-module-map`、`high-risk-module-merge`、`attack-tree-by-asset` 及其资源同步到 `~/.opendeephole/opencode_workspace/.opencode/skills`，生成全局 `skills.paths`，并显式允许读取整个 `.opencode` 目录；威胁分析入口不会再把 Agent 安装目录追加为任务级 Skill 路径。
 
 ### 模型池参数
 
@@ -320,14 +320,14 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 后端模式没有绑定 `project_dir` 或 `work_dir` 时，调用会立即失败，不会回退到进程当前目录。独立模式始终使用 YAML 中固定的两个目录，因此 Session continuation 不会改变权限边界。
 
-每次创建或续写 Session 时，内部服务都会覆盖 Session 权限：
+内部服务会在 Serve 启动前把受管边界写入最终全局 `opencode.json`：
 
-- 允许读取项目目录、当前工作目录和全局 OpenCode workspace；最终 OpenCode 配置的 `skills.paths` 以及通用过程显式绑定的临时 `skill_paths` 都会获得完整子路径的 `read: allow` 与外部目录规则，使 `references/`、`assets/`、`scripts/` 等资源可读。
-- 先拒绝所有 `edit`，再允许当前 `work_dir` 及宿主声明的稳定可写根。完整 Agent 将整个 `~/.opendeephole/scans` 声明为可写，standalone 默认没有额外稳定可写根。
+- 允许读取项目工作目录、当前工作目录和全局 workspace 的 `.opencode`；最终配置的 `skills.paths` 以及通用过程显式绑定的临时 `skill_paths` 都会获得完整子路径的 `read: allow` 与外部目录规则，使 `references/`、`assets/`、`scripts/` 等资源可读。
+- 先拒绝所有 `edit`，再允许宿主声明的稳定可写根。完整 Agent 允许写四个 `.opendeephole` 任务根，standalone 允许写固定 `work_dir`；通用嵌入宿主若没有声明覆盖当前 `work_dir` 的稳定根，Task Agent 会把该目录加入本次最终配置。
 - 拒绝所有 `bash`，避免通过 shell 绕过项目只读和工作目录写边界。
 - 允许加载最终配置注册的 SKILL，以及通用过程通过 `skill_paths` 绑定的临时 SKILL；注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
 
-权限是内部实现细节，组件和 validator 不传 `permission`。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
+权限是内部实现细节，组件和 validator 不传 `permission`，Task Agent 也不会在 `POST /session` 或 `PATCH /session/{sessionID}` 中发送权限。升级前已经存在的 Session 若保存过权限数组会保持原状，迁移只更新全局配置，不主动改写历史 Session。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
 
 ## JSON 自动纠正和新 Session 重试
 
@@ -335,7 +335,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 服务先解析 LLM 的最终文本；文本中的 JSON 合法时始终优先采用。若文本不匹配 Schema，服务会检查当前这条消息中成功完成的内置 `write`、`edit`、`apply_patch`/`patch` 调用，按实际写入顺序从后向前读取文件，最后一个匹配 Schema 的文件成为 `structured`。这不会改变 `OpenCodeResult.text`，它仍是 LLM 最后一次文本输出。自定义 MCP 工具的未知文件副作用不在跟踪范围内。
 
-每次消息完成后，服务会删除确认由该消息新建、且未被 `file_write_allowlist` 匹配的文件；无论 JSON 来自文本还是文件、消息执行失败，或即将进入同 Session 纠错，都会执行该清理。已存在但被修改的文件不会删除，也不会恢复旧内容。白名单中的相对路径以当前 `work_dir` 为基准；绝对路径必须位于 `work_dir` 内；文件项匹配自身，目录项匹配自身和所有后代。白名单只控制保留，不会扩大 Session 写权限；即使宿主另行允许整个 scans 根，白名单候选仍限制在当前 `work_dir` 内。
+每次消息完成后，服务会删除确认由该消息新建、且未被 `file_write_allowlist` 匹配的文件；无论 JSON 来自文本还是文件、消息执行失败，或即将进入同 Session 纠错，都会执行该清理。已存在但被修改的文件不会删除，也不会恢复旧内容。白名单中的相对路径以当前 `work_dir` 为基准；绝对路径必须位于 `work_dir` 内；文件项匹配自身，目录项匹配自身和所有后代。白名单只控制保留，不会扩大最终全局配置的写权限；即使宿主另行允许整个 scans 根，白名单候选仍限制在当前 `work_dir` 内。
 
 若文本和已写文件都没有符合 Schema 的 JSON，服务会在原 Session 最多追加 `invalid_json_retry_count` 次纠正消息；这些消息复用同一 Session、同一模型 Lease，不重新排队。`invalid_json_retry_prompt=None` 时使用当前包含完整 Schema 的中文默认提示词；传入非空字符串时，每次都原样发送该字符串，不追加 Schema、重试序号或其它内容。空字符串、纯空白和非字符串会在提交任务前报错。未传 `output_schema` 时完全不启用文件跟踪、文件 JSON 回退或自动清理；纠错次数为 `0` 时不会发送纠正消息。
 

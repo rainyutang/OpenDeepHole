@@ -28,8 +28,8 @@ from task_agent.task_service import (
     OpenCodeTaskSpec,
     _SessionRuntime,
     _permission_path_patterns,
+    _runtime_with_permissions,
     _runtime_with_skill_paths,
-    _task_permissions,
     bind_opencode_execution_context,
 )
 
@@ -58,15 +58,24 @@ def test_permission_path_patterns_include_native_windows_descendants() -> None:
     assert f"{work_dir}/**" not in patterns
 
 
-def test_host_writable_root_allows_windows_scan_tree(tmp_path: Path) -> None:
+def test_permission_path_patterns_include_home_aliases() -> None:
+    scans_root = Path.home() / ".opendeephole" / "scans"
+
+    patterns = _permission_path_patterns(scans_root)
+
+    assert "~/.opendeephole/scans" in patterns
+    assert "~/.opendeephole/scans/**" in patterns
+    assert r"~\.opendeephole\scans" in patterns
+    assert r"~\.opendeephole\scans\**" in patterns
+
+
+def test_host_writable_root_is_written_to_windows_runtime_config(
+    tmp_path: Path,
+) -> None:
     scans_root = PureWindowsPath(r"C:\Users\demo\.opendeephole\scans")
     context = OpenCodeExecutionContext(
         project_dir=tmp_path,
         work_dir=tmp_path / "work",
-    )
-    record = SimpleNamespace(
-        spec=SimpleNamespace(directory=tmp_path),
-        execution_context=context,
     )
     bindings = SimpleNamespace(
         get_workspace=lambda: tmp_path / "workspace",
@@ -77,16 +86,16 @@ def test_host_writable_root_allows_windows_scan_tree(tmp_path: Path) -> None:
         "task_agent.task_service.get_host_bindings",
         return_value=bindings,
     ):
-        rules = _task_permissions(record, _runtime(tmp_path))
+        runtime = _runtime_with_permissions(
+            _runtime(tmp_path),
+            context,
+        )
 
-    permission_tuples = {
-        (rule["permission"], rule["pattern"], rule["action"])
-        for rule in rules
-    }
+    permission = json.loads(runtime.config_content)["permission"]
     for pattern in _permission_path_patterns(scans_root):
-        assert ("read", pattern, "allow") in permission_tuples
-        assert ("external_directory", pattern, "allow") in permission_tuples
-        assert ("edit", pattern, "allow") in permission_tuples
+        assert permission["read"][pattern] == "allow"
+        assert permission["external_directory"][pattern] == "allow"
+        assert permission["edit"][pattern] == "allow"
 
 
 @pytest.fixture(autouse=True)
@@ -175,6 +184,56 @@ def test_component_skill_paths_are_merged_into_runtime_config(
         str(tmp_path / "skills-b"),
     ]
     assert runtime.config_content == '{"skills":{"paths":["/existing"]}}'
+
+
+def test_runtime_permissions_are_written_to_global_config(
+    tmp_path: Path,
+) -> None:
+    scans_root = tmp_path / ".opendeephole" / "scans"
+    work_dir = scans_root / "scan-7"
+    skill_root = tmp_path / "configured-skills"
+    workspace = tmp_path / "workspace"
+    context = OpenCodeExecutionContext(
+        project_dir=tmp_path / "project",
+        work_dir=work_dir,
+    )
+    runtime = dataclasses.replace(
+        _runtime(tmp_path),
+        config_workspace=workspace,
+        config_content=json.dumps({
+            "skills": {"paths": [str(skill_root)]},
+            "permission": {
+                "task": {"*": "allow"},
+                "bash": {"*": "allow"},
+                "edit": {"*": "allow"},
+            },
+        }),
+    )
+    bindings = SimpleNamespace(
+        writable_roots=lambda: (scans_root,),
+    )
+
+    with patch(
+        "task_agent.task_service.get_host_bindings",
+        return_value=bindings,
+    ):
+        merged = _runtime_with_permissions(runtime, context)
+
+    permission = json.loads(merged.config_content)["permission"]
+    assert permission["task"] == {"*": "allow"}
+    assert permission["bash"] == {"*": "deny"}
+    assert permission["skill"] == {"*": "allow"}
+    assert permission["edit"]["*"] == "deny"
+    assert str(work_dir.resolve()) not in permission["edit"]
+    for root in (workspace / ".opencode", skill_root):
+        for pattern in _permission_path_patterns(root):
+            assert permission["read"][pattern] == "allow"
+            assert permission["external_directory"][pattern] == "allow"
+            assert pattern not in permission["edit"]
+    for pattern in _permission_path_patterns(scans_root):
+        assert permission["read"][pattern] == "allow"
+        assert permission["external_directory"][pattern] == "allow"
+        assert permission["edit"][pattern] == "allow"
 
 
 def _service_patches(
@@ -552,7 +611,7 @@ def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None
     asyncio.run(run())
 
 
-def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: Path) -> None:
+def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
         manager = SimpleNamespace()
@@ -662,35 +721,7 @@ def test_task_service_parses_json_and_computes_scope_and_permissions(tmp_path: P
         assert "用户理由：边界检查缺失" in captured["system_prompt"]
         assert "CodeGraph project scope" not in captured["system_prompt"]
         assert "Selected scan feedback" not in captured["system_prompt"]
-        permission_tuples = {
-            (rule["permission"], rule["pattern"], rule["action"])
-            for rule in captured["permissions"]
-        }
-        assert ("bash", "*", "deny") in permission_tuples
-        assert ("skill", "*", "allow") in permission_tuples
-        assert ("edit", "*", "deny") in permission_tuples
-        assert ("edit", str(project_dir.resolve()), "deny") in permission_tuples
-        assert ("edit", str(scan_dir.resolve()), "allow") in permission_tuples
-        assert ("edit", str(scans_root.resolve()), "allow") in permission_tuples
-        assert ("edit", str(project_dir.resolve()), "allow") not in permission_tuples
-        assert (
-            "external_directory",
-            str(project_dir.resolve()),
-            "allow",
-        ) in permission_tuples
-        assert ("external_directory", str(scan_dir.resolve()), "allow") in permission_tuples
-        for pattern in _permission_path_patterns(skill_root):
-            assert ("read", pattern, "allow") in permission_tuples
-            assert ("external_directory", pattern, "allow") in permission_tuples
-            assert ("edit", pattern, "allow") not in permission_tuples
-        for pattern in _permission_path_patterns(configured_skill_root):
-            assert ("read", pattern, "allow") in permission_tuples
-            assert ("external_directory", pattern, "allow") in permission_tuples
-            assert ("edit", pattern, "allow") not in permission_tuples
-        global_workspace = Path("/tmp/opendeephole-global").resolve()
-        for pattern in _permission_path_patterns(global_workspace):
-            assert ("read", pattern, "allow") in permission_tuples
-            assert ("external_directory", pattern, "allow") in permission_tuples
+        assert "permissions" not in captured
         acquire_kwargs = acquire_mock.await_args.kwargs
         assert acquire_kwargs["stats_scope_id"] == "scan-7"
         assert acquire_kwargs["task_context"]["task_type"] == "audit"

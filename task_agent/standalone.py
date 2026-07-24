@@ -399,6 +399,7 @@ def _build_bindings(config: StandaloneOpenCodeConfig) -> OpenCodeHostBindings:
         get_config=lambda: config,
         get_workspace=lambda: config.workspace_dir,
         build_session_runtime=build_session_runtime,
+        writable_roots=lambda: (config.work_dir,),
     )
 
 

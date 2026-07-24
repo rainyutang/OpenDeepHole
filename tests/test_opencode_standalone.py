@@ -349,20 +349,28 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
             assert first_call["directory"] == (tmp_path / "project").resolve()
             assert first_call["config_workspace"] == (tmp_path / "workspace").resolve()
             assert first_call["env_overrides"]["OPENCODE_SERVE_PORT"] == "4318"
-            assert json.loads(first_call["config_content"])["skills"]["paths"] == [
+            runtime_config = json.loads(first_call["config_content"])
+            assert runtime_config["skills"]["paths"] == [
                 str(skill_root)
             ]
-            permission_tuples = {
-                (rule["permission"], rule["pattern"], rule["action"])
-                for rule in first_call["permissions"]
-            }
-            assert ("read", str(skill_root.resolve()), "allow") in permission_tuples
+            permission = runtime_config["permission"]
+            assert permission["read"][str(skill_root.resolve())] == "allow"
             assert (
-                "external_directory",
-                str(skill_root.resolve()),
-                "allow",
-            ) in permission_tuples
-            assert ("edit", str(skill_root.resolve()), "allow") not in permission_tuples
+                permission["external_directory"][str(skill_root.resolve())]
+                == "allow"
+            )
+            assert str(skill_root.resolve()) not in permission["edit"]
+            work_dir = (tmp_path / "work").resolve()
+            assert permission["edit"][str(work_dir)] == "allow"
+            workspace_opencode = (tmp_path / "workspace" / ".opencode").resolve()
+            assert permission["read"][str(workspace_opencode)] == "allow"
+            assert (
+                permission["external_directory"][str(workspace_opencode)]
+                == "allow"
+            )
+            assert str(workspace_opencode) not in permission["edit"]
+            assert "permissions" not in first_call
+            assert "permissions" not in second_call
             assert second_call["session_id"] == "ses-standalone"
             service = task_service._get_opencode_task_service()
             assert service._session_work_directories["ses-standalone"] == (

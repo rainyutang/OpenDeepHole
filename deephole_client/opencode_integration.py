@@ -18,10 +18,12 @@ logger = get_logger(__name__)
 
 _GLOBAL_WORKSPACE = Path.home() / ".opendeephole" / "opencode_workspace"
 _MANAGED_CONFIG_FILENAME = ".opendeephole-managed-opencode.json"
-_SCANS_EXTERNAL_ROOT = "~/.opendeephole/scans"
-_SCANS_EXTERNAL_PATTERNS = (
-    _SCANS_EXTERNAL_ROOT,
-    f"{_SCANS_EXTERNAL_ROOT}/**",
+_GLOBAL_OPENCODE_EXTERNAL_ROOT = "~/.opendeephole/opencode_workspace/.opencode"
+_AGENT_WRITABLE_EXTERNAL_ROOTS = (
+    "~/.opendeephole/scans",
+    "~/.opendeephole/fp_reviews",
+    "~/.opendeephole/vulnerability_validation",
+    "~/.opendeephole/skill_create",
 )
 _THREAT_ANALYSIS_SKILLS_ROOT = (
     Path(__file__).resolve().parent / "threat_analysis" / "skills"
@@ -269,8 +271,17 @@ def configure_opencode_component() -> None:
 
 
 def _agent_writable_roots() -> tuple[Path, ...]:
-    """Return stable Agent-owned roots that every Session may edit."""
-    return ((Path.home() / ".opendeephole" / "scans").resolve(),)
+    """Return stable Agent-owned roots made writable in global config."""
+    root = Path.home() / ".opendeephole"
+    return tuple(
+        (root / name).resolve()
+        for name in (
+            "scans",
+            "fp_reviews",
+            "vulnerability_validation",
+            "skill_create",
+        )
+    )
 
 
 def get_workspace_lock(workspace: Path) -> threading.RLock:
@@ -366,10 +377,10 @@ def _sync_managed_threat_analysis_skills(workspace: Path) -> Path:
 def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
     """Return and initialize the single Agent-wide OpenCode workspace.
 
-    The workspace contains stable MCP/skill configuration and a writable
-    external-directory grant for the Agent scan store. Scan-specific state
-    (scope and selected feedback) is attached to each task by
-    :mod:`task_agent.task_service`.
+    The workspace contains stable MCP/Skill configuration, an explicit
+    read-only grant for ``.opencode``, and writable grants for the Agent-owned
+    task stores. Scan-specific state (scope and selected feedback) is attached
+    to each task by :mod:`task_agent.task_service`.
     """
     workspace = _GLOBAL_WORKSPACE
     workspace.mkdir(parents=True, exist_ok=True)
@@ -384,7 +395,7 @@ def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
         config_missing = not config_path.is_file()
         permissions_stale = (
             not config_missing
-            and not _has_managed_scan_permissions(config_path)
+            and not _has_managed_permissions(config_path, workspace)
         )
         if mcp_port is not None or config_missing or permissions_stale:
             _write_opencode_config(workspace, mcp_port=mcp_port)
@@ -403,7 +414,11 @@ def refresh_global_opencode_config() -> Path:
     with get_workspace_lock(workspace):
         _write_text_atomic(
             config_path,
-            json.dumps(build_opencode_config(mcp_url, [str(skills_dir)]), indent=2),
+            json.dumps(build_opencode_config(
+                mcp_url,
+                [str(skills_dir)],
+                readable_paths=[str(workspace / ".opencode")],
+            ), indent=2),
             mode=0o600,
         )
     return workspace
@@ -448,21 +463,44 @@ def build_opencode_config(
     mcp_url: str,
     skills_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
+    readable_paths: list[str] | None = None,
 ) -> dict:
     """Build the canonical opencode.json content for OpenDeepHole workspaces."""
+    read_permissions = {"*": "allow"}
     external_permissions = {"*": "deny"}
     edit_permissions = {"*": "deny"}
-    for pattern in _SCANS_EXTERNAL_PATTERNS:
-        external_permissions[pattern] = "allow"
-        edit_permissions[pattern] = "allow"
-    for path in writable_paths or []:
-        normalized = str(Path(path).resolve())
-        patterns = (
-            writable_edit_patterns(path)
-            + writable_edit_patterns(normalized)
-        )
-        for pattern in patterns:
-            edit_permissions[pattern] = "allow"
+
+    def add_path_rules(
+        paths: list[str | os.PathLike[str]],
+        *,
+        writable: bool,
+    ) -> None:
+        for path in paths:
+            normalized = str(Path(path).expanduser().resolve())
+            patterns = (
+                writable_edit_patterns(path)
+                + writable_edit_patterns(normalized)
+            )
+            for pattern in patterns:
+                read_permissions[pattern] = "allow"
+                external_permissions[pattern] = "allow"
+                if writable:
+                    edit_permissions[pattern] = "allow"
+
+    stable_writable_paths: list[str | os.PathLike[str]] = [
+        *_AGENT_WRITABLE_EXTERNAL_ROOTS,
+        *_agent_writable_roots(),
+        *(writable_paths or []),
+    ]
+    stable_readable_paths: list[str | os.PathLike[str]] = [
+        _GLOBAL_OPENCODE_EXTERNAL_ROOT,
+        _GLOBAL_WORKSPACE / ".opencode",
+        *(skills_paths or []),
+        *(readable_paths or []),
+    ]
+    add_path_rules(stable_readable_paths, writable=False)
+    add_path_rules(stable_writable_paths, writable=True)
+
     data = {
         "$schema": "https://opencode.ai/config.json",
         "mcp": {
@@ -473,13 +511,14 @@ def build_opencode_config(
             }
         },
         "permission": {
-            "read": {"*": "allow"},
+            "read": read_permissions,
             "list": {"*": "allow"},
             "glob": {"*": "allow"},
             "grep": {"*": "allow"},
             "external_directory": external_permissions,
             "edit": edit_permissions,
             "bash": {"*": "deny"},
+            "skill": {"*": "allow"},
         },
     }
     for spec in build_managed_mcp_runtime_specs(get_config()).values():
@@ -491,19 +530,50 @@ def build_opencode_config(
     return data
 
 
-def _has_managed_scan_permissions(config_path: Path) -> bool:
+def _has_managed_permissions(config_path: Path, workspace: Path) -> bool:
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
         permission = data.get("permission", {})
+        read = permission.get("read", {})
         external = permission.get("external_directory", {})
         edit = permission.get("edit", {})
+        readable_patterns: list[str] = []
+        for path in (
+            _GLOBAL_OPENCODE_EXTERNAL_ROOT,
+            workspace / ".opencode",
+            workspace / ".opencode" / "skills",
+        ):
+            readable_patterns.extend(writable_edit_patterns(path))
+            readable_patterns.extend(writable_edit_patterns(
+                Path(path).expanduser().resolve()
+            ))
+        writable_patterns: list[str] = []
+        for path in (*_AGENT_WRITABLE_EXTERNAL_ROOTS, *_agent_writable_roots()):
+            writable_patterns.extend(writable_edit_patterns(path))
+            writable_patterns.extend(writable_edit_patterns(
+                Path(path).expanduser().resolve()
+            ))
         return (
-            external.get("*") == "deny"
-            and edit.get("*") == "deny"
+            read.get("*") == "allow"
             and all(
-                external.get(pattern) == "allow"
+                permission.get(name, {}).get("*") == "allow"
+                for name in ("list", "glob", "grep")
+            )
+            and external.get("*") == "deny"
+            and edit.get("*") == "deny"
+            and permission.get("bash", {}).get("*") == "deny"
+            and permission.get("skill", {}).get("*") == "allow"
+            and all(
+                read.get(pattern) == "allow"
+                and external.get(pattern) == "allow"
+                and edit.get(pattern) != "allow"
+                for pattern in dict.fromkeys(readable_patterns)
+            )
+            and all(
+                read.get(pattern) == "allow"
+                and external.get(pattern) == "allow"
                 and edit.get(pattern) == "allow"
-                for pattern in _SCANS_EXTERNAL_PATTERNS
+                for pattern in dict.fromkeys(writable_patterns)
             )
         )
     except Exception:
@@ -638,6 +708,10 @@ def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None
     skills_dir = (workspace / ".opencode" / "skills").resolve()
     _write_text_atomic(
         config_path,
-        json.dumps(build_opencode_config(mcp_url, [str(skills_dir)]), indent=2),
+        json.dumps(build_opencode_config(
+            mcp_url,
+            [str(skills_dir)],
+            readable_paths=[str(workspace / ".opencode")],
+        ), indent=2),
         mode=0o600,
     )

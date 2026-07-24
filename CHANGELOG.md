@@ -2,8 +2,8 @@
 
 ## 2026-07-24
 
-- **修复** 完整 Agent 在初始化 `~/.opendeephole/opencode_workspace` 时同步原生威胁分析的四个 SKILL 及 `references/attack_mode.json`，威胁分析入口不再把 Agent 安装目录追加到 `skill_paths`；Task Agent 同时从最终配置的 `skills.paths` 推导显式读取与外部目录权限，standalone 只使用 `task-agent.yaml` 中声明的 Skill 路径
-- **变更** OpenCode 受管配置和每个 Agent Session 都允许文件工具读写整个 `~/.opendeephole/scans`；旧的 scans `edit: deny` 配置会自动迁移并保留动态 MCP URL，scans 外的项目源码仍保持只读且 `bash` 继续禁用
+- **修复** 完整 Agent 在初始化 `~/.opendeephole/opencode_workspace` 时同步原生威胁分析的四个 SKILL 及 `references/attack_mode.json`，威胁分析入口不再把 Agent 安装目录追加到 `skill_paths`；最终全局 `opencode.json` 显式允许读取 `~/.opendeephole/opencode_workspace/.opencode` 及注册的 Skill 根，standalone 只使用 `task-agent.yaml` 中声明的 Skill 路径
+- **变更** Task Agent 不再创建或 PATCH Session 级 `permission`，文件、SKILL 与 `bash` 权限全部写入 Serve 实际使用的全局 `opencode.json`；完整 Agent 全局允许读写 `~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`，旧受管配置会自动迁移并保留动态 MCP URL，既有 Session 中已经保存的历史权限不主动改写
 - **优化** 扫描详情任务队列及模型池任务标签不再展示 `P50.xxx` 形式的内部调度优先级；后端优先级数据和队列调度顺序保持不变
 - **新增** `run_opencode_task()` 在传入 `output_schema` 时可从当前消息成功写入的内置文件中回退解析 JSON；文本 JSON 保持优先且 `OpenCodeResult.text` 始终返回 LLM 最后一次文本，新建临时文件解析后自动删除，`file_write_allowlist` 可按 `work_dir` 内的文件或目录保留明确要求的产物而不扩大写权限
 - **修复** OpenCode/nga Serve 启动不再读取、继承或注入系统及运行时配置中的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和小写形式；仅保留 `NO_PROXY/no_proxy` 绕过列表，启动诊断与实际子进程环境保持一致

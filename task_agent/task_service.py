@@ -687,7 +687,6 @@ class OpenCodeTaskService:
                         source.model = str(value)
 
                 system_prompt = _task_system_prompt(record)
-                permissions = _task_permissions(record, runtime)
                 timeout_seconds = (
                     (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
                     or spec.timeout_seconds
@@ -735,7 +734,6 @@ class OpenCodeTaskService:
                                     mcp_tools=None,
                                     disabled_mcp_tools=_disabled_source_mcp_tools(spec.directory),
                                     system_prompt=system_prompt,
-                                    permissions=permissions,
                                     return_details=True,
                                     show_serve_status=self._task_progress_enabled(record),
                                     log_stage=task_output_stage(
@@ -936,6 +934,10 @@ class OpenCodeTaskService:
         runtime = _runtime_with_skill_paths(
             runtime,
             record.execution_context.skill_paths,
+        )
+        runtime = _runtime_with_permissions(
+            runtime,
+            record.execution_context,
         )
         model = runtime.model
         source = OutputSource(
@@ -1273,10 +1275,22 @@ def _task_system_prompt(record: _TaskRecord) -> str:
 
 def _permission_path_patterns(path: Path | PurePath) -> list[str]:
     normalized = str(path.resolve() if isinstance(path, Path) else path)
-    variants = [normalized]
-    for candidate in (normalized.replace("\\", "/"), normalized.replace("/", "\\")):
-        if candidate not in variants:
-            variants.append(candidate)
+    roots = [normalized]
+    if isinstance(path, Path):
+        try:
+            relative_to_home = path.resolve().relative_to(Path.home().resolve())
+        except ValueError:
+            pass
+        else:
+            home_relative = str(PurePath("~") / relative_to_home)
+            if home_relative not in roots:
+                roots.append(home_relative)
+
+    variants: list[str] = []
+    for root in roots:
+        for candidate in (root, root.replace("\\", "/"), root.replace("/", "\\")):
+            if candidate not in variants:
+                variants.append(candidate)
 
     patterns: list[str] = []
     for value in variants:
@@ -1292,64 +1306,76 @@ def _permission_path_patterns(path: Path | PurePath) -> list[str]:
     return patterns
 
 
-def _task_permissions(
-    record: _TaskRecord,
+def _runtime_with_permissions(
     runtime: _SessionRuntime,
-) -> list[dict[str, str]]:
-    """Allow configured reads and writes only to task/host-owned roots."""
-    spec = record.spec
-    context = record.execution_context
-    project_dir = spec.directory.resolve()
-    work_dir = _required_work_dir(context)
-    configured_skill_paths = _runtime_skill_paths(runtime)
+    context: OpenCodeExecutionContext,
+) -> _SessionRuntime:
+    """Write the framework permission boundary into the Serve config."""
+    config = parse_opencode_jsonc(
+        runtime.config_content,
+        source="OpenCode component runtime config",
+    )
+    existing = config.get("permission")
+    permission = dict(existing) if isinstance(existing, dict) else {}
+
     host_writable_roots = _host_writable_roots()
-    external_roots = [
-        project_dir,
-        work_dir,
-        get_global_opencode_workspace(),
-        *configured_skill_paths,
-        *context.skill_paths,
-        *host_writable_roots,
-    ]
+    work_dir = _required_work_dir(context)
+    work_is_covered = any(
+        isinstance(root, Path)
+        and (work_dir == root or root in work_dir.parents)
+        for root in host_writable_roots
+    )
+    writable_roots: list[Path | PurePath] = list(host_writable_roots)
+    if not work_is_covered:
+        writable_roots.append(work_dir)
 
-    rules: list[dict[str, str]] = []
+    readable_roots: list[Path | PurePath] = []
+    if runtime.config_workspace is not None:
+        readable_roots.append(
+            Path(runtime.config_workspace).resolve() / ".opencode"
+        )
+    readable_roots.extend(_runtime_skill_paths(runtime))
+    readable_roots.extend(writable_roots)
 
-    def add(permission: str, pattern: str, action: str) -> None:
-        rules.append({
-            "permission": permission,
-            "pattern": pattern,
-            "action": action,
-        })
+    def path_rules(
+        roots: Iterable[Path | PurePath],
+        *,
+        default: str,
+        action: str,
+    ) -> dict[str, str]:
+        rules = {"*": default}
+        for root in roots:
+            for pattern in _permission_path_patterns(root):
+                rules[pattern] = action
+        return rules
 
-    for permission in ("read", "list", "glob", "grep"):
-        add(permission, "*", "allow")
-    seen_read: set[str] = set()
-    for root in external_roots:
-        for pattern in _permission_path_patterns(root):
-            if pattern not in seen_read:
-                add("read", pattern, "allow")
-                seen_read.add(pattern)
-
-    add("external_directory", "*", "deny")
-    seen_external: set[str] = set()
-    for root in external_roots:
-        for pattern in _permission_path_patterns(root):
-            if pattern not in seen_external:
-                add("external_directory", pattern, "allow")
-                seen_external.add(pattern)
-
-    add("edit", "*", "deny")
-    for pattern in _permission_path_patterns(project_dir):
-        add("edit", pattern, "deny")
-    for pattern in _permission_path_patterns(work_dir):
-        add("edit", pattern, "allow")
-    for root in host_writable_roots:
-        for pattern in _permission_path_patterns(root):
-            add("edit", pattern, "allow")
-
-    add("bash", "*", "deny")
-    add("skill", "*", "allow")
-    return rules
+    permission.update({
+        "read": path_rules(
+            readable_roots,
+            default="allow",
+            action="allow",
+        ),
+        "list": {"*": "allow"},
+        "glob": {"*": "allow"},
+        "grep": {"*": "allow"},
+        "external_directory": path_rules(
+            readable_roots,
+            default="deny",
+            action="allow",
+        ),
+        "edit": path_rules(
+            writable_roots,
+            default="deny",
+            action="allow",
+        ),
+        "bash": {"*": "deny"},
+        "skill": {"*": "allow"},
+    })
+    config["permission"] = permission
+    return dataclasses.replace(
+        runtime,
+        config_content=dump_opencode_config(config),
+    )
 
 
 def _parse_text_json(text: str, schema: dict[str, Any] | None = None) -> Any:

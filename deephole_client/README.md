@@ -31,7 +31,9 @@ SKILL；内置威胁分析不使用这条路径：完整 Agent 会把它的四�
 `task-agent.yaml` 的 `serve.opencode_config.skills.paths`。`threat_analysis/` 与来源
 `ThreatAnalysis/src/threat_analysis_harness` 逐文件一致；相邻的
 `threat_analysis_runner.py` 将它按原包名加载，不修改原生绝对导入，也不会把安装目录加入
-Task Agent 的 `skill_paths`。
+Task Agent 的 `skill_paths`。完整 Agent 会把整个全局 `.opencode` 目录的只读规则写入最终
+`opencode.json`，因此 SKILL 加载后的 `references/`、`assets/` 和 `scripts/` 不依赖
+Session 级权限。
 
 ## 威胁分析入口
 

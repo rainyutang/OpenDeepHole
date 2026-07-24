@@ -22,21 +22,47 @@ from deephole_client.opencode_integration import (
 def assert_opencode_read_permissions(
     testcase: unittest.TestCase,
     config: dict,
+    workspace: Path,
 ) -> None:
     permission = config.get("permission", {})
     for key in ("read", "list", "glob", "grep"):
-        testcase.assertEqual(permission.get(key), {"*": "allow"})
-    testcase.assertEqual(permission.get("external_directory"), {
-        "*": "deny",
-        "~/.opendeephole/scans": "allow",
-        "~/.opendeephole/scans/**": "allow",
-    })
-    testcase.assertEqual(permission.get("edit"), {
-        "*": "deny",
-        "~/.opendeephole/scans": "allow",
-        "~/.opendeephole/scans/**": "allow",
-    })
+        testcase.assertEqual(permission.get(key, {}).get("*"), "allow")
+    testcase.assertEqual(
+        permission.get("external_directory", {}).get("*"),
+        "deny",
+    )
+    testcase.assertEqual(permission.get("edit", {}).get("*"), "deny")
     testcase.assertEqual(permission.get("bash"), {"*": "deny"})
+    testcase.assertEqual(permission.get("skill"), {"*": "allow"})
+
+    read = permission["read"]
+    external = permission["external_directory"]
+    edit = permission["edit"]
+    for root in (
+        "~/.opendeephole/opencode_workspace/.opencode",
+        workspace / ".opencode",
+        workspace / ".opencode" / "skills",
+    ):
+        for pattern in writable_edit_patterns(root):
+            testcase.assertEqual(read.get(pattern), "allow")
+            testcase.assertEqual(external.get(pattern), "allow")
+            testcase.assertNotEqual(edit.get(pattern), "allow")
+
+    home_root = Path.home() / ".opendeephole"
+    for name in (
+        "scans",
+        "fp_reviews",
+        "vulnerability_validation",
+        "skill_create",
+    ):
+        for root in (
+            f"~/.opendeephole/{name}",
+            (home_root / name).resolve(),
+        ):
+            for pattern in writable_edit_patterns(root):
+                testcase.assertEqual(read.get(pattern), "allow")
+                testcase.assertEqual(external.get(pattern), "allow")
+                testcase.assertEqual(edit.get(pattern), "allow")
 
 
 class OpencodeWorkspaceTests(unittest.TestCase):
@@ -49,7 +75,15 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         bindings = configure.call_args.args[0]
         self.assertEqual(
             bindings.writable_roots(),
-            ((Path.home() / ".opendeephole" / "scans").resolve(),),
+            tuple(
+                (Path.home() / ".opendeephole" / name).resolve()
+                for name in (
+                    "scans",
+                    "fp_reviews",
+                    "vulnerability_validation",
+                    "skill_create",
+                )
+            ),
         )
 
     def test_runtime_environment_only_adds_no_proxy(self) -> None:
@@ -229,7 +263,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 config["mcp"]["deephole-code"]["url"],
                 "http://127.0.0.1:9123/mcp",
             )
-            assert_opencode_read_permissions(self, config)
+            assert_opencode_read_permissions(self, config, workspace)
             self.assertNotIn("agent", config)
             skills_dir = workspace / ".opencode" / "skills"
             for name in (
@@ -365,7 +399,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 config["mcp"]["deephole-code"]["url"],
                 "http://127.0.0.1:58507/mcp",
             )
-            assert_opencode_read_permissions(self, config)
+            assert_opencode_read_permissions(self, config, workspace)
 
     def test_global_refresh_does_not_overwrite_live_runtime_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

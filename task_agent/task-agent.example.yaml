@@ -18,6 +18,8 @@ serve:
   environment: {}
   # OpenCode 的完整配置直接写在这里；MCP 服务名可以自行定义。
   # standalone 不会自动安装 Skill；如需使用，请在这里注册实际绝对路径。
+  # Task Agent 会在最终 opencode.json 中覆盖文件、SKILL 与 bash 的受管权限。
+  # 权限不会通过 Session API 下发。
   # 下列远程和本地示例默认关闭。替换占位配置后，将 enabled 改为 true。
   # timeout 的单位是毫秒。
   opencode_config:

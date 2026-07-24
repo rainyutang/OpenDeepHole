@@ -69,10 +69,11 @@ result = await run_opencode_task(
 
 过程门面还可以通过 `opencode_task_context(..., config_path=..., skill_paths=[...])` 绑定独立
 配置和临时 SKILL 根。绑定值会被内部 `run_opencode_task()` 继承，SKILL 路径仅合并到该
-任务的 Serve 配置，不会写入宿主全局工作区；当前 Session 会同时从最终配置的
-`skills.paths` 和临时 `skill_paths` 推导显式 `read: allow` 与外部目录规则，使
+任务的 Serve 配置，不会修改宿主的持久受管 Skill 注册；Task Agent 会在最终
+`opencode.json` 中从 `skills.paths` 和临时 `skill_paths` 推导显式 `read: allow` 与外部目录规则，使
 `references/`、`assets/`、`scripts/` 等资源可读。standalone 默认仍只允许写 `work_dir`；
-嵌入宿主可通过 `OpenCodeHostBindings.writable_roots` 声明额外稳定可写根。
+嵌入宿主可通过 `OpenCodeHostBindings.writable_roots` 声明额外稳定可写根。组件不会在
+创建或续写 Session 时发送或 PATCH `permission`；升级前已有 Session 的历史权限保持原状。
 
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
 
