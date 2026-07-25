@@ -60,6 +60,19 @@ description: 基于价值资产、高风险模块、代码库和本 skill 内置
 
 高风险模块既可能是外部暴露模块，也可能是非外部暴露的内部模块。
 
+### 2.2.1 内部模块引用
+
+运行时 prompt 会提供本次任务的内部高风险模块引用目录，其中包含程序生成的
+`module_id`、规范模块名称、代码目录和外部暴露属性。
+
+- `module_id` 只用于攻击树任务 raw JSON 与最终高风险模块之间的程序对齐。
+- 必须原样使用引用目录中的 `module_id`，不得根据模块名称自行构造。
+- 根节点和普通内部节点的 `module_id` 为 `null`。
+- 叶子节点及属于高风险模块的内部节点必须使用对应的 `module_id`。
+- `related_high_risk_modules` 中的每个模块必须使用对应的 `module_id`。
+- runtime 提供的动态 JSON schema 会限制 `module_id` 只能取本次引用目录中的值。
+- 程序完成对齐后会移除 `module_id`，最终公开攻击树 JSON 的字段和结构保持不变。
+
 ### 2.3 攻击模式参考文档
 
 攻击模式参考文档提供可供选择的攻击模式。
@@ -368,6 +381,7 @@ description: 基于价值资产、高风险模块、代码库和本 skill 内置
           "node_name": "攻击价值资产：价值资产名称",
           "description": "针对该价值资产的理论攻击目标",
           "module_name": null,
+          "module_id": null,
           "is_high_risk_module": false,
           "external_exposure": false,
           "external_interface_description": null
@@ -378,6 +392,7 @@ description: 基于价值资产、高风险模块、代码库和本 skill 内置
           "node_name": "内部模块名称",
           "description": "内部模块的功能和职责",
           "module_name": "内部模块名称",
+          "module_id": "runtime 引用目录中的 module_id",
           "is_high_risk_module": true,
           "external_exposure": false,
           "external_interface_description": null
@@ -388,6 +403,7 @@ description: 基于价值资产、高风险模块、代码库和本 skill 内置
           "node_name": "外部暴露高风险模块名称",
           "description": "高风险模块的功能和面临威胁",
           "module_name": "外部暴露高风险模块名称",
+          "module_id": "runtime 引用目录中的 module_id",
           "is_high_risk_module": true,
           "external_exposure": true,
           "external_interface_description": "该模块对外提供的接口或接收的外部输入"
@@ -425,6 +441,7 @@ description: 基于价值资产、高风险模块、代码库和本 skill 内置
           "path_description": "外部暴露高风险模块 → 内部模块 → 价值资产攻击目标",
           "related_high_risk_modules": [
             {
+              "module_id": "runtime 引用目录中的 module_id",
               "module_name": "外部暴露高风险模块名称",
               "node_id": "L-001",
               "external_exposure": true,
@@ -432,6 +449,7 @@ description: 基于价值资产、高风险模块、代码库和本 skill 内置
               "association_description": "该模块是攻击路径的起始入口"
             },
             {
+              "module_id": "runtime 引用目录中的 module_id",
               "module_name": "非外部暴露高风险模块名称",
               "node_id": "I-001",
               "external_exposure": false,
@@ -542,7 +560,10 @@ description: 基于价值资产、高风险模块、代码库和本 skill 内置
 - `attack_paths`：从叶子节点到根节点的完整理论影响路径
 - 每个 `node_id`、`edge_id` 和 `path_id` 必须唯一
 - 根节点的 `module_name` 必须为 `null`
+- 根节点和普通内部节点的 `module_id` 必须为 `null`
 - 根节点的 `is_high_risk_module` 必须为 `false`
+- 叶子节点及属于高风险模块的内部节点必须填写 runtime 引用目录中的 `module_id`
+- `related_high_risk_modules` 中每项必须填写与关联节点一致的 `module_id`
 - 叶子节点的 `is_high_risk_module` 和 `external_exposure` 必须为 `true`
 - 内部节点的 `external_exposure` 必须为 `false`
 - 内部节点是否属于高风险模块，根据高风险模块输入文档确定

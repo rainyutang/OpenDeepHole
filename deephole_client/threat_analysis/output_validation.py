@@ -15,6 +15,8 @@ def validate_json_schema(
 ) -> None:
     """Validate the JSON Schema subset used by threat-analysis task outputs."""
 
+    _validate_compositions(value, schema, path)
+
     if "enum" in schema and value not in schema["enum"]:
         raise OutputSchemaValidationError(
             f"{path}: value {value!r} not in enum {schema['enum']!r}"
@@ -140,3 +142,47 @@ def _matches_type(value: Any, expected_type: str | list[str]) -> bool:
     raise OutputSchemaValidationError(
         f"Unsupported JSON schema type: {expected_type!r}"
     )
+
+
+def _validate_compositions(
+    value: Any,
+    schema: Mapping[str, Any],
+    path: str,
+) -> None:
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for branch in all_of:
+            if isinstance(branch, Mapping):
+                validate_json_schema(value, branch, path)
+
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list) and not any(
+        isinstance(branch, Mapping) and _matches_schema(value, branch, path)
+        for branch in any_of
+    ):
+        raise OutputSchemaValidationError(
+            f"{path}: value does not match any anyOf branch"
+        )
+
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list):
+        match_count = sum(
+            isinstance(branch, Mapping) and _matches_schema(value, branch, path)
+            for branch in one_of
+        )
+        if match_count != 1:
+            raise OutputSchemaValidationError(
+                f"{path}: value must match exactly one oneOf branch, matched {match_count}"
+            )
+
+
+def _matches_schema(
+    value: Any,
+    schema: Mapping[str, Any],
+    path: str,
+) -> bool:
+    try:
+        validate_json_schema(value, schema, path)
+    except OutputSchemaValidationError:
+        return False
+    return True
