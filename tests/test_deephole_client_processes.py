@@ -5,9 +5,10 @@ import inspect
 import json
 import tempfile
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from deephole_client.code_graph_build.code_database import CodeDatabase
 from task_agent import OpenCodeResult
@@ -41,6 +42,29 @@ def _task_result(structured: dict) -> OpenCodeResult:
         model="test/model",
         output_source={"model": "test/model", "serve_session_id": "session-1"},
     )
+
+
+def _write_candidate_audit_rule(
+    root: Path,
+    *,
+    checker_name: str = "demo",
+    skill_name: str = "demo-audit",
+) -> Path:
+    checker = root / checker_name
+    checker.mkdir(parents=True)
+    (checker / "audit.yaml").write_text(
+        f"name: {checker_name}\nlabel: Demo\nresult_mode: vulnerabilities\n",
+        encoding="utf-8",
+    )
+    (checker / "SKILL.md").write_text(
+        "---\n"
+        f"name: {skill_name}\n"
+        "description: Audit demo candidates\n"
+        "---\n\n"
+        "Audit the candidate.",
+        encoding="utf-8",
+    )
+    return checker
 
 
 def test_all_process_entries_are_async_and_reject_unknown_keys() -> None:
@@ -135,6 +159,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         assert audit["vulnerabilities"][0]["analysis_source"] == "threat_audit"
         assert "JSON Schema" in run_task.await_args.kwargs["prompt"]
         assert '"vulnerabilities"' in run_task.await_args.kwargs["prompt"]
+        assert "output" not in run_task.await_args.kwargs
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))
@@ -166,16 +191,7 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
             encoding="utf-8",
         )
         audit_root = root / "audit-rules"
-        audit_checker = audit_root / "demo"
-        audit_checker.mkdir(parents=True)
-        (audit_checker / "audit.yaml").write_text(
-            "name: demo\nlabel: Demo\nresult_mode: vulnerabilities\n",
-            encoding="utf-8",
-        )
-        (audit_checker / "SKILL.md").write_text(
-            "Audit the candidate.",
-            encoding="utf-8",
-        )
+        _write_candidate_audit_rule(audit_root)
         static = await asyncio.wait_for(run_static_analysis(
             project_path=project,
             work_dir=root / "static",
@@ -193,10 +209,18 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
             }],
             "markdown_reports": [],
         })
-        with patch(
-            "deephole_client.candidate_audit.runner.run_opencode_task",
-            new=AsyncMock(return_value=model_result),
-        ) as run_task:
+        candidate_results: list[dict] = []
+        task_context = MagicMock(return_value=nullcontext())
+        with (
+            patch(
+                "deephole_client.candidate_audit.runner.opencode_task_context",
+                task_context,
+            ),
+            patch(
+                "deephole_client.candidate_audit.runner.run_opencode_task",
+                new=AsyncMock(return_value=model_result),
+            ) as run_task,
+        ):
             audited = await asyncio.wait_for(run_candidate_audit(
                 project_path=project,
                 work_dir=root / "candidate-audit",
@@ -204,14 +228,217 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
                 candidates=static["candidates"],
                 checker_dirs=[audit_root],
                 index_db_path=index_path,
+                on_candidate_result=candidate_results.append,
             ), timeout=5)
         assert audited["status"] == "success"
         assert audited["vulnerabilities"][0]["ai_verdict"] == "not_confirmed"
-        assert "JSON Schema" in run_task.await_args.kwargs["prompt"]
-        assert '"markdown_reports"' in run_task.await_args.kwargs["prompt"]
+        prompt = run_task.await_args.kwargs["prompt"]
+        assert prompt.startswith("/demo-audit\n\n")
+        assert "Audit the candidate." not in prompt
+        assert "JSON Schema" in prompt
+        assert '"markdown_reports"' in prompt
+        assert "output" not in run_task.await_args.kwargs
+        assert task_context.call_args.kwargs["skill_paths"] == [
+            audit_root.resolve(),
+        ]
+        assert candidate_results[0]["audit_index"] == 0
+        assert candidate_results[0]["checker_name"] == "demo"
+        assert candidate_results[0]["vulnerabilities"][0]["ai_verdict"] == "not_confirmed"
         assert audited["processed_keys"] == [{
             "file": "sample.c", "line": 1, "function": "bad", "vuln_type": "demo",
         }]
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_candidate_audit_streams_results_before_the_batch_finishes() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        index_path.touch()
+        audit_root = root / "audit-rules"
+        _write_candidate_audit_rule(audit_root)
+        release_second = asyncio.Event()
+        second_started = asyncio.Event()
+        first_reported = asyncio.Event()
+        candidate_results: list[dict] = []
+
+        async def run_task(**kwargs):
+            audit_index = int(kwargs["task_name"].rsplit("-", 1)[-1])
+            if audit_index == 1:
+                second_started.set()
+                await release_second.wait()
+            return _task_result({
+                "vulnerabilities": [{
+                    "confirmed": False,
+                    "ai_verdict": "not_confirmed",
+                }],
+                "markdown_reports": [],
+            })
+
+        async def on_candidate_result(result: dict) -> None:
+            candidate_results.append(result)
+            if result["audit_index"] == 0:
+                first_reported.set()
+
+        with patch(
+            "deephole_client.candidate_audit.runner.run_opencode_task",
+            side_effect=run_task,
+        ):
+            batch_task = asyncio.create_task(run_candidate_audit(
+                project_path=project,
+                work_dir=root / "candidate-audit",
+                scan_id="scan-stream",
+                candidates=[
+                    {
+                        "file": "first.c",
+                        "line": 1,
+                        "function": "first",
+                        "description": "first candidate",
+                        "vuln_type": "demo",
+                    },
+                    {
+                        "file": "second.c",
+                        "line": 2,
+                        "function": "second",
+                        "description": "second candidate",
+                        "vuln_type": "demo",
+                    },
+                ],
+                checker_dirs=[audit_root],
+                index_db_path=index_path,
+                concurrency=2,
+                on_candidate_result=on_candidate_result,
+            ))
+            try:
+                await asyncio.wait_for(second_started.wait(), timeout=1)
+                await asyncio.wait_for(first_reported.wait(), timeout=1)
+                assert not batch_task.done()
+            finally:
+                release_second.set()
+            audited = await asyncio.wait_for(batch_task, timeout=1)
+
+        assert audited["status"] == "success"
+        assert [item["audit_index"] for item in candidate_results] == [0, 1]
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        index_path.touch()
+        audit_root = root / "audit-rules"
+        _write_candidate_audit_rule(audit_root)
+        candidate_results: list[dict] = []
+        not_confirmed = _task_result({
+            "vulnerabilities": [{
+                "confirmed": False,
+                "ai_verdict": "not_confirmed",
+            }],
+            "markdown_reports": [],
+        })
+        no_result = _task_result({
+            "vulnerabilities": [],
+            "markdown_reports": [],
+        })
+        failure = OpenCodeResult(
+            session_id="session-failed",
+            status="failure",
+            text="model failed",
+            structured=None,
+            model="test/model",
+            output_source={
+                "model": "test/model",
+                "serve_session_id": "session-failed",
+            },
+        )
+        report_only = _task_result({
+            "vulnerabilities": [],
+            "markdown_reports": [{
+                "filename": "demo.md",
+                "title": "Demo",
+                "content": "Report",
+            }],
+        })
+        candidates = [
+            {
+                "file": "same.c",
+                "line": 1,
+                "function": "same",
+                "description": "first same-pattern candidate",
+                "vuln_type": "demo",
+            },
+            {
+                "file": "same.c",
+                "line": 2,
+                "function": "same",
+                "description": "filtered same-pattern candidate",
+                "vuln_type": "demo",
+            },
+            {
+                "file": "empty.c",
+                "line": 3,
+                "function": "empty",
+                "description": "empty model result",
+                "vuln_type": "demo",
+            },
+            {
+                "file": "failed.c",
+                "line": 4,
+                "function": "failed",
+                "description": "failed model task",
+                "vuln_type": "demo",
+            },
+            {
+                "file": ".",
+                "line": 1,
+                "function": "__project__",
+                "description": "report-only project audit",
+                "vuln_type": "demo",
+            },
+        ]
+
+        with patch(
+            "deephole_client.candidate_audit.runner.run_opencode_task",
+            new=AsyncMock(side_effect=[
+                not_confirmed,
+                no_result,
+                failure,
+                report_only,
+            ]),
+        ) as run_task:
+            audited = await run_candidate_audit(
+                project_path=project,
+                work_dir=root / "candidate-audit",
+                scan_id="scan-terminal",
+                candidates=candidates,
+                checker_dirs=[audit_root],
+                index_db_path=index_path,
+                concurrency=1,
+                pattern_filter_enabled=True,
+                pattern_filter_scope="function",
+                on_candidate_result=candidate_results.append,
+            )
+
+        assert run_task.await_count == 4
+        assert len(candidate_results) == 5
+        by_index = {
+            item["audit_index"]: item
+            for item in candidate_results
+        }
+        assert by_index[0]["vulnerabilities"][0]["ai_verdict"] == "not_confirmed"
+        assert by_index[1]["vulnerabilities"][0]["ai_verdict"] == "filtered_same_pattern"
+        assert by_index[2]["vulnerabilities"][0]["ai_verdict"] == "no_result"
+        assert by_index[3]["vulnerabilities"][0]["ai_verdict"] == "failed"
+        assert by_index[4]["vulnerabilities"] == []
+        assert by_index[4]["skill_reports"][0]["filename"] == "demo.md"
+        assert len(audited["processed_keys"]) == 5
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))

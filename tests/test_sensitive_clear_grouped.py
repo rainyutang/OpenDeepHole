@@ -114,12 +114,13 @@ class SensitiveClearFunctionTests(unittest.TestCase):
         prompt = _candidate_prompt(
             {
                 "name": "sensitive_clear",
-                "skill": "# Sensitive Clear\n\n读取目标函数并判断敏感数据是否清零。",
+                "skill_name": "sensitive-variable-clear-check",
             },
             _candidate().model_dump(mode="json"),
             "scan-1",
         )
 
+        self.assertTrue(prompt.startswith("/sensitive-variable-clear-check\n\n"))
         self.assertIn("`src/auth.c` 文件中的 `login` 函数敏感信息未清0问题", prompt)
         self.assertIn("scan_id: `scan-1`", prompt)
         self.assertNotIn("result_id", prompt)

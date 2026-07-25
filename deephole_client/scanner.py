@@ -546,6 +546,71 @@ async def run_scan(
                 )
                 if remaining and not cancel_event.is_set():
                     scope = str(config.pattern_filter.scope or "directory")
+                    streamed_audit_indexes: set[int] = set()
+                    streamed_processed_keys: set[
+                        tuple[str, int, str, str]
+                    ] = set()
+                    streamed_skill_reports: dict[
+                        str,
+                        list[dict[str, Any]],
+                    ] = {}
+                    skill_report_lock = asyncio.Lock()
+
+                    async def report_candidate_result(
+                        result: dict[str, Any],
+                    ) -> None:
+                        await _report_process_vulnerabilities(
+                            reporter=reporter,
+                            config=config,
+                            scan_id=scan_id,
+                            project_path=project,
+                            code_scan_path=scan_root,
+                            product=product,
+                            validation_environment=validation_environment,
+                            feedback_entries=feedback_entries,
+                            code_graph_mcp=code_graph_mcp,
+                            values=list(result.get("vulnerabilities") or []),
+                        )
+
+                        checker_name = str(
+                            result.get("checker_name") or "",
+                        )
+                        reports = [
+                            dict(item)
+                            for item in result.get("skill_reports") or []
+                            if isinstance(item, dict)
+                        ]
+                        if checker_name and reports:
+                            async with skill_report_lock:
+                                accumulated = streamed_skill_reports.setdefault(
+                                    checker_name,
+                                    [],
+                                )
+                                accumulated.extend(reports)
+                                await reporter.replace_skill_reports(
+                                    scan_id,
+                                    checker_name,
+                                    list(accumulated),
+                                )
+
+                        raw_key = result.get("processed_key")
+                        if isinstance(raw_key, dict):
+                            processed_key = (
+                                str(raw_key.get("file") or ""),
+                                int(raw_key.get("line") or 0),
+                                str(raw_key.get("function") or ""),
+                                str(raw_key.get("vuln_type") or ""),
+                            )
+                            await reporter.report_processed_key(
+                                scan_id,
+                                *processed_key,
+                            )
+                            streamed_processed_keys.add(processed_key)
+
+                        raw_audit_index = result.get("audit_index")
+                        if isinstance(raw_audit_index, int):
+                            streamed_audit_indexes.add(raw_audit_index)
+
                     audit_result = await run_candidate_audit(
                         project_path=project,
                         work_dir=scan_dir / "candidate_audit",
@@ -574,6 +639,7 @@ async def run_scan(
                         feedback_entries=feedback_entries,
                         audit_index_offset=processed,
                         output=process_output,
+                        on_candidate_result=report_candidate_result,
                         cancel_event=cancel_event,
                     )
                     for checker_name, reports in (
@@ -585,29 +651,50 @@ async def run_scan(
                                 str(checker_name),
                                 reports,
                             )
-                    audited = await _report_process_vulnerabilities(
-                        reporter=reporter,
-                        config=config,
-                        scan_id=scan_id,
-                        project_path=project,
-                        code_scan_path=scan_root,
-                        product=product,
-                        validation_environment=validation_environment,
-                        feedback_entries=feedback_entries,
-                        code_graph_mcp=code_graph_mcp,
-                        values=list(
-                            audit_result.get("vulnerabilities") or [],
-                        ),
-                    )
+                    audit_values = [
+                        value
+                        for value in audit_result.get("vulnerabilities") or []
+                        if isinstance(value, dict)
+                    ]
+                    unreported_values = [
+                        value
+                        for value in audit_values
+                        if not (
+                            isinstance(value.get("audit_index"), int)
+                            and value["audit_index"] in streamed_audit_indexes
+                        )
+                    ]
+                    if unreported_values:
+                        await _report_process_vulnerabilities(
+                            reporter=reporter,
+                            config=config,
+                            scan_id=scan_id,
+                            project_path=project,
+                            code_scan_path=scan_root,
+                            product=product,
+                            validation_environment=validation_environment,
+                            feedback_entries=feedback_entries,
+                            code_graph_mcp=code_graph_mcp,
+                            values=unreported_values,
+                        )
+                    audited = [
+                        Vulnerability.model_validate(value)
+                        for value in audit_values
+                    ]
                     for key in audit_result.get("processed_keys") or []:
                         if not isinstance(key, dict):
                             continue
-                        await reporter.report_processed_key(
-                            scan_id,
+                        processed_key = (
                             str(key.get("file") or ""),
                             int(key.get("line") or 0),
                             str(key.get("function") or ""),
                             str(key.get("vuln_type") or ""),
+                        )
+                        if processed_key in streamed_processed_keys:
+                            continue
+                        await reporter.report_processed_key(
+                            scan_id,
+                            *processed_key,
                         )
                     processed += len(audit_result.get("processed_keys") or [])
 

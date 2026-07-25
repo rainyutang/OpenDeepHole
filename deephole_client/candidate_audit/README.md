@@ -19,7 +19,19 @@
 | `audit_index_offset` | 否 | int | 审计序号偏移 |
 | `task_agent_config` | 否 | path | 独立 Task Agent 配置 |
 | `output` | 否 | callable | 同步或异步事件回调 |
+| `on_candidate_result` | 否 | callable | 单个候选进入终态后的同步或异步结果回调 |
 | `cancel_event` | 否 | event | 提供 `is_set()` 的取消信号 |
+
+每个 checker 的 `SKILL.md` 必须在 YAML frontmatter 中声明 `name`。过程会把
+`checker_dirs` 作为本次任务专属的 Skill 路径注册给 Task Agent，并以
+`/<name>` 作为 Prompt 首行加载 Skill；`SKILL.md` 正文不会拼接进 Prompt。
+
+`on_candidate_result` 会在每个候选完成后立即收到一个字典，其中包含
+`audit_index`、`checker_name`、原始 `candidate`、本候选的
+`vulnerabilities`、`skill_reports` 和 `processed_key`。正常结果、空结果、
+失败/超时、同模式过滤和只生成报告的候选都会各调用一次。过程仍会等待整批结束，
+并返回完整的 `vulnerabilities`、`skill_reports` 和 `processed_keys`，便于独立调用方
+继续按批处理结果。
 
 ```bash
 python -m deephole_client.candidate_audit --project-path /src/project \

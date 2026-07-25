@@ -131,16 +131,36 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 calls.append("candidate_audit")
                 self.assertEqual(kwargs["index_db_path"], index_path)
                 self.assertIn("candidate_audit/rules", kwargs["checker_dirs"][0].as_posix())
+                processed_key = {
+                    "file": "src/a.c",
+                    "line": 10,
+                    "function": "parse",
+                    "vuln_type": "npd",
+                }
+                await kwargs["on_candidate_result"]({
+                    "audit_index": 0,
+                    "checker_name": "npd",
+                    "candidate": {
+                        **processed_key,
+                        "description": "candidate",
+                    },
+                    "vulnerabilities": [_vulnerability()],
+                    "skill_reports": [],
+                    "processed_key": processed_key,
+                })
+                self.assertEqual(
+                    reporter.report_vulnerability.await_count,
+                    1,
+                )
+                self.assertEqual(
+                    reporter.report_processed_key.await_count,
+                    1,
+                )
                 return {
                     "status": "success",
                     "vulnerabilities": [_vulnerability()],
                     "skill_reports": {},
-                    "processed_keys": [{
-                        "file": "src/a.c",
-                        "line": 10,
-                        "function": "parse",
-                        "vuln_type": "npd",
-                    }],
+                    "processed_keys": [processed_key],
                 }
 
             mcp = MagicMock()
@@ -193,6 +213,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         )
         reporter.report_candidates.assert_awaited_once()
         reporter.report_vulnerability.assert_awaited_once()
+        reporter.report_processed_key.assert_awaited_once()
         reporter.finish_scan.assert_awaited_once()
         self.assertEqual(
             reporter.finish_scan.await_args.args[2],

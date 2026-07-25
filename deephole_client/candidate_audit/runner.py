@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from task_agent import run_opencode_task
+from task_agent import opencode_task_context, run_opencode_task
 
 PROCESS_NAME = "candidate_audit"
 PROJECT_LEVEL_FUNCTION = "__project__"
@@ -18,6 +18,7 @@ _ALLOWED_KEYS = {
     "index_db_path", "checker_names", "concurrency", "required_capability",
     "pattern_filter_enabled", "pattern_filter_scope", "feedback_entries",
     "audit_index_offset", "task_agent_config", "output", "cancel_event",
+    "on_candidate_result",
 }
 _REQUIRED_KEYS = {
     "project_path", "work_dir", "scan_id", "candidates", "index_db_path",
@@ -62,8 +63,42 @@ def _cancelled(cancel_event: Any) -> bool:
     return bool(cancel_event is not None and cancel_event.is_set())
 
 
+def _skill_name(skill_path: Path) -> str:
+    content = skill_path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError(
+            f"candidate audit skill must start with YAML frontmatter: {skill_path}"
+        )
+    closing_index = next(
+        (
+            index
+            for index, line in enumerate(lines[1:], start=1)
+            if line.strip() == "---"
+        ),
+        None,
+    )
+    if closing_index is None:
+        raise ValueError(
+            f"candidate audit skill has unterminated YAML frontmatter: {skill_path}"
+        )
+    try:
+        metadata = yaml.safe_load("\n".join(lines[1:closing_index]))
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"candidate audit skill has invalid YAML frontmatter: {skill_path}"
+        ) from exc
+    name = str(metadata.get("name") or "").strip() if isinstance(metadata, dict) else ""
+    if not name:
+        raise ValueError(
+            f"candidate audit skill frontmatter is missing name: {skill_path}"
+        )
+    return name
+
+
 def _checker_catalog(roots: list[Path]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
+    skill_owners: dict[str, str] = {}
     for root in roots:
         if not root.is_dir():
             raise FileNotFoundError(f"checker directory does not exist: {root}")
@@ -80,11 +115,19 @@ def _checker_catalog(roots: list[Path]) -> dict[str, dict[str, Any]]:
             name = str(raw.get("name") or directory.name).strip()
             if name in result:
                 continue
+            skill_name = _skill_name(skill_path)
+            previous_owner = skill_owners.get(skill_name)
+            if previous_owner is not None:
+                raise ValueError(
+                    "candidate audit skill name is duplicated: "
+                    f"{skill_name} ({previous_owner}, {name})"
+                )
+            skill_owners[skill_name] = name
             result[name] = {
                 "name": name,
                 "label": str(raw.get("label") or name),
                 "result_mode": str(raw.get("result_mode") or "vulnerabilities"),
-                "skill": skill_path.read_text(encoding="utf-8") if skill_path.is_file() else "",
+                "skill_name": skill_name,
             }
     return result
 
@@ -168,13 +211,35 @@ def _candidate_prompt(
             + json.dumps(candidate, ensure_ascii=False, indent=2)
         )
     return (
-        "请依据以下 checker 规则审计静态候选点。必须读取当前项目真实代码并验证完整数据流。\n"
+        f"/{checker['skill_name']}\n\n"
+        "请审计以下静态候选点。必须读取当前项目真实代码并验证完整数据流。\n"
         "如果不成立要明确返回 not_confirmed；不要仅复述候选描述。\n\n"
-        "Checker 规则：\n"
-        + str(checker.get("skill") or "")
-        + "\n\n"
         + target
     )
+
+
+async def _notify_candidate_result(
+    callback: Any,
+    *,
+    audit_index: int,
+    checker_name: str,
+    candidate: dict[str, Any],
+    vulnerabilities: list[dict[str, Any]],
+    reports: list[dict[str, Any]],
+    processed_key: dict[str, Any],
+) -> None:
+    if callback is None:
+        return
+    result = callback({
+        "audit_index": audit_index,
+        "checker_name": checker_name,
+        "candidate": dict(candidate),
+        "vulnerabilities": [dict(item) for item in vulnerabilities],
+        "skill_reports": [dict(item) for item in reports],
+        "processed_key": dict(processed_key),
+    })
+    if inspect.isawaitable(result):
+        await result
 
 
 async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
@@ -225,6 +290,9 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
     output = kwargs.get("output")
     if output is not None and not callable(output):
         raise TypeError("output must be callable or None")
+    on_candidate_result = kwargs.get("on_candidate_result")
+    if on_candidate_result is not None and not callable(on_candidate_result):
+        raise TypeError("on_candidate_result must be callable or None")
     cancel_event = kwargs.get("cancel_event")
     concurrency = max(1, int(kwargs.get("concurrency") or 1))
     capability = str(kwargs.get("required_capability") or "high").lower()
@@ -256,9 +324,26 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
             if skip:
                 result = _fallback(candidate, audit_index, "success", "Filtered by a previously rejected same-pattern candidate", {})
                 result["ai_verdict"] = "filtered_same_pattern"
+                processed_key = {
+                    name: candidate.get(name)
+                    for name in ("file", "line", "function", "vuln_type")
+                }
                 async with result_lock:
                     vulnerabilities.append(result)
-                    processed_keys.append({name: candidate.get(name) for name in ("file", "line", "function", "vuln_type")})
+                    processed_keys.append(processed_key)
+                await _notify_candidate_result(
+                    on_candidate_result,
+                    audit_index=audit_index,
+                    checker_name=str(candidate.get("vuln_type")),
+                    candidate=candidate,
+                    vulnerabilities=[result],
+                    reports=[],
+                    processed_key=processed_key,
+                )
+                await _emit(
+                    output, "item", f"Candidate {audit_index + 1} completed",
+                    audit_index=audit_index, vulnerability_count=1, report_count=0,
+                )
                 return
             checker = catalog[str(candidate.get("vuln_type"))]
             prompt = _candidate_prompt(
@@ -299,6 +384,10 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
                     produced[0]["ai_verdict"] = "no_result"
             else:
                 produced = [_fallback(candidate, audit_index, task_result.status, task_result.text, task_result.output_source)]
+            processed_key = {
+                name: candidate.get(name)
+                for name in ("file", "line", "function", "vuln_type")
+            }
             async with result_lock:
                 vulnerabilities.extend(produced)
                 if reports:
@@ -307,13 +396,34 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
                     not item["confirmed"] and item["ai_verdict"] == "not_confirmed" for item in produced
                 ):
                     rejected_patterns.add(key)
-                processed_keys.append({name: candidate.get(name) for name in ("file", "line", "function", "vuln_type")})
+                processed_keys.append(processed_key)
+            await _notify_candidate_result(
+                on_candidate_result,
+                audit_index=audit_index,
+                checker_name=str(candidate.get("vuln_type")),
+                candidate=candidate,
+                vulnerabilities=produced,
+                reports=reports,
+                processed_key=processed_key,
+            )
             await _emit(
                 output, "item", f"Candidate {audit_index + 1} completed",
                 audit_index=audit_index, vulnerability_count=len(produced), report_count=len(reports),
             )
 
-    await asyncio.gather(*(audit(index, candidate) for index, candidate in enumerate(normalized_candidates)))
+    with opencode_task_context(
+        project_dir=project,
+        work_dir=work_dir,
+        scan_id=str(kwargs["scan_id"]),
+        feedback_entries=feedback,
+        config_path=kwargs.get("task_agent_config"),
+        skill_paths=checker_dirs,
+        cancel_event=cancel_event,
+    ):
+        await asyncio.gather(*(
+            audit(index, candidate)
+            for index, candidate in enumerate(normalized_candidates)
+        ))
     status = "cancelled" if _cancelled(cancel_event) else "success"
     return {
         "status": status,
