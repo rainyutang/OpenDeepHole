@@ -266,6 +266,7 @@ def opencode_task_context(
     work_dir: str | PathLike[str],
     scan_id: str | None = None,
     feedback_entries: list[dict[str, Any]] | None = None,
+    code_graph_mcp: dict[str, Any] | None | object = _UNSET,
     config_path: str | PathLike[str] | None = None,
     skill_paths: list[str | PathLike[str]] | None = None,
     task_metadata: dict[str, Any] | None = None,
@@ -275,19 +276,25 @@ def opencode_task_context(
     """Bind generic host context for one or more component task calls."""
     from .task_service import bind_opencode_execution_context
 
-    with bind_opencode_execution_context(
-        project_dir=Path(project_dir).expanduser().resolve(),
-        work_dir=Path(work_dir).expanduser().resolve(),
-        config_path=(
+    context_kwargs: dict[str, Any] = {
+        "project_dir": Path(project_dir).expanduser().resolve(),
+        "work_dir": Path(work_dir).expanduser().resolve(),
+        "config_path": (
             Path(config_path).expanduser().resolve()
             if config_path is not None
             else None
         ),
-        skill_paths=list(skill_paths or []),
-        scan_id=None if scan_id is None else str(scan_id or ""),
-        feedback_entries=list(feedback_entries or []),
-        task_metadata=dict(task_metadata or {}),
-        on_output=output,
-        cancel_event=cancel_event,
+        "skill_paths": list(skill_paths or []),
+        "scan_id": None if scan_id is None else str(scan_id or ""),
+        "feedback_entries": list(feedback_entries or []),
+        "task_metadata": dict(task_metadata or {}),
+        "on_output": output,
+        "cancel_event": cancel_event,
+    }
+    if code_graph_mcp is not _UNSET:
+        context_kwargs["code_graph_mcp"] = code_graph_mcp
+
+    with bind_opencode_execution_context(
+        **context_kwargs,
     ):
         yield

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import io
 import json
@@ -47,6 +48,7 @@ class _ValidationQueueItem:
     vulnerability: dict
     report_markdown: str
     cancel_event: threading.Event
+    code_graph_mcp: dict | None = None
 
 
 @dataclass
@@ -59,6 +61,7 @@ class _FpReviewQueueItem:
     vulnerability: dict
     feedback_entries: list[dict]
     cancel_event: threading.Event
+    code_graph_mcp: dict | None = None
     processed_offset: int = 0
     planned_task_id: str = ""
 
@@ -116,6 +119,7 @@ async def _run(task, is_resume: bool) -> None:
             retry_processed_offset=task.retry_processed_offset,
             resume_threat_analysis=task.resume_threat_analysis,
             retry_threat_audit_task_ids=task.retry_threat_audit_task_ids,
+            code_graph_mcp=task.code_graph_mcp,
         )
     finally:
         _task_manager.remove(task.scan_id)
@@ -130,6 +134,7 @@ async def handle_task(
     scan_mode: str = "full",
     product: str = "",
     validation_environment: str = "",
+    code_graph_mcp: dict | None = None,
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
 ) -> None:
@@ -152,6 +157,7 @@ async def handle_task(
         scan_mode=scan_mode,
         product=product,
         validation_environment=validation_environment,
+        code_graph_mcp=code_graph_mcp,
         feedback_entries=feedback_entries,
         checker_packages=checker_packages,
     )
@@ -179,6 +185,7 @@ async def handle_resume(
     scan_mode: Optional[str] = None,
     product: Optional[str] = None,
     validation_environment: Optional[str] = None,
+    code_graph_mcp: Optional[dict] = None,
     feedback_entries: Optional[list[dict]] = None,
     checker_packages: Optional[list[dict]] = None,
     retry_candidates: Optional[list[dict]] = None,
@@ -205,6 +212,7 @@ async def handle_resume(
             scan_mode=scan_mode or "full",
             product=product or "",
             validation_environment=validation_environment or "",
+            code_graph_mcp=code_graph_mcp,
             feedback_entries=feedback_entries,
             checker_packages=checker_packages,
             retry_candidates=retry_candidates,
@@ -230,6 +238,11 @@ async def handle_resume(
             task.product = product
         if validation_environment is not None:
             task.validation_environment = validation_environment
+        task.code_graph_mcp = (
+            copy.deepcopy(code_graph_mcp)
+            if isinstance(code_graph_mcp, dict)
+            else None
+        )
         if feedback_entries is not None:
             task.feedback_entries = feedback_entries
         if checker_packages is not None:
@@ -258,6 +271,7 @@ async def handle_fp_review(
     vulnerabilities: list[dict],
     feedback_entries: list[dict] | None = None,
     processed_offset: int = 0,
+    code_graph_mcp: dict | None = None,
 ) -> None:
     """Handle an 'fp_review' command — queue AI false-positive review items."""
     if _config is None or _reporter is None:
@@ -271,6 +285,7 @@ async def handle_fp_review(
             vulnerability=vulnerability,
             feedback_entries=feedback_entries or [],
             processed_offset=processed_offset + offset,
+            code_graph_mcp=code_graph_mcp,
         )
     print(f"Queued {len(vulnerabilities)} FP review item(s) for scan {scan_id}")
 
@@ -283,6 +298,7 @@ async def enqueue_fp_review(
     vulnerability: dict,
     feedback_entries: list[dict] | None = None,
     processed_offset: int = 0,
+    code_graph_mcp: dict | None = None,
     config: Any | None = None,
     reporter: Any | None = None,
 ) -> bool:
@@ -317,6 +333,11 @@ async def enqueue_fp_review(
         project_path=project_path,
         vulnerability=vulnerability,
         feedback_entries=feedback_entries or [],
+        code_graph_mcp=(
+            copy.deepcopy(code_graph_mcp)
+            if isinstance(code_graph_mcp, dict)
+            else None
+        ),
         cancel_event=cancel_event,
         processed_offset=max(0, int(processed_offset or 0)),
         planned_task_id="",
@@ -429,6 +450,7 @@ async def _run_single_fp_review_item(item: _FpReviewQueueItem, processed_offset:
         project_dir=project,
         work_dir=review_dir,
         feedback_entries=item.feedback_entries,
+        code_graph_mcp=item.code_graph_mcp,
         cancel_event=item.cancel_event,
     ):
         result = await run_fp_review(
@@ -510,6 +532,7 @@ async def handle_vulnerability_validation(
     validation_environment: str,
     vulnerability: dict,
     report_markdown: str,
+    code_graph_mcp: dict | None = None,
 ) -> None:
     """Handle a validation command using the Agent-wide environment queue."""
     await enqueue_vulnerability_validation(
@@ -521,6 +544,7 @@ async def handle_vulnerability_validation(
         validation_environment=validation_environment,
         vulnerability=vulnerability,
         report_markdown=report_markdown,
+        code_graph_mcp=code_graph_mcp,
     )
 
 
@@ -534,6 +558,7 @@ async def enqueue_vulnerability_validation(
     validation_environment: str,
     vulnerability: dict,
     report_markdown: str,
+    code_graph_mcp: dict | None = None,
     config: Any | None = None,
     reporter: Any | None = None,
     report_queued: bool = False,
@@ -562,6 +587,11 @@ async def enqueue_vulnerability_validation(
         validation_environment=validation_environment,
         vulnerability=vulnerability,
         report_markdown=report_markdown,
+        code_graph_mcp=(
+            copy.deepcopy(code_graph_mcp)
+            if isinstance(code_graph_mcp, dict)
+            else None
+        ),
         cancel_event=cancel_event,
     )
 
@@ -778,6 +808,7 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
             scan_id=item.scan_id,
             project_dir=project,
             work_dir=validation_work_dir,
+            code_graph_mcp=item.code_graph_mcp,
             cancel_event=item.cancel_event,
         ):
             result = await run_vulnerability_validation(

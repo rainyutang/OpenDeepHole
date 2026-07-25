@@ -74,6 +74,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             scan_mode=msg.get("scan_mode", "full"),
             product=msg.get("product", ""),
             validation_environment=msg.get("validation_environment", ""),
+            code_graph_mcp=(
+                msg.get("code_graph_mcp")
+                if isinstance(msg.get("code_graph_mcp"), dict)
+                else None
+            ),
             feedback_entries=msg.get("feedback_entries", []),
             checker_packages=msg.get("checker_packages", []),
         )
@@ -91,6 +96,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             scan_mode=msg.get("scan_mode"),
             product=msg.get("product"),
             validation_environment=msg.get("validation_environment"),
+            code_graph_mcp=(
+                msg.get("code_graph_mcp")
+                if isinstance(msg.get("code_graph_mcp"), dict)
+                else None
+            ),
             feedback_entries=msg.get("feedback_entries"),
             checker_packages=msg.get("checker_packages"),
             retry_candidates=msg.get("retry_candidates"),
@@ -109,6 +119,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             vulnerabilities=msg.get("vulnerabilities", []),
             feedback_entries=msg.get("feedback_entries", []),
             processed_offset=int(msg.get("processed_offset") or 0),
+            code_graph_mcp=(
+                msg.get("code_graph_mcp")
+                if isinstance(msg.get("code_graph_mcp"), dict)
+                else None
+            ),
         )
     elif cmd_type == "vulnerability_validation":
         from deephole_client.updater import ensure_runtime_updated
@@ -146,6 +161,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             validation_environment=msg.get("validation_environment", ""),
             vulnerability=msg.get("vulnerability") or {},
             report_markdown=msg.get("report_markdown", ""),
+            code_graph_mcp=(
+                msg.get("code_graph_mcp")
+                if isinstance(msg.get("code_graph_mcp"), dict)
+                else None
+            ),
         )
     elif cmd_type == "vulnerability_validation_stop":
         await agent_server.handle_vulnerability_validation_stop(

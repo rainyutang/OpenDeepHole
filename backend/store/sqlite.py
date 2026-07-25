@@ -10,6 +10,7 @@ from pathlib import Path
 
 from backend.scan_metrics import VulnStat
 from backend.models import (
+    AgentMcpConfig,
     AgentOpenCodePoolStatus,
     Candidate,
     FeedbackEntry,
@@ -101,6 +102,19 @@ def _opencode_pool_status(value: str | None) -> OpenCodePoolStatus | None:
         return None
 
 
+def _scan_code_graph_mcp(value: str | None) -> AgentMcpConfig | None:
+    try:
+        data = json.loads(value or "")
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data:
+        return None
+    try:
+        return AgentMcpConfig.model_validate(data)
+    except Exception:
+        return None
+
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS scans (
     scan_id            TEXT PRIMARY KEY,
@@ -119,7 +133,8 @@ CREATE TABLE IF NOT EXISTS scans (
     product            TEXT NOT NULL DEFAULT '',
     validation_environment TEXT NOT NULL DEFAULT '',
     public_access_token TEXT NOT NULL DEFAULT '',
-    opencode_pool      TEXT NOT NULL DEFAULT '{}'
+    opencode_pool      TEXT NOT NULL DEFAULT '{}',
+    code_graph_mcp_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -461,6 +476,8 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN public_access_token TEXT NOT NULL DEFAULT ''")
         if "opencode_pool" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN opencode_pool TEXT NOT NULL DEFAULT '{}'")
+        if "code_graph_mcp_json" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN code_graph_mcp_json TEXT")
         agent_cur = self._conn.execute("PRAGMA table_info(agents)")
         agent_cols = {r[1] for r in agent_cur.fetchall()}
         if "mcp_probe_json" not in agent_cols:
@@ -879,6 +896,7 @@ class SqliteScanStore(ScanStoreBase):
             ),
             user_id=row["user_id"] if row["user_id"] is not None else "",
             public_access_token=row["public_access_token"] if row["public_access_token"] is not None else "",
+            code_graph_mcp=_scan_code_graph_mcp(row["code_graph_mcp_json"]),
         )
 
     # -- Scan lifecycle --
@@ -898,8 +916,9 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, agent_key, project_path, code_scan_path, scan_name,
-                     scan_mode, product, validation_environment, public_access_token, opencode_pool)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     scan_mode, product, validation_environment, public_access_token, opencode_pool,
+                     code_graph_mcp_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -928,6 +947,11 @@ class SqliteScanStore(ScanStoreBase):
                     meta.validation_environment,
                     meta.public_access_token,
                     scan.opencode_pool.model_dump_json() if scan.opencode_pool else "{}",
+                    (
+                        meta.code_graph_mcp.model_dump_json()
+                        if meta.code_graph_mcp is not None
+                        else None
+                    ),
                 ),
             )
             self._replace_scan_candidates_locked(scan.scan_id, scan.candidates)

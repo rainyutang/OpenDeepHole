@@ -15,6 +15,7 @@ from backend.api import scan as scan_api
 from backend.auth import hash_password
 from backend.models import (
     AgentInfo,
+    AgentMcpConfig,
     AgentRemoteConfig,
     BatchMarkRequest,
     BatchUnmarkRequest,
@@ -49,6 +50,7 @@ class IntegrationScanRequest(BaseModel):
     product: str = ""
     validation_environment: str = ""
     agent_config: AgentRemoteConfig = Field(default_factory=AgentRemoteConfig)
+    code_graph_mcp: AgentMcpConfig | None = None
 
 
 class IntegrationScanResponse(BaseModel):
@@ -199,6 +201,12 @@ async def create_integration_scan(
 ) -> IntegrationScanResponse:
     agent_id = _resolve_agent_id(body.agent_name)
     checker_names = _public_checker_names()
+    code_graph_mcp = body.code_graph_mcp
+    if code_graph_mcp is None and body.agent_config.code_graph.enabled:
+        # v3 integrations supplied CodeGraph inside the Agent-wide config.
+        # Preserve that behavior for this scan only; v4 never hot-loads it
+        # globally on the Agent.
+        code_graph_mcp = body.agent_config.code_graph.model_copy(deep=True)
     await _sync_agent_config(agent_id, body.agent_config)
 
     public_access_token = secrets.token_urlsafe(32)
@@ -212,6 +220,7 @@ async def create_integration_scan(
             validation_environment=body.validation_environment,
             checkers=checker_names,
             feedback_ids=[],
+            code_graph_mcp=code_graph_mcp,
         ),
         request,
         current_user,

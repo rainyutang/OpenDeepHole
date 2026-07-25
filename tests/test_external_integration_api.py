@@ -13,6 +13,8 @@ from backend.api import integration as integration_api
 from backend.api import scan as scan_api
 from backend.models import (
     AgentInfo,
+    AgentMcpConfig,
+    AgentMcpRemoteConfig,
     AgentRemoteConfig,
     FeedbackEntry,
     MarkRequest,
@@ -79,6 +81,16 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                 "admin_check": SimpleNamespace(visibility="admin"),
             }
             send = AsyncMock(return_value=True)
+            scan_graph = AgentMcpConfig(
+                enabled=True,
+                name="integration-graph",
+                transport="remote",
+                timeout_seconds=30,
+                remote=AgentMcpRemoteConfig(
+                    url="http://graph.test/mcp",
+                    headers={"Authorization": "Bearer per-scan-secret"},
+                ),
+            )
             with (
                 patch("backend.api.integration.get_scan_store", return_value=store),
                 patch("backend.api.scan.get_scan_store", return_value=store),
@@ -105,6 +117,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                             agent_config=AgentRemoteConfig(
                                 opencode={"tool": "opencode", "executable": "opencode", "model": "model"},
                             ),
+                            code_graph_mcp=scan_graph,
                         ),
                         _request(),
                         current_user=user,
@@ -118,8 +131,14 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             self.assertEqual(loaded[1].scan_items, ["public_check"])
             self.assertEqual(loaded[1].validation_environment, "仿真UBBPi板环境")
             self.assertTrue(loaded[1].public_access_token)
+            self.assertEqual(loaded[1].code_graph_mcp, scan_graph)
+            self.assertNotIn("code_graph_mcp", loaded[1].model_dump())
             self.assertEqual([call.args[1]["type"] for call in send.call_args_list], ["config", "task"])
             self.assertEqual(send.call_args_list[1].args[1]["validation_environment"], "仿真UBBPi板环境")
+            self.assertEqual(
+                send.call_args_list[1].args[1]["code_graph_mcp"],
+                scan_graph.model_dump(mode="json"),
+            )
 
     def test_public_scan_token_allows_marking_the_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

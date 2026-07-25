@@ -359,13 +359,18 @@ def _upgrade_managed_policy(
 
 
 def _upgrade_managed_remote(remote: dict) -> dict:
-    """Upgrade managed v2 defaults while preserving explicit v3 choices."""
+    """Upgrade older managed payloads to the scan-level CodeGraph v4 contract."""
     try:
         schema_version = int(remote.get("schema_version", 0) or 0)
     except (TypeError, ValueError):
         schema_version = 0
-    if schema_version >= 3:
+    if schema_version >= 4:
         return remote
+    if schema_version == 3:
+        migrated = copy.deepcopy(remote)
+        migrated["schema_version"] = 4
+        migrated.pop("code_graph", None)
+        return migrated
     if not (
         schema_version == 2
         or isinstance(remote.get("base"), dict)
@@ -388,7 +393,8 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         return migrated
 
     migrated = copy.deepcopy(remote)
-    migrated["schema_version"] = 3
+    migrated["schema_version"] = 4
+    migrated.pop("code_graph", None)
     base = migrated.get("base")
     if not isinstance(base, dict):
         base = {}
@@ -520,7 +526,6 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         _normalize_threat_analysis_config(config.threat_analysis)
         _apply_policy(config.vulnerability_mining, remote.get("vulnerability_mining"))
         _apply_policy(config.false_positive, remote.get("false_positive"))
-        config.code_graph = _mcp_config(remote.get("code_graph"), config.code_graph)
         config.product_info = _mcp_config(remote.get("product_info"), config.product_info)
         validation = remote.get("vulnerability_validation")
         if isinstance(validation, dict):
@@ -653,7 +658,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "opencode_config": config.opencode.config_jsonc,
         "base": {
             "tool": config.opencode.tool,
@@ -669,7 +674,6 @@ def remote_config_dict(config: AgentConfig) -> dict:
             "enabled": config.threat_analysis.enabled,
             "model_policy": dataclasses.asdict(config.threat_analysis.model_policy),
         },
-        "code_graph": dataclasses.asdict(config.code_graph),
         "product_info": dataclasses.asdict(config.product_info),
         "vulnerability_mining": dataclasses.asdict(config.vulnerability_mining),
         "false_positive": dataclasses.asdict(config.false_positive),
@@ -805,7 +809,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v3 remotely-managed fields while preserving local bootstrap fields."""
+    """Persist v4 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return

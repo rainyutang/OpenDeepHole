@@ -604,19 +604,19 @@ export interface AgentValidatorCatalog {
 }
 
 export interface AgentRemoteConfig {
-  schema_version: 3;
+  schema_version: 4;
   opencode_config: string;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;
-  code_graph: AgentMcpConfig;
   product_info: AgentMcpConfig;
   vulnerability_mining: AgentModelTaskPolicy;
   false_positive: AgentModelTaskPolicy;
   vulnerability_validation: AgentVulnerabilityValidationConfig;
 }
 
-export type AgentMcpTarget = "code_graph" | "product_info";
+export type AgentMcpTarget = "product_info";
+export type AgentMcpProbeTarget = AgentMcpTarget | "scan_code_graph";
 export type AgentMcpRuntimeState = "active" | "reload_pending" | "next_task";
 
 export interface AgentMcpLiveRuntimeStatus {
@@ -629,7 +629,7 @@ export interface AgentMcpLiveRuntimeStatus {
 }
 
 export interface AgentMcpProbeResult {
-  target: AgentMcpTarget;
+  target: AgentMcpProbeTarget;
   config_fingerprint: string;
   success: boolean;
   checked_at: string;
@@ -653,7 +653,6 @@ export interface AgentMcpTargetStatus {
 export interface AgentMcpStatusResponse {
   agent_key: string;
   online: boolean;
-  code_graph: AgentMcpTargetStatus;
   product_info: AgentMcpTargetStatus;
 }
 

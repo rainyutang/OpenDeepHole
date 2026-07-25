@@ -11,6 +11,8 @@ from backend.api import scan as scan_api
 from backend.models import (
     AgentFpReviewStageOutput,
     AgentInfo,
+    AgentMcpConfig,
+    AgentMcpRemoteConfig,
     AgentScanCandidates,
     AgentScanFinish,
     Candidate,
@@ -738,6 +740,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
     def test_resume_preserves_total_candidate_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
+            graph = AgentMcpConfig(
+                enabled=True,
+                name="resume-graph",
+                transport="remote",
+                remote=AgentMcpRemoteConfig(url="http://graph.test/mcp"),
+            )
+            meta = _meta()
+            meta.code_graph_mcp = graph
             store.save_scan(
                 _scan(
                     "scan-1",
@@ -746,7 +756,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     processed=4,
                     error="Agent 断开连接",
                 ),
-                _meta(),
+                meta,
             )
             agent = AgentInfo(
                 agent_id="agent-old",
@@ -757,10 +767,11 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
             user = User(user_id="user-1", username="alice", role="user")
 
+            send = AsyncMock(return_value=True)
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
                 patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
-                patch("backend.api.agent.send_agent_command", new=AsyncMock(return_value=True)),
+                patch("backend.api.agent.send_agent_command", new=send),
             ):
                 request = SimpleNamespace(base_url="http://testserver/")
                 asyncio.run(scan_api.resume_scan("scan-1", request=request, current_user=user))
@@ -769,6 +780,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.total_candidates, 10)
             self.assertEqual(stored.processed_candidates, 4)
             self.assertEqual(stored.status, ScanItemStatus.PENDING)
+            self.assertEqual(
+                send.await_args.args[1]["code_graph_mcp"],
+                graph.model_dump(mode="json"),
+            )
 
     def test_retry_incomplete_scan_dispatches_retryable_failed_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

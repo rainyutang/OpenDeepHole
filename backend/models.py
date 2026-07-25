@@ -656,7 +656,6 @@ class AgentMcpTargetStatus(BaseModel):
 class AgentMcpStatusResponse(BaseModel):
     agent_key: str
     online: bool = False
-    code_graph: AgentMcpTargetStatus = AgentMcpTargetStatus()
     product_info: AgentMcpTargetStatus = AgentMcpTargetStatus()
 
 
@@ -751,7 +750,7 @@ def _upgrade_agent_policy(
 def _upgrade_agent_v2_config(value: dict) -> dict:
     """Migrate managed v2 stage defaults without touching model rows."""
     migrated = copy.deepcopy(value)
-    migrated["schema_version"] = 3
+    migrated["schema_version"] = 4
     base = migrated.get("base")
     if not isinstance(base, dict):
         base = {}
@@ -821,20 +820,25 @@ class AgentVulnerabilityValidationConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: int = 3
+    schema_version: int = 4
     opencode_config: str = "{}"
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
-    code_graph: AgentMcpConfig = AgentMcpConfig(
-        name="codegraph",
-        local=AgentMcpLocalConfig(
-            executable="codegraph",
-            args=["serve", "--mcp"],
-            environment={
-                "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status",
-            },
+    # v3 compatibility input only. Code graph MCPs are snapshotted per scan in
+    # v4 and this value is deliberately omitted from managed Agent output.
+    code_graph: AgentMcpConfig = Field(
+        default_factory=lambda: AgentMcpConfig(
+            name="codegraph",
+            local=AgentMcpLocalConfig(
+                executable="codegraph",
+                args=["serve", "--mcp"],
+                environment={
+                    "CODEGRAPH_MCP_TOOLS": "explore,node,search,callers,callees,impact,files,status",
+                },
+            ),
         ),
+        exclude=True,
     )
     product_info: AgentMcpConfig = AgentMcpConfig(name="product-info")
     vulnerability_mining: AgentModelTaskPolicy = AgentModelTaskPolicy()
@@ -846,15 +850,19 @@ class AgentRemoteConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
-        """Accept older Agent payloads while emitting only the v3 contract."""
+        """Accept older Agent payloads while emitting only the v4 contract."""
         if not isinstance(value, dict):
             return value
         try:
             schema_version = int(value.get("schema_version", 0) or 0)
         except (TypeError, ValueError):
             schema_version = 0
-        if schema_version >= 3:
+        if schema_version >= 4:
             return value
+        if schema_version == 3:
+            migrated = copy.deepcopy(value)
+            migrated["schema_version"] = 4
+            return migrated
         if schema_version == 2 or "base" in value or "model_pool" in value:
             return _upgrade_agent_v2_config(value)
         legacy = dict(value)
@@ -969,6 +977,7 @@ class CreateScanRequest(BaseModel):
     validation_environment: str = ""
     checkers: list[str]
     feedback_ids: list[str] = []
+    code_graph_mcp: AgentMcpConfig | None = None
 
 
 class ValidationTarget(BaseModel):
@@ -1003,6 +1012,13 @@ class ScanMeta(BaseModel):
     validation_environment: str = ""
     user_id: str = ""
     public_access_token: str = ""
+    # Stored for internal task dispatch only. Public scan responses must never
+    # echo connection headers or environment values.
+    code_graph_mcp: AgentMcpConfig | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
 
 
 class ScanSummary(BaseModel):

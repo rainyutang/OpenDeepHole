@@ -276,3 +276,98 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             0,
             done=True,
         )
+
+    async def test_custom_scan_graph_skips_builtin_gateway_and_enters_task_context(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        config.threat_analysis.enabled = False
+        config.vulnerability_validation.enabled = False
+        graph_config = {
+            "enabled": True,
+            "name": "scan-graph",
+            "transport": "remote",
+            "timeout_seconds": 30,
+            "remote": {
+                "url": "http://127.0.0.1:9010/mcp",
+                "headers": {"Authorization": "Bearer scan-secret"},
+            },
+            "local": {"executable": "", "args": [], "environment": {}},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            task_context = MagicMock(return_value=nullcontext())
+            builtin_mcp = MagicMock()
+            unregister_builtin = MagicMock()
+
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    task_context,
+                ),
+                patch(
+                    "deephole_client.codegraph.prepare_scan_codegraph",
+                    new=AsyncMock(return_value=True),
+                ) as prepare,
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_static_analysis",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "candidates": [],
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_candidate_audit",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "vulnerabilities": [],
+                        "skill_reports": {},
+                        "processed_keys": [],
+                    }),
+                ),
+                patch(
+                    "deephole_client.local_mcp.LocalMCPServer",
+                    builtin_mcp,
+                ),
+                patch(
+                    "deephole_client.mcp_registry.unregister",
+                    unregister_builtin,
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="custom graph",
+                    product="",
+                    validation_environment="",
+                    checker_names=["npd"],
+                    scan_id="scan-custom",
+                    cancel_event=threading.Event(),
+                    code_graph_mcp=graph_config,
+                )
+
+        prepare.assert_awaited_once()
+        builtin_mcp.assert_not_called()
+        unregister_builtin.assert_not_called()
+        self.assertEqual(
+            task_context.call_args.kwargs["code_graph_mcp"],
+            graph_config,
+        )

@@ -173,7 +173,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             list(edit).index("~/.opendeephole/scans/**"),
         )
 
-    def test_build_opencode_config_includes_managed_mcp_entries(self) -> None:
+    def test_build_opencode_config_keeps_product_mcp_global_but_not_code_graph(self) -> None:
         fake_config = SimpleNamespace(
             code_graph=SimpleNamespace(
                 enabled=True,
@@ -209,10 +209,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         ):
             config = build_opencode_config("http://127.0.0.1:9123/mcp")
 
-        self.assertEqual(
-            config["mcp"]["codegraph"]["command"],
-            ["codegraph", "serve", "--mcp"],
-        )
+        self.assertNotIn("codegraph", config["mcp"])
         self.assertEqual(config["mcp"]["product-info"]["type"], "remote")
         self.assertIs(config["mcp"]["product-info"]["oauth"], False)
 

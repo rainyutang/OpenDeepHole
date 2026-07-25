@@ -1,5 +1,5 @@
 # OpenDeepHole Agent bootstrap and managed configuration.
-# server_url / agent_name / owner_token are local-only; the remaining v3
+# server_url / agent_name / owner_token are local-only; the remaining v4
 # sections are managed by the Web "Agent 配置" page after first connection.
 
 server_url: "http://your-server:8000"
@@ -7,7 +7,7 @@ agent_name: ""
 owner_token: ""
 checkers: []
 
-schema_version: 3
+schema_version: 4
 opencode_config: |
   {}
 base:
@@ -50,20 +50,6 @@ threat_analysis:
     required_capability: "high"
     timeout_seconds: 3600
     max_retries: 2
-
-code_graph:
-  enabled: false
-  name: "codegraph"
-  transport: "local"
-  timeout_seconds: 300
-  local:
-    executable: "codegraph"
-    args: ["serve", "--mcp"]
-    environment:
-      CODEGRAPH_MCP_TOOLS: "explore,node,search,callers,callees,impact,files,status"
-  remote:
-    url: ""
-    headers: {}
 
 product_info:
   enabled: false

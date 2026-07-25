@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-07-25
+
+- **新增** Web 新建扫描必须配置本次扫描专属的代码图谱 MCP，支持本地进程或远端服务、环境变量、静态请求头和连接超时，并可在提交前通过目标 Agent 临时检测连接；配置作为私有快照持久化并贯穿扫描、续扫、去误报和漏洞验证，不再写入 Agent 全局配置
+- **安全** OpenCode 按扫描动态连接代码图谱 MCP；同一源码目录内相同扫描可并发共享连接，不同扫描会等待并切换，且会断开内置或其它扫描的源码图谱，避免跨扫描串用；连接或初始化失败时继续使用文件工具，不回退到其它代码图谱
+- **测试** 增加可独立启动的确定性假代码图谱 MCP Server，并通过真实 OpenCode Serve 验证两套图谱的工具发现、连接切换和并发隔离
+
 ## 2026-07-24
 
 - **修复** 完整 Agent 在初始化 `~/.opendeephole/opencode_workspace` 时同步原生威胁分析的四个 SKILL 及 `references/attack_mode.json`，威胁分析入口不再把 Agent 安装目录追加到 `skill_paths`；最终全局 `opencode.json` 显式允许读取 `~/.opendeephole/opencode_workspace/.opencode` 及注册的 Skill 根，standalone 只使用 `task-agent.yaml` 中声明的 Skill 路径

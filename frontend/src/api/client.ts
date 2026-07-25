@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -217,6 +217,7 @@ export async function createScan(body: {
   validation_environment?: string;
   checkers: string[];
   feedback_ids?: string[];
+  code_graph_mcp: AgentMcpConfig;
 }): Promise<ScanStartResponse> {
   const { data } = await api.post<ScanStartResponse>("/api/scan", body);
   return data;
@@ -584,6 +585,17 @@ export async function getAgentMcpStatus(agentKey: string): Promise<AgentMcpStatu
 export async function probeAgentMcp(agentKey: string, target: AgentMcpTarget): Promise<AgentMcpProbeResult> {
   const { data } = await api.post<AgentMcpProbeResult>(
     `/api/agent-configs/${agentKey}/mcp-probe/${target}`,
+  );
+  return data;
+}
+
+export async function probeScanCodeGraphMcp(
+  agentKey: string,
+  config: AgentMcpConfig,
+): Promise<AgentMcpProbeResult> {
+  const { data } = await api.post<AgentMcpProbeResult>(
+    `/api/agent-configs/${agentKey}/mcp-probe/scan_code_graph`,
+    config,
   );
   return data;
 }

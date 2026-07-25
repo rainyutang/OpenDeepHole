@@ -30,14 +30,13 @@ import type {
 } from "../types";
 
 interface Props { onBack: () => void }
-type Section = "base" | "models" | "opencode" | "threat" | "codegraph" | "product" | "mining" | "fp" | "validation";
+type Section = "base" | "models" | "opencode" | "threat" | "product" | "mining" | "fp" | "validation";
 
 const sections: { id: Section; label: string }[] = [
   { id: "base", label: "基础配置" },
   { id: "models", label: "模型配置" },
   { id: "opencode", label: "OpenCode 配置" },
   { id: "threat", label: "威胁分析" },
-  { id: "codegraph", label: "代码图谱" },
   { id: "product", label: "产品信息" },
   { id: "mining", label: "漏洞挖掘" },
   { id: "fp", label: "去误报" },
@@ -60,18 +59,11 @@ const emptyMcpRuntime = () => ({
   loaded_directories: 0, total_directories: 0,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
-  schema_version: 3,
+  schema_version: 4,
   opencode_config: "{}",
   base: { tool: "nga", executable: "nga", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
   model_pool: { global_concurrency: 4, models: [] },
   threat_analysis: { enabled: true, model_policy: policy("high", 2) },
-  code_graph: {
-    ...mcp("codegraph"),
-    local: {
-      executable: "codegraph", args: ["serve", "--mcp"],
-      environment: { CODEGRAPH_MCP_TOOLS: "explore,node,search,callers,callees,impact,files,status" },
-    },
-  },
   product_info: mcp("product-info"),
   vulnerability_mining: policy("high"),
   false_positive: policy("high"),
@@ -483,7 +475,7 @@ export default function AgentConfigPage({ onBack }: Props) {
   }, [agentKey, section]);
 
   useEffect(() => {
-    if (!agentKey || !selectedAgent?.online || !["codegraph", "product"].includes(section)) return;
+    if (!agentKey || !selectedAgent?.online || section !== "product") return;
     let disposed = false;
     let timer = 0;
     const refresh = async () => {
@@ -508,8 +500,7 @@ export default function AgentConfigPage({ onBack }: Props) {
     if (timeWindowError) { setMessage(timeWindowError); return; }
     setSaving(true); setMessage("");
     try {
-      const mcpChanged = JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)
-        || JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info);
+      const mcpChanged = JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info);
       const opencodeChanged = config.opencode_config !== savedConfig.opencode_config;
       await updateAgentConfig(agentKey, config);
       setSavedConfig(config); setDirty(false);
@@ -558,14 +549,15 @@ export default function AgentConfigPage({ onBack }: Props) {
         const base = current || {
           agent_key: agentKey,
           online: true,
-          code_graph: { enabled: savedConfig.code_graph.enabled, stale: false, last_probe: null, runtime: emptyMcpRuntime() },
           product_info: { enabled: savedConfig.product_info.enabled, stale: false, last_probe: null, runtime: emptyMcpRuntime() },
         };
-        const existing = target === "code_graph" ? base.code_graph : base.product_info;
-        const targetStatus = { enabled: target === "code_graph" ? savedConfig.code_graph.enabled : savedConfig.product_info.enabled, stale: false, last_probe: result, runtime: existing.runtime };
-        return target === "code_graph"
-          ? { ...base, online: true, code_graph: targetStatus }
-          : { ...base, online: true, product_info: targetStatus };
+        const targetStatus = {
+          enabled: savedConfig.product_info.enabled,
+          stale: false,
+          last_probe: result,
+          runtime: base.product_info.runtime,
+        };
+        return { ...base, online: true, product_info: targetStatus };
       });
       setMessage(result.success ? `MCP 检测成功，发现 ${result.tool_count} 个工具` : `MCP 检测失败：${result.error}`);
     } catch (error: any) {
@@ -737,7 +729,6 @@ export default function AgentConfigPage({ onBack }: Props) {
             </details>
           </div>}
           {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, enabled: e.target.checked } })} />启用威胁分析</label><PolicyEditor value={config.threat_analysis.model_policy} onChange={(model_policy) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy } })} /><p className="text-sm text-slate-400">这里的超时与重试由统一任务服务执行；原生威胁分析实现无需接收超时参数。</p></div>}
-          {section === "codegraph" && <McpEditor value={config.code_graph} onChange={(value) => setCfg({ ...config, code_graph: value })} status={mcpStatus?.code_graph || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.code_graph) !== JSON.stringify(savedConfig.code_graph)} probing={probingTarget === "code_graph"} reloading={reloadingTarget === "code_graph"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("code_graph")} onReload={() => reloadMcp("code_graph")} />}
           {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} status={mcpStatus?.product_info || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info)} probing={probingTarget === "product_info"} reloading={reloadingTarget === "product_info"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("product_info")} onReload={() => reloadMcp("product_info")} />}
           {section === "mining" && <PolicyEditor value={config.vulnerability_mining} onChange={(value) => setCfg({ ...config, vulnerability_mining: value })} />}
           {section === "fp" && <PolicyEditor value={config.false_positive} onChange={(value) => setCfg({ ...config, false_positive: value })} />}

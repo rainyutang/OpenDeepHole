@@ -25,6 +25,7 @@ class AgentResultPathTests(unittest.TestCase):
                 self.assertEqual(raw["storage"]["scans_dir"], str(scan_dir))
                 self.assertEqual(raw["storage"]["projects_dir"], str(scan_dir.parent))
                 self.assertEqual(raw["opencode"]["serve_port"], 4317)
+                self.assertNotIn("code_graph", raw)
                 self.assertEqual(
                     raw["threat_analysis"]["model_policy"],
                     {

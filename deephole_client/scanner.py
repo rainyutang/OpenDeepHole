@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import threading
 from pathlib import Path
@@ -106,6 +107,7 @@ async def _report_process_vulnerabilities(
     product: str,
     validation_environment: str,
     feedback_entries: list[dict[str, Any]],
+    code_graph_mcp: dict[str, Any] | None,
     values: list[Any],
 ) -> list[Vulnerability]:
     reported: list[Vulnerability] = []
@@ -132,6 +134,7 @@ async def _report_process_vulnerabilities(
                 project_path=str(project_path),
                 feedback_entries=feedback_entries,
                 processed_offset=int(fp_info.get("processed") or 0),
+                code_graph_mcp=code_graph_mcp,
             )
         if (
             config.vulnerability_validation.enabled
@@ -158,6 +161,7 @@ async def _report_process_vulnerabilities(
                 product=product,
                 validation_environment=validation_environment,
                 report_queued=True,
+                code_graph_mcp=code_graph_mcp,
             )
     return reported
 
@@ -269,6 +273,7 @@ async def run_scan(
     resume_threat_analysis: bool = False,
     retry_threat_audit_task_ids: list[str] | None = None,
     scan_mode: str = SCAN_MODE_FULL,
+    code_graph_mcp: dict[str, Any] | None = None,
 ) -> None:
     """Coordinate independent processes and report their results."""
     feedback_entries = list(feedback_entries or [])
@@ -322,6 +327,22 @@ async def run_scan(
     await emit("init", f"Project: {project}")
     await emit("init", f"Code scan path: {scan_root}")
     await emit("init", f"Scan mode: {normalized_mode}")
+
+    if isinstance(code_graph_mcp, dict):
+        code_graph_mcp = copy.deepcopy(code_graph_mcp)
+        from .codegraph import prepare_scan_codegraph
+
+        graph_ready = await prepare_scan_codegraph(
+            code_graph_mcp,
+            project,
+            emit=lambda message: emit("code_graph_mcp", str(message)),
+        )
+        if not graph_ready:
+            code_graph_mcp["enabled"] = False
+            await emit(
+                "code_graph_mcp",
+                "Scan code graph MCP preparation failed; continuing with file tools only",
+            )
 
     static_rule_roots = [
         Path(__file__).resolve().parent / "static_analysis" / "rules",
@@ -390,25 +411,37 @@ async def run_scan(
             print(str(line), flush=True)
 
     try:
-        from .local_mcp import LocalMCPServer
-        from . import mcp_registry
+        if code_graph_mcp is None:
+            from .local_mcp import LocalMCPServer
+            from . import mcp_registry
 
-        mcp_server = LocalMCPServer(project_dir=project, project_id=scan_id)
-        mcp_port = mcp_server.start()
-        mcp_registry.register(project, mcp_port, scan_id)
-        from .opencode_integration import get_global_opencode_workspace
+            mcp_server = LocalMCPServer(project_dir=project, project_id=scan_id)
+            mcp_port = mcp_server.start()
+            mcp_registry.register(project, mcp_port, scan_id)
+            from .opencode_integration import get_global_opencode_workspace
 
-        get_global_opencode_workspace(mcp_port=mcp_port)
+            get_global_opencode_workspace(mcp_port=mcp_port)
+            await emit("mcp_ready", f"Built-in code MCP ready on port {mcp_port}")
+        elif bool(code_graph_mcp.get("enabled")):
+            await emit(
+                "mcp_ready",
+                "Scan-specific code graph MCP selected; runtime connection will be verified before each model task",
+            )
+        else:
+            await emit(
+                "mcp_ready",
+                "Scan-specific code graph MCP is unavailable; model tasks will use file tools only",
+            )
         pool_task = asyncio.create_task(
             reporter.publish_opencode_pool_until(scan_id, pool_stop),
         )
-        await emit("mcp_ready", f"Local code MCP ready on port {mcp_port}")
 
         with opencode_task_context(
             scan_id=scan_id,
             project_dir=project,
             work_dir=scan_dir,
             feedback_entries=feedback_entries,
+            code_graph_mcp=code_graph_mcp,
             output=task_output,
             cancel_event=cancel_event,
         ):
@@ -561,6 +594,7 @@ async def run_scan(
                         product=product,
                         validation_environment=validation_environment,
                         feedback_entries=feedback_entries,
+                        code_graph_mcp=code_graph_mcp,
                         values=list(
                             audit_result.get("vulnerabilities") or [],
                         ),
@@ -651,12 +685,12 @@ async def run_scan(
                 mcp_server.stop()
             except Exception:
                 pass
-        try:
-            from . import mcp_registry
+            try:
+                from . import mcp_registry
 
-            mcp_registry.unregister(project)
-        except Exception:
-            pass
+                mcp_registry.unregister(project)
+            except Exception:
+                pass
 
 
 __all__ = ["run_scan"]

@@ -632,6 +632,14 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
         reference_path.parent.mkdir(parents=True)
         reference_path.write_text("[]", encoding="utf-8")
         configured_skill_root.mkdir()
+        scan_graph = {
+            "enabled": True,
+            "name": "scan-graph",
+            "transport": "remote",
+            "timeout_seconds": 30,
+            "remote": {"url": "http://graph.test/mcp", "headers": {}},
+            "local": {"executable": "", "args": [], "environment": {}},
+        }
 
         async def run_prompt(**kwargs):
             captured.update(kwargs)
@@ -690,6 +698,7 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
                     "reason": "边界检查缺失",
                     "function_source": "void parse(void) {}",
                 },),
+                code_graph_mcp=scan_graph,
                 on_output=output.append,
             ):
                 original_prompt = " \nreturn an answer exactly as written\n "
@@ -707,6 +716,8 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
         assert result.model == "provider/actual-model"
         assert result.output_source.attempt == 1
         assert captured["mcp_tools"] is None
+        assert captured["scan_id"] == "scan-7"
+        assert captured["code_graph_mcp"] == scan_graph
         assert captured["timeout"] == 12
         assert captured["return_details"] is True
         assert captured["show_serve_status"] is True
@@ -714,8 +725,11 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
         assert captured["prompt"] == original_prompt
         assert "JSON Schema" not in captured["prompt"]
         assert "JSON Schema" not in captured["system_prompt"]
-        assert "## CodeGraph 项目范围" in captured["system_prompt"]
-        assert f"projectPath={project_dir.resolve()}" in captured["system_prompt"]
+        assert "## 扫描代码图谱" in captured["system_prompt"]
+        assert "当前任务已绑定本次扫描专属的代码图谱 MCP" in captured["system_prompt"]
+        assert str(project_dir.resolve()) in captured["system_prompt"]
+        assert "本次扫描标识为 `scan-7`" in captured["system_prompt"]
+        assert "projectPath=" not in captured["system_prompt"]
         assert "## 已选择的扫描反馈" in captured["system_prompt"]
         assert "仍需核验当前代码" in captured["system_prompt"]
         assert "用户理由：边界检查缺失" in captured["system_prompt"]

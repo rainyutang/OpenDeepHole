@@ -598,6 +598,16 @@ async def create_agent_scan(
             status_code=400,
             detail="所选 Agent 尚未配置启用的显式模型，请先在 Agent 配置页面手动添加模型",
         )
+    code_graph_mcp = None
+    if body.code_graph_mcp is not None:
+        from backend.api.agent import _validate_mcp_config
+
+        _validate_mcp_config(
+            body.code_graph_mcp,
+            label="扫描代码图谱",
+            require_enabled=True,
+        )
+        code_graph_mcp = body.code_graph_mcp.model_copy(deep=True)
 
     scan_mode = _normalize_scan_mode(body.scan_mode)
     selected_checkers = checker_names if checker_names is not None else body.checkers
@@ -664,6 +674,7 @@ async def create_agent_scan(
         validation_environment=validation_environment,
         user_id=current_user.user_id,
         public_access_token=public_access_token,
+        code_graph_mcp=code_graph_mcp,
     )
 
     store = get_scan_store()
@@ -686,6 +697,11 @@ async def create_agent_scan(
         "validation_environment": validation_environment,
         "feedback_entries": feedback_entries,
         "checker_packages": checker_packages,
+        "code_graph_mcp": (
+            code_graph_mcp.model_dump(mode="json")
+            if code_graph_mcp is not None
+            else None
+        ),
         "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
     })
     if not ok:
@@ -1019,6 +1035,11 @@ async def _continue_scan(
         "retry_processed_offset": processed_offset,
         "resume_threat_analysis": resume_threat_analysis,
         "retry_threat_audit_task_ids": threat_task_ids,
+        "code_graph_mcp": (
+            meta.code_graph_mcp.model_dump(mode="json")
+            if meta.code_graph_mcp is not None
+            else None
+        ),
         "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
     })
     if not ok:
@@ -1474,6 +1495,11 @@ async def _trigger_vulnerability_validation(
         "validation_environment": validation_environment,
         "vulnerability": vuln.model_dump(),
         "report_markdown": _vuln_report_markdown(idx, vuln, fp_map.get(idx)),
+        "code_graph_mcp": (
+            meta.code_graph_mcp.model_dump(mode="json")
+            if meta.code_graph_mcp is not None
+            else None
+        ),
         "agent_runtime_update": create_agent_runtime_update_payload(_server_url),
     })
     if not ok:
@@ -1939,6 +1965,11 @@ async def _start_fp_review(
         "vulnerabilities": confirmed,
         "feedback_entries": feedback_entries,
         "processed_offset": 0,
+        "code_graph_mcp": (
+            meta.code_graph_mcp.model_dump(mode="json")
+            if meta.code_graph_mcp is not None
+            else None
+        ),
         "agent_runtime_update": create_agent_runtime_update_payload(server_url),
     })
     if not ok:

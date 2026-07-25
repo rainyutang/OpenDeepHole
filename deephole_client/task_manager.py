@@ -1,6 +1,7 @@
 """Manages scan tasks for the agent daemon."""
 from __future__ import annotations
 import asyncio
+import copy
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,7 @@ class ScanTask:
     scan_mode: str = "full"
     product: str = ""
     validation_environment: str = ""
+    code_graph_mcp: dict | None = None
     feedback_entries: list[dict] = field(default_factory=list)
     checker_packages: list[dict] = field(default_factory=list)
     retry_candidates: list[dict] | None = None
@@ -42,6 +44,7 @@ class TaskManager:
         scan_mode: str = "full",
         product: str = "",
         validation_environment: str = "",
+        code_graph_mcp: dict | None = None,
         feedback_entries: list[dict] | None = None,
         checker_packages: list[dict] | None = None,
         retry_candidates: list[dict] | None = None,
@@ -59,6 +62,11 @@ class TaskManager:
             scan_mode=scan_mode or "full",
             product=product,
             validation_environment=validation_environment,
+            code_graph_mcp=(
+                copy.deepcopy(code_graph_mcp)
+                if isinstance(code_graph_mcp, dict)
+                else None
+            ),
             feedback_entries=feedback_entries or [],
             checker_packages=checker_packages or [],
             retry_candidates=retry_candidates,

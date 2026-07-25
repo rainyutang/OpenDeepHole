@@ -1,6 +1,21 @@
 import { useEffect, useState } from "react";
-import { getAgents, getAgentValidatorCatalog, getCheckers, createScan } from "../api/client";
-import type { AgentInfo, AgentValidatorRegistration, CheckerInfo } from "../types";
+import {
+  createScan,
+  getAgents,
+  getAgentValidatorCatalog,
+  getCheckers,
+  probeScanCodeGraphMcp,
+} from "../api/client";
+import type {
+  AgentInfo,
+  AgentMcpProbeResult,
+  AgentValidatorRegistration,
+  CheckerInfo,
+} from "../types";
+import ScanCodeGraphMcpEditor, {
+  defaultScanCodeGraphMcp,
+  validateScanCodeGraphMcp,
+} from "./ScanCodeGraphMcpEditor";
 
 interface Props {
   onScanStarted: (scanId: string) => void;
@@ -26,6 +41,9 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [selectedProduct, setSelectedProduct] = useState<string>("");
   const [selectedValidationEnvironment, setSelectedValidationEnvironment] = useState<string>("");
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
+  const [codeGraphMcp, setCodeGraphMcp] = useState(defaultScanCodeGraphMcp);
+  const [probingCodeGraph, setProbingCodeGraph] = useState(false);
+  const [codeGraphProbe, setCodeGraphProbe] = useState<AgentMcpProbeResult | null>(null);
   const builtinCheckers = checkers.filter((checker) => !checker.user_created);
   const userCheckers = checkers.filter((checker) => checker.user_created);
   const threatAnalysisOnly = selectedScanMode === SCAN_MODE_THREAT_ANALYSIS_ONLY;
@@ -59,6 +77,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
 
   useEffect(() => {
     if (!selectedAgent) { setValidationTargets([]); return; }
+    setCodeGraphProbe(null);
     getAgentValidatorCatalog(selectedAgent).then((catalog) => {
       setValidationTargets(catalog.registrations);
       setSelectedProduct("");
@@ -91,6 +110,42 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
     });
   };
 
+  const probeCodeGraph = async () => {
+    if (!selectedAgent || probingCodeGraph) return;
+    const validationError = validateScanCodeGraphMcp(codeGraphMcp);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    setError(null);
+    setProbingCodeGraph(true);
+    try {
+      setCodeGraphProbe(
+        await probeScanCodeGraphMcp(selectedAgent, codeGraphMcp),
+      );
+    } catch (probeError: unknown) {
+      const detail =
+        (probeError as { response?: { data?: { detail?: string } } })?.response
+          ?.data?.detail || "代码图谱 MCP 检测失败";
+      setCodeGraphProbe({
+        target: "scan_code_graph",
+        config_fingerprint: "",
+        success: false,
+        checked_at: "",
+        transport: codeGraphMcp.transport,
+        protocol: "",
+        tool_names: [],
+        tool_count: 0,
+        duration_ms: 0,
+        error: detail,
+        runtime_state: "next_task",
+        active_sessions: 0,
+      });
+    } finally {
+      setProbingCodeGraph(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -101,6 +156,11 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
     }
     if (!projectPath.trim()) {
       setError("请输入项目路径");
+      return;
+    }
+    const codeGraphError = validateScanCodeGraphMcp(codeGraphMcp);
+    if (codeGraphError) {
+      setError(codeGraphError);
       return;
     }
     if (!threatAnalysisOnly && selectedCheckers.size === 0) {
@@ -119,6 +179,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         product: selectedProduct,
         validation_environment: selectedValidationEnvironment,
         checkers: threatAnalysisOnly ? [] : Array.from(selectedCheckers),
+        code_graph_mcp: codeGraphMcp,
       });
       onScanStarted(resp.scan_id);
     } catch (e: unknown) {
@@ -298,6 +359,21 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 静态分析只扫描该目录；必须位于项目总路径内
               </p>
             </div>
+
+            {/* Scan code graph MCP */}
+            <ScanCodeGraphMcpEditor
+              value={codeGraphMcp}
+              onChange={(value) => {
+                setCodeGraphMcp(value);
+                setCodeGraphProbe(null);
+              }}
+              online={Boolean(
+                agents.find((agent) => agent.agent_key === selectedAgent)?.online,
+              )}
+              probing={probingCodeGraph}
+              probeResult={codeGraphProbe}
+              onProbe={() => void probeCodeGraph()}
+            />
 
             {/* Scan name */}
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">

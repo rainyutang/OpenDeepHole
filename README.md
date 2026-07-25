@@ -109,11 +109,15 @@ agent_name: "my-agent"
 owner_token: ""
 ```
 
-下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、完整 OpenCode JSONC、威胁分析开关、代码图谱 MCP、产品信息 MCP、漏洞挖掘、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
+下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、完整 OpenCode JSONC、威胁分析开关、产品信息 MCP、漏洞挖掘、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
 
-代码图谱和产品信息配置区提供手动 **「检测 MCP」**：检测只在 Agent 上执行 MCP `initialize` 和 `list_tools`，不会调用业务工具，并会展示最近结果、工具列表及 OpenCode 配置加载状态。保存 MCP 后不需要重启 Agent；没有活动 Session 时在下一次模型任务自动加载，有活动 Session 时不会中断当前任务，而是在空闲后的下一次任务加载。检测结果会持久化，Agent 离线时仍可查看带时间戳的历史结果；修改并保存 MCP 配置后，旧结果会标记为需要重新检测。
+每次在 **「新建扫描」** 页面都必须单独填写代码图谱 MCP，可选择本地进程或远端服务，并配置启动参数、环境变量、请求头和超时。配置会作为扫描私有快照持久化，并在续扫、去误报和漏洞验证中继续使用；不同扫描不会共享代码图谱连接。历史扫描以及未传 `code_graph_mcp` 的兼容 API 请求继续使用内置 `deephole-code`。
 
-代码图谱的配置页检测只确认 MCP 服务能够握手并发现工具，不代表某个扫描项目已经生成 `.codegraph/codegraph.db`；项目索引是否就绪仍以对应扫描任务的运行日志和产物为准。
+新建扫描页和产品信息配置区都提供手动 **「检测 MCP」**：检测只在 Agent 上执行 MCP `initialize` 和 `list_tools`，不会调用业务工具。扫描代码图谱的检测结果不写入 Agent 全局配置；运行时仍会再次连接，连接或初始化失败时继续扫描并只使用文件工具，不会回退到其它扫描或内置代码图谱。对于本地 `codegraph` CLI，项目 `.codegraph/codegraph.db` 是否就绪仍以扫描任务日志和产物为准。
+
+仓库内置了用于联调的确定性假代码图谱 MCP，可直接运行
+`python tests/fixtures/fake_code_graph_mcp.py --port 9010 --marker scan-a`，并在新建扫描中填写远端 URL `http://127.0.0.1:9010/mcp`。真实 OpenCode Serve 的双图谱连接与隔离回归可用
+`python -m pytest -q tests/test_scan_code_graph_mcp_integration.py` 执行。
 
 模型池必须至少包含一个已启用且填写明确 `provider/model` 的模型；不再支持“使用 CLI 默认模型”的配置行，没有显式模型时创建和续扫都会被拒绝。阶段级模型能力、模型调用超时和模型重试会覆盖具体模型行的超时/重试；漏洞验证 kwargs 中的 `run_command(..., timeout=...)` 仍只由该命令自己的超时控制，不受模型超时影响，也没有验证函数整体截止时间。
 
@@ -533,7 +537,7 @@ server_url: "http://your-server:8000"
 agent_name: ""
 owner_token: ""
 checkers: []
-schema_version: 3
+schema_version: 4
 opencode_config: |
   {}
 base:
@@ -556,7 +560,7 @@ model_pool:
           end: "06:00"
 ```
 
-`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v3 字段由 Web **「Agent 配置」** 页面管理并写回。`opencode_config` 是完整 JSONC 用户配置层，支持注释和尾随逗号。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。
+`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v4 字段由 Web **「Agent 配置」** 页面管理并写回。`opencode_config` 是完整 JSONC 用户配置层，支持注释和尾随逗号。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；v3 中的全局代码图谱只作为旧集成请求的扫描级迁移输入，不再写回 Agent 配置。模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
@@ -624,7 +628,7 @@ OpenCode 模型池统计：
 - 模型必须在 `model_pool.models[]` 中填写明确模型名并启用；不再接受默认模型行。没有显式模型时不能创建或恢复扫描。
 - `model_pool.global_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 配置页的每个模型可添加多段使用时间，每段独立选择周一至周日及起止时间；时间窗口只限制新取得的模型 Lease，不会中断已经运行的任务。
-- 任务能力只分 `low`、`high`，各内置阶段默认并实际配置为 `high`，任务优先级由任务类型自动决定；v3 中手工配置为低能力的阶段仍会优先使用最低足够能力模型。模型行本身仍可标记低/中/高能力。
+- 任务能力只分 `low`、`high`，各内置阶段默认并实际配置为 `high`，任务优先级由任务类型自动决定；v3/v4 中手工配置为低能力的阶段仍会优先使用最低足够能力模型。模型行本身仍可标记低/中/高能力。
 - 模型调用默认超时为 `3600` 秒，只计算每条模型消息的执行阶段，不包含排队时间。超时、普通执行错误和同 Session JSON 纠正耗尽都会消费统一的新 Session 重试预算；默认重试 2 次，即最多 3 个 Session。新 Session 重试会释放并重新申请模型 Lease，最终超时保留最后 Session ID，模型池 completed-task 历史只记录一次最终状态。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。

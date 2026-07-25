@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import json
 import logging
@@ -77,6 +78,7 @@ class OpenCodeExecutionContext:
     skill_paths: tuple[Path, ...] = ()
     task_metadata: dict[str, Any] = field(default_factory=dict)
     feedback_entries: tuple[dict[str, Any], ...] = ()
+    code_graph_mcp: dict[str, Any] | None = field(default=None, repr=False)
     on_output: Callable[[str], Any] | None = field(default=None, compare=False, repr=False)
     on_invocation_metadata: Callable[[OutputSource], Any] | None = field(
         default=None,
@@ -119,6 +121,7 @@ def set_opencode_execution_context(
     skill_paths: Any = _INHERIT_CONTEXT_VALUE,
     task_metadata: dict[str, Any] | None = None,
     feedback_entries: Any = None,
+    code_graph_mcp: Any = _INHERIT_CONTEXT_VALUE,
     on_output: Callable[[str], Any] | None | object = _INHERIT_CONTEXT_VALUE,
     on_invocation_metadata: Callable[[OutputSource], Any] | None | object = _INHERIT_CONTEXT_VALUE,
     cancel_event: Any = _INHERIT_CONTEXT_VALUE,
@@ -160,6 +163,12 @@ def set_opencode_execution_context(
         if feedback_entries is None
         else _feedback_snapshot(feedback_entries)
     )
+    if code_graph_mcp is _INHERIT_CONTEXT_VALUE:
+        next_code_graph_mcp = current.code_graph_mcp
+    elif isinstance(code_graph_mcp, dict):
+        next_code_graph_mcp = copy.deepcopy(code_graph_mcp)
+    else:
+        next_code_graph_mcp = None
     return _execution_context.set(OpenCodeExecutionContext(
         scan_id=next_scan_id,
         project_dir=next_project_dir,
@@ -168,6 +177,7 @@ def set_opencode_execution_context(
         skill_paths=next_skill_paths,
         task_metadata=metadata,
         feedback_entries=feedback,
+        code_graph_mcp=next_code_graph_mcp,
         on_output=current.on_output if on_output is _INHERIT_CONTEXT_VALUE else on_output,
         on_invocation_metadata=(
             current.on_invocation_metadata
@@ -219,6 +229,7 @@ def _snapshot_execution_context() -> OpenCodeExecutionContext:
         skill_paths=tuple(current.skill_paths),
         task_metadata=dict(current.task_metadata),
         feedback_entries=tuple(dict(entry) for entry in feedback),
+        code_graph_mcp=copy.deepcopy(current.code_graph_mcp),
         on_output=current.on_output,
         on_invocation_metadata=current.on_invocation_metadata,
         cancel_event=current.cancel_event,
@@ -732,7 +743,9 @@ class OpenCodeTaskService:
                                     session_id=session_id or None,
                                     session_title=spec.task_name,
                                     mcp_tools=None,
-                                    disabled_mcp_tools=_disabled_source_mcp_tools(spec.directory),
+                                    disabled_mcp_tools=(),
+                                    scan_id=context.scan_id,
+                                    code_graph_mcp=context.code_graph_mcp,
                                     system_prompt=system_prompt,
                                     return_details=True,
                                     show_serve_status=self._task_progress_enabled(record),
@@ -1249,11 +1262,16 @@ def _task_system_prompt(record: _TaskRecord) -> str:
     from .feedback_format import format_feedback_experience
 
     sections: list[str] = []
-    if "deephole-code" in _disabled_source_mcp_tools(record.spec.directory):
+    if record.execution_context.scan_id:
         sections.append(
-            "## CodeGraph 项目范围\n\n"
-            "当前源码查询使用 CodeGraph MCP。调用支持项目路径参数的 CodeGraph 工具时，"
-            f"必须传入 projectPath={record.spec.directory.resolve()}。"
+            "## 扫描代码图谱\n\n"
+            "当前任务已绑定本次扫描专属的代码图谱 MCP。需要跨文件定位、调用关系或结构化"
+            "源码查询时优先使用已启用的图谱工具；若图谱工具不可用，再使用 read、grep、"
+            "glob 等文件工具。工具参数以 MCP 自身声明的 schema 为准。"
+            f"若工具参数包含 `projectPath` 或 `project_path`，使用源码目录 "
+            f"`{record.spec.directory.resolve()}`；"
+            f"本次扫描标识为 `{record.execution_context.scan_id}`；若工具参数包含 "
+            "`project_id`，使用该扫描标识。"
         )
     checker = str(record.execution_context.task_metadata.get("checker") or "").strip()
     if checker:

@@ -103,7 +103,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
         parsed = yaml.safe_load(agent_yaml)
-        self.assertEqual(parsed["schema_version"], 3)
+        self.assertEqual(parsed["schema_version"], 4)
+        self.assertNotIn("code_graph", parsed)
         self.assertTrue(parsed["model_pool"]["models"])
         self.assertTrue(all(model.get("model") for model in parsed["model_pool"]["models"]))
         self.assertNotIn("llm_api", parsed)
@@ -489,6 +490,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
     def test_fp_review_command_checks_runtime_update_before_review(self) -> None:
         update = AsyncMock(return_value=False)
         handler = AsyncMock()
+        graph = {"enabled": True, "transport": "remote"}
 
         with (
             patch("deephole_client.updater.ensure_runtime_updated", new=update),
@@ -502,6 +504,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                     "project_path": "/repo/project",
                     "vulnerabilities": [],
                     "feedback_entries": [],
+                    "code_graph_mcp": graph,
                     "agent_runtime_update": {"hash": "new-runtime"},
                 },
                 None,
@@ -512,6 +515,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         update.assert_awaited_once()
         self.assertEqual(update.await_args.args[0], {"hash": "new-runtime"})
         handler.assert_awaited_once()
+        self.assertEqual(handler.await_args.kwargs["code_graph_mcp"], graph)
 
     def test_resume_command_checks_runtime_update_before_resume(self) -> None:
         calls: list[str] = []
@@ -528,6 +532,10 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertEqual(kwargs["retry_threat_audit_task_ids"], ["threat-timeout"])
             self.assertTrue(kwargs["resume_threat_analysis"])
             self.assertEqual(kwargs["scan_mode"], "threat_analysis_only")
+            self.assertEqual(
+                kwargs["code_graph_mcp"],
+                {"enabled": True, "transport": "remote"},
+            )
 
         command = {
             "type": "resume",
@@ -541,6 +549,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "retry_processed_offset": 1,
             "resume_threat_analysis": True,
             "retry_threat_audit_task_ids": ["threat-timeout"],
+            "code_graph_mcp": {"enabled": True, "transport": "remote"},
             "agent_runtime_update": {"hash": "new-runtime"},
         }
         with (
@@ -602,6 +611,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
     def test_vulnerability_validation_command_checks_runtime_update_before_validation(self) -> None:
         update = AsyncMock(return_value=False)
         handler = AsyncMock()
+        graph = {"enabled": True, "transport": "remote"}
 
         with (
             patch("deephole_client.updater.ensure_runtime_updated", new=update),
@@ -618,6 +628,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                     "validation_environment": "lab",
                     "vulnerability": {"file": "src/a.c", "line": 1},
                     "report_markdown": "# report\n",
+                    "code_graph_mcp": graph,
                     "agent_runtime_update": {"hash": "new-runtime"},
                 },
                 None,
@@ -627,6 +638,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         update.assert_awaited_once()
         handler.assert_awaited_once()
+        self.assertEqual(handler.await_args.kwargs["code_graph_mcp"], graph)
 
     def test_vulnerability_validation_stops_when_forced_runtime_update_fails(self) -> None:
         update = AsyncMock(side_effect=RuntimeError("download unavailable"))

@@ -55,6 +55,7 @@ _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
 _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
+_SCAN_CODE_GRAPH_MCP_PREFIX = "opendeephole-scan-codegraph-"
 _SENSITIVE_EVENT_KEY_RE = re.compile(
     r"(api[_-]?key|apikey|token|secret|password|authorization|cookie|credential|"
     r"prompt|content|body)",
@@ -121,6 +122,15 @@ class OpenCodeFileWrite:
     call_id: str
     path: str
     created: bool = False
+
+
+@dataclass(frozen=True)
+class _ScanMcpLease:
+    directory_key: str
+    name: str
+    fingerprint: str
+    connected: bool
+    error: str = ""
 
 
 @dataclass
@@ -1294,6 +1304,146 @@ def _normalize_tool_selector(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
+def _scan_mcp_runtime_name(scan_id: object, configured_name: object = "") -> str:
+    raw_scan_id = str(scan_id or "").strip()
+    normalized_scan_id = re.sub(
+        r"[^a-zA-Z0-9]+",
+        "-",
+        raw_scan_id,
+    ).strip("-")
+    if not normalized_scan_id:
+        raise ValueError("Scan code graph MCP requires a scan_id")
+    normalized_name = re.sub(
+        r"[^a-zA-Z0-9]+",
+        "-",
+        str(configured_name or ""),
+    ).strip("-") or "graph"
+    label = f"{normalized_name}-{normalized_scan_id}"
+    digest = hashlib.sha256(raw_scan_id.encode("utf-8")).hexdigest()[:12]
+    return f"{_SCAN_CODE_GRAPH_MCP_PREFIX}{label[:56]}-{digest}"
+
+
+def _scan_mcp_runtime_spec(scan_id: object, raw: object) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("Scan code graph MCP config must be an object")
+    if not bool(raw.get("enabled")):
+        raise ValueError("Scan code graph MCP is disabled")
+    configured_name = str(raw.get("name") or "").strip()
+    if not configured_name:
+        raise ValueError("Scan code graph MCP name is empty")
+    transport = str(raw.get("transport") or "local").strip().lower()
+    try:
+        timeout_seconds = max(1, int(raw.get("timeout_seconds") or 300))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Scan code graph MCP timeout is invalid") from exc
+    local = raw.get("local") if isinstance(raw.get("local"), dict) else {}
+    remote = raw.get("remote") if isinstance(raw.get("remote"), dict) else {}
+    runtime_config: dict[str, Any]
+    if transport == "local":
+        executable = str(local.get("executable") or "").strip()
+        if not executable:
+            raise ValueError("Scan code graph MCP executable is empty")
+        runtime_config = {
+            "type": "local",
+            "command": [
+                executable,
+                *[str(item) for item in (local.get("args") or [])],
+            ],
+            "enabled": True,
+            "timeout": timeout_seconds * 1000,
+        }
+        environment = local.get("environment")
+        if isinstance(environment, dict) and environment:
+            runtime_config["environment"] = {
+                str(key): str(value)
+                for key, value in environment.items()
+            }
+    elif transport == "remote":
+        url = str(remote.get("url") or "").strip()
+        if not url:
+            raise ValueError("Scan code graph MCP remote URL is empty")
+        runtime_config = {
+            "type": "remote",
+            "url": url,
+            "enabled": True,
+            "timeout": timeout_seconds * 1000,
+            "oauth": False,
+        }
+        headers = remote.get("headers")
+        if isinstance(headers, dict) and headers:
+            runtime_config["headers"] = {
+                str(key): str(value)
+                for key, value in headers.items()
+            }
+    else:
+        raise ValueError(f"Unsupported scan code graph MCP transport: {transport}")
+
+    fingerprint_payload = {
+        "transport": transport,
+        "timeout_seconds": timeout_seconds,
+        "config": runtime_config,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "target": "scan_code_graph",
+        "enabled": True,
+        "name": _scan_mcp_runtime_name(scan_id, configured_name),
+        "fingerprint": fingerprint,
+        "config": runtime_config,
+        "error": "",
+    }
+
+
+def _is_source_graph_tool(tool_id: object) -> bool:
+    normalized = str(tool_id or "").lower().replace("_", "-")
+    return (
+        "deephole-code" in normalized
+        or _SCAN_CODE_GRAPH_MCP_PREFIX in normalized
+    )
+
+
+def _tool_belongs_to_mcp(tool_id: object, mcp_name: object) -> bool:
+    tool_normalized = _normalize_tool_selector(tool_id)
+    name_normalized = _normalize_tool_selector(mcp_name)
+    return bool(name_normalized and name_normalized in tool_normalized)
+
+
+def _apply_source_graph_overrides(
+    tool_ids: list[str],
+    overrides: dict[str, bool],
+    selected_mcp_name: str | None,
+    *,
+    allow_undiscovered: bool = False,
+) -> tuple[dict[str, bool], bool]:
+    """Isolate source graph tools without changing unrelated MCP tools."""
+    if selected_mcp_name is None:
+        return overrides, True
+    source_ids = [
+        tool_id
+        for tool_id in tool_ids
+        if _tool_source(tool_id) == "mcp" and _is_source_graph_tool(tool_id)
+    ]
+    for tool_id in source_ids:
+        overrides[tool_id] = False
+    if not selected_mcp_name:
+        return overrides, False
+    selected_ids = [
+        tool_id
+        for tool_id in source_ids
+        if _tool_belongs_to_mcp(tool_id, selected_mcp_name)
+    ]
+    for tool_id in selected_ids:
+        overrides[tool_id] = True
+    return overrides, bool(selected_ids) or (allow_undiscovered and not source_ids)
+
+
 def _mcp_tool_overrides(
     tool_ids: list[str],
     requested: list[str] | tuple[str, ...] | None,
@@ -1431,7 +1581,11 @@ def _error_summary(value: object) -> str:
 
 def _tool_source(tool_name: object) -> str:
     normalized = str(tool_name or "").lower().replace("_", "-")
-    if "deephole-code" in normalized or normalized.startswith("mcp--"):
+    if (
+        "deephole-code" in normalized
+        or _SCAN_CODE_GRAPH_MCP_PREFIX in normalized
+        or normalized.startswith("mcp--")
+    ):
         return "mcp"
     return "builtin"
 
@@ -1616,7 +1770,10 @@ def _tool_ids_from_response(value: object) -> list[str]:
     tool_ids: list[str] = []
     seen: set[str] = set()
     for item in value:
-        tool_id = str(item or "").strip()
+        if isinstance(item, dict):
+            tool_id = str(item.get("id") or "").strip()
+        else:
+            tool_id = str(item or "").strip()
         if not tool_id or tool_id in seen:
             continue
         seen.add(tool_id)
@@ -2308,6 +2465,12 @@ class OpenCodeServeManager:
         self._managed_mcp_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._managed_mcp_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._managed_mcp_force_pending: set[tuple[str, str]] = set()
+        # OpenCode's dynamically-added MCPs belong to one directory context,
+        # not to one session.  Let concurrent tasks from the same scan share
+        # their source MCP, but serialize a switch to a different scan so a
+        # message can never observe another scan's graph.
+        self._scan_mcp_states: dict[str, dict[str, Any]] = {}
+        self._scan_mcp_conditions: dict[str, asyncio.Condition] = {}
 
     @property
     def base_url(self) -> str:
@@ -2347,7 +2510,7 @@ class OpenCodeServeManager:
         normalized = {
             str(target): dict(spec)
             for target, spec in specs.items()
-            if str(target) in {"code_graph", "product_info"} and isinstance(spec, dict)
+            if str(target) == "product_info" and isinstance(spec, dict)
         }
         changed = {
             target
@@ -2465,6 +2628,10 @@ class OpenCodeServeManager:
                 parts = str(item).split(None, 1)
                 if is_sensitive_opencode_config_key(name) and len(parts) == 2:
                     secrets.add(parts[1])
+        if isinstance(config, dict):
+            remote_url = str(config.get("url") or "")
+            if remote_url:
+                secrets.add(remote_url)
         if secrets:
             for secret in sorted(
                 secrets,
@@ -2627,11 +2794,276 @@ class OpenCodeServeManager:
                     self._redact_managed_mcp_error(exc, spec),
                 )
 
+    async def _disconnect_source_graph_mcps(
+        self,
+        client: httpx.AsyncClient,
+        directory: Path,
+    ) -> None:
+        response = await client.get(
+            "/mcp",
+            params=_serve_context_params(directory),
+            headers=_serve_context_headers(directory),
+        )
+        response.raise_for_status()
+        statuses = self._mcp_status_map(response.json())
+        for name, raw_status in statuses.items():
+            if not _is_source_graph_tool(name):
+                continue
+            state, _error = self._mcp_native_status(raw_status)
+            if state != "connected":
+                continue
+            disconnected = await client.post(
+                f"/mcp/{quote(str(name), safe='')}/disconnect",
+                params=_serve_context_params(directory),
+                headers=_serve_context_headers(directory),
+            )
+            disconnected.raise_for_status()
+
+    async def _connect_builtin_source_mcp(
+        self,
+        client: httpx.AsyncClient,
+        directory: Path,
+    ) -> None:
+        name = "deephole-code"
+        response = await client.post(
+            f"/mcp/{quote(name, safe='')}/connect",
+            params=_serve_context_params(directory),
+            headers=_serve_context_headers(directory),
+        )
+        response.raise_for_status()
+        if response.json() is not True:
+            raise RuntimeError("OpenCode did not connect the built-in code MCP")
+        statuses_response = await client.get(
+            "/mcp",
+            params=_serve_context_params(directory),
+            headers=_serve_context_headers(directory),
+        )
+        statuses_response.raise_for_status()
+        statuses = self._mcp_status_map(statuses_response.json())
+        state, error = self._mcp_native_status(statuses.get(name))
+        if state != "connected":
+            raise RuntimeError(error or f"OpenCode reported MCP state {state}")
+
+    async def _acquire_scan_mcp(
+        self,
+        client: httpx.AsyncClient,
+        directory: Path,
+        scan_id: str,
+        raw_config: dict[str, Any] | None,
+    ) -> _ScanMcpLease:
+        directory = Path(directory).resolve()
+        directory_key = self._event_directory_key(directory)
+        spec: dict[str, Any]
+        if not str(scan_id or "").strip():
+            spec = {
+                "name": "",
+                "fingerprint": "no-source-graph",
+                "config": None,
+                "error": "",
+            }
+        elif raw_config is None:
+            spec = {
+                "name": "deephole-code",
+                "fingerprint": "builtin",
+                "config": None,
+                "error": "",
+            }
+        else:
+            try:
+                spec = _scan_mcp_runtime_spec(scan_id, raw_config)
+            except Exception as exc:
+                spec = {
+                    "name": "",
+                    "fingerprint": hashlib.sha256(
+                        f"invalid:{scan_id}".encode("utf-8")
+                    ).hexdigest(),
+                    "config": None,
+                    "error": _one_line_preview(exc),
+                }
+
+        name = str(spec.get("name") or "")
+        fingerprint = str(spec.get("fingerprint") or "")
+        identity = f"{name}:{fingerprint}"
+        condition = self._scan_mcp_conditions.setdefault(
+            directory_key,
+            asyncio.Condition(),
+        )
+        async with condition:
+            while True:
+                existing = self._scan_mcp_states.get(directory_key)
+                if existing is None:
+                    break
+                if str(existing.get("identity") or "") == identity:
+                    existing["references"] = int(existing.get("references") or 0) + 1
+                    return _ScanMcpLease(
+                        directory_key=directory_key,
+                        name=str(existing.get("name") or name),
+                        fingerprint=fingerprint,
+                        connected=bool(existing.get("connected")),
+                        error=str(existing.get("error") or ""),
+                    )
+                await condition.wait()
+
+            state: dict[str, Any] = {
+                "identity": identity,
+                "name": name,
+                "fingerprint": fingerprint,
+                "references": 1,
+                "connected": False,
+                "error": str(spec.get("error") or ""),
+                "spec": spec,
+                "directory": directory,
+            }
+            self._scan_mcp_states[directory_key] = state
+
+            config = spec.get("config")
+            timeout_ms = int(config.get("timeout") or 0) if isinstance(config, dict) else 0
+            request_timeout = max(
+                _SERVE_REQUEST_TIMEOUT_SECONDS,
+                (timeout_ms / 1000.0) + 5.0 if timeout_ms else 0,
+            )
+            try:
+                await self._disconnect_source_graph_mcps(client, directory)
+                if state["error"]:
+                    return _ScanMcpLease(
+                        directory_key=directory_key,
+                        name="",
+                        fingerprint=fingerprint,
+                        connected=False,
+                        error=str(state["error"]),
+                    )
+                if not name:
+                    return _ScanMcpLease(
+                        directory_key=directory_key,
+                        name="",
+                        fingerprint=fingerprint,
+                        connected=False,
+                    )
+                if raw_config is None:
+                    await self._connect_builtin_source_mcp(client, directory)
+                else:
+                    response = await client.post(
+                        "/mcp",
+                        params=_serve_context_params(directory),
+                        headers=_serve_context_headers(directory),
+                        json={"name": name, "config": config},
+                        timeout=request_timeout,
+                    )
+                    response.raise_for_status()
+                    statuses = self._mcp_status_map(response.json())
+                    native_state, error = self._mcp_native_status(statuses.get(name))
+                    if native_state != "connected":
+                        raise RuntimeError(
+                            error or f"OpenCode reported MCP state {native_state}"
+                        )
+                state["connected"] = True
+                return _ScanMcpLease(
+                    directory_key=directory_key,
+                    name=name,
+                    fingerprint=fingerprint,
+                    connected=True,
+                )
+            except asyncio.CancelledError:
+                self._scan_mcp_states.pop(directory_key, None)
+                condition.notify_all()
+                raise
+            except Exception as exc:
+                error = self._redact_managed_mcp_error(exc, spec)
+                if name:
+                    try:
+                        # A timed-out/failed add may still have connected inside
+                        # OpenCode. Explicitly disconnect it before allowing the
+                        # model task to continue in file-only mode.
+                        await self._disconnect_managed_mcp(
+                            client,
+                            directory,
+                            spec,
+                        )
+                    except asyncio.CancelledError:
+                        self._scan_mcp_states.pop(directory_key, None)
+                        condition.notify_all()
+                        raise
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            "Failed to clean up unavailable scan code graph MCP "
+                            "name=%s directory=%s error=%s",
+                            name,
+                            directory,
+                            self._redact_managed_mcp_error(cleanup_exc, spec),
+                        )
+                state["error"] = error
+                logger.warning(
+                    "Scan code graph MCP unavailable name=%s directory=%s error=%s",
+                    name or "disabled",
+                    directory,
+                    error,
+                )
+                return _ScanMcpLease(
+                    directory_key=directory_key,
+                    name=name,
+                    fingerprint=fingerprint,
+                    connected=False,
+                    error=error,
+                )
+
+    async def _release_scan_mcp(
+        self,
+        directory: Path,
+        lease: _ScanMcpLease | None,
+    ) -> None:
+        if lease is None:
+            return
+        condition = self._scan_mcp_conditions.get(lease.directory_key)
+        if condition is None:
+            return
+        spec: dict[str, Any] | None = None
+        should_disconnect = False
+        async with condition:
+            existing = self._scan_mcp_states.get(lease.directory_key)
+            if (
+                existing is None
+                or str(existing.get("fingerprint") or "") != lease.fingerprint
+                or str(existing.get("name") or "") != lease.name
+            ):
+                return
+            references = max(0, int(existing.get("references") or 0) - 1)
+            if references:
+                existing["references"] = references
+                return
+            spec = existing.get("spec")
+            should_disconnect = bool(existing.get("connected")) and bool(
+                existing.get("name")
+            )
+            try:
+                if should_disconnect and isinstance(spec, dict):
+                    async with httpx.AsyncClient(
+                        base_url=self.base_url,
+                        timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
+                        trust_env=False,
+                    ) as client:
+                        await self._disconnect_managed_mcp(
+                            client,
+                            Path(directory).resolve(),
+                            spec,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Failed to disconnect scan code graph MCP name=%s directory=%s error=%s",
+                    str(existing.get("name") or lease.name),
+                    directory,
+                    self._redact_managed_mcp_error(exc, spec or {}),
+                )
+            finally:
+                self._scan_mcp_states.pop(lease.directory_key, None)
+                condition.notify_all()
+
     def managed_mcp_runtime_status(self) -> dict[str, dict[str, Any]]:
         running = self._proc is not None and self._proc.poll() is None
         result: dict[str, dict[str, Any]] = {}
         total = len(self._managed_mcp_directories)
-        for target in ("code_graph", "product_info"):
+        for target in ("product_info",):
             spec = self._managed_mcp_specs.get(target) or {
                 "enabled": False,
                 "fingerprint": "",
@@ -2771,6 +3203,8 @@ class OpenCodeServeManager:
         session_title: str = "OpenDeepHole task",
         mcp_tools: list[str] | tuple[str, ...] | None = None,
         disabled_mcp_tools: list[str] | tuple[str, ...] | None = None,
+        scan_id: str = "",
+        code_graph_mcp: dict[str, Any] | None = None,
         system_prompt: str = "",
         permissions: list[dict[str, str]] | None = None,
         return_details: bool = False,
@@ -2831,6 +3265,8 @@ class OpenCodeServeManager:
         session_started = False
         session_outcome = "failure"
         session_error = ""
+        scan_mcp_lease: _ScanMcpLease | None = None
+        selected_source_mcp: str | None = None
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
         try:
@@ -2847,6 +3283,27 @@ class OpenCodeServeManager:
                 timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
                 trust_env=False,
             ) as client:
+                if str(scan_id or "").strip():
+                    scan_mcp_lease = await self._acquire_scan_mcp(
+                        client,
+                        directory,
+                        str(scan_id),
+                        code_graph_mcp if isinstance(code_graph_mcp, dict) else None,
+                    )
+                    selected_source_mcp = (
+                        scan_mcp_lease.name if scan_mcp_lease.connected else ""
+                    )
+                    if scan_mcp_lease.connected:
+                        emit(
+                            "session",
+                            f"CODE_GRAPH_MCP connected name={scan_mcp_lease.name}",
+                        )
+                    else:
+                        emit(
+                            "session",
+                            "CODE_GRAPH_MCP unavailable fallback=file_tools "
+                            f"error={_one_line_preview(scan_mcp_lease.error)}",
+                        )
                 if not active_session_id:
                     create_payload: dict[str, Any] = {
                         "title": str(session_title or "").strip() or "OpenDeepHole task",
@@ -2924,6 +3381,23 @@ class OpenCodeServeManager:
                     tool=tool,
                 )
                 mcp_overrides = _mcp_tool_overrides(tool_ids, mcp_tools, disabled_mcp_tools)
+                mcp_overrides, source_available = _apply_source_graph_overrides(
+                    tool_ids,
+                    mcp_overrides,
+                    selected_source_mcp,
+                    allow_undiscovered=bool(
+                        scan_mcp_lease is not None and scan_mcp_lease.connected
+                    ),
+                )
+                if (
+                    str(scan_id or "").strip()
+                    and selected_source_mcp is not None
+                    and not source_available
+                ):
+                    emit(
+                        "session",
+                        "CODE_GRAPH_MCP no_tools fallback=file_tools",
+                    )
                 if mcp_overrides:
                     payload["tools"] = mcp_overrides
                 if model:
@@ -3076,7 +3550,10 @@ class OpenCodeServeManager:
                             f"STOP status={session_outcome} retained=true{error_note}",
                         )
                 finally:
-                    await self._release_active_session()
+                    try:
+                        await self._release_scan_mcp(directory, scan_mcp_lease)
+                    finally:
+                        await self._release_active_session()
 
     async def _session_api_request(
         self,
@@ -4269,6 +4746,8 @@ class OpenCodeServeManager:
         self._managed_mcp_applied.clear()
         self._managed_mcp_locks.clear()
         self._managed_mcp_force_pending.clear()
+        self._scan_mcp_states.clear()
+        self._scan_mcp_conditions.clear()
         for task in tasks:
             task.cancel()
         if tasks:

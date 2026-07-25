@@ -62,20 +62,8 @@ def _config_value(value, name: str, default=None):
 
 
 def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
-    """Choose the source MCP disabled for one project using Agent state."""
-    config = get_config()
-    code_graph = getattr(config, "code_graph", None)
-    name = str(_config_value(code_graph, "name", "codegraph") or "codegraph")
-    if not bool(_config_value(code_graph, "enabled", False)):
-        return (name,)
-    try:
-        from deephole_client.codegraph import is_codegraph_mcp_available, is_codegraph_ready
-
-        if is_codegraph_mcp_available(config) and is_codegraph_ready(directory):
-            return ("deephole-code",)
-    except Exception:
-        pass
-    return (name,)
+    """Legacy host hook; scan contexts now select their source MCP explicitly."""
+    return ()
 
 
 def _build_session_runtime(cli_config, model_option, directory: Path):
@@ -635,11 +623,10 @@ def managed_mcp_config_fingerprint(managed) -> str:
 
 
 def build_managed_mcp_runtime_specs(runtime_config=None) -> dict[str, dict]:
-    """Build the two server-managed MCP entries used by config and hot reload."""
+    """Build Agent-wide MCP entries; code graphs are owned by individual scans."""
     runtime_config = runtime_config or get_config()
     result: dict[str, dict] = {}
     for target, managed in (
-        ("code_graph", getattr(runtime_config, "code_graph", None)),
         ("product_info", getattr(runtime_config, "product_info", None)),
     ):
         normalized = normalized_managed_mcp_config(managed or {})

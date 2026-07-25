@@ -131,7 +131,7 @@ def _stored_mcp_probes(record: dict | None) -> dict[str, AgentMcpProbeResult]:
     if not isinstance(payload, dict):
         return {}
     results: dict[str, AgentMcpProbeResult] = {}
-    for target in ("code_graph", "product_info"):
+    for target in ("product_info",):
         raw = payload.get(target)
         if not isinstance(raw, dict):
             continue
@@ -164,11 +164,12 @@ def _mcp_config_fingerprint(config: AgentMcpConfig) -> str:
 
 
 def _mcp_target_config(config: AgentRemoteConfig, target: str) -> AgentMcpConfig:
-    if target == "code_graph":
-        return config.code_graph
     if target == "product_info":
         return config.product_info
-    raise HTTPException(status_code=422, detail="MCP 检测目标只能是 code_graph 或 product_info")
+    raise HTTPException(
+        status_code=422,
+        detail="Agent 级 MCP 检测目标只能是 product_info；代码图谱请在创建扫描时检测",
+    )
 
 
 def _mcp_target_status(
@@ -230,6 +231,50 @@ def get_managed_agent_config(agent_key: str) -> AgentRemoteConfig:
     if record is None:
         return AgentRemoteConfig()
     return _stored_agent_config(record)
+
+
+def _validate_mcp_config(
+    mcp,
+    *,
+    label: str,
+    require_enabled: bool = False,
+) -> None:
+    if require_enabled and not mcp.enabled:
+        raise HTTPException(status_code=422, detail=f"{label} MCP 必须启用")
+    if mcp.transport not in {"local", "remote"}:
+        raise HTTPException(status_code=422, detail=f"{label} MCP 模式无效")
+    if mcp.enabled and not mcp.name.strip():
+        raise HTTPException(status_code=422, detail=f"{label} MCP 名称不能为空")
+    if mcp.enabled and mcp.name.strip() == "deephole-code":
+        raise HTTPException(status_code=422, detail=f"{label} MCP 名称不能占用 deephole-code")
+    if mcp.timeout_seconds < 1:
+        raise HTTPException(status_code=422, detail=f"{label} MCP 超时必须大于 0")
+    if mcp.enabled and mcp.transport == "local" and not mcp.local.executable.strip():
+        raise HTTPException(status_code=422, detail=f"{label} MCP 可执行文件不能为空")
+    if mcp.enabled and mcp.transport == "remote" and not mcp.remote.url.strip():
+        raise HTTPException(status_code=422, detail=f"{label} MCP 远端 URL 不能为空")
+    seen_headers: set[str] = set()
+    for raw_name, raw_value in mcp.remote.headers.items():
+        raw_name_text = str(raw_name or "")
+        name = raw_name_text.strip()
+        lowered = name.lower()
+        if (
+            not name
+            or name != raw_name_text
+            or not _HTTP_HEADER_NAME_RE.fullmatch(name)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label} MCP 请求头名称无效：{name or '(空)'}",
+            )
+        if lowered in seen_headers:
+            raise HTTPException(status_code=422, detail=f"{label} MCP 请求头名称重复：{name}")
+        seen_headers.add(lowered)
+        if "\r" in str(raw_value) or "\n" in str(raw_value):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label} MCP 请求头 {name} 的值不能包含换行",
+            )
 
 
 def _validate_managed_config(
@@ -317,41 +362,7 @@ def _validate_managed_config(
             raise HTTPException(status_code=422, detail=f"{label}的模型超时必须大于 0")
         if policy.max_retries < 0:
             raise HTTPException(status_code=422, detail=f"{label}的模型重试不能小于 0")
-    for label, mcp in (("代码图谱", config.code_graph), ("产品信息", config.product_info)):
-        if mcp.transport not in {"local", "remote"}:
-            raise HTTPException(status_code=422, detail=f"{label} MCP 模式无效")
-        if mcp.enabled and not mcp.name.strip():
-            raise HTTPException(status_code=422, detail=f"{label} MCP 名称不能为空")
-        if mcp.enabled and mcp.name.strip() == "deephole-code":
-            raise HTTPException(status_code=422, detail=f"{label} MCP 名称不能占用 deephole-code")
-        if mcp.timeout_seconds < 1:
-            raise HTTPException(status_code=422, detail=f"{label} MCP 超时必须大于 0")
-        if mcp.enabled and mcp.transport == "local" and not mcp.local.executable.strip():
-            raise HTTPException(status_code=422, detail=f"{label} MCP 可执行文件不能为空")
-        if mcp.enabled and mcp.transport == "remote" and not mcp.remote.url.strip():
-            raise HTTPException(status_code=422, detail=f"{label} MCP 远端 URL 不能为空")
-        seen_headers: set[str] = set()
-        for raw_name, raw_value in mcp.remote.headers.items():
-            raw_name_text = str(raw_name or "")
-            name = raw_name_text.strip()
-            lowered = name.lower()
-            if (
-                not name
-                or name != raw_name_text
-                or not _HTTP_HEADER_NAME_RE.fullmatch(name)
-            ):
-                raise HTTPException(status_code=422, detail=f"{label} MCP 请求头名称无效：{name or '(空)'}")
-            if lowered in seen_headers:
-                raise HTTPException(status_code=422, detail=f"{label} MCP 请求头名称重复：{name}")
-            seen_headers.add(lowered)
-            if "\r" in str(raw_value) or "\n" in str(raw_value):
-                raise HTTPException(status_code=422, detail=f"{label} MCP 请求头 {name} 的值不能包含换行")
-    if (
-        config.code_graph.enabled
-        and config.product_info.enabled
-        and config.code_graph.name.strip() == config.product_info.name.strip()
-    ):
-        raise HTTPException(status_code=422, detail="代码图谱与产品信息不能使用相同的 MCP 名称")
+    _validate_mcp_config(config.product_info, label="产品信息")
     if catalog is not None:
         registrations = {item.registration_key: item for item in catalog.registrations}
         for environment, environment_config in config.vulnerability_validation.environments.items():
@@ -1634,15 +1645,6 @@ async def get_stable_agent_mcp_status(
     return AgentMcpStatusResponse(
         agent_key=agent_key,
         online=online,
-        code_graph=_mcp_target_status(
-            config.code_graph,
-            probes.get("code_graph"),
-            _agent_mcp_runtime(
-                config.code_graph,
-                live_runtime.get("code_graph") if live_runtime else None,
-                online=online,
-            ),
-        ),
         product_info=_mcp_target_status(
             config.product_info,
             probes.get("product_info"),
@@ -1698,10 +1700,22 @@ async def probe_stable_agent_mcp(
     agent_key: str,
     target: str,
     current_user: User = Depends(get_current_user),
+    mcp_config: AgentMcpConfig | None = None,
 ) -> AgentMcpProbeResult:
     record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
-    config = _stored_agent_config(record)
-    mcp_config = _mcp_target_config(config, target)
+    transient = target == "scan_code_graph"
+    if transient:
+        if mcp_config is None:
+            raise HTTPException(status_code=400, detail="缺少扫描代码图谱 MCP 配置")
+        _validate_mcp_config(
+            mcp_config,
+            label="扫描代码图谱",
+            require_enabled=True,
+        )
+    else:
+        config = _stored_agent_config(record)
+        mcp_config = _mcp_target_config(config, target)
+    assert mcp_config is not None
     if not mcp_config.enabled:
         raise HTTPException(status_code=400, detail="请先启用并保存该 MCP 配置")
     live = _live_agent_for_key(agent_key)
@@ -1758,7 +1772,8 @@ async def probe_stable_agent_mcp(
         runtime_state=runtime_state,
         active_sessions=_nonnegative_int(incoming.get("active_sessions")),
     )
-    await _persist_mcp_probe(agent_key, result)
+    if not transient:
+        await _persist_mcp_probe(agent_key, result)
     return result
 
 

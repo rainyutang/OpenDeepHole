@@ -13,6 +13,12 @@ _ready_projects: set[Path] = set()
 _project_locks: dict[Path, asyncio.Lock] = {}
 
 
+def _value(source: Any, name: str, default: Any = None) -> Any:
+    if isinstance(source, dict):
+        return source.get(name, default)
+    return getattr(source, name, default)
+
+
 def is_codegraph_mcp_available(config: Any) -> bool:
     """Return whether the configured CodeGraph MCP can actually be started."""
     code_graph = getattr(config, "code_graph", None)
@@ -45,66 +51,85 @@ async def prepare_codegraph(
     *,
     emit: Callable[[str], Any] | None = None,
 ) -> bool:
-    code_graph = getattr(config, "code_graph", None)
-    if code_graph is None or not bool(getattr(code_graph, "enabled", False)):
+    """Compatibility wrapper for the former Agent-wide CodeGraph setting."""
+    return await prepare_scan_codegraph(
+        getattr(config, "code_graph", None),
+        project_path,
+        emit=emit,
+    )
+
+
+async def prepare_scan_codegraph(
+    code_graph: Any,
+    project_path: Path,
+    *,
+    emit: Callable[[str], Any] | None = None,
+) -> bool:
+    """Prepare known local CodeGraph CLIs; arbitrary MCPs need no vendor setup."""
+    if code_graph is None or not bool(_value(code_graph, "enabled", False)):
         return False
     root = project_path.resolve()
-    if str(getattr(code_graph, "transport", "local")) == "remote":
-        if not is_codegraph_mcp_available(config):
-            await _notify(emit, "CodeGraph 远端 URL 未配置，回退 deephole-code MCP")
-            return False
-        _ready_projects.add(root)
+    if str(_value(code_graph, "transport", "local")) == "remote":
+        remote = _value(code_graph, "remote", {}) or {}
+        return bool(str(_value(remote, "url", "") or "").strip())
+    local = _value(code_graph, "local", {}) or {}
+    executable = str(_value(local, "executable", "") or "").strip()
+    # A scan may bind any MCP implementation. Only the known CodeGraph CLI
+    # owns the .codegraph database and init command.
+    if Path(executable).name.casefold() not in {"codegraph", "codegraph.exe"}:
         return True
-    local = getattr(code_graph, "local", None)
-    executable = str(getattr(local, "executable", "") or "codegraph").strip()
     resolved = shutil.which(executable)
     if resolved is None and Path(executable).is_file():
         resolved = str(Path(executable).resolve())
     if not resolved:
-        await _notify(emit, f"CodeGraph 可执行文件不存在：{executable}，回退 deephole-code MCP")
+        await _notify(emit, f"CodeGraph 可执行文件不存在：{executable}")
         return False
-    lock = _project_locks.setdefault(root, asyncio.Lock())
+    local_environment = {
+        str(key): str(value)
+        for key, value in (_value(local, "environment", {}) or {}).items()
+    }
+    graph_dir = str(local_environment.get("CODEGRAPH_DIR") or ".codegraph").strip()
+    database = (root / graph_dir / "codegraph.db").resolve()
+    # Per-scan MCPs may point at different CodeGraph stores for the same source
+    # tree. Cache and serialize by the actual database, not just project root.
+    lock = _project_locks.setdefault(database, asyncio.Lock())
     async with lock:
-        if is_codegraph_ready(root):
+        if database.is_file():
+            if database == (root / ".codegraph" / "codegraph.db").resolve():
+                _ready_projects.add(root)
             return True
-        local_environment = {
-            str(key): str(value)
-            for key, value in (getattr(local, "environment", {}) or {}).items()
-        }
-        graph_dir = str(local_environment.get("CODEGRAPH_DIR") or ".codegraph").strip()
-        database = root / graph_dir / "codegraph.db"
-        if not database.is_file():
-            await _notify(emit, "项目尚未建立 CodeGraph，正在执行 codegraph init -i")
-            process_environment = os.environ.copy()
-            process_environment.update(local_environment)
-            proc = await asyncio.create_subprocess_exec(
-                resolved,
-                "init",
-                "-i",
-                cwd=str(root),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=process_environment,
+        await _notify(emit, "项目尚未建立 CodeGraph，正在执行 codegraph init -i")
+        process_environment = os.environ.copy()
+        process_environment.update(local_environment)
+        proc = await asyncio.create_subprocess_exec(
+            resolved,
+            "init",
+            "-i",
+            cwd=str(root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=process_environment,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=max(1, int(_value(code_graph, "timeout_seconds", 300))),
             )
-            try:
-                stdout, _ = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=max(1, int(getattr(code_graph, "timeout_seconds", 300))),
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                await _notify(emit, "CodeGraph 初始化超时，回退 deephole-code MCP")
-                return False
-            if proc.returncode != 0:
-                detail = stdout.decode("utf-8", errors="replace").strip()
-                await _notify(emit, f"CodeGraph 初始化失败，回退 deephole-code MCP：{detail}")
-                return False
-        if not database.is_file():
-            await _notify(emit, "CodeGraph 未生成 .codegraph/codegraph.db，回退 deephole-code MCP")
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            await _notify(emit, "CodeGraph 初始化超时")
             return False
-        _ready_projects.add(root)
-        await _notify(emit, "CodeGraph 已就绪，模型源码查询切换到 CodeGraph MCP")
+        if proc.returncode != 0:
+            detail = stdout.decode("utf-8", errors="replace").strip()
+            await _notify(emit, f"CodeGraph 初始化失败：{detail}")
+            return False
+        if not database.is_file():
+            await _notify(emit, f"CodeGraph 未生成 {database}")
+            return False
+        if database == (root / ".codegraph" / "codegraph.db").resolve():
+            _ready_projects.add(root)
+        await _notify(emit, "扫描代码图谱 CodeGraph 已就绪")
         return True
 
 

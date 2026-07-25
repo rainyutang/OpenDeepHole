@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 from deephole_client import mcp_probe
 from backend.api import agent as agent_api
-from backend.models import AgentInfo, AgentRemoteConfig, User
+from backend.models import AgentInfo, AgentMcpConfig, AgentRemoteConfig, User
 from task_agent.serve_client import OpenCodeServeManager
 from backend.store.sqlite import SqliteScanStore
 
@@ -160,8 +160,8 @@ def test_agent_probe_result_persists_and_becomes_stale_after_config_change(
 ) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
     config = AgentRemoteConfig()
-    config.code_graph.enabled = True
-    config.code_graph.local.executable = sys.executable
+    config.product_info.enabled = True
+    config.product_info.local.executable = sys.executable
     store.upsert_agent_record(
         agent_key="stable-agent",
         user_id="user-1",
@@ -201,28 +201,84 @@ def test_agent_probe_result_persists_and_becomes_stale_after_config_change(
 
     result = asyncio.run(agent_api.probe_stable_agent_mcp(
         "stable-agent",
-        "code_graph",
+        "product_info",
         user,
     ))
     status = asyncio.run(agent_api.get_stable_agent_mcp_status("stable-agent", user))
 
     assert result.success is True
     assert result.tool_names == ["node", "search"]
-    assert status.code_graph.stale is False
-    assert status.code_graph.last_probe == result
+    assert status.product_info.stale is False
+    assert status.product_info.last_probe == result
     persisted = json.loads(store.get_agent_record("stable-agent")["mcp_probe_json"])
-    assert persisted["code_graph"]["runtime_state"] == "reload_pending"
+    assert persisted["product_info"]["runtime_state"] == "reload_pending"
 
-    config.code_graph.timeout_seconds += 1
+    config.product_info.timeout_seconds += 1
     store.update_agent_config_record("stable-agent", config.model_dump_json())
     stale_status = asyncio.run(agent_api.get_stable_agent_mcp_status("stable-agent", user))
-    assert stale_status.code_graph.stale is True
+    assert stale_status.product_info.stale is True
+    store.close()
+
+
+def test_scan_code_graph_probe_uses_request_config_without_persisting(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = SqliteScanStore(tmp_path / "scan.db")
+    store.upsert_agent_record(
+        agent_key="stable-agent",
+        user_id="user-1",
+        ip="10.0.0.8",
+        machine_name="build-host",
+        display_name="agent",
+        agent_id="session-1",
+        last_seen="2026-07-17T01:00:00+00:00",
+        initial_config_json=AgentRemoteConfig().model_dump_json(),
+    )
+    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
+    live_agent = AgentInfo(
+        agent_id="session-1",
+        agent_key="stable-agent",
+        name="agent",
+        machine_name="build-host",
+        ip="10.0.0.8",
+        last_seen="2026-07-17T01:00:00+00:00",
+        user_id="user-1",
+    )
+    monkeypatch.setattr(
+        agent_api,
+        "_live_agent_for_key",
+        lambda _key: ("session-1", live_agent),
+    )
+    requested = AgentMcpConfig.model_validate(_mcp_config())
+
+    async def send_result(_agent_id: str, command: dict) -> bool:
+        assert command["target"] == "scan_code_graph"
+        assert command["mcp_config"] == requested.model_dump(mode="json")
+        agent_api._mcp_probe_waiters[command["request_id"]].set_result({
+            "success": True,
+            "protocol": "stdio",
+            "tool_names": ["fake_graph_lookup"],
+        })
+        return True
+
+    monkeypatch.setattr(agent_api, "send_agent_command", send_result)
+    result = asyncio.run(agent_api.probe_stable_agent_mcp(
+        "stable-agent",
+        "scan_code_graph",
+        User(user_id="user-1", username="owner", role="user"),
+        mcp_config=requested,
+    ))
+
+    assert result.success is True
+    assert result.tool_names == ["fake_graph_lookup"]
+    assert json.loads(store.get_agent_record("stable-agent")["mcp_probe_json"]) == {}
     store.close()
 
 
 def test_agent_probe_wait_timeout_cleans_up_waiter(monkeypatch) -> None:
     config = AgentRemoteConfig()
-    config.code_graph.enabled = True
+    config.product_info.enabled = True
     record = {
         "agent_key": "stable-agent",
         "user_id": "user-1",
@@ -258,7 +314,7 @@ def test_agent_probe_wait_timeout_cleans_up_waiter(monkeypatch) -> None:
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(agent_api.probe_stable_agent_mcp(
             "stable-agent",
-            "code_graph",
+            "product_info",
             user,
         ))
 
@@ -317,14 +373,13 @@ def test_agent_mcp_status_reports_live_hot_load_state(monkeypatch) -> None:
     assert status.product_info.runtime.state == "connected"
     assert status.product_info.runtime.loaded_directories == 2
     assert status.product_info.runtime.total_directories == 2
-    assert status.code_graph.runtime.state == "unknown"
     assert agent_api._mcp_status_waiters == {}
 
 
 def test_agent_mcp_reload_sends_target_and_cleans_up_waiter(monkeypatch) -> None:
     config = AgentRemoteConfig()
-    config.code_graph.enabled = True
-    config.code_graph.local.executable = sys.executable
+    config.product_info.enabled = True
+    config.product_info.local.executable = sys.executable
     record = {
         "agent_key": "stable-agent",
         "user_id": "user-1",
@@ -346,7 +401,7 @@ def test_agent_mcp_reload_sends_target_and_cleans_up_waiter(monkeypatch) -> None
 
     async def send_result(_agent_id: str, command: dict) -> bool:
         assert command["type"] == "mcp_reload"
-        assert command["target"] == "code_graph"
+        assert command["target"] == "product_info"
         agent_api._mcp_reload_waiters[command["request_id"]].set_result({"ok": True})
         return True
 
@@ -355,7 +410,7 @@ def test_agent_mcp_reload_sends_target_and_cleans_up_waiter(monkeypatch) -> None
     monkeypatch.setattr(agent_api, "send_agent_command", send_result)
     user = User(user_id="user-1", username="owner", role="user")
 
-    result = asyncio.run(agent_api.reload_stable_agent_mcp("stable-agent", "code_graph", user))
+    result = asyncio.run(agent_api.reload_stable_agent_mcp("stable-agent", "product_info", user))
 
     assert result == {"ok": True}
     assert agent_api._mcp_reload_waiters == {}

@@ -4722,16 +4722,16 @@ def test_managed_mcp_failed_disconnect_is_not_reported_as_disabled(tmp_path: Pat
 
 def test_managed_mcp_invalid_config_is_failed_before_first_session() -> None:
     manager = OpenCodeServeManager()
-    manager._managed_mcp_specs["code_graph"] = {
+    manager._managed_mcp_specs["product_info"] = {
         "enabled": True,
         "fingerprint": "missing-binary",
-        "error": "CodeGraph executable not found: codegraph",
+        "error": "Product MCP executable not found: product-info",
     }
 
-    status = manager.managed_mcp_runtime_status()["code_graph"]
+    status = manager.managed_mcp_runtime_status()["product_info"]
 
     assert status["state"] == "failed"
-    assert status["error"] == "CodeGraph executable not found: codegraph"
+    assert status["error"] == "Product MCP executable not found: product-info"
     assert status["total_directories"] == 0
 
 
