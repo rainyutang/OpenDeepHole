@@ -18,6 +18,7 @@ from task_agent.serve_client import (
     OpenCodeServeManager,
     _apply_source_graph_overrides,
     _mcp_tool_overrides,
+    _scan_mcp_lease_identity,
     _scan_mcp_runtime_spec,
 )
 from task_agent.task_service import get_opencode_execution_context
@@ -117,20 +118,37 @@ def test_agent_scan_task_snapshots_nested_mcp_values(tmp_path: Path) -> None:
 def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
     spec_a = _scan_mcp_runtime_spec(
         "scan-a",
-        _remote_mcp("http://127.0.0.1:9010/mcp").model_dump(mode="json"),
+        _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="static-mcp",
+        ).model_dump(mode="json"),
     )
     spec_b = _scan_mcp_runtime_spec(
         "scan-b",
-        _remote_mcp("http://127.0.0.1:9011/mcp").model_dump(mode="json"),
+        _remote_mcp(
+            "http://127.0.0.1:9011/mcp",
+            name="static-mcp",
+        ).model_dump(mode="json"),
     )
-    assert spec_a["name"] != spec_b["name"]
-    assert "scan-a" in spec_a["name"]
-    assert "graph" in spec_a["name"]
+    assert spec_a["name"] == "static-mcp"
+    assert spec_b["name"] == "static-mcp"
+    assert (
+        _scan_mcp_lease_identity(
+            "scan-a",
+            spec_a["name"],
+            spec_a["fingerprint"],
+        )
+        != _scan_mcp_lease_identity(
+            "scan-b",
+            spec_b["name"],
+            spec_b["fingerprint"],
+        )
+    )
     assert spec_a["config"]["headers"]["Authorization"] == "Bearer scan-secret"
 
     tool_ids = [
-        f"mcp--{spec_a['name']}--fake_graph_lookup",
-        f"mcp--{spec_b['name']}--fake_graph_lookup",
+        "static-mcp_static_read",
+        "mcp--other-graph--static_read",
         "mcp--deephole-code--view_function_code",
         "mcp--product-info--lookup",
         "read",
@@ -140,9 +158,12 @@ def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
         tool_ids,
         overrides,
         spec_a["name"],
+        source_mcp_names={"static-mcp", "other-graph"},
     )
 
     assert available is True
+    assert tool_ids[0] == "static-mcp_static_read"
+    assert len(tool_ids[0]) <= 64
     assert overrides[tool_ids[0]] is True
     assert overrides[tool_ids[1]] is False
     assert overrides["mcp--deephole-code--view_function_code"] is False
@@ -153,12 +174,89 @@ def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
         tool_ids,
         _mcp_tool_overrides(tool_ids, None),
         "",
+        source_mcp_names={"static-mcp", "other-graph"},
     )
     assert available is False
     assert disabled[tool_ids[0]] is False
     assert disabled[tool_ids[1]] is False
     assert disabled["mcp--deephole-code--view_function_code"] is False
     assert disabled["mcp--product-info--lookup"] is True
+
+
+def test_scan_mcp_name_collision_does_not_disconnect_global_mcp(
+    tmp_path: Path,
+) -> None:
+    class Response:
+        def __init__(self, value) -> None:
+            self.value = value
+            self.status_code = 200
+
+        def json(self):
+            return self.value
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class Client:
+        def __init__(self) -> None:
+            self.posts: list[str] = []
+
+        async def get(self, path: str, **_kwargs):
+            assert path == "/mcp"
+            return Response({
+                "static-mcp": {"status": "connected"},
+                "deephole-code": {"status": "connected"},
+            })
+
+        async def post(self, path: str, **_kwargs):
+            self.posts.append(path)
+            return Response(True)
+
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._managed_mcp_specs = {
+            "product_info": {
+                "enabled": True,
+                "name": "static-mcp",
+            },
+        }
+        client = Client()
+        project = tmp_path.resolve()
+        config = _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="static-mcp",
+        ).model_dump(mode="json")
+
+        lease = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-a",
+            config,
+        )
+
+        assert lease.connected is False
+        assert "conflicts with an enabled global MCP" in lease.error
+        assert client.posts == ["/mcp/deephole-code/disconnect"]
+        assert "static-mcp" not in manager._source_graph_mcp_names(project)
+        tool_ids = [
+            "static-mcp_static_read",
+            "mcp--deephole-code--view_function_code",
+        ]
+        overrides, available = _apply_source_graph_overrides(
+            tool_ids,
+            _mcp_tool_overrides(tool_ids, None),
+            "",
+            source_mcp_names=manager._source_graph_mcp_names(project),
+            protected_mcp_names=manager._enabled_managed_mcp_names(),
+        )
+        assert available is False
+        assert overrides["static-mcp_static_read"] is True
+        assert overrides["mcp--deephole-code--view_function_code"] is False
+        await manager._release_scan_mcp(project, lease)
+        assert manager._scan_mcp_states == {}
+
+    asyncio.run(run())
 
 
 def test_invalid_scan_mcp_disconnects_stale_graph_before_file_only_fallback(

@@ -30,7 +30,7 @@ def main() -> None:
     mcp = FastMCP(
         f"Fake Code Graph {marker}",
         instructions=(
-            "Use fake_graph_lookup for deterministic source-graph lookups. "
+            "Use static_read for deterministic source-graph lookups. "
             f"This server is bound to marker {marker}."
         ),
         host=args.host,
@@ -40,7 +40,7 @@ def main() -> None:
     )
 
     @mcp.tool()
-    def fake_graph_lookup(query: str) -> dict[str, object]:
+    def static_read(query: str) -> dict[str, object]:
         """Return deterministic graph nodes for the requested symbol or path."""
         result = {
             "marker": marker,

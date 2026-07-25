@@ -55,7 +55,7 @@ _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
 _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
-_SCAN_CODE_GRAPH_MCP_PREFIX = "opendeephole-scan-codegraph-"
+_LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX = "opendeephole-scan-codegraph-"
 _SENSITIVE_EVENT_KEY_RE = re.compile(
     r"(api[_-]?key|apikey|token|secret|password|authorization|cookie|credential|"
     r"prompt|content|body)",
@@ -127,6 +127,7 @@ class OpenCodeFileWrite:
 @dataclass(frozen=True)
 class _ScanMcpLease:
     directory_key: str
+    identity: str
     name: str
     fingerprint: str
     connected: bool
@@ -1304,26 +1305,38 @@ def _normalize_tool_selector(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
-def _scan_mcp_runtime_name(scan_id: object, configured_name: object = "") -> str:
-    raw_scan_id = str(scan_id or "").strip()
-    normalized_scan_id = re.sub(
-        r"[^a-zA-Z0-9]+",
-        "-",
-        raw_scan_id,
-    ).strip("-")
+def _scan_mcp_runtime_name(configured_name: object) -> str:
+    """Keep the configured MCP name unchanged in OpenCode's tool prefix."""
+    name = str(configured_name or "").strip()
+    if not name:
+        raise ValueError("Scan code graph MCP name is empty")
+    return name
+
+
+def _scan_mcp_lease_identity(
+    scan_id: object,
+    mcp_name: object,
+    fingerprint: object,
+) -> str:
+    """Build an internal identity without leaking it into MCP tool names."""
+    normalized_scan_id = str(scan_id or "").strip()
     if not normalized_scan_id:
         raise ValueError("Scan code graph MCP requires a scan_id")
-    normalized_name = re.sub(
-        r"[^a-zA-Z0-9]+",
-        "-",
-        str(configured_name or ""),
-    ).strip("-") or "graph"
-    label = f"{normalized_name}-{normalized_scan_id}"
-    digest = hashlib.sha256(raw_scan_id.encode("utf-8")).hexdigest()[:12]
-    return f"{_SCAN_CODE_GRAPH_MCP_PREFIX}{label[:56]}-{digest}"
+    payload = json.dumps(
+        [
+            normalized_scan_id,
+            str(mcp_name or ""),
+            str(fingerprint or ""),
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _scan_mcp_runtime_spec(scan_id: object, raw: object) -> dict[str, Any]:
+    if not str(scan_id or "").strip():
+        raise ValueError("Scan code graph MCP requires a scan_id")
     if not isinstance(raw, dict):
         raise ValueError("Scan code graph MCP config must be an object")
     if not bool(raw.get("enabled")):
@@ -1394,25 +1407,35 @@ def _scan_mcp_runtime_spec(scan_id: object, raw: object) -> dict[str, Any]:
     return {
         "target": "scan_code_graph",
         "enabled": True,
-        "name": _scan_mcp_runtime_name(scan_id, configured_name),
+        "name": _scan_mcp_runtime_name(configured_name),
         "fingerprint": fingerprint,
         "config": runtime_config,
         "error": "",
     }
 
 
-def _is_source_graph_tool(tool_id: object) -> bool:
-    normalized = str(tool_id or "").lower().replace("_", "-")
-    return (
-        "deephole-code" in normalized
-        or _SCAN_CODE_GRAPH_MCP_PREFIX in normalized
-    )
-
-
 def _tool_belongs_to_mcp(tool_id: object, mcp_name: object) -> bool:
-    tool_normalized = _normalize_tool_selector(tool_id)
-    name_normalized = _normalize_tool_selector(mcp_name)
-    return bool(name_normalized and name_normalized in tool_normalized)
+    tool = str(tool_id or "").strip().casefold()
+    name = str(mcp_name or "").strip().casefold()
+    if not name:
+        return False
+    return tool.startswith(f"{name}_") or tool.startswith(f"mcp--{name}--")
+
+
+def _is_source_graph_tool(
+    tool_id: object,
+    source_mcp_names: set[str] | tuple[str, ...] = (),
+    protected_mcp_names: set[str] | tuple[str, ...] = (),
+) -> bool:
+    tool = str(tool_id or "").strip().casefold()
+    if any(_tool_belongs_to_mcp(tool_id, name) for name in protected_mcp_names):
+        return False
+    if _LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX in tool:
+        return True
+    return any(
+        _tool_belongs_to_mcp(tool_id, name)
+        for name in {"deephole-code", *source_mcp_names}
+    )
 
 
 def _apply_source_graph_overrides(
@@ -1420,15 +1443,24 @@ def _apply_source_graph_overrides(
     overrides: dict[str, bool],
     selected_mcp_name: str | None,
     *,
+    source_mcp_names: set[str] | tuple[str, ...] = (),
+    protected_mcp_names: set[str] | tuple[str, ...] = (),
     allow_undiscovered: bool = False,
 ) -> tuple[dict[str, bool], bool]:
     """Isolate source graph tools without changing unrelated MCP tools."""
     if selected_mcp_name is None:
         return overrides, True
+    known_names = set(source_mcp_names)
+    if selected_mcp_name:
+        known_names.add(selected_mcp_name)
     source_ids = [
         tool_id
         for tool_id in tool_ids
-        if _tool_source(tool_id) == "mcp" and _is_source_graph_tool(tool_id)
+        if _is_source_graph_tool(
+            tool_id,
+            known_names,
+            protected_mcp_names,
+        )
     ]
     for tool_id in source_ids:
         overrides[tool_id] = False
@@ -1583,7 +1615,7 @@ def _tool_source(tool_name: object) -> str:
     normalized = str(tool_name or "").lower().replace("_", "-")
     if (
         "deephole-code" in normalized
-        or _SCAN_CODE_GRAPH_MCP_PREFIX in normalized
+        or _LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX in normalized
         or normalized.startswith("mcp--")
     ):
         return "mcp"
@@ -2471,6 +2503,7 @@ class OpenCodeServeManager:
         # message can never observe another scan's graph.
         self._scan_mcp_states: dict[str, dict[str, Any]] = {}
         self._scan_mcp_conditions: dict[str, asyncio.Condition] = {}
+        self._scan_mcp_names: dict[str, set[str]] = {}
 
     @property
     def base_url(self) -> str:
@@ -2794,11 +2827,29 @@ class OpenCodeServeManager:
                     self._redact_managed_mcp_error(exc, spec),
                 )
 
+    def _enabled_managed_mcp_names(self) -> set[str]:
+        return {
+            str(spec.get("name") or "")
+            for spec in self._managed_mcp_specs.values()
+            if spec.get("enabled") and str(spec.get("name") or "")
+        }
+
+    def _source_graph_mcp_names(self, directory: Path) -> set[str]:
+        directory_key = self._event_directory_key(Path(directory).resolve())
+        names = {
+            "deephole-code",
+            *self._scan_mcp_names.get(directory_key, set()),
+        }
+        names.difference_update(self._enabled_managed_mcp_names())
+        return names
+
     async def _disconnect_source_graph_mcps(
         self,
         client: httpx.AsyncClient,
         directory: Path,
     ) -> None:
+        source_names = self._source_graph_mcp_names(directory)
+        protected_names = self._enabled_managed_mcp_names()
         response = await client.get(
             "/mcp",
             params=_serve_context_params(directory),
@@ -2807,7 +2858,14 @@ class OpenCodeServeManager:
         response.raise_for_status()
         statuses = self._mcp_status_map(response.json())
         for name, raw_status in statuses.items():
-            if not _is_source_graph_tool(name):
+            if name in protected_names:
+                continue
+            if (
+                name not in source_names
+                and not str(name).casefold().startswith(
+                    _LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX
+                )
+            ):
                 continue
             state, _error = self._mcp_native_status(raw_status)
             if state != "connected":
@@ -2883,7 +2941,11 @@ class OpenCodeServeManager:
 
         name = str(spec.get("name") or "")
         fingerprint = str(spec.get("fingerprint") or "")
-        identity = f"{name}:{fingerprint}"
+        identity = _scan_mcp_lease_identity(
+            str(scan_id or "").strip() or "no-scan",
+            name,
+            fingerprint,
+        )
         condition = self._scan_mcp_conditions.setdefault(
             directory_key,
             asyncio.Condition(),
@@ -2897,6 +2959,7 @@ class OpenCodeServeManager:
                     existing["references"] = int(existing.get("references") or 0) + 1
                     return _ScanMcpLease(
                         directory_key=directory_key,
+                        identity=identity,
                         name=str(existing.get("name") or name),
                         fingerprint=fingerprint,
                         connected=bool(existing.get("connected")),
@@ -2915,6 +2978,14 @@ class OpenCodeServeManager:
                 "directory": directory,
             }
             self._scan_mcp_states[directory_key] = state
+            if raw_config is not None and name:
+                if name in self._enabled_managed_mcp_names():
+                    state["error"] = (
+                        f"Scan code graph MCP name {name!r} conflicts with "
+                        "an enabled global MCP"
+                    )
+                else:
+                    self._scan_mcp_names.setdefault(directory_key, set()).add(name)
 
             config = spec.get("config")
             timeout_ms = int(config.get("timeout") or 0) if isinstance(config, dict) else 0
@@ -2927,7 +2998,8 @@ class OpenCodeServeManager:
                 if state["error"]:
                     return _ScanMcpLease(
                         directory_key=directory_key,
-                        name="",
+                        identity=identity,
+                        name=name,
                         fingerprint=fingerprint,
                         connected=False,
                         error=str(state["error"]),
@@ -2935,6 +3007,7 @@ class OpenCodeServeManager:
                 if not name:
                     return _ScanMcpLease(
                         directory_key=directory_key,
+                        identity=identity,
                         name="",
                         fingerprint=fingerprint,
                         connected=False,
@@ -2959,6 +3032,7 @@ class OpenCodeServeManager:
                 state["connected"] = True
                 return _ScanMcpLease(
                     directory_key=directory_key,
+                    identity=identity,
                     name=name,
                     fingerprint=fingerprint,
                     connected=True,
@@ -3000,6 +3074,7 @@ class OpenCodeServeManager:
                 )
                 return _ScanMcpLease(
                     directory_key=directory_key,
+                    identity=identity,
                     name=name,
                     fingerprint=fingerprint,
                     connected=False,
@@ -3022,8 +3097,7 @@ class OpenCodeServeManager:
             existing = self._scan_mcp_states.get(lease.directory_key)
             if (
                 existing is None
-                or str(existing.get("fingerprint") or "") != lease.fingerprint
-                or str(existing.get("name") or "") != lease.name
+                or str(existing.get("identity") or "") != lease.identity
             ):
                 return
             references = max(0, int(existing.get("references") or 0) - 1)
@@ -3385,6 +3459,8 @@ class OpenCodeServeManager:
                     tool_ids,
                     mcp_overrides,
                     selected_source_mcp,
+                    source_mcp_names=self._source_graph_mcp_names(directory),
+                    protected_mcp_names=self._enabled_managed_mcp_names(),
                     allow_undiscovered=bool(
                         scan_mcp_lease is not None and scan_mcp_lease.connected
                     ),
@@ -4748,6 +4824,7 @@ class OpenCodeServeManager:
         self._managed_mcp_force_pending.clear()
         self._scan_mcp_states.clear()
         self._scan_mcp_conditions.clear()
+        self._scan_mcp_names.clear()
         for task in tasks:
             task.cancel()
         if tasks:

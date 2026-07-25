@@ -21,6 +21,7 @@ from task_agent.serve_client import (
     _apply_source_graph_overrides,
     _mcp_tool_overrides,
     _scan_mcp_runtime_spec,
+    _tool_belongs_to_mcp,
 )
 
 
@@ -80,9 +81,9 @@ async def _call_fake(port: int, query: str) -> str:
         ) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert [tool.name for tool in tools.tools] == ["fake_graph_lookup"]
+            assert [tool.name for tool in tools.tools] == ["static_read"]
             result = await session.call_tool(
-                "fake_graph_lookup",
+                "static_read",
                 {"query": query},
                 read_timeout_seconds=timedelta(seconds=5),
             )
@@ -127,7 +128,7 @@ async def _exercise_scan_binding(
             name
             for name, value in status_a.items()
             if manager._mcp_native_status(value)[0] == "connected"
-            and "scan-codegraph" in name
+            and name == "static-mcp"
         ]
 
         pending_b = asyncio.create_task(
@@ -158,7 +159,7 @@ async def _exercise_scan_binding(
             name
             for name, value in status_b.items()
             if manager._mcp_native_status(value)[0] == "connected"
-            and "scan-codegraph" in name
+            and name == "static-mcp"
         ]
         await manager._release_scan_mcp(project_dir, lease_b)
     return connected_a, connected_b, waited_for_a, tool_ids
@@ -237,7 +238,7 @@ def test_fake_graph_servers_are_discovered_by_real_opencode_and_stay_isolated(
         configs = [
             {
                 "enabled": True,
-                "name": "fake",
+                "name": "static-mcp",
                 "transport": "remote",
                 "timeout_seconds": 10,
                 "remote": {
@@ -265,29 +266,32 @@ def test_fake_graph_servers_are_discovered_by_real_opencode_and_stay_isolated(
                 tool_ids,
                 _mcp_tool_overrides(tool_ids, None),
                 specs[1]["name"],
+                source_mcp_names={"static-mcp"},
                 allow_undiscovered=True,
             )
             selected = [
                 tool
                 for tool, enabled in overrides.items()
-                if enabled and "scan-codegraph" in tool.replace("_", "-")
+                if enabled and _tool_belongs_to_mcp(tool, "static-mcp")
             ]
-            rejected = [
+            legacy = [
                 tool
                 for tool, enabled in overrides.items()
-                if not enabled and "scan-codegraph" in tool.replace("_", "-")
+                if enabled
+                and "opendeephole-scan-codegraph" in tool.replace("_", "-")
             ]
+            assert specs[0]["name"] == "static-mcp"
+            assert specs[1]["name"] == "static-mcp"
+            assert specs[0]["fingerprint"] != specs[1]["fingerprint"]
             assert connected_a == [specs[0]["name"]]
             assert connected_b == [specs[1]["name"]]
             assert waited_for_a is True
             assert available is True
+            assert not legacy
             if selected:
                 assert len(selected) == 1
-                assert not rejected
-                assert (
-                    specs[1]["name"].replace("-", "")
-                    in selected[0].replace("-", "").replace("_", "")
-                )
+                assert "scan-a" not in selected[0]
+                assert "scan-b" not in selected[0]
         except Exception as exc:
             raise AssertionError(
                 f"OpenCode scan MCP integration failed: {exc}\n"
