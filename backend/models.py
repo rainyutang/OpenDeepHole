@@ -617,7 +617,14 @@ class AgentMcpConfig(BaseModel):
     enabled: bool = False
     name: str = ""
     transport: str = "local"
-    timeout_seconds: int = 300
+    timeout_seconds: int = Field(
+        default=300,
+        gt=0,
+        description=(
+            "MCP request timeout in seconds; converted to OpenCode's "
+            "millisecond timeout at runtime"
+        ),
+    )
     local: AgentMcpLocalConfig = AgentMcpLocalConfig()
     remote: AgentMcpRemoteConfig = AgentMcpRemoteConfig()
 

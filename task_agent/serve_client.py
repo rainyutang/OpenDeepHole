@@ -1345,10 +1345,18 @@ def _scan_mcp_runtime_spec(scan_id: object, raw: object) -> dict[str, Any]:
     if not configured_name:
         raise ValueError("Scan code graph MCP name is empty")
     transport = str(raw.get("transport") or "local").strip().lower()
+    raw_timeout_seconds = raw.get("timeout_seconds")
     try:
-        timeout_seconds = max(1, int(raw.get("timeout_seconds") or 300))
+        timeout_seconds = int(
+            300 if raw_timeout_seconds is None else raw_timeout_seconds
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("Scan code graph MCP timeout is invalid") from exc
+    if timeout_seconds < 1:
+        raise ValueError("Scan code graph MCP timeout must be positive")
+    # OpenCode's native MCP timeout is expressed in milliseconds and is used
+    # for connection, tool discovery, and individual tool calls.
+    timeout_milliseconds = timeout_seconds * 1000
     local = raw.get("local") if isinstance(raw.get("local"), dict) else {}
     remote = raw.get("remote") if isinstance(raw.get("remote"), dict) else {}
     runtime_config: dict[str, Any]
@@ -1363,7 +1371,7 @@ def _scan_mcp_runtime_spec(scan_id: object, raw: object) -> dict[str, Any]:
                 *[str(item) for item in (local.get("args") or [])],
             ],
             "enabled": True,
-            "timeout": timeout_seconds * 1000,
+            "timeout": timeout_milliseconds,
         }
         environment = local.get("environment")
         if isinstance(environment, dict) and environment:
@@ -1379,7 +1387,7 @@ def _scan_mcp_runtime_spec(scan_id: object, raw: object) -> dict[str, Any]:
             "type": "remote",
             "url": url,
             "enabled": True,
-            "timeout": timeout_seconds * 1000,
+            "timeout": timeout_milliseconds,
             "oauth": False,
         }
         headers = remote.get("headers")

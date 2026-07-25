@@ -111,7 +111,7 @@ owner_token: ""
 
 下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、完整 OpenCode JSONC、威胁分析开关、产品信息 MCP、漏洞挖掘、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
 
-每次在 **「新建扫描」** 页面都必须单独填写代码图谱 MCP，可选择本地进程或远端服务，并配置启动参数、环境变量、请求头和超时。配置会作为扫描私有快照持久化，并在续扫、去误报和漏洞验证中继续使用；不同扫描不会共享代码图谱连接。历史扫描以及未传 `code_graph_mcp` 的兼容 API 请求继续使用内置 `deephole-code`。
+每次在 **「新建扫描」** 页面都必须单独填写代码图谱 MCP，可选择本地进程或远端服务，并配置启动参数、环境变量、请求头和 MCP 调用超时。`code_graph_mcp.timeout_seconds` 按秒填写，默认值 `300` 会在运行时转换为 OpenCode MCP 配置中的 `"enabled": true, "timeout": 300000`；该超时同时用于连接、工具发现和单次工具调用。配置会作为扫描私有快照持久化，并在续扫、去误报和漏洞验证中继续使用；不同扫描不会共享代码图谱连接。历史扫描以及未传 `code_graph_mcp` 的兼容 API 请求继续使用内置 `deephole-code`。
 
 运行时会严格使用填写的 MCP 名称，不会追加扫描 ID、前缀或哈希。例如名称为 `static-mcp` 且服务提供 `static_read` 时，OpenCode 中的工具名就是 `static-mcp_static_read`；扫描 ID 仅用于内部连接隔离。
 

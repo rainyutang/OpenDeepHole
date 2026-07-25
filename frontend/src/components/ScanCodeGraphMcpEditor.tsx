@@ -64,7 +64,7 @@ export function validateScanCodeGraphMcp(value: AgentMcpConfig): string {
   if (!value.enabled) return "扫描代码图谱 MCP 必须启用";
   if (!value.name.trim()) return "请输入扫描代码图谱 MCP 名称";
   if (!Number.isFinite(value.timeout_seconds) || value.timeout_seconds < 1) {
-    return "扫描代码图谱 MCP 超时必须大于 0";
+    return "扫描代码图谱 MCP 调用超时必须大于 0";
   }
   if (value.transport === "local" && !value.local.executable.trim()) {
     return "请输入扫描代码图谱 MCP 可执行文件";
@@ -148,7 +148,10 @@ export default function ScanCodeGraphMcpEditor({
             <option value="remote">远端服务</option>
           </select>
         </Field>
-        <Field label="连接超时（秒）">
+        <Field
+          label="MCP 调用超时（秒）"
+          hint="同时用于连接、工具发现和工具调用；300 秒生成 timeout: 300000"
+        >
           <input
             className={input}
             type="number"

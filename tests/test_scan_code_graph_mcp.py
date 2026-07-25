@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from backend.models import (
     AgentMcpConfig,
+    AgentMcpLocalConfig,
     AgentMcpRemoteConfig,
     ScanItemStatus,
     ScanMeta,
@@ -24,12 +27,17 @@ from task_agent.serve_client import (
 from task_agent.task_service import get_opencode_execution_context
 
 
-def _remote_mcp(url: str, *, name: str = "graph") -> AgentMcpConfig:
+def _remote_mcp(
+    url: str,
+    *,
+    name: str = "graph",
+    timeout_seconds: int = 12,
+) -> AgentMcpConfig:
     return AgentMcpConfig(
         enabled=True,
         name=name,
         transport="remote",
-        timeout_seconds=12,
+        timeout_seconds=timeout_seconds,
         remote=AgentMcpRemoteConfig(
             url=url,
             headers={"Authorization": "Bearer scan-secret"},
@@ -39,7 +47,10 @@ def _remote_mcp(url: str, *, name: str = "graph") -> AgentMcpConfig:
 
 def test_scan_mcp_snapshot_round_trips_without_public_serialization(tmp_path: Path) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
-    config = _remote_mcp("http://127.0.0.1:9010/mcp")
+    config = _remote_mcp(
+        "http://127.0.0.1:9010/mcp",
+        timeout_seconds=300,
+    )
     scan = ScanStatus(
         scan_id="scan-a",
         project_id="project",
@@ -60,12 +71,46 @@ def test_scan_mcp_snapshot_round_trips_without_public_serialization(tmp_path: Pa
 
     assert loaded is not None
     assert loaded.code_graph_mcp == config
+    assert loaded.code_graph_mcp.timeout_seconds == 300
     assert "code_graph_mcp" not in loaded.model_dump()
     columns = {
         row[1]
         for row in store._conn.execute("PRAGMA table_info(scans)").fetchall()
     }
     assert "code_graph_mcp_json" in columns
+
+
+def test_scan_mcp_timeout_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="greater than 0"):
+        AgentMcpConfig(timeout_seconds=0)
+
+
+def test_scan_runtime_converts_mcp_timeout_seconds_to_opencode_milliseconds() -> None:
+    configs = [
+        AgentMcpConfig(
+            enabled=True,
+            name="local-graph",
+            transport="local",
+            timeout_seconds=300,
+            local=AgentMcpLocalConfig(
+                executable="fake-code-graph",
+                args=["--serve"],
+            ),
+        ),
+        _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="remote-graph",
+            timeout_seconds=300,
+        ),
+    ]
+
+    for index, config in enumerate(configs):
+        runtime = _scan_mcp_runtime_spec(
+            f"scan-{index}",
+            config.model_dump(mode="json"),
+        )["config"]
+        assert runtime["enabled"] is True
+        assert runtime["timeout"] == 300_000
 
 
 def test_task_context_snapshots_scan_mcp_and_nested_context_inherits(tmp_path: Path) -> None:

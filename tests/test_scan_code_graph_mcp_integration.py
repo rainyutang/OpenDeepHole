@@ -282,6 +282,10 @@ def test_fake_graph_servers_are_discovered_by_real_opencode_and_stay_isolated(
             ]
             assert specs[0]["name"] == "static-mcp"
             assert specs[1]["name"] == "static-mcp"
+            assert specs[0]["config"]["enabled"] is True
+            assert specs[1]["config"]["enabled"] is True
+            assert specs[0]["config"]["timeout"] == 10_000
+            assert specs[1]["config"]["timeout"] == 10_000
             assert specs[0]["fingerprint"] != specs[1]["fingerprint"]
             assert connected_a == [specs[0]["name"]]
             assert connected_b == [specs[1]["name"]]
