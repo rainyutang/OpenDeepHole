@@ -367,7 +367,6 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
                 required_capability=capability,
                 output_schema=_RESULT_SCHEMA,
                 config_path=kwargs.get("task_agent_config"),
-                output=None,
                 cancel_event=cancel_event,
             )
             produced: list[dict[str, Any]] = []

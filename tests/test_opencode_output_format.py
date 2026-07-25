@@ -25,6 +25,15 @@ def test_task_output_header_uses_stage_session_and_supported_categories() -> Non
     assert format_task_output("scan", "ses-2", "skill", "name=audit") == (
         "[scan][ses-2][skill] name=audit"
     )
+    assert format_task_output(
+        "scan",
+        "ses-2",
+        "tool",
+        'name=codegraph input={"query":"two  spaces"}',
+    ) == (
+        '[scan][ses-2][tool] name=codegraph '
+        'input={"query":"two  spaces"}'
+    )
     with pytest.raises(ValueError, match="Unsupported Task Agent output category"):
         format_task_output("scan", "ses-2", "step", "START")
 

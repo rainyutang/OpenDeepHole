@@ -1724,6 +1724,19 @@ def _tool_call_details(tool_name: object, input_value: object) -> str:
     return " ".join(details)
 
 
+def _tool_input_json(input_value: object) -> str:
+    """Serialize complete tool input without redaction or preview truncation."""
+    try:
+        return json.dumps(
+            input_value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+    except Exception:
+        return json.dumps(str(input_value), ensure_ascii=False)
+
+
 def _path_text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
@@ -1863,6 +1876,7 @@ class _ServeEventState:
         on_file_write=None,
         ignored_file_message_ids: tuple[str, ...] = (),
         log_stage: str = "opencode",
+        source_mcp_name: str = "",
     ) -> None:
         self.tool = tool
         self.session_id = session_id
@@ -1870,6 +1884,7 @@ class _ServeEventState:
         self.on_file_write = on_file_write
         self.ignored_file_message_ids = frozenset(ignored_file_message_ids)
         self.log_stage = task_output_stage(log_stage)
+        self.source_mcp_name = str(source_mcp_name or "").strip()
         self.emitted_text = False
         self.emitted_response_text = False
         self.seen_next_text_event = False
@@ -2185,7 +2200,13 @@ class _ServeEventState:
         if _is_skill_tool(name):
             self.emit("skill", f"name={_skill_name(input_value)}")
         else:
-            details = _tool_call_details(name, input_value)
+            if (
+                self.source_mcp_name
+                and _tool_belongs_to_mcp(name, self.source_mcp_name)
+            ):
+                details = f"input={_tool_input_json(input_value)}"
+            else:
+                details = _tool_call_details(name, input_value)
             details_note = f" {details}" if details else ""
             self.emit("tool", f"name={name or 'unknown'}{details_note}")
 
@@ -3444,6 +3465,7 @@ class OpenCodeServeManager:
                         on_file_write=on_file_write,
                         ignored_file_message_ids=ignored_file_message_ids,
                         log_stage=normalized_log_stage,
+                        source_mcp_name=selected_source_mcp or "",
                     )
                     if on_line is not None:
                         event_flush_task = asyncio.create_task(

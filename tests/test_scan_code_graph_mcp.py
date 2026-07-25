@@ -121,21 +121,31 @@ def test_task_context_snapshots_scan_mcp_and_nested_context_inherits(tmp_path: P
     work.mkdir()
     nested.mkdir()
     raw = _remote_mcp("http://127.0.0.1:9010/mcp").model_dump(mode="json")
+    output: list[str] = []
 
     with opencode_task_context(
         scan_id="scan-a",
         project_dir=project,
         work_dir=work,
         code_graph_mcp=raw,
+        output=output.append,
     ):
         raw["remote"]["headers"]["Authorization"] = "mutated"
         outer = get_opencode_execution_context()
         with opencode_task_context(project_dir=project, work_dir=nested):
             inner = get_opencode_execution_context()
+        with opencode_task_context(
+            project_dir=project,
+            work_dir=nested,
+            output=None,
+        ):
+            muted = get_opencode_execution_context()
 
     assert outer.code_graph_mcp is not None
     assert outer.code_graph_mcp["remote"]["headers"]["Authorization"] == "Bearer scan-secret"
     assert inner.code_graph_mcp == outer.code_graph_mcp
+    assert inner.on_output is outer.on_output
+    assert muted.on_output is None
 
 
 def test_agent_scan_task_snapshots_nested_mcp_values(tmp_path: Path) -> None:

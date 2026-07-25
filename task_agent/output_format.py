@@ -35,7 +35,7 @@ def format_task_output(
     normalized_category = str(category or "").strip().lower()
     if normalized_category not in _TASK_OUTPUT_CATEGORIES:
         raise ValueError(f"Unsupported Task Agent output category: {category!r}")
-    content = " ".join(str(message or "").split())
+    content = re.sub(r"[\r\n]+", " ", str(message or "")).strip()
     prefix = f"[{normalized_stage}][{normalized_session}][{normalized_category}]"
     return f"{prefix} {content}".rstrip()
 

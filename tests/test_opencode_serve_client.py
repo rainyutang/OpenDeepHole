@@ -17,6 +17,7 @@ from task_agent.serve_client import (
     OpenCodePromptResult,
     OpenCodeServeKey,
     OpenCodeServeManager,
+    _ScanMcpLease,
     _ServeEventState,
     _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
     _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
@@ -1071,6 +1072,147 @@ def test_run_prompt_logs_discovered_mcp_tool_names(monkeypatch, tmp_path: Path) 
         assert "mcp__deephole-code__view_struct_code" in logged
 
     asyncio.run(run())
+
+
+def test_run_prompt_logs_selected_source_mcp_input_in_full(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["read", "static-mcp_static_read"]
+        source_input = {
+            "query": "find  target\nnext\tvalue",
+            "path": "src/with spaces.c",
+            "depth": 3,
+            "prompt": "private " + ("x" * 600),
+        }
+        _FakeAsyncClient.message_parts = [{
+            "id": "part-source-tool",
+            "type": "tool",
+            "callID": "call-source-tool",
+            "tool": "static-mcp_static_read",
+            "state": {
+                "status": "completed",
+                "input": source_input,
+                "output": "secret source body",
+            },
+        }]
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._acquire_scan_mcp = AsyncMock(return_value=_ScanMcpLease(
+            directory_key="project",
+            identity="scan-1:static-mcp",
+            name="static-mcp",
+            fingerprint="fingerprint",
+            connected=True,
+        ))
+        manager._release_scan_mcp = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+        output: list[str] = []
+
+        try:
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=project,
+                prompt="hello",
+                model="",
+                timeout=30,
+                on_line=output.append,
+                scan_id="scan-1",
+                code_graph_mcp={"enabled": True},
+            )
+        finally:
+            _FakeAsyncClient.tool_ids = [
+                "read",
+                "grep",
+                "mcp__deephole-code__view_function_code",
+            ]
+
+        expected_input = json.dumps(
+            source_input,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        expected = (
+            "[opencode][session-1][tool] "
+            f"name=static-mcp_static_read input={expected_input}"
+        )
+        assert output.count(expected) == 1
+        logged = "\n".join(output)
+        assert "secret source body" not in logged
+        assert "[truncated" not in logged
+        assert "\\n" in expected
+        assert "\\t" in expected
+        assert "find  target" in expected
+        manager._release_scan_mcp.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_selected_source_mcp_call_is_deduplicated_across_event_shapes() -> None:
+    output: list[str] = []
+    state = _ServeEventState(
+        "opencode",
+        "session-1",
+        output.append,
+        source_mcp_name="static-mcp",
+    )
+    input_value = {"query": "target", "depth": 2}
+    part = {
+        "id": "part-source-tool",
+        "sessionID": "session-1",
+        "type": "tool",
+        "callID": "call-source-tool",
+        "tool": "static-mcp_static_read",
+        "state": {
+            "status": "running",
+            "input": input_value,
+        },
+    }
+
+    _handle_serve_event({
+        "type": "message.part.updated",
+        "properties": {"sessionID": "session-1", "part": part},
+    }, state)
+    _handle_serve_event({
+        "type": "sync",
+        "name": "session.next.tool.called.1",
+        "data": {
+            "sessionID": "session-1",
+            "callID": "call-source-tool",
+            "tool": "static-mcp_static_read",
+            "input": input_value,
+        },
+    }, state)
+    state.ingest_message_snapshot({
+        "info": {
+            "id": "message-ai",
+            "sessionID": "session-1",
+            "role": "assistant",
+        },
+        "parts": [{**part, "messageID": "message-ai"}],
+    })
+
+    expected_input = json.dumps(
+        input_value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert output == [
+        "[opencode][session-1][tool] "
+        f"name=static-mcp_static_read input={expected_input}",
+    ]
 
 
 def test_list_models_uses_project_directory_context(monkeypatch, tmp_path: Path) -> None:

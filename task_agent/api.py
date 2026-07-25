@@ -270,10 +270,10 @@ def opencode_task_context(
     config_path: str | PathLike[str] | None = None,
     skill_paths: list[str | PathLike[str]] | None = None,
     task_metadata: dict[str, Any] | None = None,
-    output: Callable[[str], Any] | None = None,
+    output: Callable[[str], Any] | None | object = _UNSET,
     cancel_event: Any = None,
 ):
-    """Bind generic host context for one or more component task calls."""
+    """Bind host context; omitted output inherits and explicit None disables it."""
     from .task_service import bind_opencode_execution_context
 
     context_kwargs: dict[str, Any] = {
@@ -288,11 +288,12 @@ def opencode_task_context(
         "scan_id": None if scan_id is None else str(scan_id or ""),
         "feedback_entries": list(feedback_entries or []),
         "task_metadata": dict(task_metadata or {}),
-        "on_output": output,
         "cancel_event": cancel_event,
     }
     if code_graph_mcp is not _UNSET:
         context_kwargs["code_graph_mcp"] = code_graph_mcp
+    if output is not _UNSET:
+        context_kwargs["on_output"] = output
 
     with bind_opencode_execution_context(
         **context_kwargs,
