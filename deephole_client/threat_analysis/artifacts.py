@@ -18,7 +18,6 @@ class ThreatAnalysisLayout:
 
     def ensure(self) -> None:
         for path in [
-            self.task_inputs_dir,
             self.value_assets_raw_dir,
             self.value_assets_final_dir,
             self.high_risk_raw_dir,
@@ -27,10 +26,6 @@ class ThreatAnalysisLayout:
             self.attack_trees_final_dir,
         ]:
             path.mkdir(parents=True, exist_ok=True)
-
-    @property
-    def task_inputs_dir(self) -> Path:
-        return self.root / "task_inputs"
 
     @property
     def value_assets_raw_dir(self) -> Path:
@@ -55,12 +50,6 @@ class ThreatAnalysisLayout:
     @property
     def attack_trees_final_dir(self) -> Path:
         return self.root / "attack_trees" / "final"
-
-    def write_task_input(self, name: str, payload: Any) -> Path:
-        self.task_inputs_dir.mkdir(parents=True, exist_ok=True)
-        path = self.task_inputs_dir / name
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        return path
 
     def write_final_json(self, relative_path: str, payload: Any) -> Path:
         path = self.root / relative_path

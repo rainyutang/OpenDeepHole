@@ -138,6 +138,7 @@ class ThreatAnalysisPipeline:
         attack_trees = self.attack_trees.run(
             value_assets=value_assets,
             high_risk_modules=high_risk_modules,
+            high_risk_modules_file=merge_task["output_path"],
             context_files=attack_tree_context_files,
             timeout=timeout,
             resume=resume,

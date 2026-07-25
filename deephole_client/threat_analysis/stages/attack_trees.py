@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 from pathlib import Path
 from typing import Any, Sequence
@@ -36,32 +37,26 @@ class AttackTreeStage:
         self,
         *,
         value_assets: Sequence[dict[str, Any]],
-        high_risk_modules: Sequence[dict[str, Any]],
+        high_risk_modules_file: str | Path,
         context_files: Sequence[str | Path] = (),
         runtime_prompt: str | None = None,
     ) -> list[TaskJson]:
         tasks: list[TaskJson] = []
         for index, asset in enumerate(value_assets, start=1):
             task_id = f"attack-tree-by-asset-{index:03d}"
-            task_input = self.layout.write_task_input(
-                f"{task_id}.input.json",
-                {
-                    "value_asset": asset,
-                    "high_risk_modules": list(high_risk_modules),
-                },
-            )
             tasks.append(
                 {
                     "task_id": task_id,
                     "task_type": self.task_type,
                     "skill_name": self.skill_name,
-                    "runtime_prompt": runtime_prompt
-                    or _asset_prompt(
+                    "runtime_prompt": _asset_prompt(
                         asset,
-                        task_input=task_input,
+                        high_risk_modules_file=high_risk_modules_file,
                         context_files=context_files,
+                        runtime_prompt=runtime_prompt,
                     ),
-                    "input_files": [str(task_input)] + [str(path) for path in context_files],
+                    "input_files": [str(high_risk_modules_file)]
+                    + [str(path) for path in context_files],
                     "output_path": str(self.layout.attack_trees_raw_dir / f"{task_id}.json"),
                     "output_schema": ATTACK_TREE_SCHEMA,
                     "metadata": {
@@ -78,6 +73,7 @@ class AttackTreeStage:
         *,
         value_assets: Sequence[dict[str, Any]],
         high_risk_modules: Sequence[dict[str, Any]],
+        high_risk_modules_file: str | Path | None = None,
         context_files: Sequence[str | Path] = (),
         runtime_prompt: str | None = None,
         timeout: float | None = None,
@@ -85,9 +81,12 @@ class AttackTreeStage:
         progress_reporter: ProgressReporter | None = None,
     ) -> dict[str, Any]:
         self.layout.ensure()
+        final_high_risk_modules_file = high_risk_modules_file or (
+            self.layout.high_risk_final_dir / "high-risk-module-merge.json"
+        )
         tasks = self.build_tasks(
             value_assets=value_assets,
-            high_risk_modules=high_risk_modules,
+            high_risk_modules_file=final_high_risk_modules_file,
             context_files=context_files,
             runtime_prompt=runtime_prompt,
         )
@@ -151,19 +150,25 @@ def combine_attack_tree_outputs(outputs: Sequence[dict[str, Any]]) -> dict[str, 
 def _asset_prompt(
     asset: dict[str, Any],
     *,
-    task_input: str | Path,
+    high_risk_modules_file: str | Path,
     context_files: Sequence[str | Path] = (),
+    runtime_prompt: str | None = None,
 ) -> str:
     asset_name = asset.get("资产名") or asset.get("asset_name") or "当前价值资产"
+    task_instruction = runtime_prompt or (
+        f"请根据 skill 要求，仅针对价值资产“{asset_name}”进行攻击树分析。"
+    )
+    asset_json = json.dumps(asset, ensure_ascii=False, indent=2)
     context_text = (
         "额外代码上下文文件：" + "、".join(str(path) for path in context_files) + "。"
         if context_files
         else "未提供额外代码上下文文件。"
     )
     return (
-        f"请根据 skill 要求，仅针对价值资产“{asset_name}”进行攻击树分析。"
-        f"结构化输入文件：{task_input}，其中 value_asset 是当前价值资产，"
-        "high_risk_modules 是全部最终高风险模块列表；必须读取该文件中的高风险模块后再分析攻击路径。"
+        f"{task_instruction}\n"
+        f"当前任务的价值资产如下：\n{asset_json}\n"
+        f"全部最终高风险模块文件：{high_risk_modules_file}；"
+        "必须读取该文件中的高风险模块后再分析攻击路径。"
         f"{context_text}"
         "最终只输出符合 JSON schema 的对象。"
     )
