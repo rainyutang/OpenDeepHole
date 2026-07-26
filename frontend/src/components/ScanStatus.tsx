@@ -8,6 +8,7 @@ import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
+import { ThemeToggle } from "./ThemeToggle";
 
 const MAX_LOG_LINES = 500;
 const STATIC_CANDIDATE_PAGE_SIZE = 20;
@@ -794,8 +795,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   if (!scan) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
-        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+      <div className="relative min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
+        <div className="absolute right-4 top-4">
+          <ThemeToggle />
+        </div>
+        <div role="status" aria-label="加载扫描详情" className="page-spinner w-5 h-5 border-2 rounded-full animate-spin" />
       </div>
     );
   }
@@ -880,12 +884,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
       {/* Top bar */}
-      <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-6 py-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-4">
+      <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
+        <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
             <button
               onClick={onBack}
-              className="text-sm text-slate-400 hover:text-slate-200 transition-colors flex items-center gap-1"
+              className="flex items-center gap-1 rounded-md text-sm text-slate-400 transition-colors hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 motion-reduce:transition-none"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -913,7 +917,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               </span>
             )}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2 xl:max-w-[72%] xl:justify-end">
+            <ThemeToggle />
             {/* Feedback button with count badge */}
             <button
               onClick={() => setFeedbackOpen(true)}
@@ -1091,7 +1096,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       </div>
 
       {/* Main content */}
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div className="flex-1 overflow-auto px-4 py-4 sm:px-6">
         {activeTab === "overview" && (
           <ScanOverview
             scan={scan}
@@ -1576,11 +1581,9 @@ function ProcessFlowNav({
   };
 
   return (
-    <section className="border-t border-slate-700/60 pt-3">
+    <nav className="border-t border-slate-700/60 pt-3" aria-label="扫描执行流程">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">执行流程</div>
-        </div>
+        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">执行流程</div>
         <div className="flex flex-wrap items-center gap-2">
           <FlowUtilityButton active={activeTab === "overview"} onClick={onHome}>
             首页
@@ -1592,40 +1595,58 @@ function ProcessFlowNav({
         </div>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-slate-700/50 bg-slate-900/35 p-2.5 shadow-inner">
-        <div className="mx-auto flex w-max items-stretch gap-3">
-          <div className="flex items-center">
-            <FlowNodeButton node={nodes.threat} onClick={onNodeClick} />
-          </div>
-          <FlowArrow label="进入" />
-          <div className="flex-none rounded-xl border border-cyan-500/25 bg-gradient-to-br from-slate-950/80 via-slate-900/60 to-cyan-950/20 p-3 shadow-sm">
-            <div className="mb-3 flex items-center justify-center">
-              <div className="text-sm font-semibold text-slate-100">漏洞挖掘</div>
+      <div className="relative -mx-1">
+        <div
+          className="pointer-events-none absolute inset-y-1 left-0 z-10 w-8 bg-gradient-to-r from-slate-900/90 to-transparent xl:hidden"
+          aria-hidden="true"
+        />
+        <div
+          className="pointer-events-none absolute inset-y-1 right-0 z-10 w-8 bg-gradient-to-l from-slate-900/90 to-transparent xl:hidden"
+          aria-hidden="true"
+        />
+        <div
+          className="overflow-x-auto overscroll-x-contain rounded-xl border border-slate-700/50 bg-slate-900/35 px-2 py-3 shadow-inner scroll-smooth snap-x snap-proximity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/60 motion-reduce:scroll-auto sm:px-3"
+          tabIndex={0}
+          aria-label="执行流程图，可横向滚动"
+        >
+          <div className="mx-auto flex w-max min-w-[70rem] items-center">
+            <div className="flex snap-center items-center">
+              <FlowNodeButton node={nodes.threat} onClick={onNodeClick} />
             </div>
-            <div className="flex min-h-[11rem] items-center justify-center gap-3">
-              <div className="w-[400px] rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-2.5 shadow-sm">
-                <FlowNodeButton node={nodes.static_analysis} onClick={onNodeClick} wide />
-                <div className="mt-2.5 flex items-center gap-1.5">
-                  <FlowNodeButton node={nodes.call_graph} onClick={onNodeClick} compact />
-                  <FlowArrow compact />
-                  <FlowNodeButton node={nodes.candidate_generation} onClick={onNodeClick} compact />
-                </div>
+            <FlowArrow label="进入" />
+            <div
+              role="group"
+              aria-label="漏洞挖掘"
+              className="relative flex-none rounded-xl border border-cyan-500/25 bg-gradient-to-br from-slate-950/80 via-slate-900/60 to-cyan-950/20 px-3 py-8 shadow-sm"
+            >
+              <div className="absolute inset-x-3 top-2 flex items-center justify-center">
+                <div className="text-sm font-semibold text-slate-100">漏洞挖掘</div>
               </div>
-              <FlowArrow />
-              <FlowAuditBranch
-                auditNode={nodes.candidate_audit}
-                fpReviewNode={nodes.fp_review}
-                onNodeClick={onNodeClick}
-              />
+              <div className="flex h-44 items-center">
+                <div className="h-44 w-[20.5rem] rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-2 shadow-sm">
+                  <FlowNodeButton node={nodes.static_analysis} onClick={onNodeClick} wide />
+                  <div className="mt-1.5 flex items-center">
+                    <FlowNodeButton node={nodes.call_graph} onClick={onNodeClick} compact />
+                    <FlowArrow compact />
+                    <FlowNodeButton node={nodes.candidate_generation} onClick={onNodeClick} compact />
+                  </div>
+                </div>
+                <FlowArrow />
+                <FlowAuditBranch
+                  auditNode={nodes.candidate_audit}
+                  fpReviewNode={nodes.fp_review}
+                  onNodeClick={onNodeClick}
+                />
+              </div>
             </div>
-          </div>
-          <FlowArrow label="正报验证" />
-          <div className="flex items-center">
-            <FlowNodeButton node={nodes.validation} onClick={onNodeClick} />
+            <FlowArrow label="正报验证" />
+            <div className="flex snap-center items-center">
+              <FlowNodeButton node={nodes.validation} onClick={onNodeClick} />
+            </div>
           </div>
         </div>
       </div>
-    </section>
+    </nav>
   );
 }
 
@@ -1648,7 +1669,8 @@ function FlowUtilityButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
+      aria-current={active ? "page" : undefined}
+      className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900 motion-reduce:transition-none ${
         active
           ? "border-blue-500/50 bg-blue-500/15 text-blue-100"
           : "border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700"
@@ -1671,16 +1693,19 @@ function FlowNodeButton({
   wide?: boolean;
 }) {
   const statusTone = flowStatusTone(node.status, node.tone);
+  const condensed = compact || wide;
   const sizeClass = compact
-    ? "min-h-[5rem] w-[10.5rem]"
+    ? "h-[4.75rem] w-36"
     : wide
-      ? "min-h-[5.25rem] w-full"
-      : "min-h-[5.75rem] w-[11.5rem]";
+      ? "h-[4.75rem] w-full"
+      : "min-h-[5.5rem] w-44";
   return (
     <button
       type="button"
       onClick={() => onClick(node.id)}
-      className={`${sizeClass} rounded-lg border px-3 py-2 text-left transition-colors ${
+      aria-current={node.active ? "step" : undefined}
+      aria-label={`${node.label}，${flowStatusLabel(node.status)}，${node.detail}`}
+      className={`${sizeClass} snap-center rounded-lg border px-3 ${condensed ? "py-1.5" : "py-2"} text-left transition-[background-color,border-color,box-shadow,transform] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/80 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900 motion-safe:hover:-translate-y-0.5 motion-reduce:transition-none ${
         node.active
           ? `${toneBorder(node.tone)} ${toneBg(node.tone)} ring-1 ring-current/20`
           : "border-slate-700 bg-slate-900/70 hover:border-slate-600 hover:bg-slate-800/80"
@@ -1692,13 +1717,13 @@ function FlowNodeButton({
           {node.label}
         </span>
         {node.status === "running" && (
-          <span className="mt-0.5 h-3 w-3 shrink-0 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />
+          <span className="mt-0.5 h-3 w-3 shrink-0 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin motion-reduce:animate-none" aria-hidden="true" />
         )}
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <div className={`${condensed ? "mt-1" : "mt-2"} flex flex-wrap items-center gap-1.5`}>
         <StatusPill label={flowStatusLabel(node.status)} tone={statusTone} />
       </div>
-      <div className="mt-2 line-clamp-2 text-xs leading-5 text-slate-400">
+      <div className={`${condensed ? "mt-0.5 truncate leading-4" : "mt-2 line-clamp-2 leading-5"} text-xs text-slate-400`}>
         {node.detail}
       </div>
     </button>
@@ -1707,12 +1732,19 @@ function FlowNodeButton({
 
 function FlowArrow({ label, compact = false }: { label?: string; compact?: boolean }) {
   return (
-    <div className={`flex shrink-0 items-center ${compact ? "w-6" : "w-8"}`}>
+    <div
+      className={`relative flex shrink-0 items-center ${compact ? "w-6" : "w-8"}`}
+      aria-hidden="true"
+    >
+      {label && !compact && (
+        <span className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-medium tracking-wide text-slate-500">
+          {label}
+        </span>
+      )}
       <div className="h-px flex-1 bg-slate-600" />
       <svg className="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
       </svg>
-      {label && !compact && <span className="sr-only">{label}</span>}
     </div>
   );
 }
@@ -1727,18 +1759,29 @@ function FlowAuditBranch({
   onNodeClick: (node: FlowNodeId) => void;
 }) {
   return (
-    <div className="grid grid-cols-[11.5rem_1.5rem_10.5rem] grid-rows-[minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-2.5">
-      <div className="row-span-2 flex items-center">
-        <FlowNodeButton node={auditNode} onClick={onNodeClick} />
+    <div
+      className="-mr-3 relative h-44 w-[20.75rem] flex-none"
+      role="group"
+      aria-label="候选点审计分支：同时进入漏洞验证和对抗式去误报"
+    >
+      <svg
+        className="pointer-events-none absolute inset-0 h-full w-full text-slate-600"
+        viewBox="0 0 332 176"
+        preserveAspectRatio="none"
+        fill="none"
+        stroke="currentColor"
+        aria-hidden="true"
+      >
+        <path d="M144 88H332" strokeWidth="1.5" />
+        <path d="M160 88V138H172" strokeWidth="1.5" />
+        <path d="m168 133 5 5-5 5" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <div className="absolute left-0 top-1/2 -translate-y-1/2">
+        <FlowNodeButton node={auditNode} onClick={onNodeClick} compact />
       </div>
-      <div className="flex h-full items-center">
-        <FlowArrow compact />
+      <div className="absolute bottom-0 right-3">
+        <FlowNodeButton node={fpReviewNode} onClick={onNodeClick} compact />
       </div>
-      <div />
-      <div className="flex items-center">
-        <FlowArrow compact />
-      </div>
-      <FlowNodeButton node={fpReviewNode} onClick={onNodeClick} compact />
     </div>
   );
 }

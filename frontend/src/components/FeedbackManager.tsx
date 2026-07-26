@@ -212,14 +212,19 @@ export default function FeedbackManager({
   return (
     <>
       {/* Backdrop */}
-      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
+      <div aria-hidden="true" className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
 
       {/* Panel */}
-      <div className="fixed right-0 top-0 bottom-0 w-[42rem] max-w-full bg-slate-900 border-l border-slate-700 z-50 flex flex-col shadow-2xl">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="feedback-manager-title"
+        className="fixed right-0 top-0 bottom-0 w-[42rem] max-w-full bg-slate-900 border-l border-slate-700 z-50 flex flex-col overflow-hidden shadow-2xl"
+      >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700">
-          <div>
-            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+        <div className="flex items-center justify-between px-4 py-4 sm:px-5 border-b border-slate-700">
+          <div className="min-w-0">
+            <h3 id="feedback-manager-title" className="text-sm font-bold text-white uppercase tracking-wider">
               误报屏蔽规则
             </h3>
             {selectable && (
@@ -229,18 +234,22 @@ export default function FeedbackManager({
             )}
           </div>
           <button
+            type="button"
             onClick={onClose}
+            aria-label="关闭误报屏蔽规则"
             className="text-slate-500 hover:text-slate-300 transition-colors"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg aria-hidden="true" className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
 
         {/* Type tabs */}
-        <div className="flex items-center gap-1 px-5 py-3 border-b border-slate-700/50 overflow-x-auto">
+        <div aria-label="按漏洞类型筛选" className="flex items-center gap-1 px-4 py-3 sm:px-5 border-b border-slate-700/50 overflow-x-auto">
           <button
+            type="button"
+            aria-pressed={activeType === null}
             onClick={() => { setActiveType(null); setShowSkill(false); }}
             className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
               activeType === null
@@ -253,6 +262,8 @@ export default function FeedbackManager({
           {allTypes.map((t) => (
             <button
               key={t}
+              type="button"
+              aria-pressed={activeType === t}
               onClick={() => setActiveType(t)}
               className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${
                 activeType === t
@@ -269,7 +280,7 @@ export default function FeedbackManager({
         </div>
 
         {/* Actions bar */}
-        <div className="flex items-center gap-2 px-5 py-2 border-b border-slate-700/30">
+        <div className="flex flex-wrap items-center gap-2 px-4 py-2 sm:px-5 border-b border-slate-700/30">
           <button
             onClick={() => {
               setAddMode(true);
@@ -317,7 +328,7 @@ export default function FeedbackManager({
 
         {/* SKILL preview */}
         {showSkill && (
-          <div className="px-5 py-3 border-b border-slate-700/50 bg-slate-800/50 max-h-64 overflow-y-auto">
+          <div className="px-4 py-3 sm:px-5 border-b border-slate-700/50 bg-slate-800/50 max-h-64 overflow-y-auto">
             <div className="flex items-center justify-between mb-2">
               <h4 className="text-xs font-semibold text-emerald-400 uppercase">
                 当前 SKILL — {activeType?.toUpperCase()}
@@ -344,8 +355,8 @@ export default function FeedbackManager({
 
         {/* Add form */}
         {addMode && (
-          <div className="px-5 py-3 border-b border-slate-700/50 bg-slate-800/50 space-y-2">
-            <div className="flex gap-2">
+          <div className="px-4 py-3 sm:px-5 border-b border-slate-700/50 bg-slate-800/50 space-y-2">
+            <div className="flex flex-col gap-2 sm:flex-row">
               <select
                 value={addForm.vuln_type}
                 onChange={(e) => setAddForm((f) => ({ ...f, vuln_type: e.target.value }))}
@@ -364,12 +375,12 @@ export default function FeedbackManager({
                 <option value="false_positive">实为误报</option>
               </select>
             </div>
-            <div className="flex gap-2">
+            <div className="grid grid-cols-[minmax(0,1fr)_5rem] gap-2 sm:grid-cols-[minmax(0,1fr)_5rem_minmax(0,1fr)]">
               <input
                 value={addForm.file}
                 onChange={(e) => setAddForm((f) => ({ ...f, file: e.target.value }))}
                 placeholder="文件路径"
-                className="flex-1 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 placeholder-slate-500"
+                className="min-w-0 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 placeholder-slate-500"
               />
               <input
                 value={addForm.line || ""}
@@ -382,7 +393,7 @@ export default function FeedbackManager({
                 value={addForm.function}
                 onChange={(e) => setAddForm((f) => ({ ...f, function: e.target.value }))}
                 placeholder="函数名"
-                className="flex-1 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 placeholder-slate-500"
+                className="col-span-2 min-w-0 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-xs text-slate-200 placeholder-slate-500 sm:col-span-1"
               />
             </div>
             <input

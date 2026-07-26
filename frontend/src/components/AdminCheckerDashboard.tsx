@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { getCheckerDashboard, getValidationTargets } from "../api/client";
 import type { CheckerDashboardResponse, CheckerDashboardStats, CheckerScanDashboardStats, ScanItemStatus } from "../types";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   onBack: () => void;
@@ -60,9 +61,9 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      <div className="bg-slate-900/90 border-b border-slate-800 px-6 py-4">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
+      <div className="bg-slate-900/90 border-b border-slate-800 px-4 py-4 sm:px-6">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-4">
             <button
               onClick={onBack}
               className="text-sm text-slate-400 hover:text-white transition-colors"
@@ -76,7 +77,7 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <select
               value={productFilter}
               onChange={(e) => handleProductFilterChange(e.target.value)}
@@ -96,17 +97,18 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
             >
               刷新
             </button>
+            <ThemeToggle />
           </div>
         </div>
       </div>
 
-      <div className="flex-1 px-6 py-6">
+      <div className="flex-1 px-4 py-6 sm:px-6">
         {loading ? (
           <div className="flex items-center justify-center h-64">
             <div className="w-6 h-6 border-2 border-slate-600 border-t-blue-400 rounded-full animate-spin" />
           </div>
         ) : error ? (
-          <div className="border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-4 py-3 text-sm">
+          <div role="alert" className="border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-4 py-3 text-sm">
             {error}
           </div>
         ) : data ? (
@@ -230,6 +232,7 @@ function CheckerCard({
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       className={`w-full rounded-lg border px-4 py-3 text-left transition-colors ${activeCls}`}
     >
       <div className="flex items-center gap-2 mb-1">
@@ -319,7 +322,7 @@ function CheckerDetail({
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full min-w-[76rem] text-sm">
           <thead>
             <tr className="bg-slate-950/40 border-b border-slate-800">
               <Th>扫描</Th>

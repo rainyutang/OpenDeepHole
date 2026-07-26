@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { createSkill, deleteSkill, getCheckerCatalog, importSkill } from "../api/client";
 import type { CheckerCatalogItem, SkillCreateJob, SkillImportFile } from "../types";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   onBack: () => void;
@@ -77,9 +78,9 @@ export default function CheckerCatalogPage({ onBack }: Props) {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      <div className="bg-slate-900/90 border-b border-slate-800 px-6 py-4">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
+      <div className="bg-slate-900/90 border-b border-slate-800 px-4 py-4 sm:px-6">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-4">
             <button
               onClick={onBack}
               className="text-sm text-slate-400 hover:text-white transition-colors"
@@ -93,7 +94,7 @@ export default function CheckerCatalogPage({ onBack }: Props) {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <button
               onClick={() => setMode("create")}
               className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg border border-blue-500/60 transition-colors"
@@ -106,17 +107,18 @@ export default function CheckerCatalogPage({ onBack }: Props) {
             >
               刷新
             </button>
+            <ThemeToggle />
           </div>
         </div>
       </div>
 
-      <div className="flex-1 px-6 py-6">
+      <div className="flex-1 px-4 py-6 sm:px-6">
         {loading ? (
           <div className="flex items-center justify-center h-64">
             <div className="w-6 h-6 border-2 border-slate-600 border-t-blue-400 rounded-full animate-spin" />
           </div>
         ) : error ? (
-          <div className="border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-4 py-3 text-sm">
+          <div role="alert" className="border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-4 py-3 text-sm">
             {error}
           </div>
         ) : (
@@ -278,9 +280,9 @@ function SkillCreatePage({
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      <div className="bg-slate-900/90 border-b border-slate-800 px-6 py-4">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
+      <div className="bg-slate-900/90 border-b border-slate-800 px-4 py-4 sm:px-6">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-4">
             <button
               onClick={handleBack}
               className="text-sm text-slate-400 hover:text-white transition-colors"
@@ -288,17 +290,20 @@ function SkillCreatePage({
               &larr; 返回
             </button>
             <div>
-              <h1 className="text-lg font-bold text-white">新增SKILL</h1>
+              <h1 className="text-lg font-bold text-white">新增 SKILL</h1>
               <p className="text-sm text-slate-400 mt-0.5">
                 直接生成可编辑模板，系统固定运行规则会在导入时强制拼接
               </p>
             </div>
           </div>
-          <StatusPill status={job?.status || "idle"} />
+          <div className="flex items-center gap-2">
+            <StatusPill status={job?.status || "idle"} />
+            <ThemeToggle />
+          </div>
         </div>
       </div>
 
-      <div className="flex-1 px-6 py-6">
+      <div className="flex-1 px-4 py-6 sm:px-6">
         <div className="max-w-7xl mx-auto grid grid-cols-1 xl:grid-cols-[34rem_1fr] gap-5">
           <form onSubmit={handleSubmit} className="space-y-4">
             <Panel title="基础信息">
@@ -387,12 +392,12 @@ function SkillCreatePage({
             </Panel>
 
             {error && (
-              <div className="border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-4 py-3 text-sm">
+              <div role="alert" className="border border-red-500/30 bg-red-500/10 text-red-300 rounded-lg px-4 py-3 text-sm">
                 {error}
               </div>
             )}
 
-            <div className="flex gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row">
               <button
                 type="submit"
                 disabled={submitting}
@@ -465,7 +470,7 @@ function SkillCreatePage({
 
 function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="border border-slate-800 bg-slate-900/70 rounded-lg p-5">
+    <section className="border border-slate-800 bg-slate-900/70 rounded-lg p-4 sm:p-5">
       <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-4">{title}</h2>
       {children}
     </section>
@@ -536,6 +541,7 @@ function CheckerListItem({
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       className={`w-full rounded-lg border px-4 py-3 text-left transition-colors ${activeCls}`}
     >
       <div className="flex items-center gap-2 mb-1">

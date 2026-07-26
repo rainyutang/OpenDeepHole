@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import type {
   NativeThreatAttackPath,
   NativeThreatAttackTree,
@@ -115,6 +115,23 @@ export function ThreatAnalysisPanel({
     attackTrees: trees.length,
   };
 
+  const handleTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    current: Tab,
+  ) => {
+    const currentIndex = RESULT_TABS.findIndex((item) => item.key === current);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % RESULT_TABS.length;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + RESULT_TABS.length) % RESULT_TABS.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = RESULT_TABS.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextTab = RESULT_TABS[nextIndex].key;
+    setTab(nextTab);
+    document.getElementById(`threat-analysis-tab-${nextTab}`)?.focus();
+  };
+
   return (
     <div className="space-y-4">
       <section className="threat-analysis-viewer">
@@ -139,6 +156,8 @@ export function ThreatAnalysisPanel({
               role="tab"
               aria-controls={`threat-analysis-panel-${item.key}`}
               aria-selected={tab === item.key}
+              tabIndex={tab === item.key ? 0 : -1}
+              onKeyDown={(event) => handleTabKeyDown(event, item.key)}
               onClick={() => setTab(item.key)}
               className={`threat-analysis-viewer__tab ${
                 tab === item.key ? "is-active" : ""
@@ -224,11 +243,11 @@ function ValueAssetsTable({ assets }: { assets: NativeThreatValueAsset[] }) {
   const headers = ["资产名", "资产类别", "资产描述", "攻击损失", "判断为价值资产的原因"];
 
   return (
-    <div className="threat-analysis-viewer__table-wrap">
+    <div role="region" aria-label="价值资产表格" tabIndex={0} className="threat-analysis-viewer__table-wrap">
       <table className="threat-analysis-viewer__table threat-analysis-viewer__table--assets">
         <thead>
           <tr>
-            {headers.map((header) => <th key={header}>{header}</th>)}
+            {headers.map((header) => <th key={header} scope="col">{header}</th>)}
           </tr>
         </thead>
         <tbody>
@@ -268,11 +287,11 @@ function HighRiskModulesTable({
   ];
 
   return (
-    <div className="threat-analysis-viewer__table-wrap">
+    <div role="region" aria-label="高风险模块表格" tabIndex={0} className="threat-analysis-viewer__table-wrap">
       <table className="threat-analysis-viewer__table threat-analysis-viewer__table--modules">
         <thead>
           <tr>
-            {headers.map((header) => <th key={header}>{header}</th>)}
+            {headers.map((header) => <th key={header} scope="col">{header}</th>)}
           </tr>
         </thead>
         <tbody>
@@ -302,11 +321,11 @@ function InternalNodesTable({ nodes }: { nodes: NativeThreatTreeNode[] }) {
   const headers = ["内部节点名称", "描述"];
 
   return (
-    <div className="threat-analysis-viewer__table-wrap">
+    <div role="region" aria-label="内部节点表格" tabIndex={0} className="threat-analysis-viewer__table-wrap">
       <table className="threat-analysis-viewer__table threat-analysis-viewer__table--nodes">
         <thead>
           <tr>
-            {headers.map((header) => <th key={header}>{header}</th>)}
+            {headers.map((header) => <th key={header} scope="col">{header}</th>)}
           </tr>
         </thead>
         <tbody>
@@ -417,7 +436,12 @@ function AttackTreeView({
         <span>{tree.tree_id || `#${index + 1}`}</span>
       </header>
 
-      <div className="threat-analysis-viewer__tree-body">
+      <div
+        role="region"
+        aria-label={`${tree.value_asset?.asset_name || tree.tree_id || `攻击树 ${index + 1}`}图`}
+        tabIndex={0}
+        className="threat-analysis-viewer__tree-body"
+      >
         {roots.length === 0 ? (
           <ViewerEmptyBlock text="暂无可展示节点" />
         ) : (

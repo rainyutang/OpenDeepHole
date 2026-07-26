@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   onBack: () => void;
@@ -30,15 +31,18 @@ export default function AgentDownload({ onBack }: Props) {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-gray-100">
-      <div className="mx-auto max-w-5xl px-6 py-8">
-        <div className="mb-8 flex items-center gap-4">
-          <button onClick={onBack} className="text-sm text-slate-400 transition-colors hover:text-white">
-            ← 返回
-          </button>
-          <div>
-            <h1 className="text-xl font-bold text-white">客户端下载</h1>
-            <p className="mt-1 text-sm text-slate-400">Agent 配置已迁移到独立的“Agent 配置”页面。</p>
+      <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
+        <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-4">
+            <button onClick={onBack} className="mt-1 shrink-0 text-sm text-slate-400 transition-colors hover:text-white">
+              ← 返回
+            </button>
+            <div className="min-w-0">
+              <h1 className="text-xl font-bold text-white">客户端下载</h1>
+              <p className="mt-1 text-sm text-slate-400">Agent 配置已迁移到独立的“Agent 配置”页面。</p>
+            </div>
           </div>
+          <ThemeToggle />
         </div>
 
         <div className="mb-5 rounded-xl border border-slate-700 bg-slate-800/60 p-5">

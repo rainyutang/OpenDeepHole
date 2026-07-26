@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getValidationTargets, getScans, resumeScan, stopScan, deleteScan, updateScanValidationTarget } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User, ValidationTarget } from "../types";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   onViewScan: (scanId: string) => void;
@@ -374,9 +375,14 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
       {deleteConfirmId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-6 w-80">
-            <h3 className="text-base font-semibold text-white mb-2">确认删除</h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-scan-title"
+            className="w-full max-w-sm bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-5 sm:p-6"
+          >
+            <h3 id="delete-scan-title" className="text-base font-semibold text-white mb-2">确认删除</h3>
             <p className="text-sm text-slate-400 mb-5">
               确定要删除扫描任务 <span className="font-medium text-slate-300">{deleteTargetName}</span> 吗？此操作无法撤销。
             </p>
@@ -398,14 +404,14 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
         </div>
       )}
       {/* Header */}
-      <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div>
+      <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
+        <div className="mx-auto flex max-w-[100rem] flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+          <div className="shrink-0">
             <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
             <p className="text-sm text-slate-400 mt-0.5">C/C++ Source Code Audit Tool</p>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-slate-400">
+          <div className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end">
+            <span className="mr-auto text-sm text-slate-400 xl:mr-1">
               {user.username}
               {user.role === "admin" && (
                 <span className="ml-1.5 text-xs font-semibold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">
@@ -448,25 +454,26 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
               onClick={onNewScan}
               variant="primary"
             />
+            <ThemeToggle />
             <button
               onClick={onLogout}
-              className="px-3 py-2 text-sm font-medium text-slate-400 hover:text-red-400 transition-colors"
+              className="px-3 py-2 text-sm font-medium text-slate-400 hover:text-red-400 transition-colors whitespace-nowrap"
             >
-              Logout
+              退出登录
             </button>
           </div>
         </div>
       </div>
 
       {/* Content */}
-      <div className="flex-1 px-6 py-6">
+      <div className="mx-auto w-full max-w-[100rem] flex-1 px-4 py-6 sm:px-6">
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">
           扫描历史
         </h2>
 
         {loading ? (
           <div className="flex items-center justify-center h-48">
-            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            <div role="status" aria-label="加载扫描历史" className="page-spinner w-5 h-5 border-2 rounded-full animate-spin" />
           </div>
         ) : scans.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-48 text-slate-500">
@@ -474,8 +481,8 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
             <p className="text-sm mt-1">点击右上角「新建扫描」开始</p>
           </div>
         ) : (
-          <div className="border border-slate-700 rounded-xl">
-            <table className="w-full text-sm">
+          <div className="overflow-x-auto rounded-xl border border-slate-700">
+            <table className="w-full min-w-[78rem] text-sm">
               <thead>
                 <tr className="bg-slate-800 border-b border-slate-700">
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -571,7 +578,15 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
-                          <div className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                          <div
+                            className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden"
+                            role="progressbar"
+                            aria-label={`${displayProjectName} 任务进度`}
+                            aria-valuemin={0}
+                            aria-valuemax={Math.max(1, totalTasks, completedTasks)}
+                            aria-valuenow={completedTasks}
+                            aria-valuetext={`${completedTasks}/${totalTasks}`}
+                          >
                             <div
                               className={`h-full rounded-full transition-all ${running ? "bg-blue-500" : "bg-green-500"}`}
                               style={{ width: `${taskPct}%` }}

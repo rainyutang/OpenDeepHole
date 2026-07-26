@@ -16,6 +16,7 @@ import ScanCodeGraphMcpEditor, {
   defaultScanCodeGraphMcp,
   validateScanCodeGraphMcp,
 } from "./ScanCodeGraphMcpEditor";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   onScanStarted: (scanId: string) => void;
@@ -195,30 +196,33 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
       {/* Header */}
-      <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div>
+      <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
+        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4">
+          <div className="min-w-0">
             <h1 className="text-lg font-bold text-white">新建扫描</h1>
             <p className="text-sm text-slate-400 mt-0.5">选择客户端、项目路径、代码扫描范围、产品、验证环境和检测项，创建扫描任务</p>
           </div>
-          <button
-            onClick={onBack}
-            className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
-          >
-            返回
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <ThemeToggle />
+            <button
+              onClick={onBack}
+              className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+            >
+              返回
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Content */}
-      <div className="flex-1 px-6 py-6 max-w-5xl mx-auto w-full">
+      <div className="flex-1 px-4 py-6 sm:px-6 max-w-5xl mx-auto w-full">
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-6">
           扫描配置
         </h2>
 
         {loading ? (
           <div className="flex items-center justify-center h-48">
-            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            <div role="status" aria-label="加载扫描配置" className="page-spinner w-5 h-5 border-2 rounded-full animate-spin" />
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-6">
@@ -257,8 +261,8 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                         }`}
                       />
                       <div className="flex-1 min-w-0">
-                        <span className="text-sm font-medium text-white">{agent.machine_name || agent.name}</span>
-                        <span className="ml-2 text-xs text-slate-400">
+                        <span className="block truncate text-sm font-medium text-white" title={agent.machine_name || agent.name}>{agent.machine_name || agent.name}</span>
+                        <span className="block truncate text-xs text-slate-400 sm:inline sm:ml-2" title={`${agent.ip}${agent.name && agent.name !== agent.machine_name ? ` · ${agent.name}` : ""}`}>
                           {agent.ip}{agent.name && agent.name !== agent.machine_name ? ` · ${agent.name}` : ""}
                         </span>
                       </div>
@@ -505,13 +509,13 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
 
             {/* Error */}
             {error && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-400">
+              <div role="alert" className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-400">
                 {error}
               </div>
             )}
 
             {/* Submit */}
-            <div className="flex gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row">
               <button
                 type="submit"
                 disabled={submitting || agents.length === 0}

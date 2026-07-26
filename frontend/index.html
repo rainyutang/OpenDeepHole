@@ -3,6 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (() => {
+        const storageKey = "opendeephole.theme";
+        let theme = "dark";
+
+        try {
+          const storedTheme = window.localStorage.getItem(storageKey);
+          if (storedTheme === "light" || storedTheme === "dark") {
+            theme = storedTheme;
+          }
+        } catch {
+          // Keep the default theme when browser storage is unavailable.
+        }
+
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>OpenDeepHole</title>
   </head>

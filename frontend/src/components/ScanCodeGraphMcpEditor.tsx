@@ -95,7 +95,7 @@ export default function ScanCodeGraphMcpEditor({
 }) {
   const validationError = validateScanCodeGraphMcp(value);
   return (
-    <div className="space-y-5 bg-slate-800 border border-slate-700 rounded-xl p-5">
+    <div className="space-y-5 bg-slate-800 border border-slate-700 rounded-xl p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-medium text-slate-200">扫描代码图谱 MCP</h3>
@@ -116,6 +116,7 @@ export default function ScanCodeGraphMcpEditor({
 
       {probeResult && (
         <div
+          role="status"
           className={`rounded-lg border p-3 text-xs ${
             probeResult.success
               ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
@@ -247,7 +248,7 @@ export default function ScanCodeGraphMcpEditor({
           </Field>
         </div>
       )}
-      {validationError && <p className="text-xs text-red-300">{validationError}</p>}
+      {validationError && <p role="alert" className="text-xs text-red-300">{validationError}</p>}
       <p className="text-xs leading-5 text-amber-200">
         运行时仍会重新连接并核验工具；连接失败时扫描继续，但不会回退到其他代码图谱。
       </p>

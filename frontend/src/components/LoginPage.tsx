@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { login } from "../api/client";
 import type { User } from "../types";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   onLogin: (user: User) => void;
@@ -21,7 +22,7 @@ export default function LoginPage({ onLogin, onGoRegister }: Props) {
       const resp = await login(username, password);
       onLogin(resp.user);
     } catch (err: any) {
-      const msg = err.response?.data?.detail || "Login failed";
+      const msg = err.response?.data?.detail || "登录失败";
       setError(msg);
     } finally {
       setLoading(false);
@@ -29,35 +30,39 @@ export default function LoginPage({ onLogin, onGoRegister }: Props) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center px-4 py-8 sm:px-6">
       <div className="w-full max-w-sm">
-        <div className="text-center mb-8">
+        <div className="text-center mb-6 sm:mb-8">
           <h1 className="text-2xl font-bold text-white">OpenDeepHole</h1>
           <p className="text-sm text-slate-400 mt-1">C/C++ Source Code Audit Tool</p>
         </div>
 
         <form
           onSubmit={handleSubmit}
-          className="bg-slate-800/80 backdrop-blur border border-slate-700 rounded-xl shadow-2xl p-6"
+          className="relative bg-slate-800/80 backdrop-blur border border-slate-700 rounded-xl shadow-2xl p-5 sm:p-6"
         >
-          <h2 className="text-lg font-semibold text-white mb-5">Login</h2>
+          <div className="mb-5 flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-white">登录</h2>
+            <ThemeToggle />
+          </div>
 
           {error && (
-            <div className="mb-4 px-3 py-2 text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg">
+            <div role="alert" className="mb-4 px-3 py-2 text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg">
               {error}
             </div>
           )}
 
           <div className="mb-4">
             <label className="block text-sm font-medium text-slate-400 mb-1.5">
-              Username
+              用户名
             </label>
             <input
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-              placeholder="Enter username"
+              placeholder="请输入用户名"
+              autoComplete="username"
               autoFocus
               required
             />
@@ -65,14 +70,15 @@ export default function LoginPage({ onLogin, onGoRegister }: Props) {
 
           <div className="mb-6">
             <label className="block text-sm font-medium text-slate-400 mb-1.5">
-              Password
+              密码
             </label>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-              placeholder="Enter password"
+              placeholder="请输入密码"
+              autoComplete="current-password"
               required
             />
           </div>
@@ -82,7 +88,7 @@ export default function LoginPage({ onLogin, onGoRegister }: Props) {
             disabled={loading}
             className="w-full py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
           >
-            {loading ? "Logging in..." : "Login"}
+            {loading ? "登录中..." : "登录"}
           </button>
 
           <p className="mt-4 text-center text-sm text-slate-400">

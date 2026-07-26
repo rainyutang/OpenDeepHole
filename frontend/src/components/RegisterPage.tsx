@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { register } from "../api/client";
 import type { User } from "../types";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   onRegister: (user: User) => void;
@@ -36,21 +37,24 @@ export default function RegisterPage({ onRegister, onGoLogin }: Props) {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center px-4 py-8 sm:px-6">
       <div className="w-full max-w-sm">
-        <div className="text-center mb-8">
+        <div className="text-center mb-6 sm:mb-8">
           <h1 className="text-2xl font-bold text-white">OpenDeepHole</h1>
           <p className="text-sm text-slate-400 mt-1">C/C++ Source Code Audit Tool</p>
         </div>
 
         <form
           onSubmit={handleSubmit}
-          className="bg-slate-800/80 backdrop-blur border border-slate-700 rounded-xl shadow-2xl p-6"
+          className="relative bg-slate-800/80 backdrop-blur border border-slate-700 rounded-xl shadow-2xl p-5 sm:p-6"
         >
-          <h2 className="text-lg font-semibold text-white mb-5">注册</h2>
+          <div className="mb-5 flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-white">注册</h2>
+            <ThemeToggle />
+          </div>
 
           {error && (
-            <div className="mb-4 px-3 py-2 text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg">
+            <div role="alert" className="mb-4 px-3 py-2 text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg">
               {error}
             </div>
           )}
@@ -65,6 +69,7 @@ export default function RegisterPage({ onRegister, onGoLogin }: Props) {
               onChange={(e) => setUsername(e.target.value)}
               className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               placeholder="至少2个字符"
+              autoComplete="username"
               autoFocus
               required
             />
@@ -80,6 +85,7 @@ export default function RegisterPage({ onRegister, onGoLogin }: Props) {
               onChange={(e) => setPassword(e.target.value)}
               className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               placeholder="至少4个字符"
+              autoComplete="new-password"
               required
             />
           </div>
@@ -94,6 +100,7 @@ export default function RegisterPage({ onRegister, onGoLogin }: Props) {
               onChange={(e) => setConfirmPassword(e.target.value)}
               className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
               placeholder="再次输入密码"
+              autoComplete="new-password"
               required
             />
           </div>

@@ -28,6 +28,7 @@ import type {
   AgentValidatorCatalog,
   AgentValidatorField,
 } from "../types";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface Props { onBack: () => void }
 type Section = "base" | "models" | "opencode" | "threat" | "product" | "mining" | "fp" | "validation";
@@ -666,21 +667,22 @@ export default function AgentConfigPage({ onBack }: Props) {
   });
 
   return <div className="min-h-screen bg-slate-900 text-white">
-    <header className="border-b border-slate-700 bg-slate-800/90 px-6 py-4">
+    <header className="border-b border-slate-700 bg-slate-800/90 px-4 py-4 sm:px-6">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4">
         <button onClick={onBack} className="text-sm text-slate-400 hover:text-white">← 返回</button>
-        <h1 className="text-lg font-bold">Agent 配置</h1>
-        <select disabled={probingTarget !== null || reloadingTarget !== null} className={`${input} ml-auto max-w-md disabled:cursor-not-allowed disabled:opacity-60`} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
+        <h1 className="text-lg font-bold whitespace-nowrap">Agent 配置</h1>
+        <select disabled={probingTarget !== null || reloadingTarget !== null} className={`${input} order-last w-full disabled:cursor-not-allowed disabled:opacity-60 md:order-none md:ml-auto md:max-w-md`} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
           {!agents.length && <option value="">暂无 Agent</option>}
           {agents.map((agent) => <option key={agent.agent_key} value={agent.agent_key}>{agent.machine_name || agent.name} / {agent.ip} / {agent.online ? "在线" : "离线"}</option>)}
         </select>
+        <ThemeToggle />
         <button disabled={!dirty || saving || probingTarget !== null || reloadingTarget !== null} onClick={save} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium disabled:bg-slate-700">{saving ? "保存中…" : "保存配置"}</button>
       </div>
-      {message && <p className="mx-auto mt-3 max-w-7xl text-sm text-amber-300">{message}</p>}
+      {message && <p role="status" className="mx-auto mt-3 max-w-7xl text-sm text-amber-300">{message}</p>}
     </header>
-    <main className="mx-auto flex max-w-7xl gap-6 px-6 py-6">
-      <nav className="w-44 shrink-0 space-y-1">{sections.map((item) => <button key={item.id} onClick={() => setSection(item.id)} className={`w-full rounded-lg px-4 py-2.5 text-left text-sm ${section === item.id ? "bg-blue-600 text-white" : "text-slate-300 hover:bg-slate-800"}`}>{item.label}</button>)}</nav>
-      <section className="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-800/60 p-6">
+    <main className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-6 sm:px-6 lg:flex-row lg:gap-6">
+      <nav aria-label="Agent 配置分区" className="flex w-full shrink-0 gap-1 overflow-x-auto pb-1 lg:block lg:w-44 lg:space-y-1 lg:overflow-visible lg:pb-0">{sections.map((item) => <button key={item.id} onClick={() => setSection(item.id)} aria-current={section === item.id ? "page" : undefined} className={`w-auto shrink-0 whitespace-nowrap rounded-lg px-4 py-2.5 text-left text-sm lg:w-full ${section === item.id ? "bg-blue-600 text-white" : "text-slate-300 hover:bg-slate-800"}`}>{item.label}</button>)}</nav>
+      <section className="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-800/60 p-4 sm:p-6">
         {loading ? <p className="text-slate-400">加载中…</p> : !agentKey ? <p className="text-slate-400">请先启动或注册 Agent。</p> : <>
           <h2 className="mb-6 text-lg font-semibold">{sections.find((item) => item.id === section)?.label}</h2>
           {section === "base" && <div className="grid gap-5 md:grid-cols-2">
@@ -739,10 +741,10 @@ export default function AgentConfigPage({ onBack }: Props) {
         </>}
       </section>
     </main>
-    {modelPicker && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
-      <div className="w-full max-w-2xl rounded-lg border border-slate-700 bg-slate-900 p-4 shadow-xl">
+    {modelPicker && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div role="dialog" aria-modal="true" aria-labelledby="model-picker-title" className="w-full max-w-2xl rounded-lg border border-slate-700 bg-slate-900 p-4 shadow-xl">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-white">从 serve 导入模型</h3>
+          <h3 id="model-picker-title" className="text-sm font-semibold text-white">从 serve 导入模型</h3>
           <button type="button" onClick={() => setModelPicker(null)} className="px-2 py-1 text-xs text-slate-300 hover:text-white">关闭</button>
         </div>
         {modelPicker.message && <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">{modelPicker.message}</div>}
