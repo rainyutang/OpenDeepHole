@@ -21,6 +21,8 @@ from backend.models import (
     HistoryPattern,
     OpenCodePoolModelStats,
     OpenCodePoolStatus,
+    OpenCodeModelTokenUsage,
+    OpenCodeTokenUsage,
     OutputSource,
     ScanEvent,
     ScanItemStatus,
@@ -100,6 +102,71 @@ def _opencode_pool_status(value: str | None) -> OpenCodePoolStatus | None:
         return OpenCodePoolStatus(**data)
     except Exception:
         return None
+
+
+def _token_usage_rows(usage: OpenCodeTokenUsage) -> list[tuple]:
+    models = list(usage.by_model)
+    if not models:
+        models = [
+            OpenCodeModelTokenUsage(
+                model="unknown",
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                reasoning_tokens=usage.reasoning_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                total_tokens=usage.total_tokens,
+            )
+        ]
+    return [
+        (
+            item.model or "unknown",
+            item.input_tokens,
+            item.output_tokens,
+            item.reasoning_tokens,
+            item.cache_read_tokens,
+            item.cache_write_tokens,
+            1 if usage.complete else 0,
+        )
+        for item in models
+    ]
+
+
+def _token_usage_from_rows(rows: list[sqlite3.Row]) -> OpenCodeTokenUsage | None:
+    if not rows:
+        return None
+    by_model: list[OpenCodeModelTokenUsage] = []
+    complete = True
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    grouped: dict[str, dict[str, int]] = {}
+    for row in rows:
+        model = str(row["model"] or "unknown")
+        current = grouped.setdefault(model, {key: 0 for key in totals})
+        for key in totals:
+            value = max(0, int(row[key] or 0))
+            current[key] += value
+            totals[key] += value
+        complete = complete and bool(row["complete"])
+    for model, counters in sorted(grouped.items()):
+        by_model.append(
+            OpenCodeModelTokenUsage(
+                model=model,
+                **counters,
+                total_tokens=sum(counters.values()),
+            )
+        )
+    return OpenCodeTokenUsage(
+        **totals,
+        total_tokens=sum(totals.values()),
+        complete=complete,
+        by_model=by_model,
+    )
 
 
 def _scan_code_graph_mcp(value: str | None) -> AgentMcpConfig | None:
@@ -415,6 +482,41 @@ CREATE TABLE IF NOT EXISTS agent_opencode_pool_models (
 
 CREATE INDEX IF NOT EXISTS idx_agent_opencode_pool_lookup
 ON agent_opencode_pool_models(agent_name, user_id);
+
+CREATE TABLE IF NOT EXISTS scan_opencode_token_usage (
+    scan_id          TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+    agent_session_id TEXT NOT NULL,
+    model            TEXT NOT NULL,
+    input_tokens     INTEGER NOT NULL DEFAULT 0,
+    output_tokens    INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    complete         INTEGER NOT NULL DEFAULT 1,
+    updated_at       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(scan_id, agent_session_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_opencode_token_usage
+ON scan_opencode_token_usage(scan_id);
+
+CREATE TABLE IF NOT EXISTS agent_opencode_token_usage (
+    agent_key        TEXT NOT NULL REFERENCES agents(agent_key) ON DELETE CASCADE,
+    user_id          TEXT NOT NULL DEFAULT '',
+    agent_session_id TEXT NOT NULL,
+    model            TEXT NOT NULL,
+    input_tokens     INTEGER NOT NULL DEFAULT 0,
+    output_tokens    INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    complete         INTEGER NOT NULL DEFAULT 1,
+    updated_at       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(agent_key, user_id, agent_session_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_opencode_token_usage
+ON agent_opencode_token_usage(agent_key, user_id);
 """
 
 
@@ -1046,6 +1148,93 @@ class SqliteScanStore(ScanStoreBase):
                 (status.model_dump_json(), scan_id),
             )
             self._conn.commit()
+
+    def upsert_scan_opencode_token_usage(
+        self,
+        *,
+        scan_id: str,
+        agent_session_id: str,
+        status: OpenCodePoolStatus,
+    ) -> None:
+        if status.token_usage is None:
+            return
+        session_id = agent_session_id or status.agent_session_id or "unknown"
+        now = status.updated_at or ""
+        rows = [
+            (scan_id, session_id, *row, now)
+            for row in _token_usage_rows(status.token_usage)
+        ]
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM scan_opencode_token_usage "
+                "WHERE scan_id = ? AND agent_session_id = ?",
+                (scan_id, session_id),
+            )
+            self._conn.executemany(
+                """\
+                INSERT INTO scan_opencode_token_usage (
+                    scan_id, agent_session_id, model, input_tokens, output_tokens,
+                    reasoning_tokens, cache_read_tokens, cache_write_tokens,
+                    complete, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            self._conn.commit()
+
+    def get_scan_opencode_token_usage(self, scan_id: str) -> OpenCodeTokenUsage | None:
+        cur = self._conn.execute(
+            "SELECT * FROM scan_opencode_token_usage WHERE scan_id = ?",
+            (scan_id,),
+        )
+        return _token_usage_from_rows(cur.fetchall())
+
+    def upsert_agent_opencode_token_usage(
+        self,
+        *,
+        agent_key: str,
+        user_id: str,
+        agent_session_id: str,
+        status: OpenCodePoolStatus,
+    ) -> None:
+        if status.token_usage is None:
+            return
+        session_id = agent_session_id or status.agent_session_id or "unknown"
+        now = status.updated_at or ""
+        rows = [
+            (agent_key, user_id or "", session_id, *row, now)
+            for row in _token_usage_rows(status.token_usage)
+        ]
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM agent_opencode_token_usage "
+                "WHERE agent_key = ? AND user_id = ? AND agent_session_id = ?",
+                (agent_key, user_id or "", session_id),
+            )
+            self._conn.executemany(
+                """\
+                INSERT INTO agent_opencode_token_usage (
+                    agent_key, user_id, agent_session_id, model, input_tokens,
+                    output_tokens, reasoning_tokens, cache_read_tokens,
+                    cache_write_tokens, complete, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            self._conn.commit()
+
+    def get_agent_opencode_token_usage(
+        self,
+        *,
+        agent_key: str,
+        user_id: str,
+    ) -> OpenCodeTokenUsage | None:
+        cur = self._conn.execute(
+            "SELECT * FROM agent_opencode_token_usage "
+            "WHERE agent_key = ? AND user_id = ?",
+            (agent_key, user_id or ""),
+        )
+        return _token_usage_from_rows(cur.fetchall())
 
     def upsert_agent_opencode_pool_status(
         self,

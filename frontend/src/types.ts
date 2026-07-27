@@ -373,6 +373,24 @@ export interface OpenCodePoolModelStats {
   active_tasks: Record<string, unknown>[];
 }
 
+export interface OpenCodeTokenCounters {
+  input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+}
+
+export interface OpenCodeModelTokenUsage extends OpenCodeTokenCounters {
+  model: string;
+}
+
+export interface OpenCodeTokenUsage extends OpenCodeTokenCounters {
+  complete: boolean;
+  by_model: OpenCodeModelTokenUsage[];
+}
+
 export interface OpenCodePoolStatus {
   scope_id: string;
   agent_name?: string;
@@ -384,6 +402,7 @@ export interface OpenCodePoolStatus {
   queued_tasks: Record<string, unknown>[];
   planned_tasks?: Record<string, unknown>[];
   completed_tasks?: Record<string, unknown>[];
+  token_usage?: OpenCodeTokenUsage | null;
   models: OpenCodePoolModelStats[];
   updated_at: string;
 }

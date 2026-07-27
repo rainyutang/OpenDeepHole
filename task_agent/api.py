@@ -53,6 +53,7 @@ class OpenCodeResult:
     structured: Any
     model: str
     output_source: dict[str, Any] = field(default_factory=dict)
+    token_usage: dict[str, Any] | None = None
 
 
 def _normalize_file_write_allowlist(

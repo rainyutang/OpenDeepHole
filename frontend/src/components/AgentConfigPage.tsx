@@ -4,6 +4,7 @@ import {
   getAgentMcpStatus,
   getAgentOpenCodeModels,
   getAgentOpenCodePool,
+  getAgentOpenCodeUsage,
   getAgentOpenCodeRuntimeConfig,
   getAgents,
   getAgentValidatorCatalog,
@@ -27,16 +28,18 @@ import type {
   AgentValidationEnvironmentConfig,
   AgentValidatorCatalog,
   AgentValidatorField,
+  OpenCodeTokenUsage,
 } from "../types";
 import { ThemeToggle } from "./ThemeToggle";
 
 interface Props { onBack: () => void }
-type Section = "base" | "models" | "opencode" | "threat" | "product" | "mining" | "fp" | "validation";
+type Section = "base" | "models" | "opencode" | "usage" | "threat" | "product" | "mining" | "fp" | "validation";
 
 const sections: { id: Section; label: string }[] = [
   { id: "base", label: "基础配置" },
   { id: "models", label: "模型配置" },
   { id: "opencode", label: "OpenCode 配置" },
+  { id: "usage", label: "Token 统计" },
   { id: "threat", label: "威胁分析" },
   { id: "product", label: "产品信息" },
   { id: "mining", label: "漏洞挖掘" },
@@ -395,6 +398,10 @@ export default function AgentConfigPage({ onBack }: Props) {
   const [savedConfig, setSavedConfig] = useState<AgentRemoteConfig>(defaultConfig);
   const [catalog, setCatalog] = useState<AgentValidatorCatalog>({ registrations: [], errors: [], updated_at: "" });
   const [pool, setPool] = useState<AgentOpenCodePoolStatus | null>(null);
+  const [tokenUsage, setTokenUsage] = useState<OpenCodeTokenUsage | null>(null);
+  const [tokenUsageLoading, setTokenUsageLoading] = useState(false);
+  const [tokenUsageError, setTokenUsageError] = useState("");
+  const tokenUsageRequest = useRef(0);
   const [mcpStatus, setMcpStatus] = useState<AgentMcpStatusResponse | null>(null);
   const [runtimeConfig, setRuntimeConfig] = useState<AgentOpenCodeRuntimeConfig | null>(null);
   const [runtimeConfigLoading, setRuntimeConfigLoading] = useState(false);
@@ -459,6 +466,10 @@ export default function AgentConfigPage({ onBack }: Props) {
     if (!agentKey) return;
     setLoading(true);
     setMcpStatus(null);
+    setTokenUsage(null);
+    setTokenUsageLoading(true);
+    setTokenUsageError("");
+    const usageRequestId = ++tokenUsageRequest.current;
     runtimeConfigRequest.current += 1;
     setRuntimeConfig(null);
     setRuntimeConfigError("");
@@ -468,6 +479,18 @@ export default function AgentConfigPage({ onBack }: Props) {
       const live = agents.find((item) => item.agent_key === agentKey && item.online);
       if (live) getAgentOpenCodePool(live.agent_id).then(setPool).catch(() => setPool(null)); else setPool(null);
     }).catch(() => setMessage("加载 Agent 配置失败")).finally(() => setLoading(false));
+    getAgentOpenCodeUsage(agentKey)
+      .then((value) => {
+        if (usageRequestId === tokenUsageRequest.current) setTokenUsage(value);
+      })
+      .catch(() => {
+        if (usageRequestId === tokenUsageRequest.current) {
+          setTokenUsageError("读取 Token 统计失败");
+        }
+      })
+      .finally(() => {
+        if (usageRequestId === tokenUsageRequest.current) setTokenUsageLoading(false);
+      });
   }, [agentKey, agents]);
 
   useEffect(() => {
@@ -730,6 +753,14 @@ export default function AgentConfigPage({ onBack }: Props) {
               </div>
             </details>
           </div>}
+          {section === "usage" && (
+            <TokenUsagePanel
+              usage={tokenUsage}
+              loading={tokenUsageLoading}
+              error={tokenUsageError}
+              online={Boolean(selectedAgent?.online)}
+            />
+          )}
           {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, enabled: e.target.checked } })} />启用威胁分析</label><PolicyEditor value={config.threat_analysis.model_policy} onChange={(model_policy) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy } })} /><p className="text-sm text-slate-400">这里的超时与重试由统一任务服务执行；原生威胁分析实现无需接收超时参数。</p></div>}
           {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} status={mcpStatus?.product_info || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info)} probing={probingTarget === "product_info"} reloading={reloadingTarget === "product_info"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("product_info")} onReload={() => reloadMcp("product_info")} />}
           {section === "mining" && <PolicyEditor value={config.vulnerability_mining} onChange={(value) => setCfg({ ...config, vulnerability_mining: value })} />}
@@ -769,6 +800,66 @@ export default function AgentConfigPage({ onBack }: Props) {
         </div>
       </div>
     </div>}
+  </div>;
+}
+
+const formatTokenCount = (value: number) => new Intl.NumberFormat("zh-CN").format(value || 0);
+
+function TokenUsagePanel({
+  usage,
+  loading,
+  error,
+  online,
+}: {
+  usage: OpenCodeTokenUsage | null;
+  loading: boolean;
+  error: string;
+  online: boolean;
+}) {
+  if (loading) return <p className="text-sm text-slate-400">Token 统计加载中…</p>;
+  if (error) return <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">{error}</div>;
+  if (!usage) {
+    return <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-6 text-center text-sm text-slate-400">
+      暂无 Token 统计。该功能只统计升级后由 OpenCode Serve 执行的调用，不回填历史扫描。
+    </div>;
+  }
+  const metrics = [
+    ["总 Token", usage.total_tokens],
+    ["输入", usage.input_tokens],
+    ["输出", usage.output_tokens],
+    ["推理", usage.reasoning_tokens],
+    ["缓存读取", usage.cache_read_tokens],
+    ["缓存写入", usage.cache_write_tokens],
+  ] as const;
+  const models = [...(usage.by_model || [])].sort((left, right) => right.total_tokens - left.total_tokens);
+  return <div className="space-y-5">
+    <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+      <span>按稳定 Agent 身份累计，Agent 重启或离线后仍保留。</span>
+      <StatusBadge label={online ? "Agent 在线" : "Agent 离线"} tone={online ? "green" : "slate"} />
+    </div>
+    {!usage.complete && <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
+      部分 OpenCode 会话统计读取失败，当前数字可能存在偏差。
+    </div>}
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      {metrics.map(([label, value]) => <div key={label} className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
+        <div className="text-xs text-slate-500">{label}</div>
+        <div className="mt-2 font-mono text-xl font-semibold text-slate-100">{formatTokenCount(value)}</div>
+      </div>)}
+    </div>
+    <div className="overflow-hidden rounded-xl border border-slate-700">
+      <div className="border-b border-slate-700 bg-slate-900/60 px-4 py-3 text-sm font-medium text-slate-200">实际模型明细</div>
+      {models.length === 0 ? <div className="p-4 text-sm text-slate-500">暂无模型明细。</div> : <div className="overflow-x-auto">
+        <table className="w-full min-w-[46rem] text-sm">
+          <thead className="bg-slate-950/60 text-left text-xs text-slate-500">
+            <tr>{["模型", "输入", "输出", "推理", "缓存读取", "缓存写入", "总计"].map((label) => <th key={label} className="px-3 py-2 font-medium">{label}</th>)}</tr>
+          </thead>
+          <tbody>{models.map((item) => <tr key={item.model} className="border-t border-slate-800">
+            <td className="px-3 py-3 font-mono text-xs text-cyan-300">{item.model}</td>
+            {[item.input_tokens, item.output_tokens, item.reasoning_tokens, item.cache_read_tokens, item.cache_write_tokens, item.total_tokens].map((value, index) => <td key={index} className="px-3 py-3 font-mono text-xs text-slate-300">{formatTokenCount(value)}</td>)}
+          </tr>)}</tbody>
+        </table>
+      </div>}
+    </div>
   </div>;
 }
 

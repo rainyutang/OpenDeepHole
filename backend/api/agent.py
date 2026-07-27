@@ -65,6 +65,7 @@ from backend.models import (
     FpReviewStatus,
     HistoryPattern,
     OpenCodePoolStatus,
+    OpenCodeTokenUsage,
     ScanEvent,
     ScanItemStatus,
     SkillReport,
@@ -1178,6 +1179,13 @@ async def update_agent_opencode_pool(agent_id: str, status: OpenCodePoolStatus) 
             agent_session_id=status.agent_session_id,
             status=status,
         )
+    if hasattr(store, "upsert_agent_opencode_token_usage") and agent.agent_key:
+        store.upsert_agent_opencode_token_usage(
+            agent_key=agent.agent_key,
+            user_id=agent.user_id,
+            agent_session_id=status.agent_session_id,
+            status=status,
+        )
     return {"ok": True}
 
 
@@ -1210,6 +1218,11 @@ async def get_agent_opencode_pool(
             online=online,
         )
     result.agent_name = agent.name
+    if hasattr(store, "get_agent_opencode_token_usage") and agent.agent_key:
+        result.token_usage = store.get_agent_opencode_token_usage(
+            agent_key=agent.agent_key,
+            user_id=agent.user_id,
+        )
     latest = _agent_opencode_pool_latest.get(agent_id)
     if online and latest is not None and latest.agent_session_id == agent.agent_session_id:
         live_by_model = {model.id: model for model in latest.models}
@@ -1249,6 +1262,8 @@ async def get_agent_opencode_pool(
         result.global_queued = latest.global_queued
         result.queued_tasks = latest.queued_tasks
         result.planned_tasks = latest.planned_tasks
+        if result.token_usage is None:
+            result.token_usage = latest.token_usage
         result.updated_at = latest.updated_at or result.updated_at
     if not online:
         for model in result.models:
@@ -1361,6 +1376,24 @@ async def get_stable_agent_config(
 ) -> AgentRemoteConfig:
     record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
     return _stored_agent_config(record)
+
+
+@public_router.get(
+    "/api/agent-configs/{agent_key}/opencode-usage",
+    response_model=OpenCodeTokenUsage | None,
+)
+async def get_stable_agent_opencode_usage(
+    agent_key: str,
+    current_user: User = Depends(get_current_user),
+) -> OpenCodeTokenUsage | None:
+    store = get_scan_store()
+    record = _authorize_agent_record(store.get_agent_record(agent_key), current_user)
+    if not hasattr(store, "get_agent_opencode_token_usage"):
+        return None
+    return store.get_agent_opencode_token_usage(
+        agent_key=agent_key,
+        user_id=str(record.get("user_id") or ""),
+    )
 
 
 @public_router.put("/api/agent-configs/{agent_key}")
@@ -2491,6 +2524,14 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
     loaded = store.load_scan(scan_id)
     previous_pool = loaded[0].opencode_pool if loaded is not None else None
     body = _merge_completed_opencode_tasks(previous_pool, body)
+    if hasattr(store, "upsert_scan_opencode_token_usage"):
+        store.upsert_scan_opencode_token_usage(
+            scan_id=scan_id,
+            agent_session_id=body.agent_session_id,
+            status=body,
+        )
+    if hasattr(store, "get_scan_opencode_token_usage"):
+        body.token_usage = store.get_scan_opencode_token_usage(scan_id)
     terminal = loaded is not None and loaded[0].status not in _RUNNING_SCAN_STATUSES
     status = _terminal_opencode_pool_status(body) if terminal else body
     store.update_opencode_pool_status(scan_id, status)

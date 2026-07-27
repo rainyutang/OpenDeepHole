@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from .token_usage import OpenCodeTokenUsage, merge_token_usages
+
 
 CAPABILITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 NO_AVAILABLE_MODEL_MESSAGE = (
@@ -118,6 +120,8 @@ _scope_updated_at: dict[str, str] = {}
 _global_updated_at: str = ""
 _active_tasks: dict[str, dict[str, Any]] = {}
 _completed_tasks_by_scope: dict[str, list[dict[str, Any]]] = {}
+_token_usage_by_scope: dict[str, OpenCodeTokenUsage] = {}
+_global_token_usage: OpenCodeTokenUsage | None = None
 _peak_total_tasks_by_scope: dict[str, int] = {}
 _pending_requests: list[_PendingLeaseRequest] = []
 _planned_tasks: dict[str, _PlannedTask] = {}
@@ -970,7 +974,31 @@ async def clear_completed_tasks(scope_id: str) -> None:
         return
     async with _condition:
         _completed_tasks_by_scope.pop(scope_id, None)
+        _token_usage_by_scope.pop(scope_id, None)
         _peak_total_tasks_by_scope.pop(scope_id, None)
+
+
+async def record_model_token_usage(
+    lease: ModelLease | None,
+    usage: OpenCodeTokenUsage | dict[str, Any] | None,
+) -> None:
+    """Add one prompt's deduplicated usage to Agent and scan accumulators."""
+    if lease is None or usage is None:
+        return
+    global _global_token_usage, _global_updated_at
+    async with _condition:
+        _global_token_usage = merge_token_usages((_global_token_usage, usage))
+        if lease.stats_scope_id:
+            scoped_usage = merge_token_usages(
+                (_token_usage_by_scope.get(lease.stats_scope_id), usage)
+            )
+            if scoped_usage is not None:
+                _token_usage_by_scope[lease.stats_scope_id] = scoped_usage
+        updated_at = _now_iso()
+        _global_updated_at = updated_at
+        if lease.stats_scope_id:
+            _scope_updated_at[lease.stats_scope_id] = updated_at
+        _condition.notify_all()
 
 
 async def update_model_lease_context(lease: ModelLease | None, updates: dict[str, Any]) -> None:
@@ -1160,6 +1188,11 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
             "queued_tasks": queued_tasks,
             "planned_tasks": planned_tasks,
             "completed_tasks": completed_tasks,
+            "token_usage": (
+                _token_usage_by_scope[scope_id].as_dict()
+                if scope_id in _token_usage_by_scope
+                else None
+            ),
             "models": sorted(models, key=lambda item: item["id"]),
             "updated_at": _scope_updated_at.get(scope_id, ""),
         }
@@ -1175,6 +1208,9 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
         "queued_tasks": queued_tasks,
         "planned_tasks": planned_tasks,
         "completed_tasks": [],
+        "token_usage": (
+            _global_token_usage.as_dict() if _global_token_usage is not None else None
+        ),
         "models": sorted(models, key=lambda item: item["id"]),
         "updated_at": _global_updated_at,
     }

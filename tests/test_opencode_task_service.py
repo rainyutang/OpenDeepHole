@@ -317,6 +317,7 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "structured",
         "model",
         "output_source",
+        "token_usage",
     ]
     assert get_type_hints(run_opencode_task)["task_type"] is str
     assert "cancelled" not in get_args(get_type_hints(OpenCodeResult)["status"])
@@ -332,6 +333,12 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
             text='{"answer": 7}',
             structured={"answer": 7},
             model="provider/model",
+            token_usage={
+                "input_tokens": 5, "output_tokens": 2, "reasoning_tokens": 1,
+                "cache_read_tokens": 3, "cache_write_tokens": 0,
+                "total_tokens": 11, "complete": True,
+                "by_model": [],
+            },
         )
         service = SimpleNamespace(run_task=AsyncMock(return_value=internal))
         with (
@@ -361,6 +368,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
             structured={"answer": 7},
             model="provider/model",
             output_source=internal.output_source.model_dump(),
+            token_usage=internal.token_usage,
         )
         spec = service.run_task.await_args.args[0]
         assert spec.directory == tmp_path.resolve()

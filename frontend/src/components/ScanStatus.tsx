@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
-import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, VulnerabilityValidation } from "../types";
+import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, VulnerabilityValidation } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import VulnerabilityList from "./VulnerabilityList";
@@ -71,6 +71,15 @@ function hasFinalUserVerdict(vuln: { user_verdict?: string | null }): boolean {
 function percent(current: number, total: number): number {
   if (!total || total <= 0) return 0;
   return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+}
+
+function formatTokenCount(value: number): string {
+  return new Intl.NumberFormat("zh-CN").format(value || 0);
+}
+
+function taskTokenUsage(task: Record<string, unknown>): OpenCodeTokenUsage | null {
+  const value = task.token_usage;
+  return value && typeof value === "object" ? value as OpenCodeTokenUsage : null;
 }
 
 function scanEventMatches(event: ScanEvent, phases: string[]): boolean {
@@ -1883,9 +1892,19 @@ function ScanOverview({
           detail={`${scan.opencode_pool?.completed_task_count ?? scan.completed_task_count} 已执行`}
           tone="blue"
         />
+        {scan.opencode_pool?.token_usage && (
+          <OverviewMetric
+            icon="queue"
+            label="Token 总量"
+            value={scan.opencode_pool.token_usage.total_tokens}
+            detail={scan.opencode_pool.token_usage.complete ? "统计完整" : "统计可能有偏差"}
+            tone="purple"
+          />
+        )}
         <OverviewMetric icon="queue" label="可续扫任务" value={continuableCount} detail={continuableCount > 0 ? "可续扫" : "无待处理项"} tone="amber" />
       </div>
 
+      <ScanTokenUsagePanel usage={scan.opencode_pool?.token_usage ?? null} />
       <ScanTaskQueuePanel pool={scan.opencode_pool ?? null} />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_22rem]">
@@ -1975,6 +1994,45 @@ function ScanOverview({
   );
 }
 
+function ScanTokenUsagePanel({ usage }: { usage: OpenCodeTokenUsage | null }) {
+  if (!usage) {
+    return <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+      <h3 className="text-sm font-semibold text-slate-200">Token 统计</h3>
+      <p className="mt-2 text-xs text-slate-500">暂无统计。升级前创建的扫描不会回填 Token 用量。</p>
+    </section>;
+  }
+  const items = [
+    ["输入", usage.input_tokens],
+    ["输出", usage.output_tokens],
+    ["推理", usage.reasoning_tokens],
+    ["缓存读取", usage.cache_read_tokens],
+    ["缓存写入", usage.cache_write_tokens],
+    ["总计", usage.total_tokens],
+  ] as const;
+  return <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-200">Token 统计</h3>
+        <p className="mt-1 text-xs text-slate-500">包含主会话、子会话、重试与 JSON 修正调用。</p>
+      </div>
+      {!usage.complete && <StatusPill label="统计可能不完整" tone="amber" />}
+    </div>
+    <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+      {items.map(([label, value]) => <div key={label} className="rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2">
+        <div className="text-[11px] text-slate-500">{label}</div>
+        <div className="mt-1 font-mono text-sm text-slate-200">{formatTokenCount(value)}</div>
+      </div>)}
+    </div>
+    {usage.by_model.length > 1 && <div className="mt-3 flex flex-wrap gap-2">
+      {[...usage.by_model].sort((left, right) => right.total_tokens - left.total_tokens).map((item) => (
+        <span key={item.model} className="rounded border border-slate-700 bg-slate-950/60 px-2 py-1 font-mono text-[11px] text-slate-400">
+          {item.model}: {formatTokenCount(item.total_tokens)}
+        </span>
+      ))}
+    </div>}
+  </section>;
+}
+
 function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
   const [page, setPage] = useState(1);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
@@ -2049,6 +2107,7 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                     ? task.task.blocked_reason.trim()
                     : "";
                   const sessionId = scanQueueTaskSessionId(task.task);
+                  const tokenUsage = taskTokenUsage(task.task);
                   const isTerminal = !["planned", "queued", "running"].includes(task.status);
                   return (
                     <Fragment key={taskKey}>
@@ -2114,6 +2173,29 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                                   <div className="text-xs font-semibold text-amber-200">阻塞原因</div>
                                   <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-amber-300">
                                     {blockedReason}
+                                  </div>
+                                </div>
+                              )}
+                              {tokenUsage && (
+                                <div>
+                                  <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-300">
+                                    Token 用量
+                                    {!tokenUsage.complete && <StatusPill label="可能不完整" tone="amber" />}
+                                  </div>
+                                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                                    {[
+                                      ["输入", tokenUsage.input_tokens],
+                                      ["输出", tokenUsage.output_tokens],
+                                      ["推理", tokenUsage.reasoning_tokens],
+                                      ["缓存读", tokenUsage.cache_read_tokens],
+                                      ["缓存写", tokenUsage.cache_write_tokens],
+                                      ["总计", tokenUsage.total_tokens],
+                                    ].map(([label, value]) => (
+                                      <div key={String(label)} className="rounded-md border border-slate-800 bg-slate-900/80 px-2.5 py-2">
+                                        <div className="text-[10px] text-slate-500">{label}</div>
+                                        <div className="mt-1 font-mono text-xs text-slate-200">{formatTokenCount(Number(value))}</div>
+                                      </div>
+                                    ))}
                                   </div>
                                 </div>
                               )}
@@ -2369,7 +2451,7 @@ function OverviewMetric({
       <div className="min-w-0">
         <div className="text-xs text-slate-500">{label}</div>
         <div className="mt-1 flex items-baseline gap-2">
-          <span className={`text-2xl font-semibold ${toneText(tone)}`}>{value}</span>
+          <span className={`text-2xl font-semibold ${toneText(tone)}`}>{formatTokenCount(value)}</span>
           <span className="truncate text-xs text-slate-500">{detail}</span>
         </div>
       </div>

@@ -18,6 +18,7 @@ from backend.models import (
     FpReviewStageOutput,
     HistoryPattern,
     OpenCodePoolStatus,
+    OpenCodeTokenUsage,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -61,6 +62,20 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def update_opencode_pool_status(self, scan_id: str, status: OpenCodePoolStatus) -> None:
         """Persist the latest OpenCode model-pool status snapshot for a scan."""
+
+    @abstractmethod
+    def upsert_scan_opencode_token_usage(
+        self,
+        *,
+        scan_id: str,
+        agent_session_id: str,
+        status: OpenCodePoolStatus,
+    ) -> None:
+        """Replace one Agent-process snapshot of scan token usage."""
+
+    @abstractmethod
+    def get_scan_opencode_token_usage(self, scan_id: str) -> OpenCodeTokenUsage | None:
+        """Return cumulative token usage for a scan."""
 
     @abstractmethod
     def list_scans(self) -> list[ScanSummary]:

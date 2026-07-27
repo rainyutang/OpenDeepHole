@@ -13,12 +13,14 @@ from task_agent.model_pool import (
     model_options,
     model_pool_snapshot,
     register_planned_task,
+    record_model_token_usage,
     release_model_lease,
     refresh_configured_model_pool,
     total_model_capacity,
     update_model_lease_context,
     wait_for_model_pool_update,
 )
+from task_agent.token_usage import TokenCounters, token_usage_from_models
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +38,8 @@ def _reset_model_pool():
     model_pool_module._global_updated_at = ""
     model_pool_module._active_tasks.clear()
     model_pool_module._completed_tasks_by_scope.clear()
+    model_pool_module._token_usage_by_scope.clear()
+    model_pool_module._global_token_usage = None
     model_pool_module._peak_total_tasks_by_scope.clear()
     model_pool_module._pending_requests.clear()
     model_pool_module._planned_tasks.clear()
@@ -43,6 +47,43 @@ def _reset_model_pool():
     model_pool_module._pending_sequence = 0
     model_pool_module._planned_sequence = 0
     yield
+
+
+def test_token_usage_accumulates_by_actual_model_for_scope_and_agent() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "configured",
+            "model": "provider/configured",
+            "capability": "high",
+            "max_concurrency": 1,
+        }])
+        lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            stats_scope_id="scan-1",
+        )
+        assert lease is not None
+        await record_model_token_usage(
+            lease,
+            token_usage_from_models({
+                "provider/actual": TokenCounters(
+                    input_tokens=8,
+                    output_tokens=3,
+                    reasoning_tokens=2,
+                    cache_read_tokens=4,
+                    cache_write_tokens=1,
+                ),
+            }),
+        )
+
+        scoped = model_pool_snapshot("scan-1")["token_usage"]
+        global_usage = model_pool_snapshot()["token_usage"]
+        assert scoped == global_usage
+        assert scoped["total_tokens"] == 18
+        assert scoped["by_model"][0]["model"] == "provider/actual"
+        await release_model_lease(lease, outcome="success")
+
+    asyncio.run(run())
 
 
 def test_model_options_empty_pool_does_not_fall_back_to_legacy_model() -> None:

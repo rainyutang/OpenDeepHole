@@ -37,11 +37,13 @@ from .model_pool import (
     configured_global_concurrency,
     normalize_priority,
     normalize_requirement,
+    record_model_token_usage,
     release_model_lease,
     update_model_lease_context,
 )
 from .output_format import format_task_output, task_output_stage
 from .serve_client import OpenCodeFileWrite, OpenCodePromptResult, get_serve_manager
+from .token_usage import OpenCodeTokenUsage, merge_token_usages
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +281,7 @@ class OpenCodeTaskResult:
     text: str = ""
     structured: Any = None
     model: str = ""
+    token_usage: dict[str, Any] | None = None
     output_source: OutputSource = field(default_factory=OutputSource)
     error: str = ""
     queued_at: str = ""
@@ -593,6 +596,7 @@ class OpenCodeTaskService:
         last_text = ""
         last_model = ""
         last_source = OutputSource()
+        task_token_usage: OpenCodeTokenUsage | None = None
 
         session_attempt = 1
         while session_attempt <= total_session_attempts:
@@ -640,8 +644,16 @@ class OpenCodeTaskService:
                         source=source,
                         error="OpenCode task cancelled while queued",
                         duration_seconds=accumulated_duration,
+                        token_usage=(
+                            task_token_usage.as_dict() if task_token_usage is not None else None
+                        ),
                     )
                     return
+                if task_token_usage is not None:
+                    await update_model_lease_context(
+                        lease,
+                        {"token_usage": task_token_usage.as_dict()},
+                    )
 
                 if (
                     session_attempt == 1
@@ -697,6 +709,16 @@ class OpenCodeTaskService:
                     if value:
                         source.model = str(value)
 
+                async def record_token_usage(value: OpenCodeTokenUsage) -> None:
+                    nonlocal task_token_usage
+                    task_token_usage = merge_token_usages((task_token_usage, value))
+                    await record_model_token_usage(lease, value)
+                    if task_token_usage is not None:
+                        await update_model_lease_context(
+                            lease,
+                            {"token_usage": task_token_usage.as_dict()},
+                        )
+
                 system_prompt = _task_system_prompt(record)
                 timeout_seconds = (
                     (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
@@ -734,6 +756,7 @@ class OpenCodeTaskService:
                                     on_line=context.on_output,
                                     on_session_id=record_session,
                                     on_response_model=record_model,
+                                    on_token_usage=record_token_usage,
                                     on_file_write=(
                                         record_file_write
                                         if spec.output_schema is not None
@@ -815,6 +838,9 @@ class OpenCodeTaskService:
                     model=last_model,
                     source=source,
                     duration_seconds=accumulated_duration + active_duration,
+                    token_usage=(
+                        task_token_usage.as_dict() if task_token_usage is not None else None
+                    ),
                 )
                 return
             except asyncio.TimeoutError as exc:
@@ -841,6 +867,9 @@ class OpenCodeTaskService:
                     source=source,
                     error="OpenCode task cancelled",
                     duration_seconds=accumulated_duration + _elapsed(attempt_started),
+                    token_usage=(
+                        task_token_usage.as_dict() if task_token_usage is not None else None
+                    ),
                 )
                 return
             except NoAvailableModelError as exc:
@@ -856,6 +885,9 @@ class OpenCodeTaskService:
                     source=source,
                     error=str(exc),
                     duration_seconds=accumulated_duration + _elapsed(attempt_started),
+                    token_usage=(
+                        task_token_usage.as_dict() if task_token_usage is not None else None
+                    ),
                 )
                 return
             except _InvalidStructuredOutput as exc:
@@ -896,6 +928,9 @@ class OpenCodeTaskService:
                 await update_model_lease_context(lease, {
                     "serve_session_id": final_session_id or session_id,
                     "session_attempt": session_attempt,
+                    "token_usage": (
+                        task_token_usage.as_dict() if task_token_usage is not None else None
+                    ),
                 })
                 await release_model_lease(
                     lease,
@@ -926,6 +961,9 @@ class OpenCodeTaskService:
                 source=last_source,
                 error=retry_reason or "OpenCode task failed",
                 duration_seconds=accumulated_duration,
+                token_usage=(
+                    task_token_usage.as_dict() if task_token_usage is not None else None
+                ),
             )
             return
 
@@ -981,6 +1019,7 @@ class OpenCodeTaskService:
         model: str = "",
         error: str = "",
         duration_seconds: float = 0.0,
+        token_usage: dict[str, Any] | None = None,
     ) -> None:
         record.status = status
         if not record.session_future.done():
@@ -1012,6 +1051,7 @@ class OpenCodeTaskService:
             text=text,
             structured=structured,
             model=resolved_model,
+            token_usage=token_usage,
             output_source=source,
             error=error,
             queued_at=record.queued_at,
@@ -1590,6 +1630,7 @@ async def _run_component_task(
             structured=result.structured if output_schema is not None else None,
             model=result.model,
             output_source=output_source,
+            token_usage=result.token_usage,
         )
     if result.status == "timeout":
         return OpenCodeResult(
@@ -1599,6 +1640,7 @@ async def _run_component_task(
             structured=None,
             model=result.model,
             output_source=output_source,
+            token_usage=result.token_usage,
         )
     return OpenCodeResult(
         session_id=result.session_id,
@@ -1607,6 +1649,7 @@ async def _run_component_task(
         structured=None,
         model=result.model,
         output_source=output_source,
+        token_usage=result.token_usage,
     )
 
 

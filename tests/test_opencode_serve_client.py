@@ -25,11 +25,14 @@ from task_agent.serve_client import (
     _config_hash,
     _flush_event_state_periodically,
     _handle_serve_event,
+    _message_token_entries,
     _next_event_reconnect_delay,
+    _session_tree_token_entries,
     _serve_context_headers,
     _serve_port,
     _serve_startup_env_debug,
     _serve_startup_shell_debug,
+    _token_usage_delta,
 )
 
 
@@ -169,6 +172,81 @@ class _FakeAsyncClient:
                 *lines,
             ]
         return _FakeStreamContext(lines)
+
+
+def test_session_tree_token_usage_deduplicates_baseline_and_prefers_step_finish() -> None:
+    old_message = {
+        "info": {
+            "id": "msg-old", "role": "assistant",
+            "providerID": "provider-a", "modelID": "model-a",
+            "tokens": {"input": 2, "output": 3},
+        },
+        "parts": [],
+    }
+    new_message = {
+        "info": {
+            "id": "msg-new", "role": "assistant",
+            "providerID": "provider-a", "modelID": "model-a",
+            "tokens": {"input": 999, "output": 999},
+        },
+        "parts": [
+            {
+                "id": "step-1", "type": "step-finish",
+                "tokens": {
+                    "input": 10, "output": 4, "reasoning": 2,
+                    "cache": {"read": 5, "write": 1},
+                },
+            },
+            {
+                "id": "step-2", "type": "step-finish",
+                "tokens": {"input": 3, "output": 1},
+            },
+        ],
+    }
+    child_message = {
+        "info": {
+            "id": "msg-child", "role": "assistant",
+            "providerID": "provider-b", "modelID": "model-b",
+            "tokens": {
+                "input": 7, "output": 2, "reasoning": 1,
+                "cache": {"read": 3, "write": 0},
+            },
+        },
+        "parts": [],
+    }
+
+    class TreeClient:
+        async def get(self, path: str, **_kwargs):
+            values = {
+                "/session/root/message": [old_message, new_message],
+                "/session/root/children": [{"id": "child"}],
+                "/session/child/message": [child_message],
+                "/session/child/children": [],
+            }
+            return _FakeResponse(values[path])
+
+    async def run() -> None:
+        baseline = _message_token_entries("root", old_message, "")
+        after, complete = await _session_tree_token_entries(
+            TreeClient(), "root", {}, {}, ""
+        )
+        usage = _token_usage_delta(baseline, after, complete=complete)
+
+        assert usage.complete is True
+        assert usage.counters.input_tokens == 20
+        assert usage.counters.output_tokens == 7
+        assert usage.counters.reasoning_tokens == 3
+        assert usage.counters.cache_read_tokens == 8
+        assert usage.counters.cache_write_tokens == 1
+        assert usage.counters.total_tokens == 39
+        assert {
+            item.model: item.counters.total_tokens for item in usage.by_model
+        } == {
+            "provider-a/model-a": 26,
+            "provider-b/model-b": 13,
+        }
+
+    asyncio.run(run())
 
 
 class _FakeModelAsyncClient:
@@ -330,7 +408,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             "grep": True,
             "mcp__deephole-code__view_function_code": True,
         }
-        assert session_client.gets == [{
+        assert [item for item in session_client.gets if item["path"] == "/experimental/tool/ids"] == [{
             "path": "/experimental/tool/ids",
             "params": expected_params,
             "headers": expected_headers,
@@ -488,7 +566,7 @@ def test_continued_prompt_ignores_previous_message_file_writes(
         session_client = _FakeAsyncClient.instances[0]
         assert any(
             item["path"] == "/session/session-1/message"
-            and item["params"]["limit"] == "2"
+            and item["params"].get("limit") == "2"
             for item in session_client.gets
         )
 

@@ -425,6 +425,24 @@ class OpenCodePoolModelStats(BaseModel):
     active_tasks: list[dict] = []
 
 
+class OpenCodeTokenCounters(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_tokens: int = 0
+
+
+class OpenCodeModelTokenUsage(OpenCodeTokenCounters):
+    model: str = "unknown"
+
+
+class OpenCodeTokenUsage(OpenCodeTokenCounters):
+    complete: bool = True
+    by_model: list[OpenCodeModelTokenUsage] = []
+
+
 class OpenCodePoolStatus(BaseModel):
     scope_id: str = ""
     agent_name: str = ""
@@ -436,6 +454,7 @@ class OpenCodePoolStatus(BaseModel):
     queued_tasks: list[dict] = []
     planned_tasks: list[dict] = []
     completed_tasks: list[dict] = []
+    token_usage: OpenCodeTokenUsage | None = None
     models: list[OpenCodePoolModelStats] = []
     updated_at: str = ""
 

@@ -33,6 +33,12 @@ from .config_json import (
     redact_opencode_config_content,
 )
 from .output_format import format_task_output, task_output_stage
+from .token_usage import (
+    OpenCodeTokenUsage,
+    TokenCounters,
+    parse_token_counters,
+    token_usage_from_models,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +118,7 @@ class OpenCodePromptResult:
     lines: list[str]
     text: str
     model: str = ""
+    token_usage: OpenCodeTokenUsage | None = None
     raw: Any = field(default=None, repr=False, compare=False)
 
 
@@ -1299,6 +1306,111 @@ def _response_message_id(value: Any) -> str:
     if not isinstance(value, dict) or not isinstance(value.get("info"), dict):
         return ""
     return str(value["info"].get("id") or "").strip()
+
+
+def _message_token_entries(
+    session_id: str,
+    message: object,
+    fallback_model: str,
+) -> dict[tuple[str, str, str], tuple[str, TokenCounters]]:
+    if not isinstance(message, dict):
+        return {}
+    info = message.get("info")
+    if not isinstance(info, dict) or str(info.get("role") or "") != "assistant":
+        return {}
+    message_id = str(info.get("id") or "").strip()
+    if not message_id:
+        return {}
+    model = _response_model(message) or fallback_model or "unknown"
+    entries: dict[tuple[str, str, str], tuple[str, TokenCounters]] = {}
+    parts = message.get("parts")
+    if isinstance(parts, list):
+        for index, part in enumerate(parts):
+            if not isinstance(part, dict) or part.get("type") != "step-finish":
+                continue
+            counters = parse_token_counters(part.get("tokens"))
+            if counters is None:
+                continue
+            part_id = str(part.get("id") or f"step:{index}")
+            entries[(session_id, message_id, part_id)] = (model, counters)
+    if entries:
+        return entries
+    counters = parse_token_counters(info.get("tokens"))
+    if counters is not None:
+        entries[(session_id, message_id, "message")] = (model, counters)
+    return entries
+
+
+async def _session_tree_token_entries(
+    client: httpx.AsyncClient,
+    root_session_id: str,
+    params: dict[str, str],
+    headers: dict[str, str],
+    fallback_model: str,
+) -> tuple[dict[tuple[str, str, str], tuple[str, TokenCounters]], bool]:
+    entries: dict[tuple[str, str, str], tuple[str, TokenCounters]] = {}
+    complete = True
+    pending = [root_session_id]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if not current or current in visited:
+            continue
+        visited.add(current)
+        try:
+            response = await client.get(
+                f"/session/{current}/message",
+                params=params,
+                headers=headers,
+            )
+            response.raise_for_status()
+            messages = response.json()
+            if isinstance(messages, list):
+                for message in messages:
+                    entries.update(
+                        _message_token_entries(current, message, fallback_model)
+                    )
+            else:
+                complete = False
+        except Exception as exc:
+            complete = False
+            logger.debug("Failed to collect OpenCode messages for %s: %s", current, exc)
+        try:
+            response = await client.get(
+                f"/session/{current}/children",
+                params=params,
+                headers=headers,
+            )
+            response.raise_for_status()
+            children = response.json()
+            if isinstance(children, list):
+                for child in children:
+                    if not isinstance(child, dict):
+                        continue
+                    child_id = str(child.get("id") or "").strip()
+                    if child_id and child_id not in visited:
+                        pending.append(child_id)
+            else:
+                complete = False
+        except Exception as exc:
+            complete = False
+            logger.debug("Failed to collect OpenCode child sessions for %s: %s", current, exc)
+    return entries, complete
+
+
+def _token_usage_delta(
+    before: dict[tuple[str, str, str], tuple[str, TokenCounters]],
+    after: dict[tuple[str, str, str], tuple[str, TokenCounters]],
+    *,
+    complete: bool,
+) -> OpenCodeTokenUsage:
+    models: dict[str, TokenCounters] = {}
+    for key, (model, counters) in after.items():
+        if key in before:
+            continue
+        normalized_model = model or "unknown"
+        models[normalized_model] = models.get(normalized_model, TokenCounters()) + counters
+    return token_usage_from_models(models, complete=complete)
 
 
 def _normalize_tool_selector(value: object) -> str:
@@ -3299,6 +3411,7 @@ class OpenCodeServeManager:
         on_line=None,
         on_session_id=None,
         on_response_model=None,
+        on_token_usage=None,
         on_file_write=None,
         cancel_event=None,
         env_overrides: dict[str, str] | None = None,
@@ -3386,6 +3499,53 @@ class OpenCodeServeManager:
                 timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
                 trust_env=False,
             ) as client:
+                token_baseline: dict[
+                    tuple[str, str, str], tuple[str, TokenCounters]
+                ] = {}
+                token_baseline_complete = True
+                captured_token_usage: OpenCodeTokenUsage | None = None
+                token_usage_captured = False
+
+                async def capture_token_usage(
+                    response_message: object = None,
+                ) -> OpenCodeTokenUsage:
+                    nonlocal captured_token_usage, token_usage_captured
+                    if token_usage_captured and captured_token_usage is not None:
+                        return captured_token_usage
+                    after, after_complete = await _session_tree_token_entries(
+                        client,
+                        active_session_id,
+                        params,
+                        headers,
+                        model,
+                    )
+                    if response_message is not None:
+                        after.update(
+                            _message_token_entries(
+                                active_session_id,
+                                response_message,
+                                model,
+                            )
+                        )
+                    captured_token_usage = _token_usage_delta(
+                        token_baseline,
+                        after,
+                        complete=token_baseline_complete and after_complete,
+                    )
+                    token_usage_captured = True
+                    if on_token_usage is not None:
+                        try:
+                            result = on_token_usage(captured_token_usage)
+                            if hasattr(result, "__await__"):
+                                await result
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to publish OpenCode token usage for session %s: %s",
+                                active_session_id,
+                                exc,
+                            )
+                    return captured_token_usage
+
                 if str(scan_id or "").strip():
                     scan_mcp_lease = await self._acquire_scan_mcp(
                         client,
@@ -3429,6 +3589,16 @@ class OpenCodeServeManager:
                         json={"permission": permissions},
                     )
                     updated.raise_for_status()
+                if session_mode == "continued":
+                    token_baseline, token_baseline_complete = (
+                        await _session_tree_token_entries(
+                            client,
+                            active_session_id,
+                            params,
+                            headers,
+                            model,
+                        )
+                    )
                 if on_session_id:
                     result = on_session_id(active_session_id)
                     if hasattr(result, "__await__"):
@@ -3546,11 +3716,17 @@ class OpenCodeServeManager:
                         headers,
                     )
                     await self._cancel_request_task(request)
+                    await capture_token_usage()
                     raise
                 except BaseException:
                     await self._cancel_request_task(request)
+                    await capture_token_usage()
                     raise
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except BaseException:
+                    await capture_token_usage()
+                    raise
                 if event_state:
                     deadline = (
                         asyncio.get_running_loop().time()
@@ -3571,6 +3747,7 @@ class OpenCodeServeManager:
                         event_registered = False
                     event_state.flush()
                 response_data = response.json()
+                await capture_token_usage(response_data)
                 response_model = _response_model(response_data)
                 if response_model and on_response_model:
                     result = on_response_model(response_model)
@@ -3614,6 +3791,7 @@ class OpenCodeServeManager:
                     lines=lines,
                     text="\n".join(response_text),
                     model=response_model,
+                    token_usage=captured_token_usage,
                     raw=response_data,
                 )
                 session_outcome = "success"
@@ -3716,6 +3894,14 @@ class OpenCodeServeManager:
         value = await self._session_api_request(
             method="GET",
             path=f"/session/{session_id}/message",
+            **runtime,
+        )
+        return value if isinstance(value, list) else []
+
+    async def get_session_children(self, session_id: str, **runtime: Any) -> list[dict[str, Any]]:
+        value = await self._session_api_request(
+            method="GET",
+            path=f"/session/{session_id}/children",
             **runtime,
         )
         return value if isinstance(value, list) else []

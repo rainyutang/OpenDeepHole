@@ -389,10 +389,12 @@ class Reporter:
         """Push the latest OpenCode model-pool status snapshot."""
         if self.dry_run:
             return True
+        payload = dict(snapshot)
+        payload["agent_session_id"] = self.agent_session_id
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/opencode-pool",
-                json=snapshot,
+                json=payload,
                 timeout=5.0,
             )
             return True

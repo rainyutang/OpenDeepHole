@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, OpenCodeTokenUsage, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -548,6 +548,13 @@ export async function getAgentConfig(agentKey: string): Promise<AgentRemoteConfi
 
 export async function getAgentOpenCodePool(agentId: string): Promise<AgentOpenCodePoolStatus> {
   const { data } = await api.get<AgentOpenCodePoolStatus>(`/api/agent/${agentId}/opencode-pool`);
+  return data;
+}
+
+export async function getAgentOpenCodeUsage(agentKey: string): Promise<OpenCodeTokenUsage | null> {
+  const { data } = await api.get<OpenCodeTokenUsage | null>(
+    `/api/agent-configs/${agentKey}/opencode-usage`,
+  );
   return data;
 }
 
