@@ -14,8 +14,8 @@ from typing import Any
 from task_agent import run_opencode_task
 
 from task_agent.audit_schema import (
-    VULNERABILITY_LIST_SCHEMA,
-    audit_output_instruction,
+    THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+    threat_audit_output_instruction,
 )
 
 PROCESS_NAME = "threat_audit"
@@ -102,6 +102,161 @@ def _module_code_paths(module: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _path_nodes(
+    attack_path: dict[str, Any],
+    nodes: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    related_by_node = {
+        _text(item.get("node_id")): item
+        for item in attack_path.get("related_high_risk_modules") or []
+        if isinstance(item, dict) and _text(item.get("node_id"))
+    }
+    raw_node_ids = attack_path.get("node_ids")
+    node_ids = [
+        _text(item)
+        for item in (raw_node_ids if isinstance(raw_node_ids, list) else [])
+        if _text(item)
+    ]
+    if not node_ids:
+        node_ids = list(related_by_node)
+    result: list[dict[str, Any]] = []
+    for node_id in dict.fromkeys(node_ids):
+        node = nodes.get(node_id)
+        if node is not None:
+            result.append(node)
+            continue
+        related = related_by_node.get(node_id)
+        if related is None:
+            continue
+        result.append({
+            "node_id": node_id,
+            "node_type": "",
+            "node_name": _text(related.get("module_name")),
+            "description": _text(related.get("association_description")),
+            "module_name": _text(related.get("module_name")),
+            "is_high_risk_module": True,
+            "external_exposure": related.get("external_exposure") is True,
+            "external_interface_description": "",
+        })
+    return result
+
+
+def _code_path_contexts(
+    related: list[dict[str, Any]],
+    modules_by_name: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    contexts: list[dict[str, str]] = []
+    matched_modules: list[dict[str, Any]] = []
+    for item in related:
+        module_name = _text(item.get("module_name"))
+        module = modules_by_name.get(module_name)
+        if module is None:
+            continue
+        if module not in matched_modules:
+            matched_modules.append(module)
+        for code_path in _module_code_paths(module):
+            context = {
+                "module_name": module_name,
+                "path": code_path["path"],
+                "description": code_path["description"],
+            }
+            if context not in contexts:
+                contexts.append(context)
+    return contexts, matched_modules
+
+
+def _external_exposure_contexts(
+    path_nodes: list[dict[str, Any]],
+    related: list[dict[str, Any]],
+    modules_by_name: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    nodes_by_id = {
+        _text(node.get("node_id")): node
+        for node in path_nodes
+        if _text(node.get("node_id"))
+    }
+    for node in path_nodes:
+        if node.get("external_exposure") is not True:
+            continue
+        context = {
+            "node_name": _text(node.get("node_name")),
+            "module_name": _text(node.get("module_name")),
+            "description": _text(node.get("external_interface_description")),
+            "source": "attack_tree",
+        }
+        if context not in result:
+            result.append(context)
+    for item in related:
+        module_name = _text(item.get("module_name"))
+        node = nodes_by_id.get(_text(item.get("node_id"))) or {}
+        if item.get("external_exposure") is True:
+            context = {
+                "node_name": _text(node.get("node_name")),
+                "module_name": module_name,
+                "description": _text(node.get("external_interface_description")),
+                "source": "attack_tree",
+            }
+            if context not in result:
+                result.append(context)
+        module = modules_by_name.get(module_name)
+        if module is None or _text(module.get("是否外部暴露面")) != "是":
+            continue
+        if any(
+            context["node_name"] == _text(node.get("node_name"))
+            and context["module_name"] == module_name
+            for context in result
+        ):
+            continue
+        context = {
+            "node_name": _text(node.get("node_name")),
+            "module_name": module_name,
+            "description": "",
+            "source": "high_risk_module",
+        }
+        if context not in result:
+            result.append(context)
+    return result
+
+
+def _edge_contexts(
+    attack_path: dict[str, Any],
+    node_id: str,
+    edges: list[dict[str, Any]],
+    nodes: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    raw_edge_ids = attack_path.get("edge_ids")
+    edge_ids = {
+        _text(item)
+        for item in (raw_edge_ids if isinstance(raw_edge_ids, list) else [])
+        if _text(item)
+    }
+    result: list[dict[str, str]] = []
+    for edge in edges:
+        edge_id = _text(edge.get("edge_id"))
+        if edge_ids and edge_id not in edge_ids:
+            continue
+        source_id = _text(edge.get("source_node_id"))
+        target_id = _text(edge.get("target_node_id"))
+        if node_id not in {source_id, target_id}:
+            continue
+        context = {
+            "source": _text((nodes.get(source_id) or {}).get("node_name"))
+            or source_id,
+            "target": _text((nodes.get(target_id) or {}).get("node_name"))
+            or target_id,
+            "influence_type": _text(edge.get("influence_type")),
+            "description": _text(edge.get("description")),
+        }
+        if context not in result:
+            result.append(context)
+    return result
+
+
 def _tasks(
     scan_id: str,
     attack_tree_data: dict[str, Any],
@@ -112,8 +267,7 @@ def _tasks(
         for module in high_risk_modules
         if isinstance(module, dict) and str(module.get("模块名称") or "").strip()
     }
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    tasks_by_identity: dict[str, dict[str, Any]] = {}
     raw_trees = attack_tree_data.get("attack_trees") or []
     for tree_index, tree in enumerate(raw_trees):
         if not isinstance(tree, dict):
@@ -123,10 +277,15 @@ def _tasks(
         asset = asset if isinstance(asset, dict) else {}
         asset_name = _display_label(asset.get("asset_name"), "未命名资产")
         nodes = {
-            str(node.get("node_id") or ""): node
+            _text(node.get("node_id")): node
             for node in tree.get("nodes") or []
             if isinstance(node, dict) and node.get("node_id")
         }
+        edges = [
+            edge
+            for edge in tree.get("edges") or []
+            if isinstance(edge, dict)
+        ]
         for path_index, attack_path in enumerate(tree.get("attack_paths") or []):
             if not isinstance(attack_path, dict):
                 continue
@@ -139,104 +298,346 @@ def _tasks(
                 for item in attack_path.get("related_high_risk_modules") or []
                 if isinstance(item, dict)
             ]
-            matched_modules = [
-                modules_by_name[name]
-                for name in (
-                    str(item.get("module_name") or "").strip()
-                    for item in related
-                )
-                if name in modules_by_name
-            ]
-            code_paths: list[dict[str, str]] = []
-            seen_paths: set[str] = set()
-            for module in matched_modules:
-                for code_path in _module_code_paths(module):
-                    if code_path["path"] in seen_paths:
-                        continue
-                    seen_paths.add(code_path["path"])
-                    code_paths.append(code_path)
-            first_code_path = code_paths[0] if code_paths else {}
-            surface = related[0] if related else {}
-            surface_id = str(surface.get("node_id") or "")
-            surface_name = _display_label(
-                surface.get("module_name")
-                or (nodes.get(surface_id) or {}).get("node_name"),
-                "未命名高风险模块",
+            code_path_contexts, matched_modules = _code_path_contexts(
+                related,
+                modules_by_name,
             )
-            risks = list(dict.fromkeys(
-                str(module.get("面临威胁") or "").strip()
-                for module in matched_modules
-                if str(module.get("面临威胁") or "").strip()
-            ))
-            risk_name = "；".join(risks) or "未命名风险"
-            attack_goal = _display_label(
-                attack_path.get("path_name"),
-                str((nodes.get(str(tree.get("root_node_id") or "")) or {}).get("node_name") or "未命名攻击目标"),
+            path_nodes = _path_nodes(attack_path, nodes)
+            exposures = _external_exposure_contexts(
+                path_nodes,
+                related,
+                modules_by_name,
             )
-            evidence = [
-                value
-                for value in [
-                    str(attack_path.get("path_description") or "").strip(),
-                    *(str(item.get("association_description") or "").strip() for item in related),
-                ]
-                if value
+            path_context = {
+                "path_id": _text(attack_path.get("path_id")),
+                "path_name": _text(attack_path.get("path_name")),
+                "path_description": _text(attack_path.get("path_description")),
+            }
+            module_associations = [
+                {
+                    "module_name": _text(item.get("module_name")),
+                    "path_role": _text(item.get("path_role")),
+                    "association_description": _text(
+                        item.get("association_description"),
+                    ),
+                }
+                for item in related
             ]
             patterns = [
                 item
                 for item in attack_path.get("attack_patterns") or []
                 if isinstance(item, dict)
             ]
-            for pattern_index, pattern in enumerate(patterns):
-                pattern_id = str(
-                    pattern.get("pattern_id")
-                    or f"{path_id}-pattern-{pattern_index + 1}"
+            for node_index, node in enumerate(path_nodes):
+                node_id = _text(node.get("node_id")) or (
+                    f"{path_id}-node-{node_index + 1}"
                 )
-                method_name = _display_label(
-                    pattern.get("pattern_name"),
-                    "未命名攻击模式",
+                qualified_node_id = f"{tree_id}:{node_id}"
+                surface_name = _display_label(
+                    node.get("module_name") or node.get("node_name"),
+                    "未命名威胁节点",
                 )
-                identity = f"{tree_id}\0{path_id}\0{pattern_id}\0{method_name}"
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                fingerprint = hashlib.sha1(identity.encode("utf-8")).hexdigest()
-                result.append({
-                    "task_id": _stable_task_id(scan_id, identity),
-                    "scan_id": scan_id,
-                    "status": "pending",
-                    "surface_node_id": surface_id,
-                    "surface_name": surface_name,
-                    "method_node_id": pattern_id,
-                    "method_name": method_name,
-                    "attack_goal": attack_goal,
-                    "risk_id": "",
-                    "risk_name": risk_name,
-                    "asset_id": "",
-                    "asset_name": asset_name,
-                    "code_path": str(first_code_path.get("path") or ""),
-                    "code_path_description": str(
-                        first_code_path.get("description") or "",
-                    ),
-                    "code_paths": code_paths,
-                    "attack_path_id": path_id,
-                    "attack_path_fingerprint": fingerprint,
-                    "preconditions": [],
-                    "evidence": evidence,
-                    "attack_pattern": dict(pattern),
-                    "native_attack_path": dict(attack_path),
-                    "description": _task_description(
-                        attack_goal=attack_goal,
-                        surface_name=surface_name,
-                        method_name=method_name,
-                        asset_name=asset_name,
-                        risk_name=risk_name,
-                    ),
-                })
+                node_edges = _edge_contexts(
+                    attack_path,
+                    node_id,
+                    edges,
+                    nodes,
+                )
+                for pattern_index, pattern in enumerate(patterns):
+                    raw_pattern_id = _text(pattern.get("pattern_id"))
+                    pattern_name = _text(pattern.get("pattern_name"))
+                    pattern_identity = (
+                        raw_pattern_id
+                        or pattern_name
+                        or f"{path_id}-pattern-{pattern_index + 1}"
+                    )
+                    method_node_id = raw_pattern_id or pattern_identity
+                    method_name = _display_label(
+                        pattern_name,
+                        "未命名攻击模式",
+                    )
+                    identity = (
+                        f"{tree_id}\0{node_id}\0{pattern_identity}"
+                    )
+                    task = tasks_by_identity.get(identity)
+                    if task is None:
+                        attack_goal = _display_label(
+                            attack_path.get("path_name"),
+                            _text(node.get("node_name"))
+                            or "未命名攻击目标",
+                        )
+                        task = {
+                            "task_id": _stable_task_id(scan_id, identity),
+                            "scan_id": scan_id,
+                            "status": "pending",
+                            "surface_node_id": qualified_node_id,
+                            "surface_name": surface_name,
+                            "method_node_id": method_node_id,
+                            "method_name": method_name,
+                            "attack_goal": attack_goal,
+                            "risk_id": "",
+                            "risk_name": "",
+                            "asset_id": "",
+                            "asset_name": asset_name,
+                            "code_path": "",
+                            "code_path_description": "",
+                            "code_paths": [],
+                            "attack_path_id": path_id,
+                            "attack_path_fingerprint": "",
+                            "native_node_id": node_id,
+                            "audit_node": dict(node),
+                            "value_asset": dict(asset),
+                            "attack_pattern": dict(pattern),
+                            "attack_path_contexts": [],
+                            "native_attack_paths": [],
+                            "code_path_contexts": [],
+                            "external_exposures": [],
+                            "pattern_associations": [],
+                            "module_associations": [],
+                            "edge_contexts": [],
+                            "_risks": [],
+                            "_identity": identity,
+                        }
+                        tasks_by_identity[identity] = task
+                    if path_context not in task["attack_path_contexts"]:
+                        task["attack_path_contexts"].append(path_context)
+                        task["native_attack_paths"].append(dict(attack_path))
+                    for context in code_path_contexts:
+                        if context not in task["code_path_contexts"]:
+                            task["code_path_contexts"].append(context)
+                        code_path = {
+                            "path": context["path"],
+                            "description": context["description"],
+                        }
+                        if code_path not in task["code_paths"]:
+                            task["code_paths"].append(code_path)
+                    for context in exposures:
+                        if context not in task["external_exposures"]:
+                            task["external_exposures"].append(context)
+                    association = _text(pattern.get("association_description"))
+                    if (
+                        association
+                        and association not in task["pattern_associations"]
+                    ):
+                        task["pattern_associations"].append(association)
+                    for context in module_associations:
+                        if context not in task["module_associations"]:
+                            task["module_associations"].append(context)
+                    for context in node_edges:
+                        if context not in task["edge_contexts"]:
+                            task["edge_contexts"].append(context)
+                    for module in matched_modules:
+                        risk = _text(module.get("面临威胁"))
+                        if risk and risk not in task["_risks"]:
+                            task["_risks"].append(risk)
+
+    result = list(tasks_by_identity.values())
+    for task in result:
+        first_code_path = task["code_paths"][0] if task["code_paths"] else {}
+        task["code_path"] = _text(first_code_path.get("path"))
+        task["code_path_description"] = _text(
+            first_code_path.get("description"),
+        )
+        task["risk_name"] = "；".join(task.pop("_risks")) or "未命名风险"
+        task["native_attack_path"] = (
+            task["native_attack_paths"][0]
+            if task["native_attack_paths"]
+            else {}
+        )
+        path_ids = [
+            context["path_id"]
+            for context in task["attack_path_contexts"]
+            if context["path_id"]
+        ]
+        fingerprint_input = "\0".join([
+            task.pop("_identity"),
+            *sorted(set(path_ids)),
+        ])
+        task["attack_path_fingerprint"] = hashlib.sha1(
+            fingerprint_input.encode("utf-8"),
+        ).hexdigest()
+        task["description"] = _task_description(
+            attack_goal=task["attack_goal"],
+            surface_name=task["surface_name"],
+            method_name=task["method_name"],
+            asset_name=task["asset_name"],
+            risk_name=task["risk_name"],
+        )
     return result
 
 
+def _append_prompt_items(
+    lines: list[str],
+    label: str,
+    values: list[str],
+) -> None:
+    normalized = list(dict.fromkeys(value for value in values if value))
+    if not normalized:
+        return
+    lines.append(f"- {label}：")
+    lines.extend(f"  - {value}" for value in normalized)
+
+
+def _prompt_context_text(*values: Any) -> str:
+    return "；".join(dict.fromkeys(
+        value
+        for item in values
+        if (value := _text(item))
+    ))
+
+
+def _threat_prompt(task: dict[str, Any]) -> str:
+    node = task.get("audit_node")
+    node = node if isinstance(node, dict) else {}
+    pattern = task.get("attack_pattern")
+    pattern = pattern if isinstance(pattern, dict) else {}
+    asset = task.get("value_asset")
+    asset = asset if isinstance(asset, dict) else {}
+    target_name = _text(node.get("module_name")) or _text(
+        node.get("node_name"),
+    )
+    pattern_name = _text(pattern.get("pattern_name"))
+    asset_name = _text(asset.get("asset_name"))
+    lines = [
+        (
+            f"你是一个白盒审计专家。请检查「{target_name}」是否存在可利用的"
+            f"真实漏洞，能够导致「{pattern_name}」，并危害「{asset_name}」。"
+        ),
+        "",
+        (
+            "以下上下文全部来自威胁分析结果。缺失的信息直接省略，不得推测"
+            "或自行补全："
+        ),
+    ]
+    node_name = _text(node.get("node_name"))
+    node_type = _text(node.get("node_type"))
+    if node_name:
+        lines.append(
+            f"- 审计节点：{node_name}"
+            + (f"（{node_type}）" if node_type else ""),
+        )
+    node_description = _text(node.get("description"))
+    if node_description:
+        lines.append(f"- 节点说明：{node_description}")
+    _append_prompt_items(
+        lines,
+        "相关代码路径",
+        [
+            _prompt_context_text(
+                context.get("module_name"),
+                context.get("path"),
+                context.get("description"),
+            )
+            for context in task.get("code_path_contexts") or []
+            if isinstance(context, dict)
+        ],
+    )
+    exposure_values: list[str] = []
+    for context in task.get("external_exposures") or []:
+        if not isinstance(context, dict):
+            continue
+        value = _prompt_context_text(
+            context.get("node_name"),
+            context.get("module_name"),
+            context.get("description"),
+        )
+        if (
+            value
+            and context.get("source") == "high_risk_module"
+            and not _text(context.get("description"))
+        ):
+            value += "；高风险模块分析标记为外部暴露面"
+        if value:
+            exposure_values.append(value)
+    _append_prompt_items(lines, "对外暴露面", exposure_values)
+    pattern_id = _text(pattern.get("pattern_id"))
+    if pattern_name or pattern_id:
+        pattern_label = pattern_name
+        if pattern_id:
+            pattern_label += f"（{pattern_id}）" if pattern_label else pattern_id
+        lines.append(f"- 攻击模式：{pattern_label}")
+    associations = [
+        _text(value)
+        for value in task.get("pattern_associations") or []
+        if _text(value)
+    ]
+    if associations:
+        lines.append(f"- 模式关联说明：{'；'.join(associations)}")
+    asset_category = _text(asset.get("asset_category"))
+    if asset_name:
+        lines.append(
+            f"- 目标资产：{asset_name}"
+            + (f"（{asset_category}）" if asset_category else ""),
+        )
+    asset_description = _text(asset.get("asset_description"))
+    if asset_description:
+        lines.append(f"- 资产说明：{asset_description}")
+    attack_loss = _text(asset.get("attack_loss"))
+    if attack_loss:
+        lines.append(f"- 预期危害：{attack_loss}")
+    _append_prompt_items(
+        lines,
+        "攻击路径",
+        [
+            _prompt_context_text(
+                context.get("path_name"),
+                context.get("path_description"),
+            )
+            for context in task.get("attack_path_contexts") or []
+            if isinstance(context, dict)
+        ],
+    )
+    _append_prompt_items(
+        lines,
+        "模块关联说明",
+        [
+            _prompt_context_text(
+                context.get("module_name"),
+                context.get("path_role"),
+                context.get("association_description"),
+            )
+            for context in task.get("module_associations") or []
+            if isinstance(context, dict)
+        ],
+    )
+    _append_prompt_items(
+        lines,
+        "节点影响关系",
+        [
+            (
+                f"{_text(context.get('source'))}"
+                f" --{_text(context.get('influence_type'))}--> "
+                f"{_text(context.get('target'))}"
+                + (
+                    f"；{_text(context.get('description'))}"
+                    if _text(context.get("description"))
+                    else ""
+                )
+            )
+            for context in task.get("edge_contexts") or []
+            if isinstance(context, dict)
+        ],
+    )
+    lines.extend([
+        "",
+        (
+            "优先审计上述代码路径，必要时沿真实调用链和数据流检查相关代码。"
+            "威胁分析只作为审计线索，不能作为漏洞成立的证据。必须通过真实"
+            "代码验证从对外暴露面或外部输入到漏洞触发点，再到目标资产危害"
+            "的完整可达路径，不得推测或凑结果。"
+        ),
+        "",
+        (
+            "只输出能够导致上述攻击模式并危害目标资产的真实漏洞。每个独立"
+            "漏洞对应一个列表元素，不得合并不同漏洞的位置、代码或调用链。"
+        ),
+    ])
+    return "\n".join(lines) + threat_audit_output_instruction(
+        THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+    )
+
+
 def _normalize_vulnerability(raw: dict[str, Any], task: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
-    confirmed = bool(raw.get("confirmed"))
     return {
         "file": str(raw.get("file") or task["code_path"] or "."),
         "line": max(1, int(raw.get("line") or 1)),
@@ -253,7 +654,7 @@ def _normalize_vulnerability(raw: dict[str, Any], task: dict[str, Any], source: 
             and str(item.get("file") or "").strip()
         ],
         "vuln_type": str(raw.get("vuln_type") or "threat_path"),
-        "severity": str(raw.get("severity") or ("unknown" if confirmed else "low")),
+        "severity": str(raw.get("severity") or "low"),
         "description": str(raw.get("description") or task["method_name"]),
         "impact": str(raw.get("impact") or ""),
         "vulnerable_code": str(raw.get("vulnerable_code") or ""),
@@ -262,8 +663,8 @@ def _normalize_vulnerability(raw: dict[str, Any], task: dict[str, Any], source: 
         "trigger_conditions": str(raw.get("trigger_conditions") or ""),
         "ai_analysis": "",
         "vulnerability_report": "",
-        "confirmed": confirmed,
-        "ai_verdict": "confirmed" if confirmed else "not_confirmed",
+        "confirmed": True,
+        "ai_verdict": "confirmed",
         "failure_reason": "",
         "analysis_source": "threat_audit",
         "source_task_id": task["task_id"],
@@ -275,7 +676,7 @@ def _normalize_vulnerability(raw: dict[str, Any], task: dict[str, Any], source: 
 
 
 async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
-    """Run a bounded model audit for every selected threat code path."""
+    """Audit every threat-analysis node and associated attack-pattern pair."""
     unknown = sorted(set(kwargs) - _ALLOWED_KEYS)
     if unknown:
         raise TypeError(f"run_threat_audit() got unexpected key(s): {', '.join(unknown)}")
@@ -328,28 +729,14 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
             task["status"] = "running"
             task["started_at"] = datetime.now(timezone.utc).isoformat()
             await _emit(output, "progress", f"Auditing {task['task_id']}", task_id=task["task_id"])
-            prompt = (
-                "请审计当前项目中的以下威胁任务，验证给定攻击面和攻击方式是否对应"
-                "可利用的真实漏洞。必须读取项目真实代码，验证从攻击入口到漏洞触发点"
-                "的完整路径，不得为凑结果而推测。每个独立问题对应一个列表元素，"
-                "不得合并不同漏洞的位置、代码或调用链。\n\n威胁任务：\n"
-                + json.dumps(task, ensure_ascii=False, indent=2)
-            )
-            prompt += audit_output_instruction(
-                VULNERABILITY_LIST_SCHEMA,
-                list_result=True,
-                severity_basis=(
-                    "具体判定根据漏洞的真实可利用性及机密性、完整性、"
-                    "可用性影响。"
-                ),
-            )
+            prompt = _threat_prompt(task)
             try:
                 result = await run_opencode_task(
                     task_name=task["task_id"],
                     task_type="threat_audit",
                     prompt=prompt,
                     required_capability=capability,
-                    output_schema=VULNERABILITY_LIST_SCHEMA,
+                    output_schema=THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
                     config_path=kwargs.get("task_agent_config"),
                     cancel_event=cancel_event,
                 )
@@ -385,10 +772,6 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
                 for item in result.structured
                 if isinstance(item, dict)
             ]
-            if not produced:
-                task["status"] = "failed"
-                task["failure_reason"] = "Threat audit returned an empty result list"
-                return
             async with result_lock:
                 vulnerabilities.extend(produced)
             task["status"] = "completed"

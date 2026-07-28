@@ -57,11 +57,31 @@ def parse_llm_json_schema(text: str, schema: dict[str, Any]) -> Any:
     return _select_json_candidate(
         normalized,
         lambda value: _matches_json_schema(value, schema),
+        outermost_only=True,
     )
 
 
-def _select_json_candidate(text: str, matches: Callable[[Any], bool]) -> Any:
+def _select_json_candidate(
+    text: str,
+    matches: Callable[[Any], bool],
+    *,
+    outermost_only: bool = False,
+) -> Any:
     candidates = _extract_json_candidates(text)
+    if outermost_only:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if not any(
+                other["position"] <= candidate["position"]
+                and (
+                    other["position"] + other["length"]
+                    >= candidate["position"] + candidate["length"]
+                )
+                and other["length"] > candidate["length"]
+                for other in candidates
+            )
+        ]
     matched = [candidate for candidate in candidates if matches(candidate["value"])]
     if not matched:
         raise LLMJsonParseError(

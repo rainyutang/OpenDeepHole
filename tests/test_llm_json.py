@@ -89,6 +89,27 @@ def test_parse_llm_json_schema_rejects_invalid_shape() -> None:
         parse_llm_json_schema('{"line":"7","extra":true}', schema)
 
 
+def test_parse_llm_json_schema_does_not_promote_nested_empty_array() -> None:
+    schema = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "call_chain": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["call_chain"],
+            "additionalProperties": False,
+        },
+    }
+
+    with pytest.raises(LLMJsonParseError):
+        parse_llm_json_schema('[{"call_chain":[]}]', schema)
+
+
 def test_parse_llm_json_schema_enforces_string_and_number_bounds() -> None:
     schema = {
         "type": "object",

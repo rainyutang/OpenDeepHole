@@ -5,6 +5,7 @@ import json
 import pytest
 
 from task_agent.audit_schema import (
+    THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
     VULNERABILITY_ITEM_SCHEMA,
     VULNERABILITY_LIST_SCHEMA,
 )
@@ -145,3 +146,36 @@ def test_list_schema_rejects_mixed_or_multiple_false_results() -> None:
                 json.dumps(value, ensure_ascii=False),
                 VULNERABILITY_LIST_SCHEMA,
             )
+
+
+def test_threat_audit_schema_accepts_empty_or_confirmed_only_results() -> None:
+    item = _confirmed_item()
+    del item["confirmed"]
+
+    for value in ([], [item, {**item, "function": "parse_header"}]):
+        assert parse_llm_json_schema(
+            json.dumps(value, ensure_ascii=False),
+            THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+        ) == value
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"confirmed": True},
+        {"root_cause": None},
+        {"call_chain": []},
+    ],
+)
+def test_threat_audit_schema_rejects_status_or_incomplete_results(
+    update: dict,
+) -> None:
+    item = _confirmed_item()
+    del item["confirmed"]
+    item.update(update)
+
+    with pytest.raises(LLMJsonParseError):
+        parse_llm_json_schema(
+            json.dumps([item], ensure_ascii=False),
+            THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+        )

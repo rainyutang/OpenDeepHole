@@ -1,7 +1,9 @@
 # 威胁审计过程
 
 公开入口是异步函数 `run_threat_audit(**kwargs)`。它读取威胁分析的原生攻击树和高风险
-模块产物，为每个 `attack_pattern` 单独创建一个审计任务，不依赖威胁分析 Python 包。
+模块产物，对每条攻击路径中的节点与 `attack_pattern` 逐一配对创建审计任务，不依赖
+威胁分析 Python 包。同一攻击树中相同的“节点 + 攻击模式”只保留一个任务，多条攻击
+路径的上下文会合并。
 
 | key | 必填 | 类型 | 说明 |
 |---|---:|---|---|
@@ -42,13 +44,19 @@ python -m deephole_client.threat_audit \
   --task-agent-config ./task-agent.yaml
 ```
 
-返回值包含 `status`、逐攻击模式的 `tasks` 和汇总后的 `vulnerabilities`。
+返回值包含 `status`、逐节点/攻击模式的 `tasks` 和汇总后的 `vulnerabilities`。
 
-威胁审计保持独立执行且不加载候选点 Skill。每个“攻击面 × 攻击方式”模型任务返回
-裸 JSON List，允许一次返回多个独立问题；没有问题时返回仅包含一个
-`confirmed=false` 结论的 List。列表项与候选点/项目级审计共用
-`task_agent.audit_schema.VULNERABILITY_ITEM_SCHEMA`，模型不再返回
-`ai_analysis`、`ai_verdict` 或 `vulnerability_report`。过程入口仍使用上述
-`status/tasks/vulnerabilities` 外层对象汇总全部任务，避免改变扫描协调接口。
-其中 `call_chain` 的每个元素均为包含 `function`、`file` 和函数定义起始行
-`line` 的对象，并按外部入口到漏洞触发点排序。
+威胁审计保持独立执行且不加载候选点 Skill。Prompt 只注入原生威胁分析产物中实际
+存在的信息：节点与边、攻击模式、价值资产、攻击路径、关联高风险模块及其代码目录，
+以及已识别的对外暴露面；缺失字段不会推测补全。同一节点和攻击模式出现在多条路径时，
+代码路径、暴露面与关联说明按原始顺序去重合并。
+
+每个模型任务返回裸 JSON List，允许一次返回多个独立漏洞；没有漏洞时返回 `[]`，
+任务仍标记为 `completed`。列表项使用专用
+`task_agent.audit_schema.THREAT_AUDIT_VULNERABILITY_ITEM_SCHEMA`，不包含
+`confirmed`，并要求填写严重程度、漏洞位置、类型、资产影响、完整相关代码、入口到
+触发点调用链、攻击入口、根因和触发条件。模型不返回 `ai_analysis`、`ai_verdict`
+或 `vulnerability_report`；过程在汇总到平台漏洞对象时统一补充
+`confirmed=true` 和 `ai_verdict=confirmed`，因此外层
+`status/tasks/vulnerabilities` 接口保持不变。`call_chain` 的每个元素均包含
+`function`、`file` 和函数定义起始行 `line`，并按外部入口到漏洞触发点排序。

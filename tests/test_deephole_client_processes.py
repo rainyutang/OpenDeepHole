@@ -219,6 +219,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             )
         assert audit["status"] == "success"
         assert audit["vulnerabilities"][0]["analysis_source"] == "threat_audit"
+        assert audit["vulnerabilities"][0]["confirmed"] is True
         assert audit["vulnerabilities"][0]["call_chain"][0] == {
             "function": "entry",
             "file": "src/entry.c",
@@ -227,7 +228,28 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         assert "JSON Schema" in run_task.await_args.kwargs["prompt"]
         assert "裸 JSON List" in run_task.await_args.kwargs["prompt"]
         assert run_task.await_args.kwargs["output_schema"]["type"] == "array"
+        assert run_task.await_args.kwargs["output_schema"]["minItems"] == 0
+        assert (
+            "confirmed"
+            not in run_task.await_args.kwargs["output_schema"]["items"]["properties"]
+        )
         assert "output" not in run_task.await_args.kwargs
+
+        with patch(
+            "deephole_client.threat_audit.runner.run_opencode_task",
+            new=AsyncMock(return_value=_task_result([])),
+        ):
+            empty_audit = await run_threat_audit(
+                project_path=project,
+                work_dir=root / "empty-audit",
+                scan_id="scan-empty",
+                attack_tree_path=analysis["attack_tree_path"],
+                high_risk_modules_path=analysis["high_risk_modules_path"],
+            )
+        assert empty_audit["status"] == "success"
+        assert empty_audit["vulnerabilities"] == []
+        assert empty_audit["tasks"][0]["status"] == "completed"
+        assert empty_audit["tasks"][0]["result_count"] == 0
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))

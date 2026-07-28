@@ -11,12 +11,12 @@ from unittest.mock import patch
 import pytest
 
 import deephole_client.threat_analysis_runner as threat_analysis_runner
-from backend.models import ScanItemStatus, ScanMeta, ScanStatus
+from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_data import parse_threat_analysis_data
 from deephole_client.process_artifacts import collect_json_artifacts
 from deephole_client.threat_analysis_runner import run_threat_analysis
-from deephole_client.threat_audit.runner import _tasks
+from deephole_client.threat_audit.runner import _tasks, _threat_prompt
 from task_agent import OpenCodeResult, run_opencode_task, run_sync_component
 from task_agent.task_service import get_opencode_execution_context
 
@@ -279,28 +279,83 @@ def test_opaque_artifact_bundle_round_trips_without_schema_conversion() -> None:
         assert scan.threat_analysis == bundle
 
 
-def test_threat_audit_creates_one_task_for_each_native_attack_pattern() -> None:
+def test_threat_audit_creates_one_task_for_each_node_pattern_pair() -> None:
     attack_tree_data = {
         "attack_trees": [{
             "tree_id": "TREE-1",
             "value_asset": {
                 "asset_name": "管理权限",
                 "asset_category": "服务资产",
+                "asset_description": "系统管理和配置能力",
+                "attack_loss": "攻击者可接管系统",
             },
-            "nodes": [],
+            "nodes": [
+                {
+                    "node_id": "NODE-1",
+                    "node_type": "叶子节点",
+                    "node_name": "管理接口",
+                    "description": "接收远程管理请求",
+                    "module_name": "管理接口",
+                    "is_high_risk_module": True,
+                    "external_exposure": True,
+                    "external_interface_description": "HTTPS 管理接口",
+                },
+                {
+                    "node_id": "NODE-2",
+                    "node_type": "内部节点",
+                    "node_name": "认证模块",
+                    "description": "验证管理凭据",
+                    "module_name": "认证模块",
+                    "is_high_risk_module": True,
+                    "external_exposure": False,
+                    "external_interface_description": None,
+                },
+                {
+                    "node_id": "NODE-3",
+                    "node_type": "根节点",
+                    "node_name": "攻击价值资产：管理权限",
+                    "description": "管理权限受到攻击",
+                    "module_name": None,
+                    "is_high_risk_module": False,
+                    "external_exposure": False,
+                    "external_interface_description": None,
+                },
+            ],
+            "edges": [
+                {
+                    "edge_id": "EDGE-1",
+                    "source_node_id": "NODE-1",
+                    "target_node_id": "NODE-2",
+                    "influence_type": "调用",
+                    "description": "管理接口调用认证模块",
+                },
+                {
+                    "edge_id": "EDGE-2",
+                    "source_node_id": "NODE-2",
+                    "target_node_id": "NODE-3",
+                    "influence_type": "直接影响",
+                    "description": "认证结果决定管理权限",
+                },
+            ],
             "attack_paths": [{
                 "path_id": "PATH-1",
                 "path_name": "绕过认证",
+                "node_ids": ["NODE-1", "NODE-2", "NODE-3"],
+                "edge_ids": ["EDGE-1", "EDGE-2"],
                 "path_description": "从管理入口到权限资产",
                 "related_high_risk_modules": [
                     {
                         "module_name": "管理接口",
                         "node_id": "NODE-1",
+                        "external_exposure": True,
+                        "path_role": "外部攻击入口",
                         "association_description": "外部输入入口",
                     },
                     {
                         "module_name": "认证模块",
                         "node_id": "NODE-2",
+                        "external_exposure": False,
+                        "path_role": "直接资产影响模块",
                         "association_description": "验证凭据",
                     },
                 ],
@@ -324,21 +379,255 @@ def test_threat_audit_creates_one_task_for_each_native_attack_pattern() -> None:
             "模块名称": "管理接口",
             "代码目录": ["src/api", "src/common"],
             "面临威胁": "未授权访问",
+            "是否外部暴露面": "是",
+            "判断为高风险模块的原因": "处理外部管理请求",
         },
         {
             "模块名称": "认证模块",
             "代码目录": "src/auth",
             "面临威胁": "认证绕过",
+            "是否外部暴露面": "否",
+            "判断为高风险模块的原因": "决定管理权限",
         },
     ]
 
     tasks = _tasks("scan-1", attack_tree_data, high_risk_modules)
 
-    assert [task["method_name"] for task in tasks] == ["弱口令", "会话伪造"]
-    assert len({task["task_id"] for task in tasks}) == 2
+    assert [
+        (task["native_node_id"], task["method_node_id"])
+        for task in tasks
+    ] == [
+        ("NODE-1", "PATTERN-1"),
+        ("NODE-1", "PATTERN-2"),
+        ("NODE-2", "PATTERN-1"),
+        ("NODE-2", "PATTERN-2"),
+        ("NODE-3", "PATTERN-1"),
+        ("NODE-3", "PATTERN-2"),
+    ]
+    assert len({task["task_id"] for task in tasks}) == 6
     assert [path["path"] for path in tasks[0]["code_paths"]] == [
         "src/api",
         "src/common",
         "src/auth",
     ]
     assert all(task["attack_path_id"] == "PATH-1" for task in tasks)
+    prompt = _threat_prompt(tasks[1])
+    assert "管理接口" in prompt
+    assert "会话伪造（PATTERN-2）" in prompt
+    assert "src/api" in prompt
+    assert "HTTPS 管理接口" in prompt
+    assert "系统管理和配置能力" in prompt
+    assert "攻击者可接管系统" in prompt
+    assert "管理接口 --调用--> 认证模块" in prompt
+    assert tasks[1]["task_id"] not in prompt
+    assert '"confirmed":' not in prompt
+
+
+def test_threat_audit_merges_duplicate_node_pattern_across_paths() -> None:
+    nodes = [
+        {
+            "node_id": node_id,
+            "node_type": "叶子节点" if exposed else "内部节点",
+            "node_name": module_name,
+            "description": f"{module_name}说明",
+            "module_name": module_name,
+            "is_high_risk_module": True,
+            "external_exposure": exposed,
+            "external_interface_description": (
+                f"{module_name}入口" if exposed else None
+            ),
+        }
+        for node_id, module_name, exposed in [
+            ("NODE-A", "入口A", True),
+            ("NODE-B", "共享处理模块", False),
+            ("NODE-C", "入口C", True),
+        ]
+    ]
+    pattern = {
+        "pattern_id": "PATTERN-SHARED",
+        "pattern_name": "恶意输入",
+        "association_description": "外部输入可到达处理模块",
+    }
+
+    def attack_path(
+        path_id: str,
+        entry_id: str,
+        entry_name: str,
+    ) -> dict:
+        return {
+            "path_id": path_id,
+            "path_name": f"{entry_name}攻击路径",
+            "node_ids": [entry_id, "NODE-B"],
+            "edge_ids": [],
+            "path_description": f"{entry_name}到共享处理模块",
+            "related_high_risk_modules": [
+                {
+                    "module_name": entry_name,
+                    "node_id": entry_id,
+                    "external_exposure": True,
+                    "path_role": "外部攻击入口",
+                    "association_description": f"{entry_name}接收输入",
+                },
+                {
+                    "module_name": "共享处理模块",
+                    "node_id": "NODE-B",
+                    "external_exposure": False,
+                    "path_role": "直接资产影响模块",
+                    "association_description": "处理不可信数据",
+                },
+            ],
+            "attack_patterns": [pattern],
+        }
+
+    paths = [
+        attack_path("PATH-A", "NODE-A", "入口A"),
+        attack_path("PATH-C", "NODE-C", "入口C"),
+    ]
+    paths[1]["attack_patterns"].append({
+        "pattern_id": "PATTERN-C",
+        "pattern_name": "入口C专用攻击",
+        "association_description": "仅与入口C路径关联",
+    })
+    attack_tree_data = {
+        "attack_trees": [{
+            "tree_id": "TREE-1",
+            "value_asset": {"asset_name": "关键服务"},
+            "nodes": nodes,
+            "edges": [],
+            "attack_paths": paths,
+        }],
+    }
+    high_risk_modules = [
+        {
+            "模块名称": module_name,
+            "代码目录": code_path,
+            "面临威胁": "恶意输入",
+            "是否外部暴露面": "是" if exposed else "否",
+            "判断为高风险模块的原因": f"{module_name}风险",
+        }
+        for module_name, code_path, exposed in [
+            ("入口A", "src/a", True),
+            ("共享处理模块", "src/shared", False),
+            ("入口C", "src/c", True),
+        ]
+    ]
+
+    tasks = _tasks("scan-1", attack_tree_data, high_risk_modules)
+
+    assert {
+        (task["native_node_id"], task["method_node_id"])
+        for task in tasks
+    } == {
+        ("NODE-A", "PATTERN-SHARED"),
+        ("NODE-B", "PATTERN-SHARED"),
+        ("NODE-C", "PATTERN-SHARED"),
+        ("NODE-B", "PATTERN-C"),
+        ("NODE-C", "PATTERN-C"),
+    }
+    assert not any(
+        task["native_node_id"] == "NODE-A"
+        and task["method_node_id"] == "PATTERN-C"
+        for task in tasks
+    )
+    shared = next(
+        task for task in tasks if task["native_node_id"] == "NODE-B"
+    )
+    assert [item["path_id"] for item in shared["attack_path_contexts"]] == [
+        "PATH-A",
+        "PATH-C",
+    ]
+    assert {item["path"] for item in shared["code_paths"]} == {
+        "src/a",
+        "src/shared",
+        "src/c",
+    }
+    assert {
+        item["module_name"] for item in shared["external_exposures"]
+    } == {"入口A", "入口C"}
+
+    reversed_tasks = _tasks(
+        "scan-1",
+        {
+            "attack_trees": [{
+                **attack_tree_data["attack_trees"][0],
+                "attack_paths": list(reversed(paths)),
+            }],
+        },
+        high_risk_modules,
+    )
+    reversed_shared = next(
+        task
+        for task in reversed_tasks
+        if task["native_node_id"] == "NODE-B"
+    )
+    assert reversed_shared["task_id"] == shared["task_id"]
+    assert (
+        reversed_shared["attack_path_fingerprint"]
+        == shared["attack_path_fingerprint"]
+    )
+
+
+def test_threat_audit_task_storage_namespaces_nodes_by_tree(
+    tmp_path: Path,
+) -> None:
+    def tree(tree_id: str, asset_name: str) -> dict:
+        return {
+            "tree_id": tree_id,
+            "value_asset": {"asset_name": asset_name},
+            "nodes": [{
+                "node_id": "NODE-1",
+                "node_type": "叶子节点",
+                "node_name": "共享入口",
+                "description": "接收外部输入",
+                "module_name": "共享入口",
+                "is_high_risk_module": True,
+                "external_exposure": True,
+                "external_interface_description": "网络接口",
+            }],
+            "edges": [],
+            "attack_paths": [{
+                "path_id": "PATH-1",
+                "path_name": "共享路径",
+                "node_ids": ["NODE-1"],
+                "edge_ids": [],
+                "path_description": "外部输入进入共享入口",
+                "related_high_risk_modules": [{
+                    "module_name": "共享入口",
+                    "node_id": "NODE-1",
+                    "external_exposure": True,
+                    "path_role": "外部攻击入口",
+                    "association_description": "接收外部输入",
+                }],
+                "attack_patterns": [{
+                    "pattern_id": "PATTERN-1",
+                    "pattern_name": "恶意输入",
+                    "association_description": "输入可触发异常",
+                }],
+            }],
+        }
+
+    tasks = _tasks(
+        "scan-1",
+        {"attack_trees": [
+            tree("TREE-A", "资产A"),
+            tree("TREE-B", "资产B"),
+        ]},
+        [{
+            "模块名称": "共享入口",
+            "代码目录": "src/shared",
+            "面临威胁": "恶意输入",
+        }],
+    )
+
+    assert {task["surface_node_id"] for task in tasks} == {
+        "TREE-A:NODE-1",
+        "TREE-B:NODE-1",
+    }
+    store = SqliteScanStore(tmp_path / "scan.db")
+    store.save_scan(*_scan("scan-1"))
+    for task in tasks:
+        store.upsert_threat_audit_task(
+            "scan-1",
+            ThreatAuditTask.model_validate(task),
+        )
+    assert len(store.list_threat_audit_tasks("scan-1")) == 2
