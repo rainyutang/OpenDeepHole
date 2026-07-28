@@ -332,6 +332,84 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
+function formatOptionalTokens(value: number | null): string {
+  return value === null ? "未配置" : new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function optionalFlag(value: boolean | null): string {
+  return value === null ? "未知" : value ? "开启" : "关闭";
+}
+
+function OpenCodeRuntimeDiagnosticsPanel({
+  value,
+  loading,
+}: {
+  value: AgentOpenCodeRuntimeConfig | null;
+  loading: boolean;
+}) {
+  const diagnostics = value?.diagnostics;
+  const riskBadges = {
+    pass: { label: "配置检查通过", tone: "green" as const },
+    warning: { label: "需关注", tone: "amber" as const },
+    high: { label: "高风险", tone: "red" as const },
+    unknown: { label: "风险未知", tone: "slate" as const },
+  };
+  return <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h3 className="font-medium text-slate-100">Serve 生效配置与上下文风险</h3>
+        <p className="mt-1 text-xs leading-5 text-slate-400">从运行中的 Serve 读取合并后的模型限制和压缩设置。风险只作提示，不会阻止扫描或修改你的 OpenCode 配置。</p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {diagnostics?.serve_version && <StatusBadge label={`OpenCode ${diagnostics.serve_version}`} tone="blue" />}
+        <StatusBadge
+          label={diagnostics?.current ? "当前生效值" : value?.runtime_state === "reload_pending" && diagnostics?.available ? "当前 Serve（待重载）" : diagnostics?.available ? "非当前快照" : "当前状态未知"}
+          tone={diagnostics?.current ? "green" : diagnostics?.available ? "amber" : "slate"}
+        />
+      </div>
+    </div>
+    {loading && !value && <p className="mt-4 text-sm text-slate-400">正在读取 Serve 生效配置…</p>}
+    {diagnostics?.error && <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-100">{diagnostics.error}</div>}
+    {value && !diagnostics?.current && <p className="mt-4 text-xs leading-5 text-slate-400">Serve 未运行、正在等待重载或当前仅有历史快照，因此不能确认这些值此刻是否生效；查看状态不会自动启动 Serve。</p>}
+    {diagnostics && diagnostics.models.length === 0 && <p className="mt-4 rounded-lg border border-dashed border-slate-700 px-3 py-5 text-center text-sm text-slate-400">模型池中没有启用的显式模型，暂无可检查项。</p>}
+    {diagnostics && diagnostics.models.length > 0 && <div className="mt-4 space-y-3">
+      {diagnostics.models.map((model) => {
+        const risk = riskBadges[model.risk] || riskBadges.unknown;
+        return <div key={model.model} className="rounded-lg border border-slate-700 bg-slate-950/60 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="break-all font-mono text-sm text-slate-100">{model.model}</p>
+              {model.name && <p className="mt-1 text-xs text-slate-500">{model.name}</p>}
+            </div>
+            <StatusBadge label={risk.label} tone={risk.tone} />
+          </div>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {[
+              ["context 上限", formatOptionalTokens(model.limit.context)],
+              ["input 上限", formatOptionalTokens(model.limit.input)],
+              ["output 上限", formatOptionalTokens(model.limit.output)],
+              ["估算压缩阈值", formatOptionalTokens(model.estimated_compaction_threshold)],
+              ["自动压缩", optionalFlag(model.compaction.auto)],
+              ["工具输出裁剪", optionalFlag(model.compaction.prune)],
+              ["配置 reserved", formatOptionalTokens(model.compaction.reserved)],
+              ["有效预留量", formatOptionalTokens(model.compaction.effective_reserved)],
+            ].map(([label, content]) => <div key={label} className="rounded-md border border-slate-800 bg-slate-900/70 px-3 py-2">
+              <p className="text-[11px] text-slate-500">{label}</p>
+              <p className="mt-1 font-mono text-xs text-slate-200">{content}</p>
+            </div>)}
+          </div>
+          {model.findings.length > 0
+            ? <ul className="mt-4 space-y-1.5 text-xs leading-5">
+              {model.findings.map((finding, index) => <li key={`${finding.code}-${index}`} className={finding.level === "high" ? "text-red-200" : finding.level === "warning" ? "text-amber-200" : "text-slate-400"}>• {finding.message}</li>)}
+            </ul>
+            : <p className="mt-4 text-xs leading-5 text-emerald-300">当前读取到的限制与压缩配置在结构上没有发现风险。此结论不校验远端模型服务实际接受的上下文上限。</p>}
+        </div>;
+      })}
+    </div>}
+    <p className="mt-4 text-[11px] leading-5 text-slate-500">“估算压缩阈值”按当前 Serve 返回的限制和 OpenCode v1 压缩规则计算，仅用于提前发现配置冲突；远端模型服务仍可能采用更小的实际上限。</p>
+  </div>;
+}
+
 function OpenCodeRuntimeViewer({
   value, loading, error, revealed, onRefresh, onToggleReveal, onCopy,
 }: {
@@ -350,12 +428,13 @@ function OpenCodeRuntimeViewer({
   };
   const runtime = runtimeBadges[value?.runtime_state || "next_task"] || runtimeBadges.next_task;
   return <div className="space-y-4">
+    <OpenCodeRuntimeDiagnosticsPanel value={value} loading={loading} />
     <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-3">
           <div>
-            <h3 className="font-medium text-slate-100">Agent 当前 opencode.json</h3>
-            <p className="mt-1 text-xs leading-5 text-slate-400">直接读取 Agent 磁盘上的最终运行文件，包含本机原配置、网页自定义层以及 OpenDeepHole 添加的 MCP、技能、权限和子 Agent 配置。</p>
+            <h3 className="font-medium text-slate-100">Agent 运行配置层 opencode.json</h3>
+            <p className="mt-1 text-xs leading-5 text-slate-400">读取 OpenDeepHole 写入 Agent 运行目录的配置层；它还会与 OpenCode 全局配置合并，因此是否真正生效以上方 Serve 状态为准。</p>
           </div>
           <div className="flex flex-wrap gap-2">
             {!value ? <StatusBadge label="正在读取" tone="blue" /> : <>
@@ -367,7 +446,7 @@ function OpenCodeRuntimeViewer({
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" disabled={loading} onClick={onRefresh} className="rounded-lg border border-blue-500/50 px-3 py-2 text-xs text-blue-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500">{loading ? "读取中…" : "刷新当前文件"}</button>
+          <button type="button" disabled={loading} onClick={onRefresh} className="rounded-lg border border-blue-500/50 px-3 py-2 text-xs text-blue-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500">{loading ? "读取中…" : "刷新配置状态"}</button>
           <button type="button" disabled={loading || !value?.exists} onClick={onToggleReveal} className="rounded-lg border border-amber-500/50 px-3 py-2 text-xs text-amber-200 disabled:cursor-not-allowed disabled:border-slate-700 disabled:text-slate-500">{revealed ? "隐藏敏感内容" : "显示完整内容"}</button>
           <button type="button" disabled={loading || !value?.exists || !value.content} onClick={onCopy} className="rounded-lg border border-slate-600 px-3 py-2 text-xs text-slate-200 disabled:cursor-not-allowed disabled:text-slate-500">复制{revealed ? "完整" : "脱敏"}内容</button>
         </div>

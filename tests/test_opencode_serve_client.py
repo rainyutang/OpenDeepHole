@@ -26,6 +26,7 @@ from task_agent.serve_client import (
     _flush_event_state_periodically,
     _handle_serve_event,
     _message_token_entries,
+    _model_config_diagnostic,
     _next_event_reconnect_delay,
     _session_tree_token_entries,
     _serve_context_headers,
@@ -269,6 +270,144 @@ class _FakeModelAsyncClient:
         if isinstance(response, Exception):
             raise response
         return _FakeResponse(response)
+
+
+def test_model_config_diagnostic_estimates_compaction_threshold() -> None:
+    result = _model_config_diagnostic(
+        "corp/glm-5",
+        model=OpenCodeModelInfo(
+            id="corp/glm-5",
+            provider_id="corp",
+            model_id="glm-5",
+            limit_context=131071,
+            limit_input=120000,
+            limit_output=8192,
+        ),
+        compaction={"auto": True, "prune": True, "reserved": 20000},
+        runtime_state="active",
+        config_available=True,
+    )
+
+    assert result["estimated_compaction_threshold"] == 100000
+    assert result["compaction"]["effective_reserved"] == 20000
+    assert result["risk"] == "pass"
+    assert result["findings"] == []
+
+
+def test_model_config_diagnostic_warns_when_input_limit_is_missing() -> None:
+    result = _model_config_diagnostic(
+        "corp/glm-5",
+        model=OpenCodeModelInfo(
+            id="corp/glm-5",
+            provider_id="corp",
+            model_id="glm-5",
+            limit_context=131071,
+            limit_output=8192,
+        ),
+        compaction={"auto": True, "prune": False, "reserved": 20000},
+        runtime_state="active",
+        config_available=True,
+    )
+
+    assert result["estimated_compaction_threshold"] == 122879
+    assert result["risk"] == "warning"
+    assert {item["code"] for item in result["findings"]} == {
+        "tool_pruning_disabled",
+        "input_limit_missing",
+        "reserved_not_used_for_threshold",
+    }
+
+
+def test_model_config_diagnostic_flags_disabled_compaction_and_invalid_reserved() -> None:
+    result = _model_config_diagnostic(
+        "corp/glm-5",
+        model=OpenCodeModelInfo(
+            id="corp/glm-5",
+            provider_id="corp",
+            model_id="glm-5",
+            limit_context=131071,
+            limit_input=8000,
+            limit_output=8192,
+        ),
+        compaction={"auto": False, "prune": True, "reserved": "invalid"},
+        runtime_state="active",
+        config_available=True,
+    )
+
+    assert result["risk"] == "high"
+    assert {item["code"] for item in result["findings"]} >= {
+        "auto_compaction_disabled",
+        "invalid_reserved",
+        "nonpositive_compaction_threshold",
+    }
+
+
+def test_runtime_diagnostics_does_not_start_stopped_serve() -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._fetch_models = AsyncMock()
+
+        result = await manager.config_runtime_diagnostics(["corp/glm-5"])
+
+        assert result["available"] is False
+        assert result["current"] is False
+        assert result["models"][0]["risk"] == "unknown"
+        assert result["models"][0]["findings"][0]["code"] == "runtime_unavailable"
+        manager._fetch_models.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_runtime_diagnostics_reads_active_serve_effective_config(monkeypatch) -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        _FakeModelAsyncClient.instances = []
+        _FakeModelAsyncClient.responses = {
+            "/global/health": {"healthy": True, "version": "1.18.4"},
+            "/config": {
+                "compaction": {
+                    "auto": True,
+                    "prune": True,
+                    "reserved": 20000,
+                },
+            },
+        }
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeModelAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._fetch_models = AsyncMock(return_value=[
+            OpenCodeModelInfo(
+                id="corp/glm-5",
+                provider_id="corp",
+                model_id="glm-5",
+                name="GLM-5",
+                limit_context=131071,
+                limit_input=120000,
+                limit_output=8192,
+            ),
+        ])
+
+        result = await manager.config_runtime_diagnostics(["corp/glm-5"])
+
+        assert result["available"] is True
+        assert result["current"] is True
+        assert result["serve_version"] == "1.18.4"
+        assert result["error"] == ""
+        assert result["models"][0]["estimated_compaction_threshold"] == 100000
+        assert result["models"][0]["risk"] == "pass"
+        assert [item["path"] for item in _FakeModelAsyncClient.instances[0].gets] == [
+            "/global/health",
+            "/config",
+        ]
+
+    asyncio.run(run())
 
 
 class _HangingMessageAsyncClient:
@@ -1353,7 +1492,14 @@ def test_fetch_models_uses_complete_provider_response_without_config_fallback(
                     {
                         "id": "anthropic",
                         "models": {
-                            "claude-sonnet": {"name": "Claude Sonnet"},
+                            "claude-sonnet": {
+                                "name": "Claude Sonnet",
+                                "limit": {
+                                    "context": 200000,
+                                    "input": 180000,
+                                    "output": 8192,
+                                },
+                            },
                         },
                     },
                     {
@@ -1382,6 +1528,9 @@ def test_fetch_models_uses_complete_provider_response_without_config_fallback(
                 provider_id="anthropic",
                 model_id="claude-sonnet",
                 name="Claude Sonnet",
+                limit_context=200000,
+                limit_input=180000,
+                limit_output=8192,
             ),
             OpenCodeModelInfo(
                 id="openai/gpt-5",

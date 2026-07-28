@@ -677,6 +677,44 @@ export interface AgentMcpStatusResponse {
 
 export type AgentOpenCodeRuntimeSource = "live" | "snapshot" | "none";
 
+export type AgentOpenCodeConfigRisk = "pass" | "warning" | "high" | "unknown";
+
+export interface AgentOpenCodeRiskFinding {
+  level: "warning" | "high" | "unknown" | string;
+  code: string;
+  message: string;
+}
+
+export interface AgentOpenCodeModelRuntimeStatus {
+  model: string;
+  provider_id: string;
+  model_id: string;
+  name: string;
+  resolved: boolean;
+  limit: {
+    context: number | null;
+    input: number | null;
+    output: number | null;
+  };
+  compaction: {
+    auto: boolean | null;
+    prune: boolean | null;
+    reserved: number | null;
+    effective_reserved: number | null;
+  };
+  estimated_compaction_threshold: number | null;
+  risk: AgentOpenCodeConfigRisk;
+  findings: AgentOpenCodeRiskFinding[];
+}
+
+export interface AgentOpenCodeRuntimeDiagnostics {
+  available: boolean;
+  current: boolean;
+  serve_version: string;
+  error: string;
+  models: AgentOpenCodeModelRuntimeStatus[];
+}
+
 export interface AgentOpenCodeRuntimeConfig {
   agent_key: string;
   online: boolean;
@@ -692,6 +730,7 @@ export interface AgentOpenCodeRuntimeConfig {
   runtime_state: AgentMcpRuntimeState;
   active_sessions: number;
   warning: string;
+  diagnostics: AgentOpenCodeRuntimeDiagnostics;
 }
 
 export interface AgentOpenCodeModelListItem {

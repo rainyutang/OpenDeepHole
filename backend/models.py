@@ -685,6 +685,50 @@ class AgentMcpStatusResponse(BaseModel):
     product_info: AgentMcpTargetStatus = AgentMcpTargetStatus()
 
 
+class AgentOpenCodeRiskFinding(BaseModel):
+    level: str = "unknown"
+    code: str = ""
+    message: str = ""
+
+
+class AgentOpenCodeModelLimitStatus(BaseModel):
+    context: int | None = None
+    input: int | None = None
+    output: int | None = None
+
+
+class AgentOpenCodeCompactionStatus(BaseModel):
+    auto: bool | None = None
+    prune: bool | None = None
+    reserved: int | None = None
+    effective_reserved: int | None = None
+
+
+class AgentOpenCodeModelRuntimeStatus(BaseModel):
+    model: str = ""
+    provider_id: str = ""
+    model_id: str = ""
+    name: str = ""
+    resolved: bool = False
+    limit: AgentOpenCodeModelLimitStatus = Field(
+        default_factory=AgentOpenCodeModelLimitStatus,
+    )
+    compaction: AgentOpenCodeCompactionStatus = Field(
+        default_factory=AgentOpenCodeCompactionStatus,
+    )
+    estimated_compaction_threshold: int | None = None
+    risk: str = "unknown"
+    findings: list[AgentOpenCodeRiskFinding] = Field(default_factory=list)
+
+
+class AgentOpenCodeRuntimeDiagnostics(BaseModel):
+    available: bool = False
+    current: bool = False
+    serve_version: str = ""
+    error: str = ""
+    models: list[AgentOpenCodeModelRuntimeStatus] = Field(default_factory=list)
+
+
 class AgentOpenCodeRuntimeConfigResponse(BaseModel):
     agent_key: str
     online: bool = False
@@ -700,6 +744,9 @@ class AgentOpenCodeRuntimeConfigResponse(BaseModel):
     runtime_state: str = "next_task"
     active_sessions: int = 0
     warning: str = ""
+    diagnostics: AgentOpenCodeRuntimeDiagnostics = Field(
+        default_factory=AgentOpenCodeRuntimeDiagnostics,
+    )
 
 
 class AgentValidationEnvironmentConfig(BaseModel):

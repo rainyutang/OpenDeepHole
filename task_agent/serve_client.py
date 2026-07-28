@@ -60,6 +60,8 @@ _DEFAULT_SERVE_PORT = 4096
 _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
 _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
+_OPENCODE_OUTPUT_TOKEN_MAX = 32_000
+_OPENCODE_COMPACTION_BUFFER = 20_000
 _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
 _LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX = "opendeephole-scan-codegraph-"
 _SENSITIVE_EVENT_KEY_RE = re.compile(
@@ -101,6 +103,9 @@ class OpenCodeModelInfo:
     provider_id: str
     model_id: str
     name: str = ""
+    limit_context: int | None = None
+    limit_input: int | None = None
+    limit_output: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2581,15 +2586,239 @@ def _provider_models(provider: dict[str, Any]) -> list[OpenCodeModelInfo]:
         if not provider_id or not model_id:
             continue
         name = ""
+        limit_context: int | None = None
+        limit_input: int | None = None
+        limit_output: int | None = None
         if isinstance(raw, dict):
             name = str(raw.get("name") or raw.get("label") or "")
             model_id = str(raw.get("id") or model_id).strip()
+            limit = raw.get("limit")
+            if isinstance(limit, dict):
+                limit_context = _optional_int(limit.get("context"))
+                limit_input = _optional_int(limit.get("input"))
+                limit_output = _optional_int(limit.get("output"))
         result.append(OpenCodeModelInfo(
             id=f"{provider_id}/{model_id}",
             provider_id=provider_id,
             model_id=model_id,
             name=name,
+            limit_context=limit_context,
+            limit_input=limit_input,
+            limit_output=limit_output,
         ))
+    return result
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _configured_model_identity(value: object) -> tuple[str, str, str]:
+    model = str(value or "").strip()
+    try:
+        provider_id, model_id = split_model_id(model)
+    except ValueError:
+        return model, "", ""
+    return model, provider_id, model_id
+
+
+def _risk_finding(level: str, code: str, message: str) -> dict[str, str]:
+    return {
+        "level": level,
+        "code": code,
+        "message": message,
+    }
+
+
+def _model_config_diagnostic(
+    configured_model: str,
+    *,
+    model: OpenCodeModelInfo | None,
+    compaction: dict[str, Any] | None,
+    runtime_state: str,
+    config_available: bool,
+) -> dict[str, Any]:
+    model_value, provider_id, model_id = _configured_model_identity(configured_model)
+    result: dict[str, Any] = {
+        "model": model_value,
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "name": model.name if model is not None else "",
+        "resolved": model is not None,
+        "limit": {
+            "context": model.limit_context if model is not None else None,
+            "input": model.limit_input if model is not None else None,
+            "output": model.limit_output if model is not None else None,
+        },
+        "compaction": {
+            "auto": None,
+            "prune": None,
+            "reserved": None,
+            "effective_reserved": None,
+        },
+        "estimated_compaction_threshold": None,
+        "risk": "unknown",
+        "findings": [],
+    }
+    findings: list[dict[str, str]] = result["findings"]
+    if runtime_state == "reload_pending":
+        findings.append(_risk_finding(
+            "warning",
+            "reload_pending",
+            "新配置仍在等待 Serve 空闲后重载；当前展示的是旧 Serve 的生效值。",
+        ))
+    if runtime_state not in {"active", "reload_pending"} or not config_available:
+        findings.append(_risk_finding(
+            "unknown",
+            "runtime_unavailable",
+            "Serve 未运行或无法读取有效配置，不能判断当前上下文风险。",
+        ))
+        return result
+    if not provider_id or not model_id:
+        findings.append(_risk_finding(
+            "high",
+            "invalid_model_id",
+            "模型标识不是 provider/model 格式。",
+        ))
+        result["risk"] = "high"
+        return result
+    if model is None:
+        findings.append(_risk_finding(
+            "unknown",
+            "model_unresolved",
+            "当前 Serve 的 /provider 结果中没有找到该模型。",
+        ))
+        return result
+
+    compaction = compaction if isinstance(compaction, dict) else {}
+    auto = compaction.get("auto")
+    auto = auto if isinstance(auto, bool) else True
+    prune = compaction.get("prune")
+    prune = prune if isinstance(prune, bool) else False
+    reserved_present = "reserved" in compaction and compaction.get("reserved") is not None
+    configured_reserved = _optional_int(compaction.get("reserved"))
+    output = model.limit_output
+    effective_output = (
+        min(output, _OPENCODE_OUTPUT_TOKEN_MAX)
+        if output is not None and output > 0
+        else _OPENCODE_OUTPUT_TOKEN_MAX
+    )
+    effective_reserved = (
+        configured_reserved
+        if configured_reserved is not None
+        else min(_OPENCODE_COMPACTION_BUFFER, effective_output)
+    )
+    result["compaction"] = {
+        "auto": auto,
+        "prune": prune,
+        "reserved": configured_reserved,
+        "effective_reserved": effective_reserved,
+    }
+
+    if not auto:
+        findings.append(_risk_finding(
+            "high",
+            "auto_compaction_disabled",
+            "自动压缩已关闭，长会话可能直接触发上游上下文错误。",
+        ))
+    if not prune:
+        findings.append(_risk_finding(
+            "warning",
+            "tool_pruning_disabled",
+            "旧工具输出裁剪未启用，工具密集型扫描更容易累积上下文。",
+        ))
+    if reserved_present and configured_reserved is None:
+        findings.append(_risk_finding(
+            "high",
+            "invalid_reserved",
+            "compaction.reserved 必须为整数。",
+        ))
+    elif configured_reserved is not None and configured_reserved <= 0:
+        findings.append(_risk_finding(
+            "high",
+            "invalid_reserved",
+            "compaction.reserved 必须为正数。",
+        ))
+
+    context = model.limit_context
+    input_limit = model.limit_input
+    if context is None or context <= 0:
+        findings.append(_risk_finding(
+            "high",
+            "invalid_context_limit",
+            "模型未提供有效的 limit.context。",
+        ))
+    if output is None or output <= 0:
+        findings.append(_risk_finding(
+            "high",
+            "invalid_output_limit",
+            "模型未提供有效的 limit.output。",
+        ))
+    if input_limit is not None and input_limit <= 0:
+        findings.append(_risk_finding(
+            "high",
+            "invalid_input_limit",
+            "limit.input 必须为正数。",
+        ))
+    if context is not None and context > 0 and output is not None and output > context:
+        findings.append(_risk_finding(
+            "high",
+            "output_exceeds_context",
+            "limit.output 大于 limit.context。",
+        ))
+    if (
+        context is not None
+        and context > 0
+        and input_limit is not None
+        and input_limit > context
+    ):
+        findings.append(_risk_finding(
+            "high",
+            "input_exceeds_context",
+            "limit.input 大于 limit.context。",
+        ))
+
+    threshold: int | None = None
+    if input_limit is not None and input_limit > 0:
+        threshold = input_limit - effective_reserved
+        if threshold <= 0:
+            findings.append(_risk_finding(
+                "high",
+                "nonpositive_compaction_threshold",
+                "limit.input 不大于压缩预留空间，自动压缩阈值无效。",
+            ))
+    else:
+        findings.append(_risk_finding(
+            "warning",
+            "input_limit_missing",
+            "未显式配置 limit.input；压缩阈值只能按 context 与输出预算估算。",
+        ))
+        if configured_reserved is not None:
+            findings.append(_risk_finding(
+                "warning",
+                "reserved_not_used_for_threshold",
+                "当前 OpenCode v1 算法在缺少 limit.input 时不会用 reserved 计算阈值。",
+            ))
+        if context is not None and context > 0:
+            threshold = context - effective_output
+            if threshold <= 0:
+                findings.append(_risk_finding(
+                    "high",
+                    "nonpositive_compaction_threshold",
+                    "context 扣除输出预算后没有可用的自动压缩空间。",
+                ))
+    result["estimated_compaction_threshold"] = threshold
+    if any(item["level"] == "high" for item in findings):
+        result["risk"] = "high"
+    elif any(item["level"] == "warning" for item in findings):
+        result["risk"] = "warning"
+    else:
+        result["risk"] = "pass"
     return result
 
 
@@ -2677,6 +2906,108 @@ class OpenCodeServeManager:
         return {
             "runtime_state": state,
             "active_sessions": self._active_sessions,
+        }
+
+    async def config_runtime_diagnostics(
+        self,
+        configured_models: list[str] | tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Read the active Serve's effective config without starting or mutating it."""
+        status = self.config_runtime_status()
+        runtime_state = str(status["runtime_state"])
+        unique_models = list(dict.fromkeys(
+            str(item or "").strip()
+            for item in configured_models
+            if str(item or "").strip()
+        ))
+        if runtime_state not in {"active", "reload_pending"}:
+            return {
+                "available": False,
+                "current": False,
+                "serve_version": "",
+                "error": "",
+                "models": [
+                    _model_config_diagnostic(
+                        item,
+                        model=None,
+                        compaction=None,
+                        runtime_state=runtime_state,
+                        config_available=False,
+                    )
+                    for item in unique_models
+                ],
+            }
+
+        version = ""
+        config: dict[str, Any] | None = None
+        models: list[OpenCodeModelInfo] = []
+        errors: list[str] = []
+        try:
+            models = await self._fetch_models(None)
+        except Exception as exc:
+            errors.append(f"读取 /provider 失败：{_one_line_preview(exc)}")
+        health_response: object | None = None
+        config_response: object | None = None
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
+                trust_env=False,
+            ) as client:
+                health_response, config_response = await asyncio.gather(
+                    client.get("/global/health"),
+                    client.get("/config"),
+                    return_exceptions=True,
+                )
+        except Exception as exc:
+            errors.append(f"读取 Serve 有效配置失败：{_one_line_preview(exc)}")
+        if isinstance(health_response, BaseException):
+            errors.append(f"读取 /global/health 失败：{_one_line_preview(health_response)}")
+        elif health_response is not None:
+            try:
+                health_response.raise_for_status()
+                health_data = health_response.json()
+                if isinstance(health_data, dict):
+                    version = str(health_data.get("version") or "").strip()
+                else:
+                    errors.append("读取 /global/health 失败：返回内容不是对象")
+            except Exception as exc:
+                errors.append(f"读取 /global/health 失败：{_one_line_preview(exc)}")
+        if isinstance(config_response, BaseException):
+            errors.append(f"读取 /config 失败：{_one_line_preview(config_response)}")
+        elif config_response is not None:
+            try:
+                config_response.raise_for_status()
+                config_data = config_response.json()
+                if isinstance(config_data, dict):
+                    config = config_data
+                else:
+                    errors.append("读取 /config 失败：返回内容不是对象")
+            except Exception as exc:
+                errors.append(f"读取 /config 失败：{_one_line_preview(exc)}")
+
+        model_map = {item.id: item for item in models}
+        config_available = config is not None and bool(models or not unique_models)
+        compaction = (
+            config.get("compaction")
+            if isinstance(config, dict) and isinstance(config.get("compaction"), dict)
+            else {}
+        )
+        return {
+            "available": config_available,
+            "current": config_available and runtime_state == "active",
+            "serve_version": version,
+            "error": "；".join(errors),
+            "models": [
+                _model_config_diagnostic(
+                    item,
+                    model=model_map.get(item),
+                    compaction=compaction,
+                    runtime_state=runtime_state,
+                    config_available=config_available,
+                )
+                for item in unique_models
+            ],
         }
 
     def update_managed_mcp_configs(self, specs: dict[str, dict[str, Any]]) -> None:

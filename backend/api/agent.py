@@ -24,6 +24,7 @@ Other:
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import io
 import json
@@ -1432,6 +1433,11 @@ def _opencode_runtime_snapshot(incoming: dict) -> dict:
         "size_bytes": len(raw) if incoming.get("exists") else 0,
         "runtime_state": runtime_state,
         "active_sessions": _nonnegative_int(incoming.get("active_sessions")),
+        "diagnostics": (
+            copy.deepcopy(incoming.get("diagnostics"))
+            if isinstance(incoming.get("diagnostics"), dict)
+            else {}
+        ),
     }
 
 
@@ -1455,6 +1461,26 @@ def _opencode_runtime_response(
     runtime_state = str(payload.get("runtime_state") or "next_task")
     if runtime_state not in _OPENCODE_RUNTIME_STATES:
         runtime_state = "next_task"
+    diagnostics = (
+        copy.deepcopy(payload.get("diagnostics"))
+        if isinstance(payload.get("diagnostics"), dict)
+        else {}
+    )
+    if source != "live":
+        diagnostics["current"] = False
+        for item in diagnostics.get("models", []):
+            if not isinstance(item, dict):
+                continue
+            item["risk"] = "unknown"
+            findings = item.get("findings")
+            if not isinstance(findings, list):
+                findings = []
+                item["findings"] = findings
+            findings.insert(0, {
+                "level": "unknown",
+                "code": "snapshot_not_current",
+                "message": "这是历史快照，不能代表当前 Serve 的生效配置。",
+            })
     return AgentOpenCodeRuntimeConfigResponse(
         agent_key=agent_key,
         online=online,
@@ -1470,6 +1496,7 @@ def _opencode_runtime_response(
         runtime_state=runtime_state,
         active_sessions=_nonnegative_int(payload.get("active_sessions")),
         warning=str(warning or "")[:2000],
+        diagnostics=diagnostics,
     )
 
 
@@ -1513,7 +1540,7 @@ async def get_stable_agent_opencode_runtime_config(
     include_secrets: bool = False,
     current_user: User = Depends(get_current_user),
 ) -> AgentOpenCodeRuntimeConfigResponse:
-    """Return the exact resolved opencode.json, or the latest persisted snapshot."""
+    """Return the Agent runtime layer plus active Serve diagnostics or a snapshot."""
     store = get_scan_store()
     record = _authorize_agent_record(store.get_agent_record(agent_key), current_user)
     response.headers["Cache-Control"] = "no-store"

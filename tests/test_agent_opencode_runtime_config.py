@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,11 +25,22 @@ class _RuntimeManager:
     def __init__(self, runtime_state: str = "active", active_sessions: int = 0) -> None:
         self.runtime_state = runtime_state
         self.active_sessions = active_sessions
+        self.configured_models: list[str] = []
 
     def config_runtime_status(self) -> dict[str, object]:
         return {
             "runtime_state": self.runtime_state,
             "active_sessions": self.active_sessions,
+        }
+
+    async def config_runtime_diagnostics(self, configured_models) -> dict[str, object]:
+        self.configured_models = list(configured_models)
+        return {
+            "available": self.runtime_state in {"active", "reload_pending"},
+            "current": self.runtime_state == "active",
+            "serve_version": "1.18.4",
+            "error": "",
+            "models": [],
         }
 
 
@@ -75,6 +87,33 @@ def _snapshot(content: str) -> dict[str, object]:
         "size_bytes": len(raw),
         "runtime_state": "active",
         "active_sessions": 1,
+        "diagnostics": {
+            "available": True,
+            "current": True,
+            "serve_version": "1.18.4",
+            "error": "",
+            "models": [{
+                "model": "corp/model",
+                "provider_id": "corp",
+                "model_id": "model",
+                "name": "GLM-5",
+                "resolved": True,
+                "limit": {
+                    "context": 131071,
+                    "input": 120000,
+                    "output": 8192,
+                },
+                "compaction": {
+                    "auto": True,
+                    "prune": True,
+                    "reserved": 20000,
+                    "effective_reserved": 20000,
+                },
+                "estimated_compaction_threshold": 100000,
+                "risk": "pass",
+                "findings": [],
+            }],
+        },
     }
 
 
@@ -86,10 +125,15 @@ def test_agent_reads_exact_runtime_file_without_rewriting_it(tmp_path: Path, mon
     config_path.write_text(content, encoding="utf-8")
     before = config_path.stat().st_mtime_ns
     monkeypatch.setattr(opencode_config, "_GLOBAL_WORKSPACE", workspace)
+    manager = _RuntimeManager("reload_pending", 2)
+    monkeypatch.setattr(serve_client, "get_serve_manager", lambda: manager)
     monkeypatch.setattr(
-        serve_client,
-        "get_serve_manager",
-        lambda: _RuntimeManager("reload_pending", 2),
+        agent_server,
+        "_config",
+        SimpleNamespace(opencode=SimpleNamespace(models=[
+            SimpleNamespace(model="corp/model", enabled=True),
+            SimpleNamespace(model="disabled/model", enabled=False),
+        ])),
     )
 
     result = asyncio.run(agent_server.handle_opencode_runtime_config("request-1"))
@@ -100,6 +144,8 @@ def test_agent_reads_exact_runtime_file_without_rewriting_it(tmp_path: Path, mon
     assert result["path"] == str(config_path)
     assert result["runtime_state"] == "reload_pending"
     assert result["active_sessions"] == 2
+    assert result["diagnostics"]["current"] is False
+    assert manager.configured_models == ["corp/model"]
     assert result["size_bytes"] == len(content.encode("utf-8"))
     assert config_path.stat().st_mtime_ns == before
 
@@ -171,8 +217,12 @@ def test_live_runtime_config_is_masked_persisted_and_explicitly_revealed(
     assert masked_json["provider"]["corp"]["options"]["apiKey"] == "***"
     assert masked_json["provider"]["corp"]["options"]["region"] == "cn"
     assert masked_json["mcp"]["deephole-code"]["type"] == "remote"
+    assert masked.diagnostics.current is True
+    assert masked.diagnostics.models[0].limit.context == 131071
+    assert masked.diagnostics.models[0].risk == "pass"
     persisted = json.loads(store.get_agent_record("stable-agent")["opencode_runtime_config_json"])
     assert "secret-value" in persisted["content"]
+    assert persisted["diagnostics"]["models"][0]["estimated_compaction_threshold"] == 100000
 
     revealed = asyncio.run(agent_api.get_stable_agent_opencode_runtime_config(
         "stable-agent",
@@ -208,6 +258,9 @@ def test_offline_runtime_config_uses_latest_snapshot(tmp_path: Path, monkeypatch
     assert result.source == "snapshot"
     assert result.exists is True
     assert json.loads(result.content)["token"] == "***"
+    assert result.diagnostics.current is False
+    assert result.diagnostics.models[0].risk == "unknown"
+    assert result.diagnostics.models[0].findings[0].code == "snapshot_not_current"
     assert "历史快照" in result.warning
     store.close()
 

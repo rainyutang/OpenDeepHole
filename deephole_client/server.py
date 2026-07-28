@@ -940,11 +940,12 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
 
 
 async def handle_opencode_runtime_config(request_id: str) -> dict:
-    """Read the exact Agent-wide opencode.json currently present on disk."""
+    """Read the Agent runtime layer and active Serve configuration diagnostics."""
     from deephole_client.opencode_integration import opencode_runtime_config_path
     from task_agent.serve_client import get_serve_manager
 
     config_path = opencode_runtime_config_path()
+    manager = get_serve_manager()
     checked_at = datetime.now(timezone.utc).isoformat()
     result: dict[str, object] = {
         "type": "opencode_runtime_config_result",
@@ -977,7 +978,28 @@ async def handle_opencode_runtime_config(request_id: str) -> dict:
             "ok": False,
             "message": f"读取当前 opencode.json 失败：{exc}",
         })
-    result.update(get_serve_manager().config_runtime_status())
+    result.update(manager.config_runtime_status())
+    configured_models = [
+        str(getattr(item, "model", "") or "").strip()
+        for item in (
+            getattr(getattr(_config, "opencode", None), "models", []) or []
+        )
+        if bool(getattr(item, "enabled", True))
+        and str(getattr(item, "model", "") or "").strip()
+    ]
+    try:
+        result["diagnostics"] = await manager.config_runtime_diagnostics(
+            configured_models,
+        )
+    except Exception as exc:
+        message = " ".join(str(exc).split())[:2000]
+        result["diagnostics"] = {
+            "available": False,
+            "current": False,
+            "serve_version": "",
+            "error": f"读取 Serve 有效配置失败：{message}",
+            "models": [],
+        }
     return result
 
 

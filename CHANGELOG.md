@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-07-28
+
+- **新增** Agent 的 OpenCode 配置页可只读展示运行中 Serve 合并后的模型 `context/input/output` 限制、自动压缩与工具输出裁剪状态、估算压缩阈值和非阻断风险提示；Serve 未运行、等待重载或 Agent 离线时明确标记为未知/历史状态，查看状态不会启动 Serve、修改配置或阻止扫描
+
 ## 2026-07-27
 
 - **新增** OpenCode Serve 调用支持 Token 用量统计：按消息与 `step-finish` 去重汇总主会话、子会话、同 Session JSON 修正、新 Session 重试以及失败、超时和取消前已产生的用量，并记录输入、输出、推理、缓存读取、缓存写入与总 Token
