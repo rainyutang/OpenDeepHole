@@ -48,6 +48,16 @@ from .token_usage import OpenCodeTokenUsage, merge_token_usages
 logger = logging.getLogger(__name__)
 
 TERMINAL_TASK_STATUSES = {"success", "failure", "timeout", "cancelled"}
+_DEFAULT_TASK_PRIORITY = 50
+_TASK_TYPE_PRIORITIES = {
+    "vulnerability_validation": 90,
+    "threat_analysis": 75,
+    "skill_create": 70,
+    "fp_review": 60,
+    "threat_audit": 50,
+    "audit": 50,
+    "project_audit": 50,
+}
 
 
 def get_config() -> Any:
@@ -1613,11 +1623,7 @@ def _message_model(info: dict[str, Any]) -> str:
 
 
 def _task_priority(task_type: str) -> int:
-    if task_type == "vulnerability_validation":
-        return 80
-    if task_type == "skill_create":
-        return 70
-    return 50
+    return _TASK_TYPE_PRIORITIES.get(task_type, _DEFAULT_TASK_PRIORITY)
 
 
 def _task_timeout_seconds(

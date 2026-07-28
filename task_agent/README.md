@@ -85,6 +85,8 @@ result = await run_opencode_task(
 
 `task_type` 是文档约定的字符串，而不是导出的枚举。支持的值包括 `audit`、`project_audit`、`sensitive_clear`、`report_audit`、`threat_analysis`、`threat_audit`、`fp_review`、`vulnerability_validation`、`git_history`、`variant_hunt`、`memory_api_discovery` 和 `skill_create`；未知值会在提交前被拒绝。
 
+任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：`vulnerability_validation=90`、`threat_analysis=75`、`skill_create=70`、`fp_review=60`，`threat_audit`、`audit` 和 `project_audit` 为 `50`；其它支持类型默认也是 `50`。同优先级任务按进入队列的先后顺序执行。
+
 嵌入 OpenDeepHole 时，宿主会在启动期间注册一次 `OpenCodeHostBindings`。注册过程会提供后端配置、共享工作区、解析后的 Serve 进程设置以及可选的 MCP 选择；它不会实例化管理器或启动 Serve。首次调用 `run_opencode_task()` 时，系统会按需创建共享任务服务和 Serve 管理器。在发送提示词之前，该管理器会在 Serve 尚未运行时启动它、复用兼容的进程，或执行既有的重启与恢复逻辑。
 
 未注册宿主时，同一函数会从组件自有的 YAML 文件完成初始化。可以传入 `config_path=...`、设置 `TASK_AGENT_CONFIG`，或将 `task-agent.yaml` 放在当前目录中。请复制 `task-agent.example.yaml` 作为起点。在单例的整个生命周期内，该配置会固定项目、可写工作目录、组件工作区、Serve 进程设置和显式模型池。只有执行 `await shutdown_opencode()` 后才能选择其他配置。

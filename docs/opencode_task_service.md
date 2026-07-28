@@ -78,6 +78,19 @@ result = await run_opencode_task(
 | `memory_api_discovery` | 内存 API 识别 |
 | `skill_create` | SKILL 创建 |
 
+任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：
+
+| `task_type` | 优先级 |
+| --- | ---: |
+| `vulnerability_validation` | 90 |
+| `threat_analysis` | 75 |
+| `skill_create` | 70 |
+| `fp_review` | 60 |
+| `threat_audit` | 50 |
+| `audit`、`project_audit` | 50 |
+
+其它支持类型默认优先级也是 `50`。同优先级任务按进入队列的先后顺序执行；优先级不会抢占已经取得 Lease 的任务。
+
 任务策略页只配置 `low`、`high` 两档，v3 默认全部为 `high`。v2 及更早配置中的阶段级 `any`/`low` 会一次性迁移为 `high`，旧默认超时 `1200` 会迁移为 `3600`；升级到 v3 后仍可手工改回 `low` 或填写自定义超时。模型行自身的能力标签和显式超时不会迁移。
 
 ## 独立组件配置

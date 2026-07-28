@@ -453,6 +453,55 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("task_type", "expected_priority"),
+    [
+        ("vulnerability_validation", 90),
+        ("threat_analysis", 75),
+        ("fp_review", 60),
+        ("threat_audit", 50),
+        ("audit", 50),
+        ("project_audit", 50),
+        ("skill_create", 70),
+    ],
+)
+def test_public_interface_assigns_task_type_priority(
+    tmp_path: Path,
+    task_type: str,
+    expected_priority: int,
+) -> None:
+    async def run() -> None:
+        internal = OpenCodeTaskResult(
+            task_id="task-priority",
+            session_id="ses-priority",
+            message_id="msg-priority",
+            status="success",
+            text="ok",
+            model="provider/model",
+        )
+        service = SimpleNamespace(run_task=AsyncMock(return_value=internal))
+        with (
+            patch(
+                "task_agent.task_service._get_opencode_task_service",
+                return_value=service,
+            ),
+            patch("task_agent.task_service.get_config", return_value=_config()),
+            _task_context(tmp_path),
+        ):
+            result = await run_opencode_task(
+                task_name=f"{task_type} priority",
+                task_type=task_type,
+                prompt="run",
+                required_capability="high",
+            )
+
+        assert result.status == "success"
+        spec = service.run_task.await_args.args[0]
+        assert spec.priority == expected_priority
+
+    asyncio.run(run())
+
+
 def test_public_interface_can_override_bound_output_and_cancellation(tmp_path: Path) -> None:
     async def run() -> None:
         from task_agent.task_service import get_opencode_execution_context
