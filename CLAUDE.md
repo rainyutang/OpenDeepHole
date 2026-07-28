@@ -16,18 +16,17 @@ Browser  ──HTTP──►  Backend (FastAPI, port 8000)
                         │                                       │
                         │                                       ├── tree-sitter indexer
                         │                                       ├── static analyzers
-                        │                                       ├── shared MCP gateway
+                        │                                       ├── optional per-scan code graph MCP
                         │                                       └── OpenCode serve/session service
                         │
-                   MCP Server (FastMCP, port 8100)
-                        │  streamable-http transport
-                        └── code query tools for AI CLI tools
+                   Optional MCP Server (manual/externally managed)
+                        └── code query tools for model tasks
 ```
 
 - **Frontend**: React + TypeScript + Vite + Tailwind CSS (builds to `backend/static/`)
 - **Backend**: Python FastAPI (port 8000) — serves API + frontend static files, stores scan records in SQLite, manages WebSocket connections to agents
 - **Agent**: Python daemon (`deephole_client/`) — runs on the machine with the source code, connects to backend via WebSocket, executes the full scan pipeline locally
-- **MCP Server**: Python FastMCP (port 8100) — provides source-code query tools; the Agent owns one shared local gateway and routes `project_id` to each scan index
+- **MCP Server**: `mcp_server/` remains available for standalone/manual source queries; the Agent does not auto-start or inject it, and only an explicitly enabled scan MCP is connected
 - **Deployment**: `start.sh` builds frontend and restarts uvicorn; Docker via `docker-compose.yml`
 
 ## Agent — Connection Model (v2)
@@ -226,12 +225,11 @@ deephole_client/
   variant_hunter.py — Hunts whole-repo same-class sites per history pattern → variant candidates
   reporter.py     — HTTP client: pushes events/results/git-history to backend
   task_manager.py — In-memory task registry with cancel_event per scan
-  local_mcp.py    — Agent-owned shared MCP gateway with per-project routing
   config.py       — AgentConfig, load_config(), apply_remote_config()
   opencode_integration.py — Generic Task Agent host/runtime adapter
   skills/         — Only non-process client skills
 
-mcp_server/       — MCP Server source-query tools and project-id routing
+mcp_server/       — Standalone/manual MCP source-query tools and project-id routing
 frontend/         — React + TypeScript + Vite + Tailwind CSS
 config.yaml       — Server-side settings (ports, storage, logging, opencode, git_history, fp_review)
 agent.yaml        — Agent-side settings (server_url, agent_name, opencode, fp_review_cli, git_history)

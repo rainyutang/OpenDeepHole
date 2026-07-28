@@ -25,11 +25,6 @@ class AuthConfig(BaseModel):
     default_admin_password: str = "admin123"
 
 
-class MCPServerConfig(BaseModel):
-    host: str = "0.0.0.0"
-    port: int = 8100
-
-
 class OpenCodeModelTimeWindow(BaseModel):
     weekdays: list[int] = Field(default_factory=lambda: list(range(1, 8)))
     start: str = ""
@@ -174,7 +169,6 @@ class AppConfig(BaseModel):
     no_proxy: str = "10.0.0.0/8"
     opencode_concurrency: int = 1
     server: ServerConfig = ServerConfig()
-    mcp_server: MCPServerConfig = MCPServerConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
     fp_review_cli: OpenCodeConfig | None = None
     fp_review: FpReviewConfig = FpReviewConfig()

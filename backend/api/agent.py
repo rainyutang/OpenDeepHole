@@ -247,8 +247,6 @@ def _validate_mcp_config(
         raise HTTPException(status_code=422, detail=f"{label} MCP 模式无效")
     if mcp.enabled and not mcp.name.strip():
         raise HTTPException(status_code=422, detail=f"{label} MCP 名称不能为空")
-    if mcp.enabled and mcp.name.strip() == "deephole-code":
-        raise HTTPException(status_code=422, detail=f"{label} MCP 名称不能占用 deephole-code")
     if mcp.timeout_seconds < 1:
         raise HTTPException(status_code=422, detail=f"{label} MCP 超时必须大于 0")
     if mcp.enabled and mcp.transport == "local" and not mcp.local.executable.strip():

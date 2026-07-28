@@ -92,13 +92,13 @@ VOS_StrChr / VOS_StrRChr / VOS_StrStr / VOS_memchr / VOS_strchr
 
 **A. 局部栈数组** — `char buf[256]` 直接可见。
 
-**B. 结构体成员** — `pObj->field` 或 `stInfo.field`，调用 `view_struct_code(project_id, 结构体类型名)`。
+**B. 结构体成员** — `pObj->field` 或 `stInfo.field`，使用可用的代码图谱 MCP 或文件搜索定位结构体定义。
 嵌套结构体继续展开。
 
-**C. 全局变量** — 调用 `view_global_variable_definition(project_id, 变量名)`。
+**C. 全局变量** — 使用可用的代码图谱 MCP 或文件搜索定位变量定义。
 
 **D. 函数参数传入的指针** — 根据 candidate 描述中的调用链线索追踪调用方：
-- 有调用方：用 `view_function_code` 追踪实际 buffer。**最多向上 2 层。**
+- 有调用方：使用代码图谱 MCP 或 `read` / `grep` 追踪实际 buffer。**最多向上 2 层。**
 - 无调用方：对外函数，进入"外部输入豁免规则"处理。
 
 **E. 动态分配** — `malloc(expr)` / `new char[expr]`，分析 `expr` 的值（注意级联 S2 整数溢出）。

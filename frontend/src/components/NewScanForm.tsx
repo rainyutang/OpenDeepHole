@@ -112,7 +112,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   };
 
   const probeCodeGraph = async () => {
-    if (!selectedAgent || probingCodeGraph) return;
+    if (!selectedAgent || probingCodeGraph || !codeGraphMcp.enabled) return;
     const validationError = validateScanCodeGraphMcp(codeGraphMcp);
     if (validationError) {
       setError(validationError);
@@ -180,7 +180,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         product: selectedProduct,
         validation_environment: selectedValidationEnvironment,
         checkers: threatAnalysisOnly ? [] : Array.from(selectedCheckers),
-        code_graph_mcp: codeGraphMcp,
+        code_graph_mcp: codeGraphMcp.enabled ? codeGraphMcp : null,
       });
       onScanStarted(resp.scan_id);
     } catch (e: unknown) {

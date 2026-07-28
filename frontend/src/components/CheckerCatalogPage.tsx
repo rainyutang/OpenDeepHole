@@ -482,7 +482,7 @@ function FixedSkillRules() {
     <div className="space-y-3 text-sm leading-6 text-slate-300">
       <p>MCP 工具使用、Markdown 报告保存方式、写权限约束会由后端固定拼接到最终 SKILL.md。</p>
       <ul className="list-disc space-y-1 pl-5 text-xs text-slate-400">
-        <li>可调用 view_function_code、view_struct_code、view_global_variable_definition。</li>
+        <li>可使用本次扫描启用的代码图谱 MCP；未启用时使用 read、grep、glob 等文件工具。</li>
         <li>运行提示词会提供 REPORT_DIR，报告只能写入该目录。</li>
         <li>项目代码和上传资料保持只读，仅临时报告目录可写。</li>
       </ul>

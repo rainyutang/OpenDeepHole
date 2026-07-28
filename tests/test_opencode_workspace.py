@@ -159,7 +159,6 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             return_value=fake_config,
         ):
             config = build_opencode_config(
-                "http://127.0.0.1:9123/mcp",
                 writable_paths=[str(path)],
             )
         edit = config["permission"]["edit"]
@@ -207,9 +206,10 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 return_value="/usr/bin/codegraph",
             ),
         ):
-            config = build_opencode_config("http://127.0.0.1:9123/mcp")
+            config = build_opencode_config()
 
         self.assertNotIn("codegraph", config["mcp"])
+        self.assertNotIn("deephole-code", config["mcp"])
         self.assertEqual(config["mcp"]["product-info"]["type"], "remote")
         self.assertIs(config["mcp"]["product-info"]["oauth"], False)
 
@@ -232,7 +232,6 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace_path = Path(tmp) / "opencode_workspace"
             fake_config = SimpleNamespace(
-                mcp_server=SimpleNamespace(port=8100),
                 code_graph=SimpleNamespace(enabled=False, name="codegraph"),
                 product_info=SimpleNamespace(
                     enabled=False,
@@ -249,17 +248,14 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                     return_value=fake_config,
                 ),
             ):
-                workspace = get_global_opencode_workspace(mcp_port=9123)
+                workspace = get_global_opencode_workspace()
 
             config = json.loads(
                 managed_opencode_config_path(workspace).read_text(
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(
-                config["mcp"]["deephole-code"]["url"],
-                "http://127.0.0.1:9123/mcp",
-            )
+            self.assertNotIn("deephole-code", config["mcp"])
             assert_opencode_read_permissions(self, config, workspace)
             self.assertNotIn("agent", config)
             skills_dir = workspace / ".opencode" / "skills"
@@ -305,7 +301,6 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             (managed / "stale-empty-directory").mkdir()
             (unrelated / "SKILL.md").write_text("user-owned", encoding="utf-8")
             fake_config = SimpleNamespace(
-                mcp_server=SimpleNamespace(port=8100),
                 code_graph=SimpleNamespace(enabled=False, name="codegraph"),
                 product_info=SimpleNamespace(
                     enabled=False,
@@ -322,7 +317,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                     return_value=fake_config,
                 ),
             ):
-                get_global_opencode_workspace(mcp_port=9123)
+                get_global_opencode_workspace()
 
             self.assertFalse((managed / "stale.txt").exists())
             self.assertFalse((managed / "stale-empty-directory").exists())
@@ -336,7 +331,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 for path in skills_dir.iterdir()
             ))
 
-    def test_stale_permissions_are_refreshed_without_replacing_live_mcp_url(
+    def test_stale_permissions_are_refreshed_and_obsolete_builtin_mcp_is_removed(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -368,7 +363,6 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_config = SimpleNamespace(
-                mcp_server=SimpleNamespace(port=8100),
                 code_graph=SimpleNamespace(enabled=False, name="codegraph"),
                 product_info=SimpleNamespace(
                     enabled=False,
@@ -392,17 +386,13 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(
-                config["mcp"]["deephole-code"]["url"],
-                "http://127.0.0.1:58507/mcp",
-            )
+            self.assertNotIn("deephole-code", config["mcp"])
             assert_opencode_read_permissions(self, config, workspace)
 
-    def test_global_refresh_does_not_overwrite_live_runtime_config(self) -> None:
+    def test_obsolete_builtin_mcp_alone_triggers_managed_config_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace_path = Path(tmp) / "opencode_workspace"
             fake_config = SimpleNamespace(
-                mcp_server=SimpleNamespace(port=8100),
                 code_graph=SimpleNamespace(enabled=False, name="codegraph"),
                 product_info=SimpleNamespace(
                     enabled=False,
@@ -419,7 +409,42 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                     return_value=fake_config,
                 ),
             ):
-                workspace = get_global_opencode_workspace(mcp_port=9123)
+                workspace = get_global_opencode_workspace()
+                config_path = managed_opencode_config_path(workspace)
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                config["mcp"]["deephole-code"] = {
+                    "type": "remote",
+                    "url": "http://127.0.0.1:8100/mcp",
+                    "enabled": True,
+                }
+                config_path.write_text(json.dumps(config), encoding="utf-8")
+
+                get_global_opencode_workspace()
+
+            refreshed = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertNotIn("deephole-code", refreshed["mcp"])
+
+    def test_global_refresh_does_not_overwrite_live_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "opencode_workspace"
+            fake_config = SimpleNamespace(
+                code_graph=SimpleNamespace(enabled=False, name="codegraph"),
+                product_info=SimpleNamespace(
+                    enabled=False,
+                    name="product-info",
+                ),
+            )
+            with (
+                patch(
+                    "deephole_client.opencode_integration._GLOBAL_WORKSPACE",
+                    workspace_path,
+                ),
+                patch(
+                    "deephole_client.opencode_integration.get_config",
+                    return_value=fake_config,
+                ),
+            ):
+                workspace = get_global_opencode_workspace()
                 live_path = workspace / "opencode.json"
                 live_path.write_text('{"sentinel": true}', encoding="utf-8")
                 refresh_global_opencode_config()

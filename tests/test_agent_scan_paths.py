@@ -166,14 +166,13 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     "processed_keys": [processed_key],
                 }
 
-            mcp = MagicMock()
-            mcp.start.return_value = 4711
+            task_context = MagicMock(return_value=nullcontext())
             with (
                 patch("deephole_client.scanner.Path.home", return_value=root),
                 patch("deephole_client.scanner.configure_platform_runtime"),
                 patch(
                     "deephole_client.scanner.opencode_task_context",
-                    return_value=nullcontext(),
+                    task_context,
                 ),
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
@@ -186,15 +185,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 patch(
                     "deephole_client.scanner.run_candidate_audit",
                     side_effect=audit,
-                ),
-                patch(
-                    "deephole_client.local_mcp.LocalMCPServer",
-                    return_value=mcp,
-                ),
-                patch("deephole_client.mcp_registry.register"),
-                patch("deephole_client.mcp_registry.unregister"),
-                patch(
-                    "deephole_client.opencode_integration.get_global_opencode_workspace",
                 ),
             ):
                 await run_scan(
@@ -222,7 +212,12 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             reporter.finish_scan.await_args.args[2],
             "complete",
         )
-        mcp.stop.assert_called_once()
+        self.assertIsNone(task_context.call_args.kwargs["code_graph_mcp"])
+        self.assertTrue(any(
+            call.args[1].message
+            == "Code graph MCP is not enabled; model tasks will use file tools only"
+            for call in reporter.send_event.await_args_list
+        ))
 
     async def test_threat_only_mode_does_not_start_static_processes(self) -> None:
         reporter = _reporter()
@@ -237,9 +232,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             project.mkdir()
             index_path = root / "index.db"
             index_path.touch()
-            mcp = MagicMock()
-            mcp.start.return_value = 4711
-
             with (
                 patch("deephole_client.scanner.Path.home", return_value=root),
                 patch("deephole_client.scanner.configure_platform_runtime"),
@@ -267,15 +259,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     "deephole_client.scanner._run_threat_processes",
                     new=AsyncMock(return_value={"status": "success"}),
                 ) as threat,
-                patch(
-                    "deephole_client.local_mcp.LocalMCPServer",
-                    return_value=mcp,
-                ),
-                patch("deephole_client.mcp_registry.register"),
-                patch("deephole_client.mcp_registry.unregister"),
-                patch(
-                    "deephole_client.opencode_integration.get_global_opencode_workspace",
-                ),
             ):
                 await run_scan(
                     config=config,
@@ -301,7 +284,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             done=True,
         )
 
-    async def test_custom_scan_graph_skips_builtin_gateway_and_enters_task_context(
+    async def test_custom_scan_graph_is_prepared_and_enters_task_context(
         self,
     ) -> None:
         reporter = _reporter()
@@ -327,8 +310,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             index_path = root / "index.db"
             index_path.touch()
             task_context = MagicMock(return_value=nullcontext())
-            builtin_mcp = MagicMock()
-            unregister_builtin = MagicMock()
 
             with (
                 patch("deephole_client.scanner.Path.home", return_value=root),
@@ -365,14 +346,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                         "processed_keys": [],
                     }),
                 ),
-                patch(
-                    "deephole_client.local_mcp.LocalMCPServer",
-                    builtin_mcp,
-                ),
-                patch(
-                    "deephole_client.mcp_registry.unregister",
-                    unregister_builtin,
-                ),
             ):
                 await run_scan(
                     config=config,
@@ -389,8 +362,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         prepare.assert_awaited_once()
-        builtin_mcp.assert_not_called()
-        unregister_builtin.assert_not_called()
         self.assertEqual(
             task_context.call_args.kwargs["code_graph_mcp"],
             graph_config,

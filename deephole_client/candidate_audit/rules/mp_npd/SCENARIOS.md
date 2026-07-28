@@ -23,7 +23,7 @@ int handle_request(Context *ctx) {
 ```
 
 **规则**：`multi-layer-pointer-use-before-null-check`
-**LLM 分析**：`view_function_code` 看不到任何判空；`find_function_references` 发现 `handle_request` 由网络协议解码层直接调用，`Context *ctx` 来自请求帧，攻击者可构造 `ctx->session == NULL` 触发崩溃。判定为真实漏洞，severity=high。
+**LLM 分析**：使用代码图谱 MCP 或文件工具查看函数实现，没有任何判空；继续追踪调用关系，发现 `handle_request` 由网络协议解码层直接调用，`Context *ctx` 来自请求帧，攻击者可构造 `ctx->session == NULL` 触发崩溃。判定为真实漏洞，severity=high。
 
 ---
 
@@ -40,7 +40,7 @@ int process(Context *ctx) {
 ```
 
 **规则**：`multi-layer-pointer-root-checked-child-unchecked`
-**LLM 分析**：`view_struct_code` 看 `Context`，发现 `session` 字段是延迟初始化（只有调用 `attach_session` 后才非空）。`process` 可能在 attach 前被调用。判定为真实漏洞。
+**LLM 分析**：使用代码图谱 MCP 或文件工具查看 `Context`，发现 `session` 字段是延迟初始化（只有调用 `attach_session` 后才非空）。`process` 可能在 attach 前被调用。判定为真实漏洞。
 
 ---
 
@@ -133,7 +133,7 @@ int handle(Context *ctx) {
 }
 ```
 
-**LLM 分析**：`view_function_code` 查 `CHECK_NULL_RET` 宏，确认其内部做了非空校验并 return，判定为误报。
+**LLM 分析**：使用代码图谱 MCP 或文件工具查看 `CHECK_NULL_RET` 宏，确认其内部做了非空校验并 return，判定为误报。
 
 ---
 
@@ -174,7 +174,7 @@ void op(Context *ctx) {       // 调用方持有 create_ctx 的返回，且未 d
 }
 ```
 
-**LLM 分析**：`view_struct_code` + 查 `create_ctx` / `destroy_ctx`，确认 `session` 在对象有效期内永远非空。判定为误报。
+**LLM 分析**：使用代码图谱 MCP 或文件工具查看结构体及 `create_ctx` / `destroy_ctx`，确认 `session` 在对象有效期内永远非空。判定为误报。
 
 ---
 
@@ -193,7 +193,7 @@ void dispatch(Context *ctx) {
 }
 ```
 
-**LLM 分析**：`find_function_references` 查 `hot_op`，确认所有 caller 都在判空保护下调用。判定为误报。
+**LLM 分析**：使用代码图谱 MCP 或 `grep` 追踪 `hot_op`，确认所有 caller 都在判空保护下调用。判定为误报。
 
 ---
 
@@ -231,7 +231,7 @@ void mock_use(Context *ctx) {
 
 ## 不支持的场景（超出工具检测范围）
 
-- **跨函数判空追踪**：判空在调用者，使用在被调函数；需要 LLM 通过 `find_function_references` 手动确认（属"误报由 LLM 过滤"而非工具支持）
+- **跨函数判空追踪**：判空在调用者，使用在被调函数；需要 LLM 通过代码图谱 MCP 或文件搜索手动确认（属"误报由 LLM 过滤"而非工具支持）
 - **数据流敏感分析**：`if (ctx->session) { ... } ... use(ctx->session->buf);` 中"..."里 session 是否被某个调用置 NULL，semgrep 无法跟踪
 - **路径敏感分析**：某条 if 分支保证非空、另一条不保证，semgrep 仅做结构匹配
 - **数组下标形式的成员**：`ctx->sessions[i].buf` 不被 `->$F1->$F2` 模式匹配

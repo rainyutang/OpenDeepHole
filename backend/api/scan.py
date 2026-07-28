@@ -599,7 +599,7 @@ async def create_agent_scan(
             detail="所选 Agent 尚未配置启用的显式模型，请先在 Agent 配置页面手动添加模型",
         )
     code_graph_mcp = None
-    if body.code_graph_mcp is not None:
+    if body.code_graph_mcp is not None and body.code_graph_mcp.enabled:
         from backend.api.agent import _validate_mcp_config
 
         _validate_mcp_config(

@@ -30,7 +30,6 @@ def _runtime_sections(config: AgentConfig, scan_dir: Path | None = None) -> dict
         "product_info": dataclasses.asdict(config.product_info),
         "static_dedup": config.static_dedup,
         "pattern_filter": dataclasses.asdict(config.pattern_filter),
-        "mcp_server": {"port": 8100},
         "no_proxy": config.no_proxy,
         "vulnerability_validation": {
             "enabled": config.vulnerability_validation.enabled,

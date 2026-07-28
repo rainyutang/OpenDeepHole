@@ -111,7 +111,7 @@ owner_token: ""
 
 下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、完整 OpenCode JSONC、威胁分析开关、产品信息 MCP、漏洞挖掘、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
 
-每次在 **「新建扫描」** 页面都必须单独填写代码图谱 MCP，可选择本地进程或远端服务，并配置启动参数、环境变量、请求头和 MCP 调用超时。`code_graph_mcp.timeout_seconds` 按秒填写，默认值 `300` 会在运行时转换为 OpenCode MCP 配置中的 `"enabled": true, "timeout": 300000`；该超时同时用于连接、工具发现和单次工具调用。配置会作为扫描私有快照持久化，并在续扫、去误报和漏洞验证中继续使用；不同扫描不会共享代码图谱连接。历史扫描以及未传 `code_graph_mcp` 的兼容 API 请求继续使用内置 `deephole-code`。
+**「新建扫描」** 页面的代码图谱 MCP 是可选项，默认关闭；未启用、未传或传入 `null` 时，模型任务只使用 `read`、`grep`、`glob` 等文件工具，不会启动或回退到内置代码 MCP。启用后可选择本地进程或远端服务，并配置启动参数、环境变量、请求头和 MCP 调用超时。`code_graph_mcp.timeout_seconds` 按秒填写，默认值 `300` 会在运行时转换为 OpenCode MCP 配置中的 `"enabled": true, "timeout": 300000`；该超时同时用于连接、工具发现和单次工具调用。启用的配置会作为扫描私有快照持久化，并在续扫、去误报和漏洞验证中继续使用；不同扫描不会共享代码图谱连接。
 
 运行时会严格使用填写的 MCP 名称，不会追加扫描 ID、前缀或哈希。例如名称为 `static-mcp` 且服务提供 `static_read` 时，OpenCode 中的工具名就是 `static-mcp_static_read`；扫描 ID 仅用于内部连接隔离。
 
@@ -566,7 +566,7 @@ model_pool:
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_config` < OpenDeepHole 受管字段”合并。受管字段包括 `$schema`、deephole-code 与已启用的受管 MCP、公共技能路径和运行权限；这些值不能从 Web 配置覆盖。Agent 每次初始化全局 workspace 时，会把原生威胁分析 harness 的四个 SKILL 连同 `references/attack_mode.json` 同步到 `~/.opendeephole/opencode_workspace/.opencode/skills`，并在最终全局 `opencode.json` 中显式允许读取该 `.opencode` 目录及全部后代；威胁分析任务只使用该全局路径，不再把 Agent 安装目录临时追加到 `skills.paths`。API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
+OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_config` < OpenDeepHole 受管字段”合并。受管字段包括 `$schema`、已启用的全局产品知识 MCP、公共技能路径和运行权限；这些值不能从 Web 配置覆盖。产品知识 MCP 由 Agent 配置中的 `product_info` 管理，既写入受管 `opencode.json`，也会通过带目录上下文的 `/mcp` 接口热加载到已经使用过的 OpenCode 工作目录，并跨扫描、跨 Session 保持可用。扫描代码图谱 MCP 使用相同的底层配置格式和 `/mcp` 接口，但只按扫描快照临时连接，任务结束后释放。Agent 每次初始化全局 workspace 时，会把原生威胁分析 harness 的四个 SKILL 连同 `references/attack_mode.json` 同步到 `~/.opendeephole/opencode_workspace/.opencode/skills`，并在最终全局 `opencode.json` 中显式允许读取该 `.opencode` 目录及全部后代；威胁分析任务只使用该全局路径，不再把 Agent 安装目录临时追加到 `skills.paths`。API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
 
 配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），设置 `OPENCODE_CONFIG_DIR` 并显式清除 `OPENCODE_CONFIG_CONTENT`；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。
 
@@ -577,8 +577,8 @@ OpenCode 调用约定：
 - 文件、SKILL 与 `bash` 权限统一写入 Serve 实际使用的全局 `opencode.json`，Task Agent 不再在创建或续写 Session 时发送或 PATCH `permission`。项目目录作为 Session 工作目录保持可读；`~/.opendeephole/opencode_workspace/.opencode` 和最终配置注册的 SKILL 根只读，完整 Agent 的文件编辑工具可写 `~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 与 `skill_create`，其它源码目录保持只读且 `bash` 全面禁用。既有 Session 已保存的历史权限不会被迁移代码主动改写；脱离 Agent 运行时只从 `task-agent.yaml` 的 `serve.opencode_config.skills.paths` 加载 SKILL。
 - `output_schema` 只用于本地 JSON 解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。最终文本 JSON 优先；若模型改用内置文件工具写 JSON，Task Agent 会从当前消息最后写入的合法文件填充 `structured`，但 `text` 仍保留 LLM 最后一次文本输出。确认由本条消息新建的临时文件在解析后自动删除；必须保留的文件或目录可传 `file_write_allowlist`，该白名单只控制清理且不能扩大 `work_dir` 写权限。JSON 仍不合规时默认在原 Session 追加 2 次包含 Schema 的中文纠正，也可通过 `invalid_json_retry_prompt` 提供原样发送的自定义纠正提示词；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
-- Agent 进程内只有一个共享 deephole-code MCP 网关；各扫描用 `project_id` 注册自己的 `code_index.db` 路由，不再为每个扫描启动独立 MCP 服务。
-- 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个公共 OpenCode 接口，复用共享 MCP 网关和项目索引路由；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
+- 只有扫描显式启用的代码图谱 MCP 才会动态连接；空配置、历史 `null` 配置、去误报和漏洞验证均遵循同一文件工具模式，不会启动内置源码 MCP。
+- 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个公共 OpenCode 接口，并继承扫描选择的代码图谱 MCP 或文件工具模式；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
 
 内部 Python 调用统一使用自包含的 `task_agent` 组件。调用方不启动 CLI 或 Serve；首次 `run_opencode_task()` 会惰性创建任务服务和 Serve 管理单例，并在发送任务前完成 Serve 的启动、兼容进程复用或异常恢复：
 
@@ -697,7 +697,6 @@ OpenDeepHole/
 │   ├── task_manager.py    # 任务生命周期管理（创建/停止/恢复）
 │   ├── scanner.py         # 只负责过程协调与平台结果上报
 │   ├── reporter.py        # 向服务器上报进度和结果
-│   ├── local_mcp.py       # Agent 进程级共享 MCP 网关
 │   └── opencode_integration.py # 平台 Task Agent 宿主适配
 ├── frontend/              # React + TypeScript + Vite + Tailwind CSS
 ├── backend/
@@ -708,7 +707,7 @@ OpenDeepHole/
 │   │   ├── checkers.py    # Checker 列表 API
 │   │   └── auth.py        # 用户认证与管理 API
 │   └── registry.py        # 服务端 checker 元数据目录
-├── mcp_server/            # Agent 共享 MCP 网关与源码查询工具
+├── mcp_server/            # 可独立手动启动的源码查询 MCP（Agent 不会自动加载）
 ├── agent.yaml             # Agent 配置模板
 ├── run_agent.sh           # Agent 守护进程启动脚本（Linux/macOS）
 ├── run_agent.bat          # Agent 守护进程启动脚本（Windows）

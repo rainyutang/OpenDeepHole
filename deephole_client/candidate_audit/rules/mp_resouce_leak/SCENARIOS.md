@@ -29,7 +29,7 @@ int load_record(Context *ctx, const char *key) {
 且 `Session` / `Context` 都**没有**配套的 destroy 函数会释放 `buf` 字段。
 
 **规则**：`multi-ptr-member-resource-acquire-no-release-in-function`
-**LLM 分析**：`view_struct_code` 查 `Session`，无 destroy；`find_function_references` 查 `load_record`，caller 不调 destroy。判定为真实漏洞。
+**LLM 分析**：使用代码图谱 MCP 或文件工具查看 `Session`，无 destroy；继续追踪 `load_record` 的调用方，caller 不调 destroy。判定为真实漏洞。
 
 ---
 
@@ -153,7 +153,7 @@ int alloc_session_resources(Context *ctx) {
 }
 ```
 
-**LLM 分析**：用 `find_function_references` / 全工程搜索发现存在 `destroy_session`，且 caller 在生命周期结束时一定调用。`alloc_session_resources` 是初始化函数，所有权转移给 caller，判定为误报。
+**LLM 分析**：使用代码图谱 MCP 或全工程搜索发现存在 `destroy_session`，且 caller 在生命周期结束时一定调用。`alloc_session_resources` 是初始化函数，所有权转移给 caller，判定为误报。
 
 ---
 
@@ -183,7 +183,7 @@ int reload(Context *ctx, size_t n) {
 }
 ```
 
-**LLM 分析**：`view_function_code` 查 `free_session_buf`，确认其释放该成员。判定为误报。
+**LLM 分析**：使用代码图谱 MCP 或文件工具查看 `free_session_buf`，确认其释放该成员。判定为误报。
 
 注意：semgrep 的 `pattern-not` 是 `$ANY($FIELD, ...)`，要求字段表达式**字面**出现在参数列表中。`free_session_buf(ctx->session)` 传的是 `ctx->session` 而非 `ctx->session->buf`，不匹配 `$ANY($FIELD, ...)`，因此会误报。
 
@@ -216,7 +216,7 @@ int grow(Context *ctx, size_t n) {
 }
 ```
 
-**LLM 分析**：`view_function_code` 查 `xrealloc` 实现，确认其失败时 `abort()`。判定为误报。
+**LLM 分析**：使用代码图谱 MCP 或文件工具查看 `xrealloc` 实现，确认其失败时 `abort()`。判定为误报。
 
 ---
 

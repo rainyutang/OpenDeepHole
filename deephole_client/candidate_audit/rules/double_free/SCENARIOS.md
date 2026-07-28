@@ -80,7 +80,7 @@ fail:
 ```
 
 **规则**：`C.member-release-before-owner-cleanup`
-**LLM 分析**：用 `view_function_code` 查看 `destroy_conn` 实现，确认其释放 `c->url`，且失败分支未 `c->url = NULL`。判定为真实漏洞。
+**LLM 分析**：使用代码图谱 MCP 或文件工具查看 `destroy_conn` 实现，确认其释放 `c->url`，且失败分支未 `c->url = NULL`。判定为真实漏洞。
 
 ---
 
@@ -117,7 +117,7 @@ int register_handler(Registry *r, Handler *h) {
 ```
 
 **规则**：`D.transfer-error-branch-release`
-**LLM 分析**：用 `find_function_references` + `view_function_code` 查看 `registry_add` 实现，发现其失败时也调用了 `free(h)`。判定为真实漏洞，severity=high（生产路径常触发）。
+**LLM 分析**：使用代码图谱 MCP 或 `read` / `grep` 查看 `registry_add` 及其调用关系，发现其失败时也调用了 `free(h)`。判定为真实漏洞，severity=high（生产路径常触发）。
 
 ---
 
@@ -337,7 +337,7 @@ void f() {
 ```
 
 **规则**：`D.possible-ownership-transfer-then-caller-release`（INFO 级别）
-**LLM 分析**：`view_function_code` 查看 `lookup`，发现其只读 `value` 字符串拷贝到内部，并未保存指针。caller 释放是正确的。判定为误报。
+**LLM 分析**：使用代码图谱 MCP 或文件工具查看 `lookup`，发现其只读 `value` 字符串拷贝到内部，并未保存指针。caller 释放是正确的。判定为误报。
 
 ---
 

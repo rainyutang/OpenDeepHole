@@ -44,7 +44,7 @@ function Field({
 
 export function defaultScanCodeGraphMcp(): AgentMcpConfig {
   return {
-    enabled: true,
+    enabled: false,
     name: "codegraph",
     transport: "local",
     timeout_seconds: 300,
@@ -61,7 +61,7 @@ export function defaultScanCodeGraphMcp(): AgentMcpConfig {
 }
 
 export function validateScanCodeGraphMcp(value: AgentMcpConfig): string {
-  if (!value.enabled) return "扫描代码图谱 MCP 必须启用";
+  if (!value.enabled) return "";
   if (!value.name.trim()) return "请输入扫描代码图谱 MCP 名称";
   if (!Number.isFinite(value.timeout_seconds) || value.timeout_seconds < 1) {
     return "扫描代码图谱 MCP 调用超时必须大于 0";
@@ -98,23 +98,40 @@ export default function ScanCodeGraphMcpEditor({
     <div className="space-y-5 bg-slate-800 border border-slate-700 rounded-xl p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-medium text-slate-200">扫描代码图谱 MCP</h3>
+          <h3 className="text-sm font-medium text-slate-200">
+            扫描代码图谱 MCP <span className="font-normal text-slate-500">（可选）</span>
+          </h3>
           <p className="mt-1 text-xs leading-5 text-slate-500">
-            此配置会保存为本次扫描的独立快照，并用于扫描、恢复、去误报和漏洞验证。
+            启用后，此配置会保存为本次扫描的独立快照，并用于扫描、恢复、去误报和漏洞验证。
           </p>
         </div>
         <button
           type="button"
           onClick={onProbe}
-          disabled={!online || probing || Boolean(validationError)}
-          title={!online ? "Agent 离线" : validationError}
+          disabled={!value.enabled || !online || probing || Boolean(validationError)}
+          title={!value.enabled ? "请先启用代码图谱 MCP" : !online ? "Agent 离线" : validationError}
           className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
         >
           {probing ? "检测中…" : "检测连接"}
         </button>
       </div>
 
-      {probeResult && (
+      <label className="flex items-center gap-2 text-sm text-slate-200">
+        <input
+          type="checkbox"
+          checked={value.enabled}
+          onChange={(event) => onChange({ ...value, enabled: event.target.checked })}
+        />
+        启用代码图谱 MCP
+      </label>
+
+      {!value.enabled && (
+        <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-3 text-xs leading-5 text-slate-400">
+          本次扫描不会加载代码图谱 MCP；模型任务仅使用 read、grep、glob 等文件工具。静态分析所需的代码索引仍会正常构建。
+        </div>
+      )}
+
+      {value.enabled && probeResult && (
         <div
           role="status"
           className={`rounded-lg border p-3 text-xs ${
@@ -129,7 +146,7 @@ export default function ScanCodeGraphMcpEditor({
         </div>
       )}
 
-      <div className="grid gap-4 md:grid-cols-3">
+      {value.enabled && <div className="grid gap-4 md:grid-cols-3">
         <Field label="MCP 名称">
           <input
             className={input}
@@ -163,9 +180,9 @@ export default function ScanCodeGraphMcpEditor({
             }
           />
         </Field>
-      </div>
+      </div>}
 
-      {value.transport === "local" ? (
+      {value.enabled && (value.transport === "local" ? (
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="可执行文件">
             <input
@@ -247,11 +264,11 @@ export default function ScanCodeGraphMcpEditor({
             />
           </Field>
         </div>
-      )}
-      {validationError && <p role="alert" className="text-xs text-red-300">{validationError}</p>}
-      <p className="text-xs leading-5 text-amber-200">
+      ))}
+      {value.enabled && validationError && <p role="alert" className="text-xs text-red-300">{validationError}</p>}
+      {value.enabled && <p className="text-xs leading-5 text-amber-200">
         运行时仍会重新连接并核验工具；连接失败时扫描继续，但不会回退到其他代码图谱。
-      </p>
+      </p>}
     </div>
   );
 }

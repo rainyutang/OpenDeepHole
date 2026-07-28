@@ -204,7 +204,7 @@ def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
     tool_ids = [
         "static-mcp_static_read",
         "mcp--other-graph--static_read",
-        "mcp--deephole-code--view_function_code",
+        "mcp--manual-source--view_function_code",
         "mcp--product-info--lookup",
         "read",
     ]
@@ -213,7 +213,7 @@ def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
         tool_ids,
         overrides,
         spec_a["name"],
-        source_mcp_names={"static-mcp", "other-graph"},
+        source_mcp_names={"static-mcp", "other-graph", "manual-source"},
     )
 
     assert available is True
@@ -221,7 +221,7 @@ def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
     assert len(tool_ids[0]) <= 64
     assert overrides[tool_ids[0]] is True
     assert overrides[tool_ids[1]] is False
-    assert overrides["mcp--deephole-code--view_function_code"] is False
+    assert overrides["mcp--manual-source--view_function_code"] is False
     assert overrides["mcp--product-info--lookup"] is True
     assert overrides["read"] is True
 
@@ -229,12 +229,12 @@ def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
         tool_ids,
         _mcp_tool_overrides(tool_ids, None),
         "",
-        source_mcp_names={"static-mcp", "other-graph"},
+        source_mcp_names={"static-mcp", "other-graph", "manual-source"},
     )
     assert available is False
     assert disabled[tool_ids[0]] is False
     assert disabled[tool_ids[1]] is False
-    assert disabled["mcp--deephole-code--view_function_code"] is False
+    assert disabled["mcp--manual-source--view_function_code"] is False
     assert disabled["mcp--product-info--lookup"] is True
 
 
@@ -260,7 +260,6 @@ def test_scan_mcp_name_collision_does_not_disconnect_global_mcp(
             assert path == "/mcp"
             return Response({
                 "static-mcp": {"status": "connected"},
-                "deephole-code": {"status": "connected"},
             })
 
         async def post(self, path: str, **_kwargs):
@@ -292,11 +291,11 @@ def test_scan_mcp_name_collision_does_not_disconnect_global_mcp(
 
         assert lease.connected is False
         assert "conflicts with an enabled global MCP" in lease.error
-        assert client.posts == ["/mcp/deephole-code/disconnect"]
+        assert client.posts == []
         assert "static-mcp" not in manager._source_graph_mcp_names(project)
         tool_ids = [
             "static-mcp_static_read",
-            "mcp--deephole-code--view_function_code",
+            "mcp--opendeephole-scan-codegraph-old--view_function_code",
         ]
         overrides, available = _apply_source_graph_overrides(
             tool_ids,
@@ -307,14 +306,14 @@ def test_scan_mcp_name_collision_does_not_disconnect_global_mcp(
         )
         assert available is False
         assert overrides["static-mcp_static_read"] is True
-        assert overrides["mcp--deephole-code--view_function_code"] is False
+        assert overrides["mcp--opendeephole-scan-codegraph-old--view_function_code"] is False
         await manager._release_scan_mcp(project, lease)
         assert manager._scan_mcp_states == {}
 
     asyncio.run(run())
 
 
-def test_invalid_scan_mcp_disconnects_stale_graph_before_file_only_fallback(
+def test_disabled_scan_mcp_disconnects_stale_graph_before_file_only_mode(
     tmp_path: Path,
 ) -> None:
     class Response:
@@ -334,7 +333,9 @@ def test_invalid_scan_mcp_disconnects_stale_graph_before_file_only_fallback(
 
         async def get(self, path: str, **_kwargs):
             assert path == "/mcp"
-            return Response({"deephole-code": {"status": "connected"}})
+            return Response({
+                "opendeephole-scan-codegraph-old": {"status": "connected"},
+            })
 
         async def post(self, path: str, **_kwargs):
             self.posts.append(path)
@@ -353,8 +354,10 @@ def test_invalid_scan_mcp_disconnects_stale_graph_before_file_only_fallback(
         )
 
         assert lease.connected is False
-        assert "disabled" in lease.error
-        assert client.posts == ["/mcp/deephole-code/disconnect"]
+        assert lease.error == ""
+        assert client.posts == [
+            "/mcp/opendeephole-scan-codegraph-old/disconnect",
+        ]
         await manager._release_scan_mcp(project, lease)
         assert manager._scan_mcp_states == {}
 

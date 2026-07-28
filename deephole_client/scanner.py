@@ -330,19 +330,20 @@ async def run_scan(
 
     if isinstance(code_graph_mcp, dict):
         code_graph_mcp = copy.deepcopy(code_graph_mcp)
-        from .codegraph import prepare_scan_codegraph
+        if bool(code_graph_mcp.get("enabled")):
+            from .codegraph import prepare_scan_codegraph
 
-        graph_ready = await prepare_scan_codegraph(
-            code_graph_mcp,
-            project,
-            emit=lambda message: emit("code_graph_mcp", str(message)),
-        )
-        if not graph_ready:
-            code_graph_mcp["enabled"] = False
-            await emit(
-                "code_graph_mcp",
-                "Scan code graph MCP preparation failed; continuing with file tools only",
+            graph_ready = await prepare_scan_codegraph(
+                code_graph_mcp,
+                project,
+                emit=lambda message: emit("code_graph_mcp", str(message)),
             )
+            if not graph_ready:
+                code_graph_mcp["enabled"] = False
+                await emit(
+                    "code_graph_mcp",
+                    "Scan code graph MCP preparation failed; continuing with file tools only",
+                )
 
     static_rule_roots = [
         Path(__file__).resolve().parent / "static_analysis" / "rules",
@@ -398,7 +399,6 @@ async def run_scan(
         stats=stats,
     )
 
-    mcp_server = None
     pool_stop = asyncio.Event()
     pool_task: asyncio.Task[Any] | None = None
     threat_task: asyncio.Task[dict[str, Any]] | None = None
@@ -411,18 +411,7 @@ async def run_scan(
             print(str(line), flush=True)
 
     try:
-        if code_graph_mcp is None:
-            from .local_mcp import LocalMCPServer
-            from . import mcp_registry
-
-            mcp_server = LocalMCPServer(project_dir=project, project_id=scan_id)
-            mcp_port = mcp_server.start()
-            mcp_registry.register(project, mcp_port, scan_id)
-            from .opencode_integration import get_global_opencode_workspace
-
-            get_global_opencode_workspace(mcp_port=mcp_port)
-            await emit("mcp_ready", f"Built-in code MCP ready on port {mcp_port}")
-        elif bool(code_graph_mcp.get("enabled")):
+        if isinstance(code_graph_mcp, dict) and bool(code_graph_mcp.get("enabled")):
             await emit(
                 "mcp_ready",
                 "Scan-specific code graph MCP selected; runtime connection will be verified before each model task",
@@ -430,7 +419,7 @@ async def run_scan(
         else:
             await emit(
                 "mcp_ready",
-                "Scan-specific code graph MCP is unavailable; model tasks will use file tools only",
+                "Code graph MCP is not enabled; model tasks will use file tools only",
             )
         pool_task = asyncio.create_task(
             reporter.publish_opencode_pool_until(scan_id, pool_stop),
@@ -770,17 +759,6 @@ async def run_scan(
         if pool_task is not None:
             try:
                 await pool_task
-            except Exception:
-                pass
-        if mcp_server is not None:
-            try:
-                mcp_server.stop()
-            except Exception:
-                pass
-            try:
-                from . import mcp_registry
-
-                mcp_registry.unregister(project)
             except Exception:
                 pass
 

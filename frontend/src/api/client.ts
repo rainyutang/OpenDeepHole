@@ -217,7 +217,7 @@ export async function createScan(body: {
   validation_environment?: string;
   checkers: string[];
   feedback_ids?: string[];
-  code_graph_mcp: AgentMcpConfig;
+  code_graph_mcp?: AgentMcpConfig | null;
 }): Promise<ScanStartResponse> {
   const { data } = await api.post<ScanStartResponse>("/api/scan", body);
   return data;

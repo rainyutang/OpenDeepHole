@@ -35,7 +35,7 @@ void destroy_packet(Packet *pkt) {
 ```
 
 **静态候选**：`free(pkt)`，`Packet` 含 `payload`、`owner` 指针成员。  
-**LLM 分析**：`view_struct_code` 确认字段为 owned buffer；`view_function_code` 确认 `destroy_packet` 没有释放成员。判定为真实漏洞，severity 通常为 `medium`。
+**LLM 分析**：使用代码图谱 MCP 或文件工具确认字段为 owned buffer，并确认 `destroy_packet` 没有释放成员。判定为真实漏洞，severity 通常为 `medium`。
 
 ---
 
@@ -287,7 +287,7 @@ void destroy_arena(Arena *arena) {
    `.h` 后缀的头文件不会被 `_collect_source_files` 收集。
 6. **同名 short release wrapper 的歧义**：当项目里存在多个同名 short release
    函数（不同 namespace 或 file-scope static），candidate 描述里不区分调用
-   的是哪一个。LLM 调用 `view_function_code` 时需要按 `所在函数` 的文件路径
+   的是哪一个。LLM 查看函数实现时需要按 `所在函数` 的文件路径
    反推；通常 MCP 工具的模糊匹配能 cover。
 
 ## 候选 description 字段说明

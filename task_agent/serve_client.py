@@ -1559,7 +1559,7 @@ def _is_source_graph_tool(
         return True
     return any(
         _tool_belongs_to_mcp(tool_id, name)
-        for name in {"deephole-code", *source_mcp_names}
+        for name in source_mcp_names
     )
 
 
@@ -1739,8 +1739,7 @@ def _error_summary(value: object) -> str:
 def _tool_source(tool_name: object) -> str:
     normalized = str(tool_name or "").lower().replace("_", "-")
     if (
-        "deephole-code" in normalized
-        or _LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX in normalized
+        _LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX in normalized
         or normalized.startswith("mcp--")
     ):
         return "mcp"
@@ -3308,10 +3307,7 @@ class OpenCodeServeManager:
 
     def _source_graph_mcp_names(self, directory: Path) -> set[str]:
         directory_key = self._event_directory_key(Path(directory).resolve())
-        names = {
-            "deephole-code",
-            *self._scan_mcp_names.get(directory_key, set()),
-        }
+        names = set(self._scan_mcp_names.get(directory_key, set()))
         names.difference_update(self._enabled_managed_mcp_names())
         return names
 
@@ -3349,31 +3345,6 @@ class OpenCodeServeManager:
             )
             disconnected.raise_for_status()
 
-    async def _connect_builtin_source_mcp(
-        self,
-        client: httpx.AsyncClient,
-        directory: Path,
-    ) -> None:
-        name = "deephole-code"
-        response = await client.post(
-            f"/mcp/{quote(name, safe='')}/connect",
-            params=_serve_context_params(directory),
-            headers=_serve_context_headers(directory),
-        )
-        response.raise_for_status()
-        if response.json() is not True:
-            raise RuntimeError("OpenCode did not connect the built-in code MCP")
-        statuses_response = await client.get(
-            "/mcp",
-            params=_serve_context_params(directory),
-            headers=_serve_context_headers(directory),
-        )
-        statuses_response.raise_for_status()
-        statuses = self._mcp_status_map(statuses_response.json())
-        state, error = self._mcp_native_status(statuses.get(name))
-        if state != "connected":
-            raise RuntimeError(error or f"OpenCode reported MCP state {state}")
-
     async def _acquire_scan_mcp(
         self,
         client: httpx.AsyncClient,
@@ -3391,10 +3362,10 @@ class OpenCodeServeManager:
                 "config": None,
                 "error": "",
             }
-        elif raw_config is None:
+        elif raw_config is None or not bool(raw_config.get("enabled")):
             spec = {
-                "name": "deephole-code",
-                "fingerprint": "builtin",
+                "name": "",
+                "fingerprint": "file-tools-only",
                 "config": None,
                 "error": "",
             }
@@ -3484,23 +3455,20 @@ class OpenCodeServeManager:
                         fingerprint=fingerprint,
                         connected=False,
                     )
-                if raw_config is None:
-                    await self._connect_builtin_source_mcp(client, directory)
-                else:
-                    response = await client.post(
-                        "/mcp",
-                        params=_serve_context_params(directory),
-                        headers=_serve_context_headers(directory),
-                        json={"name": name, "config": config},
-                        timeout=request_timeout,
+                response = await client.post(
+                    "/mcp",
+                    params=_serve_context_params(directory),
+                    headers=_serve_context_headers(directory),
+                    json={"name": name, "config": config},
+                    timeout=request_timeout,
+                )
+                response.raise_for_status()
+                statuses = self._mcp_status_map(response.json())
+                native_state, error = self._mcp_native_status(statuses.get(name))
+                if native_state != "connected":
+                    raise RuntimeError(
+                        error or f"OpenCode reported MCP state {native_state}"
                     )
-                    response.raise_for_status()
-                    statuses = self._mcp_status_map(response.json())
-                    native_state, error = self._mcp_native_status(statuses.get(name))
-                    if native_state != "connected":
-                        raise RuntimeError(
-                            error or f"OpenCode reported MCP state {native_state}"
-                        )
                 state["connected"] = True
                 return _ScanMcpLease(
                     directory_key=directory_key,
@@ -3892,11 +3860,16 @@ class OpenCodeServeManager:
                             "session",
                             f"CODE_GRAPH_MCP connected name={scan_mcp_lease.name}",
                         )
-                    else:
+                    elif scan_mcp_lease.error:
                         emit(
                             "session",
                             "CODE_GRAPH_MCP unavailable fallback=file_tools "
                             f"error={_one_line_preview(scan_mcp_lease.error)}",
+                        )
+                    else:
+                        emit(
+                            "session",
+                            "CODE_GRAPH_MCP disabled mode=file_tools",
                         )
                 if not active_session_id:
                     create_payload: dict[str, Any] = {
@@ -3996,11 +3969,7 @@ class OpenCodeServeManager:
                         scan_mcp_lease is not None and scan_mcp_lease.connected
                     ),
                 )
-                if (
-                    str(scan_id or "").strip()
-                    and selected_source_mcp is not None
-                    and not source_available
-                ):
+                if scan_mcp_lease is not None and scan_mcp_lease.connected and not source_available:
                     emit(
                         "session",
                         "CODE_GRAPH_MCP no_tools fallback=file_tools",

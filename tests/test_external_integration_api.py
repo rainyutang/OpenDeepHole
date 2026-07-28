@@ -123,6 +123,27 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                         current_user=user,
                     )
                 )
+                disabled_result = asyncio.run(
+                    integration_api.create_integration_scan(
+                        integration_api.IntegrationScanRequest(
+                            agent_name="reverse-linux-agent",
+                            project_path="/repo/file-tools-only",
+                            scan_name="file-tools-only",
+                            product="LTE",
+                            validation_environment="仿真UBBPi板环境",
+                            agent_config=AgentRemoteConfig(
+                                opencode={
+                                    "tool": "opencode",
+                                    "executable": "opencode",
+                                    "model": "model",
+                                },
+                            ),
+                            code_graph_mcp=AgentMcpConfig(enabled=False),
+                        ),
+                        _request(),
+                        current_user=user,
+                    )
+                )
 
             self.assertEqual(result.checkers, ["public_check"])
             self.assertIn("/#/public-scan/", result.result_url)
@@ -133,12 +154,19 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             self.assertTrue(loaded[1].public_access_token)
             self.assertEqual(loaded[1].code_graph_mcp, scan_graph)
             self.assertNotIn("code_graph_mcp", loaded[1].model_dump())
-            self.assertEqual([call.args[1]["type"] for call in send.call_args_list], ["config", "task"])
+            self.assertEqual(
+                [call.args[1]["type"] for call in send.call_args_list],
+                ["config", "task", "config", "task"],
+            )
             self.assertEqual(send.call_args_list[1].args[1]["validation_environment"], "仿真UBBPi板环境")
             self.assertEqual(
                 send.call_args_list[1].args[1]["code_graph_mcp"],
                 scan_graph.model_dump(mode="json"),
             )
+            disabled_loaded = store.load_scan(disabled_result.scan_id)
+            self.assertIsNotNone(disabled_loaded)
+            self.assertIsNone(disabled_loaded[1].code_graph_mcp)
+            self.assertIsNone(send.call_args_list[3].args[1]["code_graph_mcp"])
 
     def test_public_scan_token_allows_marking_the_scan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

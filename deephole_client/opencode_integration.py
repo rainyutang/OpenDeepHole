@@ -362,7 +362,7 @@ def _sync_managed_threat_analysis_skills(workspace: Path) -> Path:
     return skills_dir
 
 
-def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
+def get_global_opencode_workspace() -> Path:
     """Return and initialize the single Agent-wide OpenCode workspace.
 
     The workspace contains stable MCP/Skill configuration, an explicit
@@ -374,37 +374,31 @@ def get_global_opencode_workspace(*, mcp_port: int | None = None) -> Path:
     workspace.mkdir(parents=True, exist_ok=True)
     with get_workspace_lock(workspace):
         _sync_managed_threat_analysis_skills(workspace)
-        # A caller that owns/has just joined the Agent-wide MCP gateway provides
-        # its actual port. Stale managed permissions are migrated before the
-        # next Serve acquisition; without an explicit port, the writer keeps
-        # the current gateway URL instead of replacing a dynamically allocated
-        # port with the configured fallback.
         config_path = managed_opencode_config_path(workspace)
         config_missing = not config_path.is_file()
         permissions_stale = (
             not config_missing
             and not _has_managed_permissions(config_path, workspace)
         )
-        if mcp_port is not None or config_missing or permissions_stale:
-            _write_opencode_config(workspace, mcp_port=mcp_port)
+        builtin_mcp_stale = (
+            not config_missing
+            and _has_obsolete_builtin_mcp(config_path)
+        )
+        if config_missing or permissions_stale or builtin_mcp_stale:
+            _write_opencode_config(workspace)
     return workspace
 
 
 def refresh_global_opencode_config() -> Path:
-    """Rewrite managed MCP entries while preserving the active code gateway URL."""
+    """Rewrite the Agent-owned OpenCode configuration and managed MCP entries."""
     workspace = get_global_opencode_workspace()
     config_path = managed_opencode_config_path(workspace)
-    current_url = _current_deephole_code_url(config_path)
-    mcp_url = current_url or (
-        f"http://127.0.0.1:{get_config().mcp_server.port}/mcp"
-    )
     skills_dir = (workspace / ".opencode" / "skills").resolve()
     with get_workspace_lock(workspace):
         _write_text_atomic(
             config_path,
             json.dumps(build_opencode_config(
-                mcp_url,
-                [str(skills_dir)],
+                skills_paths=[str(skills_dir)],
                 readable_paths=[str(workspace / ".opencode")],
             ), indent=2),
             mode=0o600,
@@ -448,7 +442,6 @@ def writable_edit_patterns(path: str | os.PathLike[str]) -> list[str]:
 
 
 def build_opencode_config(
-    mcp_url: str,
     skills_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
     readable_paths: list[str] | None = None,
@@ -491,13 +484,7 @@ def build_opencode_config(
 
     data = {
         "$schema": "https://opencode.ai/config.json",
-        "mcp": {
-            "deephole-code": {
-                "type": "remote",
-                "url": mcp_url,
-                "enabled": True,
-            }
-        },
+        "mcp": {},
         "permission": {
             "read": read_permissions,
             "list": {"*": "allow"},
@@ -568,15 +555,13 @@ def _has_managed_permissions(config_path: Path, workspace: Path) -> bool:
         return False
 
 
-def _current_deephole_code_url(config_path: Path) -> str | None:
+def _has_obsolete_builtin_mcp(config_path: Path) -> bool:
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
-        value = data.get("mcp", {}).get("deephole-code", {}).get("url")
-        if value is None:
-            return None
-        return str(value).strip() or None
+        mcp = data.get("mcp", {})
+        return isinstance(mcp, dict) and "deephole-code" in mcp
     except Exception:
-        return None
+        return False
 
 
 def _managed_mcp_value(value, name: str, default=None):
@@ -635,8 +620,8 @@ def build_managed_mcp_runtime_specs(runtime_config=None) -> dict[str, dict]:
         transport = normalized["transport"]
         error = ""
         entry: dict | None = None
-        if enabled and (not name or name == "deephole-code"):
-            error = "MCP name is empty or reserved"
+        if enabled and not name:
+            error = "MCP name is empty"
         elif enabled and transport == "remote":
             url = normalized["remote"]["url"]
             if not url:
@@ -684,20 +669,14 @@ def build_managed_mcp_runtime_specs(runtime_config=None) -> dict[str, dict]:
     return result
 
 
-def _write_opencode_config(workspace: Path, mcp_port: int | None = None) -> None:
+def _write_opencode_config(workspace: Path) -> None:
     """Generate the private OpenDeepHole-owned runtime configuration layer."""
-    config = get_config()
-    port = mcp_port if mcp_port is not None else config.mcp_server.port
     config_path = managed_opencode_config_path(workspace)
-    mcp_url = f"http://127.0.0.1:{port}/mcp"
-    if mcp_port is None:
-        mcp_url = _current_deephole_code_url(config_path) or mcp_url
     skills_dir = (workspace / ".opencode" / "skills").resolve()
     _write_text_atomic(
         config_path,
         json.dumps(build_opencode_config(
-            mcp_url,
-            [str(skills_dir)],
+            skills_paths=[str(skills_dir)],
             readable_paths=[str(workspace / ".opencode")],
         ), indent=2),
         mode=0o600,
