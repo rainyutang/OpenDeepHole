@@ -216,6 +216,11 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     vuln_type           TEXT NOT NULL,
     severity            TEXT NOT NULL,
     description         TEXT NOT NULL,
+    impact              TEXT NOT NULL DEFAULT '',
+    vulnerable_code     TEXT NOT NULL DEFAULT '',
+    attack_entry        TEXT NOT NULL DEFAULT '',
+    root_cause          TEXT NOT NULL DEFAULT '',
+    trigger_conditions  TEXT NOT NULL DEFAULT '',
     ai_analysis         TEXT NOT NULL,
     vulnerability_report TEXT NOT NULL DEFAULT '',
     confirmed           INTEGER NOT NULL,
@@ -657,6 +662,17 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN vulnerability_report TEXT NOT NULL DEFAULT ''"
             )
+        for column in (
+            "impact",
+            "vulnerable_code",
+            "attack_entry",
+            "root_cause",
+            "trigger_conditions",
+        ):
+            if column not in vuln_cols:
+                self._conn.execute(
+                    f"ALTER TABLE vulnerabilities ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
 
         self._conn.executescript("""\
             CREATE TABLE IF NOT EXISTS scan_candidates (
@@ -1670,13 +1686,14 @@ class SqliteScanStore(ScanStoreBase):
                 """\
                 INSERT INTO vulnerabilities
                     (scan_id, idx, audit_index, file, line, function, call_chain, vuln_type,
-                     severity, description, ai_analysis, vulnerability_report, confirmed,
+                     severity, description, impact, vulnerable_code, attack_entry,
+                     root_cause, trigger_conditions, ai_analysis, vulnerability_report, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line, variant_of,
                      analysis_source, source_task_id, threat_surface_node_id,
                      threat_method_node_id, threat_code_path, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -1689,6 +1706,11 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.vuln_type,
                     vuln.severity,
                     vuln.description,
+                    vuln.impact,
+                    vuln.vulnerable_code,
+                    vuln.attack_entry,
+                    vuln.root_cause,
+                    vuln.trigger_conditions,
                     vuln.ai_analysis,
                     vuln.vulnerability_report,
                     1 if vuln.confirmed else 0,
@@ -1741,6 +1763,11 @@ class SqliteScanStore(ScanStoreBase):
                         call_chain = ?,
                         severity = ?,
                         description = ?,
+                        impact = ?,
+                        vulnerable_code = ?,
+                        attack_entry = ?,
+                        root_cause = ?,
+                        trigger_conditions = ?,
                         ai_analysis = ?,
                         vulnerability_report = ?,
                         confirmed = ?,
@@ -1766,6 +1793,11 @@ class SqliteScanStore(ScanStoreBase):
                         json.dumps(vuln.call_chain, ensure_ascii=False),
                         vuln.severity,
                         vuln.description,
+                        vuln.impact,
+                        vuln.vulnerable_code,
+                        vuln.attack_entry,
+                        vuln.root_cause,
+                        vuln.trigger_conditions,
                         vuln.ai_analysis,
                         vuln.vulnerability_report,
                         1 if vuln.confirmed else 0,
@@ -1796,13 +1828,14 @@ class SqliteScanStore(ScanStoreBase):
                 """\
                 INSERT INTO vulnerabilities
                     (scan_id, idx, audit_index, file, line, function, call_chain, vuln_type,
-                     severity, description, ai_analysis, vulnerability_report, confirmed,
+                     severity, description, impact, vulnerable_code, attack_entry,
+                     root_cause, trigger_conditions, ai_analysis, vulnerability_report, confirmed,
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line, variant_of,
                      analysis_source, source_task_id, threat_surface_node_id,
                      threat_method_node_id, threat_code_path, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -1815,6 +1848,11 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.vuln_type,
                     vuln.severity,
                     vuln.description,
+                    vuln.impact,
+                    vuln.vulnerable_code,
+                    vuln.attack_entry,
+                    vuln.root_cause,
+                    vuln.trigger_conditions,
                     vuln.ai_analysis,
                     vuln.vulnerability_report,
                     1 if vuln.confirmed else 0,
@@ -1950,6 +1988,27 @@ class SqliteScanStore(ScanStoreBase):
                 vuln_type=r["vuln_type"],
                 severity=r["severity"],
                 description=r["description"],
+                impact=(r["impact"] if "impact" in r.keys() else "") or "",
+                vulnerable_code=(
+                    r["vulnerable_code"]
+                    if "vulnerable_code" in r.keys()
+                    else ""
+                ) or "",
+                attack_entry=(
+                    r["attack_entry"]
+                    if "attack_entry" in r.keys()
+                    else ""
+                ) or "",
+                root_cause=(
+                    r["root_cause"]
+                    if "root_cause" in r.keys()
+                    else ""
+                ) or "",
+                trigger_conditions=(
+                    r["trigger_conditions"]
+                    if "trigger_conditions" in r.keys()
+                    else ""
+                ) or "",
                 ai_analysis=r["ai_analysis"],
                 vulnerability_report=(
                     r["vulnerability_report"]

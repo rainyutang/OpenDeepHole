@@ -3250,7 +3250,7 @@ function FpReviewDetail({
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-xs text-slate-500">#{index}</span>
               <span className="text-sm font-semibold text-slate-100">{vulnerability.vuln_type}</span>
-              <span className="text-xs text-slate-500">{vulnerability.severity}</span>
+              <span className="text-xs text-slate-500">{vulnerabilitySeverityLabel(vulnerability.severity)}</span>
             </div>
             <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerability.file}:{vulnerability.line}</div>
             <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerability.function}</div>
@@ -3495,7 +3495,7 @@ function ValidationDetail({
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-xs text-slate-500">#{index}</span>
               <span className="text-sm font-semibold text-slate-100">{vulnerability.vuln_type}</span>
-              <span className="text-xs text-slate-500">{vulnerability.severity}</span>
+              <span className="text-xs text-slate-500">{vulnerabilitySeverityLabel(vulnerability.severity)}</span>
             </div>
             <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerability.file}:{vulnerability.line}</div>
             <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerability.function}</div>
@@ -4141,6 +4141,14 @@ function capabilityLabel(value: string): string {
   if (value === "high") return "高";
   if (value === "medium") return "中";
   if (value === "low") return "低";
+  return value || "-";
+}
+
+function vulnerabilitySeverityLabel(value: string): string {
+  if (value === "critical") return "致命";
+  if (value === "high") return "严重";
+  if (value === "medium") return "一般";
+  if (value === "low") return "提示";
   return value || "-";
 }
 

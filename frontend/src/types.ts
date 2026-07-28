@@ -123,6 +123,11 @@ export interface Vulnerability {
   vuln_type: string;
   severity: string;
   description: string;
+  impact?: string;
+  vulnerable_code?: string;
+  attack_entry?: string;
+  root_cause?: string;
+  trigger_conditions?: string;
   ai_analysis: string;
   vulnerability_report?: string;
   confirmed: boolean;

@@ -11,6 +11,12 @@ from typing import Any
 import yaml
 from task_agent import opencode_task_context, run_opencode_task
 
+from task_agent.audit_schema import (
+    VULNERABILITY_ITEM_SCHEMA,
+    VULNERABILITY_LIST_SCHEMA,
+    audit_output_instruction,
+)
+
 PROCESS_NAME = "candidate_audit"
 PROJECT_LEVEL_FUNCTION = "__project__"
 _ALLOWED_KEYS = {
@@ -23,34 +29,6 @@ _ALLOWED_KEYS = {
 _REQUIRED_KEYS = {
     "project_path", "work_dir", "scan_id", "candidates", "index_db_path",
 }
-_RESULT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "vulnerabilities": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "file": {"type": "string"}, "line": {"type": "integer"},
-                    "function": {"type": "string"},
-                    "call_chain": {"type": "array", "items": {"type": "string"}},
-                    "vuln_type": {"type": "string"}, "severity": {"type": "string"},
-                    "description": {"type": "string"}, "ai_analysis": {"type": "string"},
-                    "vulnerability_report": {"type": "string"},
-                    "confirmed": {"type": "boolean"}, "ai_verdict": {"type": "string"},
-                },
-                "required": [
-                    "file", "line", "function", "vuln_type", "severity",
-                    "description", "ai_analysis", "confirmed", "ai_verdict",
-                ],
-            },
-        },
-        "markdown_reports": {"type": "array", "items": {"type": "object"}},
-    },
-    "required": ["vulnerabilities", "markdown_reports"],
-}
-
-
 async def _emit(output: Any, kind: str, message: str, **data: Any) -> None:
     if output is None:
         return
@@ -140,14 +118,23 @@ def _normalize_vulnerability(
         "file": str(raw.get("file") or candidate.get("file") or "."),
         "line": max(1, int(raw.get("line") or candidate.get("line") or 1)),
         "function": str(raw.get("function") or candidate.get("function") or "<unknown>"),
-        "call_chain": list(raw.get("call_chain") or []),
+        "call_chain": [
+            str(item)
+            for item in raw.get("call_chain") or []
+            if str(item).strip()
+        ],
         "vuln_type": str(raw.get("vuln_type") or candidate.get("vuln_type") or "unknown"),
-        "severity": str(raw.get("severity") or "unknown"),
+        "severity": str(raw.get("severity") or ("unknown" if confirmed else "low")),
         "description": str(raw.get("description") or candidate.get("description") or ""),
-        "ai_analysis": str(raw.get("ai_analysis") or ""),
-        "vulnerability_report": str(raw.get("vulnerability_report") or ""),
+        "impact": str(raw.get("impact") or ""),
+        "vulnerable_code": str(raw.get("vulnerable_code") or ""),
+        "attack_entry": str(raw.get("attack_entry") or ""),
+        "root_cause": str(raw.get("root_cause") or ""),
+        "trigger_conditions": str(raw.get("trigger_conditions") or ""),
+        "ai_analysis": "",
+        "vulnerability_report": "",
         "confirmed": confirmed,
-        "ai_verdict": str(raw.get("ai_verdict") or ("confirmed" if confirmed else "not_confirmed")),
+        "ai_verdict": "confirmed" if confirmed else "not_confirmed",
         "failure_reason": "",
         "audit_index": audit_index,
         "analysis_source": "static_candidate",
@@ -165,6 +152,11 @@ def _fallback(candidate: dict[str, Any], audit_index: int, status: str, reason: 
         "vuln_type": str(candidate.get("vuln_type") or "unknown"),
         "severity": "unknown",
         "description": str(candidate.get("description") or ""),
+        "impact": "",
+        "vulnerable_code": "",
+        "attack_entry": "",
+        "root_cause": "",
+        "trigger_conditions": "",
         "ai_analysis": reason or "No analysis result returned",
         "vulnerability_report": "",
         "confirmed": False,
@@ -190,7 +182,19 @@ def _candidate_prompt(
     scan_id: str,
 ) -> str:
     metadata = candidate.get("metadata")
-    if (
+    is_project = candidate.get("function") == PROJECT_LEVEL_FUNCTION
+    if is_project:
+        target = (
+            "项目级审计目标：\n"
+            + json.dumps(candidate, ensure_ascii=False, indent=2)
+        )
+        instruction = (
+            "请按已加载的 Skill 对当前项目进行审计。必须读取项目真实代码并验证"
+            "完整攻击路径；每个独立问题对应一个列表元素，不得合并不同漏洞的位置、"
+            "代码或调用链。若 Skill 中的旧输出字段、枚举或模板与本提示冲突，"
+            "以本提示及 JSON Schema 为准。"
+        )
+    elif (
         str(candidate.get("vuln_type") or "") == "sensitive_clear"
         and isinstance(metadata, dict)
         and metadata.get("kind") == "sensitive_clear_function"
@@ -205,15 +209,27 @@ def _candidate_prompt(
             f"分析 `{file_path}` 文件中的 `{function_name}` 函数敏感信息未清0问题。"
             f"scan_id: `{scan_id}`。"
         )
+        instruction = (
+            "请按已加载的 Skill 审计以下单个候选点。必须读取项目真实代码，"
+            "验证从攻击入口到漏洞触发点的完整路径，不得仅复述候选或编造证据。"
+            "若 Skill 中的旧输出字段、枚举或模板与本提示冲突，"
+            "以本提示及 JSON Schema 为准。"
+        )
     else:
         target = (
             "候选点：\n"
             + json.dumps(candidate, ensure_ascii=False, indent=2)
         )
+        instruction = (
+            "请按已加载的 Skill 审计以下单个候选点。必须读取项目真实代码，"
+            "验证从攻击入口到漏洞触发点的完整路径，不得仅复述候选或编造证据。"
+            "若 Skill 中的旧输出字段、枚举或模板与本提示冲突，"
+            "以本提示及 JSON Schema 为准。"
+        )
     return (
         f"/{checker['skill_name']}\n\n"
-        "请审计以下静态候选点。必须读取当前项目真实代码并验证完整数据流。\n"
-        "如果不成立要明确返回 not_confirmed；不要仅复述候选描述。\n\n"
+        + instruction
+        + "\n\n"
         + target
     )
 
@@ -353,36 +369,68 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
             )
             if feedback:
                 prompt += "\n\n历史人工反馈（只作判定参考）：\n" + json.dumps(feedback, ensure_ascii=False, indent=2)
-            prompt += (
-                "\n\n请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
-                "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，"
-                "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
-                + json.dumps(_RESULT_SCHEMA, ensure_ascii=False, indent=2)
+            is_project = candidate.get("function") == PROJECT_LEVEL_FUNCTION
+            result_schema = (
+                VULNERABILITY_LIST_SCHEMA
+                if is_project
+                else VULNERABILITY_ITEM_SCHEMA
+            )
+            prompt += audit_output_instruction(
+                result_schema,
+                list_result=is_project,
+                severity_basis="具体判定遵循已加载的 Skill。",
             )
             await _emit(output, "progress", f"Auditing candidate {audit_index + 1}", audit_index=audit_index)
             task_result = await run_opencode_task(
                 task_name=f"candidate-audit-{kwargs['scan_id']}-{audit_index}",
-                task_type="project_audit" if candidate.get("function") == PROJECT_LEVEL_FUNCTION else "audit",
+                task_type="project_audit" if is_project else "audit",
                 prompt=prompt,
                 required_capability=capability,
-                output_schema=_RESULT_SCHEMA,
+                output_schema=result_schema,
                 config_path=kwargs.get("task_agent_config"),
                 cancel_event=cancel_event,
             )
             produced: list[dict[str, Any]] = []
             reports: list[dict[str, Any]] = []
-            if task_result.status == "success" and isinstance(task_result.structured, dict):
-                produced = [
-                    _normalize_vulnerability(item, candidate, audit_index, task_result.output_source)
-                    for item in task_result.structured.get("vulnerabilities") or []
+            raw_items: list[dict[str, Any]] = []
+            if (
+                task_result.status == "success"
+                and is_project
+                and isinstance(task_result.structured, list)
+            ):
+                raw_items = [
+                    item
+                    for item in task_result.structured
                     if isinstance(item, dict)
                 ]
-                reports = [item for item in task_result.structured.get("markdown_reports") or [] if isinstance(item, dict)]
-                if not produced and not reports and candidate.get("function") != PROJECT_LEVEL_FUNCTION:
-                    produced = [_fallback(candidate, audit_index, "success", "No result returned", task_result.output_source)]
-                    produced[0]["ai_verdict"] = "no_result"
+            elif (
+                task_result.status == "success"
+                and not is_project
+                and isinstance(task_result.structured, dict)
+            ):
+                raw_items = [task_result.structured]
+            if raw_items:
+                produced = [
+                    _normalize_vulnerability(item, candidate, audit_index, task_result.output_source)
+                    for item in raw_items
+                ]
             else:
-                produced = [_fallback(candidate, audit_index, task_result.status, task_result.text, task_result.output_source)]
+                reason = (
+                    task_result.text
+                    if task_result.status != "success"
+                    else "No result returned"
+                )
+                produced = [
+                    _fallback(
+                        candidate,
+                        audit_index,
+                        task_result.status,
+                        reason,
+                        task_result.output_source,
+                    )
+                ]
+                if task_result.status == "success":
+                    produced[0]["ai_verdict"] = "no_result"
             processed_key = {
                 name: candidate.get(name)
                 for name in ("file", "line", "function", "vuln_type")

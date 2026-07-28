@@ -26,10 +26,25 @@
 `checker_dirs` 作为本次任务专属的 Skill 路径注册给 Task Agent，并以
 `/<name>` 作为 Prompt 首行加载 Skill；`SKILL.md` 正文不会拼接进 Prompt。
 
+普通候选点的单次模型任务直接返回一个漏洞对象；`function="__project__"` 的项目级
+审计返回裸 JSON List，每个独立问题一个元素。项目级未发现问题时返回仅包含一个
+`confirmed=false` 结论的 List。两种模式共用
+`task_agent.audit_schema.VULNERABILITY_ITEM_SCHEMA`，字段包括：
+
+- 始终必填：`confirmed`、`severity`、`file`、`function`、`line`、`description`
+- 确认问题时必填：`vuln_type`、`impact`、`vulnerable_code`、`call_chain`、
+  `attack_entry`、`root_cause`、`trigger_conditions`
+- `severity` 仅允许 `critical`、`high`、`medium`、`low`；非问题固定为 `low`
+
+模型不再生成 `ai_analysis`、`ai_verdict`、`vulnerability_report` 或
+`markdown_reports`。`ai_verdict` 由过程根据 `confirmed` 派生，最终 Markdown 报告
+由平台使用结构化字段生成。
+
 `on_candidate_result` 会在每个候选完成后立即收到一个字典，其中包含
 `audit_index`、`checker_name`、原始 `candidate`、本候选的
 `vulnerabilities`、`skill_reports` 和 `processed_key`。正常结果、空结果、
-失败/超时、同模式过滤和只生成报告的候选都会各调用一次。过程仍会等待整批结束，
+失败/超时和同模式过滤都会各调用一次；`skill_reports` 作为兼容字段保留为空列表。
+过程仍会等待整批结束，
 并返回完整的 `vulnerabilities`、`skill_reports` 和 `processed_keys`，便于独立调用方
 继续按批处理结果。
 

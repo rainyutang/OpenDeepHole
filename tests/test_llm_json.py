@@ -87,3 +87,28 @@ def test_parse_llm_json_schema_rejects_invalid_shape() -> None:
 
     with pytest.raises(LLMJsonParseError):
         parse_llm_json_schema('{"line":"7","extra":true}', schema)
+
+
+def test_parse_llm_json_schema_enforces_string_and_number_bounds() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 4},
+            "line": {"type": "integer", "minimum": 1, "maximum": 10},
+        },
+        "required": ["name", "line"],
+        "additionalProperties": False,
+    }
+
+    assert parse_llm_json_schema('{"name":"ok","line":7}', schema) == {
+        "name": "ok",
+        "line": 7,
+    }
+    for text in (
+        '{"name":"","line":7}',
+        '{"name":"longer","line":7}',
+        '{"name":"ok","line":0}',
+        '{"name":"ok","line":11}',
+    ):
+        with pytest.raises(LLMJsonParseError):
+            parse_llm_json_schema(text, schema)

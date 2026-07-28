@@ -17,20 +17,23 @@ description: 管理员测试用项目级 SKILL-only checker，用于验证无 an
 
 1. 先理解代码扫描路径对应的代码范围。提示词中会给出代码扫描路径和 `project_id`。
 2. 选择若干关键函数阅读源码，优先关注入口函数、解析函数、认证/权限判断函数、内存拷贝函数、资源释放函数。
-3. 如果发现真实问题，每个问题都必须形成一个独立结果。
+3. 如果发现真实问题，每个问题都必须形成列表中的一个独立结果。
 4. 每个真实问题必须填写：
    - `confirmed=true`
-   - `severity` 为 `high` / `medium` / `low`
-   - `description` 用一句话说明问题
-   - `ai_analysis` 写清楚证据、可达路径、触发条件和影响
+   - `severity` 为 `critical` / `high` / `medium` / `low`
+   - `description` 简要说明漏洞位置、触发方式和结果
    - `file` 为真实问题所在文件路径
    - `line` 为真实问题所在行号
    - `function` 为真实问题所在函数名
+   - `vuln_type` 填漏洞类型，可附带 CWE 编号
+   - `impact` 分别说明机密性、完整性、可用性影响
+   - `vulnerable_code` 包含证明问题所需的全部相关源码
+   - `call_chain` 按攻击入口到漏洞函数顺序列出全部函数
+   - `attack_entry`、`root_cause`、`trigger_conditions` 分别说明攻击入口、根因和触发条件
 5. 如果没有发现真实问题，也必须返回一个结果：
    - `confirmed=false`
    - `severity="low"`
    - `description` 说明没有发现可确认问题
-   - `ai_analysis` 简要说明检查过的函数和未确认漏洞的原因
    - `file`、`line`、`function` 使用提示词中给出的项目级占位值
 
 ## 判定标准

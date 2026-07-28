@@ -217,6 +217,22 @@ def _matches_json_schema(value: Any, schema: Any) -> bool:
             if any(key not in properties for key in value):
                 return False
 
+    if isinstance(value, str):
+        min_length = schema.get("minLength")
+        max_length = schema.get("maxLength")
+        if isinstance(min_length, int) and len(value) < min_length:
+            return False
+        if isinstance(max_length, int) and len(value) > max_length:
+            return False
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            return False
+        if isinstance(maximum, (int, float)) and value > maximum:
+            return False
+
     if isinstance(value, list):
         min_items = schema.get("minItems")
         max_items = schema.get("maxItems")

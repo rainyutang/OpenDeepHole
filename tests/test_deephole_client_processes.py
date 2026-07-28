@@ -33,7 +33,7 @@ PROCESS_FUNCTIONS = (
 )
 
 
-def _task_result(structured: dict) -> OpenCodeResult:
+def _task_result(structured: object) -> OpenCodeResult:
     return OpenCodeResult(
         session_id="session-1",
         status="success",
@@ -42,6 +42,36 @@ def _task_result(structured: dict) -> OpenCodeResult:
         model="test/model",
         output_source={"model": "test/model", "serve_session_id": "session-1"},
     )
+
+
+def _audit_item(
+    *,
+    confirmed: bool,
+    file: str,
+    line: int,
+    function: str,
+    description: str,
+    vuln_type: str = "demo",
+) -> dict:
+    item = {
+        "confirmed": confirmed,
+        "severity": "high" if confirmed else "low",
+        "file": file,
+        "line": line,
+        "function": function,
+        "description": description,
+    }
+    if confirmed:
+        item.update({
+            "vuln_type": vuln_type,
+            "impact": "机密性：无直接影响；完整性：无直接影响；可用性：进程崩溃",
+            "vulnerable_code": f"{file}:{line} {function}\nunsafe();",
+            "call_chain": ["entry", function],
+            "attack_entry": "外部请求由 entry 处理",
+            "root_cause": "缺少必要校验",
+            "trigger_conditions": "攻击者提交畸形输入",
+        })
+    return item
 
 
 def _write_candidate_audit_rule(
@@ -139,11 +169,14 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         assert Path(analysis["attack_tree_path"]).is_file()
         assert events and all(event["process"] == "threat_analysis" for event in events)
 
-        audit_task_result = _task_result({"vulnerabilities": [{
-            "file": "src/parser.c", "line": 10, "function": "parse",
-            "vuln_type": "oob", "severity": "high", "description": "bad length",
-            "ai_analysis": "reachable", "confirmed": True, "ai_verdict": "confirmed",
-        }]})
+        audit_task_result = _task_result([_audit_item(
+            confirmed=True,
+            file="src/parser.c",
+            line=10,
+            function="parse",
+            description="bad length",
+            vuln_type="oob",
+        )])
         with patch(
             "deephole_client.threat_audit.runner.run_opencode_task",
             new=AsyncMock(return_value=audit_task_result),
@@ -158,7 +191,8 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         assert audit["status"] == "success"
         assert audit["vulnerabilities"][0]["analysis_source"] == "threat_audit"
         assert "JSON Schema" in run_task.await_args.kwargs["prompt"]
-        assert '"vulnerabilities"' in run_task.await_args.kwargs["prompt"]
+        assert "裸 JSON List" in run_task.await_args.kwargs["prompt"]
+        assert run_task.await_args.kwargs["output_schema"]["type"] == "array"
         assert "output" not in run_task.await_args.kwargs
 
     with tempfile.TemporaryDirectory() as temp:
@@ -201,14 +235,13 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         assert static["status"] == "success"
         assert static["stats"]["total"] == 1
 
-        model_result = _task_result({
-            "vulnerabilities": [{
-                "file": "sample.c", "line": 1, "function": "bad", "vuln_type": "demo",
-                "severity": "low", "description": "candidate", "ai_analysis": "safe",
-                "confirmed": False, "ai_verdict": "not_confirmed",
-            }],
-            "markdown_reports": [],
-        })
+        model_result = _task_result(_audit_item(
+            confirmed=False,
+            file="sample.c",
+            line=1,
+            function="bad",
+            description="candidate is guarded",
+        ))
         candidate_results: list[dict] = []
         task_context = MagicMock(return_value=nullcontext())
         with (
@@ -236,7 +269,9 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         assert prompt.startswith("/demo-audit\n\n")
         assert "Audit the candidate." not in prompt
         assert "JSON Schema" in prompt
-        assert '"markdown_reports"' in prompt
+        assert '"vulnerable_code"' in prompt
+        assert '"markdown_reports"' not in prompt
+        assert run_task.await_args.kwargs["output_schema"]["type"] == "object"
         assert "output" not in run_task.await_args.kwargs
         assert task_context.call_args.kwargs["skill_paths"] == [
             audit_root.resolve(),
@@ -270,13 +305,13 @@ def test_candidate_audit_streams_results_before_the_batch_finishes() -> None:
             if audit_index == 1:
                 second_started.set()
                 await release_second.wait()
-            return _task_result({
-                "vulnerabilities": [{
-                    "confirmed": False,
-                    "ai_verdict": "not_confirmed",
-                }],
-                "markdown_reports": [],
-            })
+            return _task_result(_audit_item(
+                confirmed=False,
+                file=f"{'first' if audit_index == 0 else 'second'}.c",
+                line=audit_index + 1,
+                function="first" if audit_index == 0 else "second",
+                description="candidate is guarded",
+            ))
 
         async def on_candidate_result(result: dict) -> None:
             candidate_results.append(result)
@@ -336,17 +371,14 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
         audit_root = root / "audit-rules"
         _write_candidate_audit_rule(audit_root)
         candidate_results: list[dict] = []
-        not_confirmed = _task_result({
-            "vulnerabilities": [{
-                "confirmed": False,
-                "ai_verdict": "not_confirmed",
-            }],
-            "markdown_reports": [],
-        })
-        no_result = _task_result({
-            "vulnerabilities": [],
-            "markdown_reports": [],
-        })
+        not_confirmed = _task_result(_audit_item(
+            confirmed=False,
+            file="same.c",
+            line=1,
+            function="same",
+            description="same-pattern candidate is guarded",
+        ))
+        no_result = _task_result([])
         failure = OpenCodeResult(
             session_id="session-failed",
             status="failure",
@@ -358,14 +390,22 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
                 "serve_session_id": "session-failed",
             },
         )
-        report_only = _task_result({
-            "vulnerabilities": [],
-            "markdown_reports": [{
-                "filename": "demo.md",
-                "title": "Demo",
-                "content": "Report",
-            }],
-        })
+        project_result = _task_result([
+            _audit_item(
+                confirmed=True,
+                file="project.c",
+                line=9,
+                function="project_issue",
+                description="project-level issue",
+            ),
+            _audit_item(
+                confirmed=True,
+                file="other.c",
+                line=12,
+                function="other_issue",
+                description="second project-level issue",
+            ),
+        ])
         candidates = [
             {
                 "file": "same.c",
@@ -410,7 +450,7 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
                 not_confirmed,
                 no_result,
                 failure,
-                report_only,
+                project_result,
             ]),
         ) as run_task:
             audited = await run_candidate_audit(
@@ -436,8 +476,15 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
         assert by_index[1]["vulnerabilities"][0]["ai_verdict"] == "filtered_same_pattern"
         assert by_index[2]["vulnerabilities"][0]["ai_verdict"] == "no_result"
         assert by_index[3]["vulnerabilities"][0]["ai_verdict"] == "failed"
-        assert by_index[4]["vulnerabilities"] == []
-        assert by_index[4]["skill_reports"][0]["filename"] == "demo.md"
+        assert len(by_index[4]["vulnerabilities"]) == 2
+        assert all(
+            item["ai_verdict"] == "confirmed"
+            for item in by_index[4]["vulnerabilities"]
+        )
+        assert by_index[4]["skill_reports"] == []
+        project_call = run_task.await_args_list[-1]
+        assert project_call.kwargs["output_schema"]["type"] == "array"
+        assert "裸 JSON List" in project_call.kwargs["prompt"]
         assert len(audited["processed_keys"]) == 5
 
     with tempfile.TemporaryDirectory() as temp:

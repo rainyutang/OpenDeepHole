@@ -1300,22 +1300,34 @@ def _vuln_report_markdown(
     validation: VulnerabilityValidation | None = None,
 ) -> str:
     """Render a single vulnerability (AI analysis + FP-review stages) as Markdown."""
+    severity_labels = {
+        "critical": "致命",
+        "high": "严重",
+        "medium": "一般",
+        "low": "提示",
+    }
+    severity = str(vuln.severity or "")
+    severity_text = (
+        f"{severity_labels[severity]} ({severity})"
+        if severity in severity_labels
+        else severity or "（无）"
+    )
     lines: list[str] = []
     lines.append(f"# 漏洞报告 — {vuln.vuln_type} @ {vuln.file}:{vuln.line}")
     lines.append("")
     lines.append("| 字段 | 内容 |")
     lines.append("| --- | --- |")
-    lines.append(f"| 文件 | {vuln.file} |")
-    lines.append(f"| 行号 | {vuln.line} |")
-    lines.append(f"| 函数 | {vuln.function} |")
+    lines.append(f"| 是否是问题 | {'是' if vuln.confirmed else '否'} |")
+    lines.append(f"| 严重程度 | {severity_text} |")
+    lines.append(f"| 漏洞文件 | {vuln.file} |")
+    lines.append(f"| 漏洞函数 | {vuln.function} |")
+    lines.append(f"| 漏洞行号 | {vuln.line} |")
+    lines.append(f"| 漏洞类型 | {vuln.vuln_type} |")
     call_chain = [str(item).strip() for item in (getattr(vuln, "call_chain", None) or []) if str(item).strip()]
     if not call_chain and vuln.function:
         call_chain = [vuln.function]
     if call_chain:
         lines.append(f"| 验证入口函数 | {call_chain[0]} |")
-    lines.append(f"| 类型 | {vuln.vuln_type} |")
-    lines.append(f"| 严重级别 | {vuln.severity} |")
-    lines.append(f"| AI 判定 | {vuln.ai_verdict or ('confirmed' if vuln.confirmed else '')} |")
     if getattr(vuln, "variant_of", ""):
         lines.append(f"| 同类变体来源 | {vuln.variant_of} |")
     source_text = _format_output_source(getattr(vuln, "output_source", None))
@@ -1324,19 +1336,45 @@ def _vuln_report_markdown(
     if vuln.user_verdict:
         lines.append(f"| 用户判定 | {vuln.user_verdict} |")
     lines.append("")
-    lines.append("## 描述")
+    lines.append("## 漏洞描述")
     lines.append("")
     lines.append(vuln.description or "（无）")
     lines.append("")
+    impact = str(getattr(vuln, "impact", "") or "").strip()
+    if impact:
+        lines.append("## 漏洞影响")
+        lines.append("")
+        lines.append(impact)
+        lines.append("")
+    vulnerable_code = str(
+        getattr(vuln, "vulnerable_code", "") or ""
+    ).strip()
+    if vulnerable_code:
+        lines.append("## 漏洞代码")
+        lines.append("")
+        _append_fenced_block(lines, vulnerable_code)
+        lines.append("")
     if call_chain:
-        lines.append("## 函数调用链")
+        lines.append("## 漏洞调用链")
         lines.append("")
         for position, function_name in enumerate(call_chain, start=1):
             lines.append(f"{position}. `{function_name}`")
         lines.append("")
+    for field, title in (
+        ("attack_entry", "攻击入口"),
+        ("root_cause", "漏洞根因"),
+        ("trigger_conditions", "触发条件"),
+    ):
+        content = str(getattr(vuln, field, "") or "").strip()
+        if not content:
+            continue
+        lines.append(f"## {title}")
+        lines.append("")
+        lines.append(content)
+        lines.append("")
     vulnerability_report = str(getattr(vuln, "vulnerability_report", "") or "").strip()
     if vulnerability_report:
-        lines.append("## 模型漏洞报告")
+        lines.append("## 旧版模型漏洞报告")
         lines.append("")
         lines.append(vulnerability_report)
         lines.append("")
@@ -1345,17 +1383,24 @@ def _vuln_report_markdown(
         lines.append("")
         lines.append(vuln.user_verdict_reason)
         lines.append("")
-    lines.append("## AI 分析")
-    lines.append("")
-    lines.append(vuln.ai_analysis or "（无）")
-    lines.append("")
+    if vuln.ai_analysis:
+        lines.append("## 旧版 AI 分析")
+        lines.append("")
+        lines.append(vuln.ai_analysis)
+        lines.append("")
 
     if fp_result is not None:
         lines.append("## 去误报复核")
         lines.append("")
         verdict_label = {"tp": "真实漏洞 (tp)", "fp": "误报 (fp)"}.get(fp_result.verdict, fp_result.verdict)
         lines.append(f"- **最终结论**：{verdict_label}")
-        lines.append(f"- **严重级别**：{fp_result.severity}")
+        fp_severity = str(fp_result.severity or "")
+        fp_severity_text = (
+            f"{severity_labels[fp_severity]} ({fp_severity})"
+            if fp_severity in severity_labels
+            else fp_severity
+        )
+        lines.append(f"- **严重级别**：{fp_severity_text}")
         if getattr(fp_result, "match_type", ""):
             match_label = {"history": "对应历史问题模式", "validation": "对应其它函数校验"}.get(
                 fp_result.match_type, fp_result.match_type

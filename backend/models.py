@@ -102,10 +102,15 @@ class Vulnerability(BaseModel):
     function: str
     call_chain: list[str] = []
     vuln_type: str
-    severity: str        # "high", "medium", "low"
+    severity: str        # "critical", "high", "medium", "low"
     description: str
-    ai_analysis: str
-    vulnerability_report: str = ""            # Markdown report emitted by the audit
+    impact: str = ""
+    vulnerable_code: str = ""
+    attack_entry: str = ""
+    root_cause: str = ""
+    trigger_conditions: str = ""
+    ai_analysis: str = ""                     # Legacy unstructured analysis
+    vulnerability_report: str = ""            # Legacy/downstream Markdown report
     confirmed: bool
     ai_verdict: str = ""                     # "confirmed" | "not_confirmed" | "timeout" | "no_result" | "failed" | "filtered_same_pattern"
     failure_reason: str = ""                 # OpenCode/runner output for retryable failures

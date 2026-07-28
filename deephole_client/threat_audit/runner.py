@@ -13,6 +13,11 @@ from typing import Any
 
 from task_agent import run_opencode_task
 
+from task_agent.audit_schema import (
+    VULNERABILITY_LIST_SCHEMA,
+    audit_output_instruction,
+)
+
 PROCESS_NAME = "threat_audit"
 _ALLOWED_KEYS = {
     "project_path", "work_dir", "scan_id", "attack_tree_path",
@@ -32,37 +37,6 @@ _GENERATED_THREAT_ID_PATTERN = re.compile(
     r"[A-Z0-9][A-Z0-9-]*$",
     re.IGNORECASE,
 )
-_RESULT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "vulnerabilities": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "file": {"type": "string"},
-                    "line": {"type": "integer"},
-                    "function": {"type": "string"},
-                    "call_chain": {"type": "array", "items": {"type": "string"}},
-                    "vuln_type": {"type": "string"},
-                    "severity": {"type": "string"},
-                    "description": {"type": "string"},
-                    "ai_analysis": {"type": "string"},
-                    "vulnerability_report": {"type": "string"},
-                    "confirmed": {"type": "boolean"},
-                    "ai_verdict": {"type": "string"},
-                },
-                "required": [
-                    "file", "line", "function", "vuln_type", "severity",
-                    "description", "ai_analysis", "confirmed", "ai_verdict",
-                ],
-            },
-        }
-    },
-    "required": ["vulnerabilities"],
-}
-
-
 async def _emit(output: Any, kind: str, message: str, **data: Any) -> None:
     if output is None:
         return
@@ -267,14 +241,23 @@ def _normalize_vulnerability(raw: dict[str, Any], task: dict[str, Any], source: 
         "file": str(raw.get("file") or task["code_path"] or "."),
         "line": max(1, int(raw.get("line") or 1)),
         "function": str(raw.get("function") or "__threat_path__"),
-        "call_chain": list(raw.get("call_chain") or []),
+        "call_chain": [
+            str(item)
+            for item in raw.get("call_chain") or []
+            if str(item).strip()
+        ],
         "vuln_type": str(raw.get("vuln_type") or "threat_path"),
-        "severity": str(raw.get("severity") or "unknown"),
+        "severity": str(raw.get("severity") or ("unknown" if confirmed else "low")),
         "description": str(raw.get("description") or task["method_name"]),
-        "ai_analysis": str(raw.get("ai_analysis") or ""),
-        "vulnerability_report": str(raw.get("vulnerability_report") or ""),
+        "impact": str(raw.get("impact") or ""),
+        "vulnerable_code": str(raw.get("vulnerable_code") or ""),
+        "attack_entry": str(raw.get("attack_entry") or ""),
+        "root_cause": str(raw.get("root_cause") or ""),
+        "trigger_conditions": str(raw.get("trigger_conditions") or ""),
+        "ai_analysis": "",
+        "vulnerability_report": "",
         "confirmed": confirmed,
-        "ai_verdict": str(raw.get("ai_verdict") or ("confirmed" if confirmed else "not_confirmed")),
+        "ai_verdict": "confirmed" if confirmed else "not_confirmed",
         "failure_reason": "",
         "analysis_source": "threat_audit",
         "source_task_id": task["task_id"],
@@ -339,15 +322,20 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
             task["status"] = "running"
             task["started_at"] = datetime.now(timezone.utc).isoformat()
             await _emit(output, "progress", f"Auditing {task['task_id']}", task_id=task["task_id"])
-            prompt = """请审计当前项目中的以下威胁路径，确认是否存在可利用的真实漏洞。
-必须读取真实代码。不存在漏洞时返回空 vulnerabilities；不得为凑结果而推测。
-威胁任务：
-""" + json.dumps(task, ensure_ascii=False, indent=2)
-            prompt += (
-                "\n\n请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
-                "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，"
-                "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
-                + json.dumps(_RESULT_SCHEMA, ensure_ascii=False, indent=2)
+            prompt = (
+                "请审计当前项目中的以下威胁任务，验证给定攻击面和攻击方式是否对应"
+                "可利用的真实漏洞。必须读取项目真实代码，验证从攻击入口到漏洞触发点"
+                "的完整路径，不得为凑结果而推测。每个独立问题对应一个列表元素，"
+                "不得合并不同漏洞的位置、代码或调用链。\n\n威胁任务：\n"
+                + json.dumps(task, ensure_ascii=False, indent=2)
+            )
+            prompt += audit_output_instruction(
+                VULNERABILITY_LIST_SCHEMA,
+                list_result=True,
+                severity_basis=(
+                    "具体判定根据漏洞的真实可利用性及机密性、完整性、"
+                    "可用性影响。"
+                ),
             )
             try:
                 result = await run_opencode_task(
@@ -355,7 +343,7 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
                     task_type="threat_audit",
                     prompt=prompt,
                     required_capability=capability,
-                    output_schema=_RESULT_SCHEMA,
+                    output_schema=VULNERABILITY_LIST_SCHEMA,
                     config_path=kwargs.get("task_agent_config"),
                     cancel_event=cancel_event,
                 )
@@ -374,15 +362,27 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
                 return
             task["finished_at"] = datetime.now(timezone.utc).isoformat()
             task["output_source"] = result.output_source
-            if result.status != "success" or not isinstance(result.structured, dict):
-                task["status"] = result.status
-                task["failure_reason"] = result.text
+            if result.status != "success" or not isinstance(result.structured, list):
+                task["status"] = (
+                    result.status
+                    if result.status != "success"
+                    else "failed"
+                )
+                task["failure_reason"] = (
+                    result.text
+                    if result.status != "success"
+                    else "Threat audit returned no result list"
+                )
                 return
             produced = [
                 _normalize_vulnerability(item, task, result.output_source)
-                for item in result.structured.get("vulnerabilities") or []
+                for item in result.structured
                 if isinstance(item, dict)
             ]
+            if not produced:
+                task["status"] = "failed"
+                task["failure_reason"] = "Threat audit returned an empty result list"
+                return
             async with result_lock:
                 vulnerabilities.extend(produced)
             task["status"] = "completed"

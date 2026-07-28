@@ -74,6 +74,11 @@ class VulnerabilityStoreTests(unittest.TestCase):
 
             replacement = _make_vuln(2, audit_index=3).model_copy(update={
                 "call_chain": ["entry_fn", "fn2"],
+                "impact": "机密性：无直接影响；完整性：无直接影响；可用性：进程崩溃",
+                "vulnerable_code": "f2.c:2 fn2\nunsafe();",
+                "attack_entry": "外部请求进入 entry_fn",
+                "root_cause": "缺少边界校验",
+                "trigger_conditions": "提交畸形输入",
                 "vulnerability_report": "# Vulnerability\n\nStored report.",
             })
             index = store.upsert_incomplete_vulnerability("scan-1", replacement)
@@ -83,6 +88,11 @@ class VulnerabilityStoreTests(unittest.TestCase):
             self.assertEqual([v.audit_index for v in stored], [7, 3])
             self.assertEqual(stored[1].ai_verdict, "confirmed")
             self.assertEqual(stored[1].call_chain, ["entry_fn", "fn2"])
+            self.assertIn("可用性", stored[1].impact)
+            self.assertEqual(stored[1].vulnerable_code, "f2.c:2 fn2\nunsafe();")
+            self.assertEqual(stored[1].attack_entry, "外部请求进入 entry_fn")
+            self.assertEqual(stored[1].root_cause, "缺少边界校验")
+            self.assertEqual(stored[1].trigger_conditions, "提交畸形输入")
             self.assertEqual(stored[1].vulnerability_report, "# Vulnerability\n\nStored report.")
 
     def test_agent_identity_config_catalog_and_scan_key_persist(self) -> None:
@@ -169,6 +179,11 @@ class VulnerabilityStoreTests(unittest.TestCase):
             self.assertIn("audit_index", cols)
             self.assertIn("call_chain", cols)
             self.assertIn("vulnerability_report", cols)
+            self.assertIn("impact", cols)
+            self.assertIn("vulnerable_code", cols)
+            self.assertIn("attack_entry", cols)
+            self.assertIn("root_cause", cols)
+            self.assertIn("trigger_conditions", cols)
             migrated.save_scan(*_make_scan("scan-1"))
             migrated.add_vulnerability("scan-1", _make_vuln(1, audit_index=5))
             self.assertEqual(migrated.get_vulnerabilities("scan-1")[0].audit_index, 5)

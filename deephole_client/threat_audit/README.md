@@ -43,3 +43,10 @@ python -m deephole_client.threat_audit \
 ```
 
 返回值包含 `status`、逐攻击模式的 `tasks` 和汇总后的 `vulnerabilities`。
+
+威胁审计保持独立执行且不加载候选点 Skill。每个“攻击面 × 攻击方式”模型任务返回
+裸 JSON List，允许一次返回多个独立问题；没有问题时返回仅包含一个
+`confirmed=false` 结论的 List。列表项与候选点/项目级审计共用
+`task_agent.audit_schema.VULNERABILITY_ITEM_SCHEMA`，模型不再返回
+`ai_analysis`、`ai_verdict` 或 `vulnerability_report`。过程入口仍使用上述
+`status/tasks/vulnerabilities` 外层对象汇总全部任务，避免改变扫描协调接口。
