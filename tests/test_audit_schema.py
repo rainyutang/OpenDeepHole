@@ -22,7 +22,18 @@ def _confirmed_item(function: str = "parse_payload") -> dict:
         "vuln_type": "越界读取（CWE-125）",
         "impact": "机密性：可能泄露内存；完整性：无直接影响；可用性：可能崩溃",
         "vulnerable_code": "src/parser.c:42 parse_payload\nvalue = payload[index];",
-        "call_chain": ["handle_request", function],
+        "call_chain": [
+            {
+                "function": "handle_request",
+                "file": "src/server.c",
+                "line": 12,
+            },
+            {
+                "function": function,
+                "file": "src/parser.c",
+                "line": 35,
+            },
+        ],
         "attack_entry": "网络请求进入 handle_request",
         "root_cause": "使用外部长度前未验证缓冲区边界",
         "trigger_conditions": "攻击者提交长度字段大于实际负载的报文",
@@ -71,6 +82,33 @@ def test_candidate_schema_rejects_invalid_false_result(update: dict) -> None:
 def test_candidate_schema_requires_all_confirmed_fields() -> None:
     value = _confirmed_item()
     del value["root_cause"]
+
+    with pytest.raises(LLMJsonParseError):
+        parse_llm_json_schema(
+            json.dumps(value, ensure_ascii=False),
+            VULNERABILITY_ITEM_SCHEMA,
+        )
+
+
+@pytest.mark.parametrize(
+    "call_chain",
+    [
+        ["handle_request", "parse_payload"],
+        [{"function": "handle_request", "file": "src/server.c"}],
+        [{"function": "handle_request", "file": "src/server.c", "line": 0}],
+        [{
+            "function": "handle_request",
+            "file": "src/server.c",
+            "line": 12,
+            "extra": "not allowed",
+        }],
+    ],
+)
+def test_candidate_schema_rejects_invalid_call_chain_items(
+    call_chain: list,
+) -> None:
+    value = _confirmed_item()
+    value["call_chain"] = call_chain
 
     with pytest.raises(LLMJsonParseError):
         parse_llm_json_schema(

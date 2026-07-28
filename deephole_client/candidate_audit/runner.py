@@ -24,7 +24,7 @@ _ALLOWED_KEYS = {
     "index_db_path", "checker_names", "concurrency", "required_capability",
     "pattern_filter_enabled", "pattern_filter_scope", "feedback_entries",
     "audit_index_offset", "task_agent_config", "output", "cancel_event",
-    "on_candidate_result",
+    "on_candidate_result", "product_mcp",
 }
 _REQUIRED_KEYS = {
     "project_path", "work_dir", "scan_id", "candidates", "index_db_path",
@@ -119,9 +119,15 @@ def _normalize_vulnerability(
         "line": max(1, int(raw.get("line") or candidate.get("line") or 1)),
         "function": str(raw.get("function") or candidate.get("function") or "<unknown>"),
         "call_chain": [
-            str(item)
+            {
+                "function": str(item.get("function") or "").strip(),
+                "file": str(item.get("file") or "").strip(),
+                "line": max(1, int(item.get("line") or 1)),
+            }
             for item in raw.get("call_chain") or []
-            if str(item).strip()
+            if isinstance(item, dict)
+            and str(item.get("function") or "").strip()
+            and str(item.get("file") or "").strip()
         ],
         "vuln_type": str(raw.get("vuln_type") or candidate.get("vuln_type") or "unknown"),
         "severity": str(raw.get("severity") or ("unknown" if confirmed else "low")),
@@ -176,62 +182,64 @@ def _pattern_key(candidate: dict[str, Any], scope: str) -> tuple[str, ...]:
     return (str(candidate.get("vuln_type")), str(candidate.get("function")))
 
 
+def _related_variable(candidate: dict[str, Any]) -> str:
+    metadata = candidate.get("metadata")
+    if not isinstance(metadata, dict):
+        return "未指定"
+    subject = str(metadata.get("subject") or "").strip()
+    if subject:
+        return subject
+    values = [
+        str(metadata.get(key) or "").strip()
+        for key in ("focus_variable", "target_variable")
+    ]
+    variables = list(dict.fromkeys(value for value in values if value))
+    return "、".join(variables) or "未指定"
+
+
 def _candidate_prompt(
     checker: dict[str, Any],
     candidate: dict[str, Any],
-    scan_id: str,
+    product_mcp: str,
 ) -> str:
-    metadata = candidate.get("metadata")
     is_project = candidate.get("function") == PROJECT_LEVEL_FUNCTION
     if is_project:
-        target = (
-            "项目级审计目标：\n"
-            + json.dumps(candidate, ensure_ascii=False, indent=2)
-        )
         instruction = (
             "请按已加载的 Skill 对当前项目进行审计。必须读取项目真实代码并验证"
             "完整攻击路径；每个独立问题对应一个列表元素，不得合并不同漏洞的位置、"
             "代码或调用链。若 Skill 中的旧输出字段、枚举或模板与本提示冲突，"
             "以本提示及 JSON Schema 为准。"
         )
-    elif (
-        str(candidate.get("vuln_type") or "") == "sensitive_clear"
-        and isinstance(metadata, dict)
-        and metadata.get("kind") == "sensitive_clear_function"
-    ):
-        function_name = str(
-            metadata.get("function_name")
-            or candidate.get("function")
-            or "",
-        )
-        file_path = str(metadata.get("file") or candidate.get("file") or "")
         target = (
-            f"分析 `{file_path}` 文件中的 `{function_name}` 函数敏感信息未清0问题。"
-            f"scan_id: `{scan_id}`。"
-        )
-        instruction = (
-            "请按已加载的 Skill 审计以下单个候选点。必须读取项目真实代码，"
-            "验证从攻击入口到漏洞触发点的完整路径，不得仅复述候选或编造证据。"
-            "若 Skill 中的旧输出字段、枚举或模板与本提示冲突，"
-            "以本提示及 JSON Schema 为准。"
-        )
-    else:
-        target = (
-            "候选点：\n"
+            "项目级审计目标：\n"
             + json.dumps(candidate, ensure_ascii=False, indent=2)
         )
+    else:
         instruction = (
-            "请按已加载的 Skill 审计以下单个候选点。必须读取项目真实代码，"
-            "验证从攻击入口到漏洞触发点的完整路径，不得仅复述候选或编造证据。"
-            "若 Skill 中的旧输出字段、枚举或模板与本提示冲突，"
-            "以本提示及 JSON Schema 为准。"
+            "你是一个白盒审计专家，使用该skill审计文件"
+            f"{str(candidate.get('file') or '')}中"
+            f"{max(1, int(candidate.get('line') or 1))}行函数"
+            f"{str(candidate.get('function') or '')}变量"
+            f"{_related_variable(candidate)}是否存在"
+            f"{str(candidate.get('vuln_type') or '')}问题，是否可以触发。"
         )
-    return (
-        f"/{checker['skill_name']}\n\n"
-        + instruction
-        + "\n\n"
-        + target
+        target = ""
+    product_instruction = (
+        f"\n已配置产品知识库，请使用 `{product_mcp}` 提供的工具获取产品知识，"
+        "判断外部入口函数。"
+        if product_mcp
+        else ""
     )
+    call_chain_instruction = (
+        "\n输出的 `call_chain` 必须以外部入口函数为起点。"
+    )
+    parts = [
+        f"/{checker['skill_name']}",
+        instruction + product_instruction + call_chain_instruction,
+    ]
+    if target:
+        parts.append(target)
+    return "\n".join(parts)
 
 
 async def _notify_candidate_result(
@@ -320,6 +328,7 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
         raise TypeError("feedback_entries must be a list")
     filter_enabled = bool(kwargs.get("pattern_filter_enabled", False))
     filter_scope = str(kwargs.get("pattern_filter_scope") or "function")
+    product_mcp = str(kwargs.get("product_mcp") or "").strip()
 
     vulnerabilities: list[dict[str, Any]] = []
     skill_reports: dict[str, list[dict[str, Any]]] = {}
@@ -365,7 +374,7 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
             prompt = _candidate_prompt(
                 checker,
                 candidate,
-                str(kwargs["scan_id"]),
+                product_mcp,
             )
             if feedback:
                 prompt += "\n\n历史人工反馈（只作判定参考）：\n" + json.dumps(feedback, ensure_ascii=False, indent=2)

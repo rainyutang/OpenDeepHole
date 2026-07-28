@@ -62,6 +62,51 @@ def _make_vuln(
 
 
 class VulnerabilityStoreTests(unittest.TestCase):
+    def test_structured_call_chain_round_trips_with_legacy_compatibility(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(*_make_scan("scan-chain"))
+            structured = _make_vuln(1).model_copy(update={
+                "call_chain": [
+                    {
+                        "function": "handle_packet",
+                        "file": "src/server.c",
+                        "line": 10,
+                    },
+                    {
+                        "function": "fn1",
+                        "file": "f1.c",
+                        "line": 1,
+                    },
+                ],
+            })
+            legacy = _make_vuln(2).model_copy(update={
+                "call_chain": ["legacy_entry", "fn2"],
+            })
+
+            store.add_vulnerability("scan-chain", structured)
+            store.add_vulnerability("scan-chain", legacy)
+
+            stored = store.get_vulnerabilities("scan-chain")
+            self.assertEqual(
+                stored[0].model_dump(mode="json")["call_chain"],
+                [
+                    {
+                        "function": "handle_packet",
+                        "file": "src/server.c",
+                        "line": 10,
+                    },
+                    {
+                        "function": "fn1",
+                        "file": "f1.c",
+                        "line": 1,
+                    },
+                ],
+            )
+            self.assertEqual(stored[1].call_chain, ["legacy_entry", "fn2"])
+
     def test_vulnerability_audit_index_round_trips_and_upsert_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")

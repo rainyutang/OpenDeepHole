@@ -115,11 +115,17 @@ export interface OutputSource {
   serve_session_id?: string;
 }
 
+export interface CallChainEntry {
+  function: string;
+  file: string;
+  line: number;
+}
+
 export interface Vulnerability {
   file: string;
   line: number;
   function: string;
-  call_chain?: string[];
+  call_chain?: Array<CallChainEntry | string>;
   vuln_type: string;
   severity: string;
   description: string;

@@ -93,6 +93,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         config = AgentConfig()
         config.threat_analysis.enabled = False
         config.vulnerability_validation.enabled = False
+        config.product_info.enabled = True
+        config.product_info.name = "product-knowledge"
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -131,6 +133,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 calls.append("candidate_audit")
                 self.assertEqual(kwargs["index_db_path"], index_path)
                 self.assertIn("candidate_audit/rules", kwargs["checker_dirs"][0].as_posix())
+                self.assertEqual(kwargs["product_mcp"], "product-knowledge")
                 processed_key = {
                     "file": "src/a.c",
                     "line": 10,

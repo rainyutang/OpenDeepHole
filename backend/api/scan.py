@@ -1293,6 +1293,40 @@ def _append_validation_markdown(lines: list[str], validation: VulnerabilityValid
                     lines.append("")
 
 
+def _normalized_call_chain(value: object) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for item in value or []:
+        if hasattr(item, "model_dump"):
+            item = item.model_dump(mode="json")
+        if isinstance(item, dict):
+            function = str(item.get("function") or "").strip()
+            file_path = str(item.get("file") or "").strip()
+            try:
+                line = int(item.get("line") or 0)
+            except (TypeError, ValueError):
+                line = 0
+            if function:
+                result.append({
+                    "function": function,
+                    "file": file_path,
+                    "line": line,
+                })
+            continue
+        function = str(item or "").strip()
+        if function:
+            result.append({"function": function, "file": "", "line": 0})
+    return result
+
+
+def _call_chain_label(item: dict[str, object]) -> str:
+    function = str(item.get("function") or "")
+    file_path = str(item.get("file") or "")
+    line = int(item.get("line") or 0)
+    if file_path and line > 0:
+        return f"{function} — {file_path}:{line}"
+    return function
+
+
 def _vuln_report_markdown(
     idx,
     vuln,
@@ -1323,11 +1357,19 @@ def _vuln_report_markdown(
     lines.append(f"| 漏洞函数 | {vuln.function} |")
     lines.append(f"| 漏洞行号 | {vuln.line} |")
     lines.append(f"| 漏洞类型 | {vuln.vuln_type} |")
-    call_chain = [str(item).strip() for item in (getattr(vuln, "call_chain", None) or []) if str(item).strip()]
+    call_chain = _normalized_call_chain(
+        getattr(vuln, "call_chain", None) or [],
+    )
     if not call_chain and vuln.function:
-        call_chain = [vuln.function]
+        call_chain = [{
+            "function": vuln.function,
+            "file": vuln.file,
+            "line": int(getattr(vuln, "function_start_line", None) or vuln.line),
+        }]
     if call_chain:
-        lines.append(f"| 验证入口函数 | {call_chain[0]} |")
+        lines.append(
+            f"| 验证入口函数 | {call_chain[0]['function']} |"
+        )
     if getattr(vuln, "variant_of", ""):
         lines.append(f"| 同类变体来源 | {vuln.variant_of} |")
     source_text = _format_output_source(getattr(vuln, "output_source", None))
@@ -1357,8 +1399,8 @@ def _vuln_report_markdown(
     if call_chain:
         lines.append("## 漏洞调用链")
         lines.append("")
-        for position, function_name in enumerate(call_chain, start=1):
-            lines.append(f"{position}. `{function_name}`")
+        for position, item in enumerate(call_chain, start=1):
+            lines.append(f"{position}. `{_call_chain_label(item)}`")
         lines.append("")
     for field, title in (
         ("attack_entry", "攻击入口"),

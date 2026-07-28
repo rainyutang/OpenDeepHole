@@ -61,6 +61,45 @@ def _json_string_list(value: str | None) -> list[str]:
     return [str(item).strip() for item in data if str(item).strip()]
 
 
+def _json_call_chain(value: str | None) -> list[dict | str]:
+    try:
+        data = json.loads(value or "[]")
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    result: list[dict | str] = []
+    for item in data:
+        if isinstance(item, dict):
+            function = str(item.get("function") or "").strip()
+            file_path = str(item.get("file") or "").strip()
+            try:
+                line = int(item.get("line") or 0)
+            except (TypeError, ValueError):
+                line = 0
+            if function and file_path and line > 0:
+                result.append({
+                    "function": function,
+                    "file": file_path,
+                    "line": line,
+                })
+            continue
+        function = str(item or "").strip()
+        if function:
+            result.append(function)
+    return result
+
+
+def _call_chain_json(values: list[object]) -> str:
+    normalized = [
+        item.model_dump(mode="json")
+        if hasattr(item, "model_dump")
+        else item
+        for item in values
+    ]
+    return json.dumps(normalized, ensure_ascii=False)
+
+
 def _output_source(value: str | None) -> OutputSource:
     try:
         data = json.loads(value or "{}")
@@ -1702,7 +1741,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.file,
                     vuln.line,
                     vuln.function,
-                    json.dumps(vuln.call_chain, ensure_ascii=False),
+                    _call_chain_json(vuln.call_chain),
                     vuln.vuln_type,
                     vuln.severity,
                     vuln.description,
@@ -1790,7 +1829,7 @@ class SqliteScanStore(ScanStoreBase):
                     """,
                     (
                         vuln.audit_index,
-                        json.dumps(vuln.call_chain, ensure_ascii=False),
+                        _call_chain_json(vuln.call_chain),
                         vuln.severity,
                         vuln.description,
                         vuln.impact,
@@ -1844,7 +1883,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.file,
                     vuln.line,
                     vuln.function,
-                    json.dumps(vuln.call_chain, ensure_ascii=False),
+                    _call_chain_json(vuln.call_chain),
                     vuln.vuln_type,
                     vuln.severity,
                     vuln.description,
@@ -1981,7 +2020,7 @@ class SqliteScanStore(ScanStoreBase):
                 line=r["line"],
                 function=r["function"],
                 call_chain=(
-                    _json_string_list(r["call_chain"])
+                    _json_call_chain(r["call_chain"])
                     if "call_chain" in r.keys()
                     else []
                 ) or [r["function"]],

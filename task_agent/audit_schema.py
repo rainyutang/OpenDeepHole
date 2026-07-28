@@ -8,6 +8,17 @@ from typing import Any
 
 SEVERITY_VALUES = ("critical", "high", "medium", "low")
 
+CALL_CHAIN_ITEM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "function": {"type": "string", "minLength": 1},
+        "file": {"type": "string", "minLength": 1},
+        "line": {"type": "integer", "minimum": 1},
+    },
+    "required": ["function", "file", "line"],
+    "additionalProperties": False,
+}
+
 VULNERABILITY_ITEM_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -26,7 +37,7 @@ VULNERABILITY_ITEM_SCHEMA: dict[str, Any] = {
         "call_chain": {
             "type": "array",
             "minItems": 1,
-            "items": {"type": "string", "minLength": 1},
+            "items": CALL_CHAIN_ITEM_SCHEMA,
         },
         "attack_entry": {"type": "string", "minLength": 1},
         "root_cause": {"type": "string", "minLength": 1},
@@ -122,9 +133,12 @@ def audit_output_instruction(
         "维度也要明确写“无直接影响”。\n"
         "- `vulnerable_code` 必须包含证明漏洞所需的全部相关源码，保留换行"
         "并标明文件、函数和行号，不得使用省略号或 Markdown 代码围栏。\n"
-        "- `call_chain` 必须按攻击入口到漏洞触发点的顺序列出全部函数；"
-        "首项是入口函数，末项必须等于 `function`。\n"
-        "- `attack_entry` 说明外部输入、接口以及对应入口函数。\n"
+        "- `call_chain` 必须按外部入口到漏洞触发点的顺序列出全部函数；"
+        "每个元素必须包含 `function`、`file` 和函数定义起始行 `line`，"
+        "首项必须是外部入口函数，末项的 `function`、`file` 必须分别等于"
+        "漏洞结果的 `function`、`file`。\n"
+        "- `attack_entry` 说明外部输入、接口以及 `call_chain` 首项对应的"
+        "外部入口函数。\n"
         "- `root_cause` 说明导致漏洞的根本原因。\n"
         "- `trigger_conditions` 说明触发漏洞必须满足的全部条件。\n\n"
         f"{shape_rule}\n\n"

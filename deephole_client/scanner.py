@@ -638,6 +638,11 @@ async def run_scan(
                         ),
                         feedback_entries=feedback_entries,
                         audit_index_offset=processed,
+                        product_mcp=(
+                            config.product_info.name
+                            if config.product_info.enabled
+                            else None
+                        ),
                         output=process_output,
                         on_candidate_result=report_candidate_result,
                         cancel_event=cancel_event,

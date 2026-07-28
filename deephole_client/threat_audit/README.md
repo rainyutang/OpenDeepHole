@@ -50,3 +50,5 @@ python -m deephole_client.threat_audit \
 `task_agent.audit_schema.VULNERABILITY_ITEM_SCHEMA`，模型不再返回
 `ai_analysis`、`ai_verdict` 或 `vulnerability_report`。过程入口仍使用上述
 `status/tasks/vulnerabilities` 外层对象汇总全部任务，避免改变扫描协调接口。
+其中 `call_chain` 的每个元素均为包含 `function`、`file` 和函数定义起始行
+`line` 的对象，并按外部入口到漏洞触发点排序。

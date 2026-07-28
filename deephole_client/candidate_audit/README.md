@@ -18,6 +18,7 @@
 | `feedback_entries` | 否 | `list[dict]` | 历史人工反馈 |
 | `audit_index_offset` | 否 | int | 审计序号偏移 |
 | `task_agent_config` | 否 | path | 独立 Task Agent 配置 |
+| `product_mcp` | 否 | str | 已启用的产品知识 MCP 配置名 |
 | `output` | 否 | callable | 同步或异步事件回调 |
 | `on_candidate_result` | 否 | callable | 单个候选进入终态后的同步或异步结果回调 |
 | `cancel_event` | 否 | event | 提供 `is_set()` 的取消信号 |
@@ -25,6 +26,11 @@
 每个 checker 的 `SKILL.md` 必须在 YAML frontmatter 中声明 `name`。过程会把
 `checker_dirs` 作为本次任务专属的 Skill 路径注册给 Task Agent，并以
 `/<name>` 作为 Prompt 首行加载 Skill；`SKILL.md` 正文不会拼接进 Prompt。
+单候选正文只包含文件、行号、函数、现有结构化元数据中的相关变量和漏洞类型，
+不再附加候选 `description` 或完整 `metadata`。相关变量依次读取
+`metadata.subject`、`metadata.focus_variable`/`target_variable`，缺失时使用
+“未指定”。传入 `product_mcp` 时会要求使用该 MCP 提供的工具获取产品知识并判断
+外部入口函数；调用链始终必须从外部入口开始。
 
 普通候选点的单次模型任务直接返回一个漏洞对象；`function="__project__"` 的项目级
 审计返回裸 JSON List，每个独立问题一个元素。项目级未发现问题时返回仅包含一个
@@ -35,6 +41,7 @@
 - 确认问题时必填：`vuln_type`、`impact`、`vulnerable_code`、`call_chain`、
   `attack_entry`、`root_cause`、`trigger_conditions`
 - `severity` 仅允许 `critical`、`high`、`medium`、`low`；非问题固定为 `low`
+- `call_chain` 每个元素必须包含 `function`、`file` 和函数定义起始行 `line`
 
 模型不再生成 `ai_analysis`、`ai_verdict`、`vulnerability_report` 或
 `markdown_reports`。`ai_verdict` 由过程根据 `confirmed` 派生，最终 Markdown 报告
@@ -52,5 +59,5 @@
 python -m deephole_client.candidate_audit --project-path /src/project \
   --work-dir /tmp/audit --candidates candidates.json \
   --checker-dir ./rules --index-db-path code_index.db \
-  --task-agent-config ./task-agent.yaml
+  --task-agent-config ./task-agent.yaml --product-mcp product-info
 ```

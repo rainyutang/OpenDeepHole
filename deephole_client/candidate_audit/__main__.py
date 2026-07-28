@@ -33,6 +33,7 @@ def main() -> None:
     parser.add_argument("--feedback")
     parser.add_argument("--audit-index-offset", type=int, default=0)
     parser.add_argument("--task-agent-config")
+    parser.add_argument("--product-mcp")
     parser.add_argument("--output-file")
     args = parser.parse_args()
     candidates = json.loads(Path(args.candidates).read_text(encoding="utf-8"))
@@ -56,6 +57,7 @@ def main() -> None:
         feedback_entries=feedback,
         audit_index_offset=args.audit_index_offset,
         task_agent_config=args.task_agent_config,
+        product_mcp=args.product_mcp,
         output=event_output,
     ))
     text = json.dumps(result, ensure_ascii=False, indent=2)

@@ -14,6 +14,7 @@ from deephole_client.code_graph_build.code_database import CodeDatabase
 from task_agent import OpenCodeResult
 
 from deephole_client.candidate_audit import run_candidate_audit
+from deephole_client.candidate_audit.runner import _candidate_prompt
 from deephole_client.code_graph_build import run_code_graph_build
 from deephole_client.fp_review import run_fp_review
 from deephole_client.static_analysis import run_static_analysis
@@ -66,7 +67,10 @@ def _audit_item(
             "vuln_type": vuln_type,
             "impact": "机密性：无直接影响；完整性：无直接影响；可用性：进程崩溃",
             "vulnerable_code": f"{file}:{line} {function}\nunsafe();",
-            "call_chain": ["entry", function],
+            "call_chain": [
+                {"function": "entry", "file": "src/entry.c", "line": 1},
+                {"function": function, "file": file, "line": line},
+            ],
             "attack_entry": "外部请求由 entry 处理",
             "root_cause": "缺少必要校验",
             "trigger_conditions": "攻击者提交畸形输入",
@@ -106,6 +110,31 @@ def test_all_process_entries_are_async_and_reject_unknown_keys() -> None:
             assert "unexpected key" in str(exc)
         else:
             raise AssertionError(f"{function.__name__} accepted an unknown key")
+
+
+def test_candidate_prompt_uses_existing_related_variables_without_clues() -> None:
+    prompt = _candidate_prompt(
+        {"skill_name": "oob-audit"},
+        {
+            "file": "src/copy.c",
+            "line": 28,
+            "function": "copy_payload",
+            "vuln_type": "oob",
+            "description": "do not include this candidate clue",
+            "metadata": {
+                "focus_variable": "length",
+                "target_variable": "destination",
+            },
+        },
+        "",
+    )
+
+    assert prompt == (
+        "/oob-audit\n"
+        "你是一个白盒审计专家，使用该skill审计文件src/copy.c中28行"
+        "函数copy_payload变量length、destination是否存在oob问题，是否可以触发。\n"
+        "输出的 `call_chain` 必须以外部入口函数为起点。"
+    )
 
 
 def test_threat_processes_run_with_task_agent_only() -> None:
@@ -190,6 +219,11 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             )
         assert audit["status"] == "success"
         assert audit["vulnerabilities"][0]["analysis_source"] == "threat_audit"
+        assert audit["vulnerabilities"][0]["call_chain"][0] == {
+            "function": "entry",
+            "file": "src/entry.c",
+            "line": 1,
+        }
         assert "JSON Schema" in run_task.await_args.kwargs["prompt"]
         assert "裸 JSON List" in run_task.await_args.kwargs["prompt"]
         assert run_task.await_args.kwargs["output_schema"]["type"] == "array"
@@ -261,13 +295,21 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
                 candidates=static["candidates"],
                 checker_dirs=[audit_root],
                 index_db_path=index_path,
+                product_mcp="product-info",
                 on_candidate_result=candidate_results.append,
             ), timeout=5)
         assert audited["status"] == "success"
         assert audited["vulnerabilities"][0]["ai_verdict"] == "not_confirmed"
         prompt = run_task.await_args.kwargs["prompt"]
-        assert prompt.startswith("/demo-audit\n\n")
+        assert prompt.startswith(
+            "/demo-audit\n"
+            "你是一个白盒审计专家，使用该skill审计文件sample.c中1行"
+            "函数bad变量未指定是否存在demo问题，是否可以触发。"
+        )
         assert "Audit the candidate." not in prompt
+        assert "candidate" not in prompt
+        assert "使用 `product-info` 提供的工具获取产品知识" in prompt
+        assert "call_chain` 必须以外部入口函数为起点" in prompt
         assert "JSON Schema" in prompt
         assert '"vulnerable_code"' in prompt
         assert '"markdown_reports"' not in prompt

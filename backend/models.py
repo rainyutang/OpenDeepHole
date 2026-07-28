@@ -95,12 +95,20 @@ class OutputSource(BaseModel):
     serve_session_id: str = ""
 
 
+class CallChainEntry(BaseModel):
+    """One function location in an externally reachable vulnerability path."""
+
+    function: str
+    file: str
+    line: int = Field(ge=1)
+
+
 class Vulnerability(BaseModel):
     """A confirmed or assessed vulnerability after AI analysis."""
     file: str
     line: int
     function: str
-    call_chain: list[str] = []
+    call_chain: list[CallChainEntry | str] = []
     vuln_type: str
     severity: str        # "critical", "high", "medium", "low"
     description: str
