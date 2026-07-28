@@ -268,6 +268,7 @@ class OpenCodeTaskSpec:
     output_retry_count: int = 2
     output_retry_prompt: str | None = None
     file_write_allowlist: tuple[Path, ...] = ()
+    writable_paths: tuple[Path, ...] | None = None
     session_id: str | None = None
     attempt: int | None = None
 
@@ -437,6 +438,14 @@ class OpenCodeTaskService:
         file_write_allowlist = tuple(
             dict.fromkeys(Path(path).resolve() for path in spec.file_write_allowlist)
         )
+        writable_paths = (
+            None
+            if spec.writable_paths is None
+            else _normalize_writable_path_values(
+                spec.writable_paths,
+                directory,
+            )
+        )
         attempt = spec.attempt
         if attempt is not None and int(attempt) < 0:
             raise ValueError("OpenCode attempt cannot be negative")
@@ -451,6 +460,7 @@ class OpenCodeTaskService:
             output_retry_count=output_retry_count,
             output_retry_prompt=output_retry_prompt,
             file_write_allowlist=file_write_allowlist,
+            writable_paths=writable_paths,
             attempt=None if attempt is None else int(attempt),
             session_id=str(spec.session_id or "").strip() or None,
         )
@@ -720,6 +730,7 @@ class OpenCodeTaskService:
                         )
 
                 system_prompt = _task_system_prompt(record)
+                permissions = _writable_path_permissions(spec.writable_paths)
                 timeout_seconds = (
                     (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
                     or spec.timeout_seconds
@@ -770,6 +781,9 @@ class OpenCodeTaskService:
                                     scan_id=context.scan_id,
                                     code_graph_mcp=context.code_graph_mcp,
                                     system_prompt=system_prompt,
+                                    permissions=(
+                                        permissions if output_attempt == 0 else None
+                                    ),
                                     return_details=True,
                                     show_serve_status=self._task_progress_enabled(record),
                                     log_stage=task_output_stage(
@@ -1364,6 +1378,27 @@ def _permission_path_patterns(path: Path | PurePath) -> list[str]:
     return patterns
 
 
+def _writable_path_permissions(
+    paths: tuple[Path, ...] | None,
+) -> list[dict[str, str]] | None:
+    if paths is None:
+        return None
+    rules: list[dict[str, str]] = []
+    for permission in ("read", "external_directory", "edit"):
+        seen: set[str] = set()
+        for root in paths:
+            for pattern in _permission_path_patterns(root):
+                if pattern in seen:
+                    continue
+                rules.append({
+                    "permission": permission,
+                    "pattern": pattern,
+                    "action": "allow",
+                })
+                seen.add(pattern)
+    return rules
+
+
 def _runtime_with_permissions(
     runtime: _SessionRuntime,
     context: OpenCodeExecutionContext,
@@ -1448,6 +1483,38 @@ def _parse_text_json(text: str, schema: dict[str, Any] | None = None) -> Any:
 
 def _path_is_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
+
+
+def _normalize_writable_path_values(
+    entries: Iterable[str | Path],
+    project_dir: Path,
+) -> tuple[Path, ...]:
+    resolved_project_dir = project_dir.resolve()
+    paths: list[Path] = []
+    for entry in entries:
+        raw = str(entry)
+        if not raw.strip():
+            raise ValueError("OpenCode writable_paths entries cannot be empty")
+        if "*" in raw or "?" in raw:
+            raise ValueError(
+                "OpenCode writable_paths entries cannot contain wildcard characters"
+            )
+        try:
+            path = Path(entry).expanduser()
+            if not path.is_absolute():
+                path = resolved_project_dir / path
+            path = path.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                f"Invalid OpenCode writable_paths entry: {entry!r}"
+            ) from exc
+        if path.parent == path:
+            raise ValueError(
+                "OpenCode writable_paths entries cannot resolve to a filesystem root: "
+                f"{entry!r}"
+            )
+        paths.append(path)
+    return tuple(dict.fromkeys(paths))
 
 
 def _normalize_file_write_allowlist_paths(
@@ -1587,6 +1654,7 @@ async def _run_component_task(
     invalid_json_retry_count: int,
     invalid_json_retry_prompt: str | None,
     file_write_allowlist: tuple[str, ...],
+    writable_paths: tuple[str, ...] | None,
     session_id: str | None,
 ) -> OpenCodeResult:
     """Translate the public contract into the internal scheduling record."""
@@ -1597,6 +1665,14 @@ async def _run_component_task(
         allowlist = _normalize_file_write_allowlist_paths(
             file_write_allowlist,
             work_dir,
+        )
+        normalized_writable_paths = (
+            None
+            if writable_paths is None
+            else _normalize_writable_path_values(
+                writable_paths,
+                project_dir,
+            )
         )
         result = await _get_opencode_task_service().run_task(
             OpenCodeTaskSpec(
@@ -1610,6 +1686,7 @@ async def _run_component_task(
                 output_retry_count=invalid_json_retry_count,
                 output_retry_prompt=invalid_json_retry_prompt,
                 file_write_allowlist=allowlist,
+                writable_paths=normalized_writable_paths,
                 session_id=session_id,
                 attempt=None,
             )

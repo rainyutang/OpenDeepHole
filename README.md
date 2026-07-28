@@ -573,8 +573,8 @@ OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_
 OpenCode 调用约定：
 
 - `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置。
-- `nga` / `opencode` 只通过 serve API 调用。Agent 优先使用 `base.opencode_serve_port`，未配置时兼容 `OPENCODE_SERVE_PORT`，两者都没有时由操作系统分配一个空闲端口；自动端口在同一 Agent 进程内跨 Serve 重启复用，Agent 重启后重新选择。配置更新在活动 Session 结束后的安全重启边界生效。standalone `task-agent.yaml` 继续使用显式 `serve.port`（默认 `4096`）。组件只调用 `task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录，也不允许调用方传 permission。
-- 文件、SKILL 与 `bash` 权限统一写入 Serve 实际使用的全局 `opencode.json`，Task Agent 不再在创建或续写 Session 时发送或 PATCH `permission`。项目目录作为 Session 工作目录保持可读；`~/.opendeephole/opencode_workspace/.opencode` 和最终配置注册的 SKILL 根只读，完整 Agent 的文件编辑工具可写 `~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 与 `skill_create`，其它源码目录保持只读且 `bash` 全面禁用。既有 Session 已保存的历史权限不会被迁移代码主动改写；脱离 Agent 运行时只从 `task-agent.yaml` 的 `serve.opencode_config.skills.paths` 加载 SKILL。
+- `nga` / `opencode` 只通过 serve API 调用。Agent 优先使用 `base.opencode_serve_port`，未配置时兼容 `OPENCODE_SERVE_PORT`，两者都没有时由操作系统分配一个空闲端口；自动端口在同一 Agent 进程内跨 Serve 重启复用，Agent 重启后重新选择。配置更新在活动 Session 结束后的安全重启边界生效。standalone `task-agent.yaml` 继续使用显式 `serve.port`（默认 `4096`）。组件只调用 `task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录。调用方不能传原生 permission，只能通过 `writable_paths` 显式增加路径级写权限。
+- 文件、SKILL 与 `bash` 的稳定权限统一写入 Serve 实际使用的全局 `opencode.json`。项目目录作为 Session 工作目录保持可读；`~/.opendeephole/opencode_workspace/.opencode` 和最终配置注册的 SKILL 根只读，完整 Agent 的文件编辑工具可写 `~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 与 `skill_create`，其它源码目录保持只读且 `bash` 全面禁用。只有显式传入 `writable_paths` 时，额外动态路径才通过 Session `permission` 创建或 PATCH；省略时不改已有 Session 权限，显式空列表清空覆盖。脱离 Agent 运行时只从 `task-agent.yaml` 的 `serve.opencode_config.skills.paths` 加载 SKILL。
 - `output_schema` 只用于本地 JSON 解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。最终文本 JSON 优先；若模型改用内置文件工具写 JSON，Task Agent 会从当前消息最后写入的合法文件填充 `structured`，但 `text` 仍保留 LLM 最后一次文本输出。确认由本条消息新建的临时文件在解析后自动删除；必须保留的文件或目录可传 `file_write_allowlist`，该白名单只控制清理且不能扩大 `work_dir` 写权限。JSON 仍不合规时默认在原 Session 追加 2 次包含 Schema 的中文纠正，也可通过 `invalid_json_retry_prompt` 提供原样发送的自定义纠正提示词；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - 只有扫描显式启用的代码图谱 MCP 才会动态连接；空配置、历史 `null` 配置、去误报和漏洞验证均遵循同一文件工具模式，不会启动内置源码 MCP。
@@ -611,6 +611,7 @@ result = await run_opencode_task(
     output_schema=RESULT_SCHEMA,
     invalid_json_retry_count=2,
     invalid_json_retry_prompt=retry_prompt,
+    writable_paths=["generated-reports"],
 )
 
 continued = await run_opencode_task(

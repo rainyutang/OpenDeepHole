@@ -36,6 +36,7 @@ result = await run_opencode_task(
     invalid_json_retry_count=2,
     invalid_json_retry_prompt=retry_prompt,
     file_write_allowlist=None,
+    writable_paths=None,
     session_id=None,
     config_path=None,
     output=None,
@@ -55,6 +56,7 @@ result = await run_opencode_task(
 | `invalid_json_retry_count` | `int` | `2` | 首次结果不符合 `output_schema` 时，在同一会话中要求模型修正 JSON 的最大次数，必须大于或等于 `0`。该参数不控制新会话重试次数。 |
 | `invalid_json_retry_prompt` | `str` 或 `None` | `None` | JSON 校验失败后的可选纠正提示词。传入非空字符串时，每次纠错都原样重复发送；`None` 使用组件当前包含完整 Schema 的中文默认提示词。 |
 | `file_write_allowlist` | 路径序列或 `None` | `None` | `output_schema` 生效时，需要保留的模型写入文件或目录。相对路径以当前 `work_dir` 为基准，绝对路径也必须位于其中；目录项同时匹配自身及所有后代。它只阻止自动清理，不增加写权限。 |
+| `writable_paths` | 路径序列或 `None` | `None` | 本次 Session 允许内置文件工具修改的额外文件或目录。相对路径以 `project_dir` 为基准，绝对路径可位于项目外；路径会获得 `read`、`external_directory` 和 `edit` 权限，其中 `edit` 同时控制 `write`、`edit` 与 `apply_patch`。不允许通配符或文件系统根目录。 |
 | `session_id` | `str` 或 `None` | `None` | 传入已有 Serve 会话 ID 以续接会话；省略、传入 `None` 或空字符串时创建新会话。同一组件生命周期内，续接会话不能切换项目目录或可写工作目录。 |
 | `config_path` | `str`、`PathLike[str]` 或 `None` | `None` | 独立运行时使用的 YAML 配置文件路径。未传入时依次读取 `TASK_AGENT_CONFIG` 和当前目录下的 `task-agent.yaml`。宿主配置已注册时不能再传入此参数。 |
 | `output` | callable 或 `None` | 使用当前执行上下文 | 可选的本次调用输出覆盖；传 `None` 可关闭 Task Agent 控制台流。 |
@@ -72,12 +74,14 @@ result = await run_opencode_task(
 任务的 Serve 配置，不会修改宿主的持久受管 Skill 注册；Task Agent 会在最终
 `opencode.json` 中从 `skills.paths` 和临时 `skill_paths` 推导显式 `read: allow` 与外部目录规则，使
 `references/`、`assets/`、`scripts/` 等资源可读。standalone 默认仍只允许写 `work_dir`；
-嵌入宿主可通过 `OpenCodeHostBindings.writable_roots` 声明额外稳定可写根。组件不会在
-创建或续写 Session 时发送或 PATCH `permission`；升级前已有 Session 的历史权限保持原状。
+嵌入宿主可通过 `OpenCodeHostBindings.writable_roots` 声明额外稳定可写根。只有调用方显式
+传入 `writable_paths` 时，组件才会在创建或续写 Session 时下发对应路径的窄化
+`permission` 覆盖；`None` 保留已有 Session 权限，显式空列表清除 Session 覆盖并回落到
+全局边界。调用方不能传原生权限规则，`bash` 始终保持禁用。
 
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
 
-传入 `output_schema` 后，每条消息仍以最终文本中的合法 JSON 为第一选择。文本不匹配时，组件会按实际成功写入顺序倒序检查当前消息的内置 `write`、`edit`、`apply_patch`/`patch` 文件，最后一个匹配 Schema 的文件作为 `structured`。本次消息确认新建且不在 `file_write_allowlist` 中的文件会在解析后删除，包括执行失败或进入同 Session 纠错时；已有文件即使被模型修改也不会删除或恢复。未传 Schema 时不跟踪、解析或清理文件；自定义 MCP 的未知文件副作用也不纳入该机制。
+传入 `output_schema` 后，每条消息仍以最终文本中的合法 JSON 为第一选择。文本不匹配时，组件会按实际成功写入顺序倒序检查当前消息的内置 `write`、`edit`、`apply_patch`/`patch` 文件，最后一个匹配 Schema 的文件作为 `structured`。本次消息确认新建且不在 `file_write_allowlist` 中的文件会在解析后删除，包括执行失败或进入同 Session 纠错时；已有文件即使被模型修改也不会删除或恢复。`writable_paths` 只授予修改权限，不会自动保留文件。未传 Schema 时不跟踪、解析或清理文件；自定义 MCP 的未知文件副作用也不纳入该机制。
 
 `task_type` 是文档约定的字符串，而不是导出的枚举。支持的值包括 `audit`、`project_audit`、`sensitive_clear`、`report_audit`、`threat_analysis`、`threat_audit`、`fp_review`、`vulnerability_validation`、`git_history`、`variant_hunt`、`memory_api_discovery` 和 `skill_create`；未知值会在提交前被拒绝。
 

@@ -369,8 +369,8 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
                 == "allow"
             )
             assert str(workspace_opencode) not in permission["edit"]
-            assert "permissions" not in first_call
-            assert "permissions" not in second_call
+            assert first_call["permissions"] is None
+            assert second_call["permissions"] is None
             assert second_call["session_id"] == "ses-standalone"
             service = task_service._get_opencode_task_service()
             assert service._session_work_directories["ses-standalone"] == (

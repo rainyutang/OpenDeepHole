@@ -18,6 +18,7 @@ from threat_analysis_harness.stages.base import (
     ProgressReporter,
     SubmitTasks,
     TaskJson,
+    TaskResultJson,
     require_all_success,
     run_or_resume_tasks,
 )
@@ -108,17 +109,111 @@ class AttackTreeStage:
                 validate_existing_output_schema=True,
             )
         )
+        results, pruned_result_indexes = self._repair_non_external_leaf_outputs(
+            tasks=tasks,
+            results=results,
+            high_risk_modules=high_risk_modules,
+            timeout=timeout,
+            progress_reporter=progress_reporter,
+        )
         normalized_outputs = [
             normalize_attack_tree_output(
                 result["output"],
                 value_asset=asset,
                 high_risk_modules=high_risk_modules,
+                allow_empty=index in pruned_result_indexes,
             )
-            for asset, result in zip(value_assets, results)
+            for index, (asset, result) in enumerate(zip(value_assets, results))
         ]
         combined = combine_attack_tree_outputs(normalized_outputs)
         self.layout.write_final_json("attack_trees/final/attack_trees.json", combined)
         return combined
+
+    def _repair_non_external_leaf_outputs(
+        self,
+        *,
+        tasks: Sequence[TaskJson],
+        results: Sequence[TaskResultJson],
+        high_risk_modules: Sequence[dict[str, Any]],
+        timeout: float | None,
+        progress_reporter: ProgressReporter | None,
+    ) -> tuple[list[TaskResultJson], set[int]]:
+        repaired_results = list(results)
+        repair_tasks: list[TaskJson] = []
+        repair_indexes: list[int] = []
+
+        for index, (task, result) in enumerate(zip(tasks, results)):
+            invalid_leaves = _non_external_leaf_references(
+                result.get("output", {}),
+                high_risk_modules,
+            )
+            if not invalid_leaves:
+                continue
+
+            session_id = _task_result_session_id(result)
+            if not session_id:
+                raise ArtifactConsistencyError(
+                    "Cannot repair non-external leaf nodes in the original session: "
+                    f"task={task.get('task_id')}"
+                )
+
+            repair_task = copy.deepcopy(task)
+            repair_task["runtime_prompt"] = _non_external_leaf_repair_prompt(invalid_leaves)
+            repair_task["session_id"] = session_id
+            repair_task["invoke_skill"] = False
+            repair_task["metadata"] = {
+                **dict(task.get("metadata", {})),
+                "semantic_repair": "non_external_leaf",
+            }
+            repair_tasks.append(repair_task)
+            repair_indexes.append(index)
+            if progress_reporter is not None:
+                progress_reporter.emit(
+                    "attack tree leaf repair requested: "
+                    f"task_id={task.get('task_id')} leaves={len(invalid_leaves)}"
+                )
+
+        if not repair_tasks:
+            return repaired_results, set()
+
+        repair_results = require_all_success(
+            self.submit_tasks(repair_tasks, timeout=timeout)
+        )
+        if len(repair_results) != len(repair_tasks):
+            raise ArtifactConsistencyError(
+                "Attack tree leaf repair returned an unexpected result count: "
+                f"expected={len(repair_tasks)}, actual={len(repair_results)}"
+            )
+
+        pruned_result_indexes: set[int] = set()
+        for index, task, repair_result in zip(
+            repair_indexes,
+            repair_tasks,
+            repair_results,
+        ):
+            remaining_invalid_leaves = _non_external_leaf_references(
+                repair_result.get("output", {}),
+                high_risk_modules,
+            )
+            if remaining_invalid_leaves:
+                pruned_output, deleted_path_count = _prune_non_external_leaf_paths(
+                    repair_result["output"],
+                    remaining_invalid_leaves,
+                )
+                repair_result = copy.deepcopy(repair_result)
+                repair_result["output"] = pruned_output
+                _write_task_output(task, pruned_output)
+                pruned_result_indexes.add(index)
+                if progress_reporter is not None:
+                    progress_reporter.emit(
+                        "attack tree non-external leaf paths pruned: "
+                        f"task_id={task.get('task_id')} "
+                        f"leaves={len(remaining_invalid_leaves)} "
+                        f"paths={deleted_path_count}"
+                    )
+            repaired_results[index] = repair_result
+
+        return repaired_results, pruned_result_indexes
 
 
 def normalize_attack_tree_output(
@@ -126,10 +221,13 @@ def normalize_attack_tree_output(
     *,
     value_asset: dict[str, Any],
     high_risk_modules: Sequence[dict[str, Any]],
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
     normalized = copy.deepcopy(output)
     attack_trees = normalized.get("attack_trees", [])
     if not attack_trees:
+        if allow_empty:
+            return {"attack_trees": []}
         asset_name = _asset_name(value_asset)
         raise ArtifactConsistencyError(
             f"Attack tree output is missing tree for asset: {asset_name}"
@@ -146,6 +244,158 @@ def normalize_attack_tree_output(
 
     validate_json_schema(normalized, ATTACK_TREE_SCHEMA)
     return normalized
+
+
+def _non_external_leaf_references(
+    output: Any,
+    high_risk_modules: Sequence[dict[str, Any]],
+) -> list[dict[str, str]]:
+    if not isinstance(output, dict):
+        return []
+
+    module_index = _high_risk_module_index(high_risk_modules)
+    invalid_leaves: list[dict[str, str]] = []
+    for tree_index, tree in enumerate(output.get("attack_trees", [])):
+        if not isinstance(tree, dict):
+            continue
+        tree_id = str(tree.get("tree_id") or "").strip()
+        for node in tree.get("nodes", []):
+            if not isinstance(node, dict) or node.get("node_type") != "叶子节点":
+                continue
+            reference = _find_high_risk_module(
+                module_index,
+                node.get("module_id"),
+                node.get("module_name"),
+                node.get("node_name"),
+            )
+            if reference is None or _is_external_module(reference.module):
+                continue
+            invalid_leaves.append(
+                {
+                    "tree_index": str(tree_index),
+                    "tree_id": tree_id,
+                    "node_id": str(node.get("node_id") or "").strip(),
+                    "node_name": str(
+                        node.get("node_name")
+                        or node.get("module_name")
+                        or _module_name(reference.module)
+                    ).strip(),
+                    "module_id": reference.module_id,
+                    "module_name": _module_name(reference.module),
+                }
+            )
+    return invalid_leaves
+
+
+def _non_external_leaf_repair_prompt(
+    invalid_leaves: Sequence[dict[str, str]],
+) -> str:
+    leaf_descriptions = "、".join(
+        (
+            f"“{leaf.get('node_name') or leaf.get('module_name')}”"
+            f"（module_id={leaf.get('module_id')}）"
+        )
+        for leaf in invalid_leaves
+    )
+    return (
+        f"叶子节点{leaf_descriptions}引用了非外部暴露的高风险模块，"
+        "请对这些位置进行修正；叶子节点只能是外部暴露的高风险模块。"
+        "请按照 JSON Schema 重新输出完整的攻击树 JSON。"
+    )
+
+
+def _prune_non_external_leaf_paths(
+    output: dict[str, Any],
+    invalid_leaves: Sequence[dict[str, str]],
+) -> tuple[dict[str, Any], int]:
+    pruned = copy.deepcopy(output)
+    invalid_node_ids_by_tree: dict[int, set[str]] = {}
+    for leaf in invalid_leaves:
+        try:
+            tree_index = int(leaf.get("tree_index", ""))
+        except ValueError:
+            continue
+        invalid_node_ids_by_tree.setdefault(tree_index, set()).add(
+            leaf.get("node_id", "")
+        )
+
+    kept_trees: list[dict[str, Any]] = []
+    deleted_path_count = 0
+    for tree_index, tree in enumerate(pruned.get("attack_trees", [])):
+        invalid_node_ids = invalid_node_ids_by_tree.get(tree_index, set())
+        if not invalid_node_ids:
+            kept_trees.append(tree)
+            continue
+
+        kept_paths: list[dict[str, Any]] = []
+        for path in tree.get("attack_paths", []):
+            path_node_ids = {
+                str(node_id).strip() for node_id in path.get("node_ids", [])
+            }
+            if path_node_ids & invalid_node_ids:
+                deleted_path_count += 1
+                continue
+            kept_paths.append(path)
+
+        if not kept_paths:
+            continue
+
+        used_node_ids = {
+            str(node_id).strip()
+            for path in kept_paths
+            for node_id in path.get("node_ids", [])
+        }
+        used_edge_ids = {
+            str(edge_id).strip()
+            for path in kept_paths
+            for edge_id in path.get("edge_ids", [])
+        }
+        tree["attack_paths"] = kept_paths
+        tree["nodes"] = [
+            node
+            for node in tree.get("nodes", [])
+            if str(node.get("node_id") or "").strip() in used_node_ids
+        ]
+        tree["edges"] = [
+            edge
+            for edge in tree.get("edges", [])
+            if str(edge.get("edge_id") or "").strip() in used_edge_ids
+        ]
+        kept_trees.append(tree)
+
+    pruned["attack_trees"] = kept_trees
+    return pruned, deleted_path_count
+
+
+def _task_result_session_id(result: TaskResultJson) -> str:
+    metadata = result.get("metadata", {})
+    if isinstance(metadata, dict):
+        task_agent = metadata.get("task_agent", {})
+        if isinstance(task_agent, dict):
+            session_id = str(task_agent.get("session_id") or "").strip()
+            if session_id:
+                return session_id
+
+    output_path = str(result.get("output_path") or "").strip()
+    if not output_path:
+        return ""
+    log_path = Path(output_path).with_suffix(Path(output_path).suffix + ".log")
+    try:
+        log_data = json.loads(log_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    task_agent = log_data.get("task_agent", {}) if isinstance(log_data, dict) else {}
+    if not isinstance(task_agent, dict):
+        return ""
+    return str(task_agent.get("session_id") or "").strip()
+
+
+def _write_task_output(task: TaskJson, output: dict[str, Any]) -> None:
+    output_path = Path(str(task["output_path"]))
+    output_path.write_text(
+        json.dumps(output, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def combine_attack_tree_outputs(outputs: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -197,6 +447,7 @@ def _asset_prompt(
         "必须按以下内部引用规则输出："
         "每个 nodes 项都必须包含 module_id；根节点和普通内部节点填写 null，"
         "叶子节点及属于高风险模块的内部节点填写引用目录中的对应 module_id；"
+        "叶子节点只能引用引用目录中 external_exposure=true 的 module_id；"
         "每个 related_high_risk_modules 项也必须填写对应 module_id。"
         "module_id 必须原样使用引用目录中的值，不得自行生成；"
         "module_name 和 node_name 仍使用引用目录中的规范 module_name。"

@@ -1048,6 +1048,52 @@ def test_run_prompt_continues_without_permissions_does_not_patch_session(
         _FakeAsyncClient.message_info = None
 
 
+def test_run_prompt_creates_session_with_explicit_empty_permissions(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["read"]
+        _FakeAsyncClient.message_info = {
+            "id": "msg_empty_permissions",
+            "providerID": "provider",
+            "modelID": "actual",
+        }
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+
+        details = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="create with global permissions only",
+            model="provider/requested",
+            timeout=30,
+            permissions=[],
+            return_details=True,
+        )
+
+        assert isinstance(details, OpenCodePromptResult)
+        client = _FakeAsyncClient.instances[0]
+        create = next(item for item in client.posts if item["path"] == "/session")
+        assert create["json"]["permission"] == []
+        assert client.patches == []
+
+    try:
+        asyncio.run(run())
+    finally:
+        _FakeAsyncClient.message_info = None
+
+
 def test_session_management_methods_use_durable_session_routes(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []

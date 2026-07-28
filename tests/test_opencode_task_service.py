@@ -30,6 +30,7 @@ from task_agent.task_service import (
     _permission_path_patterns,
     _runtime_with_permissions,
     _runtime_with_skill_paths,
+    _writable_path_permissions,
     bind_opencode_execution_context,
 )
 
@@ -67,6 +68,49 @@ def test_permission_path_patterns_include_home_aliases() -> None:
     assert "~/.opendeephole/scans/**" in patterns
     assert r"~\.opendeephole\scans" in patterns
     assert r"~\.opendeephole\scans\**" in patterns
+
+
+def test_writable_path_permissions_allow_read_external_access_and_edits(
+    tmp_path: Path,
+) -> None:
+    writable_root = tmp_path / "generated"
+
+    permissions = _writable_path_permissions((writable_root,))
+
+    assert permissions is not None
+    expected_patterns = _permission_path_patterns(writable_root)
+    for permission in ("read", "external_directory", "edit"):
+        assert [
+            rule["pattern"]
+            for rule in permissions
+            if rule["permission"] == permission
+        ] == expected_patterns
+    assert all(rule["action"] == "allow" for rule in permissions)
+    assert all(rule["permission"] != "bash" for rule in permissions)
+    assert _writable_path_permissions(None) is None
+    assert _writable_path_permissions(()) == []
+
+
+def test_dynamic_writable_paths_stay_out_of_serve_config(
+    tmp_path: Path,
+) -> None:
+    dynamic_root = tmp_path / "external-output"
+    context = OpenCodeExecutionContext(
+        project_dir=tmp_path / "project",
+        work_dir=tmp_path / "work",
+    )
+    bindings = SimpleNamespace(writable_roots=lambda: ())
+
+    with patch(
+        "task_agent.task_service.get_host_bindings",
+        return_value=bindings,
+    ):
+        runtime = _runtime_with_permissions(_runtime(tmp_path), context)
+
+    permission = json.loads(runtime.config_content)["permission"]
+    for pattern in _permission_path_patterns(dynamic_root):
+        assert pattern not in permission["edit"]
+    assert _writable_path_permissions((dynamic_root,)) is not None
 
 
 def test_host_writable_root_is_written_to_windows_runtime_config(
@@ -305,6 +349,7 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "invalid_json_retry_count",
         "invalid_json_retry_prompt",
         "file_write_allowlist",
+        "writable_paths",
         "session_id",
         "config_path",
         "output",
@@ -341,6 +386,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
             },
         )
         service = SimpleNamespace(run_task=AsyncMock(return_value=internal))
+        external_dir = tmp_path.parent / f"{tmp_path.name}-external"
         with (
             patch("task_agent.task_service._get_opencode_task_service", return_value=service),
             patch("task_agent.task_service.get_config", return_value=_config()),
@@ -357,6 +403,11 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                 file_write_allowlist=[
                     "keep.json",
                     tmp_path / "work" / "reports",
+                ],
+                writable_paths=[
+                    "generated",
+                    external_dir,
+                    "generated",
                 ],
                 session_id="ses-existing",
             )
@@ -378,6 +429,10 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         assert spec.file_write_allowlist == (
             (tmp_path / "work" / "keep.json").resolve(),
             (tmp_path / "work" / "reports").resolve(),
+        )
+        assert spec.writable_paths == (
+            (tmp_path / "generated").resolve(),
+            external_dir.resolve(),
         )
         assert spec.session_id == "ses-existing"
 
@@ -619,6 +674,48 @@ def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None
     asyncio.run(run())
 
 
+def test_public_interface_validates_writable_paths(tmp_path: Path) -> None:
+    async def run() -> None:
+        with pytest.raises(TypeError, match="writable_paths.*sequence"):
+            await run_opencode_task(
+                task_name="scalar writable path",
+                task_type="audit",
+                prompt="test",
+                required_capability="low",
+                writable_paths="generated",  # type: ignore[arg-type]
+            )
+        with pytest.raises(TypeError, match="entries.*strings or PathLike"):
+            await run_opencode_task(
+                task_name="invalid writable path",
+                task_type="audit",
+                prompt="test",
+                required_capability="low",
+                writable_paths=[123],  # type: ignore[list-item]
+            )
+        for value in ("", "generated/*", "generated/file?.json"):
+            with pytest.raises(ValueError, match="writable_paths"):
+                await run_opencode_task(
+                    task_name="unsafe writable path",
+                    task_type="audit",
+                    prompt="test",
+                    required_capability="low",
+                    writable_paths=[value],
+                )
+        with (
+            _task_context(tmp_path),
+            pytest.raises(ValueError, match="filesystem root"),
+        ):
+            await run_opencode_task(
+                task_name="root writable path",
+                task_type="audit",
+                prompt="test",
+                required_capability="low",
+                writable_paths=[Path(tmp_path.anchor)],
+            )
+
+    asyncio.run(run())
+
+
 def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
@@ -743,7 +840,7 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
         assert "用户理由：边界检查缺失" in captured["system_prompt"]
         assert "CodeGraph project scope" not in captured["system_prompt"]
         assert "Selected scan feedback" not in captured["system_prompt"]
-        assert "permissions" not in captured
+        assert captured["permissions"] is None
         acquire_kwargs = acquire_mock.await_args.kwargs
         assert acquire_kwargs["stats_scope_id"] == "scan-7"
         assert acquire_kwargs["task_context"]["task_type"] == "audit"
@@ -827,6 +924,7 @@ def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) ->
         )
         manager = SimpleNamespace(run_prompt=run_prompt)
         service = OpenCodeTaskService()
+        writable_root = tmp_path / "generated"
         service._runtime_for_task = AsyncMock(
             return_value=(_runtime(tmp_path), "provider/model-low", _source())
         )
@@ -845,11 +943,16 @@ def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) ->
                     timeout_seconds=12,
                     attempt=7,
                     output_retry_count=0,
+                    writable_paths=(writable_root,),
                 ))
 
         assert result.status == "success"
         assert len(calls) == 2
         assert [call["timeout"] for call in calls] == [77, 77]
+        assert [call["permissions"] for call in calls] == [
+            _writable_path_permissions((writable_root.resolve(),)),
+            _writable_path_permissions((writable_root.resolve(),)),
+        ]
         assert acquire_mock.await_count == 2
         assert all(
             call.kwargs["required_capability"] == "high"
@@ -1116,10 +1219,12 @@ def test_invalid_written_json_is_removed_before_same_session_retry(
         work_dir.mkdir()
         invalid_file = work_dir / "invalid.json"
         calls = 0
+        permissions: list[list[dict[str, str]] | None] = []
 
         async def run_prompt(**kwargs):
             nonlocal calls
             calls += 1
+            permissions.append(kwargs["permissions"])
             callback = kwargs["on_session_id"]("ses-file-retry")
             if hasattr(callback, "__await__"):
                 await callback
@@ -1152,6 +1257,7 @@ def test_invalid_written_json_is_removed_before_same_session_retry(
                 output_schema=SCHEMA,
                 output_retry_count=1,
                 attempt=0,
+                writable_paths=(work_dir,),
             ),
             work_dir=work_dir,
         )
@@ -1160,6 +1266,10 @@ def test_invalid_written_json_is_removed_before_same_session_retry(
         assert result.text == '{"answer": 12}'
         assert result.structured == {"answer": 12}
         assert calls == 2
+        assert permissions == [
+            _writable_path_permissions((work_dir.resolve(),)),
+            None,
+        ]
         assert not invalid_file.exists()
 
     asyncio.run(run())

@@ -203,9 +203,13 @@ def submit_tasks(
 
 
 def build_task_agent_prompt(task: Mapping[str, Any]) -> str:
-    """Invoke the OpenCode skill configured in task_agent and pass the task prompt."""
+    """Build an initial skill invocation or a plain same-session continuation prompt."""
 
     runtime_prompt = str(task.get("runtime_prompt") or "").strip()
+    if task.get("invoke_skill") is False:
+        if not runtime_prompt:
+            raise ValueError("task runtime_prompt is required when skill invocation is disabled")
+        return runtime_prompt
     skill_name = _task_skill_name(task)
     if not runtime_prompt:
         return f"/{skill_name}"

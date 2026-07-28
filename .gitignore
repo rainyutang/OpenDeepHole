@@ -31,6 +31,13 @@ Thumbs.db
 .opendeephole/
 *.log
 logs/
+task-agent.yaml
+tests/test_data/code_index.db
+tests/test_data/memleak_cases/code_index.db
+
+# Local source checkouts
+SecAnt/
+ThreatAnalysis/
 
 # Environment
 .env

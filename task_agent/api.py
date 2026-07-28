@@ -82,6 +82,36 @@ def _normalize_file_write_allowlist(
     return tuple(normalized)
 
 
+def _normalize_writable_paths(
+    value: Sequence[str | PathLike[str]] | None,
+) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, PathLike)) or not isinstance(value, Sequence):
+        raise TypeError(
+            "OpenCode writable_paths must be a sequence of paths or None"
+        )
+    normalized: list[str] = []
+    for item in value:
+        if isinstance(item, bytes) or not isinstance(item, (str, PathLike)):
+            raise TypeError(
+                "OpenCode writable_paths entries must be strings or PathLike values"
+            )
+        raw = fspath(item)
+        if not isinstance(raw, str):
+            raise TypeError(
+                "OpenCode writable_paths entries must resolve to string paths"
+            )
+        if not raw.strip():
+            raise ValueError("OpenCode writable_paths entries cannot be empty")
+        if "*" in raw or "?" in raw:
+            raise ValueError(
+                "OpenCode writable_paths entries cannot contain wildcard characters"
+            )
+        normalized.append(raw)
+    return tuple(normalized)
+
+
 async def run_opencode_task(
     *,
     task_name: str,
@@ -92,6 +122,7 @@ async def run_opencode_task(
     invalid_json_retry_count: int = 2,
     invalid_json_retry_prompt: str | None = None,
     file_write_allowlist: Sequence[str | PathLike[str]] | None = None,
+    writable_paths: Sequence[str | PathLike[str]] | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -109,6 +140,7 @@ async def run_opencode_task(
         invalid_json_retry_count=invalid_json_retry_count,
         invalid_json_retry_prompt=invalid_json_retry_prompt,
         file_write_allowlist=file_write_allowlist,
+        writable_paths=writable_paths,
         session_id=session_id,
         config_path=config_path,
         output=output,
@@ -138,6 +170,7 @@ async def _run_opencode_task_local(
     invalid_json_retry_count: int = 2,
     invalid_json_retry_prompt: str | None = None,
     file_write_allowlist: Sequence[str | PathLike[str]] | None = None,
+    writable_paths: Sequence[str | PathLike[str]] | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -171,6 +204,7 @@ async def _run_opencode_task_local(
     normalized_file_write_allowlist = _normalize_file_write_allowlist(
         file_write_allowlist
     )
+    normalized_writable_paths = _normalize_writable_paths(writable_paths)
     if output is not _UNSET and output is not None and not callable(output):
         raise TypeError("OpenCode output must be callable or None")
 
@@ -195,6 +229,7 @@ async def _run_opencode_task_local(
             invalid_json_retry_count=retry_count,
             invalid_json_retry_prompt=invalid_json_retry_prompt,
             file_write_allowlist=normalized_file_write_allowlist,
+            writable_paths=normalized_writable_paths,
             session_id=str(session_id or "").strip() or None,
         )
 

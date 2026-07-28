@@ -174,7 +174,7 @@ tail -f logs/opendeephole.log
 - `vuln_type` is a plain string (not enum) matching the checker directory name
 - One Agent-wide OpenCode workspace lives at `~/.opendeephole/opencode_workspace`; scans/reviews/validators bind scope and permissions per task, while API `directory` points at the real code root
 - The self-contained Task Agent framework lives in `task_agent/`; the seven backend-free business processes live under `deephole_client/`, and `backend/` must not own client execution
-- OpenCode TaskSpec does not expose workspace, scope/task context, MCP/SKILL selectors, permissions, CLI config, or global concurrency; the Agent computes them centrally
+- OpenCode TaskSpec does not expose workspace, scope/task context, MCP/SKILL selectors, raw permissions, CLI config, or global concurrency; `run_opencode_task(writable_paths=...)` is the only caller-facing path permission override, while the Agent computes the stable boundary centrally
 - JSON Schema rules are appended to the user prompt instead of the system prompt; framework-generated model instructions are Chinese, and Schema failures are corrected in the same session first; `attempt` counts fresh-session retries that release and reacquire a model Lease
 - Agent OpenCode configs are stored server-side in `_agent_configs` (keyed by agent name) and pushed to agents on connect and UI save
 - Model-pool scheduling (`task_agent/model_pool.py`): `opencode_concurrency` is a global Agent gate, with per-model `max_concurrency`; pending tasks are priority-descending/FIFO, require capability without downgrade, prefer the lowest sufficient model, and remain blocked until model configuration/time-window changes make them runnable
