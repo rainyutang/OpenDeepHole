@@ -13,7 +13,7 @@ from typing import Any
 
 from task_agent import run_opencode_task
 
-from task_agent.audit_schema import (
+from .audit_schema import (
     THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
     threat_audit_output_instruction,
 )

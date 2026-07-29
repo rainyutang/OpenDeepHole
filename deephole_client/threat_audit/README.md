@@ -53,7 +53,8 @@ python -m deephole_client.threat_audit \
 
 每个模型任务返回裸 JSON List，允许一次返回多个独立漏洞；没有漏洞时返回 `[]`，
 任务仍标记为 `completed`。列表项使用专用
-`task_agent.audit_schema.THREAT_AUDIT_VULNERABILITY_ITEM_SCHEMA`，不包含
+`deephole_client.threat_audit.audit_schema.THREAT_AUDIT_VULNERABILITY_ITEM_SCHEMA`，
+不包含
 `confirmed`，并要求填写严重程度、漏洞位置、类型、资产影响、完整相关代码、入口到
 触发点调用链、攻击入口、根因和触发条件。模型不返回 `ai_analysis`、`ai_verdict`
 或 `vulnerability_report`；过程在汇总到平台漏洞对象时统一补充

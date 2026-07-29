@@ -4,10 +4,12 @@ import json
 
 import pytest
 
-from task_agent.audit_schema import (
-    THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+from deephole_client.candidate_audit.audit_schema import (
     VULNERABILITY_ITEM_SCHEMA,
     VULNERABILITY_LIST_SCHEMA,
+)
+from deephole_client.threat_audit.audit_schema import (
+    THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
 )
 from task_agent.llm_json import LLMJsonParseError, parse_llm_json_schema
 

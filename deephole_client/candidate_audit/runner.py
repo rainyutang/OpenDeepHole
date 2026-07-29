@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 from task_agent import opencode_task_context, run_opencode_task
 
-from task_agent.audit_schema import (
+from .audit_schema import (
     VULNERABILITY_ITEM_SCHEMA,
     VULNERABILITY_LIST_SCHEMA,
     audit_output_instruction,

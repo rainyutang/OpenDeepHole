@@ -35,7 +35,8 @@
 普通候选点的单次模型任务直接返回一个漏洞对象；`function="__project__"` 的项目级
 审计返回裸 JSON List，每个独立问题一个元素。项目级未发现问题时返回仅包含一个
 `confirmed=false` 结论的 List。两种模式共用
-`task_agent.audit_schema.VULNERABILITY_ITEM_SCHEMA`，字段包括：
+`deephole_client.candidate_audit.audit_schema.VULNERABILITY_ITEM_SCHEMA`，
+字段包括：
 
 - 始终必填：`confirmed`、`severity`、`file`、`function`、`line`、`description`
 - 确认问题时必填：`vuln_type`、`impact`、`vulnerable_code`、`call_chain`、
