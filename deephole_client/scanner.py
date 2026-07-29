@@ -225,10 +225,12 @@ async def _run_threat_processes(
         cancel_event=cancel_event,
     )
     result_indexes: dict[str, list[int]] = {}
+    vulnerabilities: list[Vulnerability] = []
     for raw in audit_result.get("vulnerabilities") or []:
         if not isinstance(raw, dict):
             continue
         vulnerability = Vulnerability.model_validate(raw)
+        vulnerabilities.append(vulnerability)
         response = await reporter.report_vulnerability(scan_id, vulnerability)
         if isinstance(response, dict) and response.get("index") is not None:
             result_indexes.setdefault(vulnerability.source_task_id, []).append(
@@ -250,6 +252,10 @@ async def _run_threat_processes(
         **result,
         "audit_status": audit_result.get("status"),
         "audit_task_count": len(audit_result.get("tasks") or []),
+        "vulnerabilities": [
+            vulnerability.model_dump(mode="json")
+            for vulnerability in vulnerabilities
+        ],
     }
 
 
@@ -709,6 +715,13 @@ async def run_scan(
                     error=str(threat_result.get("reason") or "Threat analysis failed"),
                 )
                 return
+
+            if isinstance(threat_result, dict):
+                audited.extend(
+                    Vulnerability.model_validate(value)
+                    for value in threat_result.get("vulnerabilities") or []
+                    if isinstance(value, dict)
+                )
 
         status = "cancelled" if cancel_event.is_set() else "complete"
         await emit(

@@ -53,6 +53,24 @@ def _vulnerability() -> dict:
     }
 
 
+def _threat_vulnerability() -> dict:
+    return {
+        "file": "src/threat.c",
+        "line": 42,
+        "function": "handle_packet",
+        "call_chain": [],
+        "vuln_type": "out_of_bounds",
+        "severity": "critical",
+        "description": "threat-derived out-of-bounds write",
+        "confirmed": True,
+        "ai_verdict": "confirmed",
+        "analysis_source": "threat_audit",
+        "source_task_id": "threat-task-1",
+        "threat_surface_node_id": "TREE-1:NODE-1",
+        "threat_method_node_id": "PATTERN-1",
+    }
+
+
 class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
     def test_structured_task_output_does_not_repeat_process_prefix(self) -> None:
         line = "[threat_analysis][ses-1][tool] name=read"
@@ -257,7 +275,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "deephole_client.scanner._run_threat_processes",
-                    new=AsyncMock(return_value={"status": "success"}),
+                    new=AsyncMock(return_value={
+                        "result": True,
+                        "audit_status": "success",
+                        "vulnerabilities": [_threat_vulnerability()],
+                    }),
                 ) as threat,
             ):
                 await run_scan(
@@ -282,6 +304,13 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             0,
             0,
             done=True,
+        )
+        finish_args = reporter.finish_scan.await_args.args
+        self.assertEqual(finish_args[2], "complete")
+        self.assertEqual(len(finish_args[1]), 1)
+        self.assertEqual(
+            finish_args[1][0].analysis_source,
+            "threat_audit",
         )
 
     async def test_custom_scan_graph_is_prepared_and_enters_task_context(

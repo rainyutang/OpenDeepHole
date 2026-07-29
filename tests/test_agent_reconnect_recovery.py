@@ -1030,7 +1030,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store.save_scan(_scan("scan-1", ScanItemStatus.AUDITING, total=8, processed=5), _meta())
             agent_api._running_scans["scan-1"] = store.load_scan("scan-1")[0]
 
-            with patch("backend.api.agent.get_scan_store", return_value=store):
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+            ):
                 asyncio.run(agent_api.agent_finish_scan(
                     "scan-1",
                     AgentScanFinish(
@@ -1046,6 +1049,89 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.status, ScanItemStatus.CANCELLED)
             self.assertEqual(stored.total_candidates, 8)
             self.assertEqual(stored.processed_candidates, 4)
+
+    def test_finish_scan_reconciles_missing_threat_findings_without_duplicates(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.AUDITING, total=1, processed=1)
+            if hasattr(scan, "auto_fp_review"):
+                scan.auto_fp_review = False
+            meta = _meta()
+            if hasattr(meta, "auto_fp_review"):
+                meta.auto_fp_review = False
+            store.save_scan(scan, meta)
+            static_vuln = Vulnerability(
+                file="static.c",
+                line=10,
+                function="static_issue",
+                vuln_type="npd",
+                severity="high",
+                description="static issue",
+                confirmed=True,
+                ai_verdict="confirmed",
+            )
+            store.add_vulnerability("scan-1", static_vuln)
+            scan.vulnerabilities = [static_vuln]
+            agent_api._running_scans["scan-1"] = scan
+            threat_vuln = Vulnerability(
+                file="threat.c",
+                line=20,
+                function="threat_issue",
+                vuln_type="out_of_bounds",
+                severity="critical",
+                description="threat-derived issue",
+                confirmed=True,
+                ai_verdict="confirmed",
+                analysis_source="threat_audit",
+                source_task_id="threat-task-1",
+                threat_surface_node_id="TREE-1:NODE-1",
+                threat_method_node_id="PATTERN-1",
+            )
+            published: list[tuple[str, str, dict]] = []
+            finish = AgentScanFinish(
+                vulnerabilities=[static_vuln, threat_vuln],
+                status="complete",
+                total_candidates=1,
+                processed_candidates=1,
+            )
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.sse.publish",
+                    side_effect=lambda scan_id, event_type, data: published.append(
+                        (scan_id, event_type, data),
+                    ),
+                ),
+            ):
+                asyncio.run(agent_api.agent_finish_scan(
+                    "scan-1",
+                    finish,
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+                asyncio.run(agent_api.agent_finish_scan(
+                    "scan-1",
+                    finish,
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+
+            stored = store.get_vulnerabilities("scan-1")
+            self.assertEqual(len(stored), 2)
+            self.assertEqual(
+                [vuln.analysis_source for vuln in stored],
+                ["static_candidate", "threat_audit"],
+            )
+            threat_events = [
+                data
+                for _scan_id, event_type, data in published
+                if event_type == "scan_vulnerability"
+                and data["vulnerability"]["analysis_source"] == "threat_audit"
+            ]
+            self.assertEqual(len(threat_events), 1)
+            self.assertEqual(threat_events[0]["index"], 1)
 
     def test_finish_scan_clears_transient_opencode_pool_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1076,7 +1162,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store.update_opencode_pool_status("scan-1", pool)
             agent_api._running_scans["scan-1"] = scan
 
-            with patch("backend.api.agent.get_scan_store", return_value=store):
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+            ):
                 asyncio.run(agent_api.agent_finish_scan(
                     "scan-1",
                     AgentScanFinish(

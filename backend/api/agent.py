@@ -1973,6 +1973,30 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
     return {"ok": True}
 
 
+def _confirmed_threat_vulnerability_identity(
+    vuln: Vulnerability,
+) -> tuple[str, str, int, str, str] | None:
+    """Return the stable finish-reconciliation key for a confirmed threat finding."""
+    if str(vuln.analysis_source or "").strip().lower() != "threat_audit":
+        return None
+    if not (vuln.confirmed or vuln.ai_verdict == "confirmed"):
+        return None
+    task_identity = str(vuln.source_task_id or "").strip()
+    if not task_identity:
+        task_identity = "\0".join([
+            str(vuln.threat_surface_node_id or "").strip(),
+            str(vuln.threat_method_node_id or "").strip(),
+            str(vuln.threat_code_path or "").strip(),
+        ])
+    return (
+        task_identity,
+        str(vuln.file or "").strip(),
+        int(vuln.line),
+        str(vuln.function or "").strip(),
+        str(vuln.vuln_type or "").strip().casefold(),
+    )
+
+
 @router.post("/scan/{scan_id}/vulnerability")
 async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
     """Agent pushes a single vulnerability result immediately after auditing it."""
@@ -2284,10 +2308,40 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         ):
             final_processed = existing_scan.processed_candidates
 
-    existing_count = store.count_vulnerabilities(scan_id)
-    if body.vulnerabilities and existing_count == 0:
+    from backend.sse import publish
+
+    existing_vulnerabilities = store.get_vulnerabilities(scan_id)
+    existing_threat_identities = {
+        identity
+        for vuln in existing_vulnerabilities
+        if (
+            identity := _confirmed_threat_vulnerability_identity(vuln)
+        ) is not None
+    }
+    reconciled_vulnerabilities: list[tuple[int, Vulnerability]] = []
+    if body.vulnerabilities and not existing_vulnerabilities:
         for vuln in body.vulnerabilities:
-            store.add_vulnerability(scan_id, vuln)
+            identity = _confirmed_threat_vulnerability_identity(vuln)
+            if identity is not None and identity in existing_threat_identities:
+                continue
+            vuln_index = store.add_vulnerability(scan_id, vuln)
+            reconciled_vulnerabilities.append((vuln_index, vuln))
+            if identity is not None:
+                existing_threat_identities.add(identity)
+    elif body.vulnerabilities:
+        for vuln in body.vulnerabilities:
+            identity = _confirmed_threat_vulnerability_identity(vuln)
+            if identity is None or identity in existing_threat_identities:
+                continue
+            vuln_index = store.add_vulnerability(scan_id, vuln)
+            reconciled_vulnerabilities.append((vuln_index, vuln))
+            existing_threat_identities.add(identity)
+
+    final_vulnerabilities = (
+        store.get_vulnerabilities(scan_id)
+        if reconciled_vulnerabilities
+        else existing_vulnerabilities
+    )
 
     store.update_scan_progress(
         scan_id,
@@ -2307,8 +2361,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         store.update_opencode_pool_status(scan_id, final_pool)
     if scan is not None:
         scan.status = final_status
-        if body.vulnerabilities and existing_count == 0:
-            scan.vulnerabilities = body.vulnerabilities
+        scan.vulnerabilities = final_vulnerabilities
         scan.total_candidates = final_total
         scan.processed_candidates = final_processed
         scan.opencode_pool = final_pool
@@ -2319,7 +2372,11 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         _running_scans.pop(scan_id, None)
         _scan_owners.pop(scan_id, None)
 
-    from backend.sse import publish
+    for vuln_index, vuln in reconciled_vulnerabilities:
+        publish(scan_id, "scan_vulnerability", {
+            "index": vuln_index,
+            "vulnerability": vuln.model_dump(),
+        })
     publish(scan_id, "scan_status", {
         "status": final_status,
         "progress": 1.0 if final_status == ScanItemStatus.COMPLETE else (existing_scan.progress if existing_scan else None),
@@ -2332,9 +2389,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         "error_message": body.error_message,
     })
 
-    confirmed = sum(1 for v in body.vulnerabilities if v.confirmed)
-    if confirmed == 0:
-        confirmed = sum(1 for v in store.get_vulnerabilities(scan_id) if v.confirmed)
+    confirmed = sum(1 for vuln in final_vulnerabilities if vuln.confirmed)
     logger.info(
         "Agent finished scan %s: %s — %d confirmed / %d candidates",
         scan_id, body.status, confirmed, final_total,

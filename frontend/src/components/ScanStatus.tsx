@@ -6,6 +6,7 @@ import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAn
 import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, VulnerabilityValidation } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
+import { isEffectiveFpReviewResult, isFpReviewNonProblem } from "../fpReview";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 import { ThemeToggle } from "./ThemeToggle";
@@ -108,19 +109,27 @@ function isStaticCandidate(item: Candidate): boolean {
 }
 
 function effectiveIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
-  const fpMap = new Map((fpReview?.results ?? []).map((result) => [result.vuln_index, result]));
+  const fpMap = new Map(
+    (fpReview?.results ?? [])
+      .filter(isEffectiveFpReviewResult)
+      .map((result) => [result.vuln_index, result]),
+  );
   return scan.vulnerabilities.filter((vuln, index) => {
     if (!isAiConfirmed(vuln)) return false;
-    if (fpMap.get(index)?.verdict === "fp") return false;
+    if (isFpReviewNonProblem(fpMap.get(index))) return false;
     return true;
   }).length;
 }
 
 function issueItems(scan: ScanStatusType, fpReview: FpReviewJob | null): { vuln: Vulnerability; index: number }[] {
-  const fpMap = new Map((fpReview?.results ?? []).map((result) => [result.vuln_index, result]));
+  const fpMap = new Map(
+    (fpReview?.results ?? [])
+      .filter(isEffectiveFpReviewResult)
+      .map((result) => [result.vuln_index, result]),
+  );
   return scan.vulnerabilities
     .map((vuln, index) => ({ vuln, index }))
-    .filter(({ vuln, index }) => isAiConfirmed(vuln) && fpMap.get(index)?.verdict !== "fp");
+    .filter(({ vuln, index }) => isAiConfirmed(vuln) && !isFpReviewNonProblem(fpMap.get(index)));
 }
 
 function isValidationTerminalStatus(status: string): boolean {
