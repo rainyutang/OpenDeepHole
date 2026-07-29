@@ -1929,7 +1929,7 @@ async def download_report_zip(
             index_lines = [f"# 扫描 {scan_id} 漏洞报告索引", "", f"共 {len(confirmed)} 个 AI 确认问题：", ""]
             if fp_job is not None and fp_job.summary_markdown:
                 index_lines.extend([
-                    f"- [{'证据门禁复核' if fp_job.method == FpReviewMethod.FP_CHECK else '对抗式复核'}批次汇总](fp-review-summary.md)",
+                    f"- [{'Trail of Bits fp-check 复核' if fp_job.method == FpReviewMethod.FP_CHECK else '对抗式复核'}批次汇总](fp-review-summary.md)",
                     "",
                 ])
                 zf.writestr("fp-review-summary.md", fp_job.summary_markdown.rstrip() + "\n")
@@ -2240,7 +2240,7 @@ async def _start_fp_review(
         selected_method == FpReviewMethod.FP_CHECK
         and scan.status != ScanItemStatus.COMPLETE
     ):
-        return _fail(409, "证据门禁复核只能在扫描完成后启动")
+        return _fail(409, "Trail of Bits fp-check 复核只能在扫描完成后启动")
 
     fp_job_info = _ensure_fp_review_job_for_scan(
         scan_id,
@@ -2711,7 +2711,7 @@ async def get_fp_review_skill(
     if method == FpReviewMethod.FP_CHECK:
         skills_dir = package_root / "fp_check_review" / "skills" / "fp-check"
         skill_paths = [
-            ("证据门禁复核", skills_dir / "SKILL.md"),
+            ("Trail of Bits fp-check 复核", skills_dir / "SKILL.md"),
             ("标准验证", skills_dir / "references" / "standard-verification.md"),
             ("深度验证", skills_dir / "references" / "deep-verification.md"),
             ("六道门复核", skills_dir / "references" / "gate-reviews.md"),

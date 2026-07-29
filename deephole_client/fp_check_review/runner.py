@@ -338,7 +338,7 @@ def _local_summary(
     true_positive = [item for item in results if item["verdict"] == "true_positive"]
     false_positive = [item for item in results if item["verdict"] == "false_positive"]
     lines = [
-        "# 证据门禁复核汇总",
+        "# Trail of Bits fp-check 复核汇总",
         "",
         f"- TRUE POSITIVE：{len(true_positive)}",
         f"- FALSE POSITIVE：{len(false_positive)}",
@@ -547,7 +547,7 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
     await _emit(
         output,
         "progress",
-        f"证据门禁复核开始，共 {len(indices)} 个漏洞",
+        f"Trail of Bits fp-check 复核开始，共 {len(indices)} 个漏洞",
         total=len(indices),
         active_indices=indices,
     )
@@ -847,7 +847,7 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
     await _emit(
         output,
         "summary",
-        "证据门禁复核批次汇总已生成",
+        "Trail of Bits fp-check 复核批次汇总已生成",
         markdown=summary_markdown,
         output_source=summary_source,
         unresolved_indices=unresolved_indices,

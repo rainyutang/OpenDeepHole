@@ -52,7 +52,7 @@ function hasOutputSource(source?: OutputSource | null): boolean {
 }
 
 function fpReviewMethodLabel(method?: FpReviewMethod | null): string {
-  return method === "fp_check" ? "证据门禁复核" : "对抗式复核";
+  return method === "fp_check" ? "Trail of Bits fp-check 复核" : "对抗式复核";
 }
 
 function formatOutputSource(source?: OutputSource | null): string {
@@ -3285,7 +3285,7 @@ function FpReviewPanel({
           <span className="text-xs text-red-300">{fpReview.error_message}</span>
         )}
         {method === "fp_check" && !scanComplete && (
-          <span className="text-xs text-slate-500">证据门禁复核需等待扫描完成后整批启动。</span>
+          <span className="text-xs text-slate-500">Trail of Bits fp-check 复核需等待扫描完成后整批启动。</span>
         )}
       </div>
       {fpReview?.summary_markdown && (

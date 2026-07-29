@@ -2618,7 +2618,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
     auto_fp_review, _ = _scan_fp_review_settings(scan_id, scan)
 
     # 扫描完成且存在已确认漏洞时，按创建扫描时固定的配置自动触发去误报。
-    # 对抗式复核可能已随漏洞增量排队；证据门禁复核则只会在此处整批启动。
+    # 对抗式复核可能已随漏洞增量排队；Trail of Bits fp-check 复核则只会在此处整批启动。
     if (
         final_status == ScanItemStatus.COMPLETE
         and confirmed > 0

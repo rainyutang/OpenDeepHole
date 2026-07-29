@@ -38,8 +38,8 @@
 **静态候选收敛、同类合并与同模式过滤**：DB 类 checker 会按本次 `code_scan_path` 在 SQL 层收敛函数范围；静态候选进入 AI 前会按 checker `family` 做函数级同类合并，并只向 OpenCode 提供“函数/变量或表达式/问题类型”的最小审计问题。AI 审计确认某个同模式代表点为非问题后，可通过 `pattern_filter` 自动过滤同 `vuln_type + subject + scope` 的后续候选。详细规则见下文“静态候选合并与同模式过滤”。
 **git 历史问题挖掘 + 同类变体排查（当前硬禁用）**：默认扫描链路在完成代码索引和工作区准备后，会并行启动威胁分析和静态分析；静态分析完成后立即进入候选点 AI 审计，威胁分析结果生成后独立上报展示，并在扫描最终完成前收尾。git 历史问题挖掘及同类变体排查的实现代码仍保留，但当前版本不会执行该阶段，也不在 Agent 配置页面中暴露开关。
 
-**AI 去误报（扫描级开关与双方案）**：新建扫描时可选择是否自动去误报，并在两种固定方案中选择其一。`对抗式复核`（`adversarial`）完整保留原有 `history_match`、`prove-bug`、`prove-fp`、`final-judge` 流程，可随已确认问题增量排队；`证据门禁复核`（`fp_check`）只在扫描完成后整批启动，先对全部问题执行主张重述与标准/深度路由，统一完成标准路径后，再按数据流、可利用性、CIA 与认证/授权影响、PoC、13 项反方挑战、六道门的依赖波次处理，最后检查跨漏洞攻击链。六道门全部通过才生成 high/TP，任一失败生成 low/FP；阶段缺失或技术失败只保留证据并留待重试，不伪造结论。创建请求字段为 `auto_fp_review` 与 `fp_review_method`；前者省略时使用 `fp_review.auto_on_complete`，后者默认 `adversarial`，两项在创建后固定，手动重跑也不切换方案。
-**漏洞报告导出**：对每一个 AI 判定为「是问题」的扫描项可单独导出 Markdown 报告，包含对应方案的阶段证据；扫描详情页顶部「导出报告」会打包全部单项报告，证据门禁复核存在批次汇总时额外包含 `fp-review-summary.md`。对应端点 `GET /api/scan/{id}/vulnerability/{idx}/report` 与 `GET /api/scan/{id}/report.zip`。
+**AI 去误报（扫描级开关与双方案）**：新建扫描时可选择是否自动去误报，并在两种固定方案中选择其一。`对抗式复核`（`adversarial`）完整保留原有 `history_match`、`prove-bug`、`prove-fp`、`final-judge` 流程，可随已确认问题增量排队；`Trail of Bits fp-check 复核`（`fp_check`）来源于 Trail of Bits Skills Marketplace 的 `fp-check`，只在扫描完成后整批启动，先对全部问题执行主张重述与标准/深度路由，统一完成标准路径后，再按数据流、可利用性、CIA 与认证/授权影响、PoC、13 项反方挑战、六道门的依赖波次处理，最后检查跨漏洞攻击链。六道门全部通过才生成 high/TP，任一失败生成 low/FP；阶段缺失或技术失败只保留证据并留待重试，不伪造结论。创建请求字段为 `auto_fp_review` 与 `fp_review_method`；前者省略时使用 `fp_review.auto_on_complete`，后者默认 `adversarial`，两项在创建后固定，手动重跑也不切换方案。
+**漏洞报告导出**：对每一个 AI 判定为「是问题」的扫描项可单独导出 Markdown 报告，包含对应方案的阶段证据；扫描详情页顶部「导出报告」会打包全部单项报告，Trail of Bits fp-check 复核存在批次汇总时额外包含 `fp-review-summary.md`。对应端点 `GET /api/scan/{id}/vulnerability/{idx}/report` 与 `GET /api/scan/{id}/report.zip`。
 
 ### 静态候选合并与同模式过滤
 
@@ -196,10 +196,10 @@ Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
 4. LLM 在分析同类候选时参考这些经验，校验并减少重复误判
 5. “待分析”只保存为漏洞人工状态，不生成经验库反馈、不注入 SKILL，也不会阻止该问题继续进入 AI 去误报或续扫候选
 6. 已人工标记的问题可单条或批量取消标记；取消后会删除该标记生成的反馈、从本次扫描的 `feedback_ids` 中移除，并在下次 AI 去误报时重新复核
-7. 创建扫描时通过 `auto_fp_review` 决定是否自动复核，通过 `fp_review_method` 固定选择 `adversarial`（对抗式复核）或 `fp_check`（证据门禁复核）；省略自动开关时才读取全局 `fp_review.auto_on_complete`
+7. 创建扫描时通过 `auto_fp_review` 决定是否自动复核，通过 `fp_review_method` 固定选择 `adversarial`（对抗式复核）或 `fp_check`（Trail of Bits fp-check 复核）；省略自动开关时才读取全局 `fp_review.auto_on_complete`
 8. **正方早退**：`prove-bug` 最终 JSON 返回 `confirmed=false`（非问题）时正式早退，直接以正方理由记录"可能误报"最终结果并推送前端，跳过 `prove-fp` 和 `final-judge`；只有正方判定为真实问题时才进入后两个阶段，此时最终结论采用 `final-judge` 的最终 JSON
-9. 对抗式复核继续逐项运行并保留原早退行为；证据门禁复核先跑全批次步骤 0 和标准路径，再按深度阶段依赖执行，扫描未完成时不能手动启动
-10. 每个阶段结束后页面实时展示对应中文 Markdown；结构化输出不完整时在同 Session 纠正并按策略重试，仍失败则保留已有阶段证据但不生成 TP/FP。证据门禁复核完成后额外展示并导出批次攻击链汇总
+9. 对抗式复核继续逐项运行并保留原早退行为；Trail of Bits fp-check 复核先跑全批次步骤 0 和标准路径，再按深度阶段依赖执行，扫描未完成时不能手动启动
+10. 每个阶段结束后页面实时展示对应中文 Markdown；结构化输出不完整时在同 Session 纠正并按策略重试，仍失败则保留已有阶段证据但不生成 TP/FP。Trail of Bits fp-check 复核完成后额外展示并导出批次攻击链汇总
 11. **断线续挂**：Agent WebSocket 重连时会在 hello 中上报仍在运行的 FP 复核任务，后端重新挂接并恢复 running 状态；progress/result/stage-output 上报也会自动把因断连误标为 error 的复核任务恢复为 running
 
 ## 解耦的 Checker 架构
@@ -700,7 +700,7 @@ OpenDeepHole/
 │   ├── candidate_audit/   # 独立候选点审计过程及审计规则
 │   ├── threat_audit/      # 独立威胁审计过程
 │   ├── fp_review/         # 对抗式复核（既有流程）
-│   ├── fp_check_review/   # 证据门禁批量复核与中文版 fp-check Skill
+│   ├── fp_check_review/   # Trail of Bits fp-check 批量复核与中文版 Skill
 │   ├── vulnerability_validation/ # 独立漏洞验证过程及验证器
 │   ├── config.py          # agent.yaml 配置加载
 │   ├── main.py            # 守护进程入口（WebSocket 连接 + 自动重连）

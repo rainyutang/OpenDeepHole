@@ -1,7 +1,8 @@
-# 证据门禁复核过程
+# Trail of Bits fp-check 复核过程
 
 公开入口为异步函数 `run_fp_check_review(**kwargs)`。它与既有
 `deephole_client.fp_review.run_fp_review()` 相互独立，不替换旧流程。
+该方案来源于 Trail of Bits Skills Marketplace 的 `fp-check`，并在本项目中完成中文化和运行时适配。
 
 必填参数：
 

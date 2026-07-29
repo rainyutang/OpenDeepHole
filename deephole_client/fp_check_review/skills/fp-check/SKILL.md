@@ -3,7 +3,9 @@ name: fp-check
 description: 系统验证已经发现的安全问题，通过完整证据链排除误报，并为每个问题给出 TRUE POSITIVE 或 FALSE POSITIVE 结论。适用于判断具体漏洞是否真实、可利用或属于误报；不用于发现新漏洞。
 ---
 
-# 证据门禁复核
+# Trail of Bits fp-check 复核
+
+本 Skill 来源于 Trail of Bits Skills Marketplace 的 `fp-check`，并针对 OpenDeepHole 运行流程完成中文化适配。
 
 ## 适用范围
 

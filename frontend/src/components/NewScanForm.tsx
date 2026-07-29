@@ -403,15 +403,16 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 <button
                   type="button"
                   role="switch"
+                  aria-label="自动去误报"
                   aria-checked={autoFpReview}
                   onClick={() => setAutoFpReview((value) => !value)}
-                  className={`relative h-6 w-11 rounded-full transition-colors ${
+                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full p-0 transition-colors ${
                     autoFpReview ? "bg-amber-500" : "bg-slate-600"
                   }`}
                 >
                   <span
-                    className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                      autoFpReview ? "translate-x-5" : "translate-x-0.5"
+                    className={`absolute left-0.5 top-1/2 h-5 w-5 -translate-y-1/2 rounded-full bg-white shadow transition-transform ${
+                      autoFpReview ? "translate-x-5" : "translate-x-0"
                     }`}
                   />
                 </button>
@@ -425,8 +426,8 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                   },
                   {
                     value: "fp_check" as const,
-                    title: "证据门禁复核",
-                    description: "扫描完成后整批执行标准/深度验证、六道门和攻击链复核。",
+                    title: "Trail of Bits fp-check 复核",
+                    description: "基于 Trail of Bits fp-check，扫描完成后整批执行标准/深度验证、六道门和攻击链复核。",
                   },
                 ] satisfies Array<{
                   value: FpReviewMethod;

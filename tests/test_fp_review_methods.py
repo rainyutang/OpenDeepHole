@@ -218,7 +218,7 @@ class FpReviewMethodTests(unittest.TestCase):
                     ),
                 ))
 
-        self.assertIn("# 证据门禁复核", result["content"])
+        self.assertIn("# Trail of Bits fp-check 复核", result["content"])
         self.assertIn("# 六道门复核", result["content"])
         self.assertIn("# 数据流分析器", result["content"])
 
