@@ -3,6 +3,7 @@ import { scanSSEUrl, getScanStatus, getFpReview, getAgentIndexStatus } from "../
 import { getScanThreatAnalysis } from "../features/threatAnalysis/api";
 import type {
   FpReviewJob,
+  FpReviewMethod,
   FpReviewStatus,
   IndexStatus,
   OutputSource,
@@ -53,13 +54,14 @@ interface FpReviewStartedEvent {
   status: FpReviewStatus;
   total: number;
   processed?: number;
+  method?: FpReviewMethod;
 }
 
 interface FpReviewProgressEvent {
   review_id: string;
   vuln_index: number;
   active_indices?: number[] | null;
-  processed: number;
+  processed?: number | null;
   total: number;
 }
 
@@ -89,6 +91,9 @@ interface FpReviewFinishEvent {
   review_id: string;
   status: FpReviewStatus;
   error_message: string | null;
+  method?: FpReviewMethod;
+  summary_markdown?: string;
+  summary_output_source?: OutputSource;
 }
 
 interface VulnerabilityValidationEvent {

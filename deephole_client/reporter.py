@@ -704,6 +704,8 @@ class Reporter:
         review_id: str,
         status: str,
         error_message: Optional[str] = None,
+        summary_markdown: str = "",
+        summary_output_source: OutputSource | None = None,
     ) -> None:
         """Signal to the server that the FP review job is complete."""
         if self.dry_run:
@@ -716,6 +718,10 @@ class Reporter:
                     "review_id": review_id,
                     "status": status,
                     "error_message": error_message,
+                    "summary_markdown": summary_markdown,
+                    "summary_output_source": self._with_agent_source(
+                        summary_output_source,
+                    ).model_dump(),
                 },
                 timeout=10.0,
             )

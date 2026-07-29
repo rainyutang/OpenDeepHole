@@ -434,6 +434,8 @@ export interface ScanStatus {
   scan_id: string;
   project_id: string;
   scan_mode?: string;
+  auto_fp_review?: boolean;
+  fp_review_method?: FpReviewMethod;
   product: string;
   validation_environment: string;
   scan_items: string[];
@@ -759,10 +761,11 @@ export interface AgentOpenCodeModelsResult {
 }
 
 export type FpReviewStatus = "pending" | "running" | "complete" | "error" | "cancelled";
+export type FpReviewMethod = "adversarial" | "fp_check";
 
 export interface FpReviewResult {
   vuln_index: number;
-  verdict: "tp" | "fp";
+  verdict: "tp" | "fp" | "uncertain";
   severity: "high" | "medium" | "low";
   reason: string;
   vulnerability_report: string;
@@ -777,6 +780,7 @@ export interface FpReviewResult {
 export interface FpReviewJob {
   review_id: string;
   scan_id: string;
+  method: FpReviewMethod;
   status: FpReviewStatus;
   created_at: string;
   total: number;
@@ -784,6 +788,8 @@ export interface FpReviewJob {
   current_vuln_index: number | null;
   current_vuln_indices?: number[];
   results: FpReviewResult[];
+  summary_markdown?: string;
+  summary_output_source?: OutputSource;
   error_message: string | null;
 }
 

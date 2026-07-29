@@ -115,6 +115,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
         await agent_server.handle_fp_review(
             scan_id=msg["scan_id"],
             review_id=msg["review_id"],
+            method=str(msg.get("method") or "adversarial"),
             project_path=msg["project_path"],
             vulnerabilities=msg.get("vulnerabilities", []),
             feedback_entries=msg.get("feedback_entries", []),

@@ -31,7 +31,7 @@ opencode:
   models: []     # 空池/全禁用会让任务阻塞排队；默认模型也需显式配置 use_default_model: true
 
 fp_review:
-  auto_on_complete: true  # 扫描完成且存在已确认漏洞时，自动触发去误报（无需手动点击）
+  auto_on_complete: true  # 创建扫描未显式传 auto_fp_review 时使用的默认值；Web 新建扫描可单独覆盖
 
 git_history:
   enabled: false       # 默认关闭；设为 true 时分析 git 历史，挖掘历史安全问题模式并做同类变体排查

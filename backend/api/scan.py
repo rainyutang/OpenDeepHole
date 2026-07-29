@@ -33,6 +33,7 @@ from backend.models import (
     CreateScanRequest,
     FeedbackEntry,
     FpReviewJob,
+    FpReviewMethod,
     FpReviewResult,
     FpReviewStatus,
     HistoryPattern,
@@ -153,6 +154,22 @@ def _latest_fp_review_result_map(scan_id: str) -> dict[int, FpReviewResult]:
     return latest
 
 
+def _scan_fp_review_settings(
+    scan_id: str,
+    scan: ScanStatus | None = None,
+) -> tuple[bool, FpReviewMethod]:
+    """Return the immutable FP-review settings selected when the scan was created."""
+    meta = get_scan_store().get_scan_meta(scan_id)
+    if meta is not None:
+        return meta.auto_fp_review, meta.fp_review_method
+    if scan is not None:
+        return scan.auto_fp_review, scan.fp_review_method
+    return (
+        get_config().fp_review.auto_on_complete,
+        FpReviewMethod.ADVERSARIAL,
+    )
+
+
 def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int, FpReviewResult]) -> list[dict]:
     """Return review candidates with unresolved findings first, then already-reviewed findings."""
     unresolved: list[dict] = []
@@ -196,7 +213,16 @@ def _ensure_fp_review_job_for_scan(
             scan = loaded[0]
 
     latest_fp_results = _latest_fp_review_result_map(scan_id)
-    confirmed = _ordered_fp_review_candidates(scan, latest_fp_results)
+    ordered = _ordered_fp_review_candidates(scan, latest_fp_results)
+    _, method = _scan_fp_review_settings(scan_id, scan)
+    if method == FpReviewMethod.FP_CHECK:
+        unresolved = [
+            item for item in ordered
+            if int(item["index"]) not in latest_fp_results
+        ]
+        confirmed = unresolved or ordered
+    else:
+        confirmed = ordered
     if not confirmed:
         return None
 
@@ -208,6 +234,7 @@ def _ensure_fp_review_job_for_scan(
             return None
         return {
             "review_id": job.review_id,
+            "method": method.value,
             "total": len(confirmed),
             "processed": processed,
             "confirmed": confirmed,
@@ -219,6 +246,7 @@ def _ensure_fp_review_job_for_scan(
     if job is not None and job.status == FpReviewStatus.CANCELLED and not allow_cancelled:
         return {
             "review_id": job.review_id,
+            "method": method.value,
             "total": job.total,
             "processed": job.processed,
             "confirmed": confirmed,
@@ -229,7 +257,13 @@ def _ensure_fp_review_job_for_scan(
     if job is None or (job.status == FpReviewStatus.CANCELLED and allow_cancelled):
         review_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
-        store.create_fp_review_job(review_id, scan_id, len(confirmed), now)
+        store.create_fp_review_job(
+            review_id,
+            scan_id,
+            len(confirmed),
+            now,
+            method.value,
+        )
         job = store.get_fp_review_job(review_id)
         created = True
     if job is None:
@@ -246,12 +280,14 @@ def _ensure_fp_review_job_for_scan(
         from backend.sse import publish
         publish(scan_id, "fp_review_started", {
             "review_id": job.review_id,
+            "method": method.value,
             "status": FpReviewStatus.RUNNING.value,
             "total": len(confirmed),
             "processed": processed,
         })
     return {
         "review_id": job.review_id,
+        "method": method.value,
         "total": len(confirmed),
         "processed": processed,
         "confirmed": confirmed,
@@ -299,7 +335,11 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
         # placeholder entry (same shape the SSE stage_output handler builds).
         merged.append(FpReviewResult(
             vuln_index=vuln_index,
-            verdict="tp",
+            verdict=(
+                "uncertain"
+                if job.method == FpReviewMethod.FP_CHECK
+                else "tp"
+            ),
             severity="low",
             reason="",
             vulnerability_report="",
@@ -312,6 +352,7 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
     return FpReviewJob(
         review_id=job.review_id,
         scan_id=job.scan_id,
+        method=job.method,
         status=job.status,
         created_at=job.created_at,
         total=job.total,
@@ -319,6 +360,8 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
         current_vuln_index=job.current_vuln_index,
         current_vuln_indices=job.current_vuln_indices,
         results=merged,
+        summary_markdown=job.summary_markdown,
+        summary_output_source=job.summary_output_source,
         error_message=job.error_message,
     )
 
@@ -610,6 +653,12 @@ async def create_agent_scan(
         code_graph_mcp = body.code_graph_mcp.model_copy(deep=True)
 
     scan_mode = _normalize_scan_mode(body.scan_mode)
+    auto_fp_review = (
+        body.auto_fp_review
+        if body.auto_fp_review is not None
+        else get_config().fp_review.auto_on_complete
+    )
+    fp_review_method = body.fp_review_method
     selected_checkers = checker_names if checker_names is not None else body.checkers
     if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
         validated_checker_names = []
@@ -647,6 +696,8 @@ async def create_agent_scan(
         scan_id=scan_id,
         project_id=scan_name,
         scan_mode=scan_mode,
+        auto_fp_review=auto_fp_review,
+        fp_review_method=fp_review_method,
         product=product,
         validation_environment=validation_environment,
         scan_items=validated_checker_names,
@@ -663,6 +714,8 @@ async def create_agent_scan(
         scan_items=validated_checker_names,
         created_at=now,
         scan_mode=scan_mode,
+        auto_fp_review=auto_fp_review,
+        fp_review_method=fp_review_method,
         feedback_ids=body.feedback_ids,
         agent_id=agent_id,
         agent_key=selected_agent_key,
@@ -1155,6 +1208,20 @@ _FP_STAGE_TITLES = [
     ("prove_fp", "证明误报 (prove_fp)"),
     ("final_judge", "最终裁定 (final_judge)"),
 ]
+_FP_CHECK_STAGE_TITLES = [
+    ("claim_context", "主张与上下文"),
+    ("standard_verification", "标准验证"),
+    ("data_flow", "数据流分析"),
+    ("exploitability", "可利用性验证"),
+    ("impact", "影响评估"),
+    ("poc", "PoC 构建"),
+    ("devil_advocate", "反方审查"),
+    ("gate_review", "六道门复核"),
+]
+_FP_REVIEW_STAGE_KEYS = {
+    FpReviewMethod.ADVERSARIAL: {key for key, _ in _FP_STAGE_TITLES},
+    FpReviewMethod.FP_CHECK: {key for key, _ in _FP_CHECK_STAGE_TITLES},
+}
 
 
 def _scan_fp_result_map(scan_id: str) -> dict[int, FpReviewResult]:
@@ -1456,7 +1523,7 @@ def _vuln_report_markdown(
         if fp_result.reason:
             lines.append(f"- **理由**：{fp_result.reason}")
         lines.append("")
-        for key, title in _FP_STAGE_TITLES:
+        for key, title in _FP_STAGE_TITLES + _FP_CHECK_STAGE_TITLES:
             stage_md = (fp_result.stage_outputs or {}).get(key)
             if not stage_md:
                 continue
@@ -1693,6 +1760,7 @@ async def download_report_zip(
     _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     fp_map = _scan_fp_result_map(scan_id)
+    fp_job = get_scan_store().get_fp_review_by_scan(scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
 
     confirmed = [
@@ -1706,6 +1774,12 @@ async def download_report_zip(
             zf.writestr("README.md", f"# 扫描 {scan_id}\n\n本次扫描没有 AI 确认为问题的漏洞。\n")
         else:
             index_lines = [f"# 扫描 {scan_id} 漏洞报告索引", "", f"共 {len(confirmed)} 个 AI 确认问题：", ""]
+            if fp_job is not None and fp_job.summary_markdown:
+                index_lines.extend([
+                    f"- [{'证据门禁复核' if fp_job.method == FpReviewMethod.FP_CHECK else '对抗式复核'}批次汇总](fp-review-summary.md)",
+                    "",
+                ])
+                zf.writestr("fp-review-summary.md", fp_job.summary_markdown.rstrip() + "\n")
             for i, v in confirmed:
                 entry = f"vuln-{i}-{_safe_filename_part(v.file)}_{v.line}.md"
                 index_lines.append(f"- [{v.vuln_type} @ {v.file}:{v.line}]({entry})")
@@ -2005,6 +2079,13 @@ async def _start_fp_review(
             return _fail(404, "Scan not found")
         scan = loaded[0]
 
+    _, selected_method = _scan_fp_review_settings(scan_id, scan)
+    if (
+        selected_method == FpReviewMethod.FP_CHECK
+        and scan.status != ScanItemStatus.COMPLETE
+    ):
+        return _fail(409, "证据门禁复核只能在扫描完成后启动")
+
     fp_job_info = _ensure_fp_review_job_for_scan(
         scan_id,
         scan,
@@ -2015,6 +2096,7 @@ async def _start_fp_review(
         return _fail(400, "No confirmed vulnerabilities to review")
     confirmed = fp_job_info["confirmed"]
     review_id = str(fp_job_info["review_id"])
+    method = FpReviewMethod(str(fp_job_info["method"]))
 
     meta = store.get_scan_meta(scan_id)
     if meta is None:
@@ -2048,6 +2130,7 @@ async def _start_fp_review(
         "type": "fp_review",
         "scan_id": scan_id,
         "review_id": review_id,
+        "method": method.value,
         "project_path": meta.project_path,
         "vulnerabilities": confirmed,
         "feedback_entries": feedback_entries,
@@ -2066,12 +2149,14 @@ async def _start_fp_review(
     store.update_fp_review_job(review_id, status="running", processed=0)
     from backend.sse import publish
     publish(scan_id, "fp_review_started", {
-        "review_id": review_id, "status": "running", "total": len(confirmed), "processed": 0,
+        "review_id": review_id, "method": method.value,
+        "status": "running", "total": len(confirmed), "processed": 0,
     })
     logger.info("FP review %s triggered for scan %s (%d candidates)", review_id, scan_id, len(confirmed))
     return {
         "ok": True,
         "review_id": review_id,
+        "method": method.value,
         "status": "running",
         "total": len(confirmed),
         "processed": 0,
@@ -2252,6 +2337,7 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
     from backend.sse import publish
     publish(scan_id, "fp_review_progress", {
         "review_id": body.review_id, "vuln_index": body.vuln_index,
+        "method": job.method.value,
         "active_indices": body.active_indices,
         "processed": body.processed, "total": job.total,
     })
@@ -2291,6 +2377,7 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
     from backend.sse import publish
     publish(scan_id, "fp_review_result", {
         "review_id": body.review_id, "vuln_index": body.vuln_index,
+        "method": job.method.value,
         "verdict": body.verdict, "severity": severity, "reason": body.reason,
         "vulnerability_report": result.vulnerability_report,
         "stage_outputs": result.stage_outputs,
@@ -2317,7 +2404,7 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
     if job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
         store.update_fp_review_job(body.review_id, status="running", error_message="")
         logger.info("FP review %s auto-recovered from agent disconnect", body.review_id)
-    if body.stage not in {"history_match", "prove_bug", "prove_fp", "final_judge"}:
+    if body.stage not in _FP_REVIEW_STAGE_KEYS[job.method]:
         raise HTTPException(status_code=400, detail="Invalid FP review stage")
     now = datetime.now(timezone.utc).isoformat()
     store.upsert_fp_review_stage_output(
@@ -2331,6 +2418,7 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
     from backend.sse import publish
     publish(scan_id, "fp_review_stage_output", {
         "review_id": body.review_id,
+        "method": job.method.value,
         "vuln_index": body.vuln_index,
         "stage": body.stage,
         "markdown": body.markdown,
@@ -2354,11 +2442,16 @@ async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dic
         status=body.status,
         clear_current_vuln_index=True,
         error_message=body.error_message,
+        summary_markdown=body.summary_markdown,
+        summary_output_source=body.summary_output_source,
     )
     from backend.sse import publish
     publish(scan_id, "fp_review_finish", {
         "review_id": body.review_id, "status": body.status,
+        "method": job.method.value,
         "error_message": body.error_message,
+        "summary_markdown": body.summary_markdown,
+        "summary_output_source": body.summary_output_source.model_dump(),
     })
     logger.info("FP review %s finished with status %s", body.review_id, body.status)
     return {"ok": True}
@@ -2452,17 +2545,34 @@ async def get_fp_review_skill(
 ) -> dict:
     """Return the FP review skill content, merged with user feedback for this scan."""
     _check_scan_owner(scan_id, current_user)
-    skills_dir = (
-        Path(__file__).resolve().parent.parent.parent
-        / "deephole_client"
-        / "fp_review"
-        / "skills"
+    meta = get_scan_store().get_scan_meta(scan_id)
+    method = (
+        meta.fp_review_method
+        if meta is not None
+        else FpReviewMethod.ADVERSARIAL
     )
-    skill_paths = [
-        ("prove-bug", skills_dir / "prove_bug.md"),
-        ("prove-fp", skills_dir / "prove_fp.md"),
-        ("final-judge", skills_dir / "final_judge.md"),
-    ]
+    package_root = Path(__file__).resolve().parent.parent.parent / "deephole_client"
+    if method == FpReviewMethod.FP_CHECK:
+        skills_dir = package_root / "fp_check_review" / "skills" / "fp-check"
+        skill_paths = [
+            ("证据门禁复核", skills_dir / "SKILL.md"),
+            ("标准验证", skills_dir / "references" / "standard-verification.md"),
+            ("深度验证", skills_dir / "references" / "deep-verification.md"),
+            ("六道门复核", skills_dir / "references" / "gate-reviews.md"),
+            ("漏洞类别验证", skills_dir / "references" / "bug-class-verification.md"),
+            ("误报模式", skills_dir / "references" / "false-positive-patterns.md"),
+            ("证据模板", skills_dir / "references" / "evidence-templates.md"),
+            ("数据流分析器", skills_dir / "agents" / "data-flow-analyzer.md"),
+            ("可利用性验证器", skills_dir / "agents" / "exploitability-verifier.md"),
+            ("PoC 构建器", skills_dir / "agents" / "poc-builder.md"),
+        ]
+    else:
+        skills_dir = package_root / "fp_review" / "skills"
+        skill_paths = [
+            ("prove-bug", skills_dir / "prove_bug.md"),
+            ("prove-fp", skills_dir / "prove_fp.md"),
+            ("final-judge", skills_dir / "final_judge.md"),
+        ]
     missing = [path.name for _, path in skill_paths if not path.is_file()]
     if missing:
         raise HTTPException(status_code=404, detail=f"FP review skill not found: {', '.join(missing)}")

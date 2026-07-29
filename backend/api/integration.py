@@ -25,6 +25,7 @@ from backend.models import (
     FeedbackEntry,
     FeedbackUpdateRequest,
     FpReviewJob,
+    FpReviewMethod,
     HistoryPattern,
     MarkRequest,
     ScanStatus,
@@ -49,6 +50,8 @@ class IntegrationScanRequest(BaseModel):
     scan_name: str = ""
     product: str = ""
     validation_environment: str = ""
+    auto_fp_review: bool | None = None
+    fp_review_method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
     agent_config: AgentRemoteConfig = Field(default_factory=AgentRemoteConfig)
     code_graph_mcp: AgentMcpConfig | None = None
 
@@ -218,6 +221,8 @@ async def create_integration_scan(
             scan_name=body.scan_name,
             product=body.product,
             validation_environment=body.validation_environment,
+            auto_fp_review=body.auto_fp_review,
+            fp_review_method=body.fp_review_method,
             checkers=checker_names,
             feedback_ids=[],
             code_graph_mcp=code_graph_mcp,

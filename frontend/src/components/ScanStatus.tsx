@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
-import type { Candidate, CodeIndexStats, FpReviewJob, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, VulnerabilityValidation } from "../types";
+import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, VulnerabilityValidation } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import { isEffectiveFpReviewResult, isFpReviewNonProblem } from "../fpReview";
@@ -39,7 +39,7 @@ interface ScanQueueTask {
 const MINING_TABS: { key: MiningTab; label: string }[] = [
   { key: "static_analysis", label: "静态分析" },
   { key: "candidate_audit", label: "候选点审计" },
-  { key: "fp_review", label: "对抗式去误报" },
+  { key: "fp_review", label: "去误报复核" },
 ];
 
 const STATIC_TABS: { key: StaticTab; label: string }[] = [
@@ -49,6 +49,10 @@ const STATIC_TABS: { key: StaticTab; label: string }[] = [
 
 function hasOutputSource(source?: OutputSource | null): boolean {
   return Boolean(source && (source.agent_name || source.agent_id || source.model || source.model_id || source.tool));
+}
+
+function fpReviewMethodLabel(method?: FpReviewMethod | null): string {
+  return method === "fp_check" ? "证据门禁复核" : "对抗式复核";
 }
 
 function formatOutputSource(source?: OutputSource | null): string {
@@ -200,7 +204,9 @@ function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): string {
   if (hasActiveThreatWork(scan)) return "威胁分析 / 威胁审计";
   if (scan.status === "complete") return "完成";
   const latest = [...events].reverse().find((event) => event.phase !== "opencode_output");
-  if (latest?.phase === "fp_review") return "漏洞挖掘 / 对抗式去误报";
+  if (latest?.phase === "fp_review") {
+    return `漏洞挖掘 / ${fpReviewMethodLabel(scan.fp_review_method)}`;
+  }
   if (latest?.phase === "variant_hunt") return "威胁分析 / 历史同类问题挖掘";
   if (latest?.phase === "threat_analysis") return "威胁分析 / 攻击树分析";
   if (latest?.phase === "threat_audit") return "威胁分析 / 威胁审计";
@@ -435,6 +441,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       setFpReview({
         review_id: data.review_id,
         scan_id: scanId,
+        method: data.method ?? "adversarial",
         status: data.status,
         total: data.total,
         processed: data.processed ?? 0,
@@ -450,7 +457,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         return {
           ...prev,
           status: "running",
-          processed: data.processed,
+          processed: data.processed ?? prev.processed,
           current_vuln_index: data.vuln_index,
           current_vuln_indices: data.active_indices ?? [data.vuln_index],
           total: data.total,
@@ -478,7 +485,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         } else {
           results.push({
             vuln_index: data.vuln_index,
-            verdict: "tp",
+            verdict: prev.method === "fp_check" ? "uncertain" : "tp",
             severity: "low",
             reason: "",
             vulnerability_report: "",
@@ -526,7 +533,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     onFpReviewFinish: (data) => {
       setFpReview((prev) => {
         if (!prev || prev.review_id !== data.review_id) return prev;
-        return { ...prev, status: data.status, error_message: data.error_message, current_vuln_index: null };
+        return {
+          ...prev,
+          status: data.status,
+          error_message: data.error_message,
+          current_vuln_index: null,
+          current_vuln_indices: [],
+          summary_markdown: data.summary_markdown ?? prev.summary_markdown,
+          summary_output_source: data.summary_output_source ?? prev.summary_output_source,
+        };
       });
     },
     onIndexStatus: (data) => {
@@ -560,6 +575,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       setFpReview({
         review_id: started.review_id,
         scan_id: scanId,
+        method: started.method ?? scan?.fp_review_method ?? "adversarial",
         status: started.status ?? "running",
         total: started.total ?? 0,
         processed: started.processed ?? 0,
@@ -860,6 +876,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const indexProgress = formatIndexProgress(indexStatus, scan);
   const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis", "threat_audit"]);
   const miningEvents = filterEvents(scan.events, ["auditing", "fp_review", "opencode_output"]);
+  const selectedFpReviewMethod = fpReview?.method ?? scan.fp_review_method ?? "adversarial";
+  const miningTabs = MINING_TABS.map((tab) => (
+    tab.key === "fp_review"
+      ? { ...tab, label: fpReviewMethodLabel(selectedFpReviewMethod) }
+      : tab
+  ));
   const validationEvents = filterEvents(scan.events, ["validation"]);
   const issuesView = scan.vulnerabilities.length === 0 && isDone ? (
     <div className="flex items-center justify-center h-64 text-slate-400">
@@ -1147,7 +1169,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         )}
         {activeTab === "mining" && (
           <TabbedPanel
-            tabs={MINING_TABS}
+            tabs={miningTabs}
             active={activeMiningTab}
             onChange={setActiveMiningTab}
           >
@@ -1180,6 +1202,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               <FpReviewPanel
                 vulnerabilities={scan.vulnerabilities}
                 fpReview={fpReview}
+                method={selectedFpReviewMethod}
+                scanComplete={scan.status === "complete"}
                 isFpReviewing={isFpReviewing}
                 loading={fpReviewLoading}
                 stopping={fpReviewStopping}
@@ -1582,7 +1606,7 @@ function ProcessFlowNav({
     },
     fp_review: {
       id: "fp_review",
-      label: "对抗式去误报",
+      label: fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method),
       detail: fpReviewTotal > 0 ? `${fpReviewProcessed}/${fpReviewTotal} 已复核` : "等待正报复核",
       status: flowStatus(fpReviewDone, isFpReviewing),
       active: activeTab === "mining" && activeMiningTab === "fp_review",
@@ -1780,7 +1804,7 @@ function FlowAuditBranch({
     <div
       className="-mr-3 relative h-44 w-[20.75rem] flex-none"
       role="group"
-      aria-label="候选点审计分支：同时进入漏洞验证和对抗式去误报"
+      aria-label="候选点审计分支：同时进入漏洞验证和去误报复核"
     >
       <svg
         className="pointer-events-none absolute inset-0 h-full w-full text-slate-600"
@@ -1953,7 +1977,7 @@ function ScanOverview({
               detail={scan.total_candidates ? `${scan.processed_candidates}/${scan.total_candidates} 候选点` : "等待候选点"}
             />
             <TaskSummaryRow
-              label="对抗式去误报"
+              label={fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method)}
               status={fpReview ? taskStateLabel(fpReview.status === "complete", isFpReviewing, fpReview.status === "error") : "预留"}
               tone={isFpReviewing ? "amber" : fpReview?.status === "complete" ? "green" : fpReview?.status === "error" ? "red" : "slate"}
               progress={fpReview?.total ? percent(fpReview.processed, fpReview.total) : undefined}
@@ -2374,7 +2398,7 @@ function compareScanQueueTime(a: string, b: string): number {
 function scanQueueTaskTypeLabel(value: unknown): string {
   const type = String(value || "audit");
   if (type === "audit") return "候选点审计";
-  if (type === "fp_review") return "对抗式去误报";
+  if (type === "fp_review") return "去误报复核";
   if (type === "threat_analysis") return "威胁分析";
   if (type === "threat_audit") return "威胁审计";
   if (type === "validation") return "漏洞验证";
@@ -3048,11 +3072,21 @@ const FP_REVIEW_STAGE_LABELS: Record<string, string> = {
   prove_bug: "正报论证",
   prove_fp: "误报论证",
   final_judge: "最终裁决",
+  claim_context: "主张与上下文",
+  standard_verification: "标准验证",
+  data_flow: "数据流分析",
+  exploitability: "可利用性验证",
+  impact: "影响评估",
+  poc: "PoC 构建",
+  devil_advocate: "反方审查",
+  gate_review: "六道门复核",
 };
 
 function FpReviewPanel({
   vulnerabilities,
   fpReview,
+  method,
+  scanComplete,
   isFpReviewing,
   loading,
   stopping,
@@ -3062,6 +3096,8 @@ function FpReviewPanel({
 }: {
   vulnerabilities: Vulnerability[];
   fpReview: FpReviewJob | null;
+  method: FpReviewMethod;
+  scanComplete: boolean;
   isFpReviewing: boolean;
   loading: boolean;
   stopping: boolean;
@@ -3123,7 +3159,14 @@ function FpReviewPanel({
           ? "amber"
           : "slate";
   const selected = selectedIndex === null ? null : items.find((item) => item.index === selectedIndex) ?? null;
-  const canTrigger = confirmed.length > 0 && !isFpReviewing && !loading;
+  const canTrigger = confirmed.length > 0
+    && !isFpReviewing
+    && !loading
+    && (method !== "fp_check" || scanComplete);
+  const methodLabel = fpReviewMethodLabel(method);
+  const methodSummary = method === "fp_check"
+    ? "先完成全部问题的主张重述与标准验证，再按依赖波次执行深度验证、六道门和攻击链复核。"
+    : "沿用现有正反论证流程，对漏洞挖掘阶段确认的问题逐条复核。";
 
   useEffect(() => {
     if (items.length === 0) {
@@ -3137,10 +3180,10 @@ function FpReviewPanel({
 
   return (
     <TaskPanel
-      title="对抗式去误报"
+      title={methodLabel}
       status={status}
       tone={tone}
-      summary="对漏洞挖掘阶段确认的问题逐条复核，输出正报或误报裁决。"
+      summary={methodSummary}
     >
       <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
         <MiniMetric label="确认问题" value={confirmed.length} tone="red" />
@@ -3156,7 +3199,7 @@ function FpReviewPanel({
           disabled={!canTrigger}
           className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {loading ? "启动中..." : "启动去误报"}
+          {loading ? "启动中..." : `启动${methodLabel}`}
         </button>
         {isFpReviewing && (
           <button
@@ -3171,7 +3214,23 @@ function FpReviewPanel({
         {fpReview?.error_message && (
           <span className="text-xs text-red-300">{fpReview.error_message}</span>
         )}
+        {method === "fp_check" && !scanComplete && (
+          <span className="text-xs text-slate-500">证据门禁复核需等待扫描完成后整批启动。</span>
+        )}
       </div>
+      {fpReview?.summary_markdown && (
+        <section className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h4 className="text-xs font-semibold uppercase text-amber-200">批次复核汇总</h4>
+            {hasOutputSource(fpReview.summary_output_source) && (
+              <span className="text-[11px] text-slate-500">
+                输出来源：{formatOutputSource(fpReview.summary_output_source)}
+              </span>
+            )}
+          </div>
+          <MarkdownContent content={fpReview.summary_markdown} />
+        </section>
+      )}
       {confirmed.length === 0 ? (
         <EmptyState text="当前还没有漏洞挖掘阶段确认的问题。" />
       ) : (
@@ -3283,7 +3342,10 @@ function FpReviewDetail({
               <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">复核结论</h4>
               <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
                 <div className="mb-2 flex flex-wrap gap-2">
-                  <StatusPill label={result.verdict === "fp" ? "误报" : "正报"} tone={result.verdict === "fp" ? "green" : "red"} />
+                  <StatusPill
+                    label={result.verdict === "fp" ? "误报" : result.verdict === "tp" ? "正报" : "未完成"}
+                    tone={result.verdict === "fp" ? "green" : result.verdict === "tp" ? "red" : "slate"}
+                  />
                   <StatusPill label={`严重性：${result.severity || "-"}`} tone="slate" />
                   {result.match_type && <StatusPill label={`依据：${result.match_type}`} tone="purple" />}
                 </div>
@@ -3330,7 +3392,20 @@ function FpReviewDetail({
 }
 
 function fpStageOrder(stage: string): number {
-  const order = ["history_match", "prove_bug", "prove_fp", "final_judge"];
+  const order = [
+    "history_match",
+    "prove_bug",
+    "prove_fp",
+    "final_judge",
+    "claim_context",
+    "standard_verification",
+    "data_flow",
+    "exploitability",
+    "impact",
+    "poc",
+    "devil_advocate",
+    "gate_review",
+  ];
   const index = order.indexOf(stage);
   return index >= 0 ? index : order.length;
 }
@@ -3344,13 +3419,13 @@ function fpReviewSortRank(result: FpReviewJob["results"][number] | undefined, ru
 function fpReviewItemLabel(result: FpReviewJob["results"][number] | undefined, running: boolean): string {
   if (running) return "复核中";
   if (!result) return "等待复核";
-  return result.verdict === "fp" ? "误报" : "正报";
+  return result.verdict === "fp" ? "误报" : result.verdict === "tp" ? "正报" : "未完成";
 }
 
 function fpReviewItemTone(result: FpReviewJob["results"][number] | undefined, running: boolean): TaskTone {
   if (running) return "amber";
   if (!result) return "slate";
-  return result.verdict === "fp" ? "green" : "red";
+  return result.verdict === "fp" ? "green" : result.verdict === "tp" ? "red" : "slate";
 }
 
 function ValidationPanel({

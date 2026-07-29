@@ -15,6 +15,7 @@ from backend.models import (
     Candidate,
     FeedbackEntry,
     FpReviewJob,
+    FpReviewMethod,
     FpReviewResult,
     FpReviewStageOutput,
     FpReviewStatus,
@@ -226,6 +227,8 @@ CREATE TABLE IF NOT EXISTS scans (
     scan_id            TEXT PRIMARY KEY,
     project_id         TEXT NOT NULL,
     scan_mode          TEXT NOT NULL DEFAULT 'full',
+    auto_fp_review     INTEGER,
+    fp_review_method   TEXT NOT NULL DEFAULT 'adversarial',
     scan_items         TEXT NOT NULL,
     status             TEXT NOT NULL DEFAULT 'pending',
     created_at         TEXT NOT NULL,
@@ -413,11 +416,14 @@ CREATE INDEX IF NOT EXISTS idx_feedback_source_scan ON feedback_entries(source_s
 CREATE TABLE IF NOT EXISTS fp_review_jobs (
     review_id     TEXT PRIMARY KEY,
     scan_id       TEXT NOT NULL,
+    method        TEXT NOT NULL DEFAULT 'adversarial',
     status        TEXT NOT NULL DEFAULT 'pending',
     created_at    TEXT NOT NULL,
     total         INTEGER DEFAULT 0,
     processed     INTEGER DEFAULT 0,
     current_vuln_index INTEGER,
+    summary_markdown TEXT NOT NULL DEFAULT '',
+    summary_output_source TEXT NOT NULL DEFAULT '{}',
     error_message TEXT
 );
 
@@ -624,6 +630,12 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN opencode_pool TEXT NOT NULL DEFAULT '{}'")
         if "code_graph_mcp_json" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN code_graph_mcp_json TEXT")
+        if "auto_fp_review" not in cols:
+            self._conn.execute("ALTER TABLE scans ADD COLUMN auto_fp_review INTEGER")
+        if "fp_review_method" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN fp_review_method TEXT NOT NULL DEFAULT 'adversarial'"
+            )
         agent_cur = self._conn.execute("PRAGMA table_info(agents)")
         agent_cols = {r[1] for r in agent_cur.fetchall()}
         if "mcp_probe_json" not in agent_cols:
@@ -832,12 +844,15 @@ class SqliteScanStore(ScanStoreBase):
             CREATE TABLE IF NOT EXISTS fp_review_jobs (
                 review_id     TEXT PRIMARY KEY,
                 scan_id       TEXT NOT NULL,
+                method        TEXT NOT NULL DEFAULT 'adversarial',
                 status        TEXT NOT NULL DEFAULT 'pending',
                 created_at    TEXT NOT NULL,
                 total         INTEGER DEFAULT 0,
                 processed     INTEGER DEFAULT 0,
                 current_vuln_index INTEGER,
                 current_vuln_indices TEXT NOT NULL DEFAULT '[]',
+                summary_markdown TEXT NOT NULL DEFAULT '',
+                summary_output_source TEXT NOT NULL DEFAULT '{}',
                 error_message TEXT
             );
             CREATE TABLE IF NOT EXISTS fp_review_results (
@@ -875,6 +890,18 @@ class SqliteScanStore(ScanStoreBase):
         if "current_vuln_indices" not in fp_job_cols:
             self._conn.execute(
                 "ALTER TABLE fp_review_jobs ADD COLUMN current_vuln_indices TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "method" not in fp_job_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_jobs ADD COLUMN method TEXT NOT NULL DEFAULT 'adversarial'"
+            )
+        if "summary_markdown" not in fp_job_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_jobs ADD COLUMN summary_markdown TEXT NOT NULL DEFAULT ''"
+            )
+        if "summary_output_source" not in fp_job_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_jobs ADD COLUMN summary_output_source TEXT NOT NULL DEFAULT '{}'"
             )
         fp_cur = self._conn.execute("PRAGMA table_info(fp_review_results)")
         fp_cols = {r[1] for r in fp_cur.fetchall()}
@@ -1007,6 +1034,16 @@ class SqliteScanStore(ScanStoreBase):
             scan_id=row["scan_id"],
             project_id=row["project_id"],
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
+            auto_fp_review=(
+                bool(row["auto_fp_review"])
+                if row["auto_fp_review"] is not None
+                else True
+            ),
+            fp_review_method=(
+                row["fp_review_method"]
+                if row["fp_review_method"] is not None
+                else FpReviewMethod.ADVERSARIAL.value
+            ),
             product=row["product"] if row["product"] is not None else "",
             validation_environment=(
                 row["validation_environment"] if row["validation_environment"] is not None else ""
@@ -1040,6 +1077,16 @@ class SqliteScanStore(ScanStoreBase):
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
+            auto_fp_review=(
+                bool(row["auto_fp_review"])
+                if row["auto_fp_review"] is not None
+                else True
+            ),
+            fp_review_method=(
+                row["fp_review_method"]
+                if row["fp_review_method"] is not None
+                else FpReviewMethod.ADVERSARIAL.value
+            ),
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
             agent_key=row["agent_key"] if row["agent_key"] is not None else "",
@@ -1073,9 +1120,10 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, agent_key, project_path, code_scan_path, scan_name,
-                     scan_mode, product, validation_environment, public_access_token, opencode_pool,
+                     scan_mode, auto_fp_review, fp_review_method,
+                     product, validation_environment, public_access_token, opencode_pool,
                      code_graph_mcp_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -1100,6 +1148,8 @@ class SqliteScanStore(ScanStoreBase):
                     meta.code_scan_path,
                     meta.scan_name,
                     meta.scan_mode,
+                    int(meta.auto_fp_review),
+                    meta.fp_review_method.value,
                     meta.product,
                     meta.validation_environment,
                     meta.public_access_token,
@@ -2868,14 +2918,22 @@ class SqliteScanStore(ScanStoreBase):
 
     # -- FP Review jobs --
 
-    def create_fp_review_job(self, review_id: str, scan_id: str, total: int, created_at: str) -> None:
+    def create_fp_review_job(
+        self,
+        review_id: str,
+        scan_id: str,
+        total: int,
+        created_at: str,
+        method: str = FpReviewMethod.ADVERSARIAL.value,
+    ) -> None:
         with self._lock:
             self._conn.execute(
                 """\
-                INSERT INTO fp_review_jobs (review_id, scan_id, status, created_at, total, processed)
-                VALUES (?, ?, 'pending', ?, ?, 0)
+                INSERT INTO fp_review_jobs
+                    (review_id, scan_id, method, status, created_at, total, processed)
+                VALUES (?, ?, ?, 'pending', ?, ?, 0)
                 """,
-                (review_id, scan_id, created_at, total),
+                (review_id, scan_id, method, created_at, total),
             )
             self._conn.commit()
 
@@ -3015,6 +3073,11 @@ class SqliteScanStore(ScanStoreBase):
         return FpReviewJob(
             review_id=review_id,
             scan_id=row["scan_id"],
+            method=(
+                row["method"]
+                if "method" in row.keys()
+                else FpReviewMethod.ADVERSARIAL.value
+            ),
             status=FpReviewStatus(row["status"]),
             created_at=row["created_at"],
             total=row["total"],
@@ -3022,6 +3085,16 @@ class SqliteScanStore(ScanStoreBase):
             current_vuln_index=row["current_vuln_index"],
             current_vuln_indices=current_vuln_indices,
             results=results,
+            summary_markdown=(
+                row["summary_markdown"]
+                if "summary_markdown" in row.keys()
+                else ""
+            ) or "",
+            summary_output_source=_output_source(
+                row["summary_output_source"]
+                if "summary_output_source" in row.keys()
+                else "{}"
+            ),
             error_message=row["error_message"],
         )
 
@@ -3079,6 +3152,8 @@ class SqliteScanStore(ScanStoreBase):
         current_vuln_indices: list[int] | None = None,
         clear_current_vuln_index: bool = False,
         error_message: str | None = None,
+        summary_markdown: str | None = None,
+        summary_output_source: OutputSource | None = None,
     ) -> None:
         updates: list[str] = []
         params: list = []
@@ -3104,6 +3179,12 @@ class SqliteScanStore(ScanStoreBase):
         if error_message is not None:
             updates.append("error_message = ?")
             params.append(error_message)
+        if summary_markdown is not None:
+            updates.append("summary_markdown = ?")
+            params.append(summary_markdown)
+        if summary_output_source is not None:
+            updates.append("summary_output_source = ?")
+            params.append(summary_output_source.model_dump_json())
         if not updates:
             return
         with self._lock:

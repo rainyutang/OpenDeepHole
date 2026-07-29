@@ -19,6 +19,13 @@ class ScanItemStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class FpReviewMethod(str, Enum):
+    """False-positive review workflow selected when a scan is created."""
+
+    ADVERSARIAL = "adversarial"
+    FP_CHECK = "fp_check"
+
+
 # --- User / Auth models ---
 
 class User(BaseModel):
@@ -481,6 +488,8 @@ class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
     scan_mode: str = "full"
+    auto_fp_review: bool = True
+    fp_review_method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
     product: str = ""
     validation_environment: str = ""
     scan_items: list[str] = []
@@ -1064,6 +1073,8 @@ class CreateScanRequest(BaseModel):
     checkers: list[str]
     feedback_ids: list[str] = []
     code_graph_mcp: AgentMcpConfig | None = None
+    auto_fp_review: bool | None = None
+    fp_review_method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
 
 
 class ValidationTarget(BaseModel):
@@ -1094,6 +1105,8 @@ class ScanMeta(BaseModel):
     project_path: str = ""
     code_scan_path: str = ""
     scan_name: str = ""
+    auto_fp_review: bool = True
+    fp_review_method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
     product: str = ""
     validation_environment: str = ""
     user_id: str = ""
@@ -1260,6 +1273,7 @@ class FpReviewJob(BaseModel):
     """A false-positive review job for a scan."""
     review_id: str
     scan_id: str
+    method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
     status: FpReviewStatus
     created_at: str
     total: int = 0
@@ -1267,6 +1281,8 @@ class FpReviewJob(BaseModel):
     current_vuln_index: int | None = None
     current_vuln_indices: list[int] = []
     results: list[FpReviewResult] = []
+    summary_markdown: str = ""
+    summary_output_source: OutputSource = Field(default_factory=OutputSource)
     error_message: str | None = None
 
 
@@ -1312,3 +1328,5 @@ class AgentFpReviewFinish(BaseModel):
     review_id: str
     status: str        # "complete" | "error" | "cancelled"
     error_message: str | None = None
+    summary_markdown: str = ""
+    summary_output_source: OutputSource = Field(default_factory=OutputSource)

@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, HistoryPattern, IndexStatus, OpenCodeTokenUsage, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, OpenCodeTokenUsage, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -218,6 +218,8 @@ export async function createScan(body: {
   checkers: string[];
   feedback_ids?: string[];
   code_graph_mcp?: AgentMcpConfig | null;
+  auto_fp_review?: boolean;
+  fp_review_method?: FpReviewMethod;
 }): Promise<ScanStartResponse> {
   const { data } = await api.post<ScanStartResponse>("/api/scan", body);
   return data;
@@ -644,6 +646,7 @@ export async function triggerFpReview(scanId: string): Promise<{
   status?: FpReviewJob["status"];
   total?: number;
   processed?: number;
+  method?: FpReviewJob["method"];
 }> {
   if (isPublicScan(scanId)) {
     const { data } = await api.post(publicScanPath("/fp_review"), null, { params: publicParams() });

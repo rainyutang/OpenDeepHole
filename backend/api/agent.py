@@ -63,6 +63,7 @@ from backend.models import (
     AgentScanCandidates,
     AgentScanFinish,
     AgentVulnerabilityValidationUpdate,
+    FpReviewMethod,
     FpReviewStatus,
     HistoryPattern,
     OpenCodePoolStatus,
@@ -2027,6 +2028,7 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
             from backend.api.scan import (
                 _ensure_fp_review_job_for_scan,
                 _scan_fp_result_map,
+                _scan_fp_review_settings,
                 _vuln_report_markdown,
             )
 
@@ -2035,7 +2037,14 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
                 vuln,
                 _scan_fp_result_map(scan_id).get(vuln_index),
             )
-            if get_config().fp_review.auto_on_complete:
+            auto_fp_review, fp_review_method = _scan_fp_review_settings(
+                scan_id,
+                scan,
+            )
+            if (
+                auto_fp_review
+                and fp_review_method == FpReviewMethod.ADVERSARIAL
+            ):
                 ensured = _ensure_fp_review_job_for_scan(
                     scan_id,
                     scan,
@@ -2047,6 +2056,7 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
                     latest_results = ensured.get("latest_results") or {}
                     fp_review_info = {
                         "review_id": ensured["review_id"],
+                        "method": FpReviewMethod.ADVERSARIAL.value,
                         "vuln_index": vuln_index,
                         "queued": vuln_index not in latest_results,
                         "total": ensured["total"],
@@ -2395,12 +2405,15 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         scan_id, body.status, confirmed, final_total,
     )
 
-    # 扫描完成且存在已确认漏洞时，自动触发去误报（无需手动点击）。
-    # 仅在尚无去误报任务时触发，避免 resume / 重复 finish 造成重复复核。
+    from backend.api.scan import _scan_fp_review_settings
+    auto_fp_review, _ = _scan_fp_review_settings(scan_id, scan)
+
+    # 扫描完成且存在已确认漏洞时，按创建扫描时固定的配置自动触发去误报。
+    # 对抗式复核可能已随漏洞增量排队；证据门禁复核则只会在此处整批启动。
     if (
         final_status == ScanItemStatus.COMPLETE
         and confirmed > 0
-        and get_config().fp_review.auto_on_complete
+        and auto_fp_review
         and store.get_fp_review_by_scan(scan_id) is None
     ):
         from backend.api.scan import _start_fp_review, _server_url_from_request

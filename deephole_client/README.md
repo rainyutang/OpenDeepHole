@@ -1,7 +1,7 @@
 # DeepHole Client
 
 `deephole_client` 是仍以 “Agent” 展示和通信的本地客户端包。后端只下发任务；客户端协调
-下面七个可独立运行的业务过程，并把它们的事件和最终结果转换成现有 HTTP/WebSocket 上报。
+下面八个可独立运行的业务过程，并把它们的事件和最终结果转换成现有 HTTP/WebSocket 上报。
 
 | 过程实现 | 平台异步入口 |
 |---|---|
@@ -11,6 +11,7 @@
 | `candidate_audit/` | `run_candidate_audit(**kwargs)` |
 | `threat_audit/` | `run_threat_audit(**kwargs)` |
 | `fp_review/` | `run_fp_review(**kwargs)` |
+| `fp_check_review/` | `run_fp_check_review(**kwargs)` |
 | `vulnerability_validation/` | `run_vulnerability_validation(**kwargs)` |
 
 平台入口均为 `async`，只接受 `**kwargs`，未知 key 会报错。框架自有过程通过各目录 README

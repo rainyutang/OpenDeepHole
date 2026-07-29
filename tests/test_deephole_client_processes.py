@@ -17,6 +17,7 @@ from deephole_client.candidate_audit import run_candidate_audit
 from deephole_client.candidate_audit.runner import _candidate_prompt
 from deephole_client.code_graph_build import run_code_graph_build
 from deephole_client.fp_review import run_fp_review
+from deephole_client.fp_check_review import run_fp_check_review
 from deephole_client.static_analysis import run_static_analysis
 from deephole_client.threat_analysis_runner import run_threat_analysis
 from deephole_client.threat_audit import run_threat_audit
@@ -30,6 +31,7 @@ PROCESS_FUNCTIONS = (
     run_candidate_audit,
     run_threat_audit,
     run_fp_review,
+    run_fp_check_review,
     run_vulnerability_validation,
 )
 

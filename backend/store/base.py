@@ -300,7 +300,14 @@ class ScanStoreBase(ABC):
     # -- FP Review jobs --
 
     @abstractmethod
-    def create_fp_review_job(self, review_id: str, scan_id: str, total: int, created_at: str) -> None:
+    def create_fp_review_job(
+        self,
+        review_id: str,
+        scan_id: str,
+        total: int,
+        created_at: str,
+        method: str = "adversarial",
+    ) -> None:
         """Create a new FP review job record."""
 
     @abstractmethod
@@ -347,6 +354,8 @@ class ScanStoreBase(ABC):
         current_vuln_indices: list[int] | None = None,
         clear_current_vuln_index: bool = False,
         error_message: str | None = None,
+        summary_markdown: str | None = None,
+        summary_output_source=None,
     ) -> None:
         """Update status/progress on an FP review job."""
 

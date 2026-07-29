@@ -11,6 +11,7 @@ import type {
   AgentMcpProbeResult,
   AgentValidatorRegistration,
   CheckerInfo,
+  FpReviewMethod,
 } from "../types";
 import ScanCodeGraphMcpEditor, {
   defaultScanCodeGraphMcp,
@@ -39,6 +40,8 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [codeScanPath, setCodeScanPath] = useState<string>("");
   const [scanName, setScanName] = useState<string>("");
   const [selectedScanMode, setSelectedScanMode] = useState<string>(SCAN_MODE_FULL);
+  const [autoFpReview, setAutoFpReview] = useState(true);
+  const [fpReviewMethod, setFpReviewMethod] = useState<FpReviewMethod>("adversarial");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
   const [selectedValidationEnvironment, setSelectedValidationEnvironment] = useState<string>("");
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
@@ -177,6 +180,8 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         code_scan_path: codeScanPath.trim(),
         scan_name: scanName.trim(),
         scan_mode: selectedScanMode,
+        auto_fp_review: autoFpReview,
+        fp_review_method: fpReviewMethod,
         product: selectedProduct,
         validation_environment: selectedValidationEnvironment,
         checkers: threatAnalysisOnly ? [] : Array.from(selectedCheckers),
@@ -327,6 +332,73 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                     <div className="mt-1 text-xs text-slate-500">用于单独执行和调试威胁分析 Agent</div>
                   </div>
                 </label>
+              </div>
+            </div>
+
+            {/* False-positive review */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-300">自动去误报</div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    扫描后自动复核已确认问题；关闭后仍可在扫描详情中手动启动。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={autoFpReview}
+                  onClick={() => setAutoFpReview((value) => !value)}
+                  className={`relative h-6 w-11 rounded-full transition-colors ${
+                    autoFpReview ? "bg-amber-500" : "bg-slate-600"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                      autoFpReview ? "translate-x-5" : "translate-x-0.5"
+                    }`}
+                  />
+                </button>
+              </div>
+              <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                {([
+                  {
+                    value: "adversarial" as const,
+                    title: "对抗式复核",
+                    description: "沿用现有正反论证流程，可随已确认问题增量复核。",
+                  },
+                  {
+                    value: "fp_check" as const,
+                    title: "证据门禁复核",
+                    description: "扫描完成后整批执行标准/深度验证、六道门和攻击链复核。",
+                  },
+                ] satisfies Array<{
+                  value: FpReviewMethod;
+                  title: string;
+                  description: string;
+                }>).map((option) => (
+                  <label
+                    key={option.value}
+                    className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
+                      fpReviewMethod === option.value
+                        ? "border-amber-500 bg-amber-500/10"
+                        : "border-slate-600 hover:border-slate-500"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="fp_review_method"
+                      value={option.value}
+                      checked={fpReviewMethod === option.value}
+                      onChange={() => setFpReviewMethod(option.value)}
+                      className="mt-0.5 h-4 w-4 border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-0"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-white">{option.title}</span>
+                      <span className="mt-1 block text-xs text-slate-500">{option.description}</span>
+                    </span>
+                  </label>
+                ))}
               </div>
             </div>
 
