@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import {
   createScan,
   getAgents,
+  getAgentConfig,
+  getAgentMiningEngineCatalog,
   getAgentValidatorCatalog,
   getCheckers,
   probeScanCodeGraphMcp,
@@ -12,6 +14,8 @@ import type {
   AgentValidatorRegistration,
   CheckerInfo,
   FpReviewMethod,
+  MiningEngineCatalogItem,
+  MiningEngineConfig,
 } from "../types";
 import ScanCodeGraphMcpEditor, {
   defaultScanCodeGraphMcp,
@@ -25,12 +29,13 @@ interface Props {
 }
 
 const SCAN_MODE_FULL = "full";
-const SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only";
 
 export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [validationTargets, setValidationTargets] = useState<AgentValidatorRegistration[]>([]);
+  const [miningEngineCatalog, setMiningEngineCatalog] = useState<MiningEngineCatalogItem[]>([]);
+  const [miningEngines, setMiningEngines] = useState<Record<string, MiningEngineConfig>>({});
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +44,6 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [projectPath, setProjectPath] = useState<string>("");
   const [codeScanPath, setCodeScanPath] = useState<string>("");
   const [scanName, setScanName] = useState<string>("");
-  const [selectedScanMode, setSelectedScanMode] = useState<string>(SCAN_MODE_FULL);
   const [autoFpReview, setAutoFpReview] = useState(true);
   const [fpReviewMethod, setFpReviewMethod] = useState<FpReviewMethod>("adversarial");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
@@ -50,7 +54,10 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [codeGraphProbe, setCodeGraphProbe] = useState<AgentMcpProbeResult | null>(null);
   const builtinCheckers = checkers.filter((checker) => !checker.user_created);
   const userCheckers = checkers.filter((checker) => checker.user_created);
-  const threatAnalysisOnly = selectedScanMode === SCAN_MODE_THREAT_ANALYSIS_ONLY;
+  const staticEngineEnabled = miningEngines.static_candidate?.enabled ?? false;
+  const enabledEngineCount = miningEngineCatalog.filter(
+    (engine) => miningEngines[engine.engine_id]?.enabled,
+  ).length;
   const products = Array.from(new Set(validationTargets.map((target) => target.product))).sort();
   const validationEnvironments = validationTargets
     .filter((target) => target.product === selectedProduct)
@@ -80,13 +87,36 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   }, []);
 
   useEffect(() => {
-    if (!selectedAgent) { setValidationTargets([]); return; }
+    if (!selectedAgent) {
+      setValidationTargets([]);
+      setMiningEngineCatalog([]);
+      setMiningEngines({});
+      return;
+    }
     setCodeGraphProbe(null);
-    getAgentValidatorCatalog(selectedAgent).then((catalog) => {
-      setValidationTargets(catalog.registrations);
+    Promise.all([
+      getAgentValidatorCatalog(selectedAgent),
+      getAgentMiningEngineCatalog(selectedAgent),
+      getAgentConfig(selectedAgent),
+    ]).then(([validatorCatalog, engineCatalog, agentConfig]) => {
+      setValidationTargets(validatorCatalog.registrations);
+      setMiningEngineCatalog(engineCatalog.engines);
+      setMiningEngines(Object.fromEntries(engineCatalog.engines.map((engine) => {
+        const override = agentConfig.mining_engines?.[engine.engine_id];
+        return [engine.engine_id, {
+          enabled: override?.enabled ?? engine.default_enabled,
+          fp_review_enabled:
+            override?.fp_review_enabled
+            ?? engine.default_fp_review_enabled,
+        }];
+      })));
       setSelectedProduct("");
       setSelectedValidationEnvironment("");
-    }).catch(() => setValidationTargets([]));
+    }).catch(() => {
+      setValidationTargets([]);
+      setMiningEngineCatalog([]);
+      setMiningEngines({});
+    });
   }, [selectedAgent]);
 
   const toggleChecker = (name: string) => {
@@ -167,7 +197,11 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       setError(codeGraphError);
       return;
     }
-    if (!threatAnalysisOnly && selectedCheckers.size === 0) {
+    if (enabledEngineCount === 0) {
+      setError("请至少启用一个漏洞挖掘引擎");
+      return;
+    }
+    if (staticEngineEnabled && selectedCheckers.size === 0) {
       setError("请至少选择一个检查项");
       return;
     }
@@ -179,12 +213,13 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         project_path: projectPath.trim(),
         code_scan_path: codeScanPath.trim(),
         scan_name: scanName.trim(),
-        scan_mode: selectedScanMode,
+        scan_mode: SCAN_MODE_FULL,
         auto_fp_review: autoFpReview,
         fp_review_method: fpReviewMethod,
         product: selectedProduct,
         validation_environment: selectedValidationEnvironment,
-        checkers: threatAnalysisOnly ? [] : Array.from(selectedCheckers),
+        checkers: staticEngineEnabled ? Array.from(selectedCheckers) : [],
+        mining_engines: miningEngines,
         code_graph_mcp: codeGraphMcp.enabled ? codeGraphMcp : null,
       });
       onScanStarted(resp.scan_id);
@@ -286,53 +321,74 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               )}
             </div>
 
-            {/* Scan mode */}
+            {/* Mining engines */}
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
-              <label className="block text-sm font-medium text-slate-300 mb-3">
-                扫描模式
-              </label>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <label
-                  className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-                    selectedScanMode === SCAN_MODE_FULL
-                      ? "border-blue-500 bg-blue-500/10"
-                      : "border-slate-600 hover:border-slate-500"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="scan_mode"
-                    value={SCAN_MODE_FULL}
-                    checked={selectedScanMode === SCAN_MODE_FULL}
-                    onChange={() => setSelectedScanMode(SCAN_MODE_FULL)}
-                    className="mt-0.5 h-4 w-4 border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
-                  />
-                  <div>
-                    <div className="text-sm font-medium text-white">完整扫描</div>
-                    <div className="mt-1 text-xs text-slate-500">代码索引、威胁分析、静态分析和候选点审计</div>
-                  </div>
-                </label>
-                <label
-                  className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-                    selectedScanMode === SCAN_MODE_THREAT_ANALYSIS_ONLY
-                      ? "border-emerald-500 bg-emerald-500/10"
-                      : "border-slate-600 hover:border-slate-500"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="scan_mode"
-                    value={SCAN_MODE_THREAT_ANALYSIS_ONLY}
-                    checked={selectedScanMode === SCAN_MODE_THREAT_ANALYSIS_ONLY}
-                    onChange={() => setSelectedScanMode(SCAN_MODE_THREAT_ANALYSIS_ONLY)}
-                    className="mt-0.5 h-4 w-4 border-slate-500 bg-slate-700 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-0"
-                  />
-                  <div>
-                    <div className="text-sm font-medium text-white">仅威胁分析</div>
-                    <div className="mt-1 text-xs text-slate-500">用于单独执行和调试威胁分析 Agent</div>
-                  </div>
-                </label>
+              <div className="mb-3">
+                <div className="text-sm font-medium text-slate-300">漏洞挖掘引擎</div>
+                <p className="mt-1 text-xs text-slate-500">
+                  扫描会并行启动已启用的引擎；每个引擎可独立决定其结果是否进入去误报。
+                </p>
               </div>
+              {miningEngineCatalog.length === 0 ? (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-4 text-sm text-amber-200">
+                  所选 Agent 尚未上报可用的漏洞挖掘引擎。
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {miningEngineCatalog.map((engine) => {
+                    const value = miningEngines[engine.engine_id] ?? {};
+                    const enabled = value.enabled ?? false;
+                    const fpEnabled = value.fp_review_enabled ?? false;
+                    return (
+                      <div
+                        key={engine.engine_id}
+                        className={`rounded-lg border p-4 transition-colors ${
+                          enabled
+                            ? "border-blue-500 bg-blue-500/10"
+                            : "border-slate-600 bg-slate-900/40"
+                        }`}
+                      >
+                        <label className="flex cursor-pointer items-start gap-3">
+                          <input
+                            type="checkbox"
+                            checked={enabled}
+                            onChange={(event) => setMiningEngines((current) => ({
+                              ...current,
+                              [engine.engine_id]: {
+                                ...current[engine.engine_id],
+                                enabled: event.target.checked,
+                              },
+                            }))}
+                            className="mt-0.5 h-4 w-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+                          />
+                          <span>
+                            <span className="block text-sm font-medium text-white">{engine.label}</span>
+                            <span className="mt-1 block text-xs text-slate-500">{engine.description || engine.engine_id}</span>
+                          </span>
+                        </label>
+                        <label className={`mt-4 flex items-center gap-2 border-t border-slate-700/70 pt-3 text-xs ${
+                          enabled ? "cursor-pointer text-slate-300" : "cursor-not-allowed text-slate-600"
+                        }`}>
+                          <input
+                            type="checkbox"
+                            checked={fpEnabled}
+                            disabled={!enabled}
+                            onChange={(event) => setMiningEngines((current) => ({
+                              ...current,
+                              [engine.engine_id]: {
+                                ...current[engine.engine_id],
+                                fp_review_enabled: event.target.checked,
+                              },
+                            }))}
+                            className="h-4 w-4 rounded border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-0"
+                          />
+                          该引擎结果进入去误报
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* False-positive review */}
@@ -341,7 +397,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 <div>
                   <div className="text-sm font-medium text-slate-300">自动去误报</div>
                   <p className="mt-1 text-xs text-slate-500">
-                    扫描后自动复核已确认问题；关闭后仍可在扫描详情中手动启动。
+                    扫描后自动复核已确认且允许去误报的问题；关闭后仍可在扫描详情中手动启动。
                   </p>
                 </div>
                 <button
@@ -521,9 +577,9 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               <label className="block text-sm font-medium text-slate-300 mb-3">
                 检查项
               </label>
-              {threatAnalysisOnly ? (
-                <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-4 text-sm text-emerald-200">
-                  仅威胁分析模式不需要选择检查项。
+              {!staticEngineEnabled ? (
+                <div className="rounded-lg border border-slate-600 bg-slate-900/50 px-3 py-4 text-sm text-slate-400">
+                  静态规则扫描 + 候选点审计引擎未启用，不需要选择检查项。
                 </div>
               ) : checkers.length === 0 ? (
                 <p className="text-sm text-slate-500">无可用检查项</p>

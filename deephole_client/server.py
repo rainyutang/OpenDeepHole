@@ -120,6 +120,7 @@ async def _run(task, is_resume: bool) -> None:
             resume_threat_analysis=task.resume_threat_analysis,
             retry_threat_audit_task_ids=task.retry_threat_audit_task_ids,
             code_graph_mcp=task.code_graph_mcp,
+            mining_engines=task.mining_engines,
         )
     finally:
         _task_manager.remove(task.scan_id)
@@ -137,6 +138,7 @@ async def handle_task(
     code_graph_mcp: dict | None = None,
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
+    mining_engines: list[dict] | None = None,
 ) -> None:
     """Handle a 'task' command — start a new scan."""
     if _task_manager is None:
@@ -160,6 +162,7 @@ async def handle_task(
         code_graph_mcp=code_graph_mcp,
         feedback_entries=feedback_entries,
         checker_packages=checker_packages,
+        mining_engines=mining_engines,
     )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=False))
     print(f"Started task {scan_id}")
@@ -188,6 +191,7 @@ async def handle_resume(
     code_graph_mcp: Optional[dict] = None,
     feedback_entries: Optional[list[dict]] = None,
     checker_packages: Optional[list[dict]] = None,
+    mining_engines: Optional[list[dict]] = None,
     retry_candidates: Optional[list[dict]] = None,
     retry_total_candidates: Optional[int] = None,
     retry_processed_offset: int = 0,
@@ -215,6 +219,7 @@ async def handle_resume(
             code_graph_mcp=code_graph_mcp,
             feedback_entries=feedback_entries,
             checker_packages=checker_packages,
+            mining_engines=mining_engines,
             retry_candidates=retry_candidates,
             retry_total_candidates=retry_total_candidates,
             retry_processed_offset=retry_processed_offset,
@@ -247,6 +252,8 @@ async def handle_resume(
             task.feedback_entries = feedback_entries
         if checker_packages is not None:
             task.checker_packages = checker_packages
+        if mining_engines is not None:
+            task.mining_engines = copy.deepcopy(mining_engines)
         task.retry_candidates = retry_candidates
         task.retry_total_candidates = retry_total_candidates
         task.retry_processed_offset = retry_processed_offset

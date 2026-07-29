@@ -34,6 +34,7 @@ import socket
 import time
 import uuid
 import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,7 @@ from backend.models import (
     AgentOpenCodePoolStatus,
     AgentOpenCodeRuntimeConfigResponse,
     AgentInfo,
+    AgentMiningEngineCatalog,
     AgentRemoteConfig,
     AgentValidatorCatalog,
     AgentScanCandidates,
@@ -66,6 +68,8 @@ from backend.models import (
     FpReviewMethod,
     FpReviewStatus,
     HistoryPattern,
+    MiningEngineRunStatus,
+    MiningEngineSelection,
     OpenCodePoolStatus,
     OpenCodeTokenUsage,
     ScanEvent,
@@ -121,6 +125,24 @@ def _stored_validator_catalog(record: dict | None) -> AgentValidatorCatalog:
     except Exception as exc:
         logger.warning("Ignoring invalid persisted validator catalog: %s", exc)
         return AgentValidatorCatalog(errors=[str(exc)])
+
+
+def _stored_mining_engine_catalog(
+    record: dict | None,
+) -> AgentMiningEngineCatalog:
+    if not record:
+        return AgentMiningEngineCatalog()
+    try:
+        payload = json.loads(
+            str(record.get("mining_engine_catalog_json") or "{}")
+        )
+        return AgentMiningEngineCatalog(**payload)
+    except Exception as exc:
+        logger.warning(
+            "Ignoring invalid persisted mining-engine catalog: %s",
+            exc,
+        )
+        return AgentMiningEngineCatalog(errors=[str(exc)])
 
 
 def _stored_mcp_probes(record: dict | None) -> dict[str, AgentMcpProbeResult]:
@@ -281,6 +303,7 @@ def _validate_mcp_config(
 def _validate_managed_config(
     config: AgentRemoteConfig,
     catalog: AgentValidatorCatalog | None = None,
+    mining_catalog: AgentMiningEngineCatalog | None = None,
 ) -> None:
     try:
         parse_opencode_jsonc(config.opencode_config, source="OpenCode 配置")
@@ -364,6 +387,35 @@ def _validate_managed_config(
         if policy.max_retries < 0:
             raise HTTPException(status_code=422, detail=f"{label}的模型重试不能小于 0")
     _validate_mcp_config(config.product_info, label="产品信息")
+    if mining_catalog is not None and mining_catalog.engines:
+        available = {
+            item.engine_id: item
+            for item in mining_catalog.engines
+        }
+        unknown = sorted(set(config.mining_engines) - set(available))
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "未知的漏洞挖掘引擎配置："
+                    + ", ".join(unknown)
+                ),
+            )
+        enabled_count = 0
+        for engine_id, item in available.items():
+            override = config.mining_engines.get(engine_id)
+            enabled = (
+                item.default_enabled
+                if override is None or override.enabled is None
+                else override.enabled
+            )
+            if enabled:
+                enabled_count += 1
+        if enabled_count == 0:
+            raise HTTPException(
+                status_code=422,
+                detail="至少需要启用一个漏洞挖掘引擎",
+            )
     if catalog is not None:
         registrations = {item.registration_key: item for item in catalog.registrations}
         for environment, environment_config in config.vulnerability_validation.environments.items():
@@ -957,13 +1009,6 @@ async def agent_websocket(websocket: WebSocket) -> None:
             if owner:
                 user_id = owner.user_id
 
-        reported_config = msg.get("config")
-        try:
-            initial_config = AgentRemoteConfig(**reported_config) if isinstance(reported_config, dict) else AgentRemoteConfig()
-            _validate_managed_config(initial_config)
-        except Exception as exc:
-            logger.warning("Ignoring invalid config reported by agent %s: %s", name, exc)
-            initial_config = AgentRemoteConfig()
         reported_catalog = msg.get("validator_catalog")
         try:
             catalog = (
@@ -973,6 +1018,34 @@ async def agent_websocket(websocket: WebSocket) -> None:
             )
         except Exception as exc:
             catalog = AgentValidatorCatalog(errors=[str(exc)])
+        reported_mining_catalog = msg.get("mining_engine_catalog")
+        try:
+            mining_catalog = (
+                AgentMiningEngineCatalog(**reported_mining_catalog)
+                if isinstance(reported_mining_catalog, dict)
+                else AgentMiningEngineCatalog()
+            )
+        except Exception as exc:
+            mining_catalog = AgentMiningEngineCatalog(errors=[str(exc)])
+        reported_config = msg.get("config")
+        try:
+            initial_config = (
+                AgentRemoteConfig(**reported_config)
+                if isinstance(reported_config, dict)
+                else AgentRemoteConfig()
+            )
+            _validate_managed_config(
+                initial_config,
+                catalog,
+                mining_catalog,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ignoring invalid config reported by agent %s: %s",
+                name,
+                exc,
+            )
+            initial_config = AgentRemoteConfig()
 
         store = get_scan_store()
         existing = store.find_agent_record(user_id, ip, machine_name)
@@ -987,6 +1060,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
             last_seen=now,
             initial_config_json=initial_config.model_dump_json(),
             validator_catalog_json=catalog.model_dump_json(),
+            mining_engine_catalog_json=mining_catalog.model_dump_json(),
         )
         stable_key = str(record["agent_key"])
         cfg = _stored_agent_config(record)
@@ -1359,7 +1433,11 @@ async def update_agent_config(
     agent = _registered_agents.get(agent_id)
     agent_key = agent.agent_key if agent is not None else agent_id
     record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
-    _validate_managed_config(body, _stored_validator_catalog(record))
+    _validate_managed_config(
+        body,
+        _stored_validator_catalog(record),
+        _stored_mining_engine_catalog(record),
+    )
     get_scan_store().update_agent_config_record(agent_key, body.model_dump_json())
     _agent_configs[agent_key] = body
     logger.info("Config updated for stable agent %s", agent_key)
@@ -1403,7 +1481,11 @@ async def update_stable_agent_config(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
-    _validate_managed_config(body, _stored_validator_catalog(record))
+    _validate_managed_config(
+        body,
+        _stored_validator_catalog(record),
+        _stored_mining_engine_catalog(record),
+    )
     get_scan_store().update_agent_config_record(agent_key, body.model_dump_json())
     _agent_configs[agent_key] = body
     live = _live_agent_for_key(agent_key)
@@ -1851,6 +1933,21 @@ async def get_stable_agent_validator_catalog(
     })
 
 
+@public_router.get(
+    "/api/agent-configs/{agent_key}/mining-engine-catalog",
+    response_model=AgentMiningEngineCatalog,
+)
+async def get_stable_agent_mining_engine_catalog(
+    agent_key: str,
+    current_user: User = Depends(get_current_user),
+) -> AgentMiningEngineCatalog:
+    record = _authorize_agent_record(
+        get_scan_store().get_agent_record(agent_key),
+        current_user,
+    )
+    return _stored_mining_engine_catalog(record)
+
+
 @public_router.get("/api/agent-configs/{agent_key}/validation-environments")
 async def get_stable_agent_validation_environments(
     agent_key: str,
@@ -1974,34 +2071,140 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
     return {"ok": True}
 
 
-def _confirmed_threat_vulnerability_identity(
+def _finish_vulnerability_identity(
     vuln: Vulnerability,
-) -> tuple[str, str, int, str, str] | None:
-    """Return the stable finish-reconciliation key for a confirmed threat finding."""
-    if str(vuln.analysis_source or "").strip().lower() != "threat_audit":
-        return None
-    if not (vuln.confirmed or vuln.ai_verdict == "confirmed"):
-        return None
-    task_identity = str(vuln.source_task_id or "").strip()
-    if not task_identity:
-        task_identity = "\0".join([
-            str(vuln.threat_surface_node_id or "").strip(),
-            str(vuln.threat_method_node_id or "").strip(),
-            str(vuln.threat_code_path or "").strip(),
-        ])
+) -> tuple:
+    """Return an engine-scoped key for idempotent finish reconciliation."""
     return (
-        task_identity,
+        str(vuln.engine_id or "").strip(),
+        vuln.audit_index,
+        str(vuln.source_task_id or "").strip(),
+        str(vuln.threat_surface_node_id or "").strip(),
+        str(vuln.threat_method_node_id or "").strip(),
+        str(vuln.threat_code_path or "").strip(),
         str(vuln.file or "").strip(),
         int(vuln.line),
         str(vuln.function or "").strip(),
         str(vuln.vuln_type or "").strip().casefold(),
+        bool(vuln.confirmed),
+        str(vuln.ai_verdict or "").strip().casefold(),
+        str(vuln.description or "").strip(),
+        str(vuln.root_cause or "").strip(),
+        str(vuln.trigger_conditions or "").strip(),
     )
+
+
+def _stamp_vulnerability_engine(
+    scan_id: str,
+    vuln: Vulnerability,
+    *,
+    selections: list[MiningEngineSelection] | None = None,
+) -> Vulnerability:
+    if selections is None:
+        loaded = get_scan_store().load_scan(scan_id)
+        selections = (
+            loaded[1].mining_engines
+            if loaded is not None
+            else []
+        )
+    requested_id = str(vuln.engine_id or "").strip()
+    if (
+        str(vuln.analysis_source or "").strip() == "threat_audit"
+        and requested_id in {"", "static_candidate"}
+    ):
+        requested_id = "threat_audit"
+    if not requested_id:
+        requested_id = "static_candidate"
+
+    if selections:
+        selection = next(
+            (
+                item
+                for item in selections
+                if item.engine_id == requested_id and item.enabled
+            ),
+            None,
+        )
+        if selection is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "漏洞结果来自未启用或未知的漏洞挖掘引擎："
+                    f"{requested_id}"
+                ),
+            )
+        vuln.engine_id = selection.engine_id
+        vuln.engine_label = selection.engine_label
+        vuln.fp_review_eligible = selection.fp_review_enabled
+        return vuln
+
+    vuln.engine_id = requested_id
+    if requested_id == "threat_audit":
+        vuln.engine_label = "威胁分析 + 威胁审计"
+    elif not str(vuln.engine_label or "").strip():
+        vuln.engine_label = "静态规则扫描 + 候选点审计"
+    vuln.fp_review_eligible = bool(vuln.fp_review_eligible)
+    return vuln
+
+
+@router.post("/scan/{scan_id}/mining-engine-run")
+async def agent_report_mining_engine_run(
+    scan_id: str,
+    body: MiningEngineRunStatus,
+) -> dict:
+    """Agent reports one isolated mining-engine lifecycle state."""
+    allowed_statuses = {
+        "pending",
+        "running",
+        "success",
+        "error",
+        "cancelled",
+        "skipped",
+    }
+    if body.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=422,
+            detail=f"无效的漏洞挖掘引擎状态：{body.status}",
+        )
+    loaded = get_scan_store().load_scan(scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    selection = next(
+        (
+            item
+            for item in loaded[1].mining_engines
+            if item.engine_id == body.engine_id and item.enabled
+        ),
+        None,
+    )
+    if loaded[1].mining_engines and selection is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"未知或未启用的漏洞挖掘引擎：{body.engine_id}",
+        )
+    if selection is not None:
+        body = body.model_copy(update={
+            "engine_label": selection.engine_label,
+            "fp_review_enabled": selection.fp_review_enabled,
+        })
+    runs = get_scan_store().update_mining_engine_run(scan_id, body)
+    scan = _ensure_running_scan(scan_id)
+    if scan is not None:
+        scan.mining_engine_runs = runs
+    from backend.sse import publish
+
+    publish(scan_id, "mining_engine_run", {
+        "run": body.model_dump(mode="json"),
+        "runs": [item.model_dump(mode="json") for item in runs],
+    })
+    return {"ok": True, "run": body.model_dump(mode="json")}
 
 
 @router.post("/scan/{scan_id}/vulnerability")
 async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
     """Agent pushes a single vulnerability result immediately after auditing it."""
     store = get_scan_store()
+    vuln = _stamp_vulnerability_engine(scan_id, vuln)
     vuln_index = store.upsert_incomplete_vulnerability(scan_id, vuln)
 
     scan = _ensure_running_scan(scan_id)
@@ -2037,31 +2240,40 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
                 vuln,
                 _scan_fp_result_map(scan_id).get(vuln_index),
             )
-            auto_fp_review, fp_review_method = _scan_fp_review_settings(
-                scan_id,
-                scan,
-            )
-            if (
-                auto_fp_review
-                and fp_review_method == FpReviewMethod.ADVERSARIAL
-            ):
-                ensured = _ensure_fp_review_job_for_scan(
-                    scan_id,
-                    scan,
-                    allow_cancelled=False,
-                    publish_started=True,
-                    require_unresolved=True,
+            if vuln.fp_review_eligible:
+                auto_fp_review, fp_review_method = (
+                    _scan_fp_review_settings(
+                        scan_id,
+                        scan,
+                    )
                 )
-                if ensured is not None and not ensured.get("cancelled") and not ensured.get("no_unresolved"):
-                    latest_results = ensured.get("latest_results") or {}
-                    fp_review_info = {
-                        "review_id": ensured["review_id"],
-                        "method": FpReviewMethod.ADVERSARIAL.value,
-                        "vuln_index": vuln_index,
-                        "queued": vuln_index not in latest_results,
-                        "total": ensured["total"],
-                        "processed": ensured["processed"],
-                    }
+                if (
+                    auto_fp_review
+                    and fp_review_method == FpReviewMethod.ADVERSARIAL
+                ):
+                    ensured = _ensure_fp_review_job_for_scan(
+                        scan_id,
+                        scan,
+                        allow_cancelled=False,
+                        publish_started=True,
+                        require_unresolved=True,
+                    )
+                    if (
+                        ensured is not None
+                        and not ensured.get("cancelled")
+                        and not ensured.get("no_unresolved")
+                    ):
+                        latest_results = (
+                            ensured.get("latest_results") or {}
+                        )
+                        fp_review_info = {
+                            "review_id": ensured["review_id"],
+                            "method": FpReviewMethod.ADVERSARIAL.value,
+                            "vuln_index": vuln_index,
+                            "queued": vuln_index not in latest_results,
+                            "total": ensured["total"],
+                            "processed": ensured["processed"],
+                        }
         except Exception as exc:
             logger.warning(
                 "Failed to render vulnerability report for validation scan=%s idx=%s: %s",
@@ -2321,31 +2533,28 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
     from backend.sse import publish
 
     existing_vulnerabilities = store.get_vulnerabilities(scan_id)
-    existing_threat_identities = {
-        identity
+    existing_identities = Counter(
+        _finish_vulnerability_identity(vuln)
         for vuln in existing_vulnerabilities
-        if (
-            identity := _confirmed_threat_vulnerability_identity(vuln)
-        ) is not None
-    }
+    )
+    mining_engine_selections = (
+        loaded[1].mining_engines
+        if loaded is not None
+        else []
+    )
     reconciled_vulnerabilities: list[tuple[int, Vulnerability]] = []
-    if body.vulnerabilities and not existing_vulnerabilities:
-        for vuln in body.vulnerabilities:
-            identity = _confirmed_threat_vulnerability_identity(vuln)
-            if identity is not None and identity in existing_threat_identities:
-                continue
-            vuln_index = store.add_vulnerability(scan_id, vuln)
-            reconciled_vulnerabilities.append((vuln_index, vuln))
-            if identity is not None:
-                existing_threat_identities.add(identity)
-    elif body.vulnerabilities:
-        for vuln in body.vulnerabilities:
-            identity = _confirmed_threat_vulnerability_identity(vuln)
-            if identity is None or identity in existing_threat_identities:
-                continue
-            vuln_index = store.add_vulnerability(scan_id, vuln)
-            reconciled_vulnerabilities.append((vuln_index, vuln))
-            existing_threat_identities.add(identity)
+    for raw_vuln in body.vulnerabilities:
+        vuln = _stamp_vulnerability_engine(
+            scan_id,
+            raw_vuln,
+            selections=mining_engine_selections,
+        )
+        identity = _finish_vulnerability_identity(vuln)
+        if existing_identities[identity] > 0:
+            existing_identities[identity] -= 1
+            continue
+        vuln_index = store.upsert_incomplete_vulnerability(scan_id, vuln)
+        reconciled_vulnerabilities.append((vuln_index, vuln))
 
     final_vulnerabilities = (
         store.get_vulnerabilities(scan_id)

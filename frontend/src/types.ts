@@ -148,6 +148,9 @@ export interface Vulnerability {
   audit_index?: number | null;
   variant_of?: string;
   analysis_source?: "static_candidate" | "threat_audit" | string;
+  engine_id?: string;
+  engine_label?: string;
+  fp_review_eligible?: boolean;
   source_task_id?: string;
   threat_surface_node_id?: string;
   threat_method_node_id?: string;
@@ -439,6 +442,8 @@ export interface ScanStatus {
   product: string;
   validation_environment: string;
   scan_items: string[];
+  mining_engines?: MiningEngineSelection[];
+  mining_engine_runs?: MiningEngineRunStatus[];
   created_at: string;
   status: ScanItemStatus;
   progress: number;
@@ -635,14 +640,51 @@ export interface AgentValidatorCatalog {
   updated_at: string;
 }
 
+export interface MiningEngineConfig {
+  enabled?: boolean | null;
+  fp_review_enabled?: boolean | null;
+}
+
+export interface MiningEngineSelection {
+  engine_id: string;
+  engine_label: string;
+  enabled: boolean;
+  fp_review_enabled: boolean;
+}
+
+export interface MiningEngineRunStatus {
+  engine_id: string;
+  engine_label: string;
+  status: "pending" | "running" | "success" | "error" | "cancelled" | "skipped" | string;
+  fp_review_enabled: boolean;
+  error_message: string;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface MiningEngineCatalogItem {
+  engine_id: string;
+  label: string;
+  description: string;
+  default_enabled: boolean;
+  default_fp_review_enabled: boolean;
+}
+
+export interface AgentMiningEngineCatalog {
+  engines: MiningEngineCatalogItem[];
+  errors: string[];
+  updated_at: string;
+}
+
 export interface AgentRemoteConfig {
-  schema_version: 4;
+  schema_version: 5;
   opencode_config: string;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;
   product_info: AgentMcpConfig;
   vulnerability_mining: AgentModelTaskPolicy;
+  mining_engines: Record<string, MiningEngineConfig>;
   false_positive: AgentModelTaskPolicy;
   vulnerability_validation: AgentVulnerabilityValidationConfig;
 }

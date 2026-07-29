@@ -17,6 +17,7 @@ from backend.models import (
     AgentScanFinish,
     Candidate,
     FpReviewStatus,
+    MiningEngineSelection,
     OpenCodePoolStatus,
     ScanCandidate,
     ScanEvent,
@@ -1132,6 +1133,113 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             ]
             self.assertEqual(len(threat_events), 1)
             self.assertEqual(threat_events[0]["index"], 1)
+
+    def test_finish_scan_keeps_same_finding_from_different_engines(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan(
+                "scan-1",
+                ScanItemStatus.AUDITING,
+                total=1,
+                processed=1,
+            )
+            scan.auto_fp_review = False
+            selections = [
+                MiningEngineSelection(
+                    engine_id="engine_a",
+                    engine_label="Engine A",
+                ),
+                MiningEngineSelection(
+                    engine_id="engine_b",
+                    engine_label="Engine B",
+                    fp_review_enabled=False,
+                ),
+            ]
+            scan.mining_engines = selections
+            meta = _meta()
+            meta.auto_fp_review = False
+            meta.mining_engines = selections
+            store.save_scan(scan, meta)
+
+            finding_a = Vulnerability(
+                file="same.c",
+                line=12,
+                function="same",
+                vuln_type="npd",
+                severity="high",
+                description="same finding",
+                confirmed=True,
+                ai_verdict="confirmed",
+                engine_id="engine_a",
+                engine_label="untrusted",
+            )
+            finding_b = finding_a.model_copy(update={
+                "engine_id": "engine_b",
+                "engine_label": "also untrusted",
+            })
+            store.add_vulnerability(
+                "scan-1",
+                finding_a.model_copy(update={
+                    "engine_label": "Engine A",
+                    "fp_review_eligible": True,
+                }),
+            )
+            published: list[tuple[str, str, dict]] = []
+            finish = AgentScanFinish(
+                vulnerabilities=[finding_a, finding_b],
+                status="complete",
+                total_candidates=1,
+                processed_candidates=1,
+            )
+
+            with (
+                patch(
+                    "backend.api.agent.get_scan_store",
+                    return_value=store,
+                ),
+                patch(
+                    "backend.api.scan.get_scan_store",
+                    return_value=store,
+                ),
+                patch(
+                    "backend.sse.publish",
+                    side_effect=(
+                        lambda scan_id, event_type, data:
+                        published.append((scan_id, event_type, data))
+                    ),
+                ),
+            ):
+                asyncio.run(agent_api.agent_finish_scan(
+                    "scan-1",
+                    finish,
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+                asyncio.run(agent_api.agent_finish_scan(
+                    "scan-1",
+                    finish,
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+
+            stored = store.get_vulnerabilities("scan-1")
+            self.assertEqual(
+                [item.engine_id for item in stored],
+                ["engine_a", "engine_b"],
+            )
+            self.assertEqual(stored[0].engine_label, "Engine A")
+            self.assertEqual(stored[1].engine_label, "Engine B")
+            self.assertFalse(stored[1].fp_review_eligible)
+            vulnerability_events = [
+                data
+                for _scan_id, event_type, data in published
+                if event_type == "scan_vulnerability"
+            ]
+            self.assertEqual(len(vulnerability_events), 1)
+            self.assertEqual(
+                vulnerability_events[0]["vulnerability"]["engine_id"],
+                "engine_b",
+            )
 
     def test_finish_scan_clears_transient_opencode_pool_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

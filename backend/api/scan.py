@@ -7,6 +7,7 @@ delegates execution to agents, and provides read/status/mark endpoints.
 import asyncio
 import csv
 import io
+import json
 import re
 import shutil
 import uuid
@@ -27,6 +28,7 @@ from backend.models import (
     AgentFpReviewProgress,
     AgentFpReviewResult,
     AgentFpReviewStageOutput,
+    AgentMiningEngineCatalog,
     BatchMarkRequest,
     BatchUnmarkRequest,
     Candidate,
@@ -38,6 +40,9 @@ from backend.models import (
     FpReviewStatus,
     HistoryPattern,
     MarkRequest,
+    MiningEngineCatalogItem,
+    MiningEngineRunStatus,
+    MiningEngineSelection,
     ScanItemStatus,
     ScanMeta,
     ScanValidationTargetList,
@@ -95,6 +100,102 @@ def _normalize_scan_mode(value: str | None) -> str:
 
 def _is_threat_analysis_only_mode(value: str | None) -> bool:
     return _normalize_scan_mode(value) == SCAN_MODE_THREAT_ANALYSIS_ONLY
+
+
+def _resolve_scan_mining_engines(
+    *,
+    agent_key: str,
+    managed_config,
+    scan_overrides,
+    scan_mode: str,
+) -> list[MiningEngineSelection]:
+    record = (
+        get_scan_store().get_agent_record(agent_key)
+        if agent_key
+        else None
+    )
+    try:
+        catalog = AgentMiningEngineCatalog.model_validate_json(
+            str(
+                (record or {}).get("mining_engine_catalog_json")
+                or "{}"
+            )
+        )
+    except Exception:
+        catalog = AgentMiningEngineCatalog()
+    if not catalog.engines:
+        catalog = AgentMiningEngineCatalog(engines=[
+            MiningEngineCatalogItem(
+                engine_id="static_candidate",
+                label="静态规则扫描 + 候选点审计",
+            ),
+            MiningEngineCatalogItem(
+                engine_id="threat_audit",
+                label="威胁分析 + 威胁审计",
+            ),
+        ])
+
+    available = {item.engine_id: item for item in catalog.engines}
+    config_overrides = (
+        managed_config.mining_engines
+        if managed_config is not None
+        else {}
+    )
+    requested = scan_overrides or {}
+    unknown = sorted(
+        (set(config_overrides) | set(requested)) - set(available)
+    )
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unknown mining engines: " + ", ".join(unknown)
+            ),
+        )
+
+    selections: list[MiningEngineSelection] = []
+    for engine_id, item in available.items():
+        enabled = item.default_enabled
+        fp_review_enabled = item.default_fp_review_enabled
+        config_override = config_overrides.get(engine_id)
+        if config_override is not None:
+            if config_override.enabled is not None:
+                enabled = config_override.enabled
+            if config_override.fp_review_enabled is not None:
+                fp_review_enabled = (
+                    config_override.fp_review_enabled
+                )
+        scan_override = requested.get(engine_id)
+        if scan_override is not None:
+            if scan_override.enabled is not None:
+                enabled = scan_override.enabled
+            if scan_override.fp_review_enabled is not None:
+                fp_review_enabled = scan_override.fp_review_enabled
+        if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
+            enabled = engine_id == "threat_audit"
+        selections.append(MiningEngineSelection(
+            engine_id=engine_id,
+            engine_label=item.label,
+            enabled=enabled,
+            fp_review_enabled=fp_review_enabled,
+        ))
+    if not any(item.enabled for item in selections):
+        raise HTTPException(
+            status_code=400,
+            detail="At least one vulnerability-mining engine is required",
+        )
+    if (
+        scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY
+        and not any(
+            item.enabled and item.engine_id == "threat_audit"
+            for item in selections
+        )
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Threat-audit engine is unavailable",
+        )
+    return selections
 
 
 def _has_final_user_verdict(vuln) -> bool:
@@ -175,7 +276,11 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
     unresolved: list[dict] = []
     reviewed: list[dict] = []
     for i, v in enumerate(scan.vulnerabilities):
-        if not v.confirmed or _has_final_user_verdict(v):
+        if (
+            not v.confirmed
+            or not v.fp_review_eligible
+            or _has_final_user_verdict(v)
+        ):
             continue
         item = {
             "index": i,
@@ -653,6 +758,12 @@ async def create_agent_scan(
         code_graph_mcp = body.code_graph_mcp.model_copy(deep=True)
 
     scan_mode = _normalize_scan_mode(body.scan_mode)
+    mining_engine_selections = _resolve_scan_mining_engines(
+        agent_key=selected_agent_key,
+        managed_config=managed_config,
+        scan_overrides=body.mining_engines,
+        scan_mode=scan_mode,
+    )
     auto_fp_review = (
         body.auto_fp_review
         if body.auto_fp_review is not None
@@ -660,7 +771,11 @@ async def create_agent_scan(
     )
     fp_review_method = body.fp_review_method
     selected_checkers = checker_names if checker_names is not None else body.checkers
-    if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
+    static_engine_enabled = any(
+        item.enabled and item.engine_id == "static_candidate"
+        for item in mining_engine_selections
+    )
+    if not static_engine_enabled:
         validated_checker_names = []
         checker_packages = []
     else:
@@ -701,6 +816,16 @@ async def create_agent_scan(
         product=product,
         validation_environment=validation_environment,
         scan_items=validated_checker_names,
+        mining_engines=mining_engine_selections,
+        mining_engine_runs=[
+            MiningEngineRunStatus(
+                engine_id=item.engine_id,
+                engine_label=item.engine_label,
+                fp_review_enabled=item.fp_review_enabled,
+            )
+            for item in mining_engine_selections
+            if item.enabled
+        ],
         created_at=now,
         status=ScanItemStatus.PENDING,
         progress=0.0,
@@ -714,6 +839,7 @@ async def create_agent_scan(
         scan_items=validated_checker_names,
         created_at=now,
         scan_mode=scan_mode,
+        mining_engines=mining_engine_selections,
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
         feedback_ids=body.feedback_ids,
@@ -750,6 +876,10 @@ async def create_agent_scan(
         "validation_environment": validation_environment,
         "feedback_entries": feedback_entries,
         "checker_packages": checker_packages,
+        "mining_engines": [
+            item.model_dump(mode="json")
+            for item in mining_engine_selections
+        ],
         "code_graph_mcp": (
             code_graph_mcp.model_dump(mode="json")
             if code_graph_mcp is not None
@@ -1076,8 +1206,26 @@ async def _continue_scan(
         "feedback_entries": feedback_entries,
         "checker_packages": (
             []
-            if _is_threat_analysis_only_mode(meta.scan_mode)
+            if (
+                _is_threat_analysis_only_mode(meta.scan_mode)
+                or (
+                    bool(meta.mining_engines)
+                    and not any(
+                        item.enabled
+                        and item.engine_id == "static_candidate"
+                        for item in meta.mining_engines
+                    )
+                )
+            )
             else _checker_packages_for(meta.scan_items)
+        ),
+        "mining_engines": (
+            [
+                item.model_dump(mode="json")
+                for item in meta.mining_engines
+            ]
+            if meta.mining_engines
+            else None
         ),
         "retry_candidates": (
             [candidate.model_dump() for candidate in candidate_payload]
@@ -1182,14 +1330,16 @@ async def download_report(
     writer = csv.writer(buf)
     fp_map = _scan_fp_result_map(scan_id)
     writer.writerow([
-        "file", "line", "function", "vuln_type", "severity", "confirmed",
+        "engine_id", "engine_label", "file", "line", "function",
+        "vuln_type", "severity", "confirmed",
         "fp_verdict", "fp_severity", "match_type", "match_reference", "variant_of",
         "description", "ai_analysis",
     ])
     for i, v in enumerate(scan.vulnerabilities):
         fp = fp_map.get(i)
         writer.writerow([
-            v.file, v.line, v.function, v.vuln_type, v.severity, v.confirmed,
+            v.engine_id, v.engine_label, v.file, v.line, v.function,
+            v.vuln_type, v.severity, v.confirmed,
             fp.verdict if fp else "", fp.severity if fp else "",
             fp.match_type if fp else "", fp.match_reference if fp else "",
             v.variant_of, v.description, v.ai_analysis,
@@ -1419,6 +1569,9 @@ def _vuln_report_markdown(
     lines.append("| 字段 | 内容 |")
     lines.append("| --- | --- |")
     lines.append(f"| 是否是问题 | {'是' if vuln.confirmed else '否'} |")
+    lines.append(
+        f"| 漏洞挖掘引擎 | {vuln.engine_label} ({vuln.engine_id}) |"
+    )
     lines.append(f"| 严重程度 | {severity_text} |")
     lines.append(f"| 漏洞文件 | {vuln.file} |")
     lines.append(f"| 漏洞函数 | {vuln.function} |")
@@ -1782,7 +1935,10 @@ async def download_report_zip(
                 zf.writestr("fp-review-summary.md", fp_job.summary_markdown.rstrip() + "\n")
             for i, v in confirmed:
                 entry = f"vuln-{i}-{_safe_filename_part(v.file)}_{v.line}.md"
-                index_lines.append(f"- [{v.vuln_type} @ {v.file}:{v.line}]({entry})")
+                index_lines.append(
+                    f"- [{v.engine_label} · {v.vuln_type} @ "
+                    f"{v.file}:{v.line}]({entry})"
+                )
                 zf.writestr(entry, _vuln_report_markdown(i, v, fp_map.get(i), validation_map.get(i)))
             zf.writestr("README.md", "\n".join(index_lines) + "\n")
     buf.seek(0)

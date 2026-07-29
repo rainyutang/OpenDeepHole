@@ -6,6 +6,7 @@ import type {
   FpReviewMethod,
   FpReviewStatus,
   IndexStatus,
+  MiningEngineRunStatus,
   OutputSource,
   ScanCandidate,
   ScanEvent,
@@ -108,6 +109,11 @@ interface ThreatAuditTaskEvent {
   task: ThreatAuditTask;
 }
 
+interface MiningEngineRunEvent {
+  run: MiningEngineRunStatus;
+  runs: MiningEngineRunStatus[];
+}
+
 /* ------------------------------------------------------------------ */
 /*  Handler map                                                        */
 /* ------------------------------------------------------------------ */
@@ -126,6 +132,7 @@ export interface ScanSSEHandlers {
   onVulnerabilityValidation?: (data: VulnerabilityValidationEvent) => void;
   onThreatAnalysis?: (data: ThreatAnalysisEvent) => void;
   onThreatAuditTask?: (data: ThreatAuditTaskEvent) => void;
+  onMiningEngineRun?: (data: MiningEngineRunEvent) => void;
   onIndexStatus?: (data: IndexStatus) => void;
 }
 
@@ -247,6 +254,7 @@ export function useScanSSE(
     handle<VulnerabilityValidationEvent>("vulnerability_validation", (d) => handlersRef.current.onVulnerabilityValidation?.(d));
     handle<ThreatAnalysisEvent>("threat_analysis", (d) => handlersRef.current.onThreatAnalysis?.(d));
     handle<ThreatAuditTaskEvent>("threat_audit_task", (d) => handlersRef.current.onThreatAuditTask?.(d));
+    handle<MiningEngineRunEvent>("mining_engine_run", (d) => handlersRef.current.onMiningEngineRun?.(d));
     handle<IndexStatus>("index_status", (d) => handlersRef.current.onIndexStatus?.(d));
 
     es.onopen = () => {

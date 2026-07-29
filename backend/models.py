@@ -138,11 +138,56 @@ class Vulnerability(BaseModel):
     audit_index: int | None = None           # Static candidate audit order; DB idx remains the API handle.
     variant_of: str = ""                     # 同类变体排查命中时，来源历史问题模式（根因摘要+出处提交/文件）
     analysis_source: str = "static_candidate"  # "static_candidate" | "threat_audit"
+    engine_id: str = "static_candidate"
+    engine_label: str = "静态规则扫描 + 候选点审计"
+    fp_review_eligible: bool = True
     source_task_id: str = ""
     threat_surface_node_id: str = ""
     threat_method_node_id: str = ""
     threat_code_path: str = ""
     output_source: OutputSource = Field(default_factory=OutputSource)
+
+
+class MiningEngineConfig(BaseModel):
+    """Optional Agent/scan override for one discovered mining engine."""
+
+    enabled: bool | None = None
+    fp_review_enabled: bool | None = None
+
+
+class MiningEngineSelection(BaseModel):
+    """Resolved immutable mining-engine snapshot stored on a scan."""
+
+    engine_id: str
+    engine_label: str
+    enabled: bool = True
+    fp_review_enabled: bool = True
+
+
+class MiningEngineRunStatus(BaseModel):
+    """One engine's lifecycle state within a scan."""
+
+    engine_id: str
+    engine_label: str
+    status: str = "pending"
+    fp_review_enabled: bool = True
+    error_message: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+
+
+class MiningEngineCatalogItem(BaseModel):
+    engine_id: str
+    label: str
+    description: str = ""
+    default_enabled: bool = True
+    default_fp_review_enabled: bool = True
+
+
+class AgentMiningEngineCatalog(BaseModel):
+    engines: list[MiningEngineCatalogItem] = []
+    errors: list[str] = []
+    updated_at: str = ""
 
 
 # --- API request/response models ---
@@ -493,6 +538,8 @@ class ScanStatus(BaseModel):
     product: str = ""
     validation_environment: str = ""
     scan_items: list[str] = []
+    mining_engines: list[MiningEngineSelection] = []
+    mining_engine_runs: list[MiningEngineRunStatus] = []
     created_at: str = ""
     status: ScanItemStatus
     progress: float            # 0.0 to 1.0
@@ -845,7 +892,7 @@ def _upgrade_agent_policy(
 def _upgrade_agent_v2_config(value: dict) -> dict:
     """Migrate managed v2 stage defaults without touching model rows."""
     migrated = copy.deepcopy(value)
-    migrated["schema_version"] = 4
+    migrated["schema_version"] = 5
     base = migrated.get("base")
     if not isinstance(base, dict):
         base = {}
@@ -863,6 +910,14 @@ def _upgrade_agent_v2_config(value: dict) -> dict:
         threat.get("model_policy"),
         migrate_threat_retry_default=True,
     )
+    mining_engines = migrated.get("mining_engines")
+    if not isinstance(mining_engines, dict):
+        mining_engines = {}
+        migrated["mining_engines"] = mining_engines
+    if "threat_audit" not in mining_engines and "enabled" in threat:
+        mining_engines["threat_audit"] = {
+            "enabled": bool(threat.get("enabled")),
+        }
 
     validation = migrated.get("vulnerability_validation")
     if not isinstance(validation, dict):
@@ -915,13 +970,13 @@ class AgentVulnerabilityValidationConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: int = 4
+    schema_version: int = 5
     opencode_config: str = "{}"
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
-    # v3 compatibility input only. Code graph MCPs are snapshotted per scan in
-    # v4 and this value is deliberately omitted from managed Agent output.
+    # v3 compatibility input only. Code graph MCPs are snapshotted per scan
+    # from v4 onward and omitted from managed Agent output.
     code_graph: AgentMcpConfig = Field(
         default_factory=lambda: AgentMcpConfig(
             name="codegraph",
@@ -937,6 +992,7 @@ class AgentRemoteConfig(BaseModel):
     )
     product_info: AgentMcpConfig = AgentMcpConfig(name="product-info")
     vulnerability_mining: AgentModelTaskPolicy = AgentModelTaskPolicy()
+    mining_engines: dict[str, MiningEngineConfig] = {}
     false_positive: AgentModelTaskPolicy = AgentModelTaskPolicy(
         required_capability="high",
     )
@@ -945,18 +1001,35 @@ class AgentRemoteConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
-        """Accept older Agent payloads while emitting only the v4 contract."""
+        """Accept older Agent payloads while emitting only the v5 contract."""
         if not isinstance(value, dict):
+            return value
+        if not value:
             return value
         try:
             schema_version = int(value.get("schema_version", 0) or 0)
         except (TypeError, ValueError):
             schema_version = 0
-        if schema_version >= 4:
+        if schema_version >= 5:
             return value
-        if schema_version == 3:
+        if schema_version in {3, 4}:
             migrated = copy.deepcopy(value)
-            migrated["schema_version"] = 4
+            migrated["schema_version"] = 5
+            threat = (
+                migrated.get("threat_analysis")
+                if isinstance(migrated.get("threat_analysis"), dict)
+                else {}
+            )
+            overrides = (
+                dict(migrated.get("mining_engines"))
+                if isinstance(migrated.get("mining_engines"), dict)
+                else {}
+            )
+            if "threat_audit" not in overrides and "enabled" in threat:
+                overrides["threat_audit"] = {
+                    "enabled": bool(threat.get("enabled")),
+                }
+            migrated["mining_engines"] = overrides
             return migrated
         if schema_version == 2 or "base" in value or "model_pool" in value:
             return _upgrade_agent_v2_config(value)
@@ -1029,6 +1102,11 @@ class AgentRemoteConfig(BaseModel):
                 "timeout_seconds": timeout,
                 "max_retries": retries,
             },
+            "mining_engines": {
+                "threat_audit": {
+                    "enabled": threat.get("enabled", True),
+                },
+            },
             "false_positive": {
                 "required_capability": "high",
                 "timeout_seconds": fp_timeout,
@@ -1071,6 +1149,7 @@ class CreateScanRequest(BaseModel):
     product: str = ""
     validation_environment: str = ""
     checkers: list[str]
+    mining_engines: dict[str, MiningEngineConfig] | None = None
     feedback_ids: list[str] = []
     code_graph_mcp: AgentMcpConfig | None = None
     auto_fp_review: bool | None = None
@@ -1098,6 +1177,7 @@ class ScanMeta(BaseModel):
     scan_items: list[str]
     created_at: str
     scan_mode: str = "full"
+    mining_engines: list[MiningEngineSelection] = []
     feedback_ids: list[str] = []
     agent_id: str = ""
     agent_key: str = ""

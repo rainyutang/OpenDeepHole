@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, OpenCodeTokenUsage, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentMiningEngineCatalog, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, MiningEngineConfig, OpenCodeTokenUsage, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -216,6 +216,7 @@ export async function createScan(body: {
   product?: string;
   validation_environment?: string;
   checkers: string[];
+  mining_engines?: Record<string, MiningEngineConfig>;
   feedback_ids?: string[];
   code_graph_mcp?: AgentMcpConfig | null;
   auto_fp_review?: boolean;
@@ -617,6 +618,13 @@ export async function getAgentValidatorCatalog(agentKey: string, product = ""): 
   const { data } = await api.get<AgentValidatorCatalog>(
     `/api/agent-configs/${agentKey}/validator-catalog`,
     { params: product ? { product } : undefined },
+  );
+  return data;
+}
+
+export async function getAgentMiningEngineCatalog(agentKey: string): Promise<AgentMiningEngineCatalog> {
+  const { data } = await api.get<AgentMiningEngineCatalog>(
+    `/api/agent-configs/${agentKey}/mining-engine-catalog`,
   );
   return data;
 }

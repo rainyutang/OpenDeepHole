@@ -27,6 +27,26 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("deephole_client/main.py", names)
         self.assertIn("requirements-agent.txt", names)
         self.assertIn(
+            "deephole_client/vulnerability_mining/"
+            "engines/static_candidate/engine.yaml",
+            names,
+        )
+        self.assertIn(
+            "deephole_client/vulnerability_mining/"
+            "engines/static_candidate/engine.py",
+            names,
+        )
+        self.assertIn(
+            "deephole_client/vulnerability_mining/"
+            "engines/threat_audit/engine.yaml",
+            names,
+        )
+        self.assertIn(
+            "deephole_client/vulnerability_mining/"
+            "engines/threat_audit/engine.py",
+            names,
+        )
+        self.assertIn(
             "deephole_client/threat_analysis/threat_analysis.py",
             names,
         )
@@ -69,6 +89,16 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn("run_agent.bat", names)
         self.assertIn("requirements-agent.txt", names)
         self.assertIn(
+            "deephole_client/vulnerability_mining/"
+            "engines/static_candidate/engine.yaml",
+            names,
+        )
+        self.assertIn(
+            "deephole_client/vulnerability_mining/"
+            "engines/threat_audit/engine.yaml",
+            names,
+        )
+        self.assertIn(
             "deephole_client/threat_analysis/threat_analysis.py",
             names,
         )
@@ -103,7 +133,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
         parsed = yaml.safe_load(agent_yaml)
-        self.assertEqual(parsed["schema_version"], 4)
+        self.assertEqual(parsed["schema_version"], 5)
         self.assertNotIn("code_graph", parsed)
         self.assertTrue(parsed["model_pool"]["models"])
         self.assertTrue(all(model.get("model") for model in parsed["model_pool"]["models"]))

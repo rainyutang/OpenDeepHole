@@ -19,6 +19,7 @@ from backend.models import (
     HistoryPattern,
     OpenCodePoolStatus,
     OpenCodeTokenUsage,
+    MiningEngineRunStatus,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -62,6 +63,14 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def update_opencode_pool_status(self, scan_id: str, status: OpenCodePoolStatus) -> None:
         """Persist the latest OpenCode model-pool status snapshot for a scan."""
+
+    def update_mining_engine_run(
+        self,
+        scan_id: str,
+        run: MiningEngineRunStatus,
+    ) -> list[MiningEngineRunStatus]:
+        """Create or replace one mining-engine lifecycle row."""
+        raise NotImplementedError
 
     @abstractmethod
     def upsert_scan_opencode_token_usage(
@@ -433,6 +442,13 @@ class ScanStoreBase(ABC):
         raise NotImplementedError
 
     def update_agent_catalog_record(self, agent_key: str, catalog_json: str) -> bool:
+        raise NotImplementedError
+
+    def update_agent_mining_engine_catalog_record(
+        self,
+        agent_key: str,
+        catalog_json: str,
+    ) -> bool:
         raise NotImplementedError
 
     def update_agent_mcp_probe_record(self, agent_key: str, mcp_probe_json: str) -> bool:

@@ -15,6 +15,7 @@ from backend.models import (
     CreateScanRequest,
     FpReviewMethod,
     FpReviewResult,
+    MiningEngineSelection,
     OutputSource,
     ScanItemStatus,
     ScanMeta,
@@ -288,3 +289,56 @@ class FpReviewMethodTests(unittest.TestCase):
 
         self.assertNotIn("fp_review", response)
         self.assertIsNone(store.get_fp_review_by_scan("scan-1"))
+
+    def test_server_enforces_engine_fp_setting_on_reported_result(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            now = datetime.now(timezone.utc).isoformat()
+            selection = MiningEngineSelection(
+                engine_id="direct_engine",
+                engine_label="Direct engine",
+                enabled=True,
+                fp_review_enabled=False,
+            )
+            scan = _scan(
+                now,
+                status=ScanItemStatus.AUDITING,
+                method=FpReviewMethod.ADVERSARIAL,
+            )
+            scan.vulnerabilities = []
+            scan.mining_engines = [selection]
+            meta = _meta(now, FpReviewMethod.ADVERSARIAL)
+            meta.mining_engines = [selection]
+            store.save_scan(scan, meta)
+            agent_api._running_scans["scan-1"] = scan
+            reported = _vulnerability()
+            reported.engine_id = "direct_engine"
+            reported.engine_label = "untrusted label"
+            reported.fp_review_eligible = True
+
+            with (
+                patch(
+                    "backend.api.agent.get_scan_store",
+                    return_value=store,
+                ),
+                patch(
+                    "backend.api.scan.get_scan_store",
+                    return_value=store,
+                ),
+            ):
+                response = asyncio.run(
+                    agent_api.agent_report_vulnerability(
+                        "scan-1",
+                        reported,
+                    )
+                )
+
+            stored = store.get_vulnerabilities("scan-1")[0]
+
+        self.assertNotIn("fp_review", response)
+        self.assertIn("Direct engine", response["report_markdown"])
+        self.assertEqual(stored.engine_id, "direct_engine")
+        self.assertEqual(stored.engine_label, "Direct engine")
+        self.assertFalse(stored.fp_review_eligible)

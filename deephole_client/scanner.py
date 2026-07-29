@@ -1,37 +1,37 @@
-"""Platform coordinator for the independent DeepHole client processes."""
+"""Platform coordinator for pluggable vulnerability-mining engines."""
 
 from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from backend.models import (
-    Candidate,
+    MiningEngineSelection,
     ScanEvent,
-    ThreatAuditTask,
     Vulnerability,
 )
 from task_agent import opencode_task_context
 from task_agent.output_format import is_task_output_line
 
-from .candidate_audit import run_candidate_audit
 from .code_graph_build import run_code_graph_build
 from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
-from .process_artifacts import collect_json_artifacts
 from .reporter import Reporter
-from .static_analysis import run_static_analysis
-from .threat_analysis_runner import run_threat_analysis
-from .threat_audit import run_threat_audit
+from .vulnerability_mining import (
+    MiningEngineContext,
+    MiningEngineOutput,
+    MiningEngineRun,
+    load_mining_engines,
+    run_mining_engine,
+)
 
 
 SCAN_MODE_FULL = "full"
 SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
-ProcessOutput = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 def _resolve_scan_paths(
@@ -55,11 +55,6 @@ def _resolve_scan_paths(
     return project, scan_root
 
 
-def _capability(value: Any, default: str = "high") -> str:
-    normalized = str(value or default).strip().lower()
-    return "high" if normalized in {"medium", "high"} else "low"
-
-
 def _format_process_console_line(phase: str, message: str) -> str:
     if is_task_output_line(message):
         return message
@@ -75,6 +70,82 @@ def _event_candidate_index(event: dict[str, Any]) -> int | None:
         if isinstance(value, int):
             return value
     return None
+
+
+def _config_value(value: Any, key: str) -> bool | None:
+    if isinstance(value, dict):
+        raw = value.get(key)
+    else:
+        raw = getattr(value, key, None)
+    return raw if isinstance(raw, bool) else None
+
+
+def _resolve_mining_engines(
+    *,
+    config: AgentConfig,
+    raw_selections: list[dict[str, Any]] | None,
+    threat_only: bool,
+) -> tuple[Any, list[MiningEngineSelection]]:
+    registry = load_mining_engines()
+    manifests = registry.manifests()
+    available = {item.engine_id: item for item in manifests}
+
+    if raw_selections is not None:
+        selections: list[MiningEngineSelection] = []
+        seen: set[str] = set()
+        for raw in raw_selections:
+            selection = MiningEngineSelection.model_validate(raw)
+            if selection.engine_id in seen:
+                raise ValueError(
+                    f"Duplicate mining engine: {selection.engine_id}"
+                )
+            seen.add(selection.engine_id)
+            manifest = available.get(selection.engine_id)
+            selections.append(
+                selection.model_copy(update={
+                    "engine_label": manifest.label,
+                })
+                if manifest is not None
+                else selection
+            )
+    else:
+        selections = []
+        overrides = config.mining_engines
+        for manifest in manifests:
+            override = overrides.get(manifest.engine_id)
+            enabled = _config_value(override, "enabled")
+            fp_review_enabled = _config_value(
+                override,
+                "fp_review_enabled",
+            )
+            if (
+                override is None
+                and manifest.engine_id == "threat_audit"
+            ):
+                enabled = bool(config.threat_analysis.enabled)
+            selections.append(MiningEngineSelection(
+                engine_id=manifest.engine_id,
+                engine_label=manifest.label,
+                enabled=(
+                    manifest.default_enabled
+                    if enabled is None
+                    else enabled
+                ),
+                fp_review_enabled=(
+                    manifest.default_fp_review_enabled
+                    if fp_review_enabled is None
+                    else fp_review_enabled
+                ),
+            ))
+
+    if threat_only:
+        selections = [
+            item.model_copy(update={
+                "enabled": item.engine_id == "threat_audit",
+            })
+            for item in selections
+        ]
+    return registry, selections
 
 
 async def _finish_scan(
@@ -108,19 +179,30 @@ async def _report_process_vulnerabilities(
     validation_environment: str,
     feedback_entries: list[dict[str, Any]],
     code_graph_mcp: dict[str, Any] | None,
+    engine: MiningEngineSelection,
     values: list[Any],
-) -> list[Vulnerability]:
-    reported: list[Vulnerability] = []
+) -> list[tuple[Vulnerability, dict[str, Any] | None]]:
+    reported: list[tuple[Vulnerability, dict[str, Any] | None]] = []
     for value in values:
-        if not isinstance(value, dict):
+        if not isinstance(value, (dict, Vulnerability)):
             continue
         vulnerability = Vulnerability.model_validate(value)
-        reported.append(vulnerability)
+        vulnerability.engine_id = engine.engine_id
+        vulnerability.engine_label = engine.engine_label
+        vulnerability.fp_review_eligible = engine.fp_review_enabled
         response = await reporter.report_vulnerability(scan_id, vulnerability)
+        reported.append((
+            vulnerability,
+            response if isinstance(response, dict) else None,
+        ))
         if not isinstance(response, dict):
             continue
         fp_info = response.get("fp_review")
-        if isinstance(fp_info, dict) and fp_info.get("queued"):
+        if (
+            engine.fp_review_enabled
+            and isinstance(fp_info, dict)
+            and fp_info.get("queued")
+        ):
             from . import server as client_server
 
             payload = vulnerability.model_dump(mode="json")
@@ -166,97 +248,14 @@ async def _report_process_vulnerabilities(
     return reported
 
 
-async def _run_threat_processes(
-    *,
-    config: AgentConfig,
+async def _publish_engine_run(
     reporter: Reporter,
     scan_id: str,
-    project_path: Path,
-    code_scan_path: Path,
-    scan_dir: Path,
-    cancel_event: threading.Event,
-    output: ProcessOutput,
-    retry_task_ids: list[str] | None,
-) -> dict[str, Any]:
-    output_path = scan_dir / "threat_analysis"
-    result = await run_threat_analysis(
-        code_path=code_scan_path,
-        output_path=output_path,
-        is_resume=True,
-        product_mcp=(
-            config.product_info.name
-            if config.product_info.enabled
-            else None
-        ),
-        output=output,
-        cancel_event=cancel_event,
-    )
-    if result.get("result") is not True:
-        return result
-    try:
-        artifact_bundle = collect_json_artifacts(
-            result,
-            output_root=output_path,
-        )
-    except Exception as exc:
-        return {
-            "result": False,
-            "reason": f"Threat-analysis artifact collection failed: {exc}",
-        }
-    await reporter.push_threat_analysis(scan_id, artifact_bundle)
-
-    existing = await reporter.get_threat_audit_tasks(scan_id)
-    completed_ids = {
-        item.task_id for item in existing if item.status == "completed"
-    }
-    audit_result = await run_threat_audit(
-        project_path=project_path,
-        work_dir=scan_dir / "threat_audit",
-        scan_id=scan_id,
-        attack_tree_path=result["attack_tree_path"],
-        high_risk_modules_path=result["high_risk_modules_path"],
-        concurrency=max(1, int(config.opencode_concurrency or 1)),
-        required_capability=_capability(
-            config.vulnerability_mining.required_capability,
-        ),
-        include_task_ids=retry_task_ids,
-        exclude_task_ids=sorted(completed_ids),
-        output=output,
-        cancel_event=cancel_event,
-    )
-    result_indexes: dict[str, list[int]] = {}
-    vulnerabilities: list[Vulnerability] = []
-    for raw in audit_result.get("vulnerabilities") or []:
-        if not isinstance(raw, dict):
-            continue
-        vulnerability = Vulnerability.model_validate(raw)
-        vulnerabilities.append(vulnerability)
-        response = await reporter.report_vulnerability(scan_id, vulnerability)
-        if isinstance(response, dict) and response.get("index") is not None:
-            result_indexes.setdefault(vulnerability.source_task_id, []).append(
-                int(response["index"]),
-            )
-    for raw_task in audit_result.get("tasks") or []:
-        if not isinstance(raw_task, dict):
-            continue
-        task_data = dict(raw_task)
-        task_data["result_vuln_indexes"] = result_indexes.get(
-            str(task_data.get("task_id") or ""),
-            [],
-        )
-        await reporter.push_threat_audit_task(
-            scan_id,
-            ThreatAuditTask.model_validate(task_data),
-        )
-    return {
-        **result,
-        "audit_status": audit_result.get("status"),
-        "audit_task_count": len(audit_result.get("tasks") or []),
-        "vulnerabilities": [
-            vulnerability.model_dump(mode="json")
-            for vulnerability in vulnerabilities
-        ],
-    }
+    run: MiningEngineRun,
+) -> None:
+    publish = getattr(reporter, "report_mining_engine_run", None)
+    if publish is not None:
+        await publish(scan_id, run.as_dict())
 
 
 async def run_scan(
@@ -280,9 +279,11 @@ async def run_scan(
     retry_threat_audit_task_ids: list[str] | None = None,
     scan_mode: str = SCAN_MODE_FULL,
     code_graph_mcp: dict[str, Any] | None = None,
+    mining_engines: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Coordinate independent processes and report their results."""
+    """Run the selected directory-discovered mining engines."""
     feedback_entries = list(feedback_entries or [])
+    checker_packages = list(checker_packages or [])
     scan_dir = (
         Path.home() / ".opendeephole" / "scans" / str(scan_id)
     ).expanduser().resolve()
@@ -299,6 +300,12 @@ async def run_scan(
     }:
         raise ValueError(f"Unknown scan mode: {scan_mode}")
     threat_only = normalized_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY
+    registry, selections = _resolve_mining_engines(
+        config=config,
+        raw_selections=mining_engines,
+        threat_only=threat_only,
+    )
+    enabled_selections = [item for item in selections if item.enabled]
 
     async def emit(
         phase: str,
@@ -317,7 +324,11 @@ async def run_scan(
         if message:
             await emit(process, message, _event_candidate_index(event))
         if process == "code_graph_build":
-            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            data = (
+                event.get("data")
+                if isinstance(event.get("data"), dict)
+                else {}
+            )
             if event.get("kind") == "progress":
                 await reporter.send_index_status(
                     scan_id,
@@ -333,6 +344,29 @@ async def run_scan(
     await emit("init", f"Project: {project}")
     await emit("init", f"Code scan path: {scan_root}")
     await emit("init", f"Scan mode: {normalized_mode}")
+    await emit(
+        "init",
+        "Mining engines: "
+        + (
+            ", ".join(item.engine_label for item in enabled_selections)
+            if enabled_selections
+            else "(none)"
+        ),
+    )
+    for error in registry.errors:
+        await emit("mining_engine", f"Engine discovery warning: {error}")
+
+    if not enabled_selections:
+        await _finish_scan(
+            reporter,
+            scan_id,
+            status="error",
+            vulnerabilities=[],
+            total=0,
+            processed=0,
+            error="No vulnerability-mining engine is enabled",
+        )
+        return
 
     if isinstance(code_graph_mcp, dict):
         code_graph_mcp = copy.deepcopy(code_graph_mcp)
@@ -342,7 +376,10 @@ async def run_scan(
             graph_ready = await prepare_scan_codegraph(
                 code_graph_mcp,
                 project,
-                emit=lambda message: emit("code_graph_mcp", str(message)),
+                emit=lambda message: emit(
+                    "code_graph_mcp",
+                    str(message),
+                ),
             )
             if not graph_ready:
                 code_graph_mcp["enabled"] = False
@@ -350,26 +387,6 @@ async def run_scan(
                     "code_graph_mcp",
                     "Scan code graph MCP preparation failed; continuing with file tools only",
                 )
-
-    static_rule_roots = [
-        Path(__file__).resolve().parent / "static_analysis" / "rules",
-    ]
-    audit_rule_roots = [
-        Path(__file__).resolve().parent / "candidate_audit" / "rules",
-    ]
-    if checker_packages:
-        from .rule_packages import unpack_rule_packages
-
-        static_root = scan_dir / "rules" / "static"
-        audit_root = scan_dir / "rules" / "audit"
-        unpacked = unpack_rule_packages(
-            checker_packages,
-            static_root,
-            audit_root,
-        )
-        static_rule_roots = [static_root]
-        audit_rule_roots = [audit_root]
-        await emit("init", f"Loaded {len(unpacked)} transported rule package(s)")
 
     graph_result = await run_code_graph_build(
         project_path=project,
@@ -405,9 +422,15 @@ async def run_scan(
         stats=stats,
     )
 
+    if not any(
+        item.engine_id == "static_candidate"
+        for item in enabled_selections
+    ):
+        await reporter.send_static_progress(scan_id, 0, 0, done=True)
+
     pool_stop = asyncio.Event()
     pool_task: asyncio.Task[Any] | None = None
-    threat_task: asyncio.Task[dict[str, Any]] | None = None
+    engine_tasks: list[asyncio.Task[tuple[MiningEngineRun, MiningEngineOutput | None]]] = []
     audited: list[Vulnerability] = []
     total = 0
     processed = 0
@@ -416,8 +439,136 @@ async def run_scan(
         if line:
             print(str(line), flush=True)
 
+    async def execute_engine(
+        selection: MiningEngineSelection,
+    ) -> tuple[MiningEngineRun, MiningEngineOutput | None]:
+        loaded = registry.get(selection.engine_id)
+        run = MiningEngineRun(
+            engine_id=selection.engine_id,
+            engine_label=selection.engine_label,
+            fp_review_enabled=selection.fp_review_enabled,
+        )
+        if loaded is None:
+            run.status = "error"
+            run.error_message = "Engine adapter is unavailable"
+            run.finished_at = datetime.now(timezone.utc).isoformat()
+            await _publish_engine_run(reporter, scan_id, run)
+            return run, None
+        if (
+            is_resume
+            and selection.engine_id == "threat_audit"
+            and not resume_threat_analysis
+            and not threat_only
+        ):
+            run.status = "skipped"
+            run.finished_at = datetime.now(timezone.utc).isoformat()
+            await _publish_engine_run(reporter, scan_id, run)
+            return run, MiningEngineOutput()
+
+        run.status = "running"
+        run.started_at = datetime.now(timezone.utc).isoformat()
+        await _publish_engine_run(reporter, scan_id, run)
+        reported_vulnerability_counts: dict[str, int] = {}
+
+        async def report_values(
+            values: list[Any],
+        ) -> list[tuple[Vulnerability, dict[str, Any] | None]]:
+            reported = await _report_process_vulnerabilities(
+                reporter=reporter,
+                config=config,
+                scan_id=scan_id,
+                project_path=project,
+                code_scan_path=scan_root,
+                product=product,
+                validation_environment=validation_environment,
+                feedback_entries=feedback_entries,
+                code_graph_mcp=code_graph_mcp,
+                engine=selection,
+                values=values,
+            )
+            for vulnerability, response in reported:
+                if response is None:
+                    continue
+                fingerprint = vulnerability.model_dump_json()
+                reported_vulnerability_counts[fingerprint] = (
+                    reported_vulnerability_counts.get(fingerprint, 0) + 1
+                )
+            return reported
+
+        engine_work_dir = (
+            scan_dir
+            if selection.engine_id in {
+                "static_candidate",
+                "threat_audit",
+            }
+            else scan_dir / "mining_engines" / selection.engine_id
+        )
+        engine_work_dir.mkdir(parents=True, exist_ok=True)
+        context = MiningEngineContext(
+            engine_id=selection.engine_id,
+            engine_label=selection.engine_label,
+            fp_review_enabled=selection.fp_review_enabled,
+            scan_id=scan_id,
+            project_path=project,
+            code_scan_path=scan_root,
+            scan_dir=scan_dir,
+            work_dir=engine_work_dir,
+            index_db_path=index_path,
+            config=config,
+            reporter=reporter,
+            checker_names=list(checker_names),
+            checker_packages=list(checker_packages),
+            product=product,
+            validation_environment=validation_environment,
+            feedback_entries=list(feedback_entries),
+            code_graph_mcp=copy.deepcopy(code_graph_mcp),
+            is_resume=is_resume,
+            retry_candidates=retry_candidates,
+            retry_total_candidates=retry_total_candidates,
+            retry_processed_offset=retry_processed_offset,
+            resume_threat_analysis=resume_threat_analysis,
+            retry_threat_audit_task_ids=retry_threat_audit_task_ids,
+            output=process_output,
+            cancel_event=cancel_event,
+            report_vulnerabilities=report_values,
+        )
+        try:
+            output = await run_mining_engine(loaded, context)
+            for vulnerability in output.vulnerabilities:
+                vulnerability.engine_id = selection.engine_id
+                vulnerability.engine_label = selection.engine_label
+                vulnerability.fp_review_eligible = (
+                    selection.fp_review_enabled
+                )
+            unreported: list[Vulnerability] = []
+            remaining_reported = dict(reported_vulnerability_counts)
+            for vulnerability in output.vulnerabilities:
+                fingerprint = vulnerability.model_dump_json()
+                count = remaining_reported.get(fingerprint, 0)
+                if count > 0:
+                    remaining_reported[fingerprint] = count - 1
+                else:
+                    unreported.append(vulnerability)
+            if unreported:
+                await report_values(unreported)
+            run.status = output.status
+            run.error_message = output.error_message
+            return run, output
+        except asyncio.CancelledError:
+            run.status = "cancelled"
+            raise
+        except Exception as exc:
+            run.status = "error"
+            run.error_message = str(exc)
+            return run, None
+        finally:
+            run.finished_at = datetime.now(timezone.utc).isoformat()
+            await _publish_engine_run(reporter, scan_id, run)
+
     try:
-        if isinstance(code_graph_mcp, dict) and bool(code_graph_mcp.get("enabled")):
+        if isinstance(code_graph_mcp, dict) and bool(
+            code_graph_mcp.get("enabled")
+        ):
             await emit(
                 "mcp_ready",
                 "Scan-specific code graph MCP selected; runtime connection will be verified before each model task",
@@ -440,296 +591,51 @@ async def run_scan(
             output=task_output,
             cancel_event=cancel_event,
         ):
-            should_run_threat = (
-                bool(config.threat_analysis.enabled)
-                and (
-                    not is_resume
-                    or resume_threat_analysis
-                    or threat_only
+            engine_tasks = [
+                asyncio.create_task(execute_engine(selection))
+                for selection in enabled_selections
+            ]
+            results = await asyncio.gather(*engine_tasks)
+
+        successful_runs = 0
+        failures: list[str] = []
+        for run, output in results:
+            if run.status == "success":
+                successful_runs += 1
+            elif run.status == "error":
+                failures.append(
+                    f"{run.engine_label}: "
+                    f"{run.error_message or 'engine failed'}"
                 )
-                and not cancel_event.is_set()
-            )
-            if should_run_threat:
-                threat_task = asyncio.create_task(_run_threat_processes(
-                    config=config,
-                    reporter=reporter,
-                    scan_id=scan_id,
-                    project_path=project,
-                    code_scan_path=scan_root,
-                    scan_dir=scan_dir,
-                    cancel_event=cancel_event,
-                    output=process_output,
-                    retry_task_ids=retry_threat_audit_task_ids,
-                ))
+            if output is None:
+                continue
+            audited.extend(output.vulnerabilities)
+            total += output.total_candidates
+            processed += output.processed_candidates
 
-            if threat_only:
-                await reporter.send_static_progress(scan_id, 0, 0, done=True)
-            else:
-                candidates_cache = scan_dir / "candidates.json"
-                if retry_candidates is not None:
-                    candidate_values = [
-                        dict(value)
-                        for value in retry_candidates
-                        if isinstance(value, dict)
-                    ]
-                    total = int(retry_total_candidates or len(candidate_values))
-                elif is_resume and candidates_cache.is_file():
-                    loaded = json.loads(
-                        candidates_cache.read_text(encoding="utf-8"),
-                    )
-                    candidate_values = [
-                        dict(value) for value in loaded if isinstance(value, dict)
-                    ]
-                    total = len(candidate_values)
-                else:
-                    static_result = await run_static_analysis(
-                        project_path=project,
-                        code_scan_path=scan_root,
-                        work_dir=scan_dir / "static_analysis",
-                        index_db_path=index_path,
-                        checker_dirs=static_rule_roots,
-                        checker_names=checker_names or None,
-                        deduplicate=bool(config.static_dedup),
-                        output=process_output,
-                        cancel_event=cancel_event,
-                    )
-                    candidate_values = list(
-                        static_result.get("candidates") or [],
-                    )
-                    total = len(candidate_values)
-                    candidates_cache.write_text(
-                        json.dumps(
-                            candidate_values,
-                            ensure_ascii=False,
-                            indent=2,
-                        )
-                        + "\n",
-                        encoding="utf-8",
-                    )
-
-                candidates = [
-                    Candidate.model_validate(value)
-                    for value in candidate_values
-                ]
-                await reporter.report_candidates(scan_id, candidates)
-                await reporter.send_static_progress(
-                    scan_id,
-                    total,
-                    total,
-                    done=True,
-                )
-                processed_keys = (
-                    await reporter.get_processed_keys(scan_id)
-                    if is_resume and retry_candidates is None
-                    else set()
-                )
-                remaining = [
-                    item
-                    for item in candidate_values
-                    if (
-                        str(item.get("file") or ""),
-                        int(item.get("line") or 0),
-                        str(item.get("function") or ""),
-                        str(item.get("vuln_type") or ""),
-                    )
-                    not in processed_keys
-                ]
-                processed = (
-                    max(0, int(retry_processed_offset or 0))
-                    if retry_candidates is not None
-                    else total - len(remaining)
-                )
-                if remaining and not cancel_event.is_set():
-                    scope = str(config.pattern_filter.scope or "directory")
-                    streamed_audit_indexes: set[int] = set()
-                    streamed_processed_keys: set[
-                        tuple[str, int, str, str]
-                    ] = set()
-                    streamed_skill_reports: dict[
-                        str,
-                        list[dict[str, Any]],
-                    ] = {}
-                    skill_report_lock = asyncio.Lock()
-
-                    async def report_candidate_result(
-                        result: dict[str, Any],
-                    ) -> None:
-                        await _report_process_vulnerabilities(
-                            reporter=reporter,
-                            config=config,
-                            scan_id=scan_id,
-                            project_path=project,
-                            code_scan_path=scan_root,
-                            product=product,
-                            validation_environment=validation_environment,
-                            feedback_entries=feedback_entries,
-                            code_graph_mcp=code_graph_mcp,
-                            values=list(result.get("vulnerabilities") or []),
-                        )
-
-                        checker_name = str(
-                            result.get("checker_name") or "",
-                        )
-                        reports = [
-                            dict(item)
-                            for item in result.get("skill_reports") or []
-                            if isinstance(item, dict)
-                        ]
-                        if checker_name and reports:
-                            async with skill_report_lock:
-                                accumulated = streamed_skill_reports.setdefault(
-                                    checker_name,
-                                    [],
-                                )
-                                accumulated.extend(reports)
-                                await reporter.replace_skill_reports(
-                                    scan_id,
-                                    checker_name,
-                                    list(accumulated),
-                                )
-
-                        raw_key = result.get("processed_key")
-                        if isinstance(raw_key, dict):
-                            processed_key = (
-                                str(raw_key.get("file") or ""),
-                                int(raw_key.get("line") or 0),
-                                str(raw_key.get("function") or ""),
-                                str(raw_key.get("vuln_type") or ""),
-                            )
-                            await reporter.report_processed_key(
-                                scan_id,
-                                *processed_key,
-                            )
-                            streamed_processed_keys.add(processed_key)
-
-                        raw_audit_index = result.get("audit_index")
-                        if isinstance(raw_audit_index, int):
-                            streamed_audit_indexes.add(raw_audit_index)
-
-                    audit_result = await run_candidate_audit(
-                        project_path=project,
-                        work_dir=scan_dir / "candidate_audit",
-                        scan_id=scan_id,
-                        candidates=remaining,
-                        checker_dirs=audit_rule_roots,
-                        index_db_path=index_path,
-                        checker_names=checker_names or None,
-                        concurrency=max(
-                            1,
-                            int(config.opencode_concurrency or 1),
-                        ),
-                        required_capability=_capability(
-                            config.vulnerability_mining.required_capability,
-                        ),
-                        pattern_filter_enabled=bool(
-                            config.pattern_filter.enabled,
-                        ),
-                        pattern_filter_scope=(
-                            "global"
-                            if scope == "repo"
-                            else "file"
-                            if scope == "file"
-                            else "function"
-                        ),
-                        feedback_entries=feedback_entries,
-                        audit_index_offset=processed,
-                        product_mcp=(
-                            config.product_info.name
-                            if config.product_info.enabled
-                            else None
-                        ),
-                        output=process_output,
-                        on_candidate_result=report_candidate_result,
-                        cancel_event=cancel_event,
-                    )
-                    for checker_name, reports in (
-                        audit_result.get("skill_reports") or {}
-                    ).items():
-                        if isinstance(reports, list):
-                            await reporter.replace_skill_reports(
-                                scan_id,
-                                str(checker_name),
-                                reports,
-                            )
-                    audit_values = [
-                        value
-                        for value in audit_result.get("vulnerabilities") or []
-                        if isinstance(value, dict)
-                    ]
-                    unreported_values = [
-                        value
-                        for value in audit_values
-                        if not (
-                            isinstance(value.get("audit_index"), int)
-                            and value["audit_index"] in streamed_audit_indexes
-                        )
-                    ]
-                    if unreported_values:
-                        await _report_process_vulnerabilities(
-                            reporter=reporter,
-                            config=config,
-                            scan_id=scan_id,
-                            project_path=project,
-                            code_scan_path=scan_root,
-                            product=product,
-                            validation_environment=validation_environment,
-                            feedback_entries=feedback_entries,
-                            code_graph_mcp=code_graph_mcp,
-                            values=unreported_values,
-                        )
-                    audited = [
-                        Vulnerability.model_validate(value)
-                        for value in audit_values
-                    ]
-                    for key in audit_result.get("processed_keys") or []:
-                        if not isinstance(key, dict):
-                            continue
-                        processed_key = (
-                            str(key.get("file") or ""),
-                            int(key.get("line") or 0),
-                            str(key.get("function") or ""),
-                            str(key.get("vuln_type") or ""),
-                        )
-                        if processed_key in streamed_processed_keys:
-                            continue
-                        await reporter.report_processed_key(
-                            scan_id,
-                            *processed_key,
-                        )
-                    processed += len(audit_result.get("processed_keys") or [])
-
-            threat_result = await threat_task if threat_task is not None else None
-            if (
-                threat_only
-                and isinstance(threat_result, dict)
-                and threat_result.get("result") is not True
-                and not cancel_event.is_set()
-            ):
-                await _finish_scan(
-                    reporter,
-                    scan_id,
-                    status="error",
-                    vulnerabilities=[],
-                    total=0,
-                    processed=0,
-                    error=str(threat_result.get("reason") or "Threat analysis failed"),
-                )
-                return
-
-            if isinstance(threat_result, dict):
-                audited.extend(
-                    Vulnerability.model_validate(value)
-                    for value in threat_result.get("vulnerabilities") or []
-                    if isinstance(value, dict)
-                )
-
-        status = "cancelled" if cancel_event.is_set() else "complete"
+        if cancel_event.is_set():
+            status = "cancelled"
+        elif successful_runs == 0:
+            status = "error"
+        else:
+            status = "complete"
+        warning = "; ".join(failures) or None
         await emit(
-            "complete",
+            "complete" if status == "complete" else status,
             (
                 "Scan cancelled"
                 if status == "cancelled"
-                else f"Scan complete: {len(audited)} audit result(s)"
+                else (
+                    f"Scan failed: {warning or 'all mining engines failed'}"
+                    if status == "error"
+                    else (
+                        f"Scan complete with engine warning(s): {warning}"
+                        if warning
+                        else (
+                            f"Scan complete: {len(audited)} audit result(s)"
+                        )
+                    )
+                )
             ),
         )
         await _finish_scan(
@@ -739,11 +645,13 @@ async def run_scan(
             vulnerabilities=audited,
             total=total,
             processed=processed,
+            error=warning,
         )
     except asyncio.CancelledError:
         cancel_event.set()
-        if threat_task is not None and not threat_task.done():
-            threat_task.cancel()
+        for task in engine_tasks:
+            if not task.done():
+                task.cancel()
         await _finish_scan(
             reporter,
             scan_id,
@@ -755,8 +663,9 @@ async def run_scan(
         raise
     except Exception as exc:
         cancel_event.set()
-        if threat_task is not None and not threat_task.done():
-            threat_task.cancel()
+        for task in engine_tasks:
+            if not task.done():
+                task.cancel()
         await emit("error", f"Scan failed: {exc}")
         await _finish_scan(
             reporter,

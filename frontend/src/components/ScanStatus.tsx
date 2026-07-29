@@ -425,6 +425,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         return { ...prev, threat_audit_tasks: tasks };
       });
     },
+    onMiningEngineRun: (data) => {
+      setScan((prev) => prev ? {
+        ...prev,
+        mining_engine_runs: data.runs,
+      } : prev);
+    },
     onScanEvent: (data) => {
       setScan((prev) => {
         if (!prev) return prev;
@@ -1016,10 +1022,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             )}
             {(() => {
               const confirmedVulns = scan.vulnerabilities.filter(
-                (v) => (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed)) && !hasFinalUserVerdict(v)
+                (v) => v.fp_review_eligible !== false
+                  && (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed))
+                  && !hasFinalUserVerdict(v)
               ).length;
               const canTrigger = confirmedVulns > 0;
               const isReviewing = fpReview?.status === "running" || fpReview?.status === "pending";
+              if (!canTrigger) return null;
               return (
                 <>
                   <button
@@ -1127,9 +1136,45 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           onIssues={() => setActiveTab("issues")}
         />
 
+        {(scan.mining_engine_runs?.length ?? 0) > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <span className="text-xs text-slate-500">漏洞挖掘引擎</span>
+            {scan.mining_engine_runs!.map((run) => {
+              const tone = run.status === "success"
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                : run.status === "error"
+                  ? "border-red-500/30 bg-red-500/10 text-red-200"
+                  : run.status === "running"
+                    ? "border-blue-500/30 bg-blue-500/10 text-blue-200"
+                    : "border-slate-600 bg-slate-700/40 text-slate-300";
+              return (
+                <span
+                  key={run.engine_id}
+                  className={`rounded-full border px-2.5 py-1 text-xs ${tone}`}
+                  title={run.error_message || run.engine_id}
+                >
+                  {run.engine_label} · {
+                    run.status === "success" ? "完成"
+                      : run.status === "error" ? "失败"
+                          : run.status === "running" ? "运行中"
+                            : run.status === "cancelled" ? "已取消"
+                              : run.status === "skipped" ? "已跳过"
+                                : run.status === "pending" ? "等待中"
+                              : run.status
+                  }
+                </span>
+              );
+            })}
+          </div>
+        )}
+
         {/* Error */}
         {visibleErrorMessage && (
-          <div className="mt-3 p-2.5 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-400">
+          <div className={`mt-3 rounded-lg border p-2.5 text-sm ${
+            scan.status === "complete"
+              ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+              : "border-red-500/30 bg-red-500/10 text-red-400"
+          }`}>
             {visibleErrorMessage}
           </div>
         )}
@@ -1539,6 +1584,9 @@ function ProcessFlowNav({
     || (scan.total_candidates > 0 && scan.processed_candidates >= scan.total_candidates);
   const validations = scan.validations ?? [];
   const confirmedCount = scan.vulnerabilities.filter((vuln) => isAiConfirmed(vuln)).length;
+  const fpReviewTargetCount = scan.vulnerabilities.filter(
+    (vuln) => vuln.fp_review_eligible !== false && isAiConfirmed(vuln),
+  ).length;
   const validationRunningCount = validations.filter((item) =>
     item.running || item.status === "queued" || item.status === "running" || item.status === "pending",
   ).length;
@@ -1607,8 +1655,15 @@ function ProcessFlowNav({
     fp_review: {
       id: "fp_review",
       label: fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method),
-      detail: fpReviewTotal > 0 ? `${fpReviewProcessed}/${fpReviewTotal} 已复核` : "等待正报复核",
-      status: flowStatus(fpReviewDone, isFpReviewing),
+      detail: fpReviewTotal > 0
+        ? `${fpReviewProcessed}/${fpReviewTotal} 已复核`
+        : fpReviewTargetCount > 0
+          ? "等待正报复核"
+          : "无复核目标",
+      status: flowStatus(
+        fpReviewDone || fpReviewTargetCount === 0,
+        isFpReviewing,
+      ),
       active: activeTab === "mining" && activeMiningTab === "fp_review",
       tone: "amber",
     },
@@ -1883,6 +1938,9 @@ function ScanOverview({
   const staticPct = percent(staticScannedFiles, staticTotalFiles);
   const auditRunning = scan.status === "auditing";
   const staticRunning = scan.status === "analyzing" && !scan.static_analysis_done;
+  const fpReviewTargetCount = scan.vulnerabilities.filter(
+    (vuln) => vuln.fp_review_eligible !== false && isAiConfirmed(vuln),
+  ).length;
   const target = scan.current_candidate;
   return (
     <div className="space-y-4">
@@ -1978,10 +2036,16 @@ function ScanOverview({
             />
             <TaskSummaryRow
               label={fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method)}
-              status={fpReview ? taskStateLabel(fpReview.status === "complete", isFpReviewing, fpReview.status === "error") : "预留"}
+              status={fpReview
+                ? taskStateLabel(fpReview.status === "complete", isFpReviewing, fpReview.status === "error")
+                : fpReviewTargetCount > 0 ? "等待" : "无目标"}
               tone={isFpReviewing ? "amber" : fpReview?.status === "complete" ? "green" : fpReview?.status === "error" ? "red" : "slate"}
               progress={fpReview?.total ? percent(fpReview.processed, fpReview.total) : undefined}
-              detail={fpReview ? `${fpReview.processed}/${fpReview.total} 已复核` : "等待确认漏洞"}
+              detail={fpReview
+                ? `${fpReview.processed}/${fpReview.total} 已复核`
+                : fpReviewTargetCount > 0
+                  ? `${fpReviewTargetCount} 个可复核问题`
+                  : "已启用引擎没有可复核问题"}
             />
             <TaskSummaryRow
               label="报告导出"
@@ -3107,7 +3171,11 @@ function FpReviewPanel({
 }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const confirmed = useMemo(
-    () => vulnerabilities.map((vuln, index) => ({ vuln, index })).filter(({ vuln }) => isAiConfirmed(vuln)),
+    () => vulnerabilities
+      .map((vuln, index) => ({ vuln, index }))
+      .filter(({ vuln }) => (
+        vuln.fp_review_eligible !== false && isAiConfirmed(vuln)
+      )),
     [vulnerabilities],
   );
   const resultByIndex = useMemo(
@@ -3193,14 +3261,16 @@ function FpReviewPanel({
         <MiniMetric label="判定误报" value={fpCount} tone="green" />
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={onTrigger}
-          disabled={!canTrigger}
-          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {loading ? "启动中..." : `启动${methodLabel}`}
-        </button>
+        {confirmed.length > 0 && (
+          <button
+            type="button"
+            onClick={onTrigger}
+            disabled={!canTrigger}
+            className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loading ? "启动中..." : `启动${methodLabel}`}
+          </button>
+        )}
         {isFpReviewing && (
           <button
             type="button"
@@ -3232,7 +3302,7 @@ function FpReviewPanel({
         </section>
       )}
       {confirmed.length === 0 ? (
-        <EmptyState text="当前还没有漏洞挖掘阶段确认的问题。" />
+        <EmptyState text="当前没有允许进入去误报的确认问题。" />
       ) : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,22rem)_1fr]">
           <div className="flex flex-col rounded-xl border border-slate-700 bg-slate-900/40">

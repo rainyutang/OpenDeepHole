@@ -20,6 +20,8 @@ from backend.models import (
     FpReviewStageOutput,
     FpReviewStatus,
     HistoryPattern,
+    MiningEngineRunStatus,
+    MiningEngineSelection,
     OpenCodePoolModelStats,
     OpenCodePoolStatus,
     OpenCodeModelTokenUsage,
@@ -60,6 +62,22 @@ def _json_string_list(value: str | None) -> list[str]:
     if not isinstance(data, list):
         return []
     return [str(item).strip() for item in data if str(item).strip()]
+
+
+def _json_model_list(value: str | None, model_type) -> list:
+    try:
+        data = json.loads(value or "[]")
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    result = []
+    for item in data:
+        try:
+            result.append(model_type.model_validate(item))
+        except Exception:
+            continue
+    return result
 
 
 def _json_call_chain(value: str | None) -> list[dict | str]:
@@ -244,6 +262,8 @@ CREATE TABLE IF NOT EXISTS scans (
     public_access_token TEXT NOT NULL DEFAULT '',
     opencode_pool      TEXT NOT NULL DEFAULT '{}',
     code_graph_mcp_json TEXT
+    ,mining_engines_json TEXT NOT NULL DEFAULT '[]'
+    ,mining_engine_runs_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -276,6 +296,9 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     ticket_id           TEXT NOT NULL DEFAULT '',
     variant_of          TEXT NOT NULL DEFAULT '',
     analysis_source     TEXT NOT NULL DEFAULT 'static_candidate',
+    engine_id           TEXT NOT NULL DEFAULT 'static_candidate',
+    engine_label        TEXT NOT NULL DEFAULT '静态规则扫描 + 候选点审计',
+    fp_review_eligible  INTEGER NOT NULL DEFAULT 1,
     source_task_id      TEXT NOT NULL DEFAULT '',
     threat_surface_node_id TEXT NOT NULL DEFAULT '',
     threat_method_node_id TEXT NOT NULL DEFAULT '',
@@ -490,6 +513,7 @@ CREATE TABLE IF NOT EXISTS agents (
     display_name          TEXT NOT NULL DEFAULT '',
     config_json           TEXT NOT NULL DEFAULT '{}',
     validator_catalog_json TEXT NOT NULL DEFAULT '{}',
+    mining_engine_catalog_json TEXT NOT NULL DEFAULT '{}',
     mcp_probe_json        TEXT NOT NULL DEFAULT '{}',
     opencode_runtime_config_json TEXT NOT NULL DEFAULT '{}',
     last_agent_id         TEXT NOT NULL DEFAULT '',
@@ -630,6 +654,14 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN opencode_pool TEXT NOT NULL DEFAULT '{}'")
         if "code_graph_mcp_json" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN code_graph_mcp_json TEXT")
+        if "mining_engines_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN mining_engines_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "mining_engine_runs_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN mining_engine_runs_json TEXT NOT NULL DEFAULT '[]'"
+            )
         if "auto_fp_review" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN auto_fp_review INTEGER")
         if "fp_review_method" not in cols:
@@ -645,6 +677,10 @@ class SqliteScanStore(ScanStoreBase):
         if "opencode_runtime_config_json" not in agent_cols:
             self._conn.execute(
                 "ALTER TABLE agents ADD COLUMN opencode_runtime_config_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "mining_engine_catalog_json" not in agent_cols:
+            self._conn.execute(
+                "ALTER TABLE agents ADD COLUMN mining_engine_catalog_json TEXT NOT NULL DEFAULT '{}'"
             )
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
@@ -688,6 +724,37 @@ class SqliteScanStore(ScanStoreBase):
         if "analysis_source" not in vuln_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN analysis_source TEXT NOT NULL DEFAULT 'static_candidate'"
+            )
+        if "engine_id" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN engine_id TEXT NOT NULL DEFAULT ''"
+            )
+            self._conn.execute(
+                """\
+                UPDATE vulnerabilities
+                SET engine_id = CASE
+                    WHEN analysis_source = 'threat_audit' THEN 'threat_audit'
+                    ELSE 'static_candidate'
+                END
+                """
+            )
+        if "engine_label" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN engine_label TEXT NOT NULL DEFAULT ''"
+            )
+            self._conn.execute(
+                """\
+                UPDATE vulnerabilities
+                SET engine_label = CASE
+                    WHEN analysis_source = 'threat_audit'
+                        THEN '威胁分析 + 威胁审计'
+                    ELSE '静态规则扫描 + 候选点审计'
+                END
+                """
+            )
+        if "fp_review_eligible" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN fp_review_eligible INTEGER NOT NULL DEFAULT 1"
             )
         if "source_task_id" not in vuln_cols:
             self._conn.execute(
@@ -1049,6 +1116,14 @@ class SqliteScanStore(ScanStoreBase):
                 row["validation_environment"] if row["validation_environment"] is not None else ""
             ),
             scan_items=json.loads(row["scan_items"]),
+            mining_engines=_json_model_list(
+                row["mining_engines_json"],
+                MiningEngineSelection,
+            ),
+            mining_engine_runs=_json_model_list(
+                row["mining_engine_runs_json"],
+                MiningEngineRunStatus,
+            ),
             created_at=row["created_at"],
             status=ScanItemStatus(row["status"]),
             progress=row["progress"],
@@ -1077,6 +1152,10 @@ class SqliteScanStore(ScanStoreBase):
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
+            mining_engines=_json_model_list(
+                row["mining_engines_json"],
+                MiningEngineSelection,
+            ),
             auto_fp_review=(
                 bool(row["auto_fp_review"])
                 if row["auto_fp_review"] is not None
@@ -1122,8 +1201,9 @@ class SqliteScanStore(ScanStoreBase):
                      user_id, agent_name, agent_id, agent_key, project_path, code_scan_path, scan_name,
                      scan_mode, auto_fp_review, fp_review_method,
                      product, validation_environment, public_access_token, opencode_pool,
-                     code_graph_mcp_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     code_graph_mcp_json, mining_engines_json,
+                     mining_engine_runs_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -1159,10 +1239,63 @@ class SqliteScanStore(ScanStoreBase):
                         if meta.code_graph_mcp is not None
                         else None
                     ),
+                    json.dumps(
+                        [
+                            item.model_dump(mode="json")
+                            for item in meta.mining_engines
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        [
+                            item.model_dump(mode="json")
+                            for item in scan.mining_engine_runs
+                        ],
+                        ensure_ascii=False,
+                    ),
                 ),
             )
             self._replace_scan_candidates_locked(scan.scan_id, scan.candidates)
             self._conn.commit()
+
+    def update_mining_engine_run(
+        self,
+        scan_id: str,
+        run: MiningEngineRunStatus,
+    ) -> list[MiningEngineRunStatus]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT mining_engine_runs_json FROM scans WHERE scan_id = ?",
+                (scan_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return []
+            runs = _json_model_list(
+                row["mining_engine_runs_json"],
+                MiningEngineRunStatus,
+            )
+            by_id = {item.engine_id: item for item in runs}
+            by_id[run.engine_id] = run
+            ordered = sorted(
+                by_id.values(),
+                key=lambda item: (item.engine_label, item.engine_id),
+            )
+            self._conn.execute(
+                "UPDATE scans SET mining_engine_runs_json = ? WHERE scan_id = ?",
+                (
+                    json.dumps(
+                        [
+                            item.model_dump(mode="json")
+                            for item in ordered
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    scan_id,
+                ),
+            )
+            self._conn.commit()
+            return ordered
 
     def load_scan(self, scan_id: str) -> tuple[ScanStatus, ScanMeta] | None:
         cur = self._conn.execute(
@@ -1780,9 +1913,10 @@ class SqliteScanStore(ScanStoreBase):
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line, variant_of,
-                     analysis_source, source_task_id, threat_surface_node_id,
+                     analysis_source, engine_id, engine_label,
+                     fp_review_eligible, source_task_id, threat_surface_node_id,
                      threat_method_node_id, threat_code_path, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -1813,6 +1947,9 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.function_start_line,
                     vuln.variant_of,
                     vuln.analysis_source,
+                    vuln.engine_id,
+                    vuln.engine_label,
+                    1 if vuln.fp_review_eligible else 0,
                     vuln.source_task_id,
                     vuln.threat_surface_node_id,
                     vuln.threat_method_node_id,
@@ -1835,12 +1972,27 @@ class SqliteScanStore(ScanStoreBase):
                   AND line = ?
                   AND function = ?
                   AND vuln_type = ?
+                  AND COALESCE(
+                        NULLIF(engine_id, ''),
+                        CASE
+                            WHEN analysis_source = 'threat_audit'
+                                THEN 'threat_audit'
+                            ELSE 'static_candidate'
+                        END
+                      ) = ?
                   AND COALESCE(user_verdict, '') = ''
                   AND COALESCE(ai_verdict, '') IN ('timeout', 'no_result', 'failed')
                 ORDER BY idx ASC
                 LIMIT 1
                 """,
-                (scan_id, vuln.file, vuln.line, vuln.function, vuln.vuln_type),
+                (
+                    scan_id,
+                    vuln.file,
+                    vuln.line,
+                    vuln.function,
+                    vuln.vuln_type,
+                    vuln.engine_id,
+                ),
             )
             row = cur.fetchone()
             if row is not None:
@@ -1870,6 +2022,9 @@ class SqliteScanStore(ScanStoreBase):
                         function_start_line = ?,
                         variant_of = ?,
                         analysis_source = ?,
+                        engine_id = ?,
+                        engine_label = ?,
+                        fp_review_eligible = ?,
                         source_task_id = ?,
                         threat_surface_node_id = ?,
                         threat_method_node_id = ?,
@@ -1896,6 +2051,9 @@ class SqliteScanStore(ScanStoreBase):
                         vuln.function_start_line,
                         vuln.variant_of,
                         vuln.analysis_source,
+                        vuln.engine_id,
+                        vuln.engine_label,
+                        1 if vuln.fp_review_eligible else 0,
                         vuln.source_task_id,
                         vuln.threat_surface_node_id,
                         vuln.threat_method_node_id,
@@ -1922,9 +2080,10 @@ class SqliteScanStore(ScanStoreBase):
                      ai_verdict, failure_reason, user_verdict, user_verdict_reason,
                      ticket_submitted, ticket_id,
                      function_source, function_start_line, variant_of,
-                     analysis_source, source_task_id, threat_surface_node_id,
+                     analysis_source, engine_id, engine_label,
+                     fp_review_eligible, source_task_id, threat_surface_node_id,
                      threat_method_node_id, threat_code_path, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -1955,6 +2114,9 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.function_start_line,
                     vuln.variant_of,
                     vuln.analysis_source,
+                    vuln.engine_id,
+                    vuln.engine_label,
+                    1 if vuln.fp_review_eligible else 0,
                     vuln.source_task_id,
                     vuln.threat_surface_node_id,
                     vuln.threat_method_node_id,
@@ -2116,6 +2278,37 @@ class SqliteScanStore(ScanStoreBase):
                 audit_index=(r["audit_index"] if "audit_index" in r.keys() else None),
                 variant_of=(r["variant_of"] if "variant_of" in r.keys() else "") or "",
                 analysis_source=(r["analysis_source"] if "analysis_source" in r.keys() else "static_candidate") or "static_candidate",
+                engine_id=(
+                    (r["engine_id"] if "engine_id" in r.keys() else "")
+                    or (
+                        "threat_audit"
+                        if (
+                            r["analysis_source"]
+                            if "analysis_source" in r.keys()
+                            else ""
+                        )
+                        == "threat_audit"
+                        else "static_candidate"
+                    )
+                ),
+                engine_label=(
+                    (r["engine_label"] if "engine_label" in r.keys() else "")
+                    or (
+                        "威胁分析 + 威胁审计"
+                        if (
+                            r["analysis_source"]
+                            if "analysis_source" in r.keys()
+                            else ""
+                        )
+                        == "threat_audit"
+                        else "静态规则扫描 + 候选点审计"
+                    )
+                ),
+                fp_review_eligible=(
+                    bool(r["fp_review_eligible"])
+                    if "fp_review_eligible" in r.keys()
+                    else True
+                ),
                 source_task_id=(r["source_task_id"] if "source_task_id" in r.keys() else "") or "",
                 threat_surface_node_id=(r["threat_surface_node_id"] if "threat_surface_node_id" in r.keys() else "") or "",
                 threat_method_node_id=(r["threat_method_node_id"] if "threat_method_node_id" in r.keys() else "") or "",
@@ -3367,6 +3560,7 @@ class SqliteScanStore(ScanStoreBase):
         last_seen: str,
         initial_config_json: str = "{}",
         validator_catalog_json: str = "{}",
+        mining_engine_catalog_json: str = "{}",
     ) -> dict:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -3374,8 +3568,9 @@ class SqliteScanStore(ScanStoreBase):
                 """\
                 INSERT INTO agents
                     (agent_key, user_id, ip, machine_name, display_name, config_json,
-                     validator_catalog_json, last_agent_id, last_seen, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     validator_catalog_json, mining_engine_catalog_json,
+                     last_agent_id, last_seen, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, ip, machine_name) DO UPDATE SET
                     display_name = excluded.display_name,
                     last_agent_id = excluded.last_agent_id,
@@ -3383,6 +3578,11 @@ class SqliteScanStore(ScanStoreBase):
                     validator_catalog_json = CASE
                         WHEN excluded.validator_catalog_json = '{}' THEN agents.validator_catalog_json
                         ELSE excluded.validator_catalog_json
+                    END,
+                    mining_engine_catalog_json = CASE
+                        WHEN excluded.mining_engine_catalog_json = '{}'
+                            THEN agents.mining_engine_catalog_json
+                        ELSE excluded.mining_engine_catalog_json
                     END,
                     updated_at = excluded.updated_at
                 """,
@@ -3394,6 +3594,7 @@ class SqliteScanStore(ScanStoreBase):
                     display_name,
                     initial_config_json,
                     validator_catalog_json,
+                    mining_engine_catalog_json,
                     agent_id,
                     last_seen,
                     now,
@@ -3420,6 +3621,20 @@ class SqliteScanStore(ScanStoreBase):
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE agents SET validator_catalog_json = ?, updated_at = ? WHERE agent_key = ?",
+                (catalog_json, now, agent_key),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def update_agent_mining_engine_catalog_record(
+        self,
+        agent_key: str,
+        catalog_json: str,
+    ) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE agents SET mining_engine_catalog_json = ?, updated_at = ? WHERE agent_key = ?",
                 (catalog_json, now, agent_key),
             )
             self._conn.commit()

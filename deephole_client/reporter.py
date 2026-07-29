@@ -113,6 +113,31 @@ class Reporter:
             print(f"Warning: failed to upload vulnerability result: {e}")
             return None
 
+    async def report_mining_engine_run(
+        self,
+        scan_id: str,
+        run: dict,
+    ) -> None:
+        """Create or update one mining-engine lifecycle state."""
+        if self.dry_run:
+            print(
+                "  [ENGINE] "
+                f"{run.get('engine_id')}: {run.get('status')}"
+            )
+            return
+        try:
+            resp = await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/mining-engine-run",
+                json=run,
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            print(
+                "Warning: failed to upload mining-engine state: "
+                f"{exc}"
+            )
+
     async def report_vulnerability_validation(
         self,
         scan_id: str,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import threading
 import unittest
@@ -15,6 +16,7 @@ from deephole_client.scanner import (
     _resolve_scan_paths,
     run_scan,
 )
+from deephole_client.vulnerability_mining import MiningEngineOutput
 
 
 def _reporter() -> SimpleNamespace:
@@ -32,6 +34,7 @@ def _reporter() -> SimpleNamespace:
         get_threat_audit_tasks=AsyncMock(return_value=[]),
         push_threat_analysis=AsyncMock(),
         push_threat_audit_task=AsyncMock(),
+        report_mining_engine_run=AsyncMock(),
     )
     return reporter
 
@@ -197,11 +200,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     side_effect=graph,
                 ),
                 patch(
-                    "deephole_client.scanner.run_static_analysis",
+                    "deephole_client.static_analysis.run_static_analysis",
                     side_effect=static,
                 ),
                 patch(
-                    "deephole_client.scanner.run_candidate_audit",
+                    "deephole_client.candidate_audit.run_candidate_audit",
                     side_effect=audit,
                 ),
             ):
@@ -266,21 +269,33 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     }),
                 ),
                 patch(
-                    "deephole_client.scanner.run_static_analysis",
+                    "deephole_client.static_analysis.run_static_analysis",
                     new=static,
                 ),
                 patch(
-                    "deephole_client.scanner.run_candidate_audit",
+                    "deephole_client.candidate_audit.run_candidate_audit",
                     new=audit,
                 ),
                 patch(
-                    "deephole_client.scanner._run_threat_processes",
+                    "deephole_client.threat_analysis_runner.run_threat_analysis",
                     new=AsyncMock(return_value={
                         "result": True,
-                        "audit_status": "success",
-                        "vulnerabilities": [_threat_vulnerability()],
+                        "attack_tree_path": str(root / "attack-tree.json"),
+                        "high_risk_modules_path": str(root / "risk.json"),
                     }),
                 ) as threat,
+                patch(
+                    "deephole_client.process_artifacts.collect_json_artifacts",
+                    return_value={"artifacts": {}},
+                ),
+                patch(
+                    "deephole_client.threat_audit.run_threat_audit",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "tasks": [],
+                        "vulnerabilities": [_threat_vulnerability()],
+                    }),
+                ),
             ):
                 await run_scan(
                     config=config,
@@ -360,14 +375,14 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     }),
                 ),
                 patch(
-                    "deephole_client.scanner.run_static_analysis",
+                    "deephole_client.static_analysis.run_static_analysis",
                     new=AsyncMock(return_value={
                         "status": "success",
                         "candidates": [],
                     }),
                 ),
                 patch(
-                    "deephole_client.scanner.run_candidate_audit",
+                    "deephole_client.candidate_audit.run_candidate_audit",
                     new=AsyncMock(return_value={
                         "status": "success",
                         "vulnerabilities": [],
@@ -394,4 +409,210 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             task_context.call_args.kwargs["code_graph_mcp"],
             graph_config,
+        )
+
+    async def test_engine_failure_is_isolated_when_another_engine_succeeds(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        started: set[str] = set()
+        both_started = asyncio.Event()
+        manifests = [
+            SimpleNamespace(
+                engine_id="good",
+                label="Good engine",
+                default_enabled=True,
+                default_fp_review_enabled=True,
+            ),
+            SimpleNamespace(
+                engine_id="bad",
+                label="Bad engine",
+                default_enabled=True,
+                default_fp_review_enabled=True,
+            ),
+        ]
+        loaded = {
+            item.engine_id: SimpleNamespace(manifest=item)
+            for item in manifests
+        }
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: manifests,
+            get=lambda engine_id: loaded.get(engine_id),
+        )
+
+        async def run_engine(engine, _context):
+            started.add(engine.manifest.engine_id)
+            if len(started) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            if engine.manifest.engine_id == "bad":
+                raise RuntimeError("adapter exploded")
+            return MiningEngineOutput(
+                vulnerabilities=[_vulnerability()],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            with (
+                patch(
+                    "deephole_client.scanner.Path.home",
+                    return_value=root,
+                ),
+                patch(
+                    "deephole_client.scanner.configure_platform_runtime",
+                ),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.run_mining_engine",
+                    side_effect=run_engine,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="isolated",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-isolated",
+                    cancel_event=threading.Event(),
+                    mining_engines=[
+                        {
+                            "engine_id": "good",
+                            "engine_label": "Good engine",
+                            "enabled": True,
+                            "fp_review_enabled": True,
+                        },
+                        {
+                            "engine_id": "bad",
+                            "engine_label": "Bad engine",
+                            "enabled": True,
+                            "fp_review_enabled": True,
+                        },
+                        {
+                            "engine_id": "missing",
+                            "engine_label": "Missing engine",
+                            "enabled": True,
+                            "fp_review_enabled": False,
+                        },
+                    ],
+                )
+
+        self.assertEqual(started, {"good", "bad"})
+        finish = reporter.finish_scan.await_args
+        self.assertEqual(finish.args[2], "complete")
+        self.assertEqual(len(finish.args[1]), 1)
+        reporter.report_vulnerability.assert_awaited_once()
+        reported_vulnerability = (
+            reporter.report_vulnerability.await_args.args[1]
+        )
+        self.assertEqual(reported_vulnerability.engine_id, "good")
+        self.assertEqual(
+            reported_vulnerability.engine_label,
+            "Good engine",
+        )
+        self.assertTrue(reported_vulnerability.fp_review_eligible)
+        self.assertIn(
+            "Bad engine: adapter exploded",
+            finish.kwargs["error_message"],
+        )
+        self.assertIn(
+            "Missing engine: Engine adapter is unavailable",
+            finish.kwargs["error_message"],
+        )
+        run_states = [
+            call.args[1]["status"]
+            for call in reporter.report_mining_engine_run.await_args_list
+        ]
+        self.assertIn("success", run_states)
+        self.assertIn("error", run_states)
+        self.assertEqual(run_states.count("error"), 2)
+
+    async def test_scan_errors_when_all_enabled_engines_fail(self) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        registry = SimpleNamespace(
+            errors=["missing: invalid adapter"],
+            manifests=lambda: [],
+            get=lambda _engine_id: None,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            with (
+                patch(
+                    "deephole_client.scanner.Path.home",
+                    return_value=root,
+                ),
+                patch(
+                    "deephole_client.scanner.configure_platform_runtime",
+                ),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="all failed",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-all-failed",
+                    cancel_event=threading.Event(),
+                    mining_engines=[{
+                        "engine_id": "missing",
+                        "engine_label": "Missing engine",
+                        "enabled": True,
+                        "fp_review_enabled": False,
+                    }],
+                )
+
+        finish = reporter.finish_scan.await_args
+        self.assertEqual(finish.args[2], "error")
+        self.assertIn(
+            "Missing engine: Engine adapter is unavailable",
+            finish.kwargs["error_message"],
         )

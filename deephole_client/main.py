@@ -81,6 +81,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             ),
             feedback_entries=msg.get("feedback_entries", []),
             checker_packages=msg.get("checker_packages", []),
+            mining_engines=(
+                msg.get("mining_engines")
+                if isinstance(msg.get("mining_engines"), list)
+                else None
+            ),
         )
     elif cmd_type == "stop":
         await agent_server.handle_stop(msg["scan_id"])
@@ -103,6 +108,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             ),
             feedback_entries=msg.get("feedback_entries"),
             checker_packages=msg.get("checker_packages"),
+            mining_engines=(
+                msg.get("mining_engines")
+                if isinstance(msg.get("mining_engines"), list)
+                else None
+            ),
             retry_candidates=msg.get("retry_candidates"),
             retry_total_candidates=msg.get("retry_total_candidates"),
             retry_processed_offset=int(msg.get("retry_processed_offset") or 0),
@@ -309,12 +319,19 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 validator_result = await run_vulnerability_validation(
                     operation="catalog",
                 )
+                from deephole_client.vulnerability_mining import (
+                    build_mining_engine_catalog,
+                )
+
                 hello_msg = {
                     "type": "hello",
                     "name": name,
                     "machine_name": socket.gethostname(),
                     "config": remote_config_dict(config),
                     "validator_catalog": validator_result["catalog"],
+                    "mining_engine_catalog": (
+                        build_mining_engine_catalog()
+                    ),
                     "runtime_hash": compute_runtime_hash(),
                     "agent_session_id": reporter.agent_session_id,
                     "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),

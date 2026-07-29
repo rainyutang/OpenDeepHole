@@ -21,6 +21,7 @@ class ScanTask:
     code_graph_mcp: dict | None = None
     feedback_entries: list[dict] = field(default_factory=list)
     checker_packages: list[dict] = field(default_factory=list)
+    mining_engines: list[dict] | None = None
     retry_candidates: list[dict] | None = None
     retry_total_candidates: int | None = None
     retry_processed_offset: int = 0
@@ -47,6 +48,7 @@ class TaskManager:
         code_graph_mcp: dict | None = None,
         feedback_entries: list[dict] | None = None,
         checker_packages: list[dict] | None = None,
+        mining_engines: list[dict] | None = None,
         retry_candidates: list[dict] | None = None,
         retry_total_candidates: int | None = None,
         retry_processed_offset: int = 0,
@@ -69,6 +71,11 @@ class TaskManager:
             ),
             feedback_entries=feedback_entries or [],
             checker_packages=checker_packages or [],
+            mining_engines=(
+                copy.deepcopy(mining_engines)
+                if isinstance(mining_engines, list)
+                else None
+            ),
             retry_candidates=retry_candidates,
             retry_total_candidates=retry_total_candidates,
             retry_processed_offset=retry_processed_offset,
@@ -114,5 +121,6 @@ class TaskManager:
                 "scan_mode": task.scan_mode,
                 "product": task.product,
                 "validation_environment": task.validation_environment,
+                "mining_engines": copy.deepcopy(task.mining_engines),
             })
         return active

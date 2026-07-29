@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getAgentConfig,
+  getAgentMiningEngineCatalog,
   getAgentMcpStatus,
   getAgentOpenCodeModels,
   getAgentOpenCodePool,
@@ -14,6 +15,7 @@ import {
 } from "../api/client";
 import type {
   AgentInfo,
+  AgentMiningEngineCatalog,
   AgentMcpConfig,
   AgentMcpStatusResponse,
   AgentMcpTarget,
@@ -63,13 +65,14 @@ const emptyMcpRuntime = () => ({
   loaded_directories: 0, total_directories: 0,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
-  schema_version: 4,
+  schema_version: 5,
   opencode_config: "{}",
   base: { tool: "nga", executable: "nga", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
   model_pool: { global_concurrency: 4, models: [] },
   threat_analysis: { enabled: true, model_policy: policy("high", 2) },
   product_info: mcp("product-info"),
   vulnerability_mining: policy("high"),
+  mining_engines: {},
   false_positive: policy("high"),
   vulnerability_validation: { environments: {} },
 });
@@ -476,6 +479,7 @@ export default function AgentConfigPage({ onBack }: Props) {
   const [config, setConfig] = useState<AgentRemoteConfig>(defaultConfig);
   const [savedConfig, setSavedConfig] = useState<AgentRemoteConfig>(defaultConfig);
   const [catalog, setCatalog] = useState<AgentValidatorCatalog>({ registrations: [], errors: [], updated_at: "" });
+  const [miningCatalog, setMiningCatalog] = useState<AgentMiningEngineCatalog>({ engines: [], errors: [], updated_at: "" });
   const [pool, setPool] = useState<AgentOpenCodePoolStatus | null>(null);
   const [tokenUsage, setTokenUsage] = useState<OpenCodeTokenUsage | null>(null);
   const [tokenUsageLoading, setTokenUsageLoading] = useState(false);
@@ -553,8 +557,13 @@ export default function AgentConfigPage({ onBack }: Props) {
     setRuntimeConfig(null);
     setRuntimeConfigError("");
     setRuntimeConfigRevealed(false);
-    Promise.all([getAgentConfig(agentKey), getAgentValidatorCatalog(agentKey), getAgentMcpStatus(agentKey)]).then(([next, nextCatalog, nextMcpStatus]) => {
-      setConfig(next); setSavedConfig(next); setCatalog(nextCatalog); setMcpStatus(nextMcpStatus); setDirty(false); setMessage("");
+    Promise.all([
+      getAgentConfig(agentKey),
+      getAgentValidatorCatalog(agentKey),
+      getAgentMiningEngineCatalog(agentKey),
+      getAgentMcpStatus(agentKey),
+    ]).then(([next, nextCatalog, nextMiningCatalog, nextMcpStatus]) => {
+      setConfig(next); setSavedConfig(next); setCatalog(nextCatalog); setMiningCatalog(nextMiningCatalog); setMcpStatus(nextMcpStatus); setDirty(false); setMessage("");
       const live = agents.find((item) => item.agent_key === agentKey && item.online);
       if (live) getAgentOpenCodePool(live.agent_id).then(setPool).catch(() => setPool(null)); else setPool(null);
     }).catch(() => setMessage("加载 Agent 配置失败")).finally(() => setLoading(false));
@@ -840,9 +849,48 @@ export default function AgentConfigPage({ onBack }: Props) {
               online={Boolean(selectedAgent?.online)}
             />
           )}
-          {section === "threat" && <div className="space-y-5"><label className="flex gap-2 text-sm"><input type="checkbox" checked={config.threat_analysis.enabled} onChange={(e) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, enabled: e.target.checked } })} />启用威胁分析</label><PolicyEditor value={config.threat_analysis.model_policy} onChange={(model_policy) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy } })} /><p className="text-sm text-slate-400">这里的超时与重试由统一任务服务执行；原生威胁分析实现无需接收超时参数。</p></div>}
+          {section === "threat" && <div className="space-y-5"><PolicyEditor value={config.threat_analysis.model_policy} onChange={(model_policy) => setCfg({ ...config, threat_analysis: { ...config.threat_analysis, model_policy } })} /><p className="text-sm text-slate-400">威胁分析流程是否启用由“漏洞挖掘”中的对应引擎控制；这里仅配置其模型任务策略。</p></div>}
           {section === "product" && <McpEditor value={config.product_info} onChange={(value) => setCfg({ ...config, product_info: value })} status={mcpStatus?.product_info || null} online={Boolean(mcpStatus?.online)} unsaved={JSON.stringify(config.product_info) !== JSON.stringify(savedConfig.product_info)} probing={probingTarget === "product_info"} reloading={reloadingTarget === "product_info"} busy={probingTarget !== null || reloadingTarget !== null} onProbe={() => probeMcp("product_info")} onReload={() => reloadMcp("product_info")} />}
-          {section === "mining" && <PolicyEditor value={config.vulnerability_mining} onChange={(value) => setCfg({ ...config, vulnerability_mining: value })} />}
+          {section === "mining" && <div className="space-y-6">
+            <div>
+              <h3 className="mb-3 text-sm font-medium text-slate-200">通用模型任务策略</h3>
+              <PolicyEditor value={config.vulnerability_mining} onChange={(value) => setCfg({ ...config, vulnerability_mining: value })} />
+            </div>
+            <div className="space-y-3">
+              <div>
+                <h3 className="text-sm font-medium text-slate-200">已发现的漏洞挖掘引擎</h3>
+                <p className="mt-1 text-xs text-slate-500">目录清单提供默认值；这里的设置作为该 Agent 的默认覆盖，创建扫描时还可以再次覆盖。</p>
+              </div>
+              {miningCatalog.errors.length > 0 && <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">{miningCatalog.errors.join("；")}</div>}
+              {miningCatalog.engines.length === 0 ? <p className="rounded-lg border border-slate-700 bg-slate-900/60 p-4 text-sm text-slate-400">该 Agent 尚未上报有效的漏洞挖掘引擎。</p> : <div className="grid gap-3 md:grid-cols-2">
+                {miningCatalog.engines.map((engine) => {
+                  const override = config.mining_engines?.[engine.engine_id];
+                  const enabled = override?.enabled ?? engine.default_enabled;
+                  const fpEnabled = override?.fp_review_enabled ?? engine.default_fp_review_enabled;
+                  const update = (next: { enabled?: boolean; fp_review_enabled?: boolean }) => setCfg({
+                    ...config,
+                    mining_engines: {
+                      ...(config.mining_engines || {}),
+                      [engine.engine_id]: {
+                        ...(config.mining_engines?.[engine.engine_id] || {}),
+                        ...next,
+                      },
+                    },
+                  });
+                  return <div key={engine.engine_id} className={`rounded-xl border p-4 ${enabled ? "border-blue-500/50 bg-blue-500/10" : "border-slate-700 bg-slate-900/50"}`}>
+                    <label className="flex cursor-pointer items-start gap-3 text-sm">
+                      <input type="checkbox" checked={enabled} onChange={(event) => update({ enabled: event.target.checked })} className="mt-0.5 h-4 w-4 rounded border-slate-500 bg-slate-700 text-blue-500" />
+                      <span><span className="block font-medium text-white">{engine.label}</span><span className="mt-1 block text-xs text-slate-500">{engine.description || engine.engine_id}</span></span>
+                    </label>
+                    <label className={`mt-4 flex items-center gap-2 border-t border-slate-700/70 pt-3 text-xs ${enabled ? "cursor-pointer text-slate-300" : "cursor-not-allowed text-slate-600"}`}>
+                      <input type="checkbox" checked={fpEnabled} disabled={!enabled} onChange={(event) => update({ fp_review_enabled: event.target.checked })} className="h-4 w-4 rounded border-slate-500 bg-slate-700 text-amber-500" />
+                      该引擎结果进入去误报
+                    </label>
+                  </div>;
+                })}
+              </div>}
+            </div>
+          </div>}
           {section === "fp" && <PolicyEditor value={config.false_positive} onChange={(value) => setCfg({ ...config, false_positive: value })} />}
           {section === "validation" && <div className="space-y-6">{catalog.errors.length > 0 && <div className="rounded border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">{catalog.errors.join("；")}</div>}{environments.length === 0 ? <p className="text-sm text-slate-400">该 Agent 未安装有效的 validator.yaml。</p> : environments.map((name) => {
             const value = envConfig(name); const registrations = catalog.registrations.filter((item) => item.environment === name);
