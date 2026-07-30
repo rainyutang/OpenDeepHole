@@ -7,9 +7,11 @@ import pytest
 from deephole_client.candidate_audit.audit_schema import (
     VULNERABILITY_ITEM_SCHEMA,
     VULNERABILITY_LIST_SCHEMA,
+    audit_output_instruction,
 )
 from deephole_client.threat_audit.audit_schema import (
     THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+    threat_audit_output_instruction,
 )
 from task_agent.llm_json import LLMJsonParseError, parse_llm_json_schema
 
@@ -41,6 +43,59 @@ def _confirmed_item(function: str = "parse_payload") -> dict:
         "root_cause": "使用外部长度前未验证缓冲区边界",
         "trigger_conditions": "攻击者提交长度字段大于实际负载的报文",
     }
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        audit_output_instruction(
+            VULNERABILITY_ITEM_SCHEMA,
+            list_result=False,
+            severity_basis="具体判定遵循已加载的 Skill。",
+        ),
+        audit_output_instruction(
+            VULNERABILITY_LIST_SCHEMA,
+            list_result=True,
+            severity_basis="具体判定遵循已加载的 Skill。",
+        ),
+        threat_audit_output_instruction(
+            THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+        ),
+    ],
+)
+def test_audit_output_instructions_require_direct_exploitability_evidence(
+    instruction: str,
+) -> None:
+    for expected in (
+        "最小完整真实源码",
+        "外部输入的读取/赋值",
+        "相关 Guard（若存在）",
+        "最终危险操作",
+        "可控输入 -> 数据流/调用链 -> Guard -> 危险操作 -> 可利用性",
+        "攻击者为什么能够触发",
+        "不得只写“构造恶意输入”",
+    ):
+        assert expected in instruction
+
+
+def test_candidate_output_instruction_requires_effective_guard_evidence() -> None:
+    instruction = audit_output_instruction(
+        VULNERABILITY_ITEM_SCHEMA,
+        list_result=False,
+        severity_basis="具体判定遵循已加载的 Skill。",
+    )
+
+    assert "有效 Guard（校验/边界检查）或不可满足约束所在的函数/位置" in instruction
+    assert "攻击者输入为什么无法到达危险状态" in instruction
+    assert "不得判定为已确认漏洞" in instruction
+
+
+def test_threat_output_instruction_omits_effectively_guarded_findings() -> None:
+    instruction = threat_audit_output_instruction(
+        THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+    )
+
+    assert "若 Guard 能完整阻断所有外部输入路径，不得输出该漏洞" in instruction
 
 
 def test_candidate_schema_accepts_one_false_result() -> None:
