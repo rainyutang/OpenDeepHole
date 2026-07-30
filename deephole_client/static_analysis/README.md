@@ -26,3 +26,20 @@ python -m deephole_client.static_analysis \
 ```
 
 事件写入 stderr，最终 JSON 写入 stdout；可用 `--output-file` 同时保存结果。
+
+## 进度事件
+
+同步 Analyzer 会在后台线程中执行，避免阻塞调用方的 asyncio 事件循环。
+`output(event)` 除开始和最终结果外，还会收到以下 checker 级事件：
+
+- `checker_start`：当前规则开始，`data` 包含
+  `checker_index/checker_total/checker_name/checker_label`
+- `checker_progress`：当前规则的限流进度，额外包含
+  `progress_current/progress_total`；首条、末条、前进至少 10 个百分点或间隔
+  30 秒时上报，没有细粒度回调时也会每 30 秒报告仍在运行
+- `checker_complete`：当前规则完成，额外包含
+  `checker_candidate_count`
+- `checker_error` / `checker_cancelled`：当前规则异常或取消
+
+最终事件通过 `data.candidate_count` 报告去重后的候选总数。checker 序号和
+内部进度不会复用候选数量字段。

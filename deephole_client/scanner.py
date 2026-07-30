@@ -65,9 +65,14 @@ def _event_candidate_index(event: dict[str, Any]) -> int | None:
     data = event.get("data")
     if not isinstance(data, dict):
         return None
-    for key in ("audit_index", "vuln_index", "current", "total"):
+    keys = (
+        ("candidate_count",)
+        if event.get("process") == "static_analysis"
+        else ("candidate_index", "audit_index", "vuln_index")
+    )
+    for key in keys:
         value = data.get(key)
-        if isinstance(value, int):
+        if isinstance(value, int) and not isinstance(value, bool):
             return value
     return None
 

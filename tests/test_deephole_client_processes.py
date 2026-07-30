@@ -5,6 +5,7 @@ import inspect
 import json
 import tempfile
 import threading
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from deephole_client.code_graph_build import run_code_graph_build
 from deephole_client.fp_review import run_fp_review
 from deephole_client.fp_check_review import run_fp_check_review
 from deephole_client.static_analysis import run_static_analysis
+from deephole_client.static_analysis.base import BaseAnalyzer, Candidate
 from deephole_client.threat_analysis_runner import run_threat_analysis
 from deephole_client.threat_audit import run_threat_audit
 from deephole_client.vulnerability_validation import run_vulnerability_validation
@@ -417,6 +419,453 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         assert audited["processed_keys"] == [{
             "file": "sample.c", "line": 1, "function": "bad", "vuln_type": "demo",
         }]
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_static_analysis_keeps_event_loop_responsive_during_blocking_checker() -> None:
+    started = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
+
+    class BlockingAnalyzer(BaseAnalyzer):
+        vuln_type = "blocking"
+
+        def find_candidates(self, project_path, db=None):
+            started.set()
+            release.wait(timeout=0.5)
+            finished.set()
+            return []
+
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        database = CodeDatabase(index_path)
+        database.close()
+        analyzer = BlockingAnalyzer()
+        checker = SimpleNamespace(
+            name="blocking",
+            label="Blocking checker",
+            mode="opencode",
+            analyzer=analyzer,
+        )
+        stop_ticker = asyncio.Event()
+        ticks_while_blocked = 0
+        events: list[dict] = []
+
+        async def ticker() -> None:
+            nonlocal ticks_while_blocked
+            while not stop_ticker.is_set():
+                if started.is_set() and not finished.is_set():
+                    ticks_while_blocked += 1
+                await asyncio.sleep(0.005)
+
+        ticker_task = asyncio.create_task(ticker())
+        with patch(
+            "deephole_client.static_analysis.runner.discover_checkers",
+            return_value={"blocking": checker},
+        ), patch(
+            "deephole_client.static_analysis.runner._PROGRESS_HEARTBEAT_SECONDS",
+            0.02,
+        ):
+            analysis_task = asyncio.create_task(run_static_analysis(
+                project_path=project,
+                work_dir=root / "static",
+                index_db_path=index_path,
+                output=events.append,
+            ))
+            try:
+                for _ in range(100):
+                    if started.is_set():
+                        break
+                    await asyncio.sleep(0.005)
+                deadline = asyncio.get_running_loop().time() + 0.5
+                while (
+                    ticks_while_blocked < 3
+                    or not any(
+                        event["kind"] == "checker_progress"
+                        and "still running" in event["message"]
+                        for event in events
+                    )
+                ):
+                    if asyncio.get_running_loop().time() >= deadline:
+                        break
+                    await asyncio.sleep(0.005)
+                task_was_still_running = not analysis_task.done()
+                observed_ticks = ticks_while_blocked
+            finally:
+                release.set()
+            result = await asyncio.wait_for(analysis_task, timeout=1)
+
+        stop_ticker.set()
+        await ticker_task
+        assert started.is_set()
+        assert task_was_still_running
+        assert observed_ticks >= 3
+        assert result["status"] == "success"
+        assert analyzer.on_file_progress is None
+        assert any(
+            event["kind"] == "checker_progress"
+            and "still running" in event["message"]
+            and event["data"]["progress_current"] == 0
+            and event["data"]["progress_total"] == 0
+            for event in events
+        )
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_static_analysis_emits_checker_lifecycle_and_candidate_counts() -> None:
+    class FirstAnalyzer(BaseAnalyzer):
+        vuln_type = "first"
+
+        def find_candidates(self, project_path, db=None):
+            assert self.on_file_progress is not None
+            for current in (1, 10, 11, 12, 120, 120):
+                self.on_file_progress(current, 100)
+            return [
+                Candidate(
+                    file="first.c",
+                    line=1,
+                    function="first",
+                    description="first candidate",
+                    vuln_type="first",
+                ),
+                Candidate(
+                    file="first.c",
+                    line=2,
+                    function="second",
+                    description="second candidate",
+                    vuln_type="first",
+                ),
+            ]
+
+    class SecondAnalyzer(BaseAnalyzer):
+        vuln_type = "second"
+
+        def find_candidates(self, project_path, db=None):
+            assert self.on_file_progress is not None
+            self.on_file_progress(1, 1)
+            return [
+                Candidate(
+                    file="second.c",
+                    line=1,
+                    function="third",
+                    description="third candidate",
+                    vuln_type="second",
+                ),
+            ]
+
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        (project / "first.c").write_text("int first;\n", encoding="utf-8")
+        (project / "second.c").write_text("int second;\n", encoding="utf-8")
+        index_path = project / "code_index.db"
+        database = CodeDatabase(index_path)
+        database.close()
+        first = FirstAnalyzer()
+        second = SecondAnalyzer()
+        registry = {
+            "first": SimpleNamespace(
+                name="first",
+                label="First checker",
+                mode="opencode",
+                analyzer=first,
+            ),
+            "second": SimpleNamespace(
+                name="second",
+                label="Second checker",
+                mode="opencode",
+                analyzer=second,
+            ),
+        }
+        events: list[dict] = []
+
+        async def collect_event(event: dict) -> None:
+            await asyncio.sleep(0)
+            events.append(event)
+
+        with patch(
+            "deephole_client.static_analysis.runner.discover_checkers",
+            return_value=registry,
+        ):
+            result = await run_static_analysis(
+                project_path=project,
+                work_dir=root / "static",
+                index_db_path=index_path,
+                output=collect_event,
+            )
+
+        lifecycle = [
+            event
+            for event in events
+            if event["kind"].startswith("checker_")
+        ]
+        assert [event["kind"] for event in lifecycle] == [
+            "checker_start",
+            "checker_progress",
+            "checker_progress",
+            "checker_progress",
+            "checker_complete",
+            "checker_start",
+            "checker_progress",
+            "checker_complete",
+        ]
+        assert [
+            (
+                event["data"]["checker_index"],
+                event["data"]["checker_total"],
+                event["data"]["checker_name"],
+                event["data"]["checker_label"],
+            )
+            for event in lifecycle
+        ] == (
+            [(1, 2, "first", "First checker")] * 5
+            + [(2, 2, "second", "Second checker")] * 3
+        )
+        assert [
+            (
+                event["data"]["progress_current"],
+                event["data"]["progress_total"],
+            )
+            for event in lifecycle
+            if event["kind"] == "checker_progress"
+        ] == [(1, 100), (11, 100), (100, 100), (1, 1)]
+        assert [
+            event["data"]["checker_candidate_count"]
+            for event in lifecycle
+            if event["kind"] == "checker_complete"
+        ] == [2, 1]
+        final_event = events[-1]
+        assert final_event["kind"] == "progress"
+        assert final_event["data"]["candidate_count"] == 3
+        assert events[0]["data"] == {"checker_total": 2}
+        assert "current" not in final_event["data"]
+        assert "total" not in final_event["data"]
+        assert result["status"] == "success"
+        assert result["stats"] == {
+            "total": 3,
+            "checkers": {"first": 2, "second": 1},
+        }
+        assert first.on_file_progress is None
+        assert second.on_file_progress is None
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_static_analysis_external_cancellation_resets_file_progress_callback() -> None:
+    cancel_event = threading.Event()
+    started = threading.Event()
+
+    class CancellableAnalyzer(BaseAnalyzer):
+        vuln_type = "cancellable"
+
+        def find_candidates(self, project_path, db=None):
+            assert self.on_file_progress is not None
+            self.on_file_progress(1, 10)
+            started.set()
+            deadline = time.monotonic() + 0.5
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            return []
+
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        database = CodeDatabase(index_path)
+        database.close()
+        analyzer = CancellableAnalyzer()
+        checker = SimpleNamespace(
+            name="cancellable",
+            label="Cancellable checker",
+            mode="opencode",
+            analyzer=analyzer,
+        )
+        events: list[dict] = []
+
+        async def cancel_after_start() -> None:
+            for _ in range(100):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert started.is_set()
+            cancel_event.set()
+
+        with patch(
+            "deephole_client.static_analysis.runner.discover_checkers",
+            return_value={"cancellable": checker},
+        ):
+            cancel_task = asyncio.create_task(cancel_after_start())
+            result = await asyncio.wait_for(run_static_analysis(
+                project_path=project,
+                work_dir=root / "static",
+                index_db_path=index_path,
+                cancel_event=cancel_event,
+                output=events.append,
+            ), timeout=1)
+            await cancel_task
+
+        assert result["status"] == "cancelled"
+        assert result["stats"]["checkers"] == {}
+        cancelled_event = next(
+            event
+            for event in events
+            if event["kind"] == "checker_cancelled"
+        )
+        assert {
+            key: cancelled_event["data"][key]
+            for key in (
+                "checker_index",
+                "checker_total",
+                "checker_name",
+                "checker_label",
+            )
+        } == {
+            "checker_index": 1,
+            "checker_total": 1,
+            "checker_name": "cancellable",
+            "checker_label": "Cancellable checker",
+        }
+        assert analyzer.on_file_progress is None
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_static_analysis_task_cancellation_stops_bridge_and_cleans_callback() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingAnalyzer(BaseAnalyzer):
+        vuln_type = "task_cancel"
+
+        def find_candidates(self, project_path, db=None):
+            assert self.on_file_progress is not None
+            self.on_file_progress(1, 10)
+            started.set()
+            release.wait(timeout=1)
+            return []
+
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        database = CodeDatabase(index_path)
+        database.close()
+        analyzer = BlockingAnalyzer()
+        checker = SimpleNamespace(
+            name="task_cancel",
+            label="Task cancellation checker",
+            mode="opencode",
+            analyzer=analyzer,
+        )
+        events: list[dict] = []
+
+        with patch(
+            "deephole_client.static_analysis.runner.discover_checkers",
+            return_value={"task_cancel": checker},
+        ):
+            analysis_task = asyncio.create_task(run_static_analysis(
+                project_path=project,
+                work_dir=root / "static",
+                index_db_path=index_path,
+                output=events.append,
+            ))
+            try:
+                for _ in range(100):
+                    if started.is_set():
+                        break
+                    await asyncio.sleep(0.005)
+                assert started.is_set()
+                analysis_task.cancel()
+                try:
+                    await asyncio.wait_for(analysis_task, timeout=0.2)
+                except asyncio.CancelledError:
+                    pass
+                else:
+                    raise AssertionError("static analysis task was not cancelled")
+                event_count_after_cancel = len(events)
+            finally:
+                release.set()
+
+            for _ in range(100):
+                if analyzer.on_file_progress is None:
+                    break
+                await asyncio.sleep(0.005)
+
+        assert analyzer.on_file_progress is None
+        assert len(events) == event_count_after_cancel
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_static_analysis_resets_file_progress_callback_after_checker_error() -> None:
+    class FailingAnalyzer(BaseAnalyzer):
+        vuln_type = "failing"
+
+        def find_candidates(self, project_path, db=None):
+            assert self.on_file_progress is not None
+            self.on_file_progress(1, 2)
+            raise RuntimeError("checker failed")
+
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        database = CodeDatabase(index_path)
+        database.close()
+        analyzer = FailingAnalyzer()
+        checker = SimpleNamespace(
+            name="failing",
+            label="Failing checker",
+            mode="opencode",
+            analyzer=analyzer,
+        )
+        events: list[dict] = []
+
+        with patch(
+            "deephole_client.static_analysis.runner.discover_checkers",
+            return_value={"failing": checker},
+        ):
+            try:
+                await run_static_analysis(
+                    project_path=project,
+                    work_dir=root / "static",
+                    index_db_path=index_path,
+                    output=events.append,
+                )
+            except RuntimeError as exc:
+                assert str(exc) == "checker failed"
+            else:
+                raise AssertionError("failing checker did not raise")
+
+        error_event = next(
+            event
+            for event in events
+            if event["kind"] == "checker_error"
+        )
+        assert {
+            key: error_event["data"][key]
+            for key in (
+                "checker_index",
+                "checker_total",
+                "checker_name",
+                "checker_label",
+            )
+        } == {
+            "checker_index": 1,
+            "checker_total": 1,
+            "checker_name": "failing",
+            "checker_label": "Failing checker",
+        }
+        assert analyzer.on_file_progress is None
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))

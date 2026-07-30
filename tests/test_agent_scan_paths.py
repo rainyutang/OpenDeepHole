@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from deephole_client.config import AgentConfig
 from deephole_client.scanner import (
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    _event_candidate_index,
     _format_process_console_line,
     _report_process_vulnerabilities,
     _resolve_scan_paths,
@@ -134,6 +135,28 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "Threat analysis started",
             ),
             "[threat_analysis] Threat analysis started",
+        )
+
+    def test_static_analysis_phase_counts_are_not_candidate_indexes(self) -> None:
+        for data in (
+            {"checker_index": 2, "checker_total": 8},
+            {"progress_current": 30, "progress_total": 100},
+            {"current": 4, "total": 9},
+        ):
+            with self.subTest(data=data):
+                self.assertIsNone(_event_candidate_index({
+                    "process": "static_analysis",
+                    "kind": "progress",
+                    "data": data,
+                }))
+
+        self.assertEqual(
+            _event_candidate_index({
+                "process": "static_analysis",
+                "kind": "progress",
+                "data": {"candidate_count": 3},
+            }),
+            3,
         )
 
     def test_scan_path_must_stay_inside_project(self) -> None:
@@ -278,9 +301,22 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             ["code_graph_build", "static_analysis", "candidate_audit"],
         )
         reporter.report_candidates.assert_awaited_once()
+        reported_candidates = reporter.report_candidates.await_args.args[1]
+        self.assertEqual(len(reported_candidates), 1)
+        self.assertEqual(reported_candidates[0].file, "src/a.c")
+        reporter.send_static_progress.assert_awaited_once_with(
+            "scan-1",
+            0,
+            0,
+            done=True,
+        )
         reporter.report_vulnerability.assert_awaited_once()
         reporter.report_processed_key.assert_awaited_once()
         reporter.finish_scan.assert_awaited_once()
+        self.assertEqual(
+            reporter.finish_scan.await_args.args[3],
+            1,
+        )
         self.assertEqual(
             reporter.finish_scan.await_args.args[2],
             "complete",
