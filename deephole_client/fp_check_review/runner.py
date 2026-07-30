@@ -1,4 +1,4 @@
-"""Batch evidence-gated false-positive review derived from the fp-check workflow."""
+"""Per-item evidence-gated review and independent fp-check batch summary."""
 
 from __future__ import annotations
 
@@ -24,11 +24,14 @@ FP_CHECK_STAGE_KEYS = (
 )
 _DEEP_STAGE_KEYS = FP_CHECK_STAGE_KEYS[2:]
 _ALLOWED_KEYS = {
+    "operation",
     "project_path",
     "work_dir",
     "scan_id",
     "review_id",
     "vulnerabilities",
+    "individual_results",
+    "unresolved_indices",
     "feedback_entries",
     "history",
     "processed_offset",
@@ -40,6 +43,7 @@ _ALLOWED_KEYS = {
     "cancel_event",
 }
 _REQUIRED_KEYS = {
+    "operation",
     "project_path",
     "work_dir",
     "scan_id",
@@ -61,7 +65,7 @@ _GATES_SCHEMA = {
         for name in _GATE_NAMES
     },
     "required": list(_GATE_NAMES),
-    "additionalProperties": False,
+    "additionalProperties": True,
 }
 _STANDARD_CHECKPOINTS = (
     "claim_restatement",
@@ -100,7 +104,7 @@ def _checks_schema(names: tuple[str, ...]) -> dict[str, Any]:
             for name in names
         },
         "required": list(names),
-        "additionalProperties": False,
+        "additionalProperties": True,
     }
 
 
@@ -126,7 +130,7 @@ _CLAIM_SCHEMA = {
         "bug_class",
         "stage_markdown",
     ],
-    "additionalProperties": False,
+    "additionalProperties": True,
 }
 _STANDARD_SCHEMA = {
     "type": "object",
@@ -149,7 +153,7 @@ _STANDARD_SCHEMA = {
         "completeness",
         "stage_markdown",
     ],
-    "additionalProperties": False,
+    "additionalProperties": True,
 }
 
 
@@ -170,7 +174,7 @@ def _phase_schema(stage: str) -> dict[str, Any]:
             "completeness",
             "stage_markdown",
         ],
-        "additionalProperties": False,
+        "additionalProperties": True,
     }
 _GATE_SCHEMA = {
     "type": "object",
@@ -188,7 +192,7 @@ _GATE_SCHEMA = {
         "gates",
         "stage_markdown",
     ],
-    "additionalProperties": False,
+    "additionalProperties": True,
 }
 _CHAIN_SCHEMA = {
     "type": "object",
@@ -208,13 +212,13 @@ _CHAIN_SCHEMA = {
                     "gates": _GATES_SCHEMA,
                 },
                 "required": ["title", "member_indices", "reason", "gates"],
-                "additionalProperties": False,
+                "additionalProperties": True,
             },
         },
         "summary_markdown": {"type": "string"},
     },
     "required": ["complete", "chains", "summary_markdown"],
-    "additionalProperties": False,
+    "additionalProperties": True,
 }
 
 
@@ -366,8 +370,253 @@ def _local_summary(
     return "\n".join(lines)
 
 
+def _retry_instruction(schema: dict[str, Any]) -> str:
+    return (
+        "上一条回复未通过结构化校验。请完全替换上一条回复，只返回一个纯 JSON 对象，"
+        "不要使用 Markdown 代码围栏、前后说明或省略字段。可以包含附加说明字段，"
+        "但下列必填字段、类型和枚举必须满足：\n"
+        + json.dumps(schema, ensure_ascii=False, indent=2)
+    )
+
+
+def _summary_result(value: Any) -> dict[str, Any] | None:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if not isinstance(value, dict):
+        return None
+    try:
+        vuln_index = int(value["vuln_index"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    verdict = {
+        "tp": "true_positive",
+        "fp": "false_positive",
+        "true_positive": "true_positive",
+        "false_positive": "false_positive",
+    }.get(str(value.get("verdict") or ""))
+    if verdict is None:
+        return None
+    return {
+        "vuln_index": vuln_index,
+        "verdict": verdict,
+        "reason": str(value.get("reason") or ""),
+        "stage_outputs": dict(value.get("stage_outputs") or {}),
+    }
+
+
+def _summary_with_chains(
+    results: list[dict[str, Any]],
+    unresolved_indices: list[int],
+    chains: list[dict[str, Any]],
+) -> str:
+    lines = [_local_summary(results, unresolved_indices), "", "## 跨漏洞攻击链"]
+    if not chains:
+        lines.append("")
+        lines.append("- 未发现通过六道门复核的跨漏洞攻击链。")
+        return "\n".join(lines)
+    for chain in chains:
+        members = "、".join(
+            f"漏洞 #{int(index)}"
+            for index in chain["member_indices"]
+        )
+        lines.extend([
+            "",
+            f"### {str(chain.get('title') or '有效攻击链')}",
+            "",
+            f"- 成员：{members}",
+            f"- 结论：{str(chain.get('reason') or '该组合通过六道门复核')}",
+        ])
+    return "\n".join(lines)
+
+
+async def _run_summary_operation(
+    *,
+    kwargs: dict[str, Any],
+    vulnerabilities: list[dict[str, Any]],
+    work_dir: Path,
+    output: Any,
+    cancel_event: Any,
+    capability: str,
+    retry_count: int,
+) -> dict[str, Any]:
+    raw_results = kwargs.get("individual_results") or []
+    if not isinstance(raw_results, list):
+        raise TypeError("individual_results must be a list")
+    results = [
+        item
+        for value in raw_results
+        if (item := _summary_result(value)) is not None
+    ]
+    result_indices = {int(item["vuln_index"]) for item in results}
+    eligible_indices = {
+        int(value["index"])
+        for value in vulnerabilities
+        if value.get("index") is not None
+    }
+    raw_unresolved = kwargs.get("unresolved_indices") or []
+    if not isinstance(raw_unresolved, list):
+        raise TypeError("unresolved_indices must be a list")
+    unresolved_indices = sorted({
+        *(int(value) for value in raw_unresolved),
+        *(eligible_indices - result_indices),
+    })
+    if _cancelled(cancel_event):
+        return {
+            "status": "cancelled",
+            "review_id": str(kwargs["review_id"]),
+            "summary_markdown": "",
+            "summary_output_source": {},
+            "error_message": "用户手动停止",
+            "chains": [],
+        }
+
+    if len(results) < 2:
+        summary_markdown = _summary_with_chains(
+            results,
+            unresolved_indices,
+            [],
+        )
+        await _emit(
+            output,
+            "summary",
+            "有效单项结果不足 2 个，已生成无攻击链的确定性汇总",
+            markdown=summary_markdown,
+            output_source={},
+            unresolved_indices=unresolved_indices,
+        )
+        return {
+            "status": "success",
+            "review_id": str(kwargs["review_id"]),
+            "summary_markdown": summary_markdown,
+            "summary_output_source": {},
+            "error_message": None,
+            "chains": [],
+        }
+
+    vulnerability_map = {
+        int(value["index"]): value
+        for value in vulnerabilities
+        if value.get("index") is not None
+    }
+    chain_context = {
+        "vulnerabilities": [
+            {
+                **vulnerability_map.get(int(item["vuln_index"]), {}),
+                "index": int(item["vuln_index"]),
+                "individual_verdict": item["verdict"],
+                "individual_reason": item["reason"],
+                "stage_outputs": item["stage_outputs"],
+            }
+            for item in results
+        ],
+        "unresolved_indices": unresolved_indices,
+    }
+    chain_prompt = (
+        "/fp-check\n\n"
+        "只执行跨漏洞攻击链检查与批次汇总。单项复核结论已经固定，"
+        "不得修改、提升或覆盖任何单项 TP/FP。未完成项不得加入攻击链。"
+        "仅列出成员均有有效单项结论、至少包含两个漏洞且攻击链本身通过六道门的组合。"
+        "\n\n批次上下文：\n"
+        + json.dumps(chain_context, ensure_ascii=False, indent=2)
+        + _schema_instruction(_CHAIN_SCHEMA)
+    )
+    try:
+        chain_result = await run_opencode_task(
+            task_name=f"fp-check-{kwargs['review_id']}-exploit-chain",
+            task_type="fp_review",
+            prompt=chain_prompt,
+            required_capability=capability,
+            output_schema=_CHAIN_SCHEMA,
+            invalid_json_retry_count=retry_count,
+            invalid_json_retry_prompt=_retry_instruction(_CHAIN_SCHEMA),
+            config_path=kwargs.get("task_agent_config"),
+            cancel_event=cancel_event,
+        )
+        chain_payload = _task_payload(chain_result)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        chain_payload = {
+            "complete": False,
+            "chains": [],
+            "summary_markdown": "",
+            "_task_status": "failure",
+            "_output_source": {},
+            "reason": str(exc),
+        }
+    _write_artifact(work_dir, -1, "exploit_chain", chain_payload)
+    if (
+        chain_payload.get("_task_status") != "success"
+        or chain_payload.get("complete") is not True
+    ):
+        error_message = str(
+            chain_payload.get("reason")
+            or "跨漏洞攻击链检查未返回完整结构化结果"
+        )
+        await _emit(
+            output,
+            "error",
+            f"跨漏洞攻击链检查失败：{error_message}",
+            unresolved_indices=unresolved_indices,
+        )
+        return {
+            "status": "error",
+            "review_id": str(kwargs["review_id"]),
+            "summary_markdown": "",
+            "summary_output_source": {},
+            "error_message": error_message,
+            "chains": [],
+        }
+
+    allowed_indices = result_indices
+    chains: list[dict[str, Any]] = []
+    for raw_chain in chain_payload.get("chains") or []:
+        if not isinstance(raw_chain, dict) or not _all_gates_pass(raw_chain):
+            continue
+        try:
+            member_indices = list(dict.fromkeys(
+                int(value)
+                for value in raw_chain.get("member_indices") or []
+            ))
+        except (TypeError, ValueError):
+            continue
+        if len(member_indices) < 2 or any(
+            index not in allowed_indices
+            for index in member_indices
+        ):
+            continue
+        chains.append({
+            "title": str(raw_chain.get("title") or "有效攻击链"),
+            "member_indices": member_indices,
+            "reason": str(raw_chain.get("reason") or ""),
+            "gates": dict(raw_chain.get("gates") or {}),
+        })
+    summary_markdown = _summary_with_chains(
+        results,
+        unresolved_indices,
+        chains,
+    )
+    summary_source = dict(chain_payload.get("_output_source") or {})
+    await _emit(
+        output,
+        "summary",
+        "Trail of Bits fp-check 独立批次汇总已生成",
+        markdown=summary_markdown,
+        output_source=summary_source,
+        unresolved_indices=unresolved_indices,
+    )
+    return {
+        "status": "success",
+        "review_id": str(kwargs["review_id"]),
+        "summary_markdown": summary_markdown,
+        "summary_output_source": summary_source,
+        "error_message": None,
+        "chains": chains,
+    }
+
+
 async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
-    """Run Step 0, standard-first verification, deep waves and chain review."""
+    """Run one fp-check item or an independent cross-vulnerability summary."""
     unknown = sorted(set(kwargs) - _ALLOWED_KEYS)
     if unknown:
         raise TypeError(
@@ -380,6 +629,9 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
         raise TypeError(
             "run_fp_check_review() missing required key(s): " + ", ".join(missing),
         )
+    operation = str(kwargs["operation"])
+    if operation not in {"item", "summary"}:
+        raise ValueError("operation must be 'item' or 'summary'")
 
     project = Path(kwargs["project_path"]).expanduser().resolve()
     if not project.is_dir():
@@ -393,6 +645,27 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
         _normalize_vulnerability(value, index)
         for index, value in enumerate(raw_vulnerabilities)
     ]
+    output = kwargs.get("output")
+    if output is not None and not callable(output):
+        raise TypeError("output must be callable or None")
+    cancel_event = kwargs.get("cancel_event")
+    capability = str(kwargs.get("required_capability") or "high").lower()
+    if capability not in {"low", "high"}:
+        raise ValueError("required_capability must be 'low' or 'high'")
+    retry_count = max(0, int(kwargs.get("invalid_json_retry_count") or 2))
+    if operation == "summary":
+        return await _run_summary_operation(
+            kwargs=kwargs,
+            vulnerabilities=vulnerabilities,
+            work_dir=work_dir,
+            output=output,
+            cancel_event=cancel_event,
+            capability=capability,
+            retry_count=retry_count,
+        )
+    if len(vulnerabilities) != 1:
+        raise ValueError("operation='item' requires exactly one vulnerability")
+
     feedback_entries = kwargs.get("feedback_entries") or []
     history = kwargs.get("history") or []
     if not isinstance(feedback_entries, list) or not all(
@@ -403,55 +676,23 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
         isinstance(item, dict) for item in history
     ):
         raise TypeError("history must be a list of dicts")
-    output = kwargs.get("output")
-    if output is not None and not callable(output):
-        raise TypeError("output must be callable or None")
-    cancel_event = kwargs.get("cancel_event")
-    capability = str(kwargs.get("required_capability") or "high").lower()
-    if capability not in {"low", "high"}:
-        raise ValueError("required_capability must be 'low' or 'high'")
-    concurrency = max(1, int(kwargs.get("concurrency") or 1))
-    retry_count = max(0, int(kwargs.get("invalid_json_retry_count") or 2))
     offset = max(0, int(kwargs.get("processed_offset") or 0))
-    semaphore = asyncio.Semaphore(concurrency)
-    states: dict[int, dict[str, Any]] = {}
-
-    main_skill = _read_skill("SKILL.md")
-    references = {
-        name: _read_skill(f"references/{name}.md")
-        for name in (
-            "bug-class-verification",
-            "standard-verification",
-            "deep-verification",
-            "gate-reviews",
-            "false-positive-patterns",
-            "evidence-templates",
-        )
-    }
-    agents = {
-        name: _read_skill(f"agents/{name}.md")
-        for name in (
-            "data-flow-analyzer",
-            "exploitability-verifier",
-            "poc-builder",
-        )
-    }
-
-    for local_index, vulnerability in enumerate(vulnerabilities):
-        vuln_index = int(
-            vulnerability.get("index")
-            if vulnerability.get("index") is not None
-            else offset + local_index
-        )
-        states[vuln_index] = {
+    vulnerability = vulnerabilities[0]
+    vuln_index = int(
+        vulnerability.get("index")
+        if vulnerability.get("index") is not None
+        else offset
+    )
+    states: dict[int, dict[str, Any]] = {
+        vuln_index: {
             "vulnerability": vulnerability,
             "stages": {},
             "failed": False,
             "route": "",
-        }
+        },
+    }
 
     async def call_stage(
-        vuln_index: int,
         stage: str,
         instructions: str,
         schema: dict[str, Any],
@@ -467,10 +708,11 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
             },
         }
         prompt = (
-            instructions
-            + f"\n\n当前批次漏洞编号：{vuln_index}\n"
+            "/fp-check\n\n"
+            + instructions
+            + f"\n\n当前漏洞编号：{vuln_index}\n"
             + "必须读取项目中的真实代码并引用具体 file:line；不得仅复述原报告。"
-            + "影响评估必须分别检查机密性、完整性、可用性及认证/授权边界。"
+            + "只执行当前阶段，不得提前生成批次汇总或跨漏洞结论。"
             + "\n\n输入上下文：\n"
             + json.dumps(context, ensure_ascii=False, indent=2)
             + _schema_instruction(schema)
@@ -483,20 +725,19 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
             stage=stage,
         )
         try:
-            async with semaphore:
-                result = await run_opencode_task(
-                    task_name=(
-                        f"fp-check-{kwargs['review_id']}-{vuln_index}-{stage}"
-                    ),
-                    task_type="fp_review",
-                    prompt=prompt,
-                    required_capability=capability,
-                    output_schema=schema,
-                    invalid_json_retry_count=retry_count,
-                    config_path=kwargs.get("task_agent_config"),
-                    output=None,
-                    cancel_event=cancel_event,
-                )
+            result = await run_opencode_task(
+                task_name=(
+                    f"fp-check-{kwargs['review_id']}-{vuln_index}-{stage}"
+                ),
+                task_type="fp_review",
+                prompt=prompt,
+                required_capability=capability,
+                output_schema=schema,
+                invalid_json_retry_count=retry_count,
+                invalid_json_retry_prompt=_retry_instruction(schema),
+                config_path=kwargs.get("task_agent_config"),
+                cancel_event=cancel_event,
+            )
             payload = _task_payload(result)
         except asyncio.CancelledError:
             raise
@@ -514,97 +755,54 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
         await _emit(
             output,
             "stage",
-            f"漏洞 {vuln_index}：完成 {stage}",
+            (
+                f"漏洞 {vuln_index}：完成 {stage}"
+                if payload.get("_task_status") == "success"
+                else f"漏洞 {vuln_index}：{stage} 失败"
+            ),
             vuln_index=vuln_index,
             stage=stage,
-            markdown=str(payload.get("stage_markdown") or payload.get("reason") or ""),
+            markdown=str(
+                payload.get("stage_markdown")
+                or payload.get("reason")
+                or ""
+            ),
             output_source=dict(payload.get("_output_source") or {}),
         )
         return payload
 
-    async def gather_stage(
-        indices: list[int],
-        stage: str,
-        instructions: str,
-        schema: dict[str, Any],
-    ) -> dict[int, dict[str, Any]]:
-        selected = [
-            index for index in indices
-            if not _cancelled(cancel_event)
-        ]
-        values = await asyncio.gather(
-            *(
-                call_stage(index, stage, instructions, schema)
-                for index in selected
-            ),
-        )
-        return {
-            index: value
-            for index, value in zip(selected, values)
-        }
-
-    indices = list(states)
     await _emit(
         output,
         "progress",
-        f"Trail of Bits fp-check 复核开始，共 {len(indices)} 个漏洞",
-        total=len(indices),
-        active_indices=indices,
+        f"Trail of Bits fp-check 单项复核开始：漏洞 {vuln_index}",
+        total=1,
+        active_indices=[vuln_index],
+        vuln_index=vuln_index,
     )
-
-    claim_instruction = (
-        main_skill
-        + "\n\n"
-        + references["bug-class-verification"]
-        + "\n\n只执行步骤 0：精确重述主张、调用关系、执行上下文、威胁模型和漏洞类别，"
-        "并独立选择 standard 或 deep 路径。"
-    )
-    claim_values = await gather_stage(
-        indices,
+    claim_payload = await call_stage(
         "claim_context",
-        claim_instruction,
+        "只执行步骤 0：精确重述主张、调用关系、执行上下文、威胁模型和漏洞类别，"
+        "并选择 standard 或 deep 路径。",
         _CLAIM_SCHEMA,
     )
-    standard_indices: list[int] = []
-    deep_indices: list[int] = []
-    for index, payload in claim_values.items():
-        if payload.get("_task_status") != "success":
-            states[index]["failed"] = True
-            continue
-        route = str(payload.get("route") or "")
-        states[index]["route"] = route
-        (deep_indices if route == "deep" else standard_indices).append(index)
+    state = states[vuln_index]
+    standard = False
+    deep = False
+    if claim_payload.get("_task_status") != "success":
+        state["failed"] = True
+    else:
+        state["route"] = str(claim_payload.get("route") or "")
+        deep = state["route"] == "deep"
+        standard = not deep
 
-    standard_instruction = (
-        main_skill
-        + "\n\n"
-        + references["standard-verification"]
-        + "\n\n"
-        + references["gate-reviews"]
-        + "\n\n"
-        + references["false-positive-patterns"]
-        + "\n\n"
-        + references["evidence-templates"]
-        + "\n\n执行完整标准验证，严格执行两个升级检查点。若任一检查点需要升级，"
-        "decision 必须为 escalate，并保留已完成证据；否则评估全部六道门。"
-    )
-    standard_values = await gather_stage(
-        standard_indices,
-        "standard_verification",
-        standard_instruction,
-        _STANDARD_SCHEMA,
-    )
-    completed_results: dict[int, dict[str, Any]] = {}
+    completed_result: dict[str, Any] | None = None
 
     def make_result(
-        index: int,
         final_payload: dict[str, Any],
         verdict: str,
     ) -> dict[str, Any]:
-        state = states[index]
-        vulnerability = state["vulnerability"]
         return {
-            "vuln_index": index,
+            "vuln_index": vuln_index,
             "status": "success",
             "verdict": verdict,
             "reason": str(final_payload.get("reason") or ""),
@@ -632,90 +830,72 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
             "output_source": dict(final_payload.get("_output_source") or {}),
         }
 
-    for index, payload in standard_values.items():
+    if standard and not state["failed"] and not _cancelled(cancel_event):
+        payload = await call_stage(
+            "standard_verification",
+            "执行完整标准验证及两个升级检查点。需要升级时 decision=escalate；"
+            "否则完成全部检查点并评估六道门。",
+            _STANDARD_SCHEMA,
+        )
         decision = str(payload.get("decision") or "incomplete")
-        if payload.get("_task_status") != "success" or decision == "incomplete":
-            states[index]["failed"] = True
+        if (
+            payload.get("_task_status") != "success"
+            or decision == "incomplete"
+            or not _all_checks_complete(payload, _STANDARD_CHECKPOINTS)
+        ):
+            state["failed"] = True
         elif decision == "escalate":
-            deep_indices.append(index)
-            states[index]["route"] = "deep"
+            deep = True
+            state["route"] = "deep"
         else:
-            if not _all_checks_complete(payload, _STANDARD_CHECKPOINTS):
-                states[index]["failed"] = True
-                continue
-            verdict = (
-                "true_positive"
-                if _all_gates_pass(payload)
-                else "false_positive"
+            completed_result = make_result(
+                payload,
+                (
+                    "true_positive"
+                    if _all_gates_pass(payload)
+                    else "false_positive"
+                ),
             )
-            completed_results[index] = make_result(index, payload, verdict)
 
-    deep_indices = [
-        index
-        for index in dict.fromkeys(deep_indices)
-        if not states[index]["failed"]
-    ]
     deep_specs = (
         (
             "data_flow",
-            references["deep-verification"]
-            + "\n\n"
-            + agents["data-flow-analyzer"]
-            + "\n\n"
-            + references["bug-class-verification"]
-            + "\n\n完整执行阶段 1.1 至 1.4。",
+            "执行深度验证阶段 1.1 至 1.4，完整追踪攻击者输入到危险操作的数据流。",
             _phase_schema("data_flow"),
         ),
         (
             "exploitability",
-            references["deep-verification"]
-            + "\n\n"
-            + agents["exploitability-verifier"]
-            + "\n\n完整执行阶段 2.1 至 2.4。",
+            "执行阶段 2.1 至 2.4，验证可达性、约束和实际可利用性。",
             _phase_schema("exploitability"),
         ),
         (
             "impact",
-            references["deep-verification"]
-            + "\n\n执行阶段 3：分别评估机密性、完整性、可用性、认证和授权边界，"
-            "并区分主要安全控制与纵深防御。拒绝仅因影响是 DoS 或资源耗尽就判为误报。",
+            "执行阶段 3，分别评估机密性、完整性、可用性、认证和授权边界，"
+            "并区分主要安全控制与纵深防御。",
             _phase_schema("impact"),
         ),
         (
             "poc",
-            references["deep-verification"]
-            + "\n\n"
-            + agents["poc-builder"]
-            + "\n\n完整执行阶段 4.1 至 4.5；不能执行的 PoC 必须写明具体理由。",
+            "执行阶段 4.1 至 4.5；不能执行 PoC 时必须写明具体原因及替代证据。",
             _phase_schema("poc"),
         ),
         (
             "devil_advocate",
-            references["deep-verification"]
-            + "\n\n"
-            + references["false-positive-patterns"]
-            + "\n\n执行阶段 5，逐项回答全部 13 个反方挑战问题。",
+            "执行阶段 5，逐项回答全部 13 个反方挑战问题。",
             _phase_schema("devil_advocate"),
         ),
         (
             "gate_review",
-            references["gate-reviews"]
-            + "\n\n综合所有既有证据评估六道门。任何一道门失败都必须判为误报；"
-            "只有六道门全部通过才可确认真实漏洞。",
+            "综合既有证据评估六道门。任何一道门失败即为误报，"
+            "只有六道门全部通过才能确认真实漏洞。",
             _GATE_SCHEMA,
         ),
     )
-    active = list(deep_indices)
-    for stage, instructions, schema in deep_specs:
-        if not active or _cancelled(cancel_event):
-            break
-        values = await gather_stage(active, stage, instructions, schema)
-        next_active: list[int] = []
-        for index in active:
-            payload = values.get(index)
-            if payload is None:
-                states[index]["failed"] = True
-                continue
+    if deep and not state["failed"]:
+        for stage, instructions, schema in deep_specs:
+            if _cancelled(cancel_event):
+                break
+            payload = await call_stage(stage, instructions, schema)
             complete = (
                 payload.get("_task_status") == "success"
                 and payload.get("complete") is True
@@ -726,138 +906,52 @@ async def run_fp_check_review(**kwargs: Any) -> dict[str, Any]:
                     _DEEP_CHECKPOINTS[stage],
                 )
             if not complete:
-                states[index]["failed"] = True
-                continue
+                state["failed"] = True
+                break
             if stage == "gate_review":
-                verdict = (
-                    "true_positive"
-                    if _all_gates_pass(payload)
-                    else "false_positive"
+                completed_result = make_result(
+                    payload,
+                    (
+                        "true_positive"
+                        if _all_gates_pass(payload)
+                        else "false_positive"
+                    ),
                 )
-                completed_results[index] = make_result(index, payload, verdict)
-            else:
-                next_active.append(index)
-        active = next_active
 
-    results = [
-        completed_results[index]
-        for index in indices
-        if index in completed_results
-    ]
-    unresolved_indices = [
-        index for index in indices
-        if index not in completed_results
-    ]
-
-    chain_context = {
-        "vulnerabilities": [
-            {
-                "index": index,
-                **states[index]["vulnerability"],
-                "individual_verdict": completed_results.get(index, {}).get("verdict", "unresolved"),
-                "individual_reason": completed_results.get(index, {}).get("reason", ""),
-            }
-            for index in indices
-        ],
-        "unresolved_indices": unresolved_indices,
-    }
-    chain_prompt = (
-        main_skill
-        + "\n\n"
-        + references["gate-reviews"]
-        + "\n\n所有单项复核已经完成或标记为未完成。现在只检查跨漏洞攻击链。"
-        "仅当一条攻击链本身通过相同的六道门时，才列为有效攻击链；"
-        "它只能把已有 FALSE POSITIVE 成员提升为 TRUE POSITIVE，不能替未完成项补结论。"
-        "\n\n批次上下文：\n"
-        + json.dumps(chain_context, ensure_ascii=False, indent=2)
-        + _schema_instruction(_CHAIN_SCHEMA)
-    )
-    chain_payload: dict[str, Any]
-    if _cancelled(cancel_event):
-        chain_payload = {
-            "complete": False,
-            "chains": [],
-            "summary_markdown": "",
-            "_task_status": "cancelled",
-            "_output_source": {},
-        }
-    else:
-        try:
-            chain_result = await run_opencode_task(
-                task_name=f"fp-check-{kwargs['review_id']}-exploit-chain",
-                task_type="fp_review",
-                prompt=chain_prompt,
-                required_capability=capability,
-                output_schema=_CHAIN_SCHEMA,
-                invalid_json_retry_count=retry_count,
-                config_path=kwargs.get("task_agent_config"),
-                output=None,
-                cancel_event=cancel_event,
-            )
-            chain_payload = _task_payload(chain_result)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            chain_payload = {
-                "complete": False,
-                "chains": [],
-                "summary_markdown": "",
-                "_task_status": "failure",
-                "_output_source": {},
-                "reason": str(exc),
-            }
-    _write_artifact(work_dir, -1, "exploit_chain", chain_payload)
-
-    chain_complete = (
-        chain_payload.get("_task_status") == "success"
-        and chain_payload.get("complete") is True
-    )
-    if chain_complete:
-        for chain in chain_payload.get("chains") or []:
-            if not isinstance(chain, dict) or not _all_gates_pass(chain):
-                continue
-            reason = str(chain.get("reason") or "攻击链通过六道门复核")
-            for raw_index in chain.get("member_indices") or []:
-                try:
-                    index = int(raw_index)
-                except (TypeError, ValueError):
-                    continue
-                item = completed_results.get(index)
-                if item is None or item["verdict"] != "false_positive":
-                    continue
-                item["verdict"] = "true_positive"
-                item["revised_severity"] = "high"
-                item["reason"] = f"{item['reason']}；攻击链提升：{reason}".strip("；")
-                item["vulnerability_report"] = str(
-                    states[index]["vulnerability"].get("vulnerability_report") or ""
-                )
-    else:
-        completed_results.clear()
-        unresolved_indices = list(indices)
-
-    results = [
-        completed_results[index]
-        for index in indices
-        if index in completed_results
-    ]
-    summary_markdown = str(chain_payload.get("summary_markdown") or "").strip()
-    if not summary_markdown:
-        summary_markdown = _local_summary(results, unresolved_indices)
-    summary_source = dict(chain_payload.get("_output_source") or {})
-    await _emit(
-        output,
-        "summary",
-        "Trail of Bits fp-check 复核批次汇总已生成",
-        markdown=summary_markdown,
-        output_source=summary_source,
-        unresolved_indices=unresolved_indices,
-    )
+    results = [completed_result] if completed_result is not None else []
+    unresolved_indices = [] if completed_result is not None else [vuln_index]
+    error_message: str | None = None
+    if not results and not _cancelled(cancel_event):
+        for payload in reversed(list(state["stages"].values())):
+            reason = str(payload.get("reason") or "").strip()
+            if reason:
+                error_message = reason
+                break
+        error_message = error_message or "单项复核未生成有效 TP/FP 结果"
+        await _emit(
+            output,
+            "error",
+            f"漏洞 {vuln_index} 复核失败：{error_message}",
+            vuln_index=vuln_index,
+        )
     return {
-        "status": "cancelled" if _cancelled(cancel_event) else "success",
+        "status": (
+            "cancelled"
+            if _cancelled(cancel_event)
+            else "success"
+            if results
+            else "error"
+        ),
         "review_id": str(kwargs["review_id"]),
         "results": results,
-        "processed": len(results),
+        "processed": 1,
+        "effective_processed": len(results),
         "unresolved_indices": unresolved_indices,
-        "summary_markdown": summary_markdown,
-        "summary_output_source": summary_source,
+        "error_message": (
+            "用户手动停止"
+            if _cancelled(cancel_event)
+            else error_message
+        ),
+        "summary_markdown": "",
+        "summary_output_source": {},
     }

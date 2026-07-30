@@ -1362,6 +1362,8 @@ class FpReviewJob(BaseModel):
     results: list[FpReviewResult] = []
     summary_markdown: str = ""
     summary_output_source: OutputSource = Field(default_factory=OutputSource)
+    summary_status: FpReviewStatus | None = None
+    summary_error_message: str | None = None
     error_message: str | None = None
 
 
@@ -1404,6 +1406,17 @@ class AgentFpReviewProgress(BaseModel):
 
 class AgentFpReviewFinish(BaseModel):
     """Sent by the agent when the FP review job is complete."""
+    review_id: str
+    status: str        # "complete" | "error" | "cancelled"
+    error_message: str | None = None
+    # Kept for compatibility with older Agents. New fp-check Agents publish
+    # summaries through AgentFpReviewSummaryFinish instead.
+    summary_markdown: str = ""
+    summary_output_source: OutputSource = Field(default_factory=OutputSource)
+
+
+class AgentFpReviewSummaryFinish(BaseModel):
+    """Sent by the agent when an independent fp-check summary run finishes."""
     review_id: str
     status: str        # "complete" | "error" | "cancelled"
     error_message: str | None = None

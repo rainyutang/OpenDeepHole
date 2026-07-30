@@ -711,6 +711,7 @@ export async function triggerFpReview(scanId: string): Promise<{
   total?: number;
   processed?: number;
   method?: FpReviewJob["method"];
+  summary_status?: FpReviewJob["summary_status"];
 }> {
   if (isPublicScan(scanId)) {
     const { data } = await api.post(publicScanPath("/fp_review"), null, { params: publicParams() });
@@ -726,6 +727,24 @@ export async function stopFpReview(scanId: string): Promise<{ ok: boolean; revie
     return data;
   }
   const { data } = await api.post(`/api/scan/${scanId}/fp_review/stop`);
+  return data;
+}
+
+export async function triggerFpReviewSummary(scanId: string): Promise<{
+  ok: boolean;
+  review_id: string;
+  status: FpReviewJob["status"];
+  already_running?: boolean;
+}> {
+  if (isPublicScan(scanId)) {
+    const { data } = await api.post(
+      publicScanPath("/fp_review/summary"),
+      null,
+      { params: publicParams() },
+    );
+    return data;
+  }
+  const { data } = await api.post(`/api/scan/${scanId}/fp_review/summary`);
   return data;
 }
 

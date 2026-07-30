@@ -147,6 +147,36 @@ class FpReviewStoreTests(unittest.TestCase):
             self.assertIsNone(complete.current_vuln_index)
             self.assertEqual(complete.current_vuln_indices, [])
 
+    def test_summary_lifecycle_is_independent_and_retains_last_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.create_fp_review_job(
+                "review",
+                "scan-1",
+                1,
+                "2026-01-01T00:00:00+00:00",
+                "fp_check",
+            )
+            store.update_fp_review_job(
+                "review",
+                status="complete",
+                summary_status="complete",
+                summary_markdown="# successful summary",
+                summary_output_source=OutputSource(model="provider/model"),
+            )
+            store.update_fp_review_job(
+                "review",
+                summary_status="error",
+                summary_error_message="new summary failed",
+            )
+
+            job = store.get_fp_review_job("review")
+
+            self.assertEqual(job.status, FpReviewStatus.COMPLETE)
+            self.assertEqual(job.summary_status, FpReviewStatus.ERROR)
+            self.assertEqual(job.summary_markdown, "# successful summary")
+            self.assertEqual(job.summary_error_message, "new summary failed")
+
     def test_can_mark_fp_review_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")
@@ -233,6 +263,43 @@ class FpReviewStoreTests(unittest.TestCase):
             self.assertIsNotNone(job)
             self.assertEqual(job.current_vuln_index, 3)
             self.assertEqual(job.current_vuln_indices, [3, 6])
+
+    def test_migrates_legacy_nonempty_summary_to_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "scan.db"
+            store = SqliteScanStore(db_path)
+            store._conn.execute("DROP TABLE fp_review_jobs")
+            store._conn.execute(
+                """\
+                CREATE TABLE fp_review_jobs (
+                    review_id     TEXT PRIMARY KEY,
+                    scan_id       TEXT NOT NULL,
+                    method        TEXT NOT NULL DEFAULT 'fp_check',
+                    status        TEXT NOT NULL DEFAULT 'complete',
+                    created_at    TEXT NOT NULL,
+                    total         INTEGER DEFAULT 0,
+                    processed     INTEGER DEFAULT 0,
+                    summary_markdown TEXT NOT NULL DEFAULT '',
+                    summary_output_source TEXT NOT NULL DEFAULT '{}',
+                    error_message TEXT
+                )
+                """
+            )
+            store._conn.execute(
+                """\
+                INSERT INTO fp_review_jobs
+                    (review_id, scan_id, created_at, summary_markdown)
+                VALUES ('legacy', 'scan-1', '2026-01-01T00:00:00+00:00', '# legacy')
+                """
+            )
+            store._conn.commit()
+            store._conn.close()
+
+            migrated = SqliteScanStore(db_path)
+            job = migrated.get_fp_review_job("legacy")
+
+            self.assertEqual(job.summary_status, FpReviewStatus.COMPLETE)
+            self.assertEqual(job.summary_markdown, "# legacy")
 
 
 if __name__ == "__main__":

@@ -604,6 +604,29 @@ class Reporter:
         except Exception:
             return []
 
+    async def get_fp_review_summary_context(
+        self,
+        scan_id: str,
+        review_id: str,
+    ) -> dict:
+        """Fetch latest persisted item results for an fp-check summary."""
+        if self.dry_run:
+            return {
+                "vulnerabilities": [],
+                "results": [],
+                "unresolved_indices": [],
+            }
+        response = await self._client.get(
+            (
+                f"{self.server_url}/api/agent/scan/{scan_id}/fp-review/"
+                f"{review_id}/summary-context"
+            ),
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        value = response.json()
+        return value if isinstance(value, dict) else {}
+
     async def get_feedback(self, vuln_types: list[str]) -> list[FeedbackEntry]:
         """Fetch feedback entries from the server for SKILL enrichment."""
         if self.dry_run or not vuln_types:
@@ -752,6 +775,36 @@ class Reporter:
             )
         except Exception as e:
             print(f"Warning: failed to signal FP review finish: {e}")
+
+    async def finish_fp_review_summary(
+        self,
+        scan_id: str,
+        review_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+        summary_markdown: str = "",
+        summary_output_source: OutputSource | None = None,
+    ) -> None:
+        """Signal completion of the independent fp-check summary."""
+        if self.dry_run:
+            print(f"  [fp_review_summary] Finished with status: {status}")
+            return
+        try:
+            await self._client.post(
+                f"{self.server_url}/api/scan/{scan_id}/fp_review/summary/finish",
+                json={
+                    "review_id": review_id,
+                    "status": status,
+                    "error_message": error_message,
+                    "summary_markdown": summary_markdown,
+                    "summary_output_source": self._with_agent_source(
+                        summary_output_source,
+                    ).model_dump(),
+                },
+                timeout=10.0,
+            )
+        except Exception as e:
+            print(f"Warning: failed to signal FP review summary finish: {e}")
 
     async def close(self) -> None:
         await self._client.aclose()

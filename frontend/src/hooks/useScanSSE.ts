@@ -56,6 +56,7 @@ interface FpReviewStartedEvent {
   total: number;
   processed?: number;
   method?: FpReviewMethod;
+  summary_status?: FpReviewStatus | null;
 }
 
 interface FpReviewProgressEvent {
@@ -97,6 +98,14 @@ interface FpReviewFinishEvent {
   summary_output_source?: OutputSource;
 }
 
+interface FpReviewSummaryEvent {
+  review_id: string;
+  status: FpReviewStatus;
+  error_message?: string | null;
+  summary_markdown?: string | null;
+  summary_output_source?: OutputSource | null;
+}
+
 interface VulnerabilityValidationEvent {
   validation: VulnerabilityValidation;
 }
@@ -129,6 +138,8 @@ export interface ScanSSEHandlers {
   onFpReviewStageOutput?: (data: FpReviewStageOutputEvent) => void;
   onFpReviewResult?: (data: FpReviewResultEvent) => void;
   onFpReviewFinish?: (data: FpReviewFinishEvent) => void;
+  onFpReviewSummaryStarted?: (data: FpReviewSummaryEvent) => void;
+  onFpReviewSummaryFinish?: (data: FpReviewSummaryEvent) => void;
   onVulnerabilityValidation?: (data: VulnerabilityValidationEvent) => void;
   onThreatAnalysis?: (data: ThreatAnalysisEvent) => void;
   onThreatAuditTask?: (data: ThreatAuditTaskEvent) => void;
@@ -251,6 +262,8 @@ export function useScanSSE(
     handle<FpReviewStageOutputEvent>("fp_review_stage_output", (d) => handlersRef.current.onFpReviewStageOutput?.(d));
     handle<FpReviewResultEvent>("fp_review_result", (d) => handlersRef.current.onFpReviewResult?.(d));
     handle<FpReviewFinishEvent>("fp_review_finish", (d) => handlersRef.current.onFpReviewFinish?.(d));
+    handle<FpReviewSummaryEvent>("fp_review_summary_started", (d) => handlersRef.current.onFpReviewSummaryStarted?.(d));
+    handle<FpReviewSummaryEvent>("fp_review_summary_finish", (d) => handlersRef.current.onFpReviewSummaryFinish?.(d));
     handle<VulnerabilityValidationEvent>("vulnerability_validation", (d) => handlersRef.current.onVulnerabilityValidation?.(d));
     handle<ThreatAnalysisEvent>("threat_analysis", (d) => handlersRef.current.onThreatAnalysis?.(d));
     handle<ThreatAuditTaskEvent>("threat_audit_task", (d) => handlersRef.current.onThreatAuditTask?.(d));

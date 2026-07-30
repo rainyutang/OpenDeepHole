@@ -13,9 +13,11 @@ from deephole_client.config import AgentConfig
 from deephole_client.scanner import (
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     _format_process_console_line,
+    _report_process_vulnerabilities,
     _resolve_scan_paths,
     run_scan,
 )
+from backend.models import MiningEngineSelection
 from deephole_client.vulnerability_mining import MiningEngineOutput
 
 
@@ -75,6 +77,50 @@ def _threat_vulnerability() -> dict:
 
 
 class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reported_fp_check_item_keeps_selected_method(self) -> None:
+        reporter = _reporter()
+        reporter.report_vulnerability.return_value = {
+            "index": 0,
+            "fp_review": {
+                "review_id": "review-1",
+                "method": "fp_check",
+                "vuln_index": 0,
+                "queued": True,
+                "processed": 0,
+            },
+        }
+        config = AgentConfig()
+        config.vulnerability_validation.enabled = False
+        enqueue = AsyncMock(return_value=True)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch(
+                "deephole_client.server.enqueue_fp_review",
+                enqueue,
+            ),
+        ):
+            project = Path(tmp)
+            await _report_process_vulnerabilities(
+                reporter=reporter,
+                config=config,
+                scan_id="scan-1",
+                project_path=project,
+                code_scan_path=project,
+                product="",
+                validation_environment="",
+                feedback_entries=[],
+                code_graph_mcp=None,
+                engine=MiningEngineSelection(
+                    engine_id="static_candidate",
+                    engine_label="Static",
+                    enabled=True,
+                    fp_review_enabled=True,
+                ),
+                values=[_vulnerability()],
+            )
+
+        self.assertEqual(enqueue.await_args.kwargs["method"], "fp_check")
+
     def test_structured_task_output_does_not_repeat_process_prefix(self) -> None:
         line = "[threat_analysis][ses-1][tool] name=read"
 

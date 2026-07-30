@@ -448,6 +448,8 @@ CREATE TABLE IF NOT EXISTS fp_review_jobs (
     current_vuln_index INTEGER,
     summary_markdown TEXT NOT NULL DEFAULT '',
     summary_output_source TEXT NOT NULL DEFAULT '{}',
+    summary_status TEXT,
+    summary_error_message TEXT,
     error_message TEXT
 );
 
@@ -976,6 +978,8 @@ class SqliteScanStore(ScanStoreBase):
                 current_vuln_indices TEXT NOT NULL DEFAULT '[]',
                 summary_markdown TEXT NOT NULL DEFAULT '',
                 summary_output_source TEXT NOT NULL DEFAULT '{}',
+                summary_status TEXT,
+                summary_error_message TEXT,
                 error_message TEXT
             );
             CREATE TABLE IF NOT EXISTS fp_review_results (
@@ -1025,6 +1029,21 @@ class SqliteScanStore(ScanStoreBase):
         if "summary_output_source" not in fp_job_cols:
             self._conn.execute(
                 "ALTER TABLE fp_review_jobs ADD COLUMN summary_output_source TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "summary_status" not in fp_job_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_jobs ADD COLUMN summary_status TEXT"
+            )
+            self._conn.execute(
+                """\
+                UPDATE fp_review_jobs
+                SET summary_status = 'complete'
+                WHERE TRIM(COALESCE(summary_markdown, '')) <> ''
+                """
+            )
+        if "summary_error_message" not in fp_job_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_jobs ADD COLUMN summary_error_message TEXT"
             )
         fp_cur = self._conn.execute("PRAGMA table_info(fp_review_results)")
         fp_cols = {r[1] for r in fp_cur.fetchall()}
@@ -3136,15 +3155,32 @@ class SqliteScanStore(ScanStoreBase):
             cur = self._conn.execute(
                 """\
                 UPDATE fp_review_jobs
-                SET status = 'error',
+                SET status = CASE
+                        WHEN status IN ('pending', 'running') THEN 'error'
+                        ELSE status
+                    END,
                     current_vuln_index = NULL,
-                    error_message = ?
-                WHERE status IN ('pending', 'running')
+                    error_message = CASE
+                        WHEN status IN ('pending', 'running') THEN ?
+                        ELSE error_message
+                    END,
+                    summary_status = CASE
+                        WHEN summary_status = 'running' THEN 'error'
+                        ELSE summary_status
+                    END,
+                    summary_error_message = CASE
+                        WHEN summary_status = 'running' THEN ?
+                        ELSE summary_error_message
+                    END
+                WHERE (
+                    status IN ('pending', 'running')
+                    OR summary_status = 'running'
+                )
                   AND scan_id IN (
                       SELECT scan_id FROM scans WHERE agent_id = ?
                   )
                 """,
-                (error_message, agent_id),
+                (error_message, error_message, agent_id),
             )
             self._conn.commit()
             return cur.rowcount
@@ -3154,13 +3190,30 @@ class SqliteScanStore(ScanStoreBase):
             cur = self._conn.execute(
                 """\
                 UPDATE fp_review_jobs
-                SET status = 'error',
+                SET status = CASE
+                        WHEN status IN ('pending', 'running') THEN 'error'
+                        ELSE status
+                    END,
                     current_vuln_index = NULL,
-                    error_message = ?
+                    error_message = CASE
+                        WHEN status IN ('pending', 'running') THEN ?
+                        ELSE error_message
+                    END,
+                    summary_status = CASE
+                        WHEN summary_status = 'running' THEN 'error'
+                        ELSE summary_status
+                    END,
+                    summary_error_message = CASE
+                        WHEN summary_status = 'running' THEN ?
+                        ELSE summary_error_message
+                    END
                 WHERE scan_id = ?
-                  AND status IN ('pending', 'running')
+                  AND (
+                      status IN ('pending', 'running')
+                      OR summary_status = 'running'
+                  )
                 """,
-                (error_message, scan_id),
+                (error_message, error_message, scan_id),
             )
             self._conn.commit()
             return cur.rowcount
@@ -3344,6 +3397,16 @@ class SqliteScanStore(ScanStoreBase):
                 if "summary_output_source" in row.keys()
                 else "{}"
             ),
+            summary_status=(
+                FpReviewStatus(row["summary_status"])
+                if "summary_status" in row.keys() and row["summary_status"]
+                else None
+            ),
+            summary_error_message=(
+                row["summary_error_message"]
+                if "summary_error_message" in row.keys()
+                else None
+            ),
             error_message=row["error_message"],
         )
 
@@ -3403,6 +3466,8 @@ class SqliteScanStore(ScanStoreBase):
         error_message: str | None = None,
         summary_markdown: str | None = None,
         summary_output_source: OutputSource | None = None,
+        summary_status: str | None = None,
+        summary_error_message: str | None = None,
     ) -> None:
         updates: list[str] = []
         params: list = []
@@ -3434,6 +3499,12 @@ class SqliteScanStore(ScanStoreBase):
         if summary_output_source is not None:
             updates.append("summary_output_source = ?")
             params.append(summary_output_source.model_dump_json())
+        if summary_status is not None:
+            updates.append("summary_status = ?")
+            params.append(summary_status)
+        if summary_error_message is not None:
+            updates.append("summary_error_message = ?")
+            params.append(summary_error_message)
         if not updates:
             return
         with self._lock:

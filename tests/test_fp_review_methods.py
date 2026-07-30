@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from unittest.mock import AsyncMock
 
 from fastapi import HTTPException
 
@@ -11,6 +12,7 @@ from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.models import (
     AgentFpReviewFinish,
+    AgentFpReviewSummaryFinish,
     AgentFpReviewStageOutput,
     CreateScanRequest,
     FpReviewMethod,
@@ -177,23 +179,105 @@ class FpReviewMethodTests(unittest.TestCase):
             [0, 1],
         )
 
-    def test_fp_check_manual_start_is_blocked_until_scan_complete(self) -> None:
+    def test_cancelled_retry_carries_last_successful_summary_to_new_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             now = datetime.now(timezone.utc).isoformat()
-            store.save_scan(
-                _scan(now, status=ScanItemStatus.AUDITING),
-                _meta(now),
+            scan = _scan(now)
+            store.save_scan(scan, _meta(now))
+            for vulnerability in scan.vulnerabilities:
+                store.add_vulnerability("scan-1", vulnerability)
+            store.create_fp_review_job(
+                "review-old",
+                "scan-1",
+                2,
+                now,
+                FpReviewMethod.FP_CHECK.value,
+            )
+            store.update_fp_review_job(
+                "review-old",
+                status="cancelled",
+                summary_status="complete",
+                summary_markdown="# last successful summary",
+                summary_output_source=OutputSource(model="provider/model"),
             )
             with patch("backend.api.scan.get_scan_store", return_value=store):
-                with self.assertRaises(HTTPException) as raised:
-                    asyncio.run(scan_api._start_fp_review(
+                started = scan_api._ensure_fp_review_job_for_scan(
+                    "scan-1",
+                    allow_cancelled=True,
+                    publish_started=False,
+                )
+                job = store.get_fp_review_job(started["review_id"])
+
+        self.assertNotEqual(started["review_id"], "review-old")
+        self.assertEqual(job.summary_markdown, "# last successful summary")
+        self.assertEqual(job.summary_output_source.model, "provider/model")
+        self.assertEqual(job.summary_status.value, "pending")
+
+    def test_fp_check_manual_start_is_allowed_while_scan_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            now = datetime.now(timezone.utc).isoformat()
+            running_scan = _scan(now, status=ScanItemStatus.AUDITING)
+            store.save_scan(running_scan, _meta(now))
+            scan_api._running_scans["scan-1"] = running_scan
+            send = AsyncMock(return_value=True)
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.ensure_agent_accepting_tasks",
+                    return_value=None,
+                ),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    return_value="agent-1",
+                ),
+                patch("backend.api.agent.send_agent_command", send),
+                patch(
+                    "backend.api.agent.create_agent_task_runtime_update_payload",
+                    return_value={},
+                ),
+            ):
+                started = asyncio.run(scan_api._start_fp_review(
                         "scan-1",
                         "http://127.0.0.1:8000",
                         raise_on_error=True,
-                    ))
+                ))
 
-            self.assertEqual(raised.exception.status_code, 409)
+            self.assertTrue(started["items_dispatched"])
+            self.assertEqual(
+                send.await_args.args[1]["type"],
+                "fp_review",
+            )
+            self.assertEqual(
+                send.await_args.args[1]["method"],
+                "fp_check",
+            )
+
+    def test_offline_agent_does_not_leave_item_review_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            now = datetime.now(timezone.utc).isoformat()
+            store.save_scan(_scan(now), _meta(now))
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.ensure_agent_accepting_tasks",
+                    return_value=None,
+                ),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    return_value=None,
+                ),
+                self.assertRaises(HTTPException) as raised,
+            ):
+                asyncio.run(scan_api._start_fp_review(
+                    "scan-1",
+                    "http://127.0.0.1:8000",
+                    raise_on_error=True,
+                ))
+
+            self.assertEqual(raised.exception.status_code, 400)
             self.assertIsNone(store.get_fp_review_by_scan("scan-1"))
 
     def test_fp_check_skill_preview_uses_chinese_runtime_copy(self) -> None:
@@ -222,7 +306,7 @@ class FpReviewMethodTests(unittest.TestCase):
         self.assertIn("# 六道门复核", result["content"])
         self.assertIn("# 数据流分析器", result["content"])
 
-    def test_fp_check_stage_whitelist_and_batch_summary_endpoint(self) -> None:
+    def test_fp_check_stage_whitelist_and_independent_summary_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             now = datetime.now(timezone.utc).isoformat()
@@ -232,6 +316,12 @@ class FpReviewMethodTests(unittest.TestCase):
                 1,
                 now,
                 FpReviewMethod.FP_CHECK.value,
+            )
+            store.update_fp_review_job(
+                "review-1",
+                summary_markdown="# 旧批次汇总",
+                summary_output_source=OutputSource(model="provider/old"),
+                summary_status="complete",
             )
             with patch("backend.api.scan.get_scan_store", return_value=store):
                 accepted = asyncio.run(scan_api.agent_fp_review_stage_output(
@@ -258,7 +348,23 @@ class FpReviewMethodTests(unittest.TestCase):
                     AgentFpReviewFinish(
                         review_id="review-1",
                         status="complete",
-                        summary_markdown="# 批次汇总",
+                    ),
+                ))
+                asyncio.run(scan_api.agent_fp_review_summary_finish(
+                    "scan-1",
+                    AgentFpReviewSummaryFinish(
+                        review_id="review-1",
+                        status="error",
+                        error_message="chain schema failed",
+                    ),
+                ))
+                failed = store.get_fp_review_job("review-1")
+                asyncio.run(scan_api.agent_fp_review_summary_finish(
+                    "scan-1",
+                    AgentFpReviewSummaryFinish(
+                        review_id="review-1",
+                        status="complete",
+                        summary_markdown="# 新批次汇总",
                         summary_output_source=OutputSource(model="provider/model"),
                     ),
                 ))
@@ -267,10 +373,14 @@ class FpReviewMethodTests(unittest.TestCase):
 
         self.assertTrue(accepted["ok"])
         self.assertEqual(rejected.exception.status_code, 400)
-        self.assertEqual(job.summary_markdown, "# 批次汇总")
+        self.assertEqual(failed.summary_markdown, "# 旧批次汇总")
+        self.assertEqual(failed.summary_status.value, "error")
+        self.assertEqual(failed.summary_error_message, "chain schema failed")
+        self.assertEqual(job.summary_markdown, "# 新批次汇总")
+        self.assertEqual(job.summary_status.value, "complete")
         self.assertEqual(job.summary_output_source.model, "provider/model")
 
-    def test_fp_check_does_not_enqueue_incremental_review_on_vulnerability_report(self) -> None:
+    def test_fp_check_enqueues_incremental_review_on_vulnerability_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             now = datetime.now(timezone.utc).isoformat()
@@ -287,8 +397,88 @@ class FpReviewMethodTests(unittest.TestCase):
                     _vulnerability(),
                 ))
 
+        self.assertEqual(response["fp_review"]["method"], "fp_check")
+        self.assertTrue(response["fp_review"]["queued"])
+        self.assertIsNotNone(store.get_fp_review_by_scan("scan-1"))
+
+    def test_fp_check_auto_off_does_not_enqueue_incremental_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            now = datetime.now(timezone.utc).isoformat()
+            scan = _scan(now, status=ScanItemStatus.AUDITING)
+            scan.auto_fp_review = False
+            scan.vulnerabilities = []
+            meta = _meta(now)
+            meta.auto_fp_review = False
+            store.save_scan(scan, meta)
+            agent_api._running_scans["scan-1"] = scan
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+            ):
+                response = asyncio.run(agent_api.agent_report_vulnerability(
+                    "scan-1",
+                    _vulnerability(),
+                ))
+
         self.assertNotIn("fp_review", response)
         self.assertIsNone(store.get_fp_review_by_scan("scan-1"))
+
+    def test_summary_retry_sends_separate_command_and_retains_old_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            now = datetime.now(timezone.utc).isoformat()
+            store.save_scan(_scan(now), _meta(now))
+            store.create_fp_review_job(
+                "review-1",
+                "scan-1",
+                2,
+                now,
+                FpReviewMethod.FP_CHECK.value,
+            )
+            store.update_fp_review_job(
+                "review-1",
+                status="complete",
+                summary_status="complete",
+                summary_markdown="# old summary",
+            )
+            status_at_dispatch: list[str] = []
+
+            async def send_command(*_args, **_kwargs) -> bool:
+                current = store.get_fp_review_job("review-1")
+                status_at_dispatch.append(current.summary_status.value)
+                return True
+
+            send = AsyncMock(side_effect=send_command)
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.ensure_agent_accepting_tasks",
+                    return_value=None,
+                ),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    return_value="agent-1",
+                ),
+                patch("backend.api.agent.send_agent_command", send),
+                patch(
+                    "backend.api.agent.create_agent_task_runtime_update_payload",
+                    return_value={"hash": "runtime"},
+                ),
+            ):
+                result = asyncio.run(scan_api._start_fp_review_summary(
+                    "scan-1",
+                    "http://127.0.0.1:8000",
+                ))
+
+            job = store.get_fp_review_job("review-1")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(send.await_args.args[1]["type"], "fp_review_summary")
+        self.assertEqual(status_at_dispatch, ["running"])
+        self.assertEqual(job.status.value, "complete")
+        self.assertEqual(job.summary_status.value, "running")
+        self.assertEqual(job.summary_markdown, "# old summary")
 
     def test_server_enforces_engine_fp_setting_on_reported_result(
         self,

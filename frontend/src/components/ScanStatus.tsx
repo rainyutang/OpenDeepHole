@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import { getScanStatus, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, triggerFpReviewSummary, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
@@ -395,6 +395,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   // FP review state
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
   const [fpReviewLoading, setFpReviewLoading] = useState(false);
+  const [fpReviewSummaryLoading, setFpReviewSummaryLoading] = useState(false);
   const [fpReviewStopping, setFpReviewStopping] = useState(false);
   const [launchingValidations, setLaunchingValidations] = useState<Set<number>>(new Set());
   const [stoppingValidations, setStoppingValidations] = useState<Set<number>>(new Set());
@@ -542,18 +543,25 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       );
     },
     onFpReviewStarted: (data) => {
-      setFpReview({
+      setFpReview((prev) => ({
         review_id: data.review_id,
         scan_id: scanId,
-        method: data.method ?? "adversarial",
+        method: data.method ?? prev?.method ?? "adversarial",
         status: data.status,
         total: data.total,
         processed: data.processed ?? 0,
         current_vuln_index: null,
-        results: [],
+        current_vuln_indices: [],
+        results: prev?.results ?? [],
+        summary_markdown: prev?.summary_markdown,
+        summary_output_source: prev?.summary_output_source,
+        summary_status: data.summary_status ?? prev?.summary_status,
+        summary_error_message: data.summary_status === "pending"
+          ? null
+          : (prev?.summary_error_message ?? null),
         error_message: null,
-        created_at: new Date().toISOString(),
-      });
+        created_at: prev?.created_at ?? new Date().toISOString(),
+      }));
     },
     onFpReviewProgress: (data) => {
       setFpReview((prev) => {
@@ -643,6 +651,26 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           error_message: data.error_message,
           current_vuln_index: null,
           current_vuln_indices: [],
+        };
+      });
+    },
+    onFpReviewSummaryStarted: (data) => {
+      setFpReview((prev) => {
+        if (!prev || prev.review_id !== data.review_id) return prev;
+        return {
+          ...prev,
+          summary_status: data.status,
+          summary_error_message: null,
+        };
+      });
+    },
+    onFpReviewSummaryFinish: (data) => {
+      setFpReview((prev) => {
+        if (!prev || prev.review_id !== data.review_id) return prev;
+        return {
+          ...prev,
+          summary_status: data.status,
+          summary_error_message: data.error_message ?? null,
           summary_markdown: data.summary_markdown ?? prev.summary_markdown,
           summary_output_source: data.summary_output_source ?? prev.summary_output_source,
         };
@@ -676,18 +704,28 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     setFpReviewLoading(true);
     try {
       const started = await triggerFpReview(scanId);
-      setFpReview({
+      setFpReview((prev) => ({
         review_id: started.review_id,
         scan_id: scanId,
-        method: started.method ?? scan?.fp_review_method ?? "adversarial",
+        method: started.method ?? prev?.method ?? scan?.fp_review_method ?? "adversarial",
         status: started.status ?? "running",
         total: started.total ?? 0,
         processed: started.processed ?? 0,
         current_vuln_index: null,
-        results: [],
+        current_vuln_indices: [],
+        results: prev?.results ?? [],
+        summary_markdown: prev?.summary_markdown,
+        summary_output_source: prev?.summary_output_source,
+        summary_status: (
+          started.summary_status
+          ?? ((started.method ?? scan?.fp_review_method) === "fp_check"
+            ? "pending"
+            : prev?.summary_status)
+        ),
+        summary_error_message: null,
         error_message: null,
-        created_at: new Date().toISOString(),
-      });
+        created_at: prev?.created_at ?? new Date().toISOString(),
+      }));
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail
@@ -695,6 +733,28 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       alert(`AI去误报失败：${msg || "未知错误"}`);
     } finally {
       setFpReviewLoading(false);
+    }
+  };
+
+  const handleFpReviewSummary = async () => {
+    setFpReviewSummaryLoading(true);
+    try {
+      const started = await triggerFpReviewSummary(scanId);
+      setFpReview((prev) => (
+        prev && prev.review_id === started.review_id
+          ? {
+              ...prev,
+              summary_status: started.status,
+              summary_error_message: null,
+            }
+          : prev
+      ));
+    } catch (err: unknown) {
+      const response = (err as { response?: { data?: { detail?: string } } }).response;
+      const msg = response?.data?.detail || (err instanceof Error ? err.message : "未知错误");
+      alert(`启动批次汇总失败：${msg}`);
+    } finally {
+      setFpReviewSummaryLoading(false);
     }
   };
 
@@ -1356,9 +1416,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 scanComplete={scan.status === "complete"}
                 isFpReviewing={isFpReviewing}
                 loading={fpReviewLoading}
+                summaryLoading={fpReviewSummaryLoading}
                 stopping={fpReviewStopping}
                 events={filterEvents(miningEvents, ["fp_review", "opencode_output"])}
                 onTrigger={handleFpReview}
+                onTriggerSummary={handleFpReviewSummary}
                 onStop={handleStopFpReview}
               />
             )}
@@ -3788,9 +3850,11 @@ function FpReviewPanel({
   scanComplete,
   isFpReviewing,
   loading,
+  summaryLoading,
   stopping,
   events,
   onTrigger,
+  onTriggerSummary,
   onStop,
 }: {
   vulnerabilities: Vulnerability[];
@@ -3799,9 +3863,11 @@ function FpReviewPanel({
   scanComplete: boolean;
   isFpReviewing: boolean;
   loading: boolean;
+  summaryLoading: boolean;
   stopping: boolean;
   events: ScanEvent[];
   onTrigger: () => void | Promise<void>;
+  onTriggerSummary: () => void | Promise<void>;
   onStop: () => void | Promise<void>;
 }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -3838,11 +3904,16 @@ function FpReviewPanel({
         .sort((a, b) => fpReviewSortRank(a.result, a.running) - fpReviewSortRank(b.result, b.running) || a.index - b.index),
     [confirmed, currentIndices, resultByIndex],
   );
-  const waitingCount = items.filter((item) => !item.result && !item.running).length;
+  const waitingCount = items.filter(
+    (item) => !isEffectiveFpReviewResult(item.result) && !item.running,
+  ).length;
   const tpCount = items.filter((item) => item.result?.verdict === "tp").length;
   const fpCount = items.filter((item) => item.result?.verdict === "fp").length;
+  const summaryRunning = fpReview?.summary_status === "running";
   const status = isFpReviewing
     ? "复核中"
+    : summaryRunning
+      ? "汇总中"
     : fpReview?.status === "complete"
       ? "已完成"
       : fpReview?.status === "error"
@@ -3854,6 +3925,8 @@ function FpReviewPanel({
             : "无目标";
   const tone: TaskTone = isFpReviewing
     ? "amber"
+    : summaryRunning
+      ? "amber"
     : fpReview?.status === "complete"
       ? "green"
       : fpReview?.status === "error"
@@ -3864,11 +3937,12 @@ function FpReviewPanel({
   const selected = selectedIndex === null ? null : items.find((item) => item.index === selectedIndex) ?? null;
   const canTrigger = confirmed.length > 0
     && !isFpReviewing
+    && !summaryRunning
     && !loading
-    && (method !== "fp_check" || scanComplete);
+    && !summaryLoading;
   const methodLabel = fpReviewMethodLabel(method);
   const methodSummary = method === "fp_check"
-    ? "先完成全部问题的主张重述与标准验证，再按依赖波次执行深度验证、六道门和攻击链复核。"
+    ? "确认问题立即逐项执行证据门控复核；扫描完成后，跨漏洞攻击链检查与批次汇总单独运行。"
     : "沿用现有正反论证流程，对漏洞挖掘阶段确认的问题逐条复核。";
 
   useEffect(() => {
@@ -3906,34 +3980,85 @@ function FpReviewPanel({
             {loading ? "启动中..." : `启动${methodLabel}`}
           </button>
         )}
-        {isFpReviewing && (
+        {(isFpReviewing || summaryRunning) && (
           <button
             type="button"
             onClick={onStop}
             disabled={stopping}
             className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {stopping ? "停止中..." : "停止复核"}
+            {stopping ? "停止中..." : summaryRunning && !isFpReviewing ? "停止汇总" : "停止复核"}
           </button>
         )}
         {fpReview?.error_message && (
           <span className="text-xs text-red-300">{fpReview.error_message}</span>
         )}
         {method === "fp_check" && !scanComplete && (
-          <span className="text-xs text-slate-500">Trail of Bits fp-check 复核需等待扫描完成后整批启动。</span>
+          <span className="text-xs text-slate-500">单项复核可立即运行；跨漏洞攻击链与批次汇总将在扫描完成后启动。</span>
         )}
       </div>
-      {fpReview?.summary_markdown && (
+      {method === "fp_check" && fpReview && (
         <section className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h4 className="text-xs font-semibold uppercase text-amber-200">批次复核汇总</h4>
-            {hasOutputSource(fpReview.summary_output_source) && (
-              <span className="text-[11px] text-slate-500">
-                输出来源：{formatOutputSource(fpReview.summary_output_source)}
-              </span>
-            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <h4 className="text-xs font-semibold uppercase text-amber-200">跨漏洞攻击链与批次汇总</h4>
+              <StatusPill
+                label={
+                  fpReview.summary_status === "complete"
+                    ? "已完成"
+                    : fpReview.summary_status === "running"
+                      ? "生成中"
+                      : fpReview.summary_status === "error"
+                        ? "更新失败"
+                        : fpReview.summary_status === "cancelled"
+                          ? "已停止"
+                          : fpReview.summary_markdown
+                            ? "旧汇总，待更新"
+                            : "尚未生成"
+                }
+                tone={
+                  fpReview.summary_status === "complete"
+                    ? "green"
+                    : fpReview.summary_status === "error"
+                      ? "red"
+                      : "amber"
+                }
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {hasOutputSource(fpReview.summary_output_source) && (
+                <span className="text-[11px] text-slate-500">
+                  输出来源：{formatOutputSource(fpReview.summary_output_source)}
+                </span>
+              )}
+              {scanComplete && !summaryRunning && (
+                <button
+                  type="button"
+                  onClick={onTriggerSummary}
+                  disabled={summaryLoading || isFpReviewing}
+                  className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {summaryLoading ? "启动中..." : fpReview.summary_markdown ? "仅重试汇总" : "生成汇总"}
+                </button>
+              )}
+            </div>
           </div>
-          <MarkdownContent content={fpReview.summary_markdown} />
+          {fpReview.summary_status === "running" && fpReview.summary_markdown && (
+            <p className="mb-2 text-xs text-amber-300">正在生成新汇总，下方暂时保留上一次成功内容。</p>
+          )}
+          {fpReview.summary_status === "pending" && fpReview.summary_markdown && (
+            <p className="mb-2 text-xs text-amber-300">单项结果已变化，下方汇总已过期，等待重新生成。</p>
+          )}
+          {fpReview.summary_error_message && (
+            <p className="mb-2 whitespace-pre-wrap text-xs text-red-300">{fpReview.summary_error_message}</p>
+          )}
+          {fpReview.summary_markdown ? (
+            <MarkdownContent content={fpReview.summary_markdown} />
+          ) : (
+            <p className="text-sm text-slate-500">
+              {scanComplete ? "尚未生成批次汇总。" : "等待扫描完成后生成独立汇总。"}
+            </p>
+          )}
         </section>
       )}
       {confirmed.length === 0 ? (

@@ -184,6 +184,7 @@ async def _report_process_vulnerabilities(
                 reporter=reporter,
                 scan_id=scan_id,
                 review_id=str(fp_info["review_id"]),
+                method=str(fp_info.get("method") or "adversarial"),
                 vulnerability=payload,
                 project_path=str(project_path),
                 feedback_entries=feedback_entries,

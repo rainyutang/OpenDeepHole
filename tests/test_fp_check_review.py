@@ -109,7 +109,7 @@ def _phase(stage: str) -> dict:
 
 
 class FpCheckReviewTests(unittest.IsolatedAsyncioTestCase):
-    async def test_runs_standard_items_before_deep_dependency_waves(self) -> None:
+    async def test_item_operation_runs_standard_or_deep_stages(self) -> None:
         calls: list[str] = []
 
         async def invoke(**kwargs):
@@ -134,40 +134,37 @@ class FpCheckReviewTests(unittest.IsolatedAsyncioTestCase):
                     **_phase("gate_review"),
                     "gates": GATES_PASS,
                 })
-            if name.endswith("-exploit-chain"):
-                return _result({
-                    "complete": True,
-                    "chains": [],
-                    "summary_markdown": "# 汇总",
-                })
             return _result(_phase(name.rsplit("-", 1)[-1]))
 
         with tempfile.TemporaryDirectory() as tmp, patch(
             "deephole_client.fp_check_review.runner.run_opencode_task",
             new=invoke,
         ):
-            result = await run_fp_check_review(
+            standard_result = await run_fp_check_review(
+                operation="item",
                 project_path=tmp,
                 work_dir=Path(tmp) / "work",
                 scan_id="scan-1",
                 review_id="review-1",
-                vulnerabilities=[_vulnerability(1), _vulnerability(2)],
-                concurrency=2,
+                vulnerabilities=[_vulnerability(1)],
+            )
+            deep_result = await run_fp_check_review(
+                operation="item",
+                project_path=tmp,
+                work_dir=Path(tmp) / "work",
+                scan_id="scan-1",
+                review_id="review-1",
+                vulnerabilities=[_vulnerability(2)],
             )
 
         self.assertEqual(
-            [item["verdict"] for item in result["results"]],
-            ["false_positive", "true_positive"],
+            standard_result["results"][0]["verdict"],
+            "false_positive",
         )
-        standard_position = next(
-            i for i, value in enumerate(calls)
-            if value.endswith("-standard_verification")
+        self.assertEqual(
+            deep_result["results"][0]["verdict"],
+            "true_positive",
         )
-        data_flow_position = next(
-            i for i, value in enumerate(calls)
-            if value.endswith("-data_flow")
-        )
-        self.assertLess(standard_position, data_flow_position)
         deep_stages = [
             "data_flow",
             "exploitability",
@@ -205,6 +202,7 @@ class FpCheckReviewTests(unittest.IsolatedAsyncioTestCase):
             new=invoke,
         ):
             result = await run_fp_check_review(
+                operation="item",
                 project_path=tmp,
                 work_dir=Path(tmp) / "work",
                 scan_id="scan-1",
@@ -213,24 +211,14 @@ class FpCheckReviewTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result["results"], [])
-        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["processed"], 1)
         self.assertEqual(result["unresolved_indices"], [4])
-        self.assertIn("未生成 TP/FP", result["summary_markdown"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("stage failed", result["error_message"])
+        self.assertEqual(result["summary_markdown"], "")
 
-    async def test_valid_exploit_chain_can_promote_existing_fp_members(self) -> None:
+    async def test_valid_exploit_chain_is_summary_only(self) -> None:
         async def invoke(**kwargs):
-            name = kwargs["task_name"]
-            if name.endswith("-claim_context"):
-                return _result(_claim("standard"))
-            if name.endswith("-standard_verification"):
-                return _result({
-                    "decision": "verdict",
-                    "reason": "individually blocked",
-                    "evidence": ["src/guard.c:8"],
-                    "gates": {**GATES_PASS, "real_impact": False},
-                    "completeness": STANDARD_COMPLETE,
-                    "stage_markdown": "# 标准验证",
-                })
             return _result({
                 "complete": True,
                 "chains": [{
@@ -247,19 +235,68 @@ class FpCheckReviewTests(unittest.IsolatedAsyncioTestCase):
             new=invoke,
         ):
             result = await run_fp_check_review(
+                operation="summary",
                 project_path=tmp,
                 work_dir=Path(tmp) / "work",
                 scan_id="scan-1",
                 review_id="review-3",
                 vulnerabilities=[_vulnerability(7), _vulnerability(8)],
-                concurrency=2,
+                individual_results=[
+                    {
+                        "vuln_index": 7,
+                        "verdict": "fp",
+                        "reason": "individually blocked",
+                    },
+                    {
+                        "vuln_index": 8,
+                        "verdict": "fp",
+                        "reason": "individually blocked",
+                    },
+                ],
+                unresolved_indices=[],
             )
 
-        self.assertEqual(
-            [item["verdict"] for item in result["results"]],
-            ["true_positive", "true_positive"],
-        )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["chains"][0]["member_indices"], [7, 8])
+        self.assertIn("漏洞 #7、漏洞 #8", result["summary_markdown"])
+        self.assertNotIn("results", result)
+
+    async def test_item_uses_tolerant_schema_retry_and_inherited_output(self) -> None:
+        calls: list[dict] = []
+
+        async def invoke(**kwargs):
+            calls.append(kwargs)
+            if kwargs["task_name"].endswith("-claim_context"):
+                return _result(_claim("standard"))
+            return _result({
+                "decision": "verdict",
+                "reason": "validated",
+                "evidence": ["src/1.c:11"],
+                "gates": GATES_PASS,
+                "completeness": STANDARD_COMPLETE,
+                "stage_markdown": "# 标准验证",
+            })
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "deephole_client.fp_check_review.runner.run_opencode_task",
+            new=invoke,
+        ):
+            result = await run_fp_check_review(
+                operation="item",
+                project_path=tmp,
+                work_dir=Path(tmp) / "work",
+                scan_id="scan-1",
+                review_id="review-4",
+                vulnerabilities=[_vulnerability(1)],
+            )
+
+        self.assertEqual(result["status"], "success")
         self.assertTrue(all(
-            "攻击链提升" in item["reason"]
-            for item in result["results"]
+            call["output_schema"]["additionalProperties"]
+            for call in calls
         ))
+        self.assertTrue(all(
+            "invalid_json_retry_prompt" in call
+            for call in calls
+        ))
+        self.assertTrue(all("output" not in call for call in calls))

@@ -365,6 +365,8 @@ class ScanStoreBase(ABC):
         error_message: str | None = None,
         summary_markdown: str | None = None,
         summary_output_source=None,
+        summary_status: str | None = None,
+        summary_error_message: str | None = None,
     ) -> None:
         """Update status/progress on an FP review job."""
 

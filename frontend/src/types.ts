@@ -856,6 +856,8 @@ export interface FpReviewJob {
   results: FpReviewResult[];
   summary_markdown?: string;
   summary_output_source?: OutputSource;
+  summary_status?: FpReviewStatus | null;
+  summary_error_message?: string | null;
   error_message: string | null;
 }
 

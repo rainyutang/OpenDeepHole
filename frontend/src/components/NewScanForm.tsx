@@ -443,7 +443,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                   {
                     value: "fp_check" as const,
                     title: "Trail of Bits fp-check 复核",
-                    description: "基于 Trail of Bits fp-check，扫描完成后整批执行标准/深度验证、六道门和攻击链复核。",
+                    description: "确认问题后立即逐项执行标准/深度验证与六道门；扫描完成后另行生成跨漏洞攻击链和批次汇总。",
                   },
                 ] satisfies Array<{
                   value: FpReviewMethod;

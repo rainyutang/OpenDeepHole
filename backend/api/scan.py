@@ -27,6 +27,7 @@ from backend.models import (
     AgentFpReviewFinish,
     AgentFpReviewProgress,
     AgentFpReviewResult,
+    AgentFpReviewSummaryFinish,
     AgentFpReviewStageOutput,
     BatchMarkRequest,
     BatchUnmarkRequest,
@@ -303,8 +304,20 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
             "line": v.line,
             "function": v.function,
             "vuln_type": v.vuln_type,
+            "severity": v.severity,
             "description": v.description,
             "ai_analysis": v.ai_analysis,
+            "vulnerability_report": v.vulnerability_report,
+            "attack_entry": v.attack_entry,
+            "root_cause": v.root_cause,
+            "trigger_conditions": v.trigger_conditions,
+            "impact": v.impact,
+            "call_chain": [
+                item.model_dump(mode="json")
+                if hasattr(item, "model_dump")
+                else item
+                for item in (v.call_chain or [])
+            ],
         }
         if i in latest_fp_results:
             reviewed.append(item)
@@ -341,23 +354,46 @@ def _ensure_fp_review_job_for_scan(
             if int(item["index"]) not in latest_fp_results
         ]
         confirmed = unresolved or ordered
+        total = len(ordered)
+        processed = (
+            len(ordered) - len(unresolved)
+            if unresolved
+            else 0
+        )
     else:
         confirmed = ordered
+        total = len(confirmed)
+        processed = sum(
+            1
+            for item in confirmed
+            if int(item["index"]) in latest_fp_results
+        )
     if not confirmed:
         return None
 
-    processed = sum(1 for item in confirmed if int(item["index"]) in latest_fp_results)
     job = store.get_fp_review_by_scan(scan_id)
     created = False
-    if require_unresolved and processed >= len(confirmed):
+    if (
+        method == FpReviewMethod.FP_CHECK
+        and require_unresolved
+        and not unresolved
+    ) or (
+        method != FpReviewMethod.FP_CHECK
+        and require_unresolved
+        and processed >= len(confirmed)
+    ):
         if job is None:
             return None
         return {
             "review_id": job.review_id,
             "method": method.value,
-            "total": len(confirmed),
-            "processed": processed,
-            "confirmed": confirmed,
+            "total": total,
+            "processed": (
+                len(ordered)
+                if method == FpReviewMethod.FP_CHECK
+                else processed
+            ),
+            "confirmed": [],
             "latest_results": latest_fp_results,
             "created": False,
             "cancelled": False,
@@ -367,48 +403,73 @@ def _ensure_fp_review_job_for_scan(
         return {
             "review_id": job.review_id,
             "method": method.value,
-            "total": job.total,
+            "total": total,
             "processed": job.processed,
             "confirmed": confirmed,
             "latest_results": latest_fp_results,
             "created": False,
             "cancelled": True,
         }
+    previous_job = job
     if job is None or (job.status == FpReviewStatus.CANCELLED and allow_cancelled):
         review_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
         store.create_fp_review_job(
             review_id,
             scan_id,
-            len(confirmed),
+            total,
             now,
             method.value,
         )
         job = store.get_fp_review_job(review_id)
         created = True
+        if (
+            job is not None
+            and previous_job is not None
+            and method == FpReviewMethod.FP_CHECK
+            and previous_job.summary_markdown.strip()
+        ):
+            # A cancelled Agent task gets a fresh review_id so late callbacks
+            # cannot corrupt the retry. Carry only the last successful summary
+            # presentation forward; the new run will mark it stale below.
+            store.update_fp_review_job(
+                review_id,
+                summary_markdown=previous_job.summary_markdown,
+                summary_output_source=previous_job.summary_output_source,
+            )
     if job is None:
         return None
 
-    store.update_fp_review_job(
-        job.review_id,
-        status=FpReviewStatus.RUNNING.value,
-        total=len(confirmed),
-        processed=processed,
-        error_message="",
-    )
+    update_values: dict = {
+        "status": FpReviewStatus.RUNNING.value,
+        "total": total,
+        "processed": processed,
+        "error_message": "",
+    }
+    if method == FpReviewMethod.FP_CHECK:
+        update_values.update({
+            "summary_status": FpReviewStatus.PENDING.value,
+            "summary_error_message": "",
+        })
+    store.update_fp_review_job(job.review_id, **update_values)
     if publish_started:
         from backend.sse import publish
         publish(scan_id, "fp_review_started", {
             "review_id": job.review_id,
             "method": method.value,
             "status": FpReviewStatus.RUNNING.value,
-            "total": len(confirmed),
+            "total": total,
             "processed": processed,
+            "summary_status": (
+                FpReviewStatus.PENDING.value
+                if method == FpReviewMethod.FP_CHECK
+                else None
+            ),
         })
     return {
         "review_id": job.review_id,
         "method": method.value,
-        "total": len(confirmed),
+        "total": total,
         "processed": processed,
         "confirmed": confirmed,
         "latest_results": latest_fp_results,
@@ -482,6 +543,8 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
         results=merged,
         summary_markdown=job.summary_markdown,
         summary_output_source=job.summary_output_source,
+        summary_status=job.summary_status,
+        summary_error_message=job.summary_error_message,
         error_message=job.error_message,
     )
 
@@ -1972,7 +2035,27 @@ async def download_report_zip(
                     f"- [{'Trail of Bits fp-check 复核' if fp_job.method == FpReviewMethod.FP_CHECK else '对抗式复核'}批次汇总](fp-review-summary.md)",
                     "",
                 ])
-                zf.writestr("fp-review-summary.md", fp_job.summary_markdown.rstrip() + "\n")
+                summary_content = fp_job.summary_markdown.rstrip() + "\n"
+                if (
+                    fp_job.method == FpReviewMethod.FP_CHECK
+                    and fp_job.summary_status != FpReviewStatus.COMPLETE
+                ):
+                    summary_state = (
+                        fp_job.summary_status.value
+                        if fp_job.summary_status is not None
+                        else "pending"
+                    )
+                    warning = (
+                        "> 注意：这是上一次成功生成的批次汇总，"
+                        f"当前汇总状态为 `{summary_state}`，内容可能已过期。"
+                    )
+                    if fp_job.summary_error_message:
+                        warning += (
+                            "\n>\n> 最近一次更新失败原因："
+                            + fp_job.summary_error_message
+                        )
+                    summary_content = warning + "\n\n" + summary_content
+                zf.writestr("fp-review-summary.md", summary_content)
             for i, v in confirmed:
                 entry = f"vuln-{i}-{_safe_filename_part(v.file)}_{v.line}.md"
                 index_lines.append(
@@ -2245,6 +2328,7 @@ async def _start_fp_review(
     server_url: str,
     *,
     raise_on_error: bool = True,
+    require_unresolved: bool = False,
 ) -> dict | None:
     """Start an AI false-positive review for all confirmed vulnerabilities in a scan.
 
@@ -2257,8 +2341,6 @@ async def _start_fp_review(
         create_agent_task_runtime_update_payload,
         ensure_agent_accepting_tasks,
         send_agent_command,
-        _registered_agents,
-        _agent_ws,
     )
 
     def _fail(status_code: int, detail: str) -> None:
@@ -2284,18 +2366,25 @@ async def _start_fp_review(
     except HTTPException as exc:
         return _fail(exc.status_code, str(exc.detail))
 
-    _, selected_method = _scan_fp_review_settings(scan_id, scan)
-    if (
-        selected_method == FpReviewMethod.FP_CHECK
-        and scan.status != ScanItemStatus.COMPLETE
-    ):
-        return _fail(409, "Trail of Bits fp-check 复核只能在扫描完成后启动")
+    if not meta.agent_id and not meta.agent_name:
+        return _fail(400, "No agent associated with this scan")
+
+    # Resolve the Agent before creating/reopening the item job. Otherwise an
+    # offline Agent can leave the persisted job looking "running" even though
+    # no command was dispatched.
+    agent_id = _resolve_scan_agent_id(meta)
+    if agent_id is None:
+        return _fail(
+            400,
+            f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
+        )
 
     fp_job_info = _ensure_fp_review_job_for_scan(
         scan_id,
         scan,
         allow_cancelled=True,
         publish_started=False,
+        require_unresolved=require_unresolved,
     )
     if fp_job_info is None:
         return _fail(400, "No confirmed vulnerabilities to review")
@@ -2303,39 +2392,192 @@ async def _start_fp_review(
     review_id = str(fp_job_info["review_id"])
     method = FpReviewMethod(str(fp_job_info["method"]))
 
-    if not meta.agent_id and not meta.agent_name:
-        return _fail(400, "No agent associated with this scan")
-
-    # Resolve agent_id — may be stale if agent reconnected
-    agent_id = meta.agent_id
-    if not agent_id or agent_id not in _agent_ws:
-        agent_id = None
-        if meta.agent_name:
-            for aid, ainfo in _registered_agents.items():
-                if ainfo.name == meta.agent_name and aid in _agent_ws:
-                    agent_id = aid
-                    break
-    if agent_id is None:
-        return _fail(
-            400,
-            f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
-        )
-
     # Update stored agent_id if it changed
     if agent_id != meta.agent_id:
         store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
 
     feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
 
-    ok = await send_agent_command(agent_id, {
-        "type": "fp_review",
-        "scan_id": scan_id,
+    dispatched_items = not fp_job_info.get("no_unresolved")
+    if dispatched_items:
+        from backend.sse import publish
+        publish(scan_id, "fp_review_started", {
+            "review_id": review_id,
+            "method": method.value,
+            "status": "running",
+            "total": int(fp_job_info.get("total") or len(confirmed)),
+            "processed": int(fp_job_info.get("processed") or 0),
+            "summary_status": (
+                "pending"
+                if method == FpReviewMethod.FP_CHECK
+                else None
+            ),
+        })
+        ok = await send_agent_command(agent_id, {
+            "type": "fp_review",
+            "scan_id": scan_id,
+            "review_id": review_id,
+            "method": method.value,
+            "project_path": meta.project_path,
+            "vulnerabilities": confirmed,
+            "feedback_entries": feedback_entries,
+            "processed_offset": int(fp_job_info.get("processed") or 0),
+            "code_graph_mcp": (
+                meta.code_graph_mcp.model_dump(mode="json")
+                if meta.code_graph_mcp is not None
+                else None
+            ),
+            "agent_runtime_update": create_agent_task_runtime_update_payload(
+                server_url,
+                meta.agent_key,
+            ),
+        })
+        if not ok:
+            store.update_fp_review_job(
+                review_id,
+                status="error",
+                error_message="Agent not connected",
+            )
+            publish(scan_id, "fp_review_finish", {
+                "review_id": review_id,
+                "status": FpReviewStatus.ERROR.value,
+                "method": method.value,
+                "error_message": "Agent not connected",
+            })
+            return _fail(502, "Agent not connected")
+
+        logger.info(
+            "FP review %s triggered for scan %s (%d candidates)",
+            review_id,
+            scan_id,
+            len(confirmed),
+        )
+
+    summary_started = None
+    if (
+        method == FpReviewMethod.FP_CHECK
+        and scan.status == ScanItemStatus.COMPLETE
+    ):
+        summary_started = await _start_fp_review_summary(
+            scan_id,
+            server_url,
+            raise_on_error=raise_on_error,
+        )
+    return {
+        "ok": True,
         "review_id": review_id,
         "method": method.value,
+        "status": "running" if dispatched_items else fp_job_info.get("status", "complete"),
+        "total": int(fp_job_info.get("total") or len(confirmed)),
+        "processed": int(fp_job_info.get("processed") or 0),
+        "items_dispatched": dispatched_items,
+        "summary_started": bool(summary_started),
+        "summary_status": (
+            summary_started.get("status")
+            if isinstance(summary_started, dict)
+            else (
+                FpReviewStatus.PENDING.value
+                if method == FpReviewMethod.FP_CHECK
+                else None
+            )
+        ),
+    }
+
+
+async def _start_fp_review_summary(
+    scan_id: str,
+    server_url: str,
+    *,
+    raise_on_error: bool = True,
+) -> dict | None:
+    """Start only the independent fp-check chain analysis and summary."""
+    from backend.api.agent import (
+        create_agent_task_runtime_update_payload,
+        ensure_agent_accepting_tasks,
+        send_agent_command,
+    )
+
+    def _fail(status_code: int, detail: str) -> None:
+        if raise_on_error:
+            raise HTTPException(status_code=status_code, detail=detail)
+        logger.warning("FP review summary for scan %s skipped: %s", scan_id, detail)
+        return None
+
+    store = get_scan_store()
+    loaded = store.load_scan(scan_id)
+    scan = _running_scans.get(scan_id) or (loaded[0] if loaded is not None else None)
+    if scan is None:
+        return _fail(404, "Scan not found")
+    if scan.status != ScanItemStatus.COMPLETE:
+        return _fail(409, "跨漏洞攻击链检查只能在扫描完成后启动")
+    job = store.get_fp_review_by_scan(scan_id)
+    if job is None or job.method != FpReviewMethod.FP_CHECK:
+        return _fail(404, "No Trail of Bits fp-check review found")
+    if job.status == FpReviewStatus.CANCELLED:
+        return _fail(409, "FP review was cancelled; restart item review first")
+    if job.summary_status == FpReviewStatus.RUNNING:
+        return {
+            "ok": True,
+            "review_id": job.review_id,
+            "status": FpReviewStatus.RUNNING.value,
+            "already_running": True,
+        }
+
+    def _mark_summary_error(message: str) -> None:
+        store.update_fp_review_job(
+            job.review_id,
+            summary_status=FpReviewStatus.ERROR.value,
+            summary_error_message=message,
+        )
+        from backend.sse import publish
+        publish(scan_id, "fp_review_summary_finish", {
+            "review_id": job.review_id,
+            "status": FpReviewStatus.ERROR.value,
+            "error_message": message,
+            "summary_markdown": None,
+            "summary_output_source": None,
+        })
+
+    meta = store.get_scan_meta(scan_id)
+    if meta is None:
+        return _fail(404, "Scan not found")
+    try:
+        ensure_agent_accepting_tasks(meta.agent_key)
+    except HTTPException as exc:
+        _mark_summary_error(str(exc.detail))
+        return _fail(exc.status_code, str(exc.detail))
+    agent_id = _resolve_scan_agent_id(meta)
+    if agent_id is None:
+        _mark_summary_error("Agent not connected")
+        return _fail(
+            400,
+            f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
+        )
+    if agent_id != meta.agent_id:
+        store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
+    feedback_entries = [
+        entry.model_dump()
+        for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)
+    ]
+    # Persist the running state before dispatch. A deterministic summary can
+    # finish almost immediately; updating after the WebSocket send could race
+    # with its completion callback and overwrite "complete" with "running".
+    store.update_fp_review_job(
+        job.review_id,
+        summary_status=FpReviewStatus.RUNNING.value,
+        summary_error_message="",
+    )
+    from backend.sse import publish
+    publish(scan_id, "fp_review_summary_started", {
+        "review_id": job.review_id,
+        "status": FpReviewStatus.RUNNING.value,
+    })
+    ok = await send_agent_command(agent_id, {
+        "type": "fp_review_summary",
+        "scan_id": scan_id,
+        "review_id": job.review_id,
         "project_path": meta.project_path,
-        "vulnerabilities": confirmed,
         "feedback_entries": feedback_entries,
-        "processed_offset": 0,
         "code_graph_mcp": (
             meta.code_graph_mcp.model_dump(mode="json")
             if meta.code_graph_mcp is not None
@@ -2347,23 +2589,18 @@ async def _start_fp_review(
         ),
     })
     if not ok:
-        store.update_fp_review_job(review_id, status="error", error_message="Agent not connected")
+        _mark_summary_error("Agent not connected")
         return _fail(502, "Agent not connected")
-
-    store.update_fp_review_job(review_id, status="running", processed=0)
-    from backend.sse import publish
-    publish(scan_id, "fp_review_started", {
-        "review_id": review_id, "method": method.value,
-        "status": "running", "total": len(confirmed), "processed": 0,
-    })
-    logger.info("FP review %s triggered for scan %s (%d candidates)", review_id, scan_id, len(confirmed))
+    logger.info(
+        "Independent fp-check summary %s triggered for scan %s",
+        job.review_id,
+        scan_id,
+    )
     return {
         "ok": True,
-        "review_id": review_id,
-        "method": method.value,
-        "status": "running",
-        "total": len(confirmed),
-        "processed": 0,
+        "review_id": job.review_id,
+        "status": FpReviewStatus.RUNNING.value,
+        "already_running": False,
     }
 
 
@@ -2376,6 +2613,23 @@ async def trigger_fp_review(
     """Trigger AI false-positive review for all confirmed vulnerabilities in a scan."""
     _check_scan_owner(scan_id, current_user)
     return await _start_fp_review(scan_id, _server_url_from_request(request), raise_on_error=True)
+
+
+@router.post("/api/scan/{scan_id}/fp_review/summary", response_model=dict)
+async def trigger_fp_review_summary(
+    scan_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Retry only the independent fp-check summary."""
+    _check_scan_owner(scan_id, current_user)
+    result = await _start_fp_review_summary(
+        scan_id,
+        _server_url_from_request(request),
+        raise_on_error=True,
+    )
+    assert result is not None
+    return result
 
 
 @router.post("/api/scan/{scan_id}/fp_review/stop")
@@ -2391,19 +2645,31 @@ async def stop_fp_review(
     job = store.get_fp_review_by_scan(scan_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No FP review found for this scan")
-    if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
+    item_running = job.status in {
+        FpReviewStatus.PENDING,
+        FpReviewStatus.RUNNING,
+    }
+    summary_running = job.summary_status == FpReviewStatus.RUNNING
+    if not item_running and not summary_running:
         return {"ok": True, "review_id": job.review_id}
 
     meta = store.get_scan_meta(scan_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    store.update_fp_review_job(
-        job.review_id,
-        status=FpReviewStatus.CANCELLED.value,
-        clear_current_vuln_index=True,
-        error_message="用户手动停止",
-    )
+    updates: dict = {}
+    if item_running:
+        updates.update({
+            "status": FpReviewStatus.CANCELLED.value,
+            "clear_current_vuln_index": True,
+            "error_message": "用户手动停止",
+        })
+    if summary_running:
+        updates.update({
+            "summary_status": FpReviewStatus.CANCELLED.value,
+            "summary_error_message": "用户手动停止",
+        })
+    store.update_fp_review_job(job.review_id, **updates)
 
     agent_id = _resolve_scan_agent_id(meta)
     if agent_id is not None:
@@ -2527,11 +2793,12 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
-    # Auto-recover from agent disconnect: the Agent's FP review task survived
-    # the WebSocket reconnect and is still posting progress.
-    if job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
+    # Progress is authoritative for a non-cancelled task. This also closes the
+    # narrow race where a previous incremental wave finishes while a newly
+    # queued item is already starting.
+    if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
         store.update_fp_review_job(body.review_id, status="running", error_message="")
-        logger.info("FP review %s auto-recovered from agent disconnect", body.review_id)
+        logger.info("FP review %s resumed from Agent progress", body.review_id)
     store.update_fp_review_job(
         body.review_id,
         current_vuln_index=body.vuln_index,
@@ -2558,9 +2825,9 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
-    if job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
+    if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
         store.update_fp_review_job(body.review_id, status="running", error_message="")
-        logger.info("FP review %s auto-recovered from agent disconnect", body.review_id)
+        logger.info("FP review %s resumed from Agent result", body.review_id)
     now = datetime.now(timezone.utc).isoformat()
     # 去误报定级简化为二元：tp 且外部可触发（或命中历史/校验匹配）为 high，其余一律 low。
     severity = "high" if (body.verdict == "tp" and body.severity == "high") else "low"
@@ -2578,6 +2845,15 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         created_at=now,
     )
     store.add_fp_review_result(body.review_id, result)
+    if (
+        job.method == FpReviewMethod.FP_CHECK
+        and job.summary_status != FpReviewStatus.RUNNING
+    ):
+        store.update_fp_review_job(
+            body.review_id,
+            summary_status=FpReviewStatus.PENDING.value,
+            summary_error_message="",
+        )
     from backend.sse import publish
     publish(scan_id, "fp_review_result", {
         "review_id": body.review_id, "vuln_index": body.vuln_index,
@@ -2605,9 +2881,9 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
-    if job.status == FpReviewStatus.ERROR and _is_agent_disconnect_error(job.error_message):
+    if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
         store.update_fp_review_job(body.review_id, status="running", error_message="")
-        logger.info("FP review %s auto-recovered from agent disconnect", body.review_id)
+        logger.info("FP review %s resumed from Agent stage output", body.review_id)
     if body.stage not in _FP_REVIEW_STAGE_KEYS[job.method]:
         raise HTTPException(status_code=400, detail="Invalid FP review stage")
     now = datetime.now(timezone.utc).isoformat()
@@ -2634,30 +2910,91 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
 
 @router.post("/api/scan/{scan_id}/fp_review/finish")
 async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dict:
-    """Agent signals FP review job is complete."""
+    """Agent signals the single-item FP review queue is complete."""
     store = get_scan_store()
     job = store.get_fp_review_job(body.review_id)
     if job is None or job.scan_id != scan_id:
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
-    store.update_fp_review_job(
-        body.review_id,
-        status=body.status,
-        clear_current_vuln_index=True,
-        error_message=body.error_message,
-        summary_markdown=body.summary_markdown,
-        summary_output_source=body.summary_output_source,
-    )
+    updates: dict = {
+        "status": body.status,
+        "clear_current_vuln_index": True,
+        "error_message": body.error_message or "",
+    }
+    # Backward compatibility for an older batch fp-check Agent. Empty legacy
+    # fields must never erase a separately persisted successful summary.
+    if body.summary_markdown.strip():
+        updates.update({
+            "summary_markdown": body.summary_markdown,
+            "summary_output_source": body.summary_output_source,
+            "summary_status": FpReviewStatus.COMPLETE.value,
+            "summary_error_message": "",
+        })
+    store.update_fp_review_job(body.review_id, **updates)
     from backend.sse import publish
     publish(scan_id, "fp_review_finish", {
         "review_id": body.review_id, "status": body.status,
         "method": job.method.value,
         "error_message": body.error_message,
-        "summary_markdown": body.summary_markdown,
-        "summary_output_source": body.summary_output_source.model_dump(),
     })
     logger.info("FP review %s finished with status %s", body.review_id, body.status)
+    return {"ok": True}
+
+
+@router.post("/api/scan/{scan_id}/fp_review/summary/finish")
+async def agent_fp_review_summary_finish(
+    scan_id: str,
+    body: AgentFpReviewSummaryFinish,
+) -> dict:
+    """Agent completes the independent fp-check summary lifecycle."""
+    store = get_scan_store()
+    job = store.get_fp_review_job(body.review_id)
+    if (
+        job is None
+        or job.scan_id != scan_id
+        or job.method != FpReviewMethod.FP_CHECK
+    ):
+        raise HTTPException(status_code=404, detail="fp-check review not found")
+    if (
+        job.summary_status == FpReviewStatus.CANCELLED
+        and body.status != FpReviewStatus.CANCELLED.value
+    ):
+        return {"ok": True}
+    updates: dict = {
+        "summary_status": body.status,
+        "summary_error_message": body.error_message or "",
+    }
+    if (
+        body.status == FpReviewStatus.COMPLETE.value
+        and body.summary_markdown.strip()
+    ):
+        updates.update({
+            "summary_markdown": body.summary_markdown,
+            "summary_output_source": body.summary_output_source,
+        })
+    store.update_fp_review_job(body.review_id, **updates)
+    from backend.sse import publish
+    publish(scan_id, "fp_review_summary_finish", {
+        "review_id": body.review_id,
+        "status": body.status,
+        "error_message": body.error_message,
+        "summary_markdown": (
+            body.summary_markdown
+            if body.status == FpReviewStatus.COMPLETE.value
+            else None
+        ),
+        "summary_output_source": (
+            body.summary_output_source.model_dump()
+            if body.status == FpReviewStatus.COMPLETE.value
+            else None
+        ),
+    })
+    logger.info(
+        "FP review summary %s finished with status %s",
+        body.review_id,
+        body.status,
+    )
     return {"ok": True}
 
 

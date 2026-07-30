@@ -136,6 +136,20 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 else None
             ),
         )
+    elif cmd_type == "fp_review_summary":
+        from deephole_client.updater import ensure_runtime_updated
+        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        await agent_server.handle_fp_review_summary(
+            scan_id=msg["scan_id"],
+            review_id=msg["review_id"],
+            project_path=msg["project_path"],
+            feedback_entries=msg.get("feedback_entries", []),
+            code_graph_mcp=(
+                msg.get("code_graph_mcp")
+                if isinstance(msg.get("code_graph_mcp"), dict)
+                else None
+            ),
+        )
     elif cmd_type == "vulnerability_validation":
         from deephole_client.updater import ensure_runtime_updated
         try:
