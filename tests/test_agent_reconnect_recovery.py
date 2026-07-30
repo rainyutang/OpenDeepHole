@@ -1134,6 +1134,162 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(len(threat_events), 1)
             self.assertEqual(threat_events[0]["index"], 1)
 
+    def test_report_threat_finding_is_live_and_finish_does_not_duplicate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.AUDITING, total=1)
+            if hasattr(scan, "auto_fp_review"):
+                scan.auto_fp_review = False
+            meta = _meta()
+            if hasattr(meta, "auto_fp_review"):
+                meta.auto_fp_review = False
+            store.save_scan(scan, meta)
+            agent_api._running_scans["scan-1"] = scan
+            finding = {
+                "file": "threat.c",
+                "line": 20,
+                "function": "threat_issue",
+                "call_chain": [{
+                    "function": "receive_packet",
+                    "file": "network.c",
+                    "line": 8,
+                }],
+                "vuln_type": "out_of_bounds",
+                "severity": "critical",
+                "description": "threat-derived issue",
+                "attack_entry": "untrusted network packet",
+                "confirmed": True,
+                "ai_verdict": "confirmed",
+                "analysis_source": "threat_audit",
+                "source_task_id": "threat-task-1",
+                "threat_surface_node_id": "TREE-1:NODE-1",
+                "threat_method_node_id": "PATTERN-1",
+            }
+            published: list[tuple[str, str, dict]] = []
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.sse.publish",
+                    side_effect=lambda scan_id, event_type, data: published.append(
+                        (scan_id, event_type, data),
+                    ),
+                ),
+            ):
+                first_response = asyncio.run(agent_api.agent_report_vulnerability(
+                    "scan-1",
+                    Vulnerability(**finding),
+                ))
+                store.update_vulnerability(
+                    "scan-1",
+                    0,
+                    "confirmed",
+                    "verified by reviewer",
+                    ticket_submitted=True,
+                    ticket_id="SEC-42",
+                )
+                scan.vulnerabilities[0].user_verdict = "confirmed"
+                scan.vulnerabilities[0].user_verdict_reason = (
+                    "verified by reviewer"
+                )
+                scan.vulnerabilities[0].ticket_submitted = True
+                scan.vulnerabilities[0].ticket_id = "SEC-42"
+                replay_response = asyncio.run(
+                    agent_api.agent_report_vulnerability(
+                        "scan-1",
+                        Vulnerability(**finding),
+                    ),
+                )
+
+                self.assertEqual(first_response["index"], 0)
+                self.assertEqual(replay_response["index"], 0)
+                self.assertEqual(
+                    scan.vulnerabilities[0].user_verdict,
+                    "confirmed",
+                )
+                self.assertEqual(scan.vulnerabilities[0].ticket_id, "SEC-42")
+                distinct_finding = {
+                    **finding,
+                    "call_chain": [{
+                        "function": "receive_datagram",
+                        "file": "udp.c",
+                        "line": 18,
+                    }],
+                    "attack_entry": "untrusted UDP datagram",
+                }
+                distinct_response = asyncio.run(
+                    agent_api.agent_report_vulnerability(
+                        "scan-1",
+                        Vulnerability(**distinct_finding),
+                    ),
+                )
+                self.assertEqual(distinct_response["index"], 1)
+                persisted_scan = store.load_scan("scan-1")[0]
+                self.assertEqual(persisted_scan.status, ScanItemStatus.AUDITING)
+                persisted_findings = store.get_vulnerabilities("scan-1")
+                self.assertEqual(len(persisted_findings), 2)
+                self.assertEqual(
+                    persisted_findings[0].analysis_source,
+                    "threat_audit",
+                )
+                self.assertEqual(
+                    persisted_findings[0].user_verdict,
+                    "confirmed",
+                )
+                self.assertEqual(
+                    persisted_findings[1].attack_entry,
+                    "untrusted UDP datagram",
+                )
+                live_scan = agent_api._running_scans["scan-1"]
+                self.assertEqual(live_scan.status, ScanItemStatus.AUDITING)
+                self.assertEqual(len(live_scan.vulnerabilities), 2)
+                self.assertEqual(
+                    live_scan.vulnerabilities[0].source_task_id,
+                    "threat-task-1",
+                )
+                live_events = [
+                    data
+                    for _scan_id, event_type, data in published
+                    if event_type == "scan_vulnerability"
+                ]
+                self.assertEqual(
+                    [event["index"] for event in live_events],
+                    [0, 1],
+                )
+
+                asyncio.run(agent_api.agent_finish_scan(
+                    "scan-1",
+                    AgentScanFinish(
+                        vulnerabilities=[
+                            Vulnerability(**finding),
+                            Vulnerability(**distinct_finding),
+                        ],
+                        status="complete",
+                        total_candidates=1,
+                        processed_candidates=1,
+                    ),
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+
+            stored = store.get_vulnerabilities("scan-1")
+            self.assertEqual(len(stored), 2)
+            self.assertEqual(stored[0].source_task_id, "threat-task-1")
+            self.assertEqual(stored[0].user_verdict, "confirmed")
+            self.assertEqual(stored[0].ticket_id, "SEC-42")
+            threat_events = [
+                data
+                for _scan_id, event_type, data in published
+                if event_type == "scan_vulnerability"
+                and data["vulnerability"]["analysis_source"] == "threat_audit"
+            ]
+            self.assertEqual(
+                [event["index"] for event in threat_events],
+                [0, 1],
+            )
+
     def test_finish_scan_keeps_same_finding_from_different_engines(
         self,
     ) -> None:

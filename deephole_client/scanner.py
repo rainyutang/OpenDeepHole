@@ -182,20 +182,27 @@ async def _report_process_vulnerabilities(
         ):
             from . import server as client_server
 
-            payload = vulnerability.model_dump(mode="json")
-            payload["index"] = int(fp_info["vuln_index"])
-            await client_server.enqueue_fp_review(
-                config=config,
-                reporter=reporter,
-                scan_id=scan_id,
-                review_id=str(fp_info["review_id"]),
-                method=str(fp_info.get("method") or "adversarial"),
-                vulnerability=payload,
-                project_path=str(project_path),
-                feedback_entries=feedback_entries,
-                processed_offset=int(fp_info.get("processed") or 0),
-                code_graph_mcp=code_graph_mcp,
-            )
+            try:
+                payload = vulnerability.model_dump(mode="json")
+                payload["index"] = int(fp_info["vuln_index"])
+                await client_server.enqueue_fp_review(
+                    config=config,
+                    reporter=reporter,
+                    scan_id=scan_id,
+                    review_id=str(fp_info["review_id"]),
+                    method=str(fp_info.get("method") or "adversarial"),
+                    vulnerability=payload,
+                    project_path=str(project_path),
+                    feedback_entries=feedback_entries,
+                    processed_offset=int(fp_info.get("processed") or 0),
+                    code_graph_mcp=code_graph_mcp,
+                )
+            except Exception as exc:
+                print(
+                    "Warning: failed to queue FP review for "
+                    f"{scan_id}#{response.get('index')}: {exc}",
+                    flush=True,
+                )
         if (
             config.vulnerability_validation.enabled
             and vulnerability.confirmed
@@ -205,24 +212,31 @@ async def _report_process_vulnerabilities(
         ):
             from . import server as client_server
 
-            await client_server.enqueue_vulnerability_validation(
-                config=config,
-                reporter=reporter,
-                scan_id=scan_id,
-                vuln_index=int(response["index"]),
-                vulnerability=vulnerability.model_dump(mode="json"),
-                report_markdown=str(
-                    response.get("report_markdown")
-                    or vulnerability.vulnerability_report
-                    or vulnerability.ai_analysis
-                ),
-                project_path=str(project_path),
-                code_scan_path=str(code_scan_path),
-                product=product,
-                validation_environment=validation_environment,
-                report_queued=True,
-                code_graph_mcp=code_graph_mcp,
-            )
+            try:
+                await client_server.enqueue_vulnerability_validation(
+                    config=config,
+                    reporter=reporter,
+                    scan_id=scan_id,
+                    vuln_index=int(response["index"]),
+                    vulnerability=vulnerability.model_dump(mode="json"),
+                    report_markdown=str(
+                        response.get("report_markdown")
+                        or vulnerability.vulnerability_report
+                        or vulnerability.ai_analysis
+                    ),
+                    project_path=str(project_path),
+                    code_scan_path=str(code_scan_path),
+                    product=product,
+                    validation_environment=validation_environment,
+                    report_queued=True,
+                    code_graph_mcp=code_graph_mcp,
+                )
+            except Exception as exc:
+                print(
+                    "Warning: failed to queue validation for "
+                    f"{scan_id}#{response.get('index')}: {exc}",
+                    flush=True,
+                )
     return reported
 
 

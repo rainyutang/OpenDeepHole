@@ -18,8 +18,11 @@ from deephole_client.scanner import (
     _resolve_scan_paths,
     run_scan,
 )
-from backend.models import MiningEngineSelection
+from backend.models import MiningEngineSelection, Vulnerability
 from deephole_client.vulnerability_mining import MiningEngineOutput
+from deephole_client.vulnerability_mining.engines.threat_audit.engine import (
+    run as run_threat_audit_engine,
+)
 
 
 def _reporter() -> SimpleNamespace:
@@ -92,7 +95,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         }
         config = AgentConfig()
         config.vulnerability_validation.enabled = False
-        enqueue = AsyncMock(return_value=True)
+        enqueue = AsyncMock(side_effect=RuntimeError("queue unavailable"))
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch(
@@ -101,7 +104,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             project = Path(tmp)
-            await _report_process_vulnerabilities(
+            reported = await _report_process_vulnerabilities(
                 reporter=reporter,
                 config=config,
                 scan_id="scan-1",
@@ -121,6 +124,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(enqueue.await_args.kwargs["method"], "fp_check")
+        self.assertEqual(len(reported), 1)
+        self.assertEqual(reported[0][1]["index"], 0)
 
     def test_structured_task_output_does_not_repeat_process_prefix(self) -> None:
         line = "[threat_analysis][ses-1][tool] name=read"
@@ -330,10 +335,35 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_threat_only_mode_does_not_start_static_processes(self) -> None:
         reporter = _reporter()
+        reported_indexes: list[int] = []
+
+        async def report_vulnerability(
+            _scan_id,
+            vulnerability,
+        ):
+            index = len(reported_indexes)
+            reported_indexes.append(index)
+            vulnerability.output_source.agent_session_id = "agent-session-1"
+            return {"index": index}
+
+        reporter.report_vulnerability.side_effect = report_vulnerability
         config = AgentConfig()
         config.threat_analysis.enabled = True
         static = AsyncMock()
         audit = AsyncMock()
+        first_threat_result_reported = asyncio.Event()
+        release_threat_batch = asyncio.Event()
+        threat_vulnerabilities = [
+            _threat_vulnerability(),
+            {
+                **_threat_vulnerability(),
+                "file": "src/threat_second.c",
+                "line": 84,
+                "function": "handle_second_packet",
+                "description": "second threat-derived issue",
+                "vuln_type": "integer_overflow",
+            },
+        ]
         threat_task = {
             "task_id": "threat-task-1",
             "scan_id": "scan-threat",
@@ -367,15 +397,28 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "message": "running",
                 "data": {"task": threat_task},
             })
+            completed_task = {
+                **threat_task,
+                "status": "completed",
+                "finished_at": "2026-07-30T00:00:02+00:00",
+                "updated_at": "2026-07-30T00:00:02+00:00",
+            }
+            await kwargs["on_task_result"]({
+                "task": completed_task,
+                "vulnerabilities": threat_vulnerabilities,
+            })
+            await kwargs["output"]({
+                "process": "threat_audit",
+                "kind": "task_status",
+                "message": "completed",
+                "data": {"task": completed_task},
+            })
+            first_threat_result_reported.set()
+            await release_threat_batch.wait()
             return {
                 "status": "success",
-                "tasks": [{
-                    **threat_task,
-                    "status": "completed",
-                    "finished_at": "2026-07-30T00:00:02+00:00",
-                    "updated_at": "2026-07-30T00:00:02+00:00",
-                }],
-                "vulnerabilities": [_threat_vulnerability()],
+                "tasks": [completed_task],
+                "vulnerabilities": threat_vulnerabilities,
             }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -424,7 +467,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     new=AsyncMock(side_effect=threat_audit_run),
                 ),
             ):
-                await run_scan(
+                scan_task = asyncio.create_task(run_scan(
                     config=config,
                     project_path=project,
                     code_scan_path=project,
@@ -436,7 +479,26 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     scan_id="scan-threat",
                     cancel_event=threading.Event(),
                     scan_mode=SCAN_MODE_THREAT_ANALYSIS_ONLY,
-                )
+                ))
+                try:
+                    await asyncio.wait_for(
+                        first_threat_result_reported.wait(),
+                        timeout=1,
+                    )
+                    self.assertEqual(
+                        reporter.report_vulnerability.await_count,
+                        2,
+                    )
+                    reporter.finish_scan.assert_not_awaited()
+                    self.assertFalse(scan_task.done())
+                    live_task = (
+                        reporter.push_threat_audit_task.await_args.args[1]
+                    )
+                    self.assertEqual(live_task.status, "completed")
+                    self.assertEqual(live_task.result_vuln_indexes, [0, 1])
+                finally:
+                    release_threat_batch.set()
+                await asyncio.wait_for(scan_task, timeout=1)
 
         threat.assert_awaited_once()
         static.assert_not_awaited()
@@ -449,7 +511,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         )
         finish_args = reporter.finish_scan.await_args.args
         self.assertEqual(finish_args[2], "complete")
-        self.assertEqual(len(finish_args[1]), 1)
+        self.assertEqual(len(finish_args[1]), 2)
         self.assertEqual(
             finish_args[1][0].analysis_source,
             "threat_audit",
@@ -458,9 +520,169 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             [
                 call.args[1].status
                 for call in reporter.push_threat_audit_task.await_args_list
-            ],
+            ][:3],
             ["pending", "running", "completed"],
         )
+        self.assertEqual(reporter.report_vulnerability.await_count, 2)
+        self.assertTrue(
+            all(
+                vulnerability.output_source.agent_session_id
+                == "agent-session-1"
+                for vulnerability in finish_args[1]
+            ),
+        )
+
+    async def test_threat_engine_retries_each_unreported_finding(self) -> None:
+        for failure_mode in (
+            "empty_response",
+            "exception",
+            "legacy_runner_empty_response",
+        ):
+            with self.subTest(failure_mode=failure_mode):
+                reporter = _reporter()
+                config = AgentConfig()
+                attempts: list[str] = []
+                threat_vulnerabilities = [
+                    _threat_vulnerability(),
+                    {
+                        **_threat_vulnerability(),
+                        "file": "src/threat_retry.c",
+                        "line": 99,
+                        "function": "retry_issue",
+                        "description": "finding requiring report retry",
+                    },
+                ]
+                completed_task = {
+                    "task_id": "threat-task-1",
+                    "scan_id": "scan-threat-retry",
+                    "status": "completed",
+                    "surface_node_id": "TREE-1:NODE-1",
+                    "surface_name": "parser",
+                    "method_node_id": "PATTERN-1",
+                    "method_name": "malformed packet",
+                    "finished_at": "2026-07-30T00:00:02+00:00",
+                    "updated_at": "2026-07-30T00:00:02+00:00",
+                }
+
+                async def report_values(values):
+                    self.assertEqual(len(values), 1)
+                    vulnerability = (
+                        values[0]
+                        if isinstance(values[0], Vulnerability)
+                        else Vulnerability.model_validate(values[0])
+                    )
+                    attempts.append(vulnerability.file)
+                    if (
+                        vulnerability.file == "src/threat_retry.c"
+                        and attempts.count("src/threat_retry.c") == 1
+                    ):
+                        if failure_mode == "exception":
+                            raise RuntimeError("temporary report failure")
+                        vulnerability.output_source.agent_session_id = (
+                            "agent-session-retry"
+                        )
+                        return [(vulnerability, None)]
+                    vulnerability.output_source.agent_session_id = (
+                        "agent-session-retry"
+                    )
+                    index = (
+                        4
+                        if vulnerability.file == "src/threat.c"
+                        else 5
+                    )
+                    return [(vulnerability, {"index": index})]
+
+                async def run_audit(**kwargs):
+                    if failure_mode != "legacy_runner_empty_response":
+                        await kwargs["on_task_result"]({
+                            "task": completed_task,
+                            "vulnerabilities": threat_vulnerabilities,
+                        })
+                    await kwargs["output"]({
+                        "process": "threat_audit",
+                        "kind": "task_status",
+                        "message": "completed",
+                        "data": {"task": completed_task},
+                    })
+                    return {
+                        "status": "success",
+                        "tasks": [completed_task],
+                        "vulnerabilities": threat_vulnerabilities,
+                    }
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    project = root / "project"
+                    project.mkdir()
+                    with (
+                        patch(
+                            "deephole_client.vulnerability_mining.engines."
+                            "threat_audit.engine.run_threat_analysis",
+                            new=AsyncMock(return_value={
+                                "result": True,
+                                "attack_tree_path": str(
+                                    root / "attack-tree.json"
+                                ),
+                                "high_risk_modules_path": str(
+                                    root / "risk.json"
+                                ),
+                            }),
+                        ),
+                        patch(
+                            "deephole_client.vulnerability_mining.engines."
+                            "threat_audit.engine.collect_json_artifacts",
+                            return_value={"artifacts": {}},
+                        ),
+                        patch(
+                            "deephole_client.vulnerability_mining.engines."
+                            "threat_audit.engine.run_threat_audit",
+                            new=AsyncMock(side_effect=run_audit),
+                        ),
+                    ):
+                        result = await run_threat_audit_engine(
+                            project_path=project,
+                            code_scan_path=project,
+                            work_dir=root / "work",
+                            scan_id="scan-threat-retry",
+                            config=config,
+                            reporter=reporter,
+                            output=AsyncMock(),
+                            cancel_event=threading.Event(),
+                            retry_task_ids=None,
+                            report_vulnerabilities=report_values,
+                        )
+
+                self.assertEqual(result["status"], "success")
+                self.assertEqual(
+                    attempts,
+                    [
+                        "src/threat.c",
+                        "src/threat_retry.c",
+                        "src/threat_retry.c",
+                    ],
+                )
+                self.assertEqual(len(result["vulnerabilities"]), 2)
+                self.assertTrue(all(
+                    vulnerability.output_source.agent_session_id
+                    == "agent-session-retry"
+                    for vulnerability in result["vulnerabilities"]
+                ))
+                pushed_tasks = [
+                    call.args[1]
+                    for call in reporter.push_threat_audit_task.await_args_list
+                ]
+                self.assertEqual(
+                    pushed_tasks[0].result_vuln_indexes,
+                    (
+                        []
+                        if failure_mode == "legacy_runner_empty_response"
+                        else [4]
+                    ),
+                )
+                self.assertEqual(
+                    pushed_tasks[-1].result_vuln_indexes,
+                    [4, 5],
+                )
 
     async def test_custom_scan_graph_is_prepared_and_enters_task_context(
         self,

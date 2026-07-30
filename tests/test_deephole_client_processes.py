@@ -105,6 +105,49 @@ def _write_candidate_audit_rule(
     return checker
 
 
+def _write_threat_audit_inputs(
+    root: Path,
+    *,
+    attack_patterns: list[dict],
+) -> tuple[Path, Path, Path]:
+    project = root / "project"
+    project.mkdir()
+    attack_tree_path = root / "attack-trees.json"
+    high_risk_modules_path = root / "high-risk-modules.json"
+    attack_tree_path.write_text(json.dumps({
+        "attack_trees": [{
+            "tree_id": "TREE-CALLBACK",
+            "value_asset": {"asset_name": "service"},
+            "nodes": [{
+                "node_id": "NODE-CALLBACK",
+                "node_type": "attack_surface",
+                "node_name": "parser",
+                "module_name": "parser",
+                "description": "parses external requests",
+                "external_exposure": True,
+            }],
+            "attack_paths": [{
+                "path_id": "PATH-CALLBACK",
+                "path_name": "remote parser path",
+                "path_description": "socket input reaches parser",
+                "node_ids": ["NODE-CALLBACK"],
+                "related_high_risk_modules": [{
+                    "module_name": "parser",
+                    "node_id": "NODE-CALLBACK",
+                    "association_description": "entry",
+                }],
+                "attack_patterns": attack_patterns,
+            }],
+        }],
+    }), encoding="utf-8")
+    high_risk_modules_path.write_text(json.dumps([{
+        "模块名称": "parser",
+        "代码目录": "src/parser.c",
+        "面临威胁": "out of bounds",
+    }]), encoding="utf-8")
+    return project, attack_tree_path, high_risk_modules_path
+
+
 def test_all_process_entries_are_async_and_reject_unknown_keys() -> None:
     for function in PROCESS_FUNCTIONS:
         assert inspect.iscoroutinefunction(function)
@@ -323,6 +366,211 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             if event["kind"] == "task_status"
         ] == ["pending", "cancelled"]
         cancelled_run_task.assert_not_awaited()
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_threat_audit_calls_sync_callback_with_completed_task_result() -> None:
+    async def scenario(root: Path) -> None:
+        project, attack_tree_path, high_risk_modules_path = (
+            _write_threat_audit_inputs(
+                root,
+                attack_patterns=[{
+                    "pattern_id": "PATTERN-SYNC",
+                    "pattern_name": "malformed packet",
+                }],
+            )
+        )
+        callback_results: list[dict] = []
+        model_result = _task_result([_audit_item(
+            confirmed=True,
+            file="src/parser.c",
+            line=10,
+            function="parse",
+            description="bad length",
+            vuln_type="oob",
+        )])
+
+        with patch(
+            "deephole_client.threat_audit.runner.run_opencode_task",
+            new=AsyncMock(return_value=model_result),
+        ):
+            audited = await run_threat_audit(
+                project_path=project,
+                work_dir=root / "audit",
+                scan_id="scan-sync-callback",
+                attack_tree_path=attack_tree_path,
+                high_risk_modules_path=high_risk_modules_path,
+                on_task_result=callback_results.append,
+            )
+
+        assert audited["status"] == "success"
+        assert len(callback_results) == 1
+        callback_result = callback_results[0]
+        assert set(callback_result) == {"task", "vulnerabilities"}
+        assert callback_result["task"]["status"] == "completed"
+        assert callback_result["task"]["result_count"] == 1
+        assert callback_result["vulnerabilities"] == audited["vulnerabilities"]
+        assert callback_result["vulnerabilities"][0]["analysis_source"] == "threat_audit"
+        assert (
+            callback_result["vulnerabilities"][0]["source_task_id"]
+            == callback_result["task"]["task_id"]
+        )
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_threat_audit_callback_failure_does_not_fail_completed_task() -> None:
+    async def scenario(root: Path) -> None:
+        project, attack_tree_path, high_risk_modules_path = (
+            _write_threat_audit_inputs(
+                root,
+                attack_patterns=[{
+                    "pattern_id": "PATTERN-CALLBACK-FAILURE",
+                    "pattern_name": "malformed packet",
+                }],
+            )
+        )
+        events: list[dict] = []
+
+        def failed_callback(_result: dict) -> None:
+            raise RuntimeError("report transport unavailable")
+
+        with patch(
+            "deephole_client.threat_audit.runner.run_opencode_task",
+            new=AsyncMock(return_value=_task_result([_audit_item(
+                confirmed=True,
+                file="src/parser.c",
+                line=11,
+                function="parse",
+                description="bad length",
+                vuln_type="oob",
+            )])),
+        ):
+            audited = await run_threat_audit(
+                project_path=project,
+                work_dir=root / "audit",
+                scan_id="scan-callback-failure",
+                attack_tree_path=attack_tree_path,
+                high_risk_modules_path=high_risk_modules_path,
+                output=events.append,
+                on_task_result=failed_callback,
+            )
+
+        assert audited["status"] == "success"
+        assert audited["tasks"][0]["status"] == "completed"
+        assert len(audited["vulnerabilities"]) == 1
+        assert any(
+            event["kind"] == "error"
+            and "result callback failed" in event["message"]
+            for event in events
+        )
+        assert any(
+            event["kind"] == "task_status"
+            and event["data"]["task"]["status"] == "completed"
+            for event in events
+        )
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_threat_audit_streams_async_task_results_before_batch_finishes() -> None:
+    async def scenario(root: Path) -> None:
+        project, attack_tree_path, high_risk_modules_path = (
+            _write_threat_audit_inputs(
+                root,
+                attack_patterns=[
+                    {
+                        "pattern_id": "PATTERN-READY",
+                        "pattern_name": "ready pattern",
+                    },
+                    {
+                        "pattern_id": "PATTERN-BLOCKED",
+                        "pattern_name": "blocked pattern",
+                    },
+                ],
+            )
+        )
+        release_blocked = asyncio.Event()
+        blocked_started = asyncio.Event()
+        ready_reported = asyncio.Event()
+        callback_results: list[dict] = []
+        task_status_events: list[dict] = []
+        completed_statuses_seen_by_callback: dict[str, bool] = {}
+
+        async def run_task(**kwargs):
+            if "blocked pattern" in kwargs["prompt"]:
+                blocked_started.set()
+                await release_blocked.wait()
+                return _task_result([])
+            return _task_result([_audit_item(
+                confirmed=True,
+                file="src/parser.c",
+                line=20,
+                function="parse_ready",
+                description="ready issue",
+                vuln_type="oob",
+            )])
+
+        def collect_event(event: dict) -> None:
+            if event["kind"] == "task_status":
+                task_status_events.append(event)
+
+        async def on_task_result(result: dict) -> None:
+            await asyncio.sleep(0)
+            task = result["task"]
+            completed_statuses_seen_by_callback[task["task_id"]] = any(
+                event["data"]["task"]["task_id"] == task["task_id"]
+                and event["data"]["task"]["status"] == "completed"
+                for event in task_status_events
+            )
+            callback_results.append(result)
+            if task["method_name"] == "ready pattern":
+                ready_reported.set()
+
+        with patch(
+            "deephole_client.threat_audit.runner.run_opencode_task",
+            side_effect=run_task,
+        ):
+            batch_task = asyncio.create_task(run_threat_audit(
+                project_path=project,
+                work_dir=root / "audit",
+                scan_id="scan-async-callback",
+                attack_tree_path=attack_tree_path,
+                high_risk_modules_path=high_risk_modules_path,
+                concurrency=2,
+                output=collect_event,
+                on_task_result=on_task_result,
+            ))
+            try:
+                await asyncio.wait_for(blocked_started.wait(), timeout=1)
+                await asyncio.wait_for(ready_reported.wait(), timeout=1)
+                assert not batch_task.done()
+                assert len(callback_results) == 1
+                assert callback_results[0]["task"]["status"] == "completed"
+                assert callback_results[0]["task"]["result_count"] == 1
+                assert callback_results[0]["task"]["method_name"] == "ready pattern"
+            finally:
+                release_blocked.set()
+            audited = await asyncio.wait_for(batch_task, timeout=1)
+
+        assert audited["status"] == "success"
+        assert [
+            result["task"]["method_name"]
+            for result in callback_results
+        ] == ["ready pattern", "blocked pattern"]
+        assert [
+            result["task"]["result_count"]
+            for result in callback_results
+        ] == [1, 0]
+        assert callback_results[1]["vulnerabilities"] == []
+        assert completed_statuses_seen_by_callback == {
+            result["task"]["task_id"]: False
+            for result in callback_results
+        }
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))

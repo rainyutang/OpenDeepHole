@@ -23,7 +23,7 @@ _ALLOWED_KEYS = {
     "project_path", "work_dir", "scan_id", "attack_tree_path",
     "high_risk_modules_path", "concurrency",
     "required_capability", "include_task_ids", "exclude_task_ids",
-    "task_agent_config", "output", "cancel_event",
+    "task_agent_config", "output", "on_task_result", "cancel_event",
 }
 _REQUIRED_KEYS = {
     "project_path",
@@ -64,6 +64,7 @@ _TASK_STATUS_FIELDS = {
     "attack_path_id",
     "attack_path_fingerprint",
     "description",
+    "result_count",
     "result_vuln_indexes",
     "failure_reason",
     "output_source",
@@ -97,6 +98,22 @@ async def _emit_task_status(
         message,
         task=_task_status_snapshot(task),
     )
+
+
+async def _notify_task_result(
+    callback: Any,
+    *,
+    task: dict[str, Any],
+    vulnerabilities: list[dict[str, Any]],
+) -> None:
+    if callback is None:
+        return
+    result = callback({
+        "task": _task_status_snapshot(task),
+        "vulnerabilities": [dict(item) for item in vulnerabilities],
+    })
+    if inspect.isawaitable(result):
+        await result
 
 
 def _cancelled(cancel_event: Any) -> bool:
@@ -757,6 +774,9 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
     output = kwargs.get("output")
     if output is not None and not callable(output):
         raise TypeError("output must be callable or None")
+    on_task_result = kwargs.get("on_task_result")
+    if on_task_result is not None and not callable(on_task_result):
+        raise TypeError("on_task_result must be callable or None")
     cancel_event = kwargs.get("cancel_event")
     concurrency = max(1, int(kwargs.get("concurrency") or 1))
     capability = str(kwargs.get("required_capability") or "high").lower()
@@ -848,6 +868,28 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
                     vulnerabilities.extend(produced)
                 task["status"] = "completed"
                 task["result_count"] = len(produced)
+                task["updated_at"] = task["finished_at"]
+                try:
+                    await _notify_task_result(
+                        on_task_result,
+                        task=task,
+                        vulnerabilities=produced,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    try:
+                        await _emit(
+                            output,
+                            "error",
+                            (
+                                "Threat audit result callback failed for "
+                                f"{task['task_id']}: {exc}"
+                            ),
+                            task_id=task["task_id"],
+                        )
+                    except Exception:
+                        pass
                 await _emit_task_status(
                     output,
                     task,

@@ -2377,6 +2377,51 @@ def _finish_vulnerability_identity(
     )
 
 
+def _reported_vulnerability_identity(vuln: Vulnerability) -> str:
+    """Return the immutable evidence identity used for live-report replay."""
+    payload = vuln.model_dump(
+        mode="json",
+        exclude={
+            "user_verdict",
+            "user_verdict_reason",
+            "ticket_submitted",
+            "ticket_id",
+        },
+    )
+    # SQLite exposes an empty legacy chain as the finding function so callers
+    # always have a usable display fallback. Normalize both representations.
+    payload["call_chain"] = payload.get("call_chain") or [payload["function"]]
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _existing_threat_vulnerability(
+    vulnerabilities: list[Vulnerability],
+    target: Vulnerability,
+) -> tuple[int, Vulnerability] | None:
+    """Find an exact threat-audit replay already persisted for this task."""
+    if (
+        str(target.analysis_source or "").strip() != "threat_audit"
+        and str(target.engine_id or "").strip() != "threat_audit"
+    ):
+        return None
+    if not str(target.source_task_id or "").strip():
+        return None
+    target_identity = _reported_vulnerability_identity(target)
+    return next(
+        (
+            (index, existing)
+            for index, existing in enumerate(vulnerabilities)
+            if _reported_vulnerability_identity(existing) == target_identity
+        ),
+        None,
+    )
+
+
 def _stamp_vulnerability_engine(
     scan_id: str,
     vuln: Vulnerability,
@@ -2488,7 +2533,16 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
     """Agent pushes a single vulnerability result immediately after auditing it."""
     store = get_scan_store()
     vuln = _stamp_vulnerability_engine(scan_id, vuln)
-    vuln_index = store.upsert_incomplete_vulnerability(scan_id, vuln)
+    existing_vulnerabilities = store.get_vulnerabilities(scan_id)
+    existing_report = _existing_threat_vulnerability(
+        existing_vulnerabilities,
+        vuln,
+    )
+    is_new_report = existing_report is None
+    if existing_report is None:
+        vuln_index = store.upsert_incomplete_vulnerability(scan_id, vuln)
+    else:
+        vuln_index, vuln = existing_report
 
     scan = _ensure_running_scan(scan_id)
     if scan is not None:
@@ -2498,14 +2552,20 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
             scan.vulnerabilities.append(vuln)
 
     from backend.sse import publish
-    publish(scan_id, "scan_vulnerability", {
-        "index": vuln_index,
-        "vulnerability": vuln.model_dump(),
-    })
+    if is_new_report:
+        publish(scan_id, "scan_vulnerability", {
+            "index": vuln_index,
+            "vulnerability": vuln.model_dump(),
+        })
 
     logger.debug(
-        "Vulnerability reported for scan %s: %s %s:%d confirmed=%s",
-        scan_id, vuln.vuln_type, vuln.file, vuln.line, vuln.confirmed,
+        "Vulnerability %s for scan %s: %s %s:%d confirmed=%s",
+        "reported" if is_new_report else "replayed",
+        scan_id,
+        vuln.vuln_type,
+        vuln.file,
+        vuln.line,
+        vuln.confirmed,
     )
     report_markdown = ""
     fp_review_info = None
