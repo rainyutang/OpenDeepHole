@@ -212,12 +212,14 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             "deephole_client.threat_audit.runner.run_opencode_task",
             new=AsyncMock(return_value=audit_task_result),
         ) as run_task:
+            audit_events: list[dict] = []
             audit = await run_threat_audit(
                 project_path=project,
                 work_dir=root / "audit",
                 scan_id="scan-1",
                 attack_tree_path=analysis["attack_tree_path"],
                 high_risk_modules_path=analysis["high_risk_modules_path"],
+                output=audit_events.append,
             )
         assert audit["status"] == "success"
         assert audit["vulnerabilities"][0]["analysis_source"] == "threat_audit"
@@ -236,6 +238,27 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             not in run_task.await_args.kwargs["output_schema"]["items"]["properties"]
         )
         assert "output" not in run_task.await_args.kwargs
+        task_status_events = [
+            event
+            for event in audit_events
+            if event["kind"] == "task_status"
+        ]
+        assert [
+            event["data"]["task"]["status"]
+            for event in task_status_events
+        ] == ["pending", "running", "completed"]
+        assert len({
+            event["data"]["task"]["created_at"]
+            for event in task_status_events
+        }) == 1
+        assert all(
+            event["data"]["task"]["updated_at"]
+            for event in task_status_events
+        )
+        assert (
+            task_status_events[-1]["data"]["task"]["output_source"]["model"]
+            == "test/model"
+        )
 
         with patch(
             "deephole_client.threat_audit.runner.run_opencode_task",
@@ -252,6 +275,52 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         assert empty_audit["vulnerabilities"] == []
         assert empty_audit["tasks"][0]["status"] == "completed"
         assert empty_audit["tasks"][0]["result_count"] == 0
+
+        with patch(
+            "deephole_client.threat_audit.runner.run_opencode_task",
+            new=AsyncMock(side_effect=RuntimeError("model unavailable")),
+        ):
+            failed_events: list[dict] = []
+            failed_audit = await run_threat_audit(
+                project_path=project,
+                work_dir=root / "failed-audit",
+                scan_id="scan-failed",
+                attack_tree_path=analysis["attack_tree_path"],
+                high_risk_modules_path=analysis["high_risk_modules_path"],
+                output=failed_events.append,
+            )
+        assert failed_audit["tasks"][0]["status"] == "failed"
+        assert failed_audit["tasks"][0]["failure_reason"] == "model unavailable"
+        assert [
+            event["data"]["task"]["status"]
+            for event in failed_events
+            if event["kind"] == "task_status"
+        ] == ["pending", "running", "failed"]
+
+        cancelled = threading.Event()
+        cancelled.set()
+        with patch(
+            "deephole_client.threat_audit.runner.run_opencode_task",
+            new=AsyncMock(),
+        ) as cancelled_run_task:
+            cancelled_events: list[dict] = []
+            cancelled_audit = await run_threat_audit(
+                project_path=project,
+                work_dir=root / "cancelled-audit",
+                scan_id="scan-cancelled",
+                attack_tree_path=analysis["attack_tree_path"],
+                high_risk_modules_path=analysis["high_risk_modules_path"],
+                output=cancelled_events.append,
+                cancel_event=cancelled,
+            )
+        assert cancelled_audit["status"] == "cancelled"
+        assert cancelled_audit["tasks"][0]["status"] == "cancelled"
+        assert [
+            event["data"]["task"]["status"]
+            for event in cancelled_events
+            if event["kind"] == "task_status"
+        ] == ["pending", "cancelled"]
+        cancelled_run_task.assert_not_awaited()
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))

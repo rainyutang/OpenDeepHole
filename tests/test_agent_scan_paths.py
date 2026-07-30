@@ -219,6 +219,12 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     checker_names=["npd"],
                     scan_id="scan-1",
                     cancel_event=threading.Event(),
+                    mining_engines=[{
+                        "engine_id": "static_candidate",
+                        "engine_label": "静态规则扫描 + 候选点审计",
+                        "enabled": True,
+                        "fp_review_enabled": True,
+                    }],
                 )
 
         self.assertEqual(
@@ -246,6 +252,49 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         config.threat_analysis.enabled = True
         static = AsyncMock()
         audit = AsyncMock()
+        threat_task = {
+            "task_id": "threat-task-1",
+            "scan_id": "scan-threat",
+            "status": "running",
+            "surface_node_id": "TREE-1:NODE-1",
+            "surface_name": "parser",
+            "method_node_id": "PATTERN-1",
+            "method_name": "malformed packet",
+            "created_at": "2026-07-30T00:00:00+00:00",
+            "started_at": "2026-07-30T00:00:01+00:00",
+            "updated_at": "2026-07-30T00:00:01+00:00",
+        }
+
+        async def threat_audit_run(**kwargs):
+            await kwargs["output"]({
+                "process": "threat_audit",
+                "kind": "task_status",
+                "message": "pending",
+                "data": {
+                    "task": {
+                        **threat_task,
+                        "status": "pending",
+                        "started_at": "",
+                        "updated_at": "2026-07-30T00:00:00+00:00",
+                    },
+                },
+            })
+            await kwargs["output"]({
+                "process": "threat_audit",
+                "kind": "task_status",
+                "message": "running",
+                "data": {"task": threat_task},
+            })
+            return {
+                "status": "success",
+                "tasks": [{
+                    **threat_task,
+                    "status": "completed",
+                    "finished_at": "2026-07-30T00:00:02+00:00",
+                    "updated_at": "2026-07-30T00:00:02+00:00",
+                }],
+                "vulnerabilities": [_threat_vulnerability()],
+            }
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -290,11 +339,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "deephole_client.threat_audit.run_threat_audit",
-                    new=AsyncMock(return_value={
-                        "status": "success",
-                        "tasks": [],
-                        "vulnerabilities": [_threat_vulnerability()],
-                    }),
+                    new=AsyncMock(side_effect=threat_audit_run),
                 ),
             ):
                 await run_scan(
@@ -326,6 +371,13 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             finish_args[1][0].analysis_source,
             "threat_audit",
+        )
+        self.assertEqual(
+            [
+                call.args[1].status
+                for call in reporter.push_threat_audit_task.await_args_list
+            ],
+            ["pending", "running", "completed"],
         )
 
     async def test_custom_scan_graph_is_prepared_and_enters_task_context(
@@ -403,6 +455,12 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     scan_id="scan-custom",
                     cancel_event=threading.Event(),
                     code_graph_mcp=graph_config,
+                    mining_engines=[{
+                        "engine_id": "static_candidate",
+                        "engine_label": "静态规则扫描 + 候选点审计",
+                        "enabled": True,
+                        "fp_review_enabled": True,
+                    }],
                 )
 
         prepare.assert_awaited_once()

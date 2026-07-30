@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
-import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, VulnerabilityValidation } from "../types";
+import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import { isEffectiveFpReviewResult, isFpReviewNonProblem } from "../fpReview";
@@ -18,14 +18,17 @@ const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
 const ACTIVE_THREAT_TASK_STATUSES = new Set(["pending", "queued", "running", "analyzing", "auditing"]);
 const THREAT_POOL_TASK_TYPES = new Set(["threat_analysis", "threat_audit"]);
+const STATIC_ENGINE_ID = "static_candidate";
+const THREAT_ENGINE_ID = "threat_audit";
+const THREAT_AUDIT_PAGE_SIZE = 20;
 
-type MainTab = "overview" | "threat" | "mining" | "validation" | "issues";
+type MainTab = "overview" | "index" | "threat" | "threat_audit" | "mining" | "engine" | "validation" | "issues";
 type MiningTab = "static_analysis" | "candidate_audit" | "fp_review";
 type StaticTab = "call_graph" | "candidate_generation";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failure" | "timeout" | "cancelled" | "unknown";
-type FlowNodeId = "threat" | "static_analysis" | "call_graph" | "candidate_generation" | "candidate_audit" | "fp_review" | "validation";
-type FlowNodeStatus = "pending" | "running" | "done";
+type FlowNodeId = "index" | "threat" | "threat_audit" | "fp_review" | "validation" | `engine:${string}`;
+type FlowNodeStatus = "pending" | "running" | "done" | "warning" | "error" | "cancelled" | "skipped" | "unknown";
 
 interface ScanQueueTask {
   id: string;
@@ -156,6 +159,76 @@ function isActiveThreatAuditStatus(status: string | null | undefined): boolean {
   return ACTIVE_THREAT_TASK_STATUSES.has(String(status || "").trim().toLowerCase());
 }
 
+function effectiveMiningEngines(scan: ScanStatusType): MiningEngineSelection[] {
+  const selected = (scan.mining_engines ?? []).filter((item) => item.enabled);
+  if (selected.length > 0) return selected;
+  const threat = {
+    engine_id: THREAT_ENGINE_ID,
+    engine_label: "威胁分析 + 威胁审计",
+    enabled: true,
+    fp_review_enabled: true,
+  };
+  if (scan.scan_mode === "threat_analysis_only") return [threat];
+  return [
+    {
+      engine_id: STATIC_ENGINE_ID,
+      engine_label: "静态规则扫描 + 候选点审计",
+      enabled: true,
+      fp_review_enabled: true,
+    },
+    threat,
+  ];
+}
+
+function miningEngineRun(
+  scan: ScanStatusType,
+  engineId: string,
+): MiningEngineRunStatus | null {
+  return (scan.mining_engine_runs ?? []).find((item) => item.engine_id === engineId) ?? null;
+}
+
+function engineFlowStatus(run: MiningEngineRunStatus | null): FlowNodeStatus {
+  if (!run) return "unknown";
+  if (run.status === "running") return "running";
+  if (run.status === "success") return "done";
+  if (run.status === "error") return "error";
+  if (run.status === "cancelled") return "cancelled";
+  if (run.status === "skipped") return "skipped";
+  if (run.status === "pending") return "pending";
+  return "unknown";
+}
+
+function terminalThreatTaskStatus(status: string): boolean {
+  return ["completed", "failed", "failure", "error", "timeout", "no_result", "cancelled"].includes(
+    String(status || "").trim().toLowerCase(),
+  );
+}
+
+function threatAuditFlowStatus(
+  scan: ScanStatusType,
+  run: MiningEngineRunStatus | null,
+): FlowNodeStatus {
+  const tasks = scan.threat_audit_tasks ?? [];
+  if (tasks.some((task) => isActiveThreatAuditStatus(task.status))) return "running";
+  const runStatus = engineFlowStatus(run);
+  const failed = tasks.filter((task) =>
+    ["failed", "failure", "error", "timeout", "no_result"].includes(String(task.status || "").toLowerCase()),
+  ).length;
+  const cancelled = tasks.filter(
+    (task) => String(task.status || "").toLowerCase() === "cancelled",
+  ).length;
+  if (tasks.length > 0 && tasks.every((task) => terminalThreatTaskStatus(task.status))) {
+    if (runStatus === "error") return "error";
+    if (cancelled === tasks.length) return "cancelled";
+    return failed > 0 || cancelled > 0 ? "warning" : "done";
+  }
+  if (scan.threat_analysis && runStatus === "running") return "running";
+  if (scan.threat_analysis && runStatus === "done") return "done";
+  if (scan.threat_analysis && ["error", "cancelled", "skipped"].includes(runStatus)) return runStatus;
+  if (scan.threat_analysis && !run && scan.status === "complete") return "done";
+  return runStatus === "error" || runStatus === "cancelled" ? runStatus : "pending";
+}
+
 function poolTaskType(task: Record<string, unknown>): string {
   const direct = String(task.task_type || "").trim();
   if (direct) return direct.toLowerCase();
@@ -201,7 +274,27 @@ function threatAnalysisSummary(analysis: ThreatAnalysis): string {
 function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): string {
   if (scan.status === "error") return "异常中断";
   if (scan.status === "cancelled") return "已取消";
-  if (hasActiveThreatWork(scan)) return "威胁分析 / 威胁审计";
+  const runningEngines = effectiveMiningEngines(scan)
+    .map((engine) => ({
+      engine,
+      run: miningEngineRun(scan, engine.engine_id),
+    }))
+    .filter((item) => item.run?.status === "running");
+  if ((scan.threat_audit_tasks ?? []).some((task) => isActiveThreatAuditStatus(task.status))) {
+    return "漏洞挖掘 / 威胁审计";
+  }
+  if (runningEngines.length > 1) {
+    return `漏洞挖掘 / ${runningEngines.length} 个引擎并行`;
+  }
+  if (runningEngines.length === 1) {
+    const running = runningEngines[0];
+    if (running.engine.engine_id === THREAT_ENGINE_ID) {
+      return scan.threat_analysis
+        ? "漏洞挖掘 / 威胁审计"
+        : "漏洞挖掘 / 威胁分析";
+    }
+    return `漏洞挖掘 / ${running.engine.engine_label}`;
+  }
   if (scan.status === "complete") return "完成";
   const latest = [...events].reverse().find((event) => event.phase !== "opencode_output");
   if (latest?.phase === "fp_review") {
@@ -243,7 +336,11 @@ function formatIndexProgress(indexStatus: IndexStatus | null, scan: ScanStatusTy
   let current = indexStatus?.parsed_files ?? scan.static_scanned_files ?? 0;
   const failed = status === "error";
   const running = status === "parsing";
-  const done = !running && (status === "done" || scan.static_analysis_done || (indexStatus == null && scan.static_total_files > 0));
+  const done = !running && (
+    status === "done"
+    || scan.static_analysis_done
+    || (indexStatus == null && (scan.static_total_files > 0 || scan.status === "complete"))
+  );
   if (done && total > 0 && current === 0) current = total;
   return {
     current,
@@ -268,6 +365,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [activeTab, setActiveTab] = useState<MainTab>("overview");
   const [activeMiningTab, setActiveMiningTab] = useState<MiningTab>("static_analysis");
   const [activeStaticTab, setActiveStaticTab] = useState<StaticTab>("call_graph");
+  const [activeEngineId, setActiveEngineId] = useState("");
   const [stopping, setStopping] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [downloadingReport, setDownloadingReport] = useState(false);
@@ -753,27 +851,36 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   };
 
   const handleFlowNodeClick = (node: FlowNodeId) => {
+    if (node === "index") {
+      setActiveTab("index");
+      return;
+    }
     if (node === "threat") {
       setActiveTab("threat");
+      return;
+    }
+    if (node === "threat_audit") {
+      setActiveTab("threat_audit");
       return;
     }
     if (node === "validation") {
       setActiveTab("validation");
       return;
     }
-    setActiveTab("mining");
-    if (node === "candidate_audit") {
-      setActiveMiningTab("candidate_audit");
-      return;
-    }
     if (node === "fp_review") {
+      setActiveTab("mining");
       setActiveMiningTab("fp_review");
       return;
     }
-    setActiveMiningTab("static_analysis");
-    if (node === "call_graph" || node === "candidate_generation") {
-      setActiveStaticTab(node);
+    const engineId = node.slice("engine:".length);
+    if (engineId === STATIC_ENGINE_ID) {
+      setActiveTab("mining");
+      setActiveMiningTab("static_analysis");
+      setActiveStaticTab("candidate_generation");
+      return;
     }
+    setActiveEngineId(engineId);
+    setActiveTab("engine");
   };
 
   const loadSkill = async (vulnType: string) => {
@@ -880,14 +987,25 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     || variantIssueCount > 0
     || hasEvent(scan.events, ["git_history", "variant_hunt"]);
   const indexProgress = formatIndexProgress(indexStatus, scan);
-  const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis", "threat_audit"]);
+  const selectedEngines = effectiveMiningEngines(scan);
+  const staticEngineSelected = selectedEngines.some((item) => item.engine_id === STATIC_ENGINE_ID);
+  const fpReviewEligible = selectedEngines.some((item) => item.fp_review_enabled);
+  const activeEngine = selectedEngines.find((item) => item.engine_id === activeEngineId) ?? null;
+  const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis"]);
+  const threatAuditEvents = filterEvents(scan.events, ["threat_audit"]);
   const miningEvents = filterEvents(scan.events, ["auditing", "fp_review", "opencode_output"]);
   const selectedFpReviewMethod = fpReview?.method ?? scan.fp_review_method ?? "adversarial";
-  const miningTabs = MINING_TABS.map((tab) => (
-    tab.key === "fp_review"
-      ? { ...tab, label: fpReviewMethodLabel(selectedFpReviewMethod) }
-      : tab
-  ));
+  const miningTabs = MINING_TABS
+    .filter((tab) => (
+      tab.key === "fp_review"
+        ? fpReviewEligible
+        : staticEngineSelected
+    ))
+    .map((tab) => (
+      tab.key === "fp_review"
+        ? { ...tab, label: fpReviewMethodLabel(selectedFpReviewMethod) }
+        : tab
+    ));
   const validationEvents = filterEvents(scan.events, ["validation"]);
   const issuesView = scan.vulnerabilities.length === 0 && isDone ? (
     <div className="flex items-center justify-center h-64 text-slate-400">
@@ -1125,7 +1243,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           fpReview={fpReview}
           activeTab={activeTab}
           activeMiningTab={activeMiningTab}
-          activeStaticTab={activeStaticTab}
+          activeEngineId={activeEngineId}
           issueCount={issueCount}
           verifiedIssueCount={verifiedIssueCount}
           threatAnalysisLoading={threatAnalysisLoading}
@@ -1135,38 +1253,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           onHome={() => setActiveTab("overview")}
           onIssues={() => setActiveTab("issues")}
         />
-
-        {(scan.mining_engine_runs?.length ?? 0) > 0 && (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="text-xs text-slate-500">漏洞挖掘引擎</span>
-            {scan.mining_engine_runs!.map((run) => {
-              const tone = run.status === "success"
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-                : run.status === "error"
-                  ? "border-red-500/30 bg-red-500/10 text-red-200"
-                  : run.status === "running"
-                    ? "border-blue-500/30 bg-blue-500/10 text-blue-200"
-                    : "border-slate-600 bg-slate-700/40 text-slate-300";
-              return (
-                <span
-                  key={run.engine_id}
-                  className={`rounded-full border px-2.5 py-1 text-xs ${tone}`}
-                  title={run.error_message || run.engine_id}
-                >
-                  {run.engine_label} · {
-                    run.status === "success" ? "完成"
-                      : run.status === "error" ? "失败"
-                          : run.status === "running" ? "运行中"
-                            : run.status === "cancelled" ? "已取消"
-                              : run.status === "skipped" ? "已跳过"
-                                : run.status === "pending" ? "等待中"
-                              : run.status
-                  }
-                </span>
-              );
-            })}
-          </div>
-        )}
 
         {/* Error */}
         {visibleErrorMessage && (
@@ -1203,13 +1289,32 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             onNavigate={setActiveTab}
           />
         )}
+        {activeTab === "index" && (
+          <TaskPanel
+            title="代码索引"
+            status={taskStateLabel(indexProgress.done, indexProgress.running, indexProgress.failed)}
+            tone={indexProgress.failed ? "red" : indexProgress.done ? "green" : indexProgress.running ? "blue" : "slate"}
+            summary="扫描框架在启动所选漏洞挖掘引擎前统一构建代码索引。"
+          >
+            <CallGraphBuildPanel
+              indexStatus={indexStatus}
+              indexProgress={indexProgress}
+              events={filterEvents(scan.events, ["init", "code_graph_build"])}
+            />
+          </TaskPanel>
+        )}
         {activeTab === "threat" && (
           <ThreatAnalysisPanel
             analysis={scan.threat_analysis ?? null}
-            threatAuditTasks={scan.threat_audit_tasks ?? []}
             events={threatAnalysisEvents}
             loading={threatAnalysisLoading && !scan.threat_analysis}
             isDone={!!isDone}
+          />
+        )}
+        {activeTab === "threat_audit" && (
+          <ThreatAuditPanel
+            scan={scan}
+            events={threatAuditEvents}
           />
         )}
         {activeTab === "mining" && (
@@ -1258,6 +1363,38 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               />
             )}
           </TabbedPanel>
+        )}
+        {activeTab === "engine" && activeEngine && (
+          <GenericEnginePanel
+            engine={activeEngine}
+            run={miningEngineRun(scan, activeEngine.engine_id)}
+          >
+            <VulnerabilityList
+              scanId={scanId}
+              vulnerabilities={scan.vulnerabilities}
+              events={scan.events}
+              isScanning={!!isRunning}
+              totalCandidates={scan.total_candidates}
+              processedCandidates={scan.processed_candidates}
+              fpReview={fpReview}
+              currentFpReviewIndices={currentFpReviewIndices}
+              fpReviewRunning={isFpReviewing}
+              validations={scan.validations ?? []}
+              validatingIndices={launchingValidations}
+              stoppingValidationIndices={stoppingValidations}
+              agentOnline={!!scan.agent_online}
+              fixedEngineId={activeEngine.engine_id}
+              onTriggerValidation={handleTriggerValidation}
+              onStopValidation={handleStopValidation}
+              onFeedbackCreated={addSelectedFeedbackIds}
+              onFeedbackRemoved={removeSelectedFeedbackIds}
+            />
+          </GenericEnginePanel>
+        )}
+        {activeTab === "engine" && !activeEngine && (
+          <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-6 text-sm text-slate-400">
+            当前扫描没有该漏洞挖掘引擎的配置快照。
+          </div>
         )}
         {activeTab === "validation" && (
           <ValidationPanel
@@ -1547,7 +1684,7 @@ function ProcessFlowNav({
   fpReview,
   activeTab,
   activeMiningTab,
-  activeStaticTab,
+  activeEngineId,
   issueCount,
   verifiedIssueCount,
   threatAnalysisLoading,
@@ -1562,7 +1699,7 @@ function ProcessFlowNav({
   fpReview: FpReviewJob | null;
   activeTab: MainTab;
   activeMiningTab: MiningTab;
-  activeStaticTab: StaticTab;
+  activeEngineId: string;
   issueCount: number;
   verifiedIssueCount: number;
   threatAnalysisLoading: boolean;
@@ -1572,16 +1709,16 @@ function ProcessFlowNav({
   onHome: () => void;
   onIssues: () => void;
 }) {
+  const engines = effectiveMiningEngines(scan);
   const candidates = scan.candidates ?? [];
   const candidateCount = candidates.length || scan.total_candidates || scan.vulnerabilities.length;
   const staticRunning = scan.status === "analyzing" && !scan.static_analysis_done;
   const staticDone = scan.static_analysis_done || candidateCount > 0 || scan.status === "auditing" || scan.status === "complete";
+  const threatRun = miningEngineRun(scan, THREAT_ENGINE_ID);
+  const threatRunStatus = engineFlowStatus(threatRun);
   const threatRunning = hasActiveThreatWork(scan)
     || (threatAnalysisLoading && !scan.threat_analysis)
     || (!isDone && hasEvent(scan.events, ["threat_analysis"]) && !scan.threat_analysis);
-  const auditRunning = scan.status === "auditing" || Boolean(scan.current_candidate);
-  const auditDone = scan.status === "complete"
-    || (scan.total_candidates > 0 && scan.processed_candidates >= scan.total_candidates);
   const validations = scan.validations ?? [];
   const confirmedCount = scan.vulnerabilities.filter((vuln) => isAiConfirmed(vuln)).length;
   const fpReviewTargetCount = scan.vulnerabilities.filter(
@@ -1596,86 +1733,119 @@ function ProcessFlowNav({
   const fpReviewProcessed = fpReview?.processed ?? 0;
   const fpReviewTotal = fpReview?.total ?? 0;
 
-  const staticDetail = candidateCount > 0
-    ? `${candidateCount} 个候选点`
-    : indexProgress.total > 0
-      ? `${indexProgress.current}/${indexProgress.total} 文件`
-      : "等待静态结果";
   const validationDetail = confirmedCount > 0
     ? `${validationRunningCount} 运行 · ${validationDoneCount}/${confirmedCount} 完成`
     : "等待确认问题";
-
-  const nodes: Record<FlowNodeId, FlowNodeView> = {
-    threat: {
-      id: "threat",
-      label: "威胁分析",
-      detail: scan.threat_analysis
-        ? threatAnalysisSummary(scan.threat_analysis)
-        : "攻击树分析",
-      status: flowStatus(Boolean(scan.threat_analysis), threatRunning),
-      active: activeTab === "threat",
-      tone: "green",
-    },
-    static_analysis: {
-      id: "static_analysis",
-      label: "静态分析",
-      detail: staticDetail,
-      status: flowStatus(staticDone, staticRunning),
-      active: activeTab === "mining" && activeMiningTab === "static_analysis",
-      tone: "cyan",
-    },
-    call_graph: {
-      id: "call_graph",
-      label: "调用图构建",
-      detail: indexProgress.total > 0
-        ? `${indexProgress.current}/${indexProgress.total} 文件`
-        : "代码索引",
-      status: flowStatus(indexProgress.done, indexProgress.running),
-      active: activeTab === "mining" && activeMiningTab === "static_analysis" && activeStaticTab === "call_graph",
-      tone: "blue",
-    },
-    candidate_generation: {
-      id: "candidate_generation",
-      label: "候选点生成",
-      detail: candidateCount > 0 ? `${candidateCount} 个候选点` : "静态规则产出",
-      status: flowStatus(staticDone, staticRunning),
-      active: activeTab === "mining" && activeMiningTab === "static_analysis" && activeStaticTab === "candidate_generation",
-      tone: "cyan",
-    },
-    candidate_audit: {
-      id: "candidate_audit",
-      label: "候选点审计",
-      detail: scan.total_candidates > 0
-        ? `${scan.processed_candidates}/${scan.total_candidates} 已审计`
-        : "等待候选点",
-      status: flowStatus(auditDone, auditRunning),
-      active: activeTab === "mining" && activeMiningTab === "candidate_audit",
-      tone: "blue",
-    },
-    fp_review: {
-      id: "fp_review",
-      label: fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method),
-      detail: fpReviewTotal > 0
-        ? `${fpReviewProcessed}/${fpReviewTotal} 已复核`
-        : fpReviewTargetCount > 0
-          ? "等待正报复核"
-          : "无复核目标",
-      status: flowStatus(
-        fpReviewDone || fpReviewTargetCount === 0,
-        isFpReviewing,
-      ),
-      active: activeTab === "mining" && activeMiningTab === "fp_review",
-      tone: "amber",
-    },
-    validation: {
-      id: "validation",
-      label: "漏洞验证",
-      detail: validationDetail,
-      status: flowStatus(validationDone, validationRunningCount > 0),
-      active: activeTab === "validation",
-      tone: "purple",
-    },
+  const indexNode: FlowNodeView = {
+    id: "index",
+    label: "代码索引",
+    detail: indexProgress.total > 0
+      ? `${indexProgress.current}/${indexProgress.total} 文件`
+      : "扫描公共准备阶段",
+    status: indexProgress.failed
+      ? "error"
+      : indexProgress.done
+        ? "done"
+        : indexProgress.running
+          ? "running"
+          : scan.status === "cancelled"
+            ? "cancelled"
+            : "pending",
+    active: activeTab === "index",
+    tone: "blue",
   };
+  const threatTasks = scan.threat_audit_tasks ?? [];
+  const completedThreatTasks = threatTasks.filter((task) => task.status === "completed").length;
+  const failedThreatTasks = threatTasks.filter((task) =>
+    ["failed", "failure", "error", "timeout", "no_result"].includes(String(task.status || "").toLowerCase()),
+  ).length;
+  const activeThreatTasks = threatTasks.filter((task) => isActiveThreatAuditStatus(task.status)).length;
+  const threatAnalysisStatus: FlowNodeStatus = scan.threat_analysis
+    ? "done"
+    : ["error", "cancelled", "skipped"].includes(threatRunStatus)
+      ? threatRunStatus
+      : threatRunning || threatRunStatus === "running"
+        ? "running"
+        : "pending";
+  const threatAnalysisNode: FlowNodeView = {
+    id: "threat",
+    label: "威胁分析",
+    detail: scan.threat_analysis
+      ? threatAnalysisSummary(scan.threat_analysis)
+      : threatRun?.error_message || "等待生成攻击树",
+    status: threatAnalysisStatus,
+    active: activeTab === "threat",
+    tone: "green",
+  };
+  const threatAuditNode: FlowNodeView = {
+    id: "threat_audit",
+    label: "威胁审计",
+    detail: threatTasks.length > 0
+      ? `${activeThreatTasks} 运行 · ${completedThreatTasks}/${threatTasks.length} 完成${failedThreatTasks ? ` · ${failedThreatTasks} 未成功` : ""}`
+      : scan.threat_analysis
+        ? "等待创建审计任务"
+        : "等待威胁分析",
+    status: threatAuditFlowStatus(scan, threatRun),
+    active: activeTab === "threat_audit",
+    tone: "cyan",
+  };
+  const fpReviewNode: FlowNodeView = {
+    id: "fp_review",
+    label: fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method),
+    detail: fpReviewTotal > 0
+      ? `${fpReviewProcessed}/${fpReviewTotal} 已复核`
+      : fpReviewTargetCount > 0
+        ? "等待正报复核"
+        : "当前没有复核目标",
+    status: isFpReviewing
+      ? "running"
+      : fpReviewDone || (isDone && fpReviewTargetCount === 0)
+        ? "done"
+        : fpReview?.status === "error"
+          ? "error"
+          : fpReview?.status === "cancelled"
+            ? "cancelled"
+            : "pending",
+    active: activeTab === "mining" && activeMiningTab === "fp_review",
+    tone: "amber",
+  };
+  const validationNode: FlowNodeView = {
+    id: "validation",
+    label: "漏洞验证",
+    detail: validationDetail,
+    status: validationRunningCount > 0
+      ? "running"
+      : validationDone
+        ? "done"
+        : "pending",
+    active: activeTab === "validation",
+    tone: "purple",
+  };
+
+  const engineNode = (engine: MiningEngineSelection): FlowNodeView => {
+    const run = miningEngineRun(scan, engine.engine_id);
+    const legacyStaticStatus: FlowNodeStatus = staticRunning
+      ? "running"
+      : staticDone
+        ? "done"
+        : "pending";
+    return {
+      id: `engine:${engine.engine_id}`,
+      label: engine.engine_label,
+      detail: run?.error_message
+        || (engine.engine_id === STATIC_ENGINE_ID && candidateCount > 0
+          ? `${scan.processed_candidates}/${scan.total_candidates || candidateCount} 候选点已审计`
+          : run?.started_at
+            ? `引擎 ID：${engine.engine_id}`
+            : "等待启动"),
+      status: run ? engineFlowStatus(run) : engine.engine_id === STATIC_ENGINE_ID ? legacyStaticStatus : "unknown",
+      active: engine.engine_id === STATIC_ENGINE_ID
+        ? activeTab === "mining" && activeMiningTab !== "fp_review"
+        : activeTab === "engine" && activeEngineId === engine.engine_id,
+      tone: engine.engine_id === STATIC_ENGINE_ID ? "cyan" : "blue",
+    };
+  };
+  const fpReviewEligible = engines.some((engine) => engine.fp_review_enabled);
 
   return (
     <nav className="border-t border-slate-700/60 pt-3" aria-label="扫描执行流程">
@@ -1706,51 +1876,56 @@ function ProcessFlowNav({
           tabIndex={0}
           aria-label="执行流程图，可横向滚动"
         >
-          <div className="mx-auto flex w-max min-w-[70rem] items-center">
+          <div className="mx-auto flex w-max min-w-[58rem] items-center">
             <div className="flex snap-center items-center">
-              <FlowNodeButton node={nodes.threat} onClick={onNodeClick} />
+              <FlowNodeButton node={indexNode} onClick={onNodeClick} />
             </div>
-            <FlowArrow label="进入" />
+            <FlowArrow label="索引就绪" />
             <div
               role="group"
-              aria-label="漏洞挖掘"
-              className="relative flex-none rounded-xl border border-cyan-500/25 bg-gradient-to-br from-slate-950/80 via-slate-900/60 to-cyan-950/20 px-3 py-8 shadow-sm"
+              aria-label="本次扫描选择的漏洞挖掘引擎"
+              className="relative flex-none rounded-xl border border-cyan-500/25 bg-gradient-to-br from-slate-950/80 via-slate-900/60 to-cyan-950/20 px-3 pb-3 pt-9 shadow-sm"
             >
               <div className="absolute inset-x-3 top-2 flex items-center justify-center">
-                <div className="text-sm font-semibold text-slate-100">漏洞挖掘</div>
-              </div>
-              <div className="flex h-44 items-center">
-                <div className="h-44 w-[20.5rem] rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-2 shadow-sm">
-                  <FlowNodeButton node={nodes.static_analysis} onClick={onNodeClick} wide />
-                  <div className="mt-1.5 flex items-center">
-                    <FlowNodeButton node={nodes.call_graph} onClick={onNodeClick} compact />
-                    <FlowArrow compact />
-                    <FlowNodeButton node={nodes.candidate_generation} onClick={onNodeClick} compact />
-                  </div>
+                <div className="text-sm font-semibold text-slate-100">
+                  漏洞挖掘引擎 · {engines.length}
                 </div>
-                <FlowArrow />
-                <FlowAuditBranch
-                  auditNode={nodes.candidate_audit}
-                  fpReviewNode={nodes.fp_review}
-                  onNodeClick={onNodeClick}
-                />
+              </div>
+              <div className="flex w-[22rem] flex-col gap-2">
+                {engines.map((engine) => (
+                  <div
+                    key={engine.engine_id}
+                    className="rounded-lg border border-cyan-500/15 bg-cyan-500/5 p-2"
+                  >
+                    {engine.engine_id === THREAT_ENGINE_ID ? (
+                      <div className="flex items-center">
+                        <FlowNodeButton node={threatAnalysisNode} onClick={onNodeClick} compact />
+                        <FlowArrow compact />
+                        <FlowNodeButton node={threatAuditNode} onClick={onNodeClick} compact />
+                      </div>
+                    ) : (
+                      <FlowNodeButton node={engineNode(engine)} onClick={onNodeClick} wide />
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
-            <FlowArrow label="正报验证" />
-            <div className="flex snap-center items-center">
-              <FlowNodeButton node={nodes.validation} onClick={onNodeClick} />
+            <FlowArrow label="产出问题" />
+            <div
+              className="flex flex-col gap-2 rounded-xl border border-slate-700/60 bg-slate-950/40 p-2"
+              role="group"
+              aria-label="漏洞结果后续处理"
+            >
+              {fpReviewEligible && (
+                <FlowNodeButton node={fpReviewNode} onClick={onNodeClick} />
+              )}
+              <FlowNodeButton node={validationNode} onClick={onNodeClick} />
             </div>
           </div>
         </div>
       </div>
     </nav>
   );
-}
-
-function flowStatus(done: boolean, running: boolean): FlowNodeStatus {
-  if (running) return "running";
-  if (done) return "done";
-  return "pending";
 }
 
 function FlowUtilityButton({
@@ -1846,53 +2021,471 @@ function FlowArrow({ label, compact = false }: { label?: string; compact?: boole
   );
 }
 
-function FlowAuditBranch({
-  auditNode,
-  fpReviewNode,
-  onNodeClick,
-}: {
-  auditNode: FlowNodeView;
-  fpReviewNode: FlowNodeView;
-  onNodeClick: (node: FlowNodeId) => void;
-}) {
-  return (
-    <div
-      className="-mr-3 relative h-44 w-[20.75rem] flex-none"
-      role="group"
-      aria-label="候选点审计分支：同时进入漏洞验证和去误报复核"
-    >
-      <svg
-        className="pointer-events-none absolute inset-0 h-full w-full text-slate-600"
-        viewBox="0 0 332 176"
-        preserveAspectRatio="none"
-        fill="none"
-        stroke="currentColor"
-        aria-hidden="true"
-      >
-        <path d="M144 88H332" strokeWidth="1.5" />
-        <path d="M160 88V138H172" strokeWidth="1.5" />
-        <path d="m168 133 5 5-5 5" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-      <div className="absolute left-0 top-1/2 -translate-y-1/2">
-        <FlowNodeButton node={auditNode} onClick={onNodeClick} compact />
-      </div>
-      <div className="absolute bottom-0 right-3">
-        <FlowNodeButton node={fpReviewNode} onClick={onNodeClick} compact />
-      </div>
-    </div>
-  );
-}
-
 function flowStatusLabel(status: FlowNodeStatus): string {
   if (status === "running") return "正在执行";
   if (status === "done") return "执行完毕";
+  if (status === "warning") return "完成但有失败";
+  if (status === "error") return "执行失败";
+  if (status === "cancelled") return "已取消";
+  if (status === "skipped") return "已跳过";
+  if (status === "unknown") return "状态未知";
   return "待执行";
 }
 
 function flowStatusTone(status: FlowNodeStatus, doneTone: TaskTone): TaskTone {
   if (status === "running") return "blue";
   if (status === "done") return doneTone;
+  if (status === "warning") return "amber";
+  if (status === "error" || status === "cancelled") return "red";
   return "slate";
+}
+
+function GenericEnginePanel({
+  engine,
+  run,
+  children,
+}: {
+  engine: MiningEngineSelection;
+  run: MiningEngineRunStatus | null;
+  children: React.ReactNode;
+}) {
+  const status = engineFlowStatus(run);
+  const duration = engineRunDuration(run);
+  return (
+    <TaskPanel
+      title={engine.engine_label}
+      status={flowStatusLabel(status)}
+      tone={flowStatusTone(status, "green")}
+      summary={`漏洞挖掘引擎 ${engine.engine_id} 的运行状态和输出结果。`}
+    >
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <EngineInfoCard label="引擎 ID" value={engine.engine_id} detail="扫描配置快照" tone="cyan" />
+        <EngineInfoCard
+          label="去误报"
+          value={engine.fp_review_enabled ? "启用" : "禁用"}
+          detail={engine.fp_review_enabled ? "输出可进入复核" : "输出不进入复核"}
+          tone={engine.fp_review_enabled ? "green" : "slate"}
+        />
+        <EngineInfoCard
+          label="开始时间"
+          value={run?.started_at ? formatDateTime(run.started_at) : "-"}
+          detail={run?.started_at ? "引擎已启动" : "尚未启动"}
+          tone="blue"
+        />
+        <EngineInfoCard
+          label="运行耗时"
+          value={duration || "-"}
+          detail={run?.finished_at ? "已结束" : run?.started_at ? "执行中" : "等待运行"}
+          tone="purple"
+        />
+      </div>
+      {run?.error_message && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3">
+          <div className="text-xs font-semibold text-red-200">引擎错误</div>
+          <div className="mt-1 whitespace-pre-wrap break-words text-sm text-red-300">{run.error_message}</div>
+        </div>
+      )}
+      <section>
+        <h3 className="mb-3 text-sm font-semibold text-slate-200">该引擎输出的问题</h3>
+        {children}
+      </section>
+    </TaskPanel>
+  );
+}
+
+function EngineInfoCard({
+  label,
+  value,
+  detail,
+  tone,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  tone: TaskTone;
+}) {
+  return (
+    <div className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+      <div className="text-xs text-slate-500">{label}</div>
+      <div className={`mt-1 break-all text-sm font-semibold ${toneText(tone)}`}>{value}</div>
+      <div className="mt-1 text-xs text-slate-600">{detail}</div>
+    </div>
+  );
+}
+
+function engineRunDuration(run: MiningEngineRunStatus | null): string {
+  if (!run?.started_at) return "";
+  const started = Date.parse(run.started_at);
+  const finished = Date.parse(run.finished_at || new Date().toISOString());
+  if (Number.isNaN(started) || Number.isNaN(finished)) return "";
+  const seconds = Math.max(0, Math.round((finished - started) / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remaining = seconds % 60;
+  return `${minutes} 分 ${remaining} 秒`;
+}
+
+function ThreatAuditPanel({
+  scan,
+  events,
+}: {
+  scan: ScanStatusType;
+  events: ScanEvent[];
+}) {
+  const [statusFilter, setStatusFilter] = useState("__all__");
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const tasks = scan.threat_audit_tasks ?? [];
+  const queueTasks = useMemo(
+    () => collectScanQueueTasks(scan.opencode_pool ?? null).filter(
+      (item) => poolTaskType(item.task) === "threat_audit",
+    ),
+    [scan.opencode_pool],
+  );
+  const runtimeByTaskId = useMemo(() => {
+    const result = new Map<string, ScanQueueTask>();
+    for (const item of queueTasks) {
+      const taskName = String(item.task.task_name || "");
+      if (taskName && !result.has(taskName)) result.set(taskName, item);
+    }
+    return result;
+  }, [queueTasks]);
+  const visibleTasks = useMemo(
+    () => tasks.filter((task) => (
+      statusFilter === "__all__"
+      || effectiveThreatAuditTaskStatus(task, runtimeByTaskId.get(task.task_id)) === statusFilter
+    )),
+    [tasks, runtimeByTaskId, statusFilter],
+  );
+  const totalPages = Math.max(1, Math.ceil(visibleTasks.length / THREAT_AUDIT_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pagedTasks = visibleTasks.slice(
+    (safePage - 1) * THREAT_AUDIT_PAGE_SIZE,
+    safePage * THREAT_AUDIT_PAGE_SIZE,
+  );
+  const selected = tasks.find((task) => task.task_id === selectedTaskId) ?? null;
+  const selectedRuntime = selected ? runtimeByTaskId.get(selected.task_id) ?? null : null;
+  const statusCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    tasks.forEach((task) => {
+      const status = effectiveThreatAuditTaskStatus(task, runtimeByTaskId.get(task.task_id));
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+    });
+    return counts;
+  }, [tasks, runtimeByTaskId]);
+  const run = miningEngineRun(scan, THREAT_ENGINE_ID);
+  const processStatus = threatAuditFlowStatus(scan, run);
+
+  useEffect(() => {
+    setPage(1);
+  }, [statusFilter]);
+
+  useEffect(() => {
+    if (visibleTasks.length === 0) {
+      setSelectedTaskId(null);
+      return;
+    }
+    if (!selectedTaskId || !visibleTasks.some((task) => task.task_id === selectedTaskId)) {
+      setSelectedTaskId(visibleTasks[0].task_id);
+    }
+  }, [selectedTaskId, visibleTasks]);
+
+  return (
+    <TaskPanel
+      title="威胁审计"
+      status={flowStatusLabel(processStatus)}
+      tone={flowStatusTone(processStatus, "green")}
+      summary="按威胁分析产生的节点与攻击模式拆分任务，并逐项执行模型审计。"
+    >
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
+        <MiniMetric label="任务总数" value={tasks.length} />
+        <MiniMetric label="待执行" value={(statusCounts.get("pending") ?? 0) + (statusCounts.get("queued") ?? 0)} tone="amber" />
+        <MiniMetric label="运行中" value={statusCounts.get("running") ?? 0} tone="cyan" />
+        <MiniMetric label="已完成" value={statusCounts.get("completed") ?? 0} tone="green" />
+        <MiniMetric
+          label="未成功"
+          value={["failed", "failure", "error", "timeout", "no_result"].reduce(
+            (sum, status) => sum + (statusCounts.get(status) ?? 0),
+            0,
+          )}
+          tone="red"
+        />
+        <MiniMetric label="已取消" value={statusCounts.get("cancelled") ?? 0} />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <StaticFilterSelect
+          label="状态"
+          value={statusFilter}
+          options={threatAuditStatusOptions(tasks, runtimeByTaskId)}
+          onChange={setStatusFilter}
+        />
+      </div>
+
+      {tasks.length === 0 ? (
+        <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-10 text-center text-sm text-slate-500">
+          {run?.status === "running"
+            ? "威胁分析完成后会在这里实时创建审计任务。"
+            : run?.status === "success"
+              ? "本次威胁分析没有生成需要审计的任务。"
+              : "尚未创建威胁审计任务。"}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(20rem,26rem)_1fr]">
+          <div className="flex min-h-[28rem] flex-col overflow-hidden rounded-xl border border-slate-700 bg-slate-900/40">
+            <div className="max-h-[72vh] flex-1 overflow-y-auto">
+              {pagedTasks.length === 0 ? (
+                <div className="px-4 py-10 text-center text-sm text-slate-500">当前筛选条件下无任务</div>
+              ) : (
+                <ul className="divide-y divide-slate-800">
+                  {pagedTasks.map((task) => {
+                    const status = effectiveThreatAuditTaskStatus(task, runtimeByTaskId.get(task.task_id));
+                    return (
+                      <li key={task.task_id}>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedTaskId(task.task_id)}
+                          className={`w-full px-3 py-3 text-left transition-colors ${
+                            selectedTaskId === task.task_id
+                              ? "bg-cyan-500/15"
+                              : status === "running"
+                                ? "bg-blue-500/10 hover:bg-blue-500/15"
+                                : "hover:bg-slate-800/60"
+                          }`}
+                        >
+                          <div className="flex items-start gap-2">
+                            <StatusPill label={threatAuditStatusLabel(status)} tone={threatAuditStatusTone(status)} />
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-medium text-slate-200">
+                                {task.method_name || "未命名攻击模式"}
+                              </div>
+                              <div className="mt-1 truncate text-xs text-slate-500">
+                                {task.surface_name || "未命名威胁节点"}
+                              </div>
+                            </div>
+                            {status === "running" && (
+                              <span className="ml-auto mt-1 h-3 w-3 shrink-0 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />
+                            )}
+                          </div>
+                          {(task.code_path || task.code_paths?.length) && (
+                            <div className="mt-2 truncate font-mono text-[11px] text-cyan-300">
+                              {task.code_path || task.code_paths?.[0]?.path}
+                            </div>
+                          )}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+            {visibleTasks.length > THREAT_AUDIT_PAGE_SIZE && (
+              <div className="flex items-center justify-between gap-2 border-t border-slate-800 px-3 py-2">
+                <button
+                  type="button"
+                  disabled={safePage === 1}
+                  onClick={() => setPage((value) => Math.max(1, value - 1))}
+                  className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
+                >
+                  上一页
+                </button>
+                <span className="text-xs text-slate-500">第 {safePage}/{totalPages} 页 · 共 {visibleTasks.length} 条</span>
+                <button
+                  type="button"
+                  disabled={safePage === totalPages}
+                  onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+                  className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
+                >
+                  下一页
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="min-h-[28rem] rounded-xl border border-slate-700 bg-slate-900/40">
+            {selected ? (
+              <ThreatAuditTaskDetail task={selected} runtime={selectedRuntime} />
+            ) : (
+              <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
+                从左侧选择一个威胁审计任务查看详情
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      <EventList events={events} empty="暂无威胁审计日志" />
+    </TaskPanel>
+  );
+}
+
+function threatAuditStatusOptions(
+  tasks: ThreatAuditTask[],
+  runtimeByTaskId: Map<string, ScanQueueTask>,
+): StaticFilterOption[] {
+  const values = tasks.map((task) => {
+    return effectiveThreatAuditTaskStatus(task, runtimeByTaskId.get(task.task_id));
+  });
+  return valueOptions(values, threatAuditStatusLabel);
+}
+
+function effectiveThreatAuditTaskStatus(
+  task: ThreatAuditTask,
+  runtime: ScanQueueTask | undefined,
+): string {
+  if (runtime?.status === "running") return "running";
+  if (runtime?.status === "queued" || runtime?.status === "planned") return "queued";
+  return String(task.status || "pending").toLowerCase();
+}
+
+function threatAuditStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: "待执行",
+    planned: "计划中",
+    queued: "排队中",
+    running: "运行中",
+    completed: "已完成",
+    success: "已完成",
+    failed: "失败",
+    failure: "失败",
+    error: "异常",
+    timeout: "超时",
+    no_result: "无结果",
+    cancelled: "已取消",
+  };
+  return labels[status] ?? status;
+}
+
+function threatAuditStatusTone(status: string): TaskTone {
+  if (status === "running") return "cyan";
+  if (status === "queued" || status === "planned") return "amber";
+  if (status === "completed" || status === "success") return "green";
+  if (["failed", "failure", "error", "timeout", "no_result", "cancelled"].includes(status)) return "red";
+  return "slate";
+}
+
+function ThreatAuditTaskDetail({
+  task,
+  runtime,
+}: {
+  task: ThreatAuditTask;
+  runtime: ScanQueueTask | null;
+}) {
+  const prompt = runtime ? scanQueueTaskPrompt(runtime.task) : "";
+  const sessionId = runtime ? scanQueueTaskSessionId(runtime.task) : "";
+  const tokenUsage = runtime ? taskTokenUsage(runtime.task) : null;
+  const source = formatOutputSource(task.output_source);
+  const codePaths = task.code_paths ?? [];
+  const status = effectiveThreatAuditTaskStatus(task, runtime ?? undefined);
+  return (
+    <div className="max-h-[72vh] space-y-4 overflow-y-auto p-4">
+      <div className="border-b border-slate-800 pb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusPill label={threatAuditStatusLabel(status)} tone={threatAuditStatusTone(status)} />
+          <span className="text-sm font-semibold text-slate-100">{task.method_name || "未命名攻击模式"}</span>
+        </div>
+        <div className="mt-2 break-all font-mono text-[11px] text-slate-600">{task.task_id}</div>
+      </div>
+      <ThreatAuditDetailSection title="审计目标">
+        <DetailGrid items={[
+          ["威胁节点", task.surface_name || task.surface_node_id || "—"],
+          ["攻击模式", task.method_name || task.method_node_id || "—"],
+          ["攻击目标", task.attack_goal || "—"],
+          ["价值资产", task.asset_name || task.asset_id || "—"],
+          ["风险", task.risk_name || task.risk_id || "—"],
+          ["攻击路径", task.attack_path_id || "—"],
+        ]} />
+      </ThreatAuditDetailSection>
+      {(task.description || task.code_path_description) && (
+        <ThreatAuditDetailSection title="任务说明">
+          <MarkdownContent content={task.description || task.code_path_description || ""} />
+        </ThreatAuditDetailSection>
+      )}
+      {(task.code_path || codePaths.length > 0) && (
+        <ThreatAuditDetailSection title="代码路径">
+          <div className="space-y-2">
+            {(codePaths.length > 0 ? codePaths : [{ path: task.code_path, description: task.code_path_description }]).map((item, index) => (
+              <div key={`${item.path}-${index}`} className="rounded border border-slate-800 bg-slate-950/60 px-3 py-2">
+                <div className="break-all font-mono text-xs text-cyan-300">{item.path}</div>
+                {item.description && <div className="mt-1 text-xs text-slate-400">{item.description}</div>}
+              </div>
+            ))}
+          </div>
+        </ThreatAuditDetailSection>
+      )}
+      {task.failure_reason && (
+        <ThreatAuditDetailSection title="失败原因">
+          <div className="whitespace-pre-wrap break-words rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            {task.failure_reason}
+          </div>
+        </ThreatAuditDetailSection>
+      )}
+      <ThreatAuditDetailSection title="执行信息">
+        <DetailGrid items={[
+          ["模型", runtime?.modelId || task.output_source?.model || task.output_source?.model_id || "—"],
+          ["OpenCode Session ID", sessionId || "尚无记录"],
+          ["开始时间", task.started_at ? formatDateTime(task.started_at) : "—"],
+          ["结束时间", task.finished_at ? formatDateTime(task.finished_at) : "—"],
+          ["输出来源", source || "—"],
+          ["结果索引", task.result_vuln_indexes?.length ? task.result_vuln_indexes.map((value) => `#${value}`).join("、") : "无漏洞结果"],
+        ]} />
+      </ThreatAuditDetailSection>
+      {tokenUsage && (
+        <ThreatAuditDetailSection title="Token 用量">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {[
+              ["输入", tokenUsage.input_tokens],
+              ["输出", tokenUsage.output_tokens],
+              ["推理", tokenUsage.reasoning_tokens],
+              ["缓存读", tokenUsage.cache_read_tokens],
+              ["缓存写", tokenUsage.cache_write_tokens],
+              ["总计", tokenUsage.total_tokens],
+            ].map(([label, value]) => (
+              <MiniMetric key={String(label)} label={String(label)} value={Number(value)} />
+            ))}
+          </div>
+        </ThreatAuditDetailSection>
+      )}
+      <ThreatAuditDetailSection title="Prompt">
+        {prompt ? (
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300">
+            {prompt}
+          </pre>
+        ) : (
+          <div className="rounded border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">
+            {runtime ? "该任务记录未保存完整 Prompt。" : "尚未匹配到该任务的 OpenCode 队列或历史记录。"}
+          </div>
+        )}
+      </ThreatAuditDetailSection>
+    </div>
+  );
+}
+
+function ThreatAuditDetailSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h4>
+      {children}
+    </section>
+  );
+}
+
+function DetailGrid({ items }: { items: Array<[string, string]> }) {
+  return (
+    <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      {items.map(([label, value]) => (
+        <div key={label} className="rounded border border-slate-800 bg-slate-950/60 px-3 py-2">
+          <dt className="text-[10px] uppercase tracking-wide text-slate-600">{label}</dt>
+          <dd className="mt-1 break-all text-xs text-slate-300">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
 }
 
 function ScanOverview({
@@ -1932,12 +2525,10 @@ function ScanOverview({
   verifiedIssueCount: number;
   onNavigate: (tab: MainTab) => void;
 }) {
-  const staticSeen = scan.static_analysis_done || scan.status === "analyzing" || scan.status === "auditing" || hasEvent(scan.events, ["static_analysis"]);
-  const staticScannedFiles = staticSeen ? (scan.static_scanned_files || indexProgress.current) : 0;
-  const staticTotalFiles = staticSeen ? (scan.static_total_files || indexProgress.total) : 0;
-  const staticPct = percent(staticScannedFiles, staticTotalFiles);
+  const engines = effectiveMiningEngines(scan);
+  const staticEngineSelected = engines.some((engine) => engine.engine_id === STATIC_ENGINE_ID);
+  const fpReviewEligible = engines.some((engine) => engine.fp_review_enabled);
   const auditRunning = scan.status === "auditing";
-  const staticRunning = scan.status === "analyzing" && !scan.static_analysis_done;
   const fpReviewTargetCount = scan.vulnerabilities.filter(
     (vuln) => vuln.fp_review_eligible !== false && isAiConfirmed(vuln),
   ).length;
@@ -1971,7 +2562,9 @@ function ScanOverview({
       </section>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <OverviewMetric icon="target" label="候选点" value={scan.total_candidates || scan.vulnerabilities.length} detail={`${scan.processed_candidates} 已审计`} tone="blue" />
+        {staticEngineSelected && (
+          <OverviewMetric icon="target" label="候选点" value={scan.total_candidates || scan.vulnerabilities.length} detail={`${scan.processed_candidates} 已审计`} tone="blue" />
+        )}
         <OverviewMetric icon="alert" label="发现的问题" value={issueCount} detail={`${verifiedIssueCount} 已验证`} tone="red" onClick={() => onNavigate("issues")} />
         {showGitHistoryStages && (
           <OverviewMetric icon="history" label="历史模式" value={gitHistoryCount} detail={`${variantIssueCount} 个变体候选`} tone="purple" onClick={() => onNavigate("threat")} />
@@ -2012,41 +2605,83 @@ function ScanOverview({
               progress={indexProgress.total ? percent(indexProgress.current, indexProgress.total) : undefined}
               detail={indexProgress.total ? `${indexProgress.current}/${indexProgress.total} 文件` : "等待索引状态"}
             />
-            <TaskSummaryRow
-              label="静态分析"
-              status={taskStateLabel(scan.static_analysis_done, staticRunning, scan.status === "error")}
-              tone={scan.status === "error" ? "red" : scan.static_analysis_done ? "green" : staticRunning ? "cyan" : "slate"}
-              progress={staticTotalFiles ? staticPct : undefined}
-              detail={staticTotalFiles ? `${staticScannedFiles}/${staticTotalFiles} 文件` : "等待静态分析"}
-            />
-            {showGitHistoryStages && (
+            {engines.map((engine) => {
+              const run = miningEngineRun(scan, engine.engine_id);
+              if (engine.engine_id === THREAT_ENGINE_ID) {
+                const analysisStatus: FlowNodeStatus = scan.threat_analysis
+                  ? "done"
+                  : run?.status === "error"
+                    ? "error"
+                    : run?.status === "cancelled"
+                      ? "cancelled"
+                      : run?.status === "running"
+                        ? "running"
+                        : "pending";
+                const auditStatus = threatAuditFlowStatus(scan, run);
+                const threatTasks = scan.threat_audit_tasks ?? [];
+                const threatCompleted = threatTasks.filter((task) => task.status === "completed").length;
+                return (
+                  <Fragment key={engine.engine_id}>
+                    <TaskSummaryRow
+                      label="威胁分析"
+                      status={flowStatusLabel(analysisStatus)}
+                      tone={flowStatusTone(analysisStatus, "green")}
+                      detail={scan.threat_analysis ? threatAnalysisSummary(scan.threat_analysis) : run?.error_message || "等待威胁分析"}
+                    />
+                    <TaskSummaryRow
+                      label="威胁审计"
+                      status={flowStatusLabel(auditStatus)}
+                      tone={flowStatusTone(auditStatus, "green")}
+                      detail={threatTasks.length ? `${threatCompleted}/${threatTasks.length} 任务完成` : "等待威胁审计任务"}
+                    />
+                    {showGitHistoryStages && (
+                      <TaskSummaryRow
+                        label="Git 历史问题分析"
+                        status={taskStateLabel(gitHistoryCount > 0 || hasEvent(scan.events, ["git_history"]), hasEvent(scan.events, ["git_history"]) && !auditRunning && !isDone)}
+                        tone={gitHistoryCount > 0 ? "purple" : hasEvent(scan.events, ["git_history"]) ? "amber" : "slate"}
+                        detail={gitHistoryCount > 0 ? `${gitHistoryCount} 条历史问题模式` : "暂无历史模式"}
+                      />
+                    )}
+                  </Fragment>
+                );
+              }
+              const status = run
+                ? engineFlowStatus(run)
+                : engine.engine_id === STATIC_ENGINE_ID && scan.static_analysis_done
+                  ? "done"
+                  : "pending";
+              return (
+                <TaskSummaryRow
+                  key={engine.engine_id}
+                  label={engine.engine_label}
+                  status={flowStatusLabel(status)}
+                  tone={flowStatusTone(status, "green")}
+                  progress={engine.engine_id === STATIC_ENGINE_ID && scan.total_candidates ? pct : undefined}
+                  detail={run?.error_message || (
+                    engine.engine_id === STATIC_ENGINE_ID
+                      ? scan.total_candidates
+                        ? `${scan.processed_candidates}/${scan.total_candidates} 候选点已审计`
+                        : "等待静态规则扫描"
+                      : `引擎 ID：${engine.engine_id}`
+                  )}
+                />
+              );
+            })}
+            {fpReviewEligible && (
               <TaskSummaryRow
-                label="Git 历史问题分析"
-                status={taskStateLabel(gitHistoryCount > 0 || hasEvent(scan.events, ["git_history"]), hasEvent(scan.events, ["git_history"]) && !auditRunning && !isDone)}
-                tone={gitHistoryCount > 0 ? "purple" : hasEvent(scan.events, ["git_history"]) ? "amber" : "slate"}
-                detail={gitHistoryCount > 0 ? `${gitHistoryCount} 条历史问题模式` : "暂无历史模式"}
+                label={fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method)}
+                status={fpReview
+                  ? taskStateLabel(fpReview.status === "complete", isFpReviewing, fpReview.status === "error")
+                  : fpReviewTargetCount > 0 ? "等待" : "无目标"}
+                tone={isFpReviewing ? "amber" : fpReview?.status === "complete" ? "green" : fpReview?.status === "error" ? "red" : "slate"}
+                progress={fpReview?.total ? percent(fpReview.processed, fpReview.total) : undefined}
+                detail={fpReview
+                  ? `${fpReview.processed}/${fpReview.total} 已复核`
+                  : fpReviewTargetCount > 0
+                    ? `${fpReviewTargetCount} 个可复核问题`
+                    : "当前没有可复核问题"}
               />
             )}
-            <TaskSummaryRow
-              label="候选点 AI 审计"
-              status={taskStateLabel(isDone || (scan.total_candidates > 0 && scan.processed_candidates >= scan.total_candidates), auditRunning)}
-              tone={auditRunning ? "blue" : isDone ? "green" : "slate"}
-              progress={scan.static_analysis_done ? pct : undefined}
-              detail={scan.total_candidates ? `${scan.processed_candidates}/${scan.total_candidates} 候选点` : "等待候选点"}
-            />
-            <TaskSummaryRow
-              label={fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method)}
-              status={fpReview
-                ? taskStateLabel(fpReview.status === "complete", isFpReviewing, fpReview.status === "error")
-                : fpReviewTargetCount > 0 ? "等待" : "无目标"}
-              tone={isFpReviewing ? "amber" : fpReview?.status === "complete" ? "green" : fpReview?.status === "error" ? "red" : "slate"}
-              progress={fpReview?.total ? percent(fpReview.processed, fpReview.total) : undefined}
-              detail={fpReview
-                ? `${fpReview.processed}/${fpReview.total} 已复核`
-                : fpReviewTargetCount > 0
-                  ? `${fpReviewTargetCount} 个可复核问题`
-                  : "已启用引擎没有可复核问题"}
-            />
             <TaskSummaryRow
               label="报告导出"
               status={hasReportModeSkill ? (isRunning ? "同步中" : "可查看") : "预留"}

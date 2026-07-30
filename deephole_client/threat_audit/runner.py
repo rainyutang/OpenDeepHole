@@ -45,6 +45,60 @@ async def _emit(output: Any, kind: str, message: str, **data: Any) -> None:
         await result
 
 
+_TASK_STATUS_FIELDS = {
+    "task_id",
+    "scan_id",
+    "status",
+    "surface_node_id",
+    "surface_name",
+    "method_node_id",
+    "method_name",
+    "attack_goal",
+    "risk_id",
+    "risk_name",
+    "asset_id",
+    "asset_name",
+    "code_path",
+    "code_path_description",
+    "code_paths",
+    "attack_path_id",
+    "attack_path_fingerprint",
+    "description",
+    "result_vuln_indexes",
+    "failure_reason",
+    "output_source",
+    "created_at",
+    "started_at",
+    "finished_at",
+    "updated_at",
+}
+
+
+def _task_status_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+    """Return the stable, platform-neutral task lifecycle payload."""
+    return {
+        key: value
+        for key, value in task.items()
+        if key in _TASK_STATUS_FIELDS
+    }
+
+
+async def _emit_task_status(
+    output: Any,
+    task: dict[str, Any],
+    message: str,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    task.setdefault("created_at", now)
+    task["updated_at"] = now
+    await _emit(
+        output,
+        "task_status",
+        message,
+        task=_task_status_snapshot(task),
+    )
+
+
 def _cancelled(cancel_event: Any) -> bool:
     return bool(cancel_event is not None and cancel_event.is_set())
 
@@ -715,6 +769,12 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
     if included:
         tasks = [task for task in tasks if task["task_id"] in included]
     tasks = [task for task in tasks if task["task_id"] not in excluded]
+    for task in tasks:
+        await _emit_task_status(
+            output,
+            task,
+            f"Prepared threat audit task {task['task_id']}",
+        )
     await _emit(output, "progress", f"Prepared {len(tasks)} threat audit task(s)", total=len(tasks))
 
     semaphore = asyncio.Semaphore(concurrency)
@@ -722,15 +782,35 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
     result_lock = asyncio.Lock()
 
     async def audit(task: dict[str, Any]) -> None:
-        if _cancelled(cancel_event):
-            task["status"] = "cancelled"
-            return
-        async with semaphore:
-            task["status"] = "running"
-            task["started_at"] = datetime.now(timezone.utc).isoformat()
-            await _emit(output, "progress", f"Auditing {task['task_id']}", task_id=task["task_id"])
-            prompt = _threat_prompt(task)
-            try:
+        try:
+            if _cancelled(cancel_event):
+                task["status"] = "cancelled"
+                task["finished_at"] = datetime.now(timezone.utc).isoformat()
+                await _emit_task_status(
+                    output,
+                    task,
+                    f"Cancelled threat audit task {task['task_id']}",
+                )
+                return
+            async with semaphore:
+                if _cancelled(cancel_event):
+                    task["status"] = "cancelled"
+                    task["finished_at"] = datetime.now(timezone.utc).isoformat()
+                    await _emit_task_status(
+                        output,
+                        task,
+                        f"Cancelled threat audit task {task['task_id']}",
+                    )
+                    return
+                task["status"] = "running"
+                task["started_at"] = datetime.now(timezone.utc).isoformat()
+                await _emit_task_status(
+                    output,
+                    task,
+                    f"Running threat audit task {task['task_id']}",
+                )
+                await _emit(output, "progress", f"Auditing {task['task_id']}", task_id=task["task_id"])
+                prompt = _threat_prompt(task)
                 result = await run_opencode_task(
                     task_name=task["task_id"],
                     task_type="threat_audit",
@@ -740,46 +820,68 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
                     config_path=kwargs.get("task_agent_config"),
                     cancel_event=cancel_event,
                 )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
                 task["finished_at"] = datetime.now(timezone.utc).isoformat()
-                task["status"] = "failed"
-                task["failure_reason"] = str(exc)
-                await _emit(
+                task["output_source"] = result.output_source
+                if result.status != "success" or not isinstance(result.structured, list):
+                    task["status"] = (
+                        "failed"
+                        if result.status in {"success", "failure"}
+                        else result.status
+                    )
+                    task["failure_reason"] = (
+                        result.text
+                        if result.status != "success"
+                        else "Threat audit returned no result list"
+                    )
+                    await _emit_task_status(
+                        output,
+                        task,
+                        f"Finished threat audit task {task['task_id']} with {task['status']}",
+                    )
+                    return
+                produced = [
+                    _normalize_vulnerability(item, task, result.output_source)
+                    for item in result.structured
+                    if isinstance(item, dict)
+                ]
+                async with result_lock:
+                    vulnerabilities.extend(produced)
+                task["status"] = "completed"
+                task["result_count"] = len(produced)
+                await _emit_task_status(
                     output,
-                    "error",
-                    f"Threat audit failed for {task['task_id']}: {exc}",
-                    task_id=task["task_id"],
+                    task,
+                    f"Completed threat audit task {task['task_id']}",
                 )
-                return
+                await _emit(
+                    output, "item", f"Completed {task['task_id']}",
+                    task_id=task["task_id"], vulnerability_count=len(produced),
+                )
+        except asyncio.CancelledError:
+            task["status"] = "cancelled"
             task["finished_at"] = datetime.now(timezone.utc).isoformat()
-            task["output_source"] = result.output_source
-            if result.status != "success" or not isinstance(result.structured, list):
-                task["status"] = (
-                    result.status
-                    if result.status != "success"
-                    else "failed"
-                )
-                task["failure_reason"] = (
-                    result.text
-                    if result.status != "success"
-                    else "Threat audit returned no result list"
-                )
-                return
-            produced = [
-                _normalize_vulnerability(item, task, result.output_source)
-                for item in result.structured
-                if isinstance(item, dict)
-            ]
-            async with result_lock:
-                vulnerabilities.extend(produced)
-            task["status"] = "completed"
-            task["result_count"] = len(produced)
-            await _emit(
-                output, "item", f"Completed {task['task_id']}",
-                task_id=task["task_id"], vulnerability_count=len(produced),
+            await _emit_task_status(
+                output,
+                task,
+                f"Cancelled threat audit task {task['task_id']}",
             )
+            raise
+        except Exception as exc:
+            task["finished_at"] = datetime.now(timezone.utc).isoformat()
+            task["status"] = "failed"
+            task["failure_reason"] = str(exc)
+            await _emit_task_status(
+                output,
+                task,
+                f"Failed threat audit task {task['task_id']}",
+            )
+            await _emit(
+                output,
+                "error",
+                f"Threat audit failed for {task['task_id']}: {exc}",
+                task_id=task["task_id"],
+            )
+            return
 
     await asyncio.gather(*(audit(task) for task in tasks))
     status = "cancelled" if _cancelled(cancel_event) else "success"

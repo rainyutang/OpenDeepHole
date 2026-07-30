@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { KeyboardEvent, ReactNode } from "react";
+import type { KeyboardEvent } from "react";
 import type {
   NativeThreatAttackPath,
   NativeThreatAttackTree,
@@ -8,13 +8,11 @@ import type {
   NativeThreatValueAsset,
   ScanEvent,
   ThreatAnalysis,
-  ThreatAuditTask,
 } from "../../types";
 import "./ThreatAnalysisPanel.css";
 
 interface ThreatAnalysisPanelProps {
   analysis: ThreatAnalysis | null;
-  threatAuditTasks: ThreatAuditTask[];
   events: ScanEvent[];
   loading: boolean;
   isDone: boolean;
@@ -59,7 +57,6 @@ const RESULT_TABS: Array<{ key: Tab; label: string }> = [
 
 export function ThreatAnalysisPanel({
   analysis,
-  threatAuditTasks,
   events,
   loading,
   isDone,
@@ -88,7 +85,6 @@ export function ThreatAnalysisPanel({
                 : "等待威胁分析结果。"
           }
         />
-        <ThreatAuditTaskList tasks={threatAuditTasks} />
         <ThreatEventList events={events} />
       </div>
     );
@@ -102,7 +98,6 @@ export function ThreatAnalysisPanel({
     return (
       <div className="space-y-4">
         <EmptyState text="该扫描使用旧版威胁分析格式，当前版本不再提供兼容展示。" />
-        <ThreatAuditTaskList tasks={threatAuditTasks} />
         <ThreatEventList events={events} />
       </div>
     );
@@ -186,7 +181,6 @@ export function ThreatAnalysisPanel({
         </section>
       </section>
 
-      <ThreatAuditTaskList tasks={threatAuditTasks} />
       <ArtifactPaths analysis={analysis} />
       <ThreatEventList events={events} />
     </div>
@@ -761,33 +755,6 @@ function ArtifactPaths({ analysis }: { analysis: ThreatAnalysis }) {
   );
 }
 
-function ThreatAuditTaskList({ tasks }: { tasks: ThreatAuditTask[] }) {
-  if (tasks.length === 0) {
-    return <EmptyState text="尚未创建按攻击模式拆分的威胁审计任务。" />;
-  }
-  return (
-    <section className="rounded-lg border border-slate-800 bg-slate-900/70 p-4">
-      <h3 className="text-sm font-semibold text-white">威胁审计任务 · {tasks.length}</h3>
-      <div className="mt-3 max-h-72 divide-y divide-slate-800 overflow-auto">
-        {tasks.map((task) => (
-          <div key={task.task_id} className="py-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <Pill>{auditStatus(task.status)}</Pill>
-              <span className="text-sm text-slate-200">{task.method_name || "未命名攻击模式"}</span>
-              <span className="text-xs text-slate-500">·</span>
-              <span className="text-sm text-slate-400">{task.surface_name || "未命名模块"}</span>
-            </div>
-            {task.code_path && (
-              <div className="mt-1 break-all font-mono text-xs text-cyan-200">{task.code_path}</div>
-            )}
-            {task.failure_reason && <div className="mt-1 text-xs text-red-300">{task.failure_reason}</div>}
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
 function ThreatEventList({ events }: { events: ScanEvent[] }) {
   if (events.length === 0) return null;
   return (
@@ -808,32 +775,10 @@ function ThreatEventList({ events }: { events: ScanEvent[] }) {
   );
 }
 
-function Pill({ children }: { children: ReactNode }) {
-  return (
-    <span className="rounded border border-slate-700 bg-slate-800 px-2 py-0.5 text-xs text-slate-300">
-      {children}
-    </span>
-  );
-}
-
 function EmptyState({ text }: { text: string }) {
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-5 text-sm text-slate-400">
       {text}
     </div>
   );
-}
-
-function auditStatus(value: string): string {
-  const labels: Record<string, string> = {
-    pending: "待执行",
-    queued: "排队中",
-    running: "运行中",
-    completed: "已完成",
-    failed: "失败",
-    timeout: "超时",
-    no_result: "无结果",
-    cancelled: "已取消",
-  };
-  return labels[value] ?? value;
 }
