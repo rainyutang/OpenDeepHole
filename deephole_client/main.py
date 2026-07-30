@@ -319,19 +319,12 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 validator_result = await run_vulnerability_validation(
                     operation="catalog",
                 )
-                from deephole_client.vulnerability_mining import (
-                    build_mining_engine_catalog,
-                )
-
                 hello_msg = {
                     "type": "hello",
                     "name": name,
                     "machine_name": socket.gethostname(),
                     "config": remote_config_dict(config),
                     "validator_catalog": validator_result["catalog"],
-                    "mining_engine_catalog": (
-                        build_mining_engine_catalog()
-                    ),
                     "runtime_hash": compute_runtime_hash(),
                     "agent_session_id": reporter.agent_session_id,
                     "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),

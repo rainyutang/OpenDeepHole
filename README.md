@@ -109,7 +109,9 @@ agent_name: "my-agent"
 owner_token: ""
 ```
 
-下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、完整 OpenCode JSONC、漏洞挖掘引擎、产品信息 MCP、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
+下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、完整 OpenCode JSONC、漏洞挖掘模型策略、产品信息 MCP、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
+
+**「新建扫描」** 页面会直接读取当前代码仓 `deephole_client/vulnerability_mining/engines/` 中的引擎清单，可为一次扫描选择一个或多个引擎；这个选择与 Agent 无关，不需要等待 Agent 上报引擎。每个已选引擎还可独立配置其结果是否进入去误报，解析后的选择会随扫描固化。
 
 **「新建扫描」** 页面的代码图谱 MCP 是可选项，默认关闭；未启用、未传或传入 `null` 时，模型任务只使用 `read`、`grep`、`glob` 等文件工具，不会启动或回退到内置代码 MCP。启用后可选择本地进程或远端服务，并配置启动参数、环境变量、请求头和 MCP 调用超时。`code_graph_mcp.timeout_seconds` 按秒填写，默认值 `300` 会在运行时转换为 OpenCode MCP 配置中的 `"enabled": true, "timeout": 300000`；该超时同时用于连接、工具发现和单次工具调用。启用的配置会作为扫描私有快照持久化，并在续扫、去误报和漏洞验证中继续使用；不同扫描不会共享代码图谱连接。
 
@@ -539,7 +541,7 @@ server_url: "http://your-server:8000"
 agent_name: ""
 owner_token: ""
 checkers: []
-schema_version: 5
+schema_version: 4
 opencode_config: |
   {}
 base:
@@ -560,16 +562,9 @@ model_pool:
         - weekdays: [1, 2, 3, 4, 5, 6]  # 周一至周六
           start: "22:00"
           end: "06:00"
-mining_engines:
-  static_candidate:
-    enabled: true
-    fp_review_enabled: true
-  threat_audit:
-    enabled: true
-    fp_review_enabled: true
 ```
 
-`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v5 字段由 Web **「Agent 配置」** 页面管理并写回。`opencode_config` 是完整 JSONC 用户配置层，支持注释和尾随逗号。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。`mining_engines` 按稳定引擎 ID 覆盖目录清单默认值；新建扫描还可做单次覆盖，解析结果会随扫描固化。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；v3 中的全局代码图谱只作为旧集成请求的扫描级迁移输入，不再写回 Agent 配置，v3/v4 的威胁分析开关会迁移为 `threat_audit` 引擎覆盖。模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。
+`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v4 字段由 Web **「Agent 配置」** 页面管理并写回。`opencode_config` 是完整 JSONC 用户配置层，支持注释和尾随逗号。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。漏洞挖掘引擎不属于 Agent 配置，而是在新建扫描时从当前代码仓清单中直接选择。短暂使用过的 v5 Agent 配置会保留其它字段、移除 `mining_engines` 并归一为 v4。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；v3 中的全局代码图谱只作为旧集成请求的扫描级迁移输入，不再写回 Agent 配置。模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。
 
 新增漏洞挖掘引擎只需创建独立目录并实现固定适配契约，详见 [漏洞挖掘引擎扩展](deephole_client/vulnerability_mining/README.md)。
 

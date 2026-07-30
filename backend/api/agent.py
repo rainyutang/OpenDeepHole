@@ -59,7 +59,6 @@ from backend.models import (
     AgentOpenCodePoolStatus,
     AgentOpenCodeRuntimeConfigResponse,
     AgentInfo,
-    AgentMiningEngineCatalog,
     AgentRemoteConfig,
     AgentValidatorCatalog,
     AgentScanCandidates,
@@ -125,24 +124,6 @@ def _stored_validator_catalog(record: dict | None) -> AgentValidatorCatalog:
     except Exception as exc:
         logger.warning("Ignoring invalid persisted validator catalog: %s", exc)
         return AgentValidatorCatalog(errors=[str(exc)])
-
-
-def _stored_mining_engine_catalog(
-    record: dict | None,
-) -> AgentMiningEngineCatalog:
-    if not record:
-        return AgentMiningEngineCatalog()
-    try:
-        payload = json.loads(
-            str(record.get("mining_engine_catalog_json") or "{}")
-        )
-        return AgentMiningEngineCatalog(**payload)
-    except Exception as exc:
-        logger.warning(
-            "Ignoring invalid persisted mining-engine catalog: %s",
-            exc,
-        )
-        return AgentMiningEngineCatalog(errors=[str(exc)])
 
 
 def _stored_mcp_probes(record: dict | None) -> dict[str, AgentMcpProbeResult]:
@@ -303,7 +284,6 @@ def _validate_mcp_config(
 def _validate_managed_config(
     config: AgentRemoteConfig,
     catalog: AgentValidatorCatalog | None = None,
-    mining_catalog: AgentMiningEngineCatalog | None = None,
 ) -> None:
     try:
         parse_opencode_jsonc(config.opencode_config, source="OpenCode 配置")
@@ -387,35 +367,6 @@ def _validate_managed_config(
         if policy.max_retries < 0:
             raise HTTPException(status_code=422, detail=f"{label}的模型重试不能小于 0")
     _validate_mcp_config(config.product_info, label="产品信息")
-    if mining_catalog is not None and mining_catalog.engines:
-        available = {
-            item.engine_id: item
-            for item in mining_catalog.engines
-        }
-        unknown = sorted(set(config.mining_engines) - set(available))
-        if unknown:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "未知的漏洞挖掘引擎配置："
-                    + ", ".join(unknown)
-                ),
-            )
-        enabled_count = 0
-        for engine_id, item in available.items():
-            override = config.mining_engines.get(engine_id)
-            enabled = (
-                item.default_enabled
-                if override is None or override.enabled is None
-                else override.enabled
-            )
-            if enabled:
-                enabled_count += 1
-        if enabled_count == 0:
-            raise HTTPException(
-                status_code=422,
-                detail="至少需要启用一个漏洞挖掘引擎",
-            )
     if catalog is not None:
         registrations = {item.registration_key: item for item in catalog.registrations}
         for environment, environment_config in config.vulnerability_validation.environments.items():
@@ -506,6 +457,247 @@ _RUNNING_SCAN_STATUSES = (
     ScanItemStatus.ANALYZING,
     ScanItemStatus.AUDITING,
 )
+_RUNTIME_UPDATE_PENDING = "pending"
+_RUNTIME_UPDATE_UPDATING = "updating"
+_RUNTIME_UPDATE_FAILED = "failed"
+_RUNTIME_UPDATE_ACTIVE_STATUSES = {
+    _RUNTIME_UPDATE_PENDING,
+    _RUNTIME_UPDATE_UPDATING,
+}
+_RUNTIME_UPDATE_POLL_SECONDS = 2
+_RUNTIME_UPDATE_TIMEOUT_SECONDS = 15 * 60
+
+
+def _runtime_update_status(record: dict | None) -> str:
+    return str((record or {}).get("runtime_update_status") or "")
+
+
+def is_agent_accepting_tasks(agent_key: str) -> bool:
+    """Return whether a stable Agent may receive a new workload command."""
+    if not agent_key:
+        return True
+    record = get_scan_store().get_agent_record(agent_key)
+    return _runtime_update_status(record) != _RUNTIME_UPDATE_UPDATING
+
+
+def ensure_agent_accepting_tasks(agent_key: str) -> None:
+    if not is_agent_accepting_tasks(agent_key):
+        raise HTTPException(
+            status_code=409,
+            detail="Agent 正在更新并等待重连，请稍后再提交任务",
+        )
+
+
+def _runtime_update_age_seconds(value: str) -> float | None:
+    if not value:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
+    except Exception:
+        return None
+
+
+def _scan_belongs_to_agent(scan_id: str, agent_key: str, agent_id: str) -> bool:
+    meta = get_scan_store().get_scan_meta(scan_id)
+    if meta is None:
+        return False
+    if agent_key and meta.agent_key:
+        return meta.agent_key == agent_key
+    return bool(agent_id and meta.agent_id == agent_id)
+
+
+def _agent_has_active_work(agent_key: str, agent_id: str) -> bool:
+    """Check scan and post-scan work before allowing an update restart."""
+    store = get_scan_store()
+    for scan_id, scan in _running_scans.items():
+        if scan.status in _RUNNING_SCAN_STATUSES and _scan_belongs_to_agent(
+            scan_id,
+            agent_key,
+            agent_id,
+        ):
+            return True
+
+    pool = _agent_opencode_pool_latest.get(agent_id)
+    if pool is not None and (pool.global_running > 0 or pool.global_queued > 0):
+        return True
+
+    for summary in store.list_scans():
+        meta = store.get_scan_meta(summary.scan_id)
+        if meta is None:
+            continue
+        if agent_key and meta.agent_key:
+            matches = meta.agent_key == agent_key
+        else:
+            matches = bool(agent_id and meta.agent_id == agent_id)
+        if not matches:
+            continue
+
+        fp_job = store.get_fp_review_by_scan(summary.scan_id)
+        if fp_job is not None:
+            fp_status = getattr(fp_job.status, "value", fp_job.status)
+            if fp_status in {"pending", "running"}:
+                return True
+        if any(
+            validation.running
+            or validation.status in {"pending", "queued", "running"}
+            for validation in store.list_vulnerability_validations(summary.scan_id)
+        ):
+            return True
+    return False
+
+
+def _clear_agent_runtime_update(agent_key: str) -> None:
+    get_scan_store().set_agent_runtime_update_record(
+        agent_key,
+        status="",
+    )
+
+
+async def _process_agent_runtime_updates() -> None:
+    """Advance all durable manual Agent update requests by one scheduler tick."""
+    store = get_scan_store()
+    for record in store.list_agent_records():
+        status = _runtime_update_status(record)
+        if status not in _RUNTIME_UPDATE_ACTIVE_STATUSES:
+            continue
+
+        agent_key = str(record.get("agent_key") or "")
+        target_hash = str(record.get("runtime_update_target_hash") or "")
+        live = _live_agent_for_key(agent_key)
+
+        if live is not None and target_hash and live[1].runtime_hash == target_hash:
+            _clear_agent_runtime_update(agent_key)
+            logger.info("Agent runtime update completed: agent_key=%s", agent_key)
+            continue
+
+        if status == _RUNTIME_UPDATE_UPDATING:
+            age = _runtime_update_age_seconds(
+                str(record.get("runtime_update_started_at") or "")
+            )
+            if age is not None and age > _RUNTIME_UPDATE_TIMEOUT_SECONDS:
+                store.set_agent_runtime_update_record(
+                    agent_key,
+                    status=_RUNTIME_UPDATE_FAILED,
+                    target_hash=target_hash,
+                    server_url=str(record.get("runtime_update_server_url") or ""),
+                    requested_at=str(record.get("runtime_update_requested_at") or ""),
+                    started_at=str(record.get("runtime_update_started_at") or ""),
+                    error="Agent 更新后未在规定时间内以目标版本重连",
+                )
+                logger.warning(
+                    "Agent runtime update timed out: agent_key=%s target=%s",
+                    agent_key,
+                    target_hash[:12],
+                )
+            continue
+
+        if live is None:
+            continue
+        agent_id, agent = live
+        if _agent_has_active_work(agent_key, agent_id):
+            continue
+
+        server_url = str(record.get("runtime_update_server_url") or "")
+        if not server_url:
+            store.set_agent_runtime_update_record(
+                agent_key,
+                status=_RUNTIME_UPDATE_FAILED,
+                target_hash=target_hash,
+                requested_at=str(record.get("runtime_update_requested_at") or ""),
+                error="更新请求缺少服务端地址，请重新点击更新",
+            )
+            continue
+
+        try:
+            target_hash = _agent_runtime_hash()
+            if agent.runtime_hash and agent.runtime_hash == target_hash:
+                _clear_agent_runtime_update(agent_key)
+                continue
+            now = datetime.now(timezone.utc).isoformat()
+            store.set_agent_runtime_update_record(
+                agent_key,
+                status=_RUNTIME_UPDATE_UPDATING,
+                target_hash=target_hash,
+                server_url=server_url,
+                requested_at=str(record.get("runtime_update_requested_at") or now),
+                started_at=now,
+            )
+
+            # Let concurrent task-creation requests observe the updating state,
+            # then recheck in case one was already committed before the handoff.
+            await asyncio.sleep(0)
+            live = _live_agent_for_key(agent_key)
+            if live is None:
+                store.set_agent_runtime_update_record(
+                    agent_key,
+                    status=_RUNTIME_UPDATE_PENDING,
+                    target_hash=target_hash,
+                    server_url=server_url,
+                    requested_at=str(record.get("runtime_update_requested_at") or now),
+                )
+                continue
+            agent_id, _agent = live
+            if _agent_has_active_work(agent_key, agent_id):
+                store.set_agent_runtime_update_record(
+                    agent_key,
+                    status=_RUNTIME_UPDATE_PENDING,
+                    target_hash=target_hash,
+                    server_url=server_url,
+                    requested_at=str(record.get("runtime_update_requested_at") or now),
+                )
+                continue
+
+            update_payload = create_agent_runtime_update_payload(server_url)
+            sent = await send_agent_command(
+                agent_id,
+                {
+                    "type": "task",
+                    "runtime_update_only": True,
+                    "agent_runtime_update": update_payload,
+                },
+            )
+            if not sent:
+                store.set_agent_runtime_update_record(
+                    agent_key,
+                    status=_RUNTIME_UPDATE_PENDING,
+                    target_hash=target_hash,
+                    server_url=server_url,
+                    requested_at=str(record.get("runtime_update_requested_at") or now),
+                )
+                continue
+            logger.info(
+                "Agent runtime update dispatched at idle boundary: agent_key=%s target=%s",
+                agent_key,
+                target_hash[:12],
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to dispatch Agent runtime update for %s",
+                agent_key,
+            )
+            store.set_agent_runtime_update_record(
+                agent_key,
+                status=_RUNTIME_UPDATE_FAILED,
+                target_hash=target_hash,
+                server_url=server_url,
+                requested_at=str(record.get("runtime_update_requested_at") or ""),
+                error=f"下发 Agent 更新失败：{exc}",
+            )
+
+
+async def run_agent_runtime_update_scheduler() -> None:
+    """Continuously dispatch durable manual updates at safe idle boundaries."""
+    while True:
+        try:
+            await _process_agent_runtime_updates()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Agent runtime update scheduler tick failed")
+        await asyncio.sleep(_RUNTIME_UPDATE_POLL_SECONDS)
 
 
 def _purge_expired_runtime_downloads() -> None:
@@ -1018,15 +1210,6 @@ async def agent_websocket(websocket: WebSocket) -> None:
             )
         except Exception as exc:
             catalog = AgentValidatorCatalog(errors=[str(exc)])
-        reported_mining_catalog = msg.get("mining_engine_catalog")
-        try:
-            mining_catalog = (
-                AgentMiningEngineCatalog(**reported_mining_catalog)
-                if isinstance(reported_mining_catalog, dict)
-                else AgentMiningEngineCatalog()
-            )
-        except Exception as exc:
-            mining_catalog = AgentMiningEngineCatalog(errors=[str(exc)])
         reported_config = msg.get("config")
         try:
             initial_config = (
@@ -1034,11 +1217,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 if isinstance(reported_config, dict)
                 else AgentRemoteConfig()
             )
-            _validate_managed_config(
-                initial_config,
-                catalog,
-                mining_catalog,
-            )
+            _validate_managed_config(initial_config, catalog)
         except Exception as exc:
             logger.warning(
                 "Ignoring invalid config reported by agent %s: %s",
@@ -1060,9 +1239,17 @@ async def agent_websocket(websocket: WebSocket) -> None:
             last_seen=now,
             initial_config_json=initial_config.model_dump_json(),
             validator_catalog_json=catalog.model_dump_json(),
-            mining_engine_catalog_json=mining_catalog.model_dump_json(),
         )
         stable_key = str(record["agent_key"])
+        reported_runtime_hash = str(msg.get("runtime_hash") or "")
+        update_target_hash = str(record.get("runtime_update_target_hash") or "")
+        if (
+            _runtime_update_status(record)
+            and update_target_hash
+            and reported_runtime_hash == update_target_hash
+        ):
+            _clear_agent_runtime_update(stable_key)
+            record = store.get_agent_record(stable_key) or record
         cfg = _stored_agent_config(record)
         _agent_configs[stable_key] = cfg
 
@@ -1075,8 +1262,14 @@ async def agent_websocket(websocket: WebSocket) -> None:
             port=0,
             last_seen=now,
             user_id=user_id,
-            runtime_hash=str(msg.get("runtime_hash") or ""),
+            runtime_hash=reported_runtime_hash,
             agent_session_id=str(msg.get("agent_session_id") or agent_id),
+            runtime_update_status=_runtime_update_status(record),
+            runtime_update_target_hash=str(
+                record.get("runtime_update_target_hash") or ""
+            ),
+            runtime_update_error=str(record.get("runtime_update_error") or ""),
+            accepting_tasks=_runtime_update_status(record) != _RUNTIME_UPDATE_UPDATING,
         )
         _registered_agents[agent_id] = agent_info
         _agent_ws[agent_id] = websocket
@@ -1436,7 +1629,6 @@ async def update_agent_config(
     _validate_managed_config(
         body,
         _stored_validator_catalog(record),
-        _stored_mining_engine_catalog(record),
     )
     get_scan_store().update_agent_config_record(agent_key, body.model_dump_json())
     _agent_configs[agent_key] = body
@@ -1484,7 +1676,6 @@ async def update_stable_agent_config(
     _validate_managed_config(
         body,
         _stored_validator_catalog(record),
-        _stored_mining_engine_catalog(record),
     )
     get_scan_store().update_agent_config_record(agent_key, body.model_dump_json())
     _agent_configs[agent_key] = body
@@ -1493,6 +1684,64 @@ async def update_stable_agent_config(
     if live is not None:
         applied = await send_agent_command(live[0], {"type": "config", "config": body.model_dump()})
     return {"ok": True, "applied": applied}
+
+
+@public_router.post("/api/agent-configs/{agent_key}/runtime-update")
+async def request_stable_agent_runtime_update(
+    agent_key: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    store = get_scan_store()
+    record = _authorize_agent_record(store.get_agent_record(agent_key), current_user)
+    live = _live_agent_for_key(agent_key)
+    if live is None or not _is_agent_online(live[1]):
+        raise HTTPException(status_code=409, detail="Agent 当前离线，无法提交更新")
+
+    target_hash = _agent_runtime_hash()
+    if live[1].runtime_hash and live[1].runtime_hash == target_hash:
+        _clear_agent_runtime_update(agent_key)
+        return {
+            "status": "up_to_date",
+            "target_hash": target_hash,
+            "message": "Agent 已是最新版本",
+        }
+
+    current_status = _runtime_update_status(record)
+    current_target = str(record.get("runtime_update_target_hash") or "")
+    if (
+        current_status in _RUNTIME_UPDATE_ACTIVE_STATUSES
+        and current_target == target_hash
+    ):
+        return {
+            "status": current_status,
+            "target_hash": target_hash,
+            "message": (
+                "Agent 正在更新"
+                if current_status == _RUNTIME_UPDATE_UPDATING
+                else "更新请求已在等待 Agent 空闲"
+            ),
+        }
+
+    now = datetime.now(timezone.utc).isoformat()
+    store.set_agent_runtime_update_record(
+        agent_key,
+        status=_RUNTIME_UPDATE_PENDING,
+        target_hash=target_hash,
+        server_url=str(request.base_url).rstrip("/"),
+        requested_at=now,
+    )
+    logger.info(
+        "Agent runtime update requested: agent_key=%s user=%s target=%s",
+        agent_key,
+        current_user.username,
+        target_hash[:12],
+    )
+    return {
+        "status": _RUNTIME_UPDATE_PENDING,
+        "target_hash": target_hash,
+        "message": "更新请求已提交，Agent 将在全部任务空闲后自动更新",
+    }
 
 
 _OPENCODE_RUNTIME_STATES = {"active", "reload_pending", "next_task"}
@@ -1933,21 +2182,6 @@ async def get_stable_agent_validator_catalog(
     })
 
 
-@public_router.get(
-    "/api/agent-configs/{agent_key}/mining-engine-catalog",
-    response_model=AgentMiningEngineCatalog,
-)
-async def get_stable_agent_mining_engine_catalog(
-    agent_key: str,
-    current_user: User = Depends(get_current_user),
-) -> AgentMiningEngineCatalog:
-    record = _authorize_agent_record(
-        get_scan_store().get_agent_record(agent_key),
-        current_user,
-    )
-    return _stored_mining_engine_catalog(record)
-
-
 @public_router.get("/api/agent-configs/{agent_key}/validation-environments")
 async def get_stable_agent_validation_environments(
     agent_key: str,
@@ -2001,6 +2235,14 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
             "runtime_hash": agent.runtime_hash if agent else "",
             "agent_session_id": agent.agent_session_id if agent else "",
             "online": bool(agent and _is_agent_online(agent)),
+            "runtime_update_status": _runtime_update_status(record),
+            "runtime_update_target_hash": str(
+                record.get("runtime_update_target_hash") or ""
+            ),
+            "runtime_update_error": str(record.get("runtime_update_error") or ""),
+            "accepting_tasks": (
+                _runtime_update_status(record) != _RUNTIME_UPDATE_UPDATING
+            ),
         })
     # Keep legacy HTTP agents visible until they migrate to the stable catalog.
     for agent in _registered_agents.values():
@@ -3024,6 +3266,19 @@ def create_agent_runtime_update_payload(server_url: str) -> dict:
         "token": token,
         "expires_at": int(download.expires_at),
     }
+
+
+def create_agent_task_runtime_update_payload(
+    server_url: str,
+    agent_key: str,
+) -> dict | None:
+    """Keep ordinary tasks from bypassing a queued idle-only manual update."""
+    normalized_key = str(agent_key or "").strip()
+    if normalized_key:
+        record = get_scan_store().get_agent_record(normalized_key)
+        if _runtime_update_status(record) in _RUNTIME_UPDATE_ACTIVE_STATUSES:
+            return None
+    return create_agent_runtime_update_payload(server_url)
 
 
 def _build_agent_zip(server_url: str = "", owner_token: str = "") -> bytes:

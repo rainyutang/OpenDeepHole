@@ -1,5 +1,5 @@
 # OpenDeepHole Agent bootstrap and managed configuration.
-# server_url / agent_name / owner_token are local-only; the remaining v5
+# server_url / agent_name / owner_token are local-only; the remaining v4
 # sections are managed by the Web "Agent 配置" page after first connection.
 
 server_url: "http://your-server:8000"
@@ -7,7 +7,7 @@ agent_name: ""
 owner_token: ""
 checkers: []
 
-schema_version: 5
+schema_version: 4
 opencode_config: |
   {}
 base:
@@ -68,10 +68,6 @@ vulnerability_mining:
   required_capability: "high"
   timeout_seconds: 3600
   max_retries: 2
-
-# Empty means each engine.yaml default is used. The Web UI can override each
-# discovered engine's enabled and fp_review_enabled values.
-mining_engines: {}
 
 false_positive:
   required_capability: "high"

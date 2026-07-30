@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 import uuid
 
-from backend.api import admin, agent, auth, checkers, feedback, integration, scan, skills
+from backend.api import admin, agent, announcements, auth, checkers, feedback, integration, scan, skills
 from backend.auth import hash_password
 from backend.config import apply_no_proxy, get_config
 from backend.logger import get_logger
@@ -61,10 +62,20 @@ async def lifespan(app: FastAPI):
 
     refresh_validation_catalog()
 
+    runtime_update_task = asyncio.create_task(
+        agent.run_agent_runtime_update_scheduler()
+    )
     logger.info("OpenDeepHole backend started on port %d", config.server.port)
-    yield
-    store.close()
-    logger.info("OpenDeepHole backend shutting down")
+    try:
+        yield
+    finally:
+        runtime_update_task.cancel()
+        try:
+            await runtime_update_task
+        except asyncio.CancelledError:
+            pass
+        store.close()
+        logger.info("OpenDeepHole backend shutting down")
 
 
 app = FastAPI(
@@ -85,6 +96,7 @@ app.include_router(integration.router)
 app.include_router(checkers.router)
 app.include_router(skills.router)
 app.include_router(feedback.router)
+app.include_router(announcements.router)
 app.include_router(agent.router)
 app.include_router(agent.public_router)
 

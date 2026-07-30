@@ -10,6 +10,7 @@ from pathlib import Path
 
 from backend.scan_metrics import VulnStat
 from backend.models import (
+    Announcement,
     AgentMcpConfig,
     AgentOpenCodePoolStatus,
     Candidate,
@@ -513,7 +514,6 @@ CREATE TABLE IF NOT EXISTS agents (
     display_name          TEXT NOT NULL DEFAULT '',
     config_json           TEXT NOT NULL DEFAULT '{}',
     validator_catalog_json TEXT NOT NULL DEFAULT '{}',
-    mining_engine_catalog_json TEXT NOT NULL DEFAULT '{}',
     mcp_probe_json        TEXT NOT NULL DEFAULT '{}',
     opencode_runtime_config_json TEXT NOT NULL DEFAULT '{}',
     last_agent_id         TEXT NOT NULL DEFAULT '',
@@ -678,9 +678,65 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE agents ADD COLUMN opencode_runtime_config_json TEXT NOT NULL DEFAULT '{}'"
             )
-        if "mining_engine_catalog_json" not in agent_cols:
-            self._conn.execute(
-                "ALTER TABLE agents ADD COLUMN mining_engine_catalog_json TEXT NOT NULL DEFAULT '{}'"
+        for column in (
+            "runtime_update_status",
+            "runtime_update_target_hash",
+            "runtime_update_server_url",
+            "runtime_update_requested_at",
+            "runtime_update_started_at",
+            "runtime_update_error",
+        ):
+            if column not in agent_cols:
+                self._conn.execute(
+                    f"ALTER TABLE agents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+        announcement_table_exists = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'announcements'"
+        ).fetchone() is not None
+        self._conn.executescript("""\
+            CREATE TABLE IF NOT EXISTS announcements (
+                announcement_id TEXT PRIMARY KEY,
+                title           TEXT NOT NULL,
+                content         TEXT NOT NULL,
+                published       INTEGER NOT NULL DEFAULT 0,
+                published_at    TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_announcements_published
+            ON announcements(published, published_at DESC, created_at DESC);
+        """)
+        if not announcement_table_exists:
+            initial_announcements = (
+                (
+                    "release-2026-07-29-mining-engines",
+                    "漏洞挖掘支持多引擎",
+                    "新建扫描可按需选择漏洞挖掘引擎，扫描结果会展示来源引擎，单个引擎失败不会影响其它引擎继续运行。",
+                    "2026-07-29T00:00:00+00:00",
+                ),
+                (
+                    "release-2026-07-28-opencode-runtime",
+                    "Agent 运行配置更透明",
+                    "Agent 配置页现在可以查看 OpenCode 实际运行配置、模型限制、自动压缩和工具输出裁剪状态。",
+                    "2026-07-28T00:00:00+00:00",
+                ),
+                (
+                    "release-2026-07-27-token-usage",
+                    "Token 用量统计上线",
+                    "扫描详情和 Agent 配置页新增 Token 用量统计，可查看输入、输出、推理和缓存 Token。",
+                    "2026-07-27T00:00:00+00:00",
+                ),
+            )
+            self._conn.executemany(
+                """\
+                INSERT INTO announcements
+                    (announcement_id, title, content, published, published_at, created_at, updated_at)
+                VALUES (?, ?, ?, 1, ?, ?, ?)
+                """,
+                [
+                    (announcement_id, title, content, published_at, published_at, published_at)
+                    for announcement_id, title, content, published_at in initial_announcements
+                ],
             )
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
@@ -3523,6 +3579,97 @@ class SqliteScanStore(ScanStoreBase):
         cur = self._conn.execute("SELECT * FROM users ORDER BY created_at")
         return [self._row_to_user(row) for row in cur.fetchall()]
 
+    # -- Announcements --
+
+    @staticmethod
+    def _row_to_announcement(row: sqlite3.Row) -> Announcement:
+        return Announcement(
+            announcement_id=row["announcement_id"],
+            title=row["title"],
+            content=row["content"],
+            published=bool(row["published"]),
+            published_at=row["published_at"] or "",
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def list_announcements(
+        self,
+        *,
+        published_only: bool = False,
+        limit: int | None = None,
+    ) -> list[Announcement]:
+        query = "SELECT * FROM announcements"
+        params: list[object] = []
+        if published_only:
+            query += " WHERE published = 1"
+        query += (
+            " ORDER BY CASE WHEN published_at = '' THEN 1 ELSE 0 END,"
+            " published_at DESC, created_at DESC"
+        )
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(0, int(limit)))
+        cur = self._conn.execute(query, params)
+        return [self._row_to_announcement(row) for row in cur.fetchall()]
+
+    def get_announcement(self, announcement_id: str) -> Announcement | None:
+        cur = self._conn.execute(
+            "SELECT * FROM announcements WHERE announcement_id = ?",
+            (announcement_id,),
+        )
+        row = cur.fetchone()
+        return self._row_to_announcement(row) if row else None
+
+    def create_announcement(self, announcement: Announcement) -> None:
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO announcements
+                    (announcement_id, title, content, published, published_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    announcement.announcement_id,
+                    announcement.title,
+                    announcement.content,
+                    int(announcement.published),
+                    announcement.published_at,
+                    announcement.created_at,
+                    announcement.updated_at,
+                ),
+            )
+            self._conn.commit()
+
+    def update_announcement(self, announcement: Announcement) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                """\
+                UPDATE announcements
+                SET title = ?, content = ?, published = ?, published_at = ?, updated_at = ?
+                WHERE announcement_id = ?
+                """,
+                (
+                    announcement.title,
+                    announcement.content,
+                    int(announcement.published),
+                    announcement.published_at,
+                    announcement.updated_at,
+                    announcement.announcement_id,
+                ),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def delete_announcement(self, announcement_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM announcements WHERE announcement_id = ?",
+                (announcement_id,),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
     # -- Persistent Agent catalog/config --
 
     def find_agent_record(self, user_id: str, ip: str, machine_name: str) -> dict | None:
@@ -3560,7 +3707,6 @@ class SqliteScanStore(ScanStoreBase):
         last_seen: str,
         initial_config_json: str = "{}",
         validator_catalog_json: str = "{}",
-        mining_engine_catalog_json: str = "{}",
     ) -> dict:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -3568,9 +3714,9 @@ class SqliteScanStore(ScanStoreBase):
                 """\
                 INSERT INTO agents
                     (agent_key, user_id, ip, machine_name, display_name, config_json,
-                     validator_catalog_json, mining_engine_catalog_json,
-                     last_agent_id, last_seen, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     validator_catalog_json, last_agent_id, last_seen,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, ip, machine_name) DO UPDATE SET
                     display_name = excluded.display_name,
                     last_agent_id = excluded.last_agent_id,
@@ -3578,11 +3724,6 @@ class SqliteScanStore(ScanStoreBase):
                     validator_catalog_json = CASE
                         WHEN excluded.validator_catalog_json = '{}' THEN agents.validator_catalog_json
                         ELSE excluded.validator_catalog_json
-                    END,
-                    mining_engine_catalog_json = CASE
-                        WHEN excluded.mining_engine_catalog_json = '{}'
-                            THEN agents.mining_engine_catalog_json
-                        ELSE excluded.mining_engine_catalog_json
                     END,
                     updated_at = excluded.updated_at
                 """,
@@ -3594,7 +3735,6 @@ class SqliteScanStore(ScanStoreBase):
                     display_name,
                     initial_config_json,
                     validator_catalog_json,
-                    mining_engine_catalog_json,
                     agent_id,
                     last_seen,
                     now,
@@ -3621,20 +3761,6 @@ class SqliteScanStore(ScanStoreBase):
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE agents SET validator_catalog_json = ?, updated_at = ? WHERE agent_key = ?",
-                (catalog_json, now, agent_key),
-            )
-            self._conn.commit()
-        return cur.rowcount > 0
-
-    def update_agent_mining_engine_catalog_record(
-        self,
-        agent_key: str,
-        catalog_json: str,
-    ) -> bool:
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE agents SET mining_engine_catalog_json = ?, updated_at = ? WHERE agent_key = ?",
                 (catalog_json, now, agent_key),
             )
             self._conn.commit()
@@ -3669,6 +3795,45 @@ class SqliteScanStore(ScanStoreBase):
             cur = self._conn.execute(
                 "UPDATE agents SET last_agent_id = ?, last_seen = ?, updated_at = ? WHERE agent_key = ?",
                 (agent_id, last_seen, last_seen, agent_key),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def set_agent_runtime_update_record(
+        self,
+        agent_key: str,
+        *,
+        status: str,
+        target_hash: str = "",
+        server_url: str = "",
+        requested_at: str = "",
+        started_at: str = "",
+        error: str = "",
+    ) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                """\
+                UPDATE agents
+                SET runtime_update_status = ?,
+                    runtime_update_target_hash = ?,
+                    runtime_update_server_url = ?,
+                    runtime_update_requested_at = ?,
+                    runtime_update_started_at = ?,
+                    runtime_update_error = ?,
+                    updated_at = ?
+                WHERE agent_key = ?
+                """,
+                (
+                    status,
+                    target_hash,
+                    server_url,
+                    requested_at,
+                    started_at,
+                    error,
+                    now,
+                    agent_key,
+                ),
             )
             self._conn.commit()
         return cur.rowcount > 0

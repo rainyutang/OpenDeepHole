@@ -66,6 +66,26 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class Announcement(BaseModel):
+    announcement_id: str
+    title: str
+    content: str
+    published: bool = False
+    published_at: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class AnnouncementCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    content: str = Field(min_length=1, max_length=4000)
+    published: bool = False
+
+
+class AnnouncementUpdateRequest(AnnouncementCreateRequest):
+    pass
+
+
 # --- Internal models ---
 
 class Candidate(BaseModel):
@@ -148,10 +168,10 @@ class Vulnerability(BaseModel):
     output_source: OutputSource = Field(default_factory=OutputSource)
 
 
-class MiningEngineConfig(BaseModel):
-    """Optional Agent/scan override for one discovered mining engine."""
+class MiningEngineRequest(BaseModel):
+    """One mining engine explicitly selected for a new scan."""
 
-    enabled: bool | None = None
+    engine_id: str
     fp_review_enabled: bool | None = None
 
 
@@ -184,7 +204,7 @@ class MiningEngineCatalogItem(BaseModel):
     default_fp_review_enabled: bool = True
 
 
-class AgentMiningEngineCatalog(BaseModel):
+class MiningEngineCatalog(BaseModel):
     engines: list[MiningEngineCatalogItem] = []
     errors: list[str] = []
     updated_at: str = ""
@@ -629,6 +649,10 @@ class AgentInfo(BaseModel):
     user_id: str = ""
     runtime_hash: str = ""
     agent_session_id: str = ""
+    runtime_update_status: str = ""
+    runtime_update_target_hash: str = ""
+    runtime_update_error: str = ""
+    accepting_tasks: bool = True
 
 
 class AgentOpenCodeModelConfig(BaseModel):
@@ -892,7 +916,7 @@ def _upgrade_agent_policy(
 def _upgrade_agent_v2_config(value: dict) -> dict:
     """Migrate managed v2 stage defaults without touching model rows."""
     migrated = copy.deepcopy(value)
-    migrated["schema_version"] = 5
+    migrated["schema_version"] = 4
     base = migrated.get("base")
     if not isinstance(base, dict):
         base = {}
@@ -910,15 +934,6 @@ def _upgrade_agent_v2_config(value: dict) -> dict:
         threat.get("model_policy"),
         migrate_threat_retry_default=True,
     )
-    mining_engines = migrated.get("mining_engines")
-    if not isinstance(mining_engines, dict):
-        mining_engines = {}
-        migrated["mining_engines"] = mining_engines
-    if "threat_audit" not in mining_engines and "enabled" in threat:
-        mining_engines["threat_audit"] = {
-            "enabled": bool(threat.get("enabled")),
-        }
-
     validation = migrated.get("vulnerability_validation")
     if not isinstance(validation, dict):
         validation = {}
@@ -970,7 +985,7 @@ class AgentVulnerabilityValidationConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: int = 5
+    schema_version: int = 4
     opencode_config: str = "{}"
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
@@ -992,7 +1007,6 @@ class AgentRemoteConfig(BaseModel):
     )
     product_info: AgentMcpConfig = AgentMcpConfig(name="product-info")
     vulnerability_mining: AgentModelTaskPolicy = AgentModelTaskPolicy()
-    mining_engines: dict[str, MiningEngineConfig] = {}
     false_positive: AgentModelTaskPolicy = AgentModelTaskPolicy(
         required_capability="high",
     )
@@ -1001,7 +1015,7 @@ class AgentRemoteConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
-        """Accept older Agent payloads while emitting only the v5 contract."""
+        """Accept older/transient Agent payloads and emit the v4 contract."""
         if not isinstance(value, dict):
             return value
         if not value:
@@ -1011,25 +1025,15 @@ class AgentRemoteConfig(BaseModel):
         except (TypeError, ValueError):
             schema_version = 0
         if schema_version >= 5:
-            return value
-        if schema_version in {3, 4}:
             migrated = copy.deepcopy(value)
-            migrated["schema_version"] = 5
-            threat = (
-                migrated.get("threat_analysis")
-                if isinstance(migrated.get("threat_analysis"), dict)
-                else {}
-            )
-            overrides = (
-                dict(migrated.get("mining_engines"))
-                if isinstance(migrated.get("mining_engines"), dict)
-                else {}
-            )
-            if "threat_audit" not in overrides and "enabled" in threat:
-                overrides["threat_audit"] = {
-                    "enabled": bool(threat.get("enabled")),
-                }
-            migrated["mining_engines"] = overrides
+            migrated["schema_version"] = 4
+            migrated.pop("mining_engines", None)
+            return migrated
+        if schema_version >= 4:
+            return value
+        if schema_version == 3:
+            migrated = copy.deepcopy(value)
+            migrated["schema_version"] = 4
             return migrated
         if schema_version == 2 or "base" in value or "model_pool" in value:
             return _upgrade_agent_v2_config(value)
@@ -1102,11 +1106,6 @@ class AgentRemoteConfig(BaseModel):
                 "timeout_seconds": timeout,
                 "max_retries": retries,
             },
-            "mining_engines": {
-                "threat_audit": {
-                    "enabled": threat.get("enabled", True),
-                },
-            },
             "false_positive": {
                 "required_capability": "high",
                 "timeout_seconds": fp_timeout,
@@ -1149,7 +1148,7 @@ class CreateScanRequest(BaseModel):
     product: str = ""
     validation_environment: str = ""
     checkers: list[str]
-    mining_engines: dict[str, MiningEngineConfig] | None = None
+    mining_engines: list[MiningEngineRequest] | None = None
     feedback_ids: list[str] = []
     code_graph_mcp: AgentMcpConfig | None = None
     auto_fp_review: bool | None = None

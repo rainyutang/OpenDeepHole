@@ -43,7 +43,6 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.threat_analysis.model_policy.required_capability, "high")
         self.assertEqual(cfg.threat_analysis.model_policy.timeout_seconds, 3600)
         self.assertEqual(cfg.threat_analysis.model_policy.max_retries, 2)
-        self.assertEqual(cfg.mining_engines, {})
         self.assertTrue(cfg.static_dedup)
         self.assertTrue(cfg.pattern_filter.enabled)
         self.assertEqual(cfg.pattern_filter.scope, "directory")
@@ -51,9 +50,9 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 7200)
         self.assertEqual(cfg.opencode_concurrency, 4)
 
-    def test_backend_and_remote_v5_defaults(self) -> None:
+    def test_backend_and_remote_v4_defaults(self) -> None:
         self.assertFalse(BackendGitHistoryConfig().enabled)
-        self.assertEqual(AgentRemoteConfig().schema_version, 5)
+        self.assertEqual(AgentRemoteConfig().schema_version, 4)
         self.assertEqual(AgentRemoteConfig().opencode_config, "{}")
         self.assertEqual(AgentRemoteConfig().base.no_proxy, "10.0.0.0/8")
         self.assertIsNone(AgentRemoteConfig().base.opencode_serve_port)
@@ -63,7 +62,6 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(AgentRemoteConfig().model_pool.models, [])
         self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
         self.assertTrue(AgentRemoteConfig().threat_analysis.enabled)
-        self.assertEqual(AgentRemoteConfig().mining_engines, {})
         self.assertEqual(
             AgentRemoteConfig().threat_analysis.model_policy.timeout_seconds,
             3600,
@@ -124,7 +122,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 5)
+        self.assertEqual(config.schema_version, 4)
         self.assertEqual(config.vulnerability_mining.required_capability, "high")
         self.assertEqual(config.vulnerability_mining.timeout_seconds, 3600)
         self.assertEqual(config.vulnerability_mining.max_retries, 4)
@@ -188,23 +186,35 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 5)
+        self.assertEqual(config.schema_version, 4)
         self.assertTrue(config.code_graph.enabled)
         self.assertEqual(config.code_graph.remote.url, "http://graph.test/mcp")
         self.assertNotIn("code_graph", config.model_dump(mode="json"))
 
-    def test_v4_threat_toggle_migrates_to_engine_override(self) -> None:
-        config = AgentRemoteConfig.model_validate({
-            "schema_version": 4,
-            "threat_analysis": {
-                "enabled": False,
+    def test_transient_v5_engine_config_is_removed(self) -> None:
+        payload = {
+            "schema_version": 5,
+            "base": {
+                "opencode_serve_port": 4317,
             },
-        })
+            "mining_engines": {
+                "threat_audit": {
+                    "enabled": False,
+                },
+            },
+        }
+        config = AgentRemoteConfig.model_validate(payload)
 
-        self.assertEqual(config.schema_version, 5)
-        self.assertFalse(
-            config.mining_engines["threat_audit"].enabled,
-        )
+        self.assertEqual(config.schema_version, 4)
+        self.assertEqual(config.base.opencode_serve_port, 4317)
+        self.assertNotIn("mining_engines", config.model_dump())
+
+        local = AgentConfig()
+        apply_remote_config(local, payload)
+        exported = remote_config_dict(local)
+        self.assertEqual(exported["schema_version"], 4)
+        self.assertEqual(exported["base"]["opencode_serve_port"], 4317)
+        self.assertNotIn("mining_engines", exported)
 
     def test_managed_serve_port_must_be_valid(self) -> None:
         for port in (0, 65536):
@@ -304,7 +314,7 @@ class AgentConfigTests(unittest.TestCase):
 
         remote = remote_config_dict(cfg)
 
-        self.assertEqual(remote["schema_version"], 5)
+        self.assertEqual(remote["schema_version"], 4)
         self.assertEqual(remote["opencode_config"], cfg.opencode.config_jsonc)
         self.assertNotIn("llm_api", remote)
         self.assertEqual(remote["base"], {
@@ -326,7 +336,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         )
         self.assertEqual(remote["vulnerability_mining"]["required_capability"], "high")
-        self.assertEqual(remote["mining_engines"], {})
+        self.assertNotIn("mining_engines", remote)
         self.assertEqual(remote["false_positive"]["required_capability"], "high")
         self.assertEqual(remote["vulnerability_validation"], {"environments": {}})
         self.assertNotIn("code_graph", remote)
@@ -413,7 +423,7 @@ class AgentConfigTests(unittest.TestCase):
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["server_url"], "http://example.test")
             self.assertEqual(raw["agent_name"], "local-agent")
-            self.assertEqual(raw["schema_version"], 5)
+            self.assertEqual(raw["schema_version"], 4)
             self.assertEqual(
                 raw["opencode_config"],
                 '{\n  // managed on the Web\n  "model": "provider/model",\n}',
@@ -435,9 +445,7 @@ class AgentConfigTests(unittest.TestCase):
             self.assertNotIn("code_graph", raw)
             self.assertEqual(raw["vulnerability_mining"]["timeout_seconds"], 600)
             self.assertEqual(raw["vulnerability_mining"]["required_capability"], "high")
-            self.assertFalse(
-                raw["mining_engines"]["threat_audit"]["enabled"],
-            )
+            self.assertNotIn("mining_engines", raw)
             self.assertEqual(raw["false_positive"]["timeout_seconds"], 700)
             self.assertEqual(raw["vulnerability_validation"]["environments"]["lab"]["concurrency"], 2)
             self.assertEqual(
@@ -681,7 +689,7 @@ class AgentConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(HTTPException, error_text):
                     _validate_managed_config(config)
 
-    def test_legacy_remote_payload_migrates_to_v5_and_disables_default_model(self) -> None:
+    def test_legacy_remote_payload_migrates_to_v4_and_disables_default_model(self) -> None:
         config = AgentRemoteConfig.model_validate({
             "no_proxy": "localhost",
             "opencode_concurrency": 2,
@@ -696,7 +704,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 5)
+        self.assertEqual(config.schema_version, 4)
         self.assertEqual(config.base.no_proxy, "localhost")
         self.assertEqual(config.opencode_config, '{"model": "legacy/model"}')
         self.assertEqual(config.model_pool.global_concurrency, 2)

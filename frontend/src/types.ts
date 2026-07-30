@@ -13,6 +13,16 @@ export interface TokenResponse {
   user: User;
 }
 
+export interface Announcement {
+  announcement_id: string;
+  title: string;
+  content: string;
+  published: boolean;
+  published_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
 // --- Scan ---
 
 export type ScanItemStatus =
@@ -551,6 +561,21 @@ export interface AgentInfo {
   last_seen: string;
   online: boolean;
   agent_session_id?: string;
+  runtime_hash?: string;
+  runtime_update_status?: "" | "pending" | "updating" | "failed";
+  runtime_update_target_hash?: string;
+  runtime_update_error?: string;
+  accepting_tasks?: boolean;
+}
+
+export interface AgentRuntimeManifest {
+  hash: string;
+}
+
+export interface AgentRuntimeUpdateResponse {
+  status: "up_to_date" | "pending" | "updating" | "failed";
+  target_hash: string;
+  message: string;
 }
 
 export interface AgentOpenCodeModelConfig {
@@ -640,8 +665,8 @@ export interface AgentValidatorCatalog {
   updated_at: string;
 }
 
-export interface MiningEngineConfig {
-  enabled?: boolean | null;
+export interface MiningEngineRequest {
+  engine_id: string;
   fp_review_enabled?: boolean | null;
 }
 
@@ -670,21 +695,20 @@ export interface MiningEngineCatalogItem {
   default_fp_review_enabled: boolean;
 }
 
-export interface AgentMiningEngineCatalog {
+export interface MiningEngineCatalog {
   engines: MiningEngineCatalogItem[];
   errors: string[];
   updated_at: string;
 }
 
 export interface AgentRemoteConfig {
-  schema_version: 5;
+  schema_version: 4;
   opencode_config: string;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;
   product_info: AgentMcpConfig;
   vulnerability_mining: AgentModelTaskPolicy;
-  mining_engines: Record<string, MiningEngineConfig>;
   false_positive: AgentModelTaskPolicy;
   vulnerability_validation: AgentVulnerabilityValidationConfig;
 }

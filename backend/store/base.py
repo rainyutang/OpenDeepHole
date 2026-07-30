@@ -418,6 +418,28 @@ class ScanStoreBase(ABC):
     def count_users(self) -> int:
         """Return the total number of users."""
 
+    # -- Announcements --
+
+    def list_announcements(
+        self,
+        *,
+        published_only: bool = False,
+        limit: int | None = None,
+    ):
+        raise NotImplementedError
+
+    def get_announcement(self, announcement_id: str):
+        raise NotImplementedError
+
+    def create_announcement(self, announcement) -> None:
+        raise NotImplementedError
+
+    def update_announcement(self, announcement) -> bool:
+        raise NotImplementedError
+
+    def delete_announcement(self, announcement_id: str) -> bool:
+        raise NotImplementedError
+
     # -- Scans filtered by user --
 
     @abstractmethod
@@ -444,13 +466,6 @@ class ScanStoreBase(ABC):
     def update_agent_catalog_record(self, agent_key: str, catalog_json: str) -> bool:
         raise NotImplementedError
 
-    def update_agent_mining_engine_catalog_record(
-        self,
-        agent_key: str,
-        catalog_json: str,
-    ) -> bool:
-        raise NotImplementedError
-
     def update_agent_mcp_probe_record(self, agent_key: str, mcp_probe_json: str) -> bool:
         raise NotImplementedError
 
@@ -462,6 +477,19 @@ class ScanStoreBase(ABC):
         raise NotImplementedError
 
     def touch_agent_record(self, agent_key: str, agent_id: str, last_seen: str) -> bool:
+        raise NotImplementedError
+
+    def set_agent_runtime_update_record(
+        self,
+        agent_key: str,
+        *,
+        status: str,
+        target_hash: str = "",
+        server_url: str = "",
+        requested_at: str = "",
+        started_at: str = "",
+        error: str = "",
+    ) -> bool:
         raise NotImplementedError
 
     # -- Cleanup --

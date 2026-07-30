@@ -72,17 +72,8 @@ def _event_candidate_index(event: dict[str, Any]) -> int | None:
     return None
 
 
-def _config_value(value: Any, key: str) -> bool | None:
-    if isinstance(value, dict):
-        raw = value.get(key)
-    else:
-        raw = getattr(value, key, None)
-    return raw if isinstance(raw, bool) else None
-
-
 def _resolve_mining_engines(
     *,
-    config: AgentConfig,
     raw_selections: list[dict[str, Any]] | None,
     threat_only: bool,
 ) -> tuple[Any, list[MiningEngineSelection]]:
@@ -109,34 +100,15 @@ def _resolve_mining_engines(
                 else selection
             )
     else:
-        selections = []
-        overrides = config.mining_engines
-        for manifest in manifests:
-            override = overrides.get(manifest.engine_id)
-            enabled = _config_value(override, "enabled")
-            fp_review_enabled = _config_value(
-                override,
-                "fp_review_enabled",
-            )
-            if (
-                override is None
-                and manifest.engine_id == "threat_audit"
-            ):
-                enabled = bool(config.threat_analysis.enabled)
-            selections.append(MiningEngineSelection(
+        selections = [
+            MiningEngineSelection(
                 engine_id=manifest.engine_id,
                 engine_label=manifest.label,
-                enabled=(
-                    manifest.default_enabled
-                    if enabled is None
-                    else enabled
-                ),
-                fp_review_enabled=(
-                    manifest.default_fp_review_enabled
-                    if fp_review_enabled is None
-                    else fp_review_enabled
-                ),
-            ))
+                enabled=manifest.default_enabled,
+                fp_review_enabled=manifest.default_fp_review_enabled,
+            )
+            for manifest in manifests
+        ]
 
     if threat_only:
         selections = [
@@ -301,7 +273,6 @@ async def run_scan(
         raise ValueError(f"Unknown scan mode: {scan_mode}")
     threat_only = normalized_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY
     registry, selections = _resolve_mining_engines(
-        config=config,
         raw_selections=mining_engines,
         threat_only=threat_only,
     )

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getValidationTargets, getScans, resumeScan, stopScan, deleteScan, updateScanValidationTarget } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User, ValidationTarget } from "../types";
+import AnnouncementBoard from "./AnnouncementBoard";
 import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
@@ -467,6 +468,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
 
       {/* Content */}
       <div className="mx-auto w-full max-w-[100rem] flex-1 px-4 py-6 sm:px-6">
+        <AnnouncementBoard user={user} />
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">
           扫描历史
         </h2>

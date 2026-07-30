@@ -2,10 +2,9 @@ import { useEffect, useState } from "react";
 import {
   createScan,
   getAgents,
-  getAgentConfig,
-  getAgentMiningEngineCatalog,
   getAgentValidatorCatalog,
   getCheckers,
+  getMiningEngineCatalog,
   probeScanCodeGraphMcp,
 } from "../api/client";
 import type {
@@ -15,7 +14,6 @@ import type {
   CheckerInfo,
   FpReviewMethod,
   MiningEngineCatalogItem,
-  MiningEngineConfig,
 } from "../types";
 import ScanCodeGraphMcpEditor, {
   defaultScanCodeGraphMcp,
@@ -30,12 +28,21 @@ interface Props {
 
 const SCAN_MODE_FULL = "full";
 
+interface MiningEngineFormValue {
+  selected: boolean;
+  fp_review_enabled: boolean;
+}
+
+function agentAcceptsTasks(agent: AgentInfo) {
+  return agent.online && agent.accepting_tasks !== false;
+}
+
 export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [validationTargets, setValidationTargets] = useState<AgentValidatorRegistration[]>([]);
   const [miningEngineCatalog, setMiningEngineCatalog] = useState<MiningEngineCatalogItem[]>([]);
-  const [miningEngines, setMiningEngines] = useState<Record<string, MiningEngineConfig>>({});
+  const [miningEngines, setMiningEngines] = useState<Record<string, MiningEngineFormValue>>({});
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,9 +61,9 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [codeGraphProbe, setCodeGraphProbe] = useState<AgentMcpProbeResult | null>(null);
   const builtinCheckers = checkers.filter((checker) => !checker.user_created);
   const userCheckers = checkers.filter((checker) => checker.user_created);
-  const staticEngineEnabled = miningEngines.static_candidate?.enabled ?? false;
+  const staticEngineEnabled = miningEngines.static_candidate?.selected ?? false;
   const enabledEngineCount = miningEngineCatalog.filter(
-    (engine) => miningEngines[engine.engine_id]?.enabled,
+    (engine) => miningEngines[engine.engine_id]?.selected,
   ).length;
   const products = Array.from(new Set(validationTargets.map((target) => target.product))).sort();
   const validationEnvironments = validationTargets
@@ -66,16 +73,28 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   useEffect(() => {
     const load = async () => {
       try {
-        const [agentList, checkerList] = await Promise.all([
+        const [agentList, checkerList, engineCatalog] = await Promise.all([
           getAgents(),
           getCheckers(),
+          getMiningEngineCatalog(),
         ]);
         setAgents(agentList);
         setCheckers(checkerList);
+        setMiningEngineCatalog(engineCatalog.engines);
+        setMiningEngines(Object.fromEntries(
+          engineCatalog.engines.map((engine) => [
+            engine.engine_id,
+            {
+              selected: engine.default_enabled,
+              fp_review_enabled:
+                engine.default_fp_review_enabled,
+            },
+          ]),
+        ));
         // Pre-select all checkers
         setSelectedCheckers(new Set(checkerList.filter((c) => !c.user_created).map((c) => c.name)));
         // Pre-select first online agent
-        const onlineAgent = agentList.find((a) => a.online);
+        const onlineAgent = agentList.find(agentAcceptsTasks);
         if (onlineAgent) setSelectedAgent(onlineAgent.agent_key);
       } catch (e) {
         setError("加载数据失败，请重试");
@@ -89,33 +108,15 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   useEffect(() => {
     if (!selectedAgent) {
       setValidationTargets([]);
-      setMiningEngineCatalog([]);
-      setMiningEngines({});
       return;
     }
     setCodeGraphProbe(null);
-    Promise.all([
-      getAgentValidatorCatalog(selectedAgent),
-      getAgentMiningEngineCatalog(selectedAgent),
-      getAgentConfig(selectedAgent),
-    ]).then(([validatorCatalog, engineCatalog, agentConfig]) => {
+    getAgentValidatorCatalog(selectedAgent).then((validatorCatalog) => {
       setValidationTargets(validatorCatalog.registrations);
-      setMiningEngineCatalog(engineCatalog.engines);
-      setMiningEngines(Object.fromEntries(engineCatalog.engines.map((engine) => {
-        const override = agentConfig.mining_engines?.[engine.engine_id];
-        return [engine.engine_id, {
-          enabled: override?.enabled ?? engine.default_enabled,
-          fp_review_enabled:
-            override?.fp_review_enabled
-            ?? engine.default_fp_review_enabled,
-        }];
-      })));
       setSelectedProduct("");
       setSelectedValidationEnvironment("");
     }).catch(() => {
       setValidationTargets([]);
-      setMiningEngineCatalog([]);
-      setMiningEngines({});
     });
   }, [selectedAgent]);
 
@@ -198,7 +199,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       return;
     }
     if (enabledEngineCount === 0) {
-      setError("请至少启用一个漏洞挖掘引擎");
+      setError("请至少选择一个漏洞挖掘引擎");
       return;
     }
     if (staticEngineEnabled && selectedCheckers.size === 0) {
@@ -219,7 +220,14 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         product: selectedProduct,
         validation_environment: selectedValidationEnvironment,
         checkers: staticEngineEnabled ? Array.from(selectedCheckers) : [],
-        mining_engines: miningEngines,
+        mining_engines: miningEngineCatalog
+          .filter((engine) => miningEngines[engine.engine_id]?.selected)
+          .map((engine) => ({
+            engine_id: engine.engine_id,
+            fp_review_enabled:
+              miningEngines[engine.engine_id]?.fp_review_enabled
+              ?? engine.default_fp_review_enabled,
+          })),
         code_graph_mcp: codeGraphMcp.enabled ? codeGraphMcp : null,
       });
       onScanStarted(resp.scan_id);
@@ -279,7 +287,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                     <label
                       key={agent.agent_key}
                       className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
-                        agent.online ? "cursor-pointer" : "cursor-not-allowed opacity-60"
+                        agentAcceptsTasks(agent) ? "cursor-pointer" : "cursor-not-allowed opacity-60"
                       } ${
                         selectedAgent === agent.agent_key
                           ? "border-blue-500 bg-blue-500/10"
@@ -291,13 +299,13 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                         name="agent"
                         value={agent.agent_key}
                         checked={selectedAgent === agent.agent_key}
-                        disabled={!agent.online}
+                        disabled={!agentAcceptsTasks(agent)}
                         onChange={() => setSelectedAgent(agent.agent_key)}
                         className="sr-only"
                       />
                       <span
                         className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                          agent.online ? "bg-green-400" : "bg-slate-500"
+                          agentAcceptsTasks(agent) ? "bg-green-400" : "bg-slate-500"
                         }`}
                       />
                       <div className="flex-1 min-w-0">
@@ -309,11 +317,15 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                       <span
                         className={`text-xs px-2 py-0.5 rounded border ${
                           agent.online
-                            ? "bg-green-500/20 text-green-400 border-green-500/30"
+                            ? agent.accepting_tasks === false
+                              ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                              : "bg-green-500/20 text-green-400 border-green-500/30"
                             : "bg-slate-700 text-slate-500 border-slate-600"
                         }`}
                       >
-                        {agent.online ? "在线" : "离线"}
+                        {agent.online
+                          ? agent.accepting_tasks === false ? "更新中" : "在线"
+                          : "离线"}
                       </span>
                     </label>
                   ))}
@@ -326,18 +338,22 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               <div className="mb-3">
                 <div className="text-sm font-medium text-slate-300">漏洞挖掘引擎</div>
                 <p className="mt-1 text-xs text-slate-500">
-                  扫描会并行启动已启用的引擎；每个引擎可独立决定其结果是否进入去误报。
+                  从当前代码仓选择本次扫描要启动的一个或多个引擎；每个引擎可独立决定其结果是否进入去误报。
                 </p>
               </div>
               {miningEngineCatalog.length === 0 ? (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-4 text-sm text-amber-200">
-                  所选 Agent 尚未上报可用的漏洞挖掘引擎。
+                  当前代码仓没有可用的漏洞挖掘引擎。
                 </div>
               ) : (
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   {miningEngineCatalog.map((engine) => {
-                    const value = miningEngines[engine.engine_id] ?? {};
-                    const enabled = value.enabled ?? false;
+                    const value = miningEngines[engine.engine_id] ?? {
+                      selected: false,
+                      fp_review_enabled:
+                        engine.default_fp_review_enabled,
+                    };
+                    const enabled = value.selected ?? false;
                     const fpEnabled = value.fp_review_enabled ?? false;
                     return (
                       <div
@@ -356,7 +372,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                               ...current,
                               [engine.engine_id]: {
                                 ...current[engine.engine_id],
-                                enabled: event.target.checked,
+                                selected: event.target.checked,
                               },
                             }))}
                             className="mt-0.5 h-4 w-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
@@ -501,7 +517,9 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 setCodeGraphProbe(null);
               }}
               online={Boolean(
-                agents.find((agent) => agent.agent_key === selectedAgent)?.online,
+                agents.find((agent) => (
+                  agent.agent_key === selectedAgent && agentAcceptsTasks(agent)
+                )),
               )}
               probing={probingCodeGraph}
               probeResult={codeGraphProbe}
@@ -647,7 +665,12 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
             <div className="flex flex-col gap-3 sm:flex-row">
               <button
                 type="submit"
-                disabled={submitting || agents.length === 0}
+                disabled={
+                  submitting
+                  || !agents.some((agent) => (
+                    agent.agent_key === selectedAgent && agentAcceptsTasks(agent)
+                  ))
+                }
                 className="flex-1 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
               >
                 {submitting ? (

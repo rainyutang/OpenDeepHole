@@ -28,7 +28,6 @@ from backend.models import (
     AgentFpReviewProgress,
     AgentFpReviewResult,
     AgentFpReviewStageOutput,
-    AgentMiningEngineCatalog,
     BatchMarkRequest,
     BatchUnmarkRequest,
     Candidate,
@@ -40,7 +39,8 @@ from backend.models import (
     FpReviewStatus,
     HistoryPattern,
     MarkRequest,
-    MiningEngineCatalogItem,
+    MiningEngineCatalog,
+    MiningEngineRequest,
     MiningEngineRunStatus,
     MiningEngineSelection,
     ScanItemStatus,
@@ -102,49 +102,54 @@ def _is_threat_analysis_only_mode(value: str | None) -> bool:
     return _normalize_scan_mode(value) == SCAN_MODE_THREAT_ANALYSIS_ONLY
 
 
+def _repository_mining_engine_catalog() -> MiningEngineCatalog:
+    from deephole_client.vulnerability_mining import (
+        build_mining_engine_catalog,
+    )
+
+    return MiningEngineCatalog.model_validate(
+        build_mining_engine_catalog()
+    )
+
+
+@router.get("/api/mining-engines", response_model=MiningEngineCatalog)
+async def get_mining_engine_catalog(
+    current_user: User = Depends(get_current_user),
+) -> MiningEngineCatalog:
+    """Return the mining engines shipped by this repository."""
+    return _repository_mining_engine_catalog()
+
+
 def _resolve_scan_mining_engines(
     *,
-    agent_key: str,
-    managed_config,
-    scan_overrides,
+    scan_overrides: list[MiningEngineRequest] | None,
     scan_mode: str,
 ) -> list[MiningEngineSelection]:
-    record = (
-        get_scan_store().get_agent_record(agent_key)
-        if agent_key
-        else None
-    )
-    try:
-        catalog = AgentMiningEngineCatalog.model_validate_json(
-            str(
-                (record or {}).get("mining_engine_catalog_json")
-                or "{}"
-            )
-        )
-    except Exception:
-        catalog = AgentMiningEngineCatalog()
-    if not catalog.engines:
-        catalog = AgentMiningEngineCatalog(engines=[
-            MiningEngineCatalogItem(
-                engine_id="static_candidate",
-                label="静态规则扫描 + 候选点审计",
-            ),
-            MiningEngineCatalogItem(
-                engine_id="threat_audit",
-                label="威胁分析 + 威胁审计",
-            ),
-        ])
-
+    catalog = _repository_mining_engine_catalog()
     available = {item.engine_id: item for item in catalog.engines}
-    config_overrides = (
-        managed_config.mining_engines
-        if managed_config is not None
-        else {}
-    )
-    requested = scan_overrides or {}
-    unknown = sorted(
-        (set(config_overrides) | set(requested)) - set(available)
-    )
+    requested = scan_overrides
+    if requested is not None and not requested:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one vulnerability-mining engine is required",
+        )
+
+    requested_by_id = {}
+    duplicate_ids: set[str] = set()
+    for item in requested or []:
+        engine_id = item.engine_id.strip()
+        if engine_id in requested_by_id:
+            duplicate_ids.add(engine_id)
+        requested_by_id[engine_id] = item
+    if duplicate_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Duplicate mining engines: "
+                + ", ".join(sorted(duplicate_ids))
+            ),
+        )
+    unknown = sorted(set(requested_by_id) - set(available))
     if unknown:
         raise HTTPException(
             status_code=400,
@@ -153,49 +158,59 @@ def _resolve_scan_mining_engines(
             ),
         )
 
-    selections: list[MiningEngineSelection] = []
-    for engine_id, item in available.items():
-        enabled = item.default_enabled
-        fp_review_enabled = item.default_fp_review_enabled
-        config_override = config_overrides.get(engine_id)
-        if config_override is not None:
-            if config_override.enabled is not None:
-                enabled = config_override.enabled
-            if config_override.fp_review_enabled is not None:
-                fp_review_enabled = (
-                    config_override.fp_review_enabled
+    if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
+        threat_engine = available.get("threat_audit")
+        if threat_engine is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Threat-audit engine is unavailable",
+            )
+        override = requested_by_id.get("threat_audit")
+        return [MiningEngineSelection(
+            engine_id=threat_engine.engine_id,
+            engine_label=threat_engine.label,
+            enabled=True,
+            fp_review_enabled=(
+                override.fp_review_enabled
+                if (
+                    override is not None
+                    and override.fp_review_enabled is not None
                 )
-        scan_override = requested.get(engine_id)
-        if scan_override is not None:
-            if scan_override.enabled is not None:
-                enabled = scan_override.enabled
-            if scan_override.fp_review_enabled is not None:
-                fp_review_enabled = scan_override.fp_review_enabled
-        if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
-            enabled = engine_id == "threat_audit"
-        selections.append(MiningEngineSelection(
-            engine_id=engine_id,
-            engine_label=item.label,
-            enabled=enabled,
-            fp_review_enabled=fp_review_enabled,
-        ))
-    if not any(item.enabled for item in selections):
+                else threat_engine.default_fp_review_enabled
+            ),
+        )]
+
+    if requested is None:
+        selected_ids = [
+            item.engine_id
+            for item in catalog.engines
+            if item.default_enabled
+        ]
+    else:
+        selected_ids = [item.engine_id.strip() for item in requested]
+    if not selected_ids:
         raise HTTPException(
             status_code=400,
             detail="At least one vulnerability-mining engine is required",
         )
-    if (
-        scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY
-        and not any(
-            item.enabled and item.engine_id == "threat_audit"
-            for item in selections
+
+    return [
+        MiningEngineSelection(
+            engine_id=engine_id,
+            engine_label=available[engine_id].label,
+            enabled=True,
+            fp_review_enabled=(
+                requested_by_id[engine_id].fp_review_enabled
+                if (
+                    engine_id in requested_by_id
+                    and requested_by_id[engine_id].fp_review_enabled
+                    is not None
+                )
+                else available[engine_id].default_fp_review_enabled
+            ),
         )
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Threat-audit engine is unavailable",
-        )
-    return selections
+        for engine_id in selected_ids
+    ]
 
 
 def _has_final_user_verdict(vuln) -> bool:
@@ -721,6 +736,7 @@ async def create_agent_scan(
     from backend.api.agent import (
         _registered_agents,
         agent_config_has_explicit_model,
+        ensure_agent_accepting_tasks,
         get_managed_agent_config,
         resolve_agent_connection,
     )
@@ -740,6 +756,7 @@ async def create_agent_scan(
     # Verify the agent belongs to this user (or user is admin)
     if enforce_agent_owner and current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Agent does not belong to you")
+    ensure_agent_accepting_tasks(selected_agent_key)
     managed_config = get_managed_agent_config(selected_agent_key) if selected_agent_key else None
     if managed_config is not None and not agent_config_has_explicit_model(managed_config):
         raise HTTPException(
@@ -759,8 +776,6 @@ async def create_agent_scan(
 
     scan_mode = _normalize_scan_mode(body.scan_mode)
     mining_engine_selections = _resolve_scan_mining_engines(
-        agent_key=selected_agent_key,
-        managed_config=managed_config,
         scan_overrides=body.mining_engines,
         scan_mode=scan_mode,
     )
@@ -862,7 +877,10 @@ async def create_agent_scan(
     _scan_owners[scan_id] = current_user.user_id
 
     # Dispatch to agent via WebSocket
-    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
+    from backend.api.agent import (
+        create_agent_task_runtime_update_payload,
+        send_agent_command,
+    )
     feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, body.feedback_ids)]
     ok = await send_agent_command(agent_id, {
         "type": "task",
@@ -885,7 +903,10 @@ async def create_agent_scan(
             if code_graph_mcp is not None
             else None
         ),
-        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
+        "agent_runtime_update": create_agent_task_runtime_update_payload(
+            _server_url_from_request(request),
+            selected_agent_key,
+        ),
     })
     if not ok:
         store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
@@ -1085,6 +1106,7 @@ async def _continue_scan(
     from backend.api.agent import (
         _registered_agents,
         agent_config_has_explicit_model,
+        ensure_agent_accepting_tasks,
         get_managed_agent_config,
         resolve_agent_connection,
     )
@@ -1148,6 +1170,7 @@ async def _continue_scan(
             detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
 
+    ensure_agent_accepting_tasks(meta.agent_key or agent.agent_key)
     if meta.agent_key and not agent_config_has_explicit_model(get_managed_agent_config(meta.agent_key)):
         raise HTTPException(
             status_code=400,
@@ -1191,7 +1214,10 @@ async def _continue_scan(
     _running_scans[scan_id] = scan
     _scan_owners[scan_id] = current_user.user_id
 
-    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
+    from backend.api.agent import (
+        create_agent_task_runtime_update_payload,
+        send_agent_command,
+    )
     feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
     ok = await send_agent_command(agent_id, {
         "type": "resume",
@@ -1241,7 +1267,10 @@ async def _continue_scan(
             if meta.code_graph_mcp is not None
             else None
         ),
-        "agent_runtime_update": create_agent_runtime_update_payload(_server_url_from_request(request)),
+        "agent_runtime_update": create_agent_task_runtime_update_payload(
+            _server_url_from_request(request),
+            meta.agent_key,
+        ),
     })
     if not ok:
         for key in removed_processed_keys:
@@ -1723,7 +1752,11 @@ async def _trigger_vulnerability_validation(
     _server_url: str,
 ) -> dict:
     """Start Agent-side local validation for one AI-confirmed vulnerability."""
-    from backend.api.agent import create_agent_runtime_update_payload, send_agent_command
+    from backend.api.agent import (
+        create_agent_task_runtime_update_payload,
+        ensure_agent_accepting_tasks,
+        send_agent_command,
+    )
 
     store = get_scan_store()
     loaded = store.load_scan(scan_id)
@@ -1771,6 +1804,7 @@ async def _trigger_vulnerability_validation(
             status_code=400,
             detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
+    ensure_agent_accepting_tasks(meta.agent_key)
     if agent_id != meta.agent_id:
         store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
 
@@ -1807,7 +1841,10 @@ async def _trigger_vulnerability_validation(
             if meta.code_graph_mcp is not None
             else None
         ),
-        "agent_runtime_update": create_agent_runtime_update_payload(_server_url),
+        "agent_runtime_update": create_agent_task_runtime_update_payload(
+            _server_url,
+            meta.agent_key,
+        ),
     })
     if not ok:
         failed = store.upsert_vulnerability_validation(
@@ -2214,7 +2251,8 @@ async def _start_fp_review(
     never breaks scan-finish handling.
     """
     from backend.api.agent import (
-        create_agent_runtime_update_payload,
+        create_agent_task_runtime_update_payload,
+        ensure_agent_accepting_tasks,
         send_agent_command,
         _registered_agents,
         _agent_ws,
@@ -2235,6 +2273,14 @@ async def _start_fp_review(
             return _fail(404, "Scan not found")
         scan = loaded[0]
 
+    meta = store.get_scan_meta(scan_id)
+    if meta is None:
+        return _fail(404, "Scan not found")
+    try:
+        ensure_agent_accepting_tasks(meta.agent_key)
+    except HTTPException as exc:
+        return _fail(exc.status_code, str(exc.detail))
+
     _, selected_method = _scan_fp_review_settings(scan_id, scan)
     if (
         selected_method == FpReviewMethod.FP_CHECK
@@ -2253,10 +2299,6 @@ async def _start_fp_review(
     confirmed = fp_job_info["confirmed"]
     review_id = str(fp_job_info["review_id"])
     method = FpReviewMethod(str(fp_job_info["method"]))
-
-    meta = store.get_scan_meta(scan_id)
-    if meta is None:
-        return _fail(404, "Scan not found")
 
     if not meta.agent_id and not meta.agent_name:
         return _fail(400, "No agent associated with this scan")
@@ -2296,7 +2338,10 @@ async def _start_fp_review(
             if meta.code_graph_mcp is not None
             else None
         ),
-        "agent_runtime_update": create_agent_runtime_update_payload(server_url),
+        "agent_runtime_update": create_agent_task_runtime_update_payload(
+            server_url,
+            meta.agent_key,
+        ),
     })
     if not ok:
         store.update_fp_review_job(review_id, status="error", error_message="Agent not connected")

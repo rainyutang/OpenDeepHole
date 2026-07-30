@@ -86,12 +86,6 @@ class ThreatAnalysisConfig:
 
 
 @dataclass
-class MiningEngineConfig:
-    enabled: bool | None = None
-    fp_review_enabled: bool | None = None
-
-
-@dataclass
 class McpLocalConfig:
     executable: str = ""
     args: list[str] = field(default_factory=list)
@@ -324,7 +318,6 @@ class AgentConfig:
     ))
     product_info: McpConfig = field(default_factory=lambda: McpConfig(name="product-info"))
     vulnerability_mining: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
-    mining_engines: dict[str, MiningEngineConfig] = field(default_factory=dict)
     false_positive: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = field(default_factory=PatternFilterConfig)
@@ -366,32 +359,27 @@ def _upgrade_managed_policy(
 
 
 def _upgrade_managed_remote(remote: dict) -> dict:
-    """Upgrade older managed payloads to the mining-engine v5 contract."""
+    """Upgrade managed payloads to the Agent v4 contract."""
     try:
         schema_version = int(remote.get("schema_version", 0) or 0)
     except (TypeError, ValueError):
         schema_version = 0
     if schema_version >= 5:
-        return remote
-    if schema_version in {3, 4}:
         migrated = copy.deepcopy(remote)
-        migrated["schema_version"] = 5
+        migrated["schema_version"] = 4
+        migrated.pop("mining_engines", None)
+        return migrated
+    if schema_version >= 4:
+        if "mining_engines" not in remote:
+            return remote
+        migrated = copy.deepcopy(remote)
+        migrated.pop("mining_engines", None)
+        return migrated
+    if schema_version == 3:
+        migrated = copy.deepcopy(remote)
+        migrated["schema_version"] = 4
         migrated.pop("code_graph", None)
-        threat = (
-            migrated.get("threat_analysis")
-            if isinstance(migrated.get("threat_analysis"), dict)
-            else {}
-        )
-        overrides = (
-            dict(migrated.get("mining_engines"))
-            if isinstance(migrated.get("mining_engines"), dict)
-            else {}
-        )
-        if "threat_audit" not in overrides and "enabled" in threat:
-            overrides["threat_audit"] = {
-                "enabled": _bool_value(threat.get("enabled"), True),
-            }
-        migrated["mining_engines"] = overrides
+        migrated.pop("mining_engines", None)
         return migrated
     if not (
         schema_version == 2
@@ -415,8 +403,9 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         return migrated
 
     migrated = copy.deepcopy(remote)
-    migrated["schema_version"] = 5
+    migrated["schema_version"] = 4
     migrated.pop("code_graph", None)
+    migrated.pop("mining_engines", None)
     base = migrated.get("base")
     if not isinstance(base, dict):
         base = {}
@@ -432,14 +421,6 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         threat.get("model_policy"),
         migrate_threat_retry_default=True,
     )
-    overrides = migrated.get("mining_engines")
-    if not isinstance(overrides, dict):
-        overrides = {}
-        migrated["mining_engines"] = overrides
-    if "threat_audit" not in overrides and "enabled" in threat:
-        overrides["threat_audit"] = {
-            "enabled": _bool_value(threat.get("enabled"), True),
-        }
     validation = migrated.get("vulnerability_validation")
     if not isinstance(validation, dict):
         validation = {}
@@ -515,29 +496,6 @@ def _validation_environments(raw: object) -> dict[str, ValidationEnvironmentConf
     return result
 
 
-def _mining_engine_configs(raw: object) -> dict[str, MiningEngineConfig]:
-    if not isinstance(raw, dict):
-        return {}
-    result: dict[str, MiningEngineConfig] = {}
-    for raw_engine_id, raw_config in raw.items():
-        engine_id = str(raw_engine_id or "").strip()
-        if not engine_id or not isinstance(raw_config, dict):
-            continue
-        result[engine_id] = MiningEngineConfig(
-            enabled=(
-                _bool_value(raw_config.get("enabled"), True)
-                if raw_config.get("enabled") is not None
-                else None
-            ),
-            fp_review_enabled=(
-                _bool_value(raw_config.get("fp_review_enabled"), True)
-                if raw_config.get("fp_review_enabled") is not None
-                else None
-            ),
-        )
-    return result
-
-
 def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     """Apply a server-managed config dict onto a local AgentConfig in-place.
 
@@ -578,9 +536,6 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         _apply_policy(config.threat_analysis.model_policy, threat.get("model_policy"))
         _normalize_threat_analysis_config(config.threat_analysis)
         _apply_policy(config.vulnerability_mining, remote.get("vulnerability_mining"))
-        config.mining_engines = _mining_engine_configs(
-            remote.get("mining_engines"),
-        )
         _apply_policy(config.false_positive, remote.get("false_positive"))
         config.product_info = _mcp_config(remote.get("product_info"), config.product_info)
         validation = remote.get("vulnerability_validation")
@@ -637,10 +592,6 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
                 setattr(config.threat_analysis, f.name, section[f.name])
         _apply_policy(config.threat_analysis.model_policy, section.get("model_policy"))
         _normalize_threat_analysis_config(config.threat_analysis)
-    if "mining_engines" in remote:
-        config.mining_engines = _mining_engine_configs(
-            remote.get("mining_engines"),
-        )
     if "static_dedup" in remote and remote["static_dedup"] is not None:
         config.static_dedup = _bool_value(remote["static_dedup"], True)
     section = remote.get("pattern_filter") or {}
@@ -718,7 +669,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 5,
+        "schema_version": 4,
         "opencode_config": config.opencode.config_jsonc,
         "base": {
             "tool": config.opencode.tool,
@@ -736,10 +687,6 @@ def remote_config_dict(config: AgentConfig) -> dict:
         },
         "product_info": dataclasses.asdict(config.product_info),
         "vulnerability_mining": dataclasses.asdict(config.vulnerability_mining),
-        "mining_engines": {
-            engine_id: dataclasses.asdict(value)
-            for engine_id, value in config.mining_engines.items()
-        },
         "false_positive": dataclasses.asdict(config.false_positive),
         "vulnerability_validation": {
             "environments": {
@@ -815,7 +762,6 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         k: v for k, v in raw.get("vulnerability_validation", {}).items()
         if k in validation_fields
     }
-    mining_engines_raw = _mining_engine_configs(raw.get("mining_engines"))
     if "tool" not in oc_raw and "executable" in oc_raw:
         oc_raw["tool"] = ""
     fp_raw = raw.get("fp_review_cli", None)
@@ -847,7 +793,6 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         memory_api_discovery=MemoryApiDiscoveryConfig(**memory_api_raw),
         git_history=GitHistoryConfig(**git_history_raw),
         threat_analysis=ThreatAnalysisConfig(**threat_analysis_raw),
-        mining_engines=mining_engines_raw,
         static_dedup=_bool_value(raw.get("static_dedup", True), True),
         pattern_filter=PatternFilterConfig(**pattern_filter_raw),
         vulnerability_validation=VulnerabilityValidationConfig(**validation_raw),
@@ -875,7 +820,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v5 remotely-managed fields while preserving local bootstrap fields."""
+    """Persist v4 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return

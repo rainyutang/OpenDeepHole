@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentMiningEngineCatalog, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentValidatorCatalog, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, MiningEngineConfig, OpenCodeTokenUsage, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, OpenCodeTokenUsage, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -77,6 +77,50 @@ export function getStoredUser(): User | null {
 
 export function isAuthenticated(): boolean {
   return !!localStorage.getItem("auth_token");
+}
+
+// --- Announcements ---
+
+export async function getAnnouncements(): Promise<Announcement[]> {
+  const { data } = await api.get<Announcement[]>("/api/announcements", {
+    params: { limit: 3 },
+  });
+  return data;
+}
+
+export async function getAdminAnnouncements(): Promise<Announcement[]> {
+  const { data } = await api.get<Announcement[]>("/api/admin/announcements");
+  return data;
+}
+
+export async function createAnnouncement(
+  title: string,
+  content: string,
+  published: boolean,
+): Promise<Announcement> {
+  const { data } = await api.post<Announcement>("/api/admin/announcements", {
+    title,
+    content,
+    published,
+  });
+  return data;
+}
+
+export async function updateAnnouncement(
+  announcementId: string,
+  title: string,
+  content: string,
+  published: boolean,
+): Promise<Announcement> {
+  const { data } = await api.put<Announcement>(
+    `/api/admin/announcements/${announcementId}`,
+    { title, content, published },
+  );
+  return data;
+}
+
+export async function deleteAnnouncement(announcementId: string): Promise<void> {
+  await api.delete(`/api/admin/announcements/${announcementId}`);
 }
 
 export async function getCurrentUser(): Promise<User> {
@@ -177,6 +221,20 @@ export async function getAgents(): Promise<AgentInfo[]> {
   return data;
 }
 
+export async function getAgentRuntimeManifest(): Promise<AgentRuntimeManifest> {
+  const { data } = await api.get<AgentRuntimeManifest>("/api/agent/runtime/manifest");
+  return data;
+}
+
+export async function requestAgentRuntimeUpdate(
+  agentKey: string,
+): Promise<AgentRuntimeUpdateResponse> {
+  const { data } = await api.post<AgentRuntimeUpdateResponse>(
+    `/api/agent-configs/${agentKey}/runtime-update`,
+  );
+  return data;
+}
+
 export async function getIndexStatus(projectId: string): Promise<IndexStatus> {
   const { data } = await api.get<IndexStatus>(`/api/project/${projectId}/index-status`);
   return data;
@@ -216,7 +274,7 @@ export async function createScan(body: {
   product?: string;
   validation_environment?: string;
   checkers: string[];
-  mining_engines?: Record<string, MiningEngineConfig>;
+  mining_engines?: MiningEngineRequest[];
   feedback_ids?: string[];
   code_graph_mcp?: AgentMcpConfig | null;
   auto_fp_review?: boolean;
@@ -622,10 +680,8 @@ export async function getAgentValidatorCatalog(agentKey: string, product = ""): 
   return data;
 }
 
-export async function getAgentMiningEngineCatalog(agentKey: string): Promise<AgentMiningEngineCatalog> {
-  const { data } = await api.get<AgentMiningEngineCatalog>(
-    `/api/agent-configs/${agentKey}/mining-engine-catalog`,
-  );
+export async function getMiningEngineCatalog(): Promise<MiningEngineCatalog> {
+  const { data } = await api.get<MiningEngineCatalog>("/api/mining-engines");
   return data;
 }
 
