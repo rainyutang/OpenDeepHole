@@ -1361,7 +1361,8 @@ async def download_report(
     writer.writerow([
         "engine_id", "engine_label", "file", "line", "function",
         "vuln_type", "severity", "confirmed",
-        "fp_verdict", "fp_severity", "match_type", "match_reference", "variant_of",
+        "fp_verdict", "fp_confirmed", "fp_severity",
+        "match_type", "match_reference", "variant_of",
         "description", "ai_analysis",
     ])
     for i, v in enumerate(scan.vulnerabilities):
@@ -1369,7 +1370,9 @@ async def download_report(
         writer.writerow([
             v.engine_id, v.engine_label, v.file, v.line, v.function,
             v.vuln_type, v.severity, v.confirmed,
-            fp.verdict if fp else "", fp.severity if fp else "",
+            fp.verdict if fp else "",
+            fp.verdict == "tp" if fp and is_effective_fp_review_result(fp) else "",
+            fp.severity if fp else "",
             fp.match_type if fp else "", fp.match_reference if fp else "",
             v.variant_of, v.description, v.ai_analysis,
         ])
