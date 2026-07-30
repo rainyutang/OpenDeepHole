@@ -19,7 +19,15 @@ function announcementDate(value: string) {
 }
 
 
-export default function AnnouncementBoard({ user }: { user: User }) {
+export default function AnnouncementBoard({
+  user,
+  open,
+  onClose,
+}: {
+  user: User;
+  open: boolean;
+  onClose: () => void;
+}) {
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [managing, setManaging] = useState(false);
   const [adminAnnouncements, setAdminAnnouncements] = useState<Announcement[]>([]);
@@ -65,6 +73,7 @@ export default function AnnouncementBoard({ user }: { user: User }) {
 
   const openManager = () => {
     resetForm();
+    onClose();
     setManaging(true);
     void loadAdmin();
   };
@@ -123,47 +132,61 @@ export default function AnnouncementBoard({ user }: { user: User }) {
     }
   };
 
-  if (announcements.length === 0 && user.role !== "admin") return null;
-
   return (
     <>
-      <section
-        aria-labelledby="announcement-board-title"
-        className="mb-6 overflow-hidden rounded-xl border border-blue-500/25 bg-blue-500/5"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-blue-500/15 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <span aria-hidden="true" className="text-blue-300">◈</span>
-            <h2 id="announcement-board-title" className="text-sm font-semibold text-blue-100">更新公告</h2>
-          </div>
-          {user.role === "admin" && (
-            <button
-              type="button"
-              onClick={openManager}
-              className="rounded-md border border-blue-400/30 bg-blue-500/10 px-3 py-1.5 text-xs font-medium text-blue-200 transition-colors hover:bg-blue-500/20"
-            >
-              管理公告
-            </button>
-          )}
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="announcement-viewer-title"
+            className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 shadow-2xl"
+          >
+            <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b border-slate-700 bg-slate-900 px-5 py-4">
+              <div className="flex items-center gap-2">
+                <span aria-hidden="true" className="text-blue-300">◈</span>
+                <h2 id="announcement-viewer-title" className="font-semibold text-white">更新公告</h2>
+              </div>
+              <div className="flex items-center gap-2">
+                {user.role === "admin" && (
+                  <button
+                    type="button"
+                    onClick={openManager}
+                    className="rounded-md border border-blue-400/30 bg-blue-500/10 px-3 py-1.5 text-xs font-medium text-blue-200 transition-colors hover:bg-blue-500/20"
+                  >
+                    管理公告
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-md px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                  aria-label="关闭公告"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            {announcements.length === 0 ? (
+              <p className="px-5 py-8 text-center text-sm text-slate-500">暂无已发布公告。</p>
+            ) : (
+              <div className="divide-y divide-slate-700/70">
+                {announcements.map((announcement) => (
+                  <article key={announcement.announcement_id} className="grid gap-1 px-5 py-4 md:grid-cols-[10rem_1fr] md:gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-slate-100">{announcement.title}</p>
+                      <time className="text-xs text-slate-500">
+                        {announcementDate(announcement.published_at)}
+                      </time>
+                    </div>
+                    <p className="whitespace-pre-wrap text-sm leading-6 text-slate-300">{announcement.content}</p>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
         </div>
-        {announcements.length === 0 ? (
-          <p className="px-4 py-4 text-sm text-slate-500">暂无已发布公告。</p>
-        ) : (
-          <div className="divide-y divide-slate-700/70">
-            {announcements.map((announcement) => (
-              <article key={announcement.announcement_id} className="grid gap-1 px-4 py-3 md:grid-cols-[10rem_1fr] md:gap-4">
-                <div>
-                  <p className="text-sm font-medium text-slate-100">{announcement.title}</p>
-                  <time className="text-xs text-slate-500">
-                    {announcementDate(announcement.published_at)}
-                  </time>
-                </div>
-                <p className="whitespace-pre-wrap text-sm leading-6 text-slate-300">{announcement.content}</p>
-              </article>
-            ))}
-          </div>
-        )}
-      </section>
+      )}
 
       {managing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm">

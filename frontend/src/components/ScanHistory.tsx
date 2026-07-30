@@ -220,6 +220,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
   const [projectFilter, setProjectFilter] = useState(ALL_FILTER);
   const [creatorFilter, setCreatorFilter] = useState(ALL_FILTER);
   const [openFilter, setOpenFilter] = useState<string | null>(null);
+  const [announcementOpen, setAnnouncementOpen] = useState(false);
 
   const fetchScans = async () => {
     try {
@@ -455,6 +456,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
               onClick={onNewScan}
               variant="primary"
             />
+            <NavButton
+              label="公告"
+              description="查看最近发布的平台更新公告"
+              onClick={() => setAnnouncementOpen(true)}
+            />
             <ThemeToggle />
             <button
               onClick={onLogout}
@@ -466,9 +472,14 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
         </div>
       </div>
 
+      <AnnouncementBoard
+        user={user}
+        open={announcementOpen}
+        onClose={() => setAnnouncementOpen(false)}
+      />
+
       {/* Content */}
       <div className="mx-auto w-full max-w-[100rem] flex-1 px-4 py-6 sm:px-6">
-        <AnnouncementBoard user={user} />
         <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">
           扫描历史
         </h2>
