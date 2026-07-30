@@ -379,6 +379,10 @@ export interface OpenCodePoolModelStats {
   use_default_model: boolean;
   capability: string;
   weight: number;
+  effective_weight: number;
+  health_penalty_level: number;
+  last_health_failure_at: string;
+  last_health_failure_kind: string;
   max_concurrency: number;
   enabled: boolean;
   available: boolean;

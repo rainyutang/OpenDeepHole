@@ -4968,7 +4968,7 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
               <th className={thCls}>模型</th>
               <th className={thCls}>能力</th>
               <th className={thCls}>可用</th>
-              <th className={thCls}>权重</th>
+              <th className={thCls}>配置/有效权重</th>
               <th className={thCls}>运行/上限</th>
               <th className={thCls}>累计</th>
               <th className={thCls}>成功</th>
@@ -4995,7 +4995,26 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
                     {model.enabled ? (model.available ? "可用" : "时间窗外") : "禁用"}
                   </span>
                 </td>
-                <td className={tdCls}>{model.weight}</td>
+                <td className={tdCls}>
+                  <div className="font-mono">
+                    {model.weight} / {model.effective_weight ?? model.weight}
+                  </div>
+                  <div className={`mt-1 text-[11px] ${!model.enabled ? "text-slate-500" : (model.health_penalty_level ?? 0) > 0 ? "text-amber-300" : "text-green-400"}`}>
+                    {!model.enabled
+                      ? "无当前健康状态"
+                      : (model.health_penalty_level ?? 0) > 0
+                        ? `健康降级 ${model.health_penalty_level} 级`
+                        : "健康正常"}
+                  </div>
+                  {model.enabled && model.last_health_failure_at && (
+                    <div
+                      className="mt-1 text-[11px] text-slate-600"
+                      title={formatDateTime(model.last_health_failure_at)}
+                    >
+                      最近失败：{model.last_health_failure_kind === "timeout" ? "超时" : "请求失败"}
+                    </div>
+                  )}
+                </td>
                 <td className={tdCls}>{model.running}/{model.max_concurrency}</td>
                 <td className={tdCls}>{model.total}</td>
                 <td className={`${tdCls} text-green-300`}>{model.success}</td>

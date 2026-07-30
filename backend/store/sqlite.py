@@ -536,6 +536,10 @@ CREATE TABLE IF NOT EXISTS agent_opencode_pool_models (
     use_default_model INTEGER NOT NULL DEFAULT 0,
     capability      TEXT NOT NULL DEFAULT '',
     weight          REAL NOT NULL DEFAULT 1.0,
+    effective_weight REAL NOT NULL DEFAULT 1.0,
+    health_penalty_level INTEGER NOT NULL DEFAULT 0,
+    last_health_failure_at TEXT NOT NULL DEFAULT '',
+    last_health_failure_kind TEXT NOT NULL DEFAULT '',
     max_concurrency INTEGER NOT NULL DEFAULT 1,
     enabled         INTEGER NOT NULL DEFAULT 1,
     available       INTEGER NOT NULL DEFAULT 1,
@@ -692,6 +696,26 @@ class SqliteScanStore(ScanStoreBase):
                 self._conn.execute(
                     f"ALTER TABLE agents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+        pool_model_cur = self._conn.execute(
+            "PRAGMA table_info(agent_opencode_pool_models)"
+        )
+        pool_model_cols = {r[1] for r in pool_model_cur.fetchall()}
+        pool_model_migrations = {
+            "effective_weight": "REAL NOT NULL DEFAULT 1.0",
+            "health_penalty_level": "INTEGER NOT NULL DEFAULT 0",
+            "last_health_failure_at": "TEXT NOT NULL DEFAULT ''",
+            "last_health_failure_kind": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, definition in pool_model_migrations.items():
+            if column not in pool_model_cols:
+                self._conn.execute(
+                    f"ALTER TABLE agent_opencode_pool_models "
+                    f"ADD COLUMN {column} {definition}"
+                )
+        if "effective_weight" not in pool_model_cols:
+            self._conn.execute(
+                "UPDATE agent_opencode_pool_models SET effective_weight = weight"
+            )
         announcement_table_exists = self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'announcements'"
         ).fetchone() is not None
@@ -1571,6 +1595,10 @@ class SqliteScanStore(ScanStoreBase):
                 1 if model.use_default_model else 0,
                 model.capability,
                 model.weight,
+                model.effective_weight,
+                model.health_penalty_level,
+                model.last_health_failure_at,
+                model.last_health_failure_kind,
                 model.max_concurrency,
                 1 if model.enabled else 0,
                 1 if model.available else 0,
@@ -1601,6 +1629,10 @@ class SqliteScanStore(ScanStoreBase):
                     running = 0,
                     queued = 0,
                     active_tasks = '[]',
+                    effective_weight = weight,
+                    health_penalty_level = 0,
+                    last_health_failure_at = '',
+                    last_health_failure_kind = '',
                     updated_at = CASE WHEN ? <> '' THEN ? ELSE updated_at END
                 WHERE agent_name = ? AND user_id = ? AND agent_session_id = ?
                 """,
@@ -1611,17 +1643,23 @@ class SqliteScanStore(ScanStoreBase):
                     """\
                 INSERT INTO agent_opencode_pool_models (
                     agent_name, user_id, agent_session_id, model_id, model,
-                    use_default_model, capability, weight, max_concurrency,
-                    enabled, available, time_windows, running, queued, total,
+                    use_default_model, capability, weight, effective_weight,
+                    health_penalty_level, last_health_failure_at,
+                    last_health_failure_kind, max_concurrency, enabled,
+                    available, time_windows, running, queued, total,
                     success, failure, timeout, cancelled, total_duration_seconds,
                     last_status, last_started_at, last_finished_at, active_tasks, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_name, user_id, agent_session_id, model_id) DO UPDATE SET
                     model = excluded.model,
                     use_default_model = excluded.use_default_model,
                     capability = excluded.capability,
                     weight = excluded.weight,
+                    effective_weight = excluded.effective_weight,
+                    health_penalty_level = excluded.health_penalty_level,
+                    last_health_failure_at = excluded.last_health_failure_at,
+                    last_health_failure_kind = excluded.last_health_failure_kind,
                     max_concurrency = excluded.max_concurrency,
                     enabled = excluded.enabled,
                     available = excluded.available,
@@ -1674,6 +1712,10 @@ class SqliteScanStore(ScanStoreBase):
                     "use_default_model": False,
                     "capability": "",
                     "weight": 1.0,
+                    "effective_weight": 1.0,
+                    "health_penalty_level": 0,
+                    "last_health_failure_at": "",
+                    "last_health_failure_kind": "",
                     "max_concurrency": 1,
                     "enabled": False,
                     "available": False,
@@ -1710,6 +1752,10 @@ class SqliteScanStore(ScanStoreBase):
                 "use_default_model": bool(row["use_default_model"]),
                 "capability": row["capability"],
                 "weight": float(row["weight"]),
+                "effective_weight": float(row["effective_weight"]),
+                "health_penalty_level": int(row["health_penalty_level"]),
+                "last_health_failure_at": row["last_health_failure_at"],
+                "last_health_failure_kind": row["last_health_failure_kind"],
                 "max_concurrency": int(row["max_concurrency"]),
                 "enabled": bool(row["enabled"]),
                 "available": bool(row["available"]),
@@ -1735,6 +1781,10 @@ class SqliteScanStore(ScanStoreBase):
             if not has_current_session:
                 item["enabled"] = False
                 item["available"] = False
+                item["effective_weight"] = item["weight"]
+                item["health_penalty_level"] = 0
+                item["last_health_failure_at"] = ""
+                item["last_health_failure_kind"] = ""
             if not online:
                 item["available"] = False
             item["avg_duration_seconds"] = duration / completed if completed else 0.0

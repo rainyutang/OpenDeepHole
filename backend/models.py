@@ -492,6 +492,10 @@ class OpenCodePoolModelStats(BaseModel):
     use_default_model: bool = False
     capability: str = ""
     weight: float = 1.0
+    effective_weight: float = 1.0
+    health_penalty_level: int = 0
+    last_health_failure_at: str = ""
+    last_health_failure_kind: str = ""
     max_concurrency: int = 1
     enabled: bool = True
     available: bool = True
@@ -508,6 +512,14 @@ class OpenCodePoolModelStats(BaseModel):
     last_started_at: str = ""
     last_finished_at: str = ""
     active_tasks: list[dict] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_effective_weight_to_configured_weight(cls, value):
+        """Keep snapshots from older Agents compatible with health-aware UIs."""
+        if isinstance(value, dict) and value.get("effective_weight") is None:
+            value = {**value, "effective_weight": value.get("weight", 1.0)}
+        return value
 
 
 class OpenCodeTokenCounters(BaseModel):

@@ -168,6 +168,13 @@ def _lease(task_id: str = "task-id", *, scope_id: str = "") -> ModelLease:
         started_at=1.0,
         started_at_iso="2026-01-01T00:00:00+00:00",
         task_id=task_id,
+        health_identity=(
+            "provider/model-low",
+            False,
+            "opencode",
+            "opencode",
+        ),
+        health_generation="generation",
     )
 
 
@@ -198,6 +205,15 @@ def _source() -> OutputSource:
         model="provider/model-low",
         capability="low",
     )
+
+
+async def _notify_model_request_failure(kwargs: dict, kind: str) -> None:
+    callback = kwargs.get("on_model_request_failure")
+    if callback is None:
+        return
+    result = callback(kind)
+    if hasattr(result, "__await__"):
+        await result
 
 
 def _task_context(tmp_path: Path, **kwargs):
@@ -1548,9 +1564,14 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
         first_release = release_mock.await_args_list[0].kwargs
         final_release = release_mock.await_args_list[1].kwargs
         assert first_release["record_completion"] is False
-        assert first_release["outcome"] is None
+        assert first_release["outcome"] == "failure"
+        assert first_release["health_outcome"] is None
         assert final_release["record_completion"] is True
         assert final_release["outcome"] == "success"
+        assert final_release["health_outcome"] == "success"
+        identity = {("provider/model-low", False, "opencode", "opencode")}
+        assert acquire_mock.await_args_list[0].kwargs["avoid_model_identities"] == set()
+        assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
         assert (
             "[opencode][ses_first][session] "
             "JSON_RETRY 1/1 reason=invalid_json next_session=same"
@@ -1582,6 +1603,7 @@ def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
             if hasattr(callback, "__await__"):
                 await callback
             if len(calls) == 1:
+                await _notify_model_request_failure(kwargs, "failure")
                 raise RuntimeError("transport failed")
             return OpenCodePromptResult(
                 session_id=session_id,
@@ -1620,8 +1642,15 @@ def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
         assert {
             call.kwargs["task_id"] for call in acquire_mock.await_args_list
         } == {result.task_id}
-        assert release_mock.await_args_list[0].kwargs["record_completion"] is False
+        first_release = release_mock.await_args_list[0].kwargs
+        assert first_release["record_completion"] is False
+        assert first_release["outcome"] == "failure"
+        assert first_release["health_outcome"] == "failure"
+        identity = {("provider/model-low", False, "opencode", "opencode")}
+        assert acquire_mock.await_args_list[0].kwargs["avoid_model_identities"] == set()
+        assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
         assert release_mock.await_args_list[1].kwargs["outcome"] == "success"
+        assert release_mock.await_args_list[1].kwargs["health_outcome"] == "success"
 
     asyncio.run(run())
 
@@ -1638,6 +1667,7 @@ def test_failed_fresh_retry_keeps_last_created_session_in_pool_context(tmp_path:
                 callback = kwargs["on_session_id"]("ses_first")
                 if hasattr(callback, "__await__"):
                     await callback
+                await _notify_model_request_failure(kwargs, "neutral")
                 raise RuntimeError("first session failed")
             raise RuntimeError("final retry failed before session creation")
 
@@ -1648,7 +1678,7 @@ def test_failed_fresh_retry_keeps_last_created_session_in_pool_context(tmp_path:
         patches = _service_patches(manager)
         with (
             patches[0],
-            patches[1],
+            patches[1] as acquire_mock,
             patches[2] as release_mock,
             patches[3] as update_context_mock,
             patches[4],
@@ -1664,6 +1694,17 @@ def test_failed_fresh_retry_keeps_last_created_session_in_pool_context(tmp_path:
 
         assert result.status == "failure"
         assert result.session_id == "ses_first"
+        assert [
+            call.kwargs["avoid_model_identities"]
+            for call in acquire_mock.await_args_list
+        ] == [
+            set(),
+            {("provider/model-low", False, "opencode", "opencode")},
+        ]
+        assert [
+            call.kwargs["health_outcome"]
+            for call in release_mock.await_args_list
+        ] == [None, None]
         assert release_mock.await_args_list[-1].kwargs["outcome"] == "failure"
         assert release_mock.await_args_list[-1].kwargs["record_completion"] is True
         final_context_update = update_context_mock.await_args_list[-1].args[1]
@@ -1728,6 +1769,7 @@ def test_timeout_uses_fresh_session_retry_budget_for_unclassified_tasks(tmp_path
             callback = kwargs["on_session_id"](f"ses_timeout_{len(session_ids)}")
             if hasattr(callback, "__await__"):
                 await callback
+            await _notify_model_request_failure(kwargs, "timeout")
             raise asyncio.TimeoutError("slow")
 
         manager = SimpleNamespace(run_prompt=AsyncMock(side_effect=run_prompt))
@@ -1751,6 +1793,22 @@ def test_timeout_uses_fresh_session_retry_budget_for_unclassified_tasks(tmp_path
             call.kwargs["record_completion"]
             for call in release_mock.await_args_list
         ] == [False, False, True]
+        assert [
+            call.kwargs["outcome"]
+            for call in release_mock.await_args_list
+        ] == ["timeout", "timeout", "timeout"]
+        assert [
+            call.kwargs["health_outcome"]
+            for call in release_mock.await_args_list
+        ] == ["timeout", "timeout", "timeout"]
+        assert [
+            call.kwargs["avoid_model_identities"]
+            for call in acquire_mock.await_args_list
+        ] == [
+            set(),
+            {("provider/model-low", False, "opencode", "opencode")},
+            {("provider/model-low", False, "opencode", "opencode")},
+        ]
         assert release_mock.await_args.kwargs["outcome"] == "timeout"
 
     asyncio.run(run())

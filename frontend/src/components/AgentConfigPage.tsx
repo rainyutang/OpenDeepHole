@@ -480,7 +480,9 @@ export default function AgentConfigPage({ onBack }: Props) {
   const [tokenUsage, setTokenUsage] = useState<OpenCodeTokenUsage | null>(null);
   const [tokenUsageLoading, setTokenUsageLoading] = useState(false);
   const [tokenUsageError, setTokenUsageError] = useState("");
+  const configRequest = useRef(0);
   const tokenUsageRequest = useRef(0);
+  const poolRequest = useRef(0);
   const [mcpStatus, setMcpStatus] = useState<AgentMcpStatusResponse | null>(null);
   const [runtimeConfig, setRuntimeConfig] = useState<AgentOpenCodeRuntimeConfig | null>(null);
   const [runtimeConfigLoading, setRuntimeConfigLoading] = useState(false);
@@ -504,6 +506,16 @@ export default function AgentConfigPage({ onBack }: Props) {
 
   const selectedAgent = agents.find((agent) => agent.agent_key === agentKey);
   const setCfg = (next: AgentRemoteConfig) => { setConfig(next); setDirty(true); setMessage(""); };
+
+  const refreshModelPool = async (targetAgentId: string) => {
+    const requestId = ++poolRequest.current;
+    try {
+      const next = await getAgentOpenCodePool(targetAgentId);
+      if (requestId === poolRequest.current) setPool(next);
+    } catch {
+      // Preserve the last current-Agent snapshot across transient disconnects.
+    }
+  };
 
   const loadOpenCodeRuntimeConfig = async (refresh = true, includeSecrets = false) => {
     if (!agentKey) return;
@@ -543,8 +555,11 @@ export default function AgentConfigPage({ onBack }: Props) {
 
   useEffect(() => {
     if (!agentKey) return;
+    const requestId = ++configRequest.current;
     setLoading(true);
     setMcpStatus(null);
+    poolRequest.current += 1;
+    setPool(null);
     setTokenUsage(null);
     setTokenUsageLoading(true);
     setTokenUsageError("");
@@ -558,10 +573,13 @@ export default function AgentConfigPage({ onBack }: Props) {
       getAgentValidatorCatalog(agentKey),
       getAgentMcpStatus(agentKey),
     ]).then(([next, nextCatalog, nextMcpStatus]) => {
+      if (requestId !== configRequest.current) return;
       setConfig(next); setSavedConfig(next); setCatalog(nextCatalog); setMcpStatus(nextMcpStatus); setDirty(false); setMessage("");
-      const live = agents.find((item) => item.agent_key === agentKey && item.online);
-      if (live) getAgentOpenCodePool(live.agent_id).then(setPool).catch(() => setPool(null)); else setPool(null);
-    }).catch(() => setMessage("加载 Agent 配置失败")).finally(() => setLoading(false));
+    }).catch(() => {
+      if (requestId === configRequest.current) setMessage("加载 Agent 配置失败");
+    }).finally(() => {
+      if (requestId === configRequest.current) setLoading(false);
+    });
     getAgentOpenCodeUsage(agentKey)
       .then((value) => {
         if (usageRequestId === tokenUsageRequest.current) setTokenUsage(value);
@@ -574,7 +592,29 @@ export default function AgentConfigPage({ onBack }: Props) {
       .finally(() => {
         if (usageRequestId === tokenUsageRequest.current) setTokenUsageLoading(false);
       });
+    return () => {
+      if (requestId === configRequest.current) configRequest.current += 1;
+    };
   }, [agentKey, agents]);
+
+  useEffect(() => {
+    poolRequest.current += 1;
+    setPool(null);
+    if (!agentKey || section !== "models" || !selectedAgent?.online) return;
+    let disposed = false;
+    let timer = 0;
+    const targetAgentId = selectedAgent.agent_id;
+    const refresh = async () => {
+      await refreshModelPool(targetAgentId);
+      if (!disposed) timer = window.setTimeout(refresh, 3000);
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      poolRequest.current += 1;
+    };
+  }, [agentKey, section, selectedAgent?.agent_id, selectedAgent?.online]);
 
   useEffect(() => {
     if (!agentKey || section !== "opencode") return;
@@ -598,6 +638,7 @@ export default function AgentConfigPage({ onBack }: Props) {
   }, [agentKey, section, selectedAgent?.online]);
 
   const switchAgent = (next: string) => {
+    if (saving) return;
     if (dirty && !window.confirm("当前 Agent 的修改尚未保存，确定切换吗？")) return;
     setAgentKey(next);
   };
@@ -612,6 +653,9 @@ export default function AgentConfigPage({ onBack }: Props) {
       await updateAgentConfig(agentKey, config);
       setSavedConfig(config); setDirty(false);
       getAgentMcpStatus(agentKey).then(setMcpStatus).catch(() => undefined);
+      if (section === "models" && selectedAgent?.online) {
+        void refreshModelPool(selectedAgent.agent_id);
+      }
       if (section === "opencode" || opencodeChanged) void loadOpenCodeRuntimeConfig(true, false);
       setMessage(selectedAgent?.online
         ? (opencodeChanged
@@ -777,7 +821,7 @@ export default function AgentConfigPage({ onBack }: Props) {
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-4">
         <button onClick={onBack} className="text-sm text-slate-400 hover:text-white">← 返回</button>
         <h1 className="text-lg font-bold whitespace-nowrap">Agent 配置</h1>
-        <select disabled={probingTarget !== null || reloadingTarget !== null} className={`${input} order-last w-full disabled:cursor-not-allowed disabled:opacity-60 md:order-none md:ml-auto md:max-w-md`} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
+        <select disabled={saving || probingTarget !== null || reloadingTarget !== null} className={`${input} order-last w-full disabled:cursor-not-allowed disabled:opacity-60 md:order-none md:ml-auto md:max-w-md`} value={agentKey} onChange={(e) => switchAgent(e.target.value)}>
           {!agents.length && <option value="">暂无 Agent</option>}
           {agents.map((agent) => <option key={agent.agent_key} value={agent.agent_key}>{agent.machine_name || agent.name} / {agent.ip} / {agent.online ? "在线" : "离线"}</option>)}
         </select>
@@ -971,7 +1015,12 @@ function ModelEditor({ config, setCfg, online, onImport, pool }: { config: Agent
       {pool && <span className="pb-2 text-xs text-slate-400">运行 {pool.global_running} / 排队 {pool.global_queued}</span>}
     </div>
     {!ready && <div className="rounded border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">必须手动配置并启用至少一个有明确模型名的模型，才能启动或恢复扫描。</div>}
-    <div className="space-y-4">{models.map((model, index) => <div key={index} className="rounded-xl border border-slate-700 p-4">
+    <div className="space-y-4">{models.map((model, index) => {
+      const observedRuntime = pool?.models.find((item) => item.id === model.id);
+      const runtime = observedRuntime?.enabled ? observedRuntime : undefined;
+      const effectiveWeight = runtime?.effective_weight ?? runtime?.weight ?? model.weight;
+      const penaltyLevel = runtime?.health_penalty_level ?? 0;
+      return <div key={index} className="rounded-xl border border-slate-700 p-4">
       <div className="grid gap-3 md:grid-cols-6">
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={model.enabled} onChange={(e) => update(index, { enabled: e.target.checked })} />启用</label>
         <input className={input} value={model.id} placeholder="唯一 ID" onChange={(e) => update(index, { id: e.target.value })} />
@@ -986,6 +1035,21 @@ function ModelEditor({ config, setCfg, online, onImport, pool }: { config: Agent
         <input className={input} value={model.executable || ""} placeholder="可执行文件覆盖" onChange={(e) => update(index, { executable: e.target.value })} />
         <input className={input} type="number" min={1} value={model.timeout ?? ""} placeholder="超时覆盖" onChange={(e) => update(index, { timeout: e.target.value ? Number(e.target.value) : null })} />
         <input className={input} type="number" min={0} value={model.max_retries ?? ""} placeholder="重试覆盖" onChange={(e) => update(index, { max_retries: e.target.value ? Number(e.target.value) : null })} />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs">
+        <span className="text-slate-300">
+          配置权重 <span className="font-mono text-slate-100">{model.weight}</span>
+          <span className="px-1.5 text-slate-600">/</span>
+          有效权重 <span className={`font-mono ${penaltyLevel > 0 ? "text-amber-300" : "text-slate-100"}`}>{effectiveWeight}</span>
+        </span>
+        {!runtime
+          ? <span className="text-slate-500">暂无当前运行状态</span>
+          : penaltyLevel > 0
+            ? <span className="text-amber-300">健康降级 {penaltyLevel} 级</span>
+            : <span className="text-green-300">健康状态正常</span>}
+        {runtime?.last_health_failure_at && <span className="text-slate-500">
+          最近健康失败：{runtime.last_health_failure_kind === "timeout" ? "超时" : "请求失败"} · {probeTime(runtime.last_health_failure_at)}
+        </span>}
       </div>
       <div className="mt-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1025,6 +1089,7 @@ function ModelEditor({ config, setCfg, online, onImport, pool }: { config: Agent
           })}
         </div>}
       </div>
-    </div>)}</div>
+    </div>;
+    })}</div>
   </div>;
 }

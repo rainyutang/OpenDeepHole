@@ -34,6 +34,7 @@ def _reset_model_pool():
     model_pool_module._stats_by_scope.clear()
     model_pool_module._global_stats_by_model.clear()
     model_pool_module._options_by_id.clear()
+    model_pool_module._model_health_by_id.clear()
     model_pool_module._scope_updated_at.clear()
     model_pool_module._global_updated_at = ""
     model_pool_module._active_tasks.clear()
@@ -1261,5 +1262,448 @@ def test_waiting_strict_task_is_redispatched_after_model_config_change() -> None
         lease = await asyncio.wait_for(task, timeout=1)
         assert lease is not None and lease.option.id == "high"
         await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_health_outcome_is_independent_from_task_outcome_and_clamped() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "primary",
+            "model": "provider/primary",
+            "weight": 8,
+            "max_concurrency": 1,
+        }])
+
+        json_failure = await acquire_model_lease(cfg, global_concurrency=1)
+        await release_model_lease(
+            json_failure,
+            outcome="failure",
+            health_outcome=None,
+            record_completion=False,
+        )
+        unchanged = model_pool_snapshot()["models"][0]
+        assert unchanged["failure"] == 1
+        assert unchanged["health_penalty_level"] == 0
+        assert unchanged["effective_weight"] == 8
+
+        for _ in range(5):
+            lease = await acquire_model_lease(cfg, global_concurrency=1)
+            await release_model_lease(
+                lease,
+                outcome="failure",
+                health_outcome="failure",
+                record_completion=False,
+            )
+
+        penalized = model_pool_snapshot()["models"][0]
+        assert penalized["failure"] == 6
+        assert penalized["health_penalty_level"] == 4
+        assert penalized["effective_weight"] == pytest.approx(0.8)
+        assert penalized["last_health_failure_at"]
+        assert penalized["last_health_failure_kind"] == "failure"
+
+        success = await acquire_model_lease(cfg, global_concurrency=1)
+        await release_model_lease(
+            success,
+            outcome="success",
+            health_outcome="success",
+            record_completion=False,
+        )
+        recovered = model_pool_snapshot()["models"][0]
+        assert recovered["health_penalty_level"] == 3
+        assert recovered["effective_weight"] == 1
+        assert recovered["last_health_failure_kind"] == "failure"
+
+    asyncio.run(run())
+
+
+def test_health_penalty_recovers_one_level_per_ten_failure_free_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 100.0}
+    monkeypatch.setattr(model_pool_module.time, "monotonic", lambda: clock["now"])
+
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "primary",
+            "model": "provider/primary",
+            "weight": 4,
+            "max_concurrency": 1,
+        }])
+        for _ in range(3):
+            lease = await acquire_model_lease(cfg, global_concurrency=1)
+            await release_model_lease(
+                lease,
+                outcome="timeout",
+                health_outcome="timeout",
+                duration_seconds=1,
+                record_completion=False,
+            )
+
+        initial = model_pool_snapshot()["models"][0]
+        assert initial["health_penalty_level"] == 3
+        assert initial["effective_weight"] == pytest.approx(0.5)
+        assert initial["last_health_failure_kind"] == "timeout"
+
+        clock["now"] += 599
+        assert model_pool_snapshot()["models"][0]["health_penalty_level"] == 3
+        clock["now"] += 1
+        after_one_window = model_pool_snapshot()["models"][0]
+        assert after_one_window["health_penalty_level"] == 2
+        assert after_one_window["effective_weight"] == 1
+
+        clock["now"] += 1200
+        fully_recovered = model_pool_snapshot()["models"][0]
+        assert fully_recovered["health_penalty_level"] == 0
+        assert fully_recovered["effective_weight"] == 4
+
+    asyncio.run(run())
+
+
+def test_effective_weight_changes_weighted_model_selection() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "primary",
+            "model": "provider/primary",
+            "weight": 16,
+            "max_concurrency": 1,
+        }])
+        for _ in range(4):
+            lease = await acquire_model_lease(cfg, global_concurrency=1)
+            await release_model_lease(
+                lease,
+                outcome="failure",
+                health_outcome="failure",
+                record_completion=False,
+            )
+
+        cfg.models.append({
+            "id": "secondary",
+            "model": "provider/secondary",
+            "weight": 2,
+            "max_concurrency": 1,
+        })
+        await refresh_configured_model_pool(cfg, global_concurrency=1)
+        lease = await acquire_model_lease(cfg, global_concurrency=1)
+        try:
+            assert lease.option.id == "secondary"
+            by_id = {item["id"]: item for item in model_pool_snapshot()["models"]}
+            assert by_id["primary"]["weight"] == 16
+            assert by_id["primary"]["effective_weight"] == pytest.approx(1.6)
+        finally:
+            await release_model_lease(lease)
+
+    asyncio.run(run())
+
+
+def test_effective_weight_can_override_lowest_capability_preference() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "low",
+            "model": "provider/low",
+            "capability": "low",
+            "weight": 16,
+            "max_concurrency": 1,
+        }])
+        for _ in range(4):
+            lease = await acquire_model_lease(cfg, global_concurrency=1)
+            await release_model_lease(
+                lease,
+                outcome="failure",
+                health_outcome="failure",
+                record_completion=False,
+            )
+
+        cfg.models.append({
+            "id": "high",
+            "model": "provider/high",
+            "capability": "high",
+            "weight": 2,
+            "max_concurrency": 1,
+        })
+        await refresh_configured_model_pool(cfg, global_concurrency=1)
+        lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="low",
+            strict_capability=True,
+            prefer_lowest_capability=True,
+        )
+        try:
+            assert lease.option.id == "high"
+        finally:
+            await release_model_lease(lease)
+
+    asyncio.run(run())
+
+
+def test_retry_avoidance_uses_execution_identity_instead_of_config_id() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[
+            {
+                "id": "duplicate-a",
+                "model": "provider/same",
+                "weight": 2,
+                "max_concurrency": 1,
+            },
+            {
+                "id": "duplicate-b",
+                "model": "provider/same",
+                "weight": 2,
+                "max_concurrency": 1,
+            },
+            {
+                "id": "alternative",
+                "model": "provider/other",
+                "weight": 1,
+                "max_concurrency": 1,
+            },
+        ])
+        failed = await acquire_model_lease(cfg, global_concurrency=1)
+        assert failed.option.id == "duplicate-a"
+        failed_identity = failed.health_identity
+        await release_model_lease(
+            failed,
+            outcome="failure",
+            health_outcome="failure",
+            record_completion=False,
+        )
+        duplicate_health = {
+            item["id"]: item["health_penalty_level"]
+            for item in model_pool_snapshot()["models"]
+        }
+        assert duplicate_health["duplicate-a"] == 1
+        assert duplicate_health["duplicate-b"] == 1
+
+        retry = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            avoid_model_identities={failed_identity},
+        )
+        try:
+            assert retry.option.id == "alternative"
+        finally:
+            await release_model_lease(retry)
+
+        cfg.models = [{
+            "id": "duplicate-a",
+            "model": "provider/reconfigured",
+            "weight": 2,
+            "max_concurrency": 1,
+        }]
+        await refresh_configured_model_pool(cfg, global_concurrency=1)
+        reconfigured = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            avoid_model_identities={failed_identity},
+        )
+        try:
+            assert reconfigured.option.id == "duplicate-a"
+            assert reconfigured.option.model == "provider/reconfigured"
+        finally:
+            await release_model_lease(reconfigured)
+
+    asyncio.run(run())
+
+
+def test_retry_waits_for_busy_untried_model_instead_of_reusing_avoided_model() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[
+            {
+                "id": "primary",
+                "model": "provider/primary",
+                "capability": "high",
+                "weight": 10,
+                "max_concurrency": 1,
+            },
+            {
+                "id": "secondary",
+                "model": "provider/secondary",
+                "capability": "high",
+                "weight": 1,
+                "max_concurrency": 1,
+            },
+        ])
+        failed = await acquire_model_lease(cfg, global_concurrency=2)
+        occupied_alternative = await acquire_model_lease(cfg, global_concurrency=2)
+        assert failed.option.id == "primary"
+        assert occupied_alternative.option.id == "secondary"
+        await release_model_lease(
+            failed,
+            outcome="failure",
+            health_outcome="failure",
+            record_completion=False,
+        )
+
+        retry_task = asyncio.create_task(acquire_model_lease(
+            cfg,
+            global_concurrency=2,
+            avoid_model_ids={"primary"},
+        ))
+        await asyncio.sleep(0.03)
+        assert not retry_task.done()
+        assert model_pool_snapshot()["global_queued"] == 1
+
+        await release_model_lease(occupied_alternative)
+        retry = await asyncio.wait_for(retry_task, timeout=1)
+        try:
+            assert retry is not None
+            assert retry.option.id == "secondary"
+        finally:
+            await release_model_lease(retry)
+
+    asyncio.run(run())
+
+
+def test_retry_falls_back_when_all_eligible_models_were_avoided() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[
+            {
+                "id": "primary",
+                "model": "provider/primary",
+                "capability": "high",
+                "weight": 4,
+                "max_concurrency": 1,
+            },
+            {
+                "id": "secondary",
+                "model": "provider/secondary",
+                "capability": "low",
+                "weight": 1,
+                "max_concurrency": 1,
+            },
+        ])
+        capability_fallback = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="high",
+            avoid_model_ids={"primary"},
+        )
+        try:
+            assert capability_fallback.option.id == "primary"
+        finally:
+            await release_model_lease(capability_fallback)
+
+        all_tried_fallback = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="any",
+            avoid_model_ids={"primary", "secondary"},
+        )
+        try:
+            assert all_tried_fallback.option.id == "primary"
+        finally:
+            await release_model_lease(all_tried_fallback)
+
+    asyncio.run(run())
+
+
+def test_health_survives_non_identity_config_changes_and_resets_on_identity_change() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "primary",
+            "model": "provider/primary",
+            "tool": "opencode",
+            "executable": "/opt/opencode",
+            "weight": 4,
+            "max_concurrency": 1,
+        }])
+        lease = await acquire_model_lease(cfg, global_concurrency=1)
+        await release_model_lease(
+            lease,
+            outcome="failure",
+            health_outcome="failure",
+            record_completion=False,
+        )
+
+        cfg.models[0].update({
+            "weight": 10,
+            "max_concurrency": 3,
+            "time_windows": [{"start": "00:00", "end": "23:59"}],
+        })
+        await refresh_configured_model_pool(cfg, global_concurrency=3)
+        preserved = model_pool_snapshot()["models"][0]
+        assert preserved["health_penalty_level"] == 1
+        assert preserved["weight"] == 10
+        assert preserved["effective_weight"] == 5
+
+        cfg.models[0]["executable"] = "/opt/opencode-v2"
+        await refresh_configured_model_pool(cfg, global_concurrency=3)
+        reset = model_pool_snapshot()["models"][0]
+        assert reset["health_penalty_level"] == 0
+        assert reset["effective_weight"] == 10
+        assert reset["last_health_failure_at"] == ""
+        assert reset["last_health_failure_kind"] == ""
+
+    asyncio.run(run())
+
+
+def test_recreated_model_ignores_late_health_result_from_old_lease() -> None:
+    async def run() -> None:
+        model = {
+            "id": "primary",
+            "model": "provider/primary",
+            "weight": 4,
+            "max_concurrency": 2,
+        }
+        cfg = SimpleNamespace(models=[dict(model)])
+        old_lease = await acquire_model_lease(cfg, global_concurrency=2)
+        penalty_lease = await acquire_model_lease(cfg, global_concurrency=2)
+        await release_model_lease(
+            penalty_lease,
+            outcome="failure",
+            health_outcome="failure",
+            record_completion=False,
+        )
+        assert model_pool_snapshot()["models"][0]["health_penalty_level"] == 1
+
+        cfg.models.clear()
+        await refresh_configured_model_pool(cfg, global_concurrency=2)
+        cfg.models.append(dict(model))
+        await refresh_configured_model_pool(cfg, global_concurrency=2)
+        recreated = model_pool_snapshot()["models"][0]
+        assert recreated["health_penalty_level"] == 0
+
+        await release_model_lease(
+            old_lease,
+            outcome="timeout",
+            health_outcome="timeout",
+            record_completion=False,
+        )
+        after_late_release = model_pool_snapshot()["models"][0]
+        assert after_late_release["health_penalty_level"] == 0
+        assert after_late_release["last_health_failure_kind"] == ""
+
+    asyncio.run(run())
+
+
+def test_intermediate_attempt_records_stats_without_terminal_completion() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "primary",
+            "model": "provider/primary",
+            "max_concurrency": 1,
+        }])
+        lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            stats_scope_id="retry-scope",
+            task_id="logical-task",
+        )
+        await release_model_lease(
+            lease,
+            outcome="timeout",
+            health_outcome="timeout",
+            duration_seconds=3,
+            record_completion=False,
+        )
+
+        snapshot = model_pool_snapshot("retry-scope")
+        assert snapshot["models"][0]["total"] == 1
+        assert snapshot["models"][0]["timeout"] == 1
+        assert snapshot["models"][0]["health_penalty_level"] == 1
+        assert snapshot["completed_task_count"] == 0
+        assert snapshot["completed_tasks"] == []
 
     asyncio.run(run())

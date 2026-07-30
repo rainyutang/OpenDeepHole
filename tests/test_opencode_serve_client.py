@@ -785,6 +785,7 @@ def test_run_prompt_emits_debug_serve_startup_failure(monkeypatch, tmp_path: Pat
             )
         )
         output: list[str] = []
+        request_failures: list[str] = []
 
         with pytest.raises(RuntimeError, match="did not become healthy"):
             await manager.run_prompt(
@@ -795,12 +796,160 @@ def test_run_prompt_emits_debug_serve_startup_failure(monkeypatch, tmp_path: Pat
                 model="provider/model",
                 timeout=30,
                 on_line=output.append,
+                on_model_request_failure=request_failures.append,
                 show_serve_status=True,
             )
 
+        assert request_failures == []
         assert output[0].startswith("[opencode][pending][task] SERVE PREPARING")
         assert output[1].startswith("[opencode][pending][task] SERVE STARTUP_FAILED")
         assert "provider failed to load" in output[1]
+
+    asyncio.run(run())
+
+
+def test_run_prompt_reports_message_request_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class FailingMessageAsyncClient(_FakeAsyncClient):
+        async def post(self, path: str, **kwargs):
+            response = await super().post(path, **kwargs)
+            if path.startswith("/session/") and path.endswith("/message"):
+                response._error = RuntimeError("provider request failed")
+            return response
+
+    async def run() -> None:
+        FailingMessageAsyncClient.instances = []
+        FailingMessageAsyncClient.event_lines = []
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            FailingMessageAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 4095
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        request_failures: list[str] = []
+
+        with pytest.raises(RuntimeError, match="provider request failed"):
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="fail",
+                model="provider/model",
+                timeout=1,
+                on_model_request_failure=request_failures.append,
+            )
+
+        assert request_failures == ["failure"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("error_name", "expected_failures"),
+    [
+        ("APIError", ["failure"]),
+        ("ContextOverflowError", ["neutral"]),
+        ("MessageOutputLengthError", ["neutral"]),
+        ("StructuredOutputError", ["neutral"]),
+        ("MessageAbortedError", ["neutral"]),
+    ],
+)
+def test_run_prompt_rejects_assistant_error_response_and_classifies_health(
+    monkeypatch,
+    tmp_path: Path,
+    error_name: str,
+    expected_failures: list[str],
+) -> None:
+    class AssistantErrorAsyncClient(_FakeAsyncClient):
+        message_info = {
+            "role": "assistant",
+            "providerID": "provider",
+            "modelID": "actual",
+            "error": {
+                "name": error_name,
+                "data": {"message": "assistant request failed"},
+            },
+        }
+
+    async def run() -> None:
+        AssistantErrorAsyncClient.instances = []
+        AssistantErrorAsyncClient.event_lines = []
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            AssistantErrorAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        request_failures: list[str] = []
+        response_models: list[str] = []
+
+        with pytest.raises(RuntimeError, match="assistant request failed"):
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="fail",
+                model="provider/model",
+                timeout=1,
+                on_model_request_failure=request_failures.append,
+                on_response_model=response_models.append,
+            )
+
+        assert request_failures == expected_failures
+        assert response_models == ["provider/actual"]
+
+    asyncio.run(run())
+
+
+def test_run_prompt_prioritizes_active_cancel_over_aborted_assistant_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class AbortedMessageAsyncClient(_FakeAsyncClient):
+        message_info = {
+            "role": "assistant",
+            "error": {
+                "name": "MessageAbortedError",
+                "data": {"message": "aborted"},
+            },
+        }
+
+    async def run() -> None:
+        AbortedMessageAsyncClient.instances = []
+        AbortedMessageAsyncClient.event_lines = []
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            AbortedMessageAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 4097
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        cancel_event = asyncio.Event()
+        cancel_event.set()
+        request_failures: list[str] = []
+
+        with pytest.raises(asyncio.CancelledError):
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="cancel",
+                model="provider/model",
+                timeout=1,
+                cancel_event=cancel_event,
+                on_model_request_failure=request_failures.append,
+            )
+
+        assert request_failures == []
 
     asyncio.run(run())
 
@@ -827,6 +976,7 @@ def test_run_prompt_timeout_aborts_and_reaps_request_before_reuse(
 
         manager._acquire_session = AsyncMock(side_effect=acquire)
         output: list[str] = []
+        request_failures: list[str] = []
 
         with pytest.raises(asyncio.TimeoutError):
             await manager.run_prompt(
@@ -837,10 +987,12 @@ def test_run_prompt_timeout_aborts_and_reaps_request_before_reuse(
                 model="provider/model",
                 timeout=0.01,
                 on_line=output.append,
+                on_model_request_failure=request_failures.append,
                 log_stage="validation",
             )
 
         first_client = _HangingMessageAsyncClient.instances[0]
+        assert request_failures == ["timeout"]
         assert "/session/session-hanging/abort" in first_client.posts
         assert first_client.message_cancelled is True
         assert manager._active_sessions == 0
@@ -918,6 +1070,28 @@ def test_run_prompt_caller_cancellation_aborts_and_reaps_request(
             "[opencode][session-hanging][session] "
             "STOP status=cancelled retained=true"
         )
+
+    asyncio.run(run())
+
+
+def test_wait_for_response_prioritizes_cancel_over_completed_response() -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        cancel_event = asyncio.Event()
+
+        async def completed_response():
+            return _FakeResponse({})
+
+        request = asyncio.create_task(completed_response())
+        await asyncio.sleep(0)
+        cancel_event.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await manager._wait_for_response(
+                request=request,
+                timeout=1,
+                cancel_event=cancel_event,
+            )
 
     asyncio.run(run())
 

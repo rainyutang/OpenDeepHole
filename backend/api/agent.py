@@ -1535,6 +1535,10 @@ async def get_agent_opencode_pool(
                 model.use_default_model = live.use_default_model
                 model.capability = live.capability
                 model.weight = live.weight
+                model.effective_weight = live.effective_weight
+                model.health_penalty_level = live.health_penalty_level
+                model.last_health_failure_at = live.last_health_failure_at
+                model.last_health_failure_kind = live.last_health_failure_kind
                 model.max_concurrency = live.max_concurrency
                 model.running = live.running
                 model.queued = live.queued
@@ -1553,6 +1557,10 @@ async def get_agent_opencode_pool(
                 model.running = 0
                 model.queued = 0
                 model.active_tasks = []
+                model.effective_weight = model.weight
+                model.health_penalty_level = 0
+                model.last_health_failure_at = ""
+                model.last_health_failure_kind = ""
         known_ids = {model.id for model in result.models}
         for model in latest.models:
             if model.id not in known_ids:

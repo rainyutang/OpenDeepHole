@@ -244,8 +244,8 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 | `models[].id` | 默认取 `model`，默认模型行为 `default` | 模型池内部稳定标识，用于 Lease、日志和统计；不同模型行应使用不同 ID。 |
 | `models[].model` | 条件必填 | OpenCode 的 `provider/model`。要让该行进入可调度模型池，当 `use_default_model` 为 `false` 时必须非空。 |
 | `models[].use_default_model` | 默认 `false` | 为 `true` 时忽略 `model`，让 Serve 使用自己的默认模型。 |
-| `models[].capability` | 默认 `high` | 模型能力，可为 `low`、`medium`、`high`。公共任务只请求 `low` 或 `high`；低能力任务优先选择满足条件的较低档模型，高能力任务只使用高档模型。 |
-| `models[].weight` | 默认 `1`，最小 `0.01` | 多个可用且能力合适的模型之间的相对调度权重；值越大越容易获得后续 Lease，但不是严格百分比。 |
+| `models[].capability` | 默认 `high` | 模型能力，可为 `low`、`medium`、`high`。公共任务只请求 `low` 或 `high`；高能力任务只使用高档模型，低能力任务在当前负载和有效权重相同时优先选择满足条件的较低档模型。 |
+| `models[].weight` | 默认 `1`，最小 `0.01` | 多个可用且能力合适的模型之间的基础调度权重；运行时健康降级不会改写该配置值。 |
 | `models[].max_concurrency` | 默认 `1`，最小 `1` | 该模型行允许同时持有的 Lease 数量。 |
 | `models[].enabled` | 默认 `true` | 是否将该模型加入可调度模型池。 |
 | `models[].tool` | 默认继承 `serve.tool` | 仅该模型使用的 Serve 实现，只能为空、`opencode` 或 `nga`。 |
@@ -264,6 +264,18 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 ```
 
 例如全局并发为 `2`，但唯一高能力模型的 `max_concurrency` 为 `1` 时，两个 `high` 任务会同时进入队列，却仍然只能串行执行。要让它们同时运行，需要把该模型的 `max_concurrency` 提高到 `2`，或者再配置一个当前可用的高能力模型。
+
+模型池在当前 Agent/Task Agent 进程内为每个实际模型身份维护 `0..4` 级健康惩罚，调度使用的有效权重为：
+
+```text
+有效权重 = 基础权重 × max(10%, 0.5 ^ 健康惩罚等级)
+```
+
+五个状态的权重系数依次为 `100%`、`50%`、`25%`、`12.5%` 和 `10%`。模型池状态会分别暴露基础权重、有效权重、当前惩罚等级以及最近一次健康故障的时间和类型；配置中的 `models[].weight` 始终保持不变。
+
+只有已经进入模型消息请求后的 Provider/Auth/API 执行失败或总超时才会增加一级惩罚；即使消息接口返回 HTTP 200，assistant `info.error` 中的这类 Provider 执行错误也按真实请求失败处理。`ContextOverflowError`、`MessageOutputLengthError`、`StructuredOutputError` 和非主动取消产生的 `MessageAbortedError` 会让当前任务换模重试，但不会降权。Serve 启动或配置失败、MCP/回调故障、主动取消、没有可用模型，以及返回内容未通过 JSON Schema 校验，也都不属于模型健康故障。一次最终成功会恢复一级；没有新模型消息请求故障满 10 分钟也会恢复一级。JSON 纠错耗尽后仍会进入 fresh Session 换模重试，但该 JSON 失败本身既不降权也不恢复健康；若纠错消息请求本身超时或发生 Provider/Auth/API 执行失败，仍按真实请求故障处理。
+
+健康状态不会写回配置或跨进程持久化，Agent/Task Agent 进程重启后从零惩罚和基础权重重新开始。运行中只修改基础权重、并发数或时间窗时继续沿用同一实际模型身份的健康状态；模型 ID 对应的真实模型、默认模型标记、工具或可执行文件变化时视为新身份。
 
 每个 `time_windows` 项支持以下字段：
 
@@ -356,6 +368,8 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 若文本和已写文件都没有符合 Schema 的 JSON，服务会在原 Session 最多追加 `invalid_json_retry_count` 次纠正消息；这些消息复用同一 Session、同一模型 Lease，不重新排队。`invalid_json_retry_prompt=None` 时使用当前包含完整 Schema 的中文默认提示词；传入非空字符串时，每次都原样发送该字符串，不追加 Schema、重试序号或其它内容。空字符串、纯空白和非字符串会在提交任务前报错。未传 `output_schema` 时完全不启用文件跟踪、文件 JSON 回退或自动清理；纠错次数为 `0` 时不会发送纠正消息。
 
 若同 Session 纠正耗尽，内部服务会按对应任务策略的 `max_retries` 释放 Lease、重新排队并创建全新 Session。模型消息超时和其它可重试执行错误也使用同一预算；`max_retries=2` 表示首次 Session 之外最多再创建 2 个 Session，即最多执行 3 次。业务方不再传 `attempt`。
+
+fresh Session 重试会累计本次逻辑任务已经尝试过的实际模型身份。只要还存在满足能力与当前时间窗的未尝试模型，调度器就排除已经尝试的模型；即使未尝试模型的并发容量暂满，也继续排队等待它，而不是立即回到刚失败的模型。只有单模型可用，或所有合格模型都已经尝试后，才重新允许全部候选按当前有效权重竞争 Lease。该换模规则同样适用于 JSON 纠错耗尽，但 JSON 校验失败和纠错耗尽本身不触发健康降权。
 
 只有预算耗尽后的超时、主动取消和没有可用模型会成为终止结果：
 

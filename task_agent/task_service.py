@@ -617,6 +617,7 @@ class OpenCodeTaskService:
         last_model = ""
         last_source = OutputSource()
         task_token_usage: OpenCodeTokenUsage | None = None
+        avoid_model_identities: set[tuple[str, bool, str, str]] = set()
 
         session_attempt = 1
         while session_attempt <= total_session_attempts:
@@ -632,6 +633,10 @@ class OpenCodeTaskService:
             runtime: _SessionRuntime | None = None
             model = ""
             retry_reason = ""
+            health_outcome: str | None = None
+            avoid_model_on_retry = False
+            model_request_failed = False
+            model_request_failure = ""
             try:
                 task_context = _model_pool_task_context(
                     record,
@@ -652,6 +657,7 @@ class OpenCodeTaskService:
                     strict_capability=True,
                     prefer_lowest_capability=True,
                     wait_when_unavailable=not validation_debug,
+                    avoid_model_identities=set(avoid_model_identities),
                 )
                 if lease is None:
                     if record.requeue_requested:
@@ -729,6 +735,14 @@ class OpenCodeTaskService:
                     if value:
                         source.model = str(value)
 
+                def record_model_request_failure(kind: str) -> None:
+                    nonlocal model_request_failed, model_request_failure
+                    normalized = str(kind or "").strip().lower()
+                    if normalized in {"failure", "timeout", "neutral"}:
+                        model_request_failed = True
+                    if normalized in {"failure", "timeout"}:
+                        model_request_failure = normalized
+
                 async def record_token_usage(value: OpenCodeTokenUsage) -> None:
                     nonlocal task_token_usage
                     task_token_usage = merge_token_usages((task_token_usage, value))
@@ -776,6 +790,7 @@ class OpenCodeTaskService:
                                     timeout=timeout_seconds,
                                     on_line=context.on_output,
                                     on_session_id=record_session,
+                                    on_model_request_failure=record_model_request_failure,
                                     on_response_model=record_model,
                                     on_token_usage=record_token_usage,
                                     on_file_write=(
@@ -843,6 +858,7 @@ class OpenCodeTaskService:
                         self._session_locks.pop(lock_key, None)
 
                 attempt_outcome = "success"
+                health_outcome = "success"
                 last_message_id = message_id
                 last_text = text
                 last_model = source.model or details.model or model
@@ -870,6 +886,10 @@ class OpenCodeTaskService:
             except asyncio.TimeoutError as exc:
                 attempt_outcome = "timeout"
                 retry_reason = str(exc) or "OpenCode task timed out"
+                if model_request_failed:
+                    avoid_model_on_retry = True
+                if model_request_failure:
+                    health_outcome = model_request_failure
                 if message_id:
                     last_message_id = message_id
                 if text:
@@ -916,6 +936,10 @@ class OpenCodeTaskService:
                 return
             except _InvalidStructuredOutput as exc:
                 retry_reason = str(exc)
+                # Invalid JSON should try another model on a fresh Session, but
+                # it is a task-quality failure rather than a request-health
+                # signal and therefore must not lower the model's weight.
+                avoid_model_on_retry = True
                 if message_id:
                     last_message_id = message_id
                 if text:
@@ -924,6 +948,10 @@ class OpenCodeTaskService:
                 last_source = source
             except Exception as exc:
                 retry_reason = str(exc) or type(exc).__name__
+                if model_request_failed:
+                    avoid_model_on_retry = True
+                if model_request_failure:
+                    health_outcome = model_request_failure
                 if message_id:
                     last_message_id = message_id
                 if text:
@@ -945,6 +973,8 @@ class OpenCodeTaskService:
                 # slot now, but append terminal history/outcome only once.
                 if retry_reason and session_attempt < total_session_attempts:
                     terminal_release = False
+                    if avoid_model_on_retry and lease is not None:
+                        avoid_model_identities.add(lease.health_identity)
                 # Preserve the last session created by this logical task in the
                 # terminal model-pool history. A later retry can fail before it
                 # creates a replacement session, in which case final_session_id
@@ -958,7 +988,8 @@ class OpenCodeTaskService:
                 })
                 await release_model_lease(
                     lease,
-                    outcome=attempt_outcome if terminal_release else None,
+                    outcome=attempt_outcome,
+                    health_outcome=health_outcome,
                     duration_seconds=attempt_duration if lease is not None else None,
                     record_completion=terminal_release,
                 )

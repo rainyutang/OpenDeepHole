@@ -1736,6 +1736,28 @@ def _error_summary(value: object) -> str:
     return _one_line_preview(value)
 
 
+def _assistant_message_error(value: object) -> object | None:
+    """Return an OpenCode assistant error carried by a successful HTTP response."""
+    if not isinstance(value, dict):
+        return None
+    info = value.get("info")
+    if not isinstance(info, dict):
+        return None
+    return info.get("error")
+
+
+def _assistant_error_affects_model_health(value: object) -> bool:
+    """Exclude task-quality and explicit-abort errors from model health."""
+    if not isinstance(value, dict):
+        return True
+    return str(value.get("name") or "") not in {
+        "ContextOverflowError",
+        "MessageAbortedError",
+        "MessageOutputLengthError",
+        "StructuredOutputError",
+    }
+
+
 def _tool_source(tool_name: object) -> str:
     normalized = str(tool_name or "").lower().replace("_", "-")
     if (
@@ -3709,6 +3731,7 @@ class OpenCodeServeManager:
         timeout: int,
         on_line=None,
         on_session_id=None,
+        on_model_request_failure=None,
         on_response_model=None,
         on_token_usage=None,
         on_file_write=None,
@@ -3744,6 +3767,20 @@ class OpenCodeServeManager:
                     message,
                 )
             )
+
+        async def emit_model_request_failure(kind: str) -> None:
+            if on_model_request_failure is None:
+                return
+            try:
+                result = on_model_request_failure(kind)
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception as exc:
+                logger.warning(
+                    "Failed to publish OpenCode model request failure for session %s: %s",
+                    active_session_id,
+                    exc,
+                )
 
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
         key = OpenCodeServeKey(
@@ -4008,7 +4045,18 @@ class OpenCodeServeManager:
                         timeout=timeout,
                         cancel_event=cancel_event,
                     )
-                except (asyncio.TimeoutError, asyncio.CancelledError):
+                except asyncio.TimeoutError:
+                    await emit_model_request_failure("timeout")
+                    await self._abort_session(
+                        client,
+                        active_session_id,
+                        params,
+                        headers,
+                    )
+                    await self._cancel_request_task(request)
+                    await capture_token_usage()
+                    raise
+                except asyncio.CancelledError:
                     await self._abort_session(
                         client,
                         active_session_id,
@@ -4019,12 +4067,14 @@ class OpenCodeServeManager:
                     await capture_token_usage()
                     raise
                 except BaseException:
+                    await emit_model_request_failure("failure")
                     await self._cancel_request_task(request)
                     await capture_token_usage()
                     raise
                 try:
                     response.raise_for_status()
                 except BaseException:
+                    await emit_model_request_failure("failure")
                     await capture_token_usage()
                     raise
                 if event_state:
@@ -4053,6 +4103,28 @@ class OpenCodeServeManager:
                     result = on_response_model(response_model)
                     if hasattr(result, "__await__"):
                         await result
+                assistant_error = _assistant_message_error(response_data)
+                if assistant_error is not None:
+                    error_name = (
+                        str(assistant_error.get("name") or "")
+                        if isinstance(assistant_error, dict)
+                        else ""
+                    )
+                    if (
+                        error_name == "MessageAbortedError"
+                        and cancel_event is not None
+                        and cancel_event.is_set()
+                    ):
+                        raise asyncio.CancelledError()
+                    await emit_model_request_failure(
+                        "failure"
+                        if _assistant_error_affects_model_health(assistant_error)
+                        else "neutral"
+                    )
+                    raise RuntimeError(
+                        _error_summary(assistant_error)
+                        or "OpenCode model request failed"
+                    )
                 lines = _extract_text(response_data)
                 response_text = _extract_response_text(response_data)
                 if event_state:
@@ -4898,10 +4970,10 @@ class OpenCodeServeManager:
     ) -> httpx.Response:
         started = time.monotonic()
         while True:
-            if request.done():
-                return await request
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError()
+            if request.done():
+                return await request
             if time.monotonic() - started > timeout:
                 raise asyncio.TimeoutError()
             await asyncio.sleep(0.2)

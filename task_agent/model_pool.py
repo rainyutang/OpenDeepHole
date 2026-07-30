@@ -13,6 +13,9 @@ from .token_usage import OpenCodeTokenUsage, merge_token_usages
 
 
 CAPABILITY_ORDER = {"low": 0, "medium": 1, "high": 2}
+MODEL_HEALTH_MAX_PENALTY_LEVEL = 4
+MODEL_HEALTH_RECOVERY_SECONDS = 10 * 60
+MODEL_HEALTH_MIN_WEIGHT_FACTOR = 0.1
 NO_AVAILABLE_MODEL_MESSAGE = (
     "模型池没有已启用的模型；请先添加并启用模型。"
     "如需使用 CLI 默认模型，请显式添加“默认模型”。"
@@ -57,6 +60,8 @@ class ModelLease:
     started_at: float = 0.0
     started_at_iso: str = ""
     task_id: str = ""
+    health_identity: tuple[str, bool, str, str] = ()
+    health_generation: str = ""
 
 
 @dataclass
@@ -80,6 +85,16 @@ class ModelRuntimeStats:
 
 
 @dataclass
+class _ModelHealthState:
+    identity: tuple[str, bool, str, str]
+    generation: str
+    penalty_level: int = 0
+    last_health_failure_at: str = ""
+    last_health_failure_kind: str = ""
+    recovery_anchor: float | None = None
+
+
+@dataclass
 class _PendingLeaseRequest:
     request_id: str
     sequence: int
@@ -97,6 +112,8 @@ class _PendingLeaseRequest:
     strict_capability: bool = False
     prefer_lowest_capability: bool = False
     wait_when_unavailable: bool = False
+    avoid_model_ids: frozenset[str] = frozenset()
+    avoid_model_identities: frozenset[tuple[str, bool, str, str]] = frozenset()
 
 
 @dataclass
@@ -116,6 +133,7 @@ _last_used: dict[str, float] = {}
 _stats_by_scope: dict[str, dict[str, ModelRuntimeStats]] = {}
 _global_stats_by_model: dict[str, ModelRuntimeStats] = {}
 _options_by_id: dict[str, ModelOption] = {}
+_model_health_by_id: dict[str, _ModelHealthState] = {}
 _scope_updated_at: dict[str, str] = {}
 _global_updated_at: str = ""
 _active_tasks: dict[str, dict[str, Any]] = {}
@@ -272,6 +290,107 @@ def _active_options(options: list[ModelOption], now: datetime | None = None) -> 
     return [option for option in options if _option_available_now(option, now)]
 
 
+def _model_health_identity(option: ModelOption) -> tuple[str, bool, str, str]:
+    """Return the fields that identify the actual model execution target."""
+    return (
+        option.model,
+        option.use_default_model,
+        option.tool,
+        option.executable,
+    )
+
+
+def _ensure_model_health_locked(option: ModelOption) -> _ModelHealthState:
+    identity = _model_health_identity(option)
+    state = _model_health_by_id.get(option.id)
+    if state is not None and state.identity == identity:
+        return state
+    state = next(
+        (
+            candidate
+            for model_id, candidate in _model_health_by_id.items()
+            if model_id != option.id and candidate.identity == identity
+        ),
+        None,
+    )
+    if state is None:
+        state = _ModelHealthState(identity=identity, generation=uuid4().hex)
+    _model_health_by_id[option.id] = state
+    return state
+
+
+def _recover_model_health_locked(
+    state: _ModelHealthState,
+    *,
+    now: float | None = None,
+) -> bool:
+    if state.penalty_level <= 0 or state.recovery_anchor is None:
+        return False
+    current = time.monotonic() if now is None else now
+    elapsed = max(0.0, current - state.recovery_anchor)
+    recovery_steps = int(elapsed // MODEL_HEALTH_RECOVERY_SECONDS)
+    if recovery_steps <= 0:
+        return False
+    state.penalty_level = max(0, state.penalty_level - recovery_steps)
+    if state.penalty_level:
+        state.recovery_anchor += recovery_steps * MODEL_HEALTH_RECOVERY_SECONDS
+    else:
+        state.recovery_anchor = None
+    return True
+
+
+def _effective_model_weight_locked(option: ModelOption) -> float:
+    state = _ensure_model_health_locked(option)
+    _recover_model_health_locked(state)
+    factor = max(
+        MODEL_HEALTH_MIN_WEIGHT_FACTOR,
+        0.5 ** state.penalty_level,
+    )
+    return option.weight * factor
+
+
+def _apply_model_health_outcome_locked(
+    lease: ModelLease,
+    health_outcome: str,
+) -> bool:
+    state = _model_health_by_id.get(lease.option.id)
+    if (
+        state is None
+        or state.identity != lease.health_identity
+        or state.generation != lease.health_generation
+    ):
+        state = next(
+            (
+                candidate
+                for candidate in _model_health_by_id.values()
+                if candidate.identity == lease.health_identity
+                and candidate.generation == lease.health_generation
+            ),
+            None,
+        )
+        if state is None:
+            # A config refresh replaced or fully removed this execution target.
+            # A late release must not change the replacement model's health.
+            return False
+    now = time.monotonic()
+    _recover_model_health_locked(state, now=now)
+    if health_outcome in {"failure", "timeout"}:
+        state.penalty_level = min(
+            MODEL_HEALTH_MAX_PENALTY_LEVEL,
+            state.penalty_level + 1,
+        )
+        state.last_health_failure_at = _now_iso()
+        state.last_health_failure_kind = health_outcome
+        state.recovery_anchor = now
+        return True
+    if health_outcome == "success" and state.penalty_level > 0:
+        state.penalty_level -= 1
+        if state.penalty_level <= 0:
+            state.recovery_anchor = None
+        return True
+    return False
+
+
 def total_model_capacity(
     cli_config: Any,
     *,
@@ -308,6 +427,8 @@ def total_model_capacity(
 
 def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOption]:
     raw_models = _cfg_value(cli_config, "models", None) or []
+    configured_tool = str(_cfg_value(cli_config, "tool", "") or "opencode").strip().lower()
+    configured_executable = str(_cfg_value(cli_config, "executable", "") or "").strip()
     options: list[ModelOption] = []
     for index, raw in enumerate(raw_models):
         if raw is None:
@@ -324,6 +445,10 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
         ).strip()
         if not model_id:
             continue
+        tool = str(_cfg_value(raw, "tool", "") or configured_tool).strip().lower()
+        executable = str(
+            _cfg_value(raw, "executable", "") or configured_executable or tool
+        ).strip()
         options.append(
             ModelOption(
                 id=model_id,
@@ -335,8 +460,8 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
                     _cfg_value(raw, "max_concurrency", global_concurrency),
                     global_concurrency,
                 ),
-                tool=str(_cfg_value(raw, "tool", "") or ""),
-                executable=str(_cfg_value(raw, "executable", "") or ""),
+                tool=tool,
+                executable=executable,
                 timeout=(
                     _safe_int(_cfg_value(raw, "timeout", None), 0, 1)
                     if _cfg_value(raw, "timeout", None) not in (None, "")
@@ -399,13 +524,17 @@ def _available_options(
         high = [option for option in available if option.capability == "high"]
         if high:
             available = high
+    effective_weights = {
+        option.id: _effective_model_weight_locked(option)
+        for option in available
+    }
     return sorted(
         available,
         key=lambda option: (
-            CAPABILITY_ORDER[option.capability] if prefer_lowest_capability else 0,
-            _running_by_model.get(option.id, 0) / option.weight,
+            _running_by_model.get(option.id, 0) / effective_weights[option.id],
             _running_by_model.get(option.id, 0),
-            -option.weight,
+            -effective_weights[option.id],
+            CAPABILITY_ORDER[option.capability] if prefer_lowest_capability else 0,
             _last_used.get(option.id, 0.0),
             option.id,
         ),
@@ -470,8 +599,17 @@ def _choose_available_for_request_locked(
     request: _PendingLeaseRequest,
 ) -> tuple[ModelOption | None, list[ModelOption]]:
     eligible, hard_global_concurrency, all_options = _eligible_options_for_request_locked(request)
+    untried = [
+        option for option in eligible
+        if option.id not in request.avoid_model_ids
+        and _model_health_identity(option) not in request.avoid_model_identities
+    ]
+    # A fresh-session retry must wait for an eligible, time-active alternative
+    # even when the previous model has capacity right now. Only fall back after
+    # every eligible alternative has been attempted (or none exists).
+    selection_options = untried or eligible
     for option in _available_options(
-        eligible,
+        selection_options,
         global_concurrency=hard_global_concurrency,
         prefer_high=request.prefer_high,
         prefer_lowest_capability=request.prefer_lowest_capability,
@@ -739,6 +877,7 @@ def _grant_lease_locked(
         item.last_started_at = started_at_iso
         _scope_updated_at[request.stats_scope_id] = item.last_started_at
     _global_updated_at = started_at_iso
+    health_state = _ensure_model_health_locked(option)
     return ModelLease(
         option=option,
         running=_running_by_model[option.id],
@@ -747,6 +886,8 @@ def _grant_lease_locked(
         started_at=started_at,
         started_at_iso=started_at_iso,
         task_id=task_id,
+        health_identity=health_state.identity,
+        health_generation=health_state.generation,
     )
 
 
@@ -788,6 +929,14 @@ def _ensure_global_models_locked(options: list[ModelOption]) -> dict[str, ModelR
     global _global_updated_at
     changed = False
     for option in options:
+        previous_health = _model_health_by_id.get(option.id)
+        if (
+            previous_health is None
+            or previous_health.identity != _model_health_identity(option)
+        ):
+            _last_used.pop(option.id, None)
+            changed = True
+        _ensure_model_health_locked(option)
         previous_option = _options_by_id.get(option.id)
         if previous_option != option:
             changed = True
@@ -828,6 +977,12 @@ async def acquire_model_lease(
     strict_capability: bool = False,
     prefer_lowest_capability: bool = False,
     wait_when_unavailable: bool = False,
+    avoid_model_ids: set[str] | frozenset[str] | None = None,
+    avoid_model_identities: (
+        set[tuple[str, bool, str, str]]
+        | frozenset[tuple[str, bool, str, str]]
+        | None
+    ) = None,
 ) -> ModelLease | None:
     required = normalize_requirement(required_capability)
     request: _PendingLeaseRequest | None = None
@@ -867,6 +1022,21 @@ async def acquire_model_lease(
                     strict_capability=bool(strict_capability),
                     prefer_lowest_capability=bool(prefer_lowest_capability),
                     wait_when_unavailable=bool(wait_when_unavailable),
+                    avoid_model_ids=frozenset(
+                        str(model_id).strip()
+                        for model_id in (avoid_model_ids or ())
+                        if str(model_id).strip()
+                    ),
+                    avoid_model_identities=frozenset(
+                        (
+                            str(identity[0]),
+                            bool(identity[1]),
+                            str(identity[2]),
+                            str(identity[3]),
+                        )
+                        for identity in (avoid_model_identities or ())
+                        if isinstance(identity, (tuple, list)) and len(identity) == 4
+                    ),
                 )
                 option, all_options = _choose_available_for_request_locked(request)
                 if not all_options and not request.wait_when_unavailable:
@@ -899,6 +1069,7 @@ async def release_model_lease(
     lease: ModelLease | None,
     *,
     outcome: str | None = None,
+    health_outcome: str | None = None,
     duration_seconds: float | None = None,
     record_completion: bool = True,
 ) -> None:
@@ -932,6 +1103,13 @@ async def release_model_lease(
         if duration_seconds is not None and duration_seconds >= 0:
             global_item.total_duration_seconds += duration_seconds
         global_item.last_finished_at = finished_at
+        normalized_health_outcome = (
+            health_outcome
+            if health_outcome in {"success", "failure", "timeout"}
+            else ""
+        )
+        if normalized_health_outcome:
+            _apply_model_health_outcome_locked(lease, normalized_health_outcome)
         if record_completion and active_task is not None and lease.stats_scope_id:
             context = dict(active_task.get("context") or {})
             prompt = context.get("prompt")
@@ -1052,6 +1230,17 @@ def _stats_item_snapshot(
     scope_id: str = "",
 ) -> dict[str, Any]:
     completed = _completed_count(item)
+    if option is not None:
+        health = _ensure_model_health_locked(option)
+        effective_weight = _effective_model_weight_locked(option)
+        health_penalty_level = health.penalty_level
+        last_health_failure_at = health.last_health_failure_at
+        last_health_failure_kind = health.last_health_failure_kind
+    else:
+        effective_weight = item.weight
+        health_penalty_level = 0
+        last_health_failure_at = ""
+        last_health_failure_kind = ""
     active_tasks = [
         {
             "task_id": task["task_id"],
@@ -1068,6 +1257,10 @@ def _stats_item_snapshot(
         "use_default_model": option.use_default_model if option is not None else False,
         "capability": item.capability,
         "weight": item.weight,
+        "effective_weight": effective_weight,
+        "health_penalty_level": health_penalty_level,
+        "last_health_failure_at": last_health_failure_at,
+        "last_health_failure_kind": last_health_failure_kind,
         "max_concurrency": item.max_concurrency,
         "enabled": option is not None,
         "available": _option_available_now(option) if option is not None else False,
@@ -1226,10 +1419,14 @@ async def refresh_configured_model_pool(cli_config: Any, *, global_concurrency: 
     async with _condition:
         options = model_options(cli_config, global_concurrency=max(1, global_concurrency))
         configured_ids = {option.id for option in options}
+        # Bind new ids/identities before deleting removed ids so health follows
+        # an unchanged execution target across a config-row rename.
+        _ensure_global_models_locked(options)
         for model_id in list(_options_by_id):
             if model_id not in configured_ids:
                 _options_by_id.pop(model_id, None)
-        _ensure_global_models_locked(options)
+                _model_health_by_id.pop(model_id, None)
+                _last_used.pop(model_id, None)
         now = _now_iso()
         _global_updated_at = now
         for scope_id, stats in _stats_by_scope.items():
