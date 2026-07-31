@@ -54,9 +54,7 @@ _TASK_TYPE_PRIORITIES = {
     "threat_analysis": 75,
     "skill_create": 70,
     "fp_review": 60,
-    "threat_audit": 50,
-    "audit": 50,
-    "project_audit": 50,
+    "vulnerability_mining": 50,
 }
 
 
@@ -1260,20 +1258,14 @@ def _task_model_policy(context: OpenCodeExecutionContext) -> Any | None:
     """Return the authoritative phase policy for a model-backed task."""
     config = get_config()
     task_type = str(context.task_metadata.get("task_type") or "").strip()
-    if task_type in {
-        "audit",
-        "project_audit",
-        "sensitive_clear",
-        "report_audit",
-        "threat_audit",
-    }:
+    if task_type == "vulnerability_mining":
         return getattr(config, "vulnerability_mining", None)
     if task_type == "threat_analysis":
         threat_analysis = getattr(config, "threat_analysis", None)
         return _cfg_value(threat_analysis, "model_policy")
     if task_type == "fp_review":
         return getattr(config, "false_positive", None)
-    if task_type in {"vulnerability_validation", "validation"}:
+    if task_type == "vulnerability_validation":
         environment = str(context.task_metadata.get("validation_environment") or "").strip()
         validation = getattr(config, "vulnerability_validation", None)
         environments = _cfg_value(validation, "environments", {}) or {}

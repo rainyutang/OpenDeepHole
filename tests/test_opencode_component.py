@@ -172,7 +172,7 @@ def test_first_public_task_creates_both_lazy_singletons(tmp_path: Path) -> None:
             ):
                 result = await task_agent.run_opencode_task(
                     task_name="lazy lifecycle",
-                    task_type="audit",
+                    task_type="vulnerability_mining",
                     prompt="run",
                     required_capability="high",
                 )

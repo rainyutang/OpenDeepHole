@@ -608,8 +608,8 @@ retry_prompt = (
 )
 
 result = await run_opencode_task(
-    task_name="candidate audit",
-    task_type="audit",
+    task_name="candidate-audit-example",
+    task_type="vulnerability_mining",
     prompt=prompt,
     required_capability="high",
     output_schema=RESULT_SCHEMA,
@@ -619,8 +619,8 @@ result = await run_opencode_task(
 )
 
 continued = await run_opencode_task(
-    task_name="candidate follow-up",
-    task_type="audit",
+    task_name="candidate-audit-example-follow-up",
+    task_type="vulnerability_mining",
     prompt="...",
     required_capability="high",
     session_id=result.session_id,
@@ -631,11 +631,11 @@ continued = await run_opencode_task(
 
 OpenCode 模型池统计：
 
-- 威胁分析、候选点审计、威胁审计、去误报、历史分析、变体排查、SKILL 创建和漏洞验证全部通过唯一公共接口，内部统一创建/续写 Session 并累计模型池统计。
+- 漏洞挖掘、威胁分析、去误报和漏洞验证全部通过唯一公共接口，内部统一创建/续写 Session 并累计模型池统计。漏洞挖掘中的候选点审计、项目级审计和威胁审计共享 `task_type="vulnerability_mining"`，看板通过 `task_name` 区分具体子任务。
 - 模型必须在 `model_pool.models[]` 中填写明确模型名并启用；不再接受默认模型行。没有显式模型时不能创建或恢复扫描。
 - `model_pool.global_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 配置页的每个模型可添加多段使用时间，每段独立选择周一至周日及起止时间；时间窗口只限制新取得的模型 Lease，不会中断已经运行的任务。
-- 任务能力只分 `low`、`high`，各内置阶段默认并实际配置为 `high`；模型任务按类型自动使用固定优先级：漏洞验证 `90`、威胁分析 `75`、SKILL 创建 `70`、两种去误报复核 `60`、威胁审计与静态候选点审计 `50`，同优先级按 FIFO 调度。v3/v4 中手工配置为低能力的阶段仍会优先使用最低足够能力模型。模型行本身仍可标记低/中/高能力。
+- 任务能力只分 `low`、`high`，各内置阶段默认并实际配置为 `high`；公开模型任务按类型自动使用固定优先级：漏洞验证 `90`、威胁分析 `75`、去误报复核 `60`、漏洞挖掘 `50`，同优先级按 FIFO 调度。v3/v4 中手工配置为低能力的阶段仍会优先使用最低足够能力模型。模型行本身仍可标记低/中/高能力。
 - 模型调用默认超时为 `3600` 秒，只计算每条模型消息的执行阶段，不包含排队时间。超时、普通执行错误和同 Session JSON 纠正耗尽都会消费统一的新 Session 重试预算；默认重试 2 次，即最多 3 个 Session。新 Session 重试会释放并重新申请模型 Lease，最终超时保留最后 Session ID，模型池 completed-task 历史只记录一次最终状态。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。

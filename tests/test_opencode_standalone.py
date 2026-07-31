@@ -329,14 +329,14 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
             ):
                 first = await opencode.run_opencode_task(
                     task_name="standalone first",
-                    task_type="audit",
+                    task_type="vulnerability_mining",
                     prompt="first",
                     required_capability="high",
                     config_path=config_path,
                 )
                 second = await opencode.run_opencode_task(
                     task_name="standalone second",
-                    task_type="audit",
+                    task_type="vulnerability_mining",
                     prompt="second",
                     required_capability="high",
                     session_id=first.session_id,
@@ -387,7 +387,7 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
     ("task_type", "stage"),
     [
         ("vulnerability_validation", "validation"),
-        ("audit", "audit"),
+        ("vulnerability_mining", "vulnerability_mining"),
     ],
 )
 def test_standalone_public_task_prints_realtime_progress(
@@ -502,7 +502,7 @@ def test_host_configuration_does_not_install_default_console_output(tmp_path: Pa
             ):
                 result = await opencode.run_opencode_task(
                     task_name="host task",
-                    task_type="audit",
+                    task_type="vulnerability_mining",
                     prompt="test host output",
                     required_capability="high",
                 )

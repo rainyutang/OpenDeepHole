@@ -833,7 +833,7 @@ async def run_threat_audit(**kwargs: Any) -> dict[str, Any]:
                 prompt = _threat_prompt(task)
                 result = await run_opencode_task(
                     task_name=task["task_id"],
-                    task_type="threat_audit",
+                    task_type="vulnerability_mining",
                     prompt=prompt,
                     required_capability=capability,
                     output_schema=THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,

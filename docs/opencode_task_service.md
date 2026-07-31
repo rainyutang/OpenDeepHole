@@ -24,8 +24,8 @@ retry_prompt = (
 )
 
 result = await run_opencode_task(
-    task_name="候选点审计 NPD",
-    task_type="audit",
+    task_name="candidate-audit-npd",
+    task_type="vulnerability_mining",
     prompt=prompt,
     required_capability="high",
     output_schema=RESULT_SCHEMA,
@@ -43,7 +43,7 @@ result = await run_opencode_task(
 
 | 参数 | 类型 | 默认值 | 含义 |
 | --- | --- | --- | --- |
-| `task_name` | `str` | 必填 | 逻辑任务名及新 Session 标题 |
+| `task_name` | `str` | 必填 | 逻辑任务名及新 Session 标题；模型看板也使用它识别漏洞挖掘的具体子任务 |
 | `task_type` | `str` | 必填 | 文档约束的任务类型字符串，用于选择内部策略和看板元数据 |
 | `prompt` | `str` | 必填 | 本次原样发送给模型的提示词；服务不会根据 Schema 追加或改写内容 |
 | `required_capability` | `"low" \| "high"` | 必填 | 调用方声明的能力；嵌入 Agent 时，已分类阶段由 Web 阶段策略覆盖 |
@@ -61,22 +61,14 @@ result = await run_opencode_task(
 
 返回的 `OpenCodeResult.output_source` 是可 JSON 序列化的 dict，用于由客户端协调器原样上报实际模型和 Session 来源。
 
-`task_type` 直接传字符串，不提供枚举。允许值如下；其它值会立即抛出 `ValueError`：
+`task_type` 直接传字符串，不提供枚举。面向业务调用者的稳定类型如下；其它公共调用值会立即抛出 `ValueError`：
 
 | 字符串 | 用途 |
 | --- | --- |
-| `audit` | 候选点审计 |
-| `project_audit` | 项目级审计 |
-| `sensitive_clear` | 敏感信息清理审计 |
-| `report_audit` | Markdown 报告审计 |
+| `vulnerability_mining` | 漏洞挖掘，包括候选点审计、项目级审计和威胁审计 |
 | `threat_analysis` | 威胁分析 |
-| `threat_audit` | 威胁路径审计 |
 | `fp_review` | 去误报复核 |
 | `vulnerability_validation` | 漏洞验证 |
-| `git_history` | Git 历史分析 |
-| `variant_hunt` | 同类变体排查 |
-| `memory_api_discovery` | 内存 API 识别 |
-| `skill_create` | SKILL 创建 |
 
 任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：
 
@@ -84,12 +76,12 @@ result = await run_opencode_task(
 | --- | ---: |
 | `vulnerability_validation` | 90 |
 | `threat_analysis` | 75 |
-| `skill_create` | 70 |
 | `fp_review` | 60 |
-| `threat_audit` | 50 |
-| `audit`、`project_audit` | 50 |
+| `vulnerability_mining` | 50 |
 
-其它支持类型默认优先级也是 `50`。同优先级任务按进入队列的先后顺序执行；优先级不会抢占已经取得 Lease 的任务。
+Agent 内部辅助任务继续使用各自既有策略，但不属于公共调用指导。同优先级任务按进入队列的先后顺序执行；优先级不会抢占已经取得 Lease 的任务。
+
+漏洞挖掘子任务不再拆分 `task_type`。内置调用分别使用 `candidate-audit-*`、`project-audit-*` 和 `threat-audit-*` 任务名前缀，模型看板据此显示候选点审计、项目级审计或威胁审计；其它任务名回退显示“漏洞挖掘”。
 
 任务策略页只配置 `low`、`high` 两档，v3 默认全部为 `high`。v2 及更早配置中的阶段级 `any`/`low` 会一次性迁移为 `high`，旧默认超时 `1200` 会迁移为 `3600`；升级到 v3 后仍可手工改回 `low` 或填写自定义超时。模型行自身的能力标签和显式超时不会迁移。
 
@@ -389,8 +381,8 @@ follow_up_prompt = (
 )
 
 continued = await run_opencode_task(
-    task_name="候选点审计补充证据",
-    task_type="audit",
+    task_name="candidate-audit-npd-follow-up",
+    task_type="vulnerability_mining",
     prompt=follow_up_prompt,
     required_capability="high",
     output_schema=RESULT_SCHEMA,

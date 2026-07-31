@@ -16,12 +16,8 @@ from typing import Any, Callable, Literal
 
 
 _SUPPORTED_TASK_TYPES = frozenset({
-    "audit",
-    "project_audit",
-    "sensitive_clear",
-    "report_audit",
+    "vulnerability_mining",
     "threat_analysis",
-    "threat_audit",
     "fp_review",
     "vulnerability_validation",
     "git_history",

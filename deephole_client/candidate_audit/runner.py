@@ -390,9 +390,10 @@ async def run_candidate_audit(**kwargs: Any) -> dict[str, Any]:
                 severity_basis="具体判定遵循已加载的 Skill。",
             )
             await _emit(output, "progress", f"Auditing candidate {audit_index + 1}", audit_index=audit_index)
+            task_name_prefix = "project-audit" if is_project else "candidate-audit"
             task_result = await run_opencode_task(
-                task_name=f"candidate-audit-{kwargs['scan_id']}-{audit_index}",
-                task_type="project_audit" if is_project else "audit",
+                task_name=f"{task_name_prefix}-{kwargs['scan_id']}-{audit_index}",
+                task_type="vulnerability_mining",
                 prompt=prompt,
                 required_capability=capability,
                 output_schema=result_schema,

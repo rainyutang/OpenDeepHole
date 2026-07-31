@@ -17,7 +17,14 @@ const SCAN_QUEUE_PAGE_SIZE = 12;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";
 const FINAL_USER_VERDICTS = new Set(["confirmed", "false_positive"]);
 const ACTIVE_THREAT_TASK_STATUSES = new Set(["pending", "queued", "running", "analyzing", "auditing"]);
-const THREAT_POOL_TASK_TYPES = new Set(["threat_analysis", "threat_audit"]);
+// Read-only compatibility for model-pool snapshots saved before task types were merged.
+const LEGACY_VULNERABILITY_MINING_TASK_TYPES = new Set([
+  "audit",
+  "project_audit",
+  "sensitive_clear",
+  "report_audit",
+  "threat_audit",
+]);
 const STATIC_ENGINE_ID = "static_candidate";
 const THREAT_ENGINE_ID = "threat_audit";
 const THREAT_AUDIT_PAGE_SIZE = 20;
@@ -237,8 +244,35 @@ function poolTaskType(task: Record<string, unknown>): string {
   return "";
 }
 
+function poolTaskName(task: Record<string, unknown>): string {
+  const direct = String(task.task_name || "").trim();
+  if (direct) return direct.toLowerCase();
+  const context = task.context;
+  if (context && typeof context === "object") {
+    return String((context as Record<string, unknown>).task_name || "").trim().toLowerCase();
+  }
+  return "";
+}
+
+function isVulnerabilityMiningPoolTask(task: Record<string, unknown>): boolean {
+  const type = poolTaskType(task);
+  return type === "vulnerability_mining"
+    || LEGACY_VULNERABILITY_MINING_TASK_TYPES.has(type);
+}
+
+function isThreatAuditPoolTask(task: Record<string, unknown>): boolean {
+  const type = poolTaskType(task);
+  if (type === "threat_audit") return true;
+  return type === "vulnerability_mining"
+    && poolTaskName(task).startsWith("threat-audit-");
+}
+
+function isCandidateAuditPoolTask(task: Record<string, unknown>): boolean {
+  return isVulnerabilityMiningPoolTask(task) && !isThreatAuditPoolTask(task);
+}
+
 function isThreatPoolTask(task: Record<string, unknown>): boolean {
-  return THREAT_POOL_TASK_TYPES.has(poolTaskType(task));
+  return poolTaskType(task) === "threat_analysis" || isThreatAuditPoolTask(task);
 }
 
 function hasActiveThreatPoolWork(pool: OpenCodePoolStatus | null | undefined): boolean {
@@ -2180,7 +2214,7 @@ function ThreatAuditPanel({
   const tasks = scan.threat_audit_tasks ?? [];
   const queueTasks = useMemo(
     () => collectScanQueueTasks(scan.opencode_pool ?? null).filter(
-      (item) => poolTaskType(item.task) === "threat_audit",
+      (item) => isThreatAuditPoolTask(item.task),
     ),
     [scan.opencode_pool],
   );
@@ -3131,18 +3165,28 @@ function compareScanQueueTime(a: string, b: string): number {
   return at - bt;
 }
 
-function scanQueueTaskTypeLabel(value: unknown): string {
-  const type = String(value || "audit");
+function scanQueueTaskTypeLabel(task: Record<string, unknown>): string {
+  const type = poolTaskType(task);
+  const taskName = poolTaskName(task);
+  if (type === "vulnerability_mining") {
+    if (taskName.startsWith("candidate-audit-")) return "候选点审计";
+    if (taskName.startsWith("project-audit-")) return "项目级审计";
+    if (taskName.startsWith("threat-audit-")) return "威胁审计";
+    return "漏洞挖掘";
+  }
   if (type === "audit") return "候选点审计";
+  if (type === "project_audit") return "项目级审计";
+  if (type === "sensitive_clear") return "敏感信息清理审计";
+  if (type === "report_audit") return "报告审计";
   if (type === "fp_review") return "去误报复核";
   if (type === "threat_analysis") return "威胁分析";
   if (type === "threat_audit") return "威胁审计";
-  if (type === "validation") return "漏洞验证";
-  return type;
+  if (type === "validation" || type === "vulnerability_validation") return "漏洞验证";
+  return type || "漏洞挖掘";
 }
 
 function scanQueueTaskTitle(task: Record<string, unknown>): string {
-  const type = scanQueueTaskTypeLabel(task.task_type);
+  const type = scanQueueTaskTypeLabel(task);
   const stage = task.stage ? `/${String(task.stage)}` : "";
   const checker = task.checker ? String(task.checker) : "";
   const vulnType = task.vuln_type ? String(task.vuln_type) : "";
@@ -3770,12 +3814,12 @@ function AuditTaskPanel({
 }) {
   const runningAudits = (pool?.models ?? []).reduce(
     (count, model) => count + model.active_tasks.filter(
-      (task) => String(task.task_type || "audit") === "audit",
+      (task) => isCandidateAuditPoolTask(task),
     ).length,
     0,
   );
   const queuedAudits = (pool?.queued_tasks ?? []).filter(
-    (task) => String(task.task_type || "audit") === "audit",
+    (task) => isCandidateAuditPoolTask(task),
   ).length;
   return (
     <TaskPanel
@@ -5079,7 +5123,7 @@ function statusClass(value: string): string {
 
 function modelTaskLabel(task: Record<string, unknown> | undefined): string {
   if (!task) return "-";
-  const taskType = scanQueueTaskTypeLabel(task.task_type);
+  const taskType = scanQueueTaskTypeLabel(task);
   const stage = task.stage ? `/${String(task.stage)}` : "";
   const checker = task.checker ? String(task.checker) : "";
   const file = task.file ? String(task.file) : "";

@@ -28,8 +28,8 @@ retry_prompt = (
 )
 
 result = await run_opencode_task(
-    task_name="candidate audit",
-    task_type="audit",
+    task_name="candidate-audit-example",
+    task_type="vulnerability_mining",
     prompt=prompt,
     required_capability="high",
     output_schema=RESULT_SCHEMA,
@@ -48,7 +48,7 @@ result = await run_opencode_task(
 
 | 参数 | 类型 | 必填/默认值 | 说明 |
 | --- | --- | --- | --- |
-| `task_name` | `str` | 必填 | 任务名称，去除首尾空白后不能为空。它会用于队列记录、日志和 Serve 会话标题。 |
+| `task_name` | `str` | 必填 | 任务名称，去除首尾空白后不能为空。它会用于队列记录、日志、Serve 会话标题及看板中的细分任务识别。 |
 | `task_type` | `str` | 必填 | 任务类型，用于选择对应的模型策略、调度优先级和超时配置；仅接受下文列出的值。 |
 | `prompt` | `str` | 必填 | 发送给模型的任务提示词，不能是空字符串或只包含空白。组件会原样发送该字符串，不会因 `output_schema` 自动追加或改写内容。 |
 | `required_capability` | `Literal["low", "high"]` | 必填 | 模型池所需的能力等级，只接受 `low` 或 `high`。 |
@@ -83,9 +83,11 @@ result = await run_opencode_task(
 
 传入 `output_schema` 后，每条消息仍以最终文本中的合法 JSON 为第一选择。文本不匹配时，组件会按实际成功写入顺序倒序检查当前消息的内置 `write`、`edit`、`apply_patch`/`patch` 文件，最后一个匹配 Schema 的文件作为 `structured`。本次消息确认新建且不在 `file_write_allowlist` 中的文件会在解析后删除，包括执行失败或进入同 Session 纠错时；已有文件即使被模型修改也不会删除或恢复。`writable_paths` 只授予修改权限，不会自动保留文件。未传 Schema 时不跟踪、解析或清理文件；自定义 MCP 的未知文件副作用也不纳入该机制。
 
-`task_type` 是文档约定的字符串，而不是导出的枚举。支持的值包括 `audit`、`project_audit`、`sensitive_clear`、`report_audit`、`threat_analysis`、`threat_audit`、`fp_review`、`vulnerability_validation`、`git_history`、`variant_hunt`、`memory_api_discovery` 和 `skill_create`；未知值会在提交前被拒绝。
+`task_type` 是文档约定的字符串，而不是导出的枚举。面向业务调用者的稳定类型只有 `vulnerability_mining`、`threat_analysis`、`fp_review` 和 `vulnerability_validation`；未知值会在提交前被拒绝。Agent 自身使用的辅助任务类型属于内部实现，不作为公共调用指导的一部分。
 
-任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：`vulnerability_validation=90`、`threat_analysis=75`、`skill_create=70`、`fp_review=60`，`threat_audit`、`audit` 和 `project_audit` 为 `50`；其它支持类型默认也是 `50`。同优先级任务按进入队列的先后顺序执行。
+任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：`vulnerability_validation=90`、`threat_analysis=75`、`fp_review=60`、`vulnerability_mining=50`。同优先级任务按进入队列的先后顺序执行。
+
+漏洞挖掘中的候选点审计、项目级审计和威胁审计都传 `task_type="vulnerability_mining"`。内置调用分别使用 `candidate-audit-*`、`project-audit-*` 和 `threat-audit-*` 任务名前缀，模型看板据此显示具体子任务；自定义名称无法匹配这些前缀时统一显示为“漏洞挖掘”。
 
 嵌入 OpenDeepHole 时，宿主会在启动期间注册一次 `OpenCodeHostBindings`。注册过程会提供后端配置、共享工作区、解析后的 Serve 进程设置以及可选的 MCP 选择；它不会实例化管理器或启动 Serve。首次调用 `run_opencode_task()` 时，系统会按需创建共享任务服务和 Serve 管理器。在发送提示词之前，该管理器会在 Serve 尚未运行时启动它、复用兼容的进程，或执行既有的重启与恢复逻辑。
 

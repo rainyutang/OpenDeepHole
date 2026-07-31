@@ -246,7 +246,7 @@ def test_wait_for_model_pool_update_follows_scope_marker() -> None:
             )
         )
         await asyncio.sleep(0)
-        await register_planned_task("scan-1", {"task_type": "audit"})
+        await register_planned_task("scan-1", {"task_type": "vulnerability_mining"})
         updated_at = await waiter
 
         assert updated_at
@@ -307,7 +307,7 @@ def test_acquire_without_models_fails_fast_and_clears_planned_task() -> None:
         scope = "scope-no-model"
         planned_id = await register_planned_task(
             scope,
-            {"task_type": "audit", "file": "src/no-model.c"},
+            {"task_type": "vulnerability_mining", "file": "src/no-model.c"},
             task_key="audit:no-model",
         )
 
@@ -319,7 +319,7 @@ def test_acquire_without_models_fails_fast_and_clears_planned_task() -> None:
                     stats_scope_id=scope,
                     task_context={
                         "planned_task_id": planned_id,
-                        "task_type": "audit",
+                        "task_type": "vulnerability_mining",
                         "file": "src/no-model.c",
                         "prompt": "audit without a configured model",
                     },
@@ -341,7 +341,7 @@ def test_acquire_without_models_fails_fast_and_clears_planned_task() -> None:
         assert completed["model_id"] == ""
         assert completed["model"] == ""
         assert completed["failure_reason"] == str(exc_info.value)
-        assert completed["task_type"] == "audit"
+        assert completed["task_type"] == "vulnerability_mining"
         assert completed["file"] == "src/no-model.c"
         assert completed["prompt"] == "audit without a configured model"
         assert completed["prompt_length"] == len(completed["prompt"])
@@ -364,7 +364,7 @@ def test_queued_lease_fails_when_model_pool_is_cleared() -> None:
         )
         planned_id = await register_planned_task(
             scope,
-            {"task_type": "threat_audit"},
+            {"task_type": "vulnerability_mining"},
             task_key="threat:queued",
         )
         queued_task = asyncio.create_task(
@@ -374,7 +374,7 @@ def test_queued_lease_fails_when_model_pool_is_cleared() -> None:
                 stats_scope_id=scope,
                 task_context={
                     "planned_task_id": planned_id,
-                    "task_type": "threat_audit",
+                    "task_type": "vulnerability_mining",
                     "file": "src/dynamic.c",
                 },
             )
@@ -396,7 +396,7 @@ def test_queued_lease_fails_when_model_pool_is_cleared() -> None:
             assert failed_snapshot["planned_tasks"] == []
             assert failed_snapshot["completed_task_count"] == 1
             assert failed_snapshot["completed_tasks"][0]["outcome"] == "failure"
-            assert failed_snapshot["completed_tasks"][0]["task_type"] == "threat_audit"
+            assert failed_snapshot["completed_tasks"][0]["task_type"] == "vulnerability_mining"
             historical = {item["id"]: item for item in failed_snapshot["models"]}
             assert historical["deep"]["enabled"] is False
             assert historical["deep"]["available"] is False
@@ -419,12 +419,12 @@ def test_planned_task_snapshot_dedupes_and_is_consumed_by_lease() -> None:
 
         planned_id = await register_planned_task(
             scope,
-            {"task_type": "audit", "checker": "overflow", "file": "src/a.c", "line": 42},
+            {"task_type": "vulnerability_mining", "checker": "overflow", "file": "src/a.c", "line": 42},
             task_key="audit:42",
         )
         duplicate_id = await register_planned_task(
             scope,
-            {"task_type": "audit", "checker": "ignored"},
+            {"task_type": "vulnerability_mining", "checker": "ignored"},
             task_key="audit:42",
         )
         assert duplicate_id == planned_id
@@ -435,7 +435,7 @@ def test_planned_task_snapshot_dedupes_and_is_consumed_by_lease() -> None:
                 "planned_task_id": planned_id,
                 "scope_id": scope,
                 "planned_at": planned_snapshot["planned_tasks"][0]["planned_at"],
-                "task_type": "audit",
+                "task_type": "vulnerability_mining",
                 "checker": "overflow",
                 "file": "src/a.c",
                 "line": 42,
@@ -447,13 +447,13 @@ def test_planned_task_snapshot_dedupes_and_is_consumed_by_lease() -> None:
             global_concurrency=1,
             required_capability="high",
             stats_scope_id=scope,
-            task_context={"planned_task_id": planned_id, "task_type": "audit", "file": "src/a.c", "line": 42},
+            task_context={"planned_task_id": planned_id, "task_type": "vulnerability_mining", "file": "src/a.c", "line": 42},
         )
         try:
             active_snapshot = model_pool_snapshot(scope)
             assert active_snapshot["planned_tasks"] == []
             active_tasks = active_snapshot["models"][0]["active_tasks"]
-            assert active_tasks[0]["task_type"] == "audit"
+            assert active_tasks[0]["task_type"] == "vulnerability_mining"
             assert active_tasks[0]["file"] == "src/a.c"
         finally:
             await release_model_lease(lease)
@@ -464,14 +464,14 @@ def test_planned_task_snapshot_dedupes_and_is_consumed_by_lease() -> None:
 def test_can_clear_planned_tasks_before_lease_request() -> None:
     async def run():
         first = await register_planned_task("scan-a", {"task_type": "fp_review"}, task_key="fp:1")
-        await register_planned_task("scan-a", {"task_type": "audit"}, task_key="audit:1")
+        await register_planned_task("scan-a", {"task_type": "vulnerability_mining"}, task_key="audit:1")
         await register_planned_task("scan-b", {"task_type": "threat_analysis"}, task_key="threat")
 
         await clear_planned_task(first)
-        assert [task["task_type"] for task in model_pool_snapshot("scan-a")["planned_tasks"]] == ["audit"]
+        assert [task["task_type"] for task in model_pool_snapshot("scan-a")["planned_tasks"]] == ["vulnerability_mining"]
 
         await register_planned_task("scan-a", {"task_type": "fp_review"}, task_key="fp:2")
-        await clear_planned_tasks("scan-a", {"audit"})
+        await clear_planned_tasks("scan-a", {"vulnerability_mining"})
         assert [task["task_type"] for task in model_pool_snapshot("scan-a")["planned_tasks"]] == ["fp_review"]
 
         await clear_planned_tasks("scan-a")
@@ -530,7 +530,7 @@ def test_model_pool_snapshot_tracks_scope_queue_and_outcomes() -> None:
                 required_capability="high",
                 stats_scope_id=scope,
                 task_context={
-                    "task_type": "audit",
+                    "task_type": "vulnerability_mining",
                     "prompt": "queued audit prompt",
                     "prompt_length": len("queued audit prompt"),
                 },
@@ -602,7 +602,7 @@ def test_model_pool_snapshot_persists_completed_task_prompt_for_all_outcomes() -
                 required_capability="high",
                 stats_scope_id=scope,
                 task_context={
-                    "task_type": "threat_audit",
+                    "task_type": "vulnerability_mining",
                     "file": f"src/{index}.c",
                     "prompt": prompt,
                 },
@@ -619,7 +619,7 @@ def test_model_pool_snapshot_persists_completed_task_prompt_for_all_outcomes() -
         assert len(snapshot["completed_tasks"]) == len(outcomes)
         for completed, outcome in zip(snapshot["completed_tasks"], outcomes, strict=True):
             prompt = f"full {outcome} prompt"
-            assert completed["task_type"] == "threat_audit"
+            assert completed["task_type"] == "vulnerability_mining"
             assert completed["outcome"] == outcome
             assert completed["duration_seconds"] == 1.5
             assert completed["prompt"] == prompt
@@ -646,7 +646,7 @@ def test_fresh_session_retry_records_only_one_terminal_completion() -> None:
             global_concurrency=1,
             stats_scope_id=scope,
             task_id=task_id,
-            task_context={"task_type": "audit", "session_attempt": 1},
+            task_context={"task_type": "vulnerability_mining", "session_attempt": 1},
         )
         await release_model_lease(
             first,
@@ -661,7 +661,7 @@ def test_fresh_session_retry_records_only_one_terminal_completion() -> None:
             global_concurrency=1,
             stats_scope_id=scope,
             task_id=task_id,
-            task_context={"task_type": "audit", "session_attempt": 2},
+            task_context={"task_type": "vulnerability_mining", "session_attempt": 2},
         )
         await release_model_lease(
             second,
@@ -862,7 +862,7 @@ def test_global_queue_skips_blocked_capability_head() -> None:
                     global_concurrency=2,
                     required_capability="any",
                     stats_scope_id=scope,
-                    task_context={"task_type": "audit", "checker": "npd"},
+                    task_context={"task_type": "vulnerability_mining", "checker": "npd"},
                 )
             )
             any_lease = await asyncio.wait_for(any_task, timeout=1)
@@ -902,7 +902,7 @@ def test_planned_order_blocks_later_same_capability_request() -> None:
         first_id = await register_planned_task(
             scope,
             {
-                "task_type": "audit",
+                "task_type": "vulnerability_mining",
                 "audit_index": 0,
                 "queue_group": group,
                 "required_capability": "any",
@@ -912,7 +912,7 @@ def test_planned_order_blocks_later_same_capability_request() -> None:
         second_id = await register_planned_task(
             scope,
             {
-                "task_type": "audit",
+                "task_type": "vulnerability_mining",
                 "audit_index": 1,
                 "queue_group": group,
                 "required_capability": "any",
@@ -931,7 +931,7 @@ def test_planned_order_blocks_later_same_capability_request() -> None:
                 cancel_event=second_cancel,
                 task_context={
                     "planned_task_id": second_id,
-                    "task_type": "audit",
+                    "task_type": "vulnerability_mining",
                     "audit_index": 1,
                 },
             )
@@ -950,7 +950,7 @@ def test_planned_order_blocks_later_same_capability_request() -> None:
                 stats_scope_id=scope,
                 task_context={
                     "planned_task_id": first_id,
-                    "task_type": "audit",
+                    "task_type": "vulnerability_mining",
                     "audit_index": 0,
                 },
             )
@@ -996,7 +996,7 @@ def test_planned_order_allows_later_task_when_earlier_cannot_use_free_model() ->
         high_id = await register_planned_task(
             scope,
             {
-                "task_type": "audit",
+                "task_type": "vulnerability_mining",
                 "audit_index": 0,
                 "queue_group": group,
                 "required_capability": "high",
@@ -1006,7 +1006,7 @@ def test_planned_order_allows_later_task_when_earlier_cannot_use_free_model() ->
         low_id = await register_planned_task(
             scope,
             {
-                "task_type": "audit",
+                "task_type": "vulnerability_mining",
                 "audit_index": 1,
                 "queue_group": group,
                 "required_capability": "any",
@@ -1024,7 +1024,7 @@ def test_planned_order_allows_later_task_when_earlier_cannot_use_free_model() ->
                     stats_scope_id=scope,
                     task_context={
                         "planned_task_id": low_id,
-                        "task_type": "audit",
+                        "task_type": "vulnerability_mining",
                         "audit_index": 1,
                     },
                 ),
@@ -1129,7 +1129,7 @@ def test_model_pool_snapshot_includes_active_task_context() -> None:
             required_capability="high",
             stats_scope_id="scan-active",
             task_context={
-                "task_type": "audit",
+                "task_type": "vulnerability_mining",
                 "checker": "npd",
                 "file": "src/a.c",
                 "line": 42,
@@ -1141,7 +1141,7 @@ def test_model_pool_snapshot_includes_active_task_context() -> None:
             snapshot = model_pool_snapshot("scan-active")
             model = snapshot["models"][0]
             assert model["running"] == 1
-            assert model["active_tasks"][0]["task_type"] == "audit"
+            assert model["active_tasks"][0]["task_type"] == "vulnerability_mining"
             assert model["active_tasks"][0]["checker"] == "npd"
             assert model["active_tasks"][0]["file"] == "src/a.c"
             assert model["active_tasks"][0]["line"] == 42

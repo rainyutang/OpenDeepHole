@@ -663,7 +663,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                         "total": 3,
                         "success": 2,
                         "last_status": "running",
-                        "active_tasks": [{"task_type": "audit"}],
+                        "active_tasks": [{"task_type": "vulnerability_mining"}],
                     }
                 ],
             )
@@ -1416,7 +1416,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 scope_id="scan-1",
                 global_running=1,
                 global_queued=1,
-                queued_tasks=[{"task_type": "audit", "checker": "npd"}],
+                queued_tasks=[{"task_type": "vulnerability_mining", "checker": "npd"}],
                 models=[
                     {
                         "id": "deep",
@@ -1428,7 +1428,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                         "total": 2,
                         "success": 1,
                         "last_status": "running",
-                        "active_tasks": [{"task_type": "audit"}],
+                        "active_tasks": [{"task_type": "vulnerability_mining"}],
                     }
                 ],
             )

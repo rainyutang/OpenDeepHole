@@ -410,7 +410,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         ):
             result = await run_opencode_task(
                 task_name="public task",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="return json",
                 required_capability="high",
                 output_schema=SCHEMA,
@@ -460,7 +460,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         ):
             plain = await run_opencode_task(
                 task_name="plain text",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="return text",
                 required_capability="low",
             )
@@ -475,10 +475,11 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         ("vulnerability_validation", 90),
         ("threat_analysis", 75),
         ("fp_review", 60),
-        ("threat_audit", 50),
-        ("audit", 50),
-        ("project_audit", 50),
+        ("vulnerability_mining", 50),
         ("skill_create", 70),
+        ("git_history", 50),
+        ("variant_hunt", 50),
+        ("memory_api_discovery", 50),
     ],
 )
 def test_public_interface_assigns_task_type_priority(
@@ -549,7 +550,7 @@ def test_public_interface_can_override_bound_output_and_cancellation(tmp_path: P
         ):
             result = await run_opencode_task(
                 task_name="override context",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="inspect context",
                 required_capability="low",
                 output=None,
@@ -568,7 +569,7 @@ def test_public_interface_requires_context_and_propagates_cancellation(tmp_path:
         with pytest.raises(RuntimeError, match="project_dir is not bound"):
             await run_opencode_task(
                 task_name="missing context",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
             )
@@ -589,7 +590,7 @@ def test_public_interface_requires_context_and_propagates_cancellation(tmp_path:
         ):
             await run_opencode_task(
                 task_name="cancelled",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
             )
@@ -643,7 +644,7 @@ def test_external_cancellation_stops_same_session_json_correction_and_retries(
         ):
             caller = asyncio.create_task(run_opencode_task(
                 task_name="cancel corrections",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="return json",
                 required_capability="low",
                 output_schema=SCHEMA,
@@ -665,7 +666,7 @@ def test_public_interface_rejects_legacy_capabilities_and_unknown_task_types() -
         with pytest.raises(ValueError, match="low.*high"):
             await run_opencode_task(
                 task_name="legacy capability",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="medium",  # type: ignore[arg-type]
             )
@@ -676,6 +677,20 @@ def test_public_interface_rejects_legacy_capabilities_and_unknown_task_types() -
                 prompt="test",
                 required_capability="low",
             )
+        for legacy_type in (
+            "audit",
+            "project_audit",
+            "threat_audit",
+            "sensitive_clear",
+            "report_audit",
+        ):
+            with pytest.raises(ValueError, match="task_type"):
+                await run_opencode_task(
+                    task_name="legacy task type",
+                    task_type=legacy_type,
+                    prompt="test",
+                    required_capability="low",
+                )
 
     asyncio.run(run())
 
@@ -685,7 +700,7 @@ def test_public_interface_rejects_invalid_json_retry_prompts() -> None:
         with pytest.raises(TypeError, match="invalid_json_retry_prompt.*string"):
             await run_opencode_task(
                 task_name="invalid retry prompt type",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
                 invalid_json_retry_prompt=123,  # type: ignore[arg-type]
@@ -694,7 +709,7 @@ def test_public_interface_rejects_invalid_json_retry_prompts() -> None:
             with pytest.raises(ValueError, match="invalid_json_retry_prompt.*empty"):
                 await run_opencode_task(
                     task_name="empty retry prompt",
-                    task_type="audit",
+                    task_type="vulnerability_mining",
                     prompt="test",
                     required_capability="low",
                     invalid_json_retry_prompt=value,
@@ -708,7 +723,7 @@ def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None
         with pytest.raises(TypeError, match="file_write_allowlist.*sequence"):
             await run_opencode_task(
                 task_name="scalar allowlist",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
                 output_schema=SCHEMA,
@@ -717,7 +732,7 @@ def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None
         with pytest.raises(TypeError, match="entries.*strings or PathLike"):
             await run_opencode_task(
                 task_name="invalid allowlist entry",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
                 output_schema=SCHEMA,
@@ -729,7 +744,7 @@ def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None
         ):
             await run_opencode_task(
                 task_name="outside allowlist",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
                 output_schema=SCHEMA,
@@ -744,7 +759,7 @@ def test_public_interface_validates_writable_paths(tmp_path: Path) -> None:
         with pytest.raises(TypeError, match="writable_paths.*sequence"):
             await run_opencode_task(
                 task_name="scalar writable path",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
                 writable_paths="generated",  # type: ignore[arg-type]
@@ -752,7 +767,7 @@ def test_public_interface_validates_writable_paths(tmp_path: Path) -> None:
         with pytest.raises(TypeError, match="entries.*strings or PathLike"):
             await run_opencode_task(
                 task_name="invalid writable path",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
                 writable_paths=[123],  # type: ignore[list-item]
@@ -761,7 +776,7 @@ def test_public_interface_validates_writable_paths(tmp_path: Path) -> None:
             with pytest.raises(ValueError, match="writable_paths"):
                 await run_opencode_task(
                     task_name="unsafe writable path",
-                    task_type="audit",
+                    task_type="vulnerability_mining",
                     prompt="test",
                     required_capability="low",
                     writable_paths=[value],
@@ -772,7 +787,7 @@ def test_public_interface_validates_writable_paths(tmp_path: Path) -> None:
         ):
             await run_opencode_task(
                 task_name="root writable path",
-                task_type="audit",
+                task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
                 writable_paths=[Path(tmp_path.anchor)],
@@ -859,7 +874,7 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
                 work_dir=scan_dir,
                 skill_paths=(skill_root,),
                 task_metadata={
-                    "task_type": "audit",
+                    "task_type": "vulnerability_mining",
                     "checker": "oob",
                     "validation_debug": True,
                 },
@@ -891,7 +906,7 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
         assert captured["timeout"] == 12
         assert captured["return_details"] is True
         assert captured["show_serve_status"] is True
-        assert captured["log_stage"] == "audit"
+        assert captured["log_stage"] == "vulnerability_mining"
         assert captured["prompt"] == original_prompt
         assert "JSON Schema" not in captured["prompt"]
         assert "JSON Schema" not in captured["system_prompt"]
@@ -908,16 +923,16 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
         assert captured["permissions"] is None
         acquire_kwargs = acquire_mock.await_args.kwargs
         assert acquire_kwargs["stats_scope_id"] == "scan-7"
-        assert acquire_kwargs["task_context"]["task_type"] == "audit"
+        assert acquire_kwargs["task_context"]["task_type"] == "vulnerability_mining"
         assert acquire_kwargs["task_context"]["prompt"] == captured["prompt"]
         assert acquire_kwargs["task_context"]["prompt_length"] == len(captured["prompt"])
         assert acquire_kwargs["task_context"]["session_attempt"] == 1
         assert callable(acquire_kwargs["global_concurrency"])
         assert acquire_kwargs["wait_when_unavailable"] is False
-        assert any(line.startswith("[audit][pending][task] QUEUED") for line in output)
-        assert any(line.startswith("[audit][pending][task] START") for line in output)
+        assert any(line.startswith("[vulnerability_mining][pending][task] QUEUED") for line in output)
+        assert any(line.startswith("[vulnerability_mining][pending][task] START") for line in output)
         assert any(
-            line.startswith("[audit][ses_structured][task] FINISHED")
+            line.startswith("[vulnerability_mining][ses_structured][task] FINISHED")
             and "status=success" in line
             for line in output
         )
@@ -998,7 +1013,7 @@ def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) ->
             with bind_opencode_execution_context(
                 project_dir=tmp_path,
                 work_dir=tmp_path / "work",
-                task_metadata={"task_type": "threat_audit"},
+                task_metadata={"task_type": "vulnerability_mining"},
             ):
                 result = await service.run_task(OpenCodeTaskSpec(
                     task_name="policy",

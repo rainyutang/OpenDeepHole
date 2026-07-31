@@ -12,12 +12,12 @@ from task_agent.output_format import (
 
 def test_task_output_header_uses_stage_session_and_supported_categories() -> None:
     assert task_output_stage("vulnerability_validation") == "validation"
-    assert task_output_stage("audit") == "audit"
+    assert task_output_stage("vulnerability_mining") == "vulnerability_mining"
     assert format_task_output("validation", "", "task", "QUEUED\nnow") == (
         "[validation][pending][task] QUEUED now"
     )
-    assert format_task_output("audit", "ses-1", "session", "START") == (
-        "[audit][ses-1][session] START"
+    assert format_task_output("vulnerability_mining", "ses-1", "session", "START") == (
+        "[vulnerability_mining][ses-1][session] START"
     )
     assert format_task_output("scan", "ses-2", "tool", "name=read") == (
         "[scan][ses-2][tool] name=read"
