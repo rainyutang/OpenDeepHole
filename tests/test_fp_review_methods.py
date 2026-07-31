@@ -480,18 +480,18 @@ class FpReviewMethodTests(unittest.TestCase):
         self.assertEqual(job.summary_status.value, "running")
         self.assertEqual(job.summary_markdown, "# old summary")
 
-    def test_server_enforces_engine_fp_setting_on_reported_result(
+    def test_server_uses_platform_fp_flow_for_every_engine_result(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             now = datetime.now(timezone.utc).isoformat()
-            selection = MiningEngineSelection(
-                engine_id="direct_engine",
-                engine_label="Direct engine",
-                enabled=True,
-                fp_review_enabled=False,
-            )
+            selection = MiningEngineSelection.model_validate({
+                "engine_id": "direct_engine",
+                "engine_label": "Direct engine",
+                "enabled": True,
+                "fp_review_enabled": False,
+            })
             scan = _scan(
                 now,
                 status=ScanItemStatus.AUDITING,
@@ -503,10 +503,12 @@ class FpReviewMethodTests(unittest.TestCase):
             meta.mining_engines = [selection]
             store.save_scan(scan, meta)
             agent_api._running_scans["scan-1"] = scan
-            reported = _vulnerability()
-            reported.engine_id = "direct_engine"
-            reported.engine_label = "untrusted label"
-            reported.fp_review_eligible = True
+            reported = Vulnerability.model_validate({
+                **_vulnerability().model_dump(),
+                "engine_id": "direct_engine",
+                "engine_label": "untrusted label",
+                "fp_review_eligible": False,
+            })
 
             with (
                 patch(
@@ -516,6 +518,17 @@ class FpReviewMethodTests(unittest.TestCase):
                 patch(
                     "backend.api.scan.get_scan_store",
                     return_value=store,
+                ),
+                patch(
+                    "backend.api.scan._ensure_fp_review_job_for_scan",
+                    return_value={
+                        "review_id": "review-1",
+                        "cancelled": False,
+                        "no_unresolved": False,
+                        "latest_results": {},
+                        "total": 1,
+                        "processed": 0,
+                    },
                 ),
             ):
                 response = asyncio.run(
@@ -527,8 +540,8 @@ class FpReviewMethodTests(unittest.TestCase):
 
             stored = store.get_vulnerabilities("scan-1")[0]
 
-        self.assertNotIn("fp_review", response)
+        self.assertTrue(response["fp_review"]["queued"])
         self.assertIn("Direct engine", response["report_markdown"])
         self.assertEqual(stored.engine_id, "direct_engine")
         self.assertEqual(stored.engine_label, "Direct engine")
-        self.assertFalse(stored.fp_review_eligible)
+        self.assertFalse(hasattr(stored, "fp_review_eligible"))

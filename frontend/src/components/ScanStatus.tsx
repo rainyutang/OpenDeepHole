@@ -166,7 +166,6 @@ function effectiveMiningEngines(scan: ScanStatusType): MiningEngineSelection[] {
     engine_id: THREAT_ENGINE_ID,
     engine_label: "威胁分析 + 威胁审计",
     enabled: true,
-    fp_review_enabled: true,
   };
   if (scan.scan_mode === "threat_analysis_only") return [threat];
   return [
@@ -174,7 +173,6 @@ function effectiveMiningEngines(scan: ScanStatusType): MiningEngineSelection[] {
       engine_id: STATIC_ENGINE_ID,
       engine_label: "静态规则扫描 + 候选点审计",
       enabled: true,
-      fp_review_enabled: true,
     },
     threat,
   ];
@@ -1049,18 +1047,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const indexProgress = formatIndexProgress(indexStatus, scan);
   const selectedEngines = effectiveMiningEngines(scan);
   const staticEngineSelected = selectedEngines.some((item) => item.engine_id === STATIC_ENGINE_ID);
-  const fpReviewEligible = selectedEngines.some((item) => item.fp_review_enabled);
   const activeEngine = selectedEngines.find((item) => item.engine_id === activeEngineId) ?? null;
   const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis"]);
   const threatAuditEvents = filterEvents(scan.events, ["threat_audit"]);
   const miningEvents = filterEvents(scan.events, ["auditing", "fp_review", "opencode_output"]);
   const selectedFpReviewMethod = fpReview?.method ?? scan.fp_review_method ?? "adversarial";
   const miningTabs = MINING_TABS
-    .filter((tab) => (
-      tab.key === "fp_review"
-        ? fpReviewEligible
-        : staticEngineSelected
-    ))
+    .filter((tab) => tab.key === "fp_review" || staticEngineSelected)
     .map((tab) => (
       tab.key === "fp_review"
         ? { ...tab, label: fpReviewMethodLabel(selectedFpReviewMethod) }
@@ -1200,8 +1193,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             )}
             {(() => {
               const confirmedVulns = scan.vulnerabilities.filter(
-                (v) => v.fp_review_eligible !== false
-                  && (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed))
+                (v) => (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed))
                   && !hasFinalUserVerdict(v)
               ).length;
               const canTrigger = confirmedVulns > 0;
@@ -1783,9 +1775,7 @@ function ProcessFlowNav({
     || (!isDone && hasEvent(scan.events, ["threat_analysis"]) && !scan.threat_analysis);
   const validations = scan.validations ?? [];
   const confirmedCount = scan.vulnerabilities.filter((vuln) => isAiConfirmed(vuln)).length;
-  const fpReviewTargetCount = scan.vulnerabilities.filter(
-    (vuln) => vuln.fp_review_eligible !== false && isAiConfirmed(vuln),
-  ).length;
+  const fpReviewTargetCount = scan.vulnerabilities.filter(isAiConfirmed).length;
   const validationRunningCount = validations.filter((item) =>
     item.running || item.status === "queued" || item.status === "running" || item.status === "pending",
   ).length;
@@ -1907,8 +1897,6 @@ function ProcessFlowNav({
       tone: engine.engine_id === STATIC_ENGINE_ID ? "cyan" : "blue",
     };
   };
-  const fpReviewEligible = engines.some((engine) => engine.fp_review_enabled);
-
   return (
     <nav className="border-t border-slate-700/60 pt-3" aria-label="扫描执行流程">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -1978,9 +1966,7 @@ function ProcessFlowNav({
               role="group"
               aria-label="漏洞结果后续处理"
             >
-              {fpReviewEligible && (
-                <FlowNodeButton node={fpReviewNode} onClick={onNodeClick} />
-              )}
+              <FlowNodeButton node={fpReviewNode} onClick={onNodeClick} />
               <FlowNodeButton node={validationNode} onClick={onNodeClick} />
             </div>
           </div>
@@ -2120,14 +2106,8 @@ function GenericEnginePanel({
       tone={flowStatusTone(status, "green")}
       summary={`漏洞挖掘引擎 ${engine.engine_id} 的运行状态和输出结果。`}
     >
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <EngineInfoCard label="引擎 ID" value={engine.engine_id} detail="扫描配置快照" tone="cyan" />
-        <EngineInfoCard
-          label="去误报"
-          value={engine.fp_review_enabled ? "启用" : "禁用"}
-          detail={engine.fp_review_enabled ? "输出可进入复核" : "输出不进入复核"}
-          tone={engine.fp_review_enabled ? "green" : "slate"}
-        />
         <EngineInfoCard
           label="开始时间"
           value={run?.started_at ? formatDateTime(run.started_at) : "-"}
@@ -2589,11 +2569,8 @@ function ScanOverview({
 }) {
   const engines = effectiveMiningEngines(scan);
   const staticEngineSelected = engines.some((engine) => engine.engine_id === STATIC_ENGINE_ID);
-  const fpReviewEligible = engines.some((engine) => engine.fp_review_enabled);
   const auditRunning = scan.status === "auditing";
-  const fpReviewTargetCount = scan.vulnerabilities.filter(
-    (vuln) => vuln.fp_review_eligible !== false && isAiConfirmed(vuln),
-  ).length;
+  const fpReviewTargetCount = scan.vulnerabilities.filter(isAiConfirmed).length;
   const target = scan.current_candidate;
   return (
     <div className="space-y-4">
@@ -2729,21 +2706,19 @@ function ScanOverview({
                 />
               );
             })}
-            {fpReviewEligible && (
-              <TaskSummaryRow
-                label={fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method)}
-                status={fpReview
-                  ? taskStateLabel(fpReview.status === "complete", isFpReviewing, fpReview.status === "error")
-                  : fpReviewTargetCount > 0 ? "等待" : "无目标"}
-                tone={isFpReviewing ? "amber" : fpReview?.status === "complete" ? "green" : fpReview?.status === "error" ? "red" : "slate"}
-                progress={fpReview?.total ? percent(fpReview.processed, fpReview.total) : undefined}
-                detail={fpReview
-                  ? `${fpReview.processed}/${fpReview.total} 已复核`
-                  : fpReviewTargetCount > 0
-                    ? `${fpReviewTargetCount} 个可复核问题`
-                    : "当前没有可复核问题"}
-              />
-            )}
+            <TaskSummaryRow
+              label={fpReviewMethodLabel(fpReview?.method ?? scan.fp_review_method)}
+              status={fpReview
+                ? taskStateLabel(fpReview.status === "complete", isFpReviewing, fpReview.status === "error")
+                : fpReviewTargetCount > 0 ? "等待" : "无目标"}
+              tone={isFpReviewing ? "amber" : fpReview?.status === "complete" ? "green" : fpReview?.status === "error" ? "red" : "slate"}
+              progress={fpReview?.total ? percent(fpReview.processed, fpReview.total) : undefined}
+              detail={fpReview
+                ? `${fpReview.processed}/${fpReview.total} 已复核`
+                : fpReviewTargetCount > 0
+                  ? `${fpReviewTargetCount} 个可复核问题`
+                  : "当前没有可复核问题"}
+            />
             <TaskSummaryRow
               label="报告导出"
               status={hasReportModeSkill ? (isRunning ? "同步中" : "可查看") : "预留"}
@@ -3874,9 +3849,7 @@ function FpReviewPanel({
   const confirmed = useMemo(
     () => vulnerabilities
       .map((vuln, index) => ({ vuln, index }))
-      .filter(({ vuln }) => (
-        vuln.fp_review_eligible !== false && isAiConfirmed(vuln)
-      )),
+      .filter(({ vuln }) => isAiConfirmed(vuln)),
     [vulnerabilities],
   );
   const resultByIndex = useMemo(

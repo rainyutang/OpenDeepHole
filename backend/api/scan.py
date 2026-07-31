@@ -166,27 +166,14 @@ def _resolve_scan_mining_engines(
                 status_code=400,
                 detail="Threat-audit engine is unavailable",
             )
-        override = requested_by_id.get("threat_audit")
         return [MiningEngineSelection(
             engine_id=threat_engine.engine_id,
             engine_label=threat_engine.label,
             enabled=True,
-            fp_review_enabled=(
-                override.fp_review_enabled
-                if (
-                    override is not None
-                    and override.fp_review_enabled is not None
-                )
-                else threat_engine.default_fp_review_enabled
-            ),
         )]
 
     if requested is None:
-        selected_ids = [
-            item.engine_id
-            for item in catalog.engines
-            if item.default_enabled
-        ]
+        selected_ids = [item.engine_id for item in catalog.engines]
     else:
         selected_ids = [item.engine_id.strip() for item in requested]
     if not selected_ids:
@@ -200,15 +187,6 @@ def _resolve_scan_mining_engines(
             engine_id=engine_id,
             engine_label=available[engine_id].label,
             enabled=True,
-            fp_review_enabled=(
-                requested_by_id[engine_id].fp_review_enabled
-                if (
-                    engine_id in requested_by_id
-                    and requested_by_id[engine_id].fp_review_enabled
-                    is not None
-                )
-                else available[engine_id].default_fp_review_enabled
-            ),
         )
         for engine_id in selected_ids
     ]
@@ -294,7 +272,6 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
     for i, v in enumerate(scan.vulnerabilities):
         if (
             not v.confirmed
-            or not v.fp_review_eligible
             or _has_final_user_verdict(v)
         ):
             continue
@@ -899,7 +876,6 @@ async def create_agent_scan(
             MiningEngineRunStatus(
                 engine_id=item.engine_id,
                 engine_label=item.engine_label,
-                fp_review_enabled=item.fp_review_enabled,
             )
             for item in mining_engine_selections
             if item.enabled

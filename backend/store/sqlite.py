@@ -45,6 +45,11 @@ from backend.models import (
 from .base import ScanStoreBase
 
 
+# Kept only to satisfy the legacy SQLite column without retaining behavioral
+# meaning in models, APIs, or review routing.
+_LEGACY_FP_REVIEW_ELIGIBLE = 1
+
+
 def _json_dict(value: str | None) -> dict[str, str]:
     try:
         data = json.loads(value or "{}")
@@ -2074,7 +2079,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.analysis_source,
                     vuln.engine_id,
                     vuln.engine_label,
-                    1 if vuln.fp_review_eligible else 0,
+                    _LEGACY_FP_REVIEW_ELIGIBLE,
                     vuln.source_task_id,
                     vuln.threat_surface_node_id,
                     vuln.threat_method_node_id,
@@ -2178,7 +2183,7 @@ class SqliteScanStore(ScanStoreBase):
                         vuln.analysis_source,
                         vuln.engine_id,
                         vuln.engine_label,
-                        1 if vuln.fp_review_eligible else 0,
+                        _LEGACY_FP_REVIEW_ELIGIBLE,
                         vuln.source_task_id,
                         vuln.threat_surface_node_id,
                         vuln.threat_method_node_id,
@@ -2241,7 +2246,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.analysis_source,
                     vuln.engine_id,
                     vuln.engine_label,
-                    1 if vuln.fp_review_eligible else 0,
+                    _LEGACY_FP_REVIEW_ELIGIBLE,
                     vuln.source_task_id,
                     vuln.threat_surface_node_id,
                     vuln.threat_method_node_id,
@@ -2428,11 +2433,6 @@ class SqliteScanStore(ScanStoreBase):
                         == "threat_audit"
                         else "静态规则扫描 + 候选点审计"
                     )
-                ),
-                fp_review_eligible=(
-                    bool(r["fp_review_eligible"])
-                    if "fp_review_eligible" in r.keys()
-                    else True
                 ),
                 source_task_id=(r["source_task_id"] if "source_task_id" in r.keys() else "") or "",
                 threat_surface_node_id=(r["threat_surface_node_id"] if "threat_surface_node_id" in r.keys() else "") or "",

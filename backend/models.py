@@ -160,7 +160,6 @@ class Vulnerability(BaseModel):
     analysis_source: str = "static_candidate"  # "static_candidate" | "threat_audit"
     engine_id: str = "static_candidate"
     engine_label: str = "静态规则扫描 + 候选点审计"
-    fp_review_eligible: bool = True
     source_task_id: str = ""
     threat_surface_node_id: str = ""
     threat_method_node_id: str = ""
@@ -172,7 +171,6 @@ class MiningEngineRequest(BaseModel):
     """One mining engine explicitly selected for a new scan."""
 
     engine_id: str
-    fp_review_enabled: bool | None = None
 
 
 class MiningEngineSelection(BaseModel):
@@ -181,7 +179,6 @@ class MiningEngineSelection(BaseModel):
     engine_id: str
     engine_label: str
     enabled: bool = True
-    fp_review_enabled: bool = True
 
 
 class MiningEngineRunStatus(BaseModel):
@@ -190,7 +187,6 @@ class MiningEngineRunStatus(BaseModel):
     engine_id: str
     engine_label: str
     status: str = "pending"
-    fp_review_enabled: bool = True
     error_message: str = ""
     started_at: str = ""
     finished_at: str = ""
@@ -199,9 +195,8 @@ class MiningEngineRunStatus(BaseModel):
 class MiningEngineCatalogItem(BaseModel):
     engine_id: str
     label: str
-    description: str = ""
-    default_enabled: bool = True
-    default_fp_review_enabled: bool = True
+    description: str
+    fp_review: bool
 
 
 class MiningEngineCatalog(BaseModel):

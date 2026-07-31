@@ -160,7 +160,6 @@ export interface Vulnerability {
   analysis_source?: "static_candidate" | "threat_audit" | string;
   engine_id?: string;
   engine_label?: string;
-  fp_review_eligible?: boolean;
   source_task_id?: string;
   threat_surface_node_id?: string;
   threat_method_node_id?: string;
@@ -671,21 +670,18 @@ export interface AgentValidatorCatalog {
 
 export interface MiningEngineRequest {
   engine_id: string;
-  fp_review_enabled?: boolean | null;
 }
 
 export interface MiningEngineSelection {
   engine_id: string;
   engine_label: string;
   enabled: boolean;
-  fp_review_enabled: boolean;
 }
 
 export interface MiningEngineRunStatus {
   engine_id: string;
   engine_label: string;
   status: "pending" | "running" | "success" | "error" | "cancelled" | "skipped" | string;
-  fp_review_enabled: boolean;
   error_message: string;
   started_at: string;
   finished_at: string;
@@ -695,8 +691,7 @@ export interface MiningEngineCatalogItem {
   engine_id: string;
   label: string;
   description: string;
-  default_enabled: boolean;
-  default_fp_review_enabled: boolean;
+  fp_review: boolean;
 }
 
 export interface MiningEngineCatalog {

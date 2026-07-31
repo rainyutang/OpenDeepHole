@@ -1310,7 +1310,6 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 MiningEngineSelection(
                     engine_id="engine_b",
                     engine_label="Engine B",
-                    fp_review_enabled=False,
                 ),
             ]
             scan.mining_engines = selections
@@ -1339,9 +1338,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 "scan-1",
                 finding_a.model_copy(update={
                     "engine_label": "Engine A",
-                    "fp_review_eligible": True,
                 }),
             )
+            store._conn.execute(
+                "UPDATE vulnerabilities SET fp_review_eligible = 0 "
+                "WHERE scan_id = ? AND idx = ?",
+                ("scan-1", 0),
+            )
+            store._conn.commit()
             published: list[tuple[str, str, dict]] = []
             finish = AgentScanFinish(
                 vulnerabilities=[finding_a, finding_b],
@@ -1385,7 +1389,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(stored[0].engine_label, "Engine A")
             self.assertEqual(stored[1].engine_label, "Engine B")
-            self.assertFalse(stored[1].fp_review_eligible)
+            self.assertTrue(all(
+                not hasattr(item, "fp_review_eligible")
+                for item in stored
+            ))
             vulnerability_events = [
                 data
                 for _scan_id, event_type, data in published
@@ -1395,6 +1402,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 vulnerability_events[0]["vulnerability"]["engine_id"],
                 "engine_b",
+            )
+            self.assertNotIn(
+                "fp_review_eligible",
+                vulnerability_events[0]["vulnerability"],
             )
 
     def test_finish_scan_clears_transient_opencode_pool_state(self) -> None:

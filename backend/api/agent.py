@@ -2463,7 +2463,6 @@ def _stamp_vulnerability_engine(
             )
         vuln.engine_id = selection.engine_id
         vuln.engine_label = selection.engine_label
-        vuln.fp_review_eligible = selection.fp_review_enabled
         return vuln
 
     vuln.engine_id = requested_id
@@ -2471,7 +2470,6 @@ def _stamp_vulnerability_engine(
         vuln.engine_label = "威胁分析 + 威胁审计"
     elif not str(vuln.engine_label or "").strip():
         vuln.engine_label = "静态规则扫描 + 候选点审计"
-    vuln.fp_review_eligible = bool(vuln.fp_review_eligible)
     return vuln
 
 
@@ -2513,7 +2511,6 @@ async def agent_report_mining_engine_run(
     if selection is not None:
         body = body.model_copy(update={
             "engine_label": selection.engine_label,
-            "fp_review_enabled": selection.fp_review_enabled,
         })
     runs = get_scan_store().update_mining_engine_run(scan_id, body)
     scan = _ensure_running_scan(scan_id)
@@ -2583,37 +2580,36 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
                 vuln,
                 _scan_fp_result_map(scan_id).get(vuln_index),
             )
-            if vuln.fp_review_eligible:
-                auto_fp_review, fp_review_method = (
-                    _scan_fp_review_settings(
-                        scan_id,
-                        scan,
-                    )
+            auto_fp_review, fp_review_method = (
+                _scan_fp_review_settings(
+                    scan_id,
+                    scan,
                 )
-                if auto_fp_review:
-                    ensured = _ensure_fp_review_job_for_scan(
-                        scan_id,
-                        scan,
-                        allow_cancelled=False,
-                        publish_started=True,
-                        require_unresolved=True,
+            )
+            if auto_fp_review:
+                ensured = _ensure_fp_review_job_for_scan(
+                    scan_id,
+                    scan,
+                    allow_cancelled=False,
+                    publish_started=True,
+                    require_unresolved=True,
+                )
+                if (
+                    ensured is not None
+                    and not ensured.get("cancelled")
+                    and not ensured.get("no_unresolved")
+                ):
+                    latest_results = (
+                        ensured.get("latest_results") or {}
                     )
-                    if (
-                        ensured is not None
-                        and not ensured.get("cancelled")
-                        and not ensured.get("no_unresolved")
-                    ):
-                        latest_results = (
-                            ensured.get("latest_results") or {}
-                        )
-                        fp_review_info = {
-                            "review_id": ensured["review_id"],
-                            "method": fp_review_method.value,
-                            "vuln_index": vuln_index,
-                            "queued": vuln_index not in latest_results,
-                            "total": ensured["total"],
-                            "processed": ensured["processed"],
-                        }
+                    fp_review_info = {
+                        "review_id": ensured["review_id"],
+                        "method": fp_review_method.value,
+                        "vuln_index": vuln_index,
+                        "queued": vuln_index not in latest_results,
+                        "total": ensured["total"],
+                        "processed": ensured["processed"],
+                    }
         except Exception as exc:
             logger.warning(
                 "Failed to render vulnerability report for validation scan=%s idx=%s: %s",

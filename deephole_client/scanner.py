@@ -109,8 +109,6 @@ def _resolve_mining_engines(
             MiningEngineSelection(
                 engine_id=manifest.engine_id,
                 engine_label=manifest.label,
-                enabled=manifest.default_enabled,
-                fp_review_enabled=manifest.default_fp_review_enabled,
             )
             for manifest in manifests
         ]
@@ -166,7 +164,6 @@ async def _report_process_vulnerabilities(
         vulnerability = Vulnerability.model_validate(value)
         vulnerability.engine_id = engine.engine_id
         vulnerability.engine_label = engine.engine_label
-        vulnerability.fp_review_eligible = engine.fp_review_enabled
         response = await reporter.report_vulnerability(scan_id, vulnerability)
         reported.append((
             vulnerability,
@@ -175,11 +172,7 @@ async def _report_process_vulnerabilities(
         if not isinstance(response, dict):
             continue
         fp_info = response.get("fp_review")
-        if (
-            engine.fp_review_enabled
-            and isinstance(fp_info, dict)
-            and fp_info.get("queued")
-        ):
+        if isinstance(fp_info, dict) and fp_info.get("queued"):
             from . import server as client_server
 
             try:
@@ -437,7 +430,6 @@ async def run_scan(
         run = MiningEngineRun(
             engine_id=selection.engine_id,
             engine_label=selection.engine_label,
-            fp_review_enabled=selection.fp_review_enabled,
         )
         if loaded is None:
             run.status = "error"
@@ -498,7 +490,6 @@ async def run_scan(
         context = MiningEngineContext(
             engine_id=selection.engine_id,
             engine_label=selection.engine_label,
-            fp_review_enabled=selection.fp_review_enabled,
             scan_id=scan_id,
             project_path=project,
             code_scan_path=scan_root,
@@ -528,9 +519,6 @@ async def run_scan(
             for vulnerability in output.vulnerabilities:
                 vulnerability.engine_id = selection.engine_id
                 vulnerability.engine_label = selection.engine_label
-                vulnerability.fp_review_eligible = (
-                    selection.fp_review_enabled
-                )
             unreported: list[Vulnerability] = []
             remaining_reported = dict(reported_vulnerability_counts)
             for vulnerability in output.vulnerabilities:

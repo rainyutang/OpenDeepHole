@@ -30,7 +30,6 @@ const SCAN_MODE_FULL = "full";
 
 interface MiningEngineFormValue {
   selected: boolean;
-  fp_review_enabled: boolean;
 }
 
 function agentAcceptsTasks(agent: AgentInfo) {
@@ -85,9 +84,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
           engineCatalog.engines.map((engine) => [
             engine.engine_id,
             {
-              selected: engine.default_enabled,
-              fp_review_enabled:
-                engine.default_fp_review_enabled,
+              selected: true,
             },
           ]),
         ));
@@ -224,9 +221,6 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
           .filter((engine) => miningEngines[engine.engine_id]?.selected)
           .map((engine) => ({
             engine_id: engine.engine_id,
-            fp_review_enabled:
-              miningEngines[engine.engine_id]?.fp_review_enabled
-              ?? engine.default_fp_review_enabled,
           })),
         code_graph_mcp: codeGraphMcp.enabled ? codeGraphMcp : null,
       });
@@ -338,7 +332,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               <div className="mb-3">
                 <div className="text-sm font-medium text-slate-300">漏洞挖掘引擎</div>
                 <p className="mt-1 text-xs text-slate-500">
-                  从当前代码仓选择本次扫描要启动的一个或多个引擎；每个引擎可独立决定其结果是否进入去误报。
+                  从当前代码仓选择本次扫描要启动的一个或多个引擎；默认选择全部引擎。
                 </p>
               </div>
               {miningEngineCatalog.length === 0 ? (
@@ -349,12 +343,9 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   {miningEngineCatalog.map((engine) => {
                     const value = miningEngines[engine.engine_id] ?? {
-                      selected: false,
-                      fp_review_enabled:
-                        engine.default_fp_review_enabled,
+                      selected: true,
                     };
                     const enabled = value.selected ?? false;
-                    const fpEnabled = value.fp_review_enabled ?? false;
                     return (
                       <div
                         key={engine.engine_id}
@@ -382,24 +373,18 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                             <span className="mt-1 block text-xs text-slate-500">{engine.description || engine.engine_id}</span>
                           </span>
                         </label>
-                        <label className={`mt-4 flex items-center gap-2 border-t border-slate-700/70 pt-3 text-xs ${
-                          enabled ? "cursor-pointer text-slate-300" : "cursor-not-allowed text-slate-600"
-                        }`}>
-                          <input
-                            type="checkbox"
-                            checked={fpEnabled}
-                            disabled={!enabled}
-                            onChange={(event) => setMiningEngines((current) => ({
-                              ...current,
-                              [engine.engine_id]: {
-                                ...current[engine.engine_id],
-                                fp_review_enabled: event.target.checked,
-                              },
-                            }))}
-                            className="h-4 w-4 rounded border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-0"
-                          />
-                          该引擎结果进入去误报
-                        </label>
+                        <div className="mt-4 border-t border-slate-700/70 pt-3">
+                          <span className={`inline-flex rounded-full border px-2 py-1 text-xs font-medium ${
+                            engine.fp_review
+                              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                              : "border-slate-500/50 bg-slate-700/40 text-slate-300"
+                          }`}>
+                            {engine.fp_review ? "自带去误报" : "不带去误报"}
+                          </span>
+                          <p className="mt-2 text-xs text-slate-500">
+                            仅说明引擎自身能力，不改变平台去误报流程。
+                          </p>
+                        </div>
                       </div>
                     );
                   })}
@@ -413,7 +398,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 <div>
                   <div className="text-sm font-medium text-slate-300">自动去误报</div>
                   <p className="mt-1 text-xs text-slate-500">
-                    扫描后自动复核已确认且允许去误报的问题；关闭后仍可在扫描详情中手动启动。
+                    扫描后自动复核所有已确认问题；关闭后仍可在扫描详情中手动启动。
                   </p>
                 </div>
                 <button

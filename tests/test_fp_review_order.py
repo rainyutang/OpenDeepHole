@@ -132,7 +132,7 @@ class FpReviewOrderTests(unittest.TestCase):
 
         self.assertEqual([item["index"] for item in ordered], [1, 3, 0])
 
-    def test_engine_without_fp_review_is_not_a_review_candidate(self) -> None:
+    def test_historical_fp_flags_do_not_exclude_review_candidates(self) -> None:
         scan = ScanStatus(
             scan_id="scan-1",
             project_id="project",
@@ -142,7 +142,7 @@ class FpReviewOrderTests(unittest.TestCase):
             total_candidates=2,
             processed_candidates=2,
             vulnerabilities=[
-                Vulnerability(
+                Vulnerability.model_validate(dict(
                     file="eligible.c",
                     line=1,
                     function="eligible",
@@ -152,8 +152,8 @@ class FpReviewOrderTests(unittest.TestCase):
                     confirmed=True,
                     ai_verdict="confirmed",
                     fp_review_eligible=True,
-                ),
-                Vulnerability(
+                )),
+                Vulnerability.model_validate(dict(
                     file="direct.c",
                     line=2,
                     function="direct",
@@ -165,7 +165,7 @@ class FpReviewOrderTests(unittest.TestCase):
                     engine_id="direct_engine",
                     engine_label="Direct engine",
                     fp_review_eligible=False,
-                ),
+                )),
             ],
         )
 
@@ -173,7 +173,7 @@ class FpReviewOrderTests(unittest.TestCase):
 
         self.assertEqual(
             [item["index"] for item in ordered],
-            [0],
+            [0, 1],
         )
 
     def test_pending_analysis_does_not_block_incomplete_retry(self) -> None:

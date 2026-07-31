@@ -118,7 +118,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     engine_id="static_candidate",
                     engine_label="Static",
                     enabled=True,
-                    fp_review_enabled=True,
                 ),
                 values=[_vulnerability()],
             )
@@ -297,7 +296,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                         "engine_id": "static_candidate",
                         "engine_label": "静态规则扫描 + 候选点审计",
                         "enabled": True,
-                        "fp_review_enabled": True,
                     }],
                 )
 
@@ -763,7 +761,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                         "engine_id": "static_candidate",
                         "engine_label": "静态规则扫描 + 候选点审计",
                         "enabled": True,
-                        "fp_review_enabled": True,
                     }],
                 )
 
@@ -784,14 +781,12 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(
                 engine_id="good",
                 label="Good engine",
-                default_enabled=True,
-                default_fp_review_enabled=True,
+                fp_review=True,
             ),
             SimpleNamespace(
                 engine_id="bad",
                 label="Bad engine",
-                default_enabled=True,
-                default_fp_review_enabled=True,
+                fp_review=False,
             ),
         ]
         loaded = {
@@ -866,19 +861,16 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                             "engine_id": "good",
                             "engine_label": "Good engine",
                             "enabled": True,
-                            "fp_review_enabled": True,
                         },
                         {
                             "engine_id": "bad",
                             "engine_label": "Bad engine",
                             "enabled": True,
-                            "fp_review_enabled": True,
                         },
                         {
                             "engine_id": "missing",
                             "engine_label": "Missing engine",
                             "enabled": True,
-                            "fp_review_enabled": False,
                         },
                     ],
                 )
@@ -896,7 +888,9 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             reported_vulnerability.engine_label,
             "Good engine",
         )
-        self.assertTrue(reported_vulnerability.fp_review_eligible)
+        self.assertFalse(
+            hasattr(reported_vulnerability, "fp_review_eligible")
+        )
         self.assertIn(
             "Bad engine: adapter exploded",
             finish.kwargs["error_message"],
@@ -968,7 +962,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                         "engine_id": "missing",
                         "engine_label": "Missing engine",
                         "enabled": True,
-                        "fp_review_enabled": False,
                     }],
                 )
 
