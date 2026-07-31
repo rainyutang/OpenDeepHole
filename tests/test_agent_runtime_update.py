@@ -166,6 +166,14 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertIn("version('sse-starlette')", text)
             self.assertIn(">= 3", text)
 
+    def test_semgrep_dependency_supports_ignore_file_isolation(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        agent_requirements = (root / "requirements-agent.txt").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("semgrep>=1.116.0", agent_requirements.splitlines())
+
     def test_windows_launcher_detects_python_without_py_launcher(self) -> None:
         root = Path(__file__).resolve().parent.parent
         batch_text = (root / "run_agent.bat").read_text(encoding="utf-8")

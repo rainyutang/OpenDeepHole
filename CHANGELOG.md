@@ -2,6 +2,7 @@
 
 ## 2026-07-31
 
+- **修复** 静态分析公共 Semgrep 入口不再读取被扫描项目的 `.semgrepignore`，避免其中非法 glob 触发 `RPC / Glob__Lexer / lexing: empty token` 并导致多个 checker 以 `rc=2` 失败；Agent 同步提高 Semgrep 最低版本要求，原有 `.opendeephole` 硬排除保持不变
 - **修复** Task Agent 终态错误日志不再在 f-string 表达式内使用带反斜杠的正则字面量，恢复 Python 3.10/3.11 模块加载兼容性，并继续将多行错误压缩为单行输出
 - **修复** Windows Agent 的代码图谱构建临时库固定与最终 `code_index.db` 位于同一目录，避免用户工作目录与源码跨盘符时原子替换失败后扫描静默停在 `tree-sitter refs`；控制台和任务日志恢复阶段数量与百分比，构建异常会明确上报并将扫描收敛为错误
 - **重构** 漏洞挖掘引擎入口收敛为唯一的 `async def run(**kwargs)`，删除 `build_input`、`build_output` 及专用输入输出模型；平台扁平传入扫描上下文，并直接校验引擎返回的字典、生命周期和候选计数

@@ -1,7 +1,11 @@
+import json
+import shutil
 import subprocess
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
+
+import pytest
 
 from deephole_client.static_analysis.semgrep_runner import (
     SEMGREP_INTERNAL_EXCLUDES,
@@ -18,6 +22,7 @@ def test_semgrep_runner_sets_noninteractive_env(tmp_path: Path) -> None:
         assert "--metrics=off" in cmd
         assert "--disable-version-check" in cmd
         assert "--no-autofix" in cmd
+        assert "--x-ignore-semgrepignore-files" in cmd
         exclude_values = [
             cmd[index + 1]
             for index, value in enumerate(cmd)
@@ -43,6 +48,45 @@ def test_semgrep_runner_sets_noninteractive_env(tmp_path: Path) -> None:
     assert result.stdout == '{"results":[]}'
 
 
+@pytest.mark.skipif(
+    shutil.which("semgrep") is None,
+    reason="semgrep CLI is not installed",
+)
+def test_semgrep_runner_ignores_invalid_project_semgrepignore(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".semgrepignore").write_text("\\\n", encoding="utf-8")
+    (project / "sample.c").write_text(
+        "int sample(void) { return 0; }\n",
+        encoding="utf-8",
+    )
+    rule_file = tmp_path / "rule.yml"
+    rule_file.write_text(
+        """
+rules:
+  - id: test-return-zero
+    languages: [c]
+    severity: INFO
+    message: test
+    pattern: return 0;
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    result = run_semgrep(
+        project,
+        rule_file=rule_file,
+        checker_name="unit",
+        timeout=30,
+    )
+
+    assert result is not None
+    assert result.returncode == 0
+    data = json.loads(result.stdout)
+    assert data["errors"] == []
+    assert any(Path(path).name == "sample.c" for path in data["paths"]["scanned"])
+
+
 def test_semgrep_runner_returns_none_when_timeout_has_no_json(tmp_path: Path) -> None:
     rule_file = tmp_path / "rule.yml"
     rule_file.write_text("rules: []\n", encoding="utf-8")
@@ -62,6 +106,7 @@ def test_semgrep_runner_prints_heartbeat_when_enabled(tmp_path: Path, capsys) ->
 
     class FakePopen:
         def __init__(self, cmd, **kwargs):
+            assert "--x-ignore-semgrepignore-files" in cmd
             self.cmd = cmd
             self.returncode = 0
             self.calls = 0

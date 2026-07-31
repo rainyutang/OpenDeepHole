@@ -56,9 +56,12 @@ def run_semgrep(
 ) -> SemgrepRunResult | None:
     with tempfile.TemporaryDirectory(prefix=f"opendeephole-{checker_name}-semgrep-") as temp_dir:
         output_path = Path(temp_dir) / "semgrep.json"
+        # OpenDeepHole owns scan scope; project ignore files must not hide code
+        # or abort Semgrep target discovery with malformed glob patterns.
         cmd = [
             "semgrep", "scan", "--config", str(rule_file), "--json",
-            f"--json-output={output_path}", "--no-git-ignore", "--metrics=off",
+            f"--json-output={output_path}", "--no-git-ignore",
+            "--x-ignore-semgrepignore-files", "--metrics=off",
             "--disable-version-check", "--no-autofix",
         ]
         for pattern in SEMGREP_INTERNAL_EXCLUDES:
