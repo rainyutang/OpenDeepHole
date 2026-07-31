@@ -41,6 +41,7 @@ class AgentReporterTests(unittest.TestCase):
             stage_current=4,
             stage_total=8,
             stats=stats,
+            error="index publish failed",
         ))
 
         self.assertEqual(len(fake_client.posts), 1)
@@ -52,6 +53,7 @@ class AgentReporterTests(unittest.TestCase):
         self.assertEqual(payload["stage_current"], 4)
         self.assertEqual(payload["stage_total"], 8)
         self.assertEqual(payload["stats"], stats)
+        self.assertEqual(payload["error"], "index publish failed")
 
     def test_static_progress_http_error_is_visible(self) -> None:
         class FakeClient:

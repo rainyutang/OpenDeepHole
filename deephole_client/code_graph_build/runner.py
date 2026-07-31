@@ -7,6 +7,7 @@ import inspect
 import os
 import queue
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,10 @@ def _remove_sqlite_files(path: Path) -> None:
 
 
 def _replace_sqlite_db(temp_path: Path, final_path: Path) -> None:
+    if temp_path.parent.resolve() != final_path.parent.resolve():
+        raise ValueError(
+            "code graph staging DB must share the final DB directory"
+        )
     for suffix in ("-wal", "-shm"):
         final_path.with_name(final_path.name + suffix).unlink(missing_ok=True)
     os.replace(temp_path, final_path)
@@ -177,7 +182,12 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
             path=str(index_path),
         )
 
-    temp_path = work_dir / f"{index_path.name}.building"
+    # Keep the publish candidate beside the final DB.  The Agent work directory
+    # commonly lives under %USERPROFILE% while Windows source trees live on a
+    # different drive; os.replace() cannot atomically cross that boundary.
+    temp_path = index_path.with_name(
+        f".{index_path.name}.{uuid.uuid4().hex}.building"
+    )
     _remove_sqlite_files(temp_path)
     loop = asyncio.get_running_loop()
     local_cancel = threading.Event()
@@ -189,12 +199,13 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
         loop.call_soon_threadsafe(create_event_task)
 
     def build() -> dict[str, int] | None:
-        database = CodeDatabase(temp_path)
-        analyzer = CppAnalyzer(
-            database,
-            ctags_executable=str(kwargs.get("ctags_executable") or "ctags"),
-        )
+        database: CodeDatabase | None = None
         try:
+            database = CodeDatabase(temp_path)
+            analyzer = CppAnalyzer(
+                database,
+                ctags_executable=str(kwargs.get("ctags_executable") or "ctags"),
+            )
             analyzer.analyze_directory(
                 project,
                 on_progress=lambda current, total: schedule(
@@ -215,6 +226,12 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
             )
             if local_cancel.is_set() or _cancelled(cancel_event):
                 return None
+            schedule(
+                "progress",
+                "Finalizing code graph",
+                current=0,
+                total=1,
+            )
             database.mark_index_complete()
             database.checkpoint()
             stats = database.get_index_stats()
@@ -222,15 +239,15 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
             _replace_sqlite_db(temp_path, index_path)
             return stats
         finally:
-            try:
-                database.close()
-            except Exception:
-                pass
+            if database is not None:
+                try:
+                    database.close()
+                except Exception:
+                    pass
 
     await _emit(output, "progress", "Code graph build started")
     try:
         stats = await _run_in_daemon_thread(build)
-        await _emit(output, "progress", "Finalizing code graph")
         if stats is None or _cancelled(cancel_event):
             _remove_sqlite_files(temp_path)
             return {
@@ -243,11 +260,36 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
     except asyncio.CancelledError:
         local_cancel.set()
         raise
-    except BaseException:
+    except Exception as exc:
         local_cancel.set()
         _remove_sqlite_files(temp_path)
-        raise
+        error = (
+            f"{type(exc).__name__}: {exc}"
+            if str(exc)
+            else type(exc).__name__
+        )
+        await _emit(
+            output,
+            "error",
+            f"Code graph build failed: {error}",
+            error=error,
+        )
+        return {
+            "status": "error",
+            "index_db_path": "",
+            "cache_hit": False,
+            "stats": {},
+            "indexer_version": CodeDatabase.INDEXER_VERSION,
+            "error": error,
+        }
 
+    await _emit(
+        output,
+        "progress",
+        "Finalizing code graph",
+        current=1,
+        total=1,
+    )
     await _emit(
         output,
         "artifact",

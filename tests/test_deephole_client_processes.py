@@ -159,6 +159,107 @@ def test_all_process_entries_are_async_and_reject_unknown_keys() -> None:
             raise AssertionError(f"{function.__name__} accepted an unknown key")
 
 
+def test_code_graph_build_stages_database_beside_final_index() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        work_dir = root / "agent-work" / "code-graph"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        events: list[dict] = []
+        observed_paths: list[tuple[Path, Path]] = []
+
+        from deephole_client.code_graph_build import runner as graph_runner
+
+        replace_sqlite_db = graph_runner._replace_sqlite_db
+
+        def observe_replace(temp_path: Path, final_path: Path) -> None:
+            observed_paths.append((temp_path, final_path))
+            replace_sqlite_db(temp_path, final_path)
+
+        with (
+            patch.object(
+                graph_runner.CppAnalyzer,
+                "analyze_directory",
+                return_value=None,
+            ),
+            patch.object(
+                graph_runner,
+                "_replace_sqlite_db",
+                side_effect=observe_replace,
+            ),
+        ):
+            result = await run_code_graph_build(
+                project_path=project,
+                work_dir=work_dir,
+                index_db_path=index_path,
+                reuse_cache=False,
+                output=events.append,
+            )
+
+        assert result["status"] == "success"
+        assert observed_paths
+        temp_path, final_path = observed_paths[0]
+        assert temp_path.parent == index_path.parent
+        assert final_path == index_path
+        assert temp_path.parent != work_dir
+        assert index_path.is_file()
+        assert not list(project.glob(f".{index_path.name}.*.building*"))
+        assert any(
+            event["kind"] == "progress"
+            and event["message"] == "Finalizing code graph"
+            and event["data"] == {"current": 0, "total": 1}
+            for event in events
+        )
+        assert any(
+            event["kind"] == "progress"
+            and event["message"] == "Finalizing code graph"
+            and event["data"] == {"current": 1, "total": 1}
+            for event in events
+        )
+
+        database = CodeDatabase(index_path)
+        try:
+            assert database.is_index_complete()
+        finally:
+            database.close()
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_code_graph_build_returns_error_and_cleans_staging_database() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        events: list[dict] = []
+
+        with patch(
+            "deephole_client.code_graph_build.runner.CppAnalyzer.analyze_directory",
+            side_effect=OSError("index failed"),
+        ):
+            result = await run_code_graph_build(
+                project_path=project,
+                work_dir=root / "agent-work",
+                reuse_cache=False,
+                output=events.append,
+            )
+
+        assert result["status"] == "error"
+        assert result["error"] == "OSError: index failed"
+        assert not (project / "code_index.db").exists()
+        assert not list(project.glob(".code_index.db.*.building*"))
+        assert any(
+            event["kind"] == "error"
+            and event["message"]
+            == "Code graph build failed: OSError: index failed"
+            and event["data"]["error"] == "OSError: index failed"
+            for event in events
+        )
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
 def test_candidate_prompt_uses_existing_related_variables_without_clues() -> None:
     prompt = _candidate_prompt(
         {"skill_name": "oob-audit"},

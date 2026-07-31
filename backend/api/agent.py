@@ -3105,6 +3105,7 @@ class _IndexStatusBody(BaseModel):
     stage_current: int = 0
     stage_total: int = 0
     stats: dict[str, int] | None = None
+    error: str | None = None
 
 
 def _index_file_counts(body: _IndexStatusBody) -> tuple[int, int] | None:

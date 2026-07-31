@@ -321,6 +321,7 @@ class Reporter:
         stage_current: int = 0,
         stage_total: int = 0,
         stats: dict[str, int] | None = None,
+        error: str | None = None,
     ) -> None:
         """Push code-indexing progress to the server (best-effort, never raises)."""
         if self.dry_run:
@@ -338,6 +339,8 @@ class Reporter:
             })
         if stats is not None:
             payload["stats"] = stats
+        if error:
+            payload["error"] = error
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/index-status",

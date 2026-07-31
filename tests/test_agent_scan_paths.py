@@ -14,6 +14,7 @@ from deephole_client.scanner import (
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     _event_candidate_index,
     _format_process_console_line,
+    _format_process_event_message,
     _report_process_vulnerabilities,
     _resolve_scan_paths,
     run_scan,
@@ -138,6 +139,19 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "Threat analysis started",
             ),
             "[threat_analysis] Threat analysis started",
+        )
+
+    def test_code_graph_progress_message_includes_percentage(self) -> None:
+        event = {
+            "process": "code_graph_build",
+            "kind": "progress",
+            "message": "tree-sitter refs",
+            "data": {"current": 3200, "total": 12840},
+        }
+
+        self.assertEqual(
+            _format_process_event_message(event, event["message"]),
+            "tree-sitter refs: 3200/12840 (24.9%)",
         )
 
     def test_static_analysis_phase_counts_are_not_candidate_indexes(self) -> None:
@@ -327,6 +341,134 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(
             call.args[1].message
             == "Code graph MCP is not enabled; model tasks will use file tools only"
+            for call in reporter.send_event.await_args_list
+        ))
+
+    async def test_code_graph_stage_progress_keeps_source_file_counts(self) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+
+            async def graph(**kwargs):
+                await kwargs["output"]({
+                    "process": "code_graph_build",
+                    "kind": "progress",
+                    "message": "Indexing source files",
+                    "data": {"current": 5, "total": 10},
+                })
+                await kwargs["output"]({
+                    "process": "code_graph_build",
+                    "kind": "progress",
+                    "message": "tree-sitter refs",
+                    "data": {"current": 400, "total": 800},
+                })
+                return {
+                    "status": "cancelled",
+                    "index_db_path": "",
+                    "stats": {},
+                }
+
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    side_effect=graph,
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="progress",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-progress",
+                    cancel_event=threading.Event(),
+                    mining_engines=[{
+                        "engine_id": "static_candidate",
+                        "engine_label": "Static",
+                        "enabled": True,
+                    }],
+                )
+
+        source_status, stage_status = (
+            reporter.send_index_status.await_args_list
+        )
+        self.assertEqual(source_status.args, ("scan-progress", "parsing", 5, 10))
+        self.assertEqual(source_status.kwargs["stage"], "")
+        self.assertEqual(stage_status.args, ("scan-progress", "parsing", 5, 10))
+        self.assertEqual(stage_status.kwargs["stage"], "tree-sitter refs")
+        self.assertEqual(stage_status.kwargs["stage_current"], 400)
+        self.assertEqual(stage_status.kwargs["stage_total"], 800)
+        messages = [
+            call.args[1].message
+            for call in reporter.send_event.await_args_list
+        ]
+        self.assertIn("Indexing source files: 5/10 (50.0%)", messages)
+        self.assertIn("tree-sitter refs: 400/800 (50.0%)", messages)
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "cancelled")
+
+    async def test_code_graph_exception_finishes_scan_as_error(self) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(
+                        side_effect=OSError("cross-device publish failed"),
+                    ),
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="failure",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-failure",
+                    cancel_event=threading.Event(),
+                    mining_engines=[{
+                        "engine_id": "static_candidate",
+                        "engine_label": "Static",
+                        "enabled": True,
+                    }],
+                )
+
+        error_status = reporter.send_index_status.await_args
+        self.assertEqual(error_status.args, ("scan-failure", "error", 0, 0))
+        self.assertEqual(
+            error_status.kwargs["error"],
+            "OSError: cross-device publish failed",
+        )
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "error")
+        self.assertEqual(
+            reporter.finish_scan.await_args.kwargs["error_message"],
+            "OSError: cross-device publish failed",
+        )
+        self.assertTrue(any(
+            call.args[1].message
+            == (
+                "Code graph build failed: "
+                "OSError: cross-device publish failed"
+            )
             for call in reporter.send_event.await_args_list
         ))
 

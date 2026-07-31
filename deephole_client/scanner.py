@@ -62,6 +62,38 @@ def _format_process_console_line(phase: str, message: str) -> str:
     return f"[{phase}] {message}"
 
 
+def _event_progress_counts(
+    event: dict[str, Any],
+) -> tuple[int, int] | None:
+    if event.get("kind") != "progress":
+        return None
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    current = data.get("current")
+    total = data.get("total")
+    if (
+        not isinstance(current, int)
+        or isinstance(current, bool)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+    ):
+        return None
+    return max(current, 0), max(total, 0)
+
+
+def _format_process_event_message(
+    event: dict[str, Any],
+    message: str,
+) -> str:
+    counts = _event_progress_counts(event)
+    if counts is None or counts[1] <= 0:
+        return message
+    current, total = counts
+    percentage = max(0.0, min(100.0, current / total * 100))
+    return f"{message}: {current}/{total} ({percentage:.1f}%)"
+
+
 def _event_candidate_index(event: dict[str, Any]) -> int | None:
     data = event.get("data")
     if not isinstance(data, dict):
@@ -291,6 +323,7 @@ async def run_scan(
         threat_only=threat_only,
     )
     enabled_selections = [item for item in selections if item.enabled]
+    index_file_progress = {"current": 0, "total": 0}
 
     async def emit(
         phase: str,
@@ -306,24 +339,48 @@ async def run_scan(
     async def process_output(event: dict[str, Any]) -> None:
         process = str(event.get("process") or "process")
         message = str(event.get("message") or "")
-        if message:
-            await emit(process, message, _event_candidate_index(event))
+        index_status: dict[str, Any] | None = None
         if process == "code_graph_build":
-            data = (
-                event.get("data")
-                if isinstance(event.get("data"), dict)
-                else {}
+            counts = _event_progress_counts(event)
+            if counts is not None:
+                current, total = counts
+                is_file_progress = message == "Indexing source files"
+                if is_file_progress:
+                    index_file_progress.update({
+                        "current": current,
+                        "total": total,
+                    })
+                index_status = {
+                    "parsed_files": index_file_progress["current"],
+                    "total_files": index_file_progress["total"],
+                    "stage": "" if is_file_progress else message,
+                    "stage_current": 0 if is_file_progress else current,
+                    "stage_total": 0 if is_file_progress else total,
+                }
+            elif event.get("kind") == "progress":
+                index_status = {
+                    "parsed_files": index_file_progress["current"],
+                    "total_files": index_file_progress["total"],
+                    "stage": message,
+                    "stage_current": 0,
+                    "stage_total": 0,
+                }
+        if message:
+            await emit(
+                process,
+                _format_process_event_message(event, message),
+                _event_candidate_index(event),
             )
-            if event.get("kind") == "progress":
-                await reporter.send_index_status(
-                    scan_id,
-                    "parsing",
-                    int(data.get("current") or 0),
-                    int(data.get("total") or 0),
-                    stage=message,
-                    stage_current=int(data.get("current") or 0),
-                    stage_total=int(data.get("total") or 0),
-                )
+        if index_status is not None:
+            await reporter.send_index_status(
+                scan_id,
+                "parsing",
+                index_status["parsed_files"],
+                index_status["total_files"],
+                stage=index_status["stage"],
+                stage_current=index_status["stage_current"],
+                stage_total=index_status["stage_total"],
+            )
 
     await emit("init", f"Scan started: {scan_name}")
     await emit("init", f"Project: {project}")
@@ -373,20 +430,47 @@ async def run_scan(
                     "Scan code graph MCP preparation failed; continuing with file tools only",
                 )
 
-    graph_result = await run_code_graph_build(
-        project_path=project,
-        code_scan_path=scan_root,
-        work_dir=scan_dir / "code_graph_build",
-        reuse_cache=True,
-        output=process_output,
-        cancel_event=cancel_event,
-    )
+    try:
+        graph_result = await run_code_graph_build(
+            project_path=project,
+            code_scan_path=scan_root,
+            work_dir=scan_dir / "code_graph_build",
+            reuse_cache=True,
+            output=process_output,
+            cancel_event=cancel_event,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        error = (
+            f"{type(exc).__name__}: {exc}"
+            if str(exc)
+            else type(exc).__name__
+        )
+        await emit(
+            "code_graph_build",
+            f"Code graph build failed: {error}",
+        )
+        graph_result = {
+            "status": "error",
+            "error": error,
+        }
     if graph_result.get("status") != "success":
         status = (
             "cancelled"
             if graph_result.get("status") == "cancelled"
             else "error"
         )
+        error = str(graph_result.get("error") or "")
+        if status == "error":
+            await reporter.send_index_status(
+                scan_id,
+                "error",
+                index_file_progress["current"],
+                index_file_progress["total"],
+                stage="Code graph build failed",
+                error=error,
+            )
         await _finish_scan(
             reporter,
             scan_id,
@@ -394,7 +478,7 @@ async def run_scan(
             vulnerabilities=[],
             total=0,
             processed=0,
-            error=str(graph_result.get("error") or "") or None,
+            error=error or None,
         )
         return
     index_path = Path(str(graph_result["index_db_path"]))

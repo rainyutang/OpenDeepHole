@@ -6,7 +6,7 @@
 | key | 必填 | 类型 | 默认值 | 说明 |
 |---|---:|---|---|---|
 | `project_path` | 是 | path | - | 项目根目录 |
-| `work_dir` | 是 | path | - | 原子建库使用的工作目录 |
+| `work_dir` | 是 | path | - | 过程工作目录；SQLite 发布临时库固定与最终索引同目录 |
 | `code_scan_path` | 否 | path | `project_path` | 校验并记录的扫描范围 |
 | `index_db_path` | 否 | path | `<project_path>/code_index.db` | 最终索引文件 |
 | `reuse_cache` | 否 | bool | `true` | 复用版本匹配且完整的索引 |
