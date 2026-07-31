@@ -1090,7 +1090,8 @@ class OpenCodeTaskService:
         if resolved_model:
             terminal_parts.append(f"model={resolved_model}")
         if error:
-            terminal_parts.append(f"error={re.sub(r'\\s+', ' ', error).strip()}")
+            normalized_error = re.sub(r"\s+", " ", error).strip()
+            terminal_parts.append(f"error={normalized_error}")
         self._emit_task_progress(
             record,
             " ".join(terminal_parts),

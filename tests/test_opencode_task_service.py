@@ -977,6 +977,54 @@ def test_validation_debug_empty_model_pool_fails_without_starting_serve(tmp_path
     asyncio.run(run())
 
 
+def test_failure_progress_normalizes_multiline_error(tmp_path: Path) -> None:
+    async def run() -> None:
+        error = "first line\n second\tline"
+
+        async def run_prompt(**_kwargs):
+            raise RuntimeError(error)
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service = OpenCodeTaskService()
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        output: list[str] = []
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            _task_context(
+                tmp_path,
+                task_metadata={"standalone_console": True},
+                on_output=output.append,
+            ),
+        ):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name="multiline failure",
+                prompt="test",
+                directory=tmp_path,
+                attempt=0,
+            ))
+
+        assert result.status == "failure"
+        assert result.error == error
+        finished = next(
+            line
+            for line in output
+            if line.startswith("[opencode][pending][task] FINISHED")
+        )
+        assert "error=first line second line" in finished
+        assert "\n" not in finished
+        assert "\t" not in finished
+
+    asyncio.run(run())
+
+
 def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) -> None:
     async def run() -> None:
         calls: list[dict] = []
