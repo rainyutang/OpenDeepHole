@@ -27,6 +27,11 @@ import sys
 from pathlib import Path
 
 
+_WS_MAX_MESSAGE_ENV = "OPENDEEPHOLE_WS_MAX_MESSAGE_MB"
+_DEFAULT_WS_MAX_MESSAGE_MB = 64
+_MIB = 1024 * 1024
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -36,6 +41,25 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _ws_max_message_mb() -> int:
+    """Return the bounded Agent receive limit for server WebSocket messages."""
+    return _env_int(_WS_MAX_MESSAGE_ENV, _DEFAULT_WS_MAX_MESSAGE_MB)
+
+
+def _ws_message_too_big_hint(error: Exception, max_message_mb: int) -> str:
+    """Return an actionable hint for WebSocket close code 1009 errors."""
+    detail = str(error).lower()
+    if not any(
+        marker in detail
+        for marker in ("1009", "message too big", "frame exceeds limit")
+    ):
+        return ""
+    return (
+        f"Agent WebSocket receive limit is {max_message_mb} MiB; increase "
+        f"{_WS_MAX_MESSAGE_ENV} and restart the Agent if larger commands are expected"
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -318,6 +342,8 @@ async def _ws_loop(config, task_manager, reporter) -> None:
     ping_timeout = _env_int("OPENDEEPHOLE_WS_PING_TIMEOUT", 120)
     heartbeat_interval = _env_int("OPENDEEPHOLE_AGENT_HEARTBEAT_INTERVAL", 30)
     watchdog_timeout = _env_int("OPENDEEPHOLE_AGENT_WATCHDOG_TIMEOUT", 120)
+    max_message_mb = _ws_max_message_mb()
+    max_message_bytes = max_message_mb * _MIB
 
     reconnect_delay = 2
 
@@ -328,6 +354,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 ws_url,
                 ping_interval=ping_interval,
                 ping_timeout=ping_timeout,
+                max_size=max_message_bytes,
             ) as ws:
                 # Handshake
                 validator_result = await run_vulnerability_validation(
@@ -447,7 +474,11 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                             pass
 
         except Exception as e:
-            print(f"Connection lost: {e}. Reconnecting in {reconnect_delay}s...")
+            message = f"Connection lost: {e}."
+            hint = _ws_message_too_big_hint(e, max_message_mb)
+            if hint:
+                message += f" {hint}."
+            print(f"{message} Reconnecting in {reconnect_delay}s...")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, 60)
 

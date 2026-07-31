@@ -2,10 +2,13 @@ import asyncio
 import base64
 import hashlib
 import io
+import json
+import os
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import yaml
@@ -16,6 +19,126 @@ import deephole_client.server as agent_server
 from deephole_client.config import AgentConfig
 from deephole_client.updater import compute_runtime_hash
 from backend.api import agent as agent_api
+
+
+class AgentWebSocketMessageLimitTests(unittest.TestCase):
+    def test_message_limit_defaults_to_64_mib(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(agent_main._WS_MAX_MESSAGE_ENV, None)
+            self.assertEqual(agent_main._ws_max_message_mb(), 64)
+
+    def test_message_limit_accepts_positive_override(self) -> None:
+        with patch.dict(
+            os.environ,
+            {agent_main._WS_MAX_MESSAGE_ENV: "96"},
+        ):
+            self.assertEqual(agent_main._ws_max_message_mb(), 96)
+
+    def test_message_limit_rejects_invalid_override(self) -> None:
+        for value in ("", "0", "-1", "invalid"):
+            with self.subTest(value=value), patch.dict(
+                os.environ,
+                {agent_main._WS_MAX_MESSAGE_ENV: value},
+            ):
+                self.assertEqual(agent_main._ws_max_message_mb(), 64)
+
+    def test_websocket_connection_uses_configured_message_limit(self) -> None:
+        class StopLoop(BaseException):
+            pass
+
+        class CancelOnEnter:
+            async def __aenter__(self):
+                raise StopLoop()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        calls: list[tuple[tuple, dict]] = []
+
+        def connect(*args, **kwargs):
+            calls.append((args, kwargs))
+            return CancelOnEnter()
+
+        config = SimpleNamespace(
+            agent_name="agent-1",
+            server_url="http://server.example",
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {agent_main._WS_MAX_MESSAGE_ENV: "2"},
+            ),
+            patch("websockets.connect", new=connect),
+            self.assertRaises(StopLoop),
+        ):
+            asyncio.run(agent_main._ws_loop(config, None, None))
+
+        self.assertEqual(len(calls), 1)
+        args, kwargs = calls[0]
+        self.assertEqual(args, ("ws://server.example/api/agent/ws",))
+        self.assertEqual(kwargs["max_size"], 2 * 1024 * 1024)
+
+    def test_message_too_big_hint_includes_limit_override(self) -> None:
+        hint = agent_main._ws_message_too_big_hint(
+            RuntimeError(
+                "sent 1009 (message too big) frame exceeds limit of 1048576 bytes"
+            ),
+            64,
+        )
+        self.assertIn("64 MiB", hint)
+        self.assertIn(agent_main._WS_MAX_MESSAGE_ENV, hint)
+        self.assertEqual(
+            agent_main._ws_message_too_big_hint(
+                RuntimeError("connection refused"),
+                64,
+            ),
+            "",
+        )
+
+    def test_resume_command_larger_than_old_limit_is_dispatched_once(self) -> None:
+        large_description = "x" * (1024 * 1024 + 1024)
+        command = {
+            "type": "resume",
+            "scan_id": "scan-large",
+            "project_path": "/repo/project",
+            "retry_candidates": [
+                {
+                    "file": "src/large.c",
+                    "line": 1,
+                    "function": "large",
+                    "description": large_description,
+                    "vuln_type": "npd",
+                }
+            ],
+            "retry_total_candidates": 1,
+            "retry_processed_offset": 0,
+            "agent_runtime_update": {"hash": "same-runtime"},
+        }
+        self.assertGreater(
+            len(json.dumps(command).encode("utf-8")),
+            1024 * 1024,
+        )
+
+        update = AsyncMock(return_value=False)
+        handler = AsyncMock()
+        with (
+            patch(
+                "deephole_client.updater.ensure_runtime_updated",
+                new=update,
+            ),
+            patch(
+                "deephole_client.server.handle_resume",
+                new=handler,
+            ),
+        ):
+            asyncio.run(agent_main._handle_command(command, None, None, None))
+
+        update.assert_awaited_once()
+        handler.assert_awaited_once()
+        self.assertEqual(
+            handler.await_args.kwargs["retry_candidates"][0]["description"],
+            large_description,
+        )
 
 
 class AgentRuntimePackageTests(unittest.TestCase):

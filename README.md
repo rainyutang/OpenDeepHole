@@ -160,7 +160,9 @@ OpenDeepHole Agent
   Connected via WebSocket, agent_id: a1b2c3d4...
 ```
 
-Agent 通过 WebSocket 保持长连接，等待服务器推送任务。
+Agent 通过 WebSocket 保持长连接，等待服务器推送任务。Agent 默认允许接收最大 64 MiB 的单条
+WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续扫命令仍超过该限制，可设置正整数
+环境变量 `OPENDEEPHOLE_WS_MAX_MESSAGE_MB` 后重启 Agent。
 启动后的 Agent 支持任务执行前自动更新运行时代码。服务端更新 `deephole_client/`（包含八个独立过程及其规则、技能和验证器）、`task_agent/`、`backend/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描、恢复扫描、去误报或漏洞验证任务前下载最新 runtime 并重启后继续执行；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash。创建或恢复扫描时，选中的用户规则还会按 `static/` 与 `audit/` 两个根目录传输。如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
 
 验证方法的 manifest、kwargs、返回值和 OpenCode 调用约定见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
