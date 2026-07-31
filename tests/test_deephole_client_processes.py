@@ -1330,7 +1330,9 @@ def test_fp_review_and_validation_processes_run_in_batches() -> None:
         vulnerability = {
             "index": 7, "file": "sample.c", "line": 1, "function": "bad",
             "vuln_type": "oob", "severity": "high", "description": "candidate",
-            "ai_analysis": "analysis", "confirmed": True,
+            "ai_analysis": "analysis",
+            "vulnerability_report": "# OOB report",
+            "confirmed": True,
         }
         with patch(
             "deephole_client.fp_review.runner.run_opencode_task",

@@ -19,7 +19,6 @@ from deephole_client.scanner import (
     run_scan,
 )
 from backend.models import MiningEngineSelection, Vulnerability
-from deephole_client.vulnerability_mining import MiningEngineOutput
 from deephole_client.vulnerability_mining.engines.threat_audit.engine import (
     run as run_threat_audit_engine,
 )
@@ -55,7 +54,7 @@ def _vulnerability() -> dict:
         "severity": "high",
         "description": "null dereference",
         "ai_analysis": "confirmed from source",
-        "vulnerability_report": "",
+        "vulnerability_report": "# Null dereference report",
         "confirmed": True,
         "ai_verdict": "confirmed",
         "audit_index": 0,
@@ -646,7 +645,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                             reporter=reporter,
                             output=AsyncMock(),
                             cancel_event=threading.Event(),
-                            retry_task_ids=None,
+                            retry_threat_audit_task_ids=None,
                             report_vulnerabilities=report_values,
                         )
 
@@ -661,7 +660,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(len(result["vulnerabilities"]), 2)
                 self.assertTrue(all(
-                    vulnerability.output_source.agent_session_id
+                    vulnerability["output_source"]["agent_session_id"]
                     == "agent-session-retry"
                     for vulnerability in result["vulnerabilities"]
                 ))
@@ -798,17 +797,25 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             manifests=lambda: manifests,
             get=lambda engine_id: loaded.get(engine_id),
         )
+        received_keys: set[str] = set()
 
-        async def run_engine(engine, _context):
+        async def run_engine(engine, **engine_kwargs):
+            received_keys.update(engine_kwargs)
             started.add(engine.manifest.engine_id)
             if len(started) == 2:
                 both_started.set()
             await asyncio.wait_for(both_started.wait(), timeout=1)
             if engine.manifest.engine_id == "bad":
                 raise RuntimeError("adapter exploded")
-            return MiningEngineOutput(
-                vulnerabilities=[_vulnerability()],
-            )
+            return {
+                "status": "success",
+                "vulnerabilities": [
+                    Vulnerability.model_validate(_vulnerability()),
+                ],
+                "error_message": "",
+                "total_candidates": 1,
+                "processed_candidates": 1,
+            }
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -876,6 +883,36 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(started, {"good", "bad"})
+        self.assertEqual(
+            received_keys,
+            {
+                "engine_id",
+                "engine_label",
+                "scan_id",
+                "project_path",
+                "code_scan_path",
+                "scan_dir",
+                "work_dir",
+                "index_db_path",
+                "config",
+                "reporter",
+                "checker_names",
+                "checker_packages",
+                "product",
+                "validation_environment",
+                "feedback_entries",
+                "code_graph_mcp",
+                "is_resume",
+                "retry_candidates",
+                "retry_total_candidates",
+                "retry_processed_offset",
+                "resume_threat_analysis",
+                "retry_threat_audit_task_ids",
+                "output",
+                "cancel_event",
+                "report_vulnerabilities",
+            },
+        )
         finish = reporter.finish_scan.await_args
         self.assertEqual(finish.args[2], "complete")
         self.assertEqual(len(finish.args[1]), 1)

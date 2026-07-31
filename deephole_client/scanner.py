@@ -22,11 +22,12 @@ from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
 from .reporter import Reporter
 from .vulnerability_mining import (
-    MiningEngineContext,
-    MiningEngineOutput,
     MiningEngineRun,
     load_mining_engines,
     run_mining_engine,
+)
+from .vulnerability_mining.runtime import (
+    normalize_mining_engine_vulnerabilities,
 )
 
 
@@ -414,7 +415,9 @@ async def run_scan(
 
     pool_stop = asyncio.Event()
     pool_task: asyncio.Task[Any] | None = None
-    engine_tasks: list[asyncio.Task[tuple[MiningEngineRun, MiningEngineOutput | None]]] = []
+    engine_tasks: list[
+        asyncio.Task[tuple[MiningEngineRun, dict[str, Any] | None]]
+    ] = []
     audited: list[Vulnerability] = []
     total = 0
     processed = 0
@@ -425,7 +428,7 @@ async def run_scan(
 
     async def execute_engine(
         selection: MiningEngineSelection,
-    ) -> tuple[MiningEngineRun, MiningEngineOutput | None]:
+    ) -> tuple[MiningEngineRun, dict[str, Any] | None]:
         loaded = registry.get(selection.engine_id)
         run = MiningEngineRun(
             engine_id=selection.engine_id,
@@ -446,7 +449,7 @@ async def run_scan(
             run.status = "skipped"
             run.finished_at = datetime.now(timezone.utc).isoformat()
             await _publish_engine_run(reporter, scan_id, run)
-            return run, MiningEngineOutput()
+            return run, None
 
         run.status = "running"
         run.started_at = datetime.now(timezone.utc).isoformat()
@@ -456,6 +459,10 @@ async def run_scan(
         async def report_values(
             values: list[Any],
         ) -> list[tuple[Vulnerability, dict[str, Any] | None]]:
+            normalized = normalize_mining_engine_vulnerabilities(
+                loaded,
+                values,
+            )
             reported = await _report_process_vulnerabilities(
                 reporter=reporter,
                 config=config,
@@ -467,7 +474,7 @@ async def run_scan(
                 feedback_entries=feedback_entries,
                 code_graph_mcp=code_graph_mcp,
                 engine=selection,
-                values=values,
+                values=normalized,
             )
             for vulnerability, response in reported:
                 if response is None:
@@ -487,41 +494,39 @@ async def run_scan(
             else scan_dir / "mining_engines" / selection.engine_id
         )
         engine_work_dir.mkdir(parents=True, exist_ok=True)
-        context = MiningEngineContext(
-            engine_id=selection.engine_id,
-            engine_label=selection.engine_label,
-            scan_id=scan_id,
-            project_path=project,
-            code_scan_path=scan_root,
-            scan_dir=scan_dir,
-            work_dir=engine_work_dir,
-            index_db_path=index_path,
-            config=config,
-            reporter=reporter,
-            checker_names=list(checker_names),
-            checker_packages=list(checker_packages),
-            product=product,
-            validation_environment=validation_environment,
-            feedback_entries=list(feedback_entries),
-            code_graph_mcp=copy.deepcopy(code_graph_mcp),
-            is_resume=is_resume,
-            retry_candidates=retry_candidates,
-            retry_total_candidates=retry_total_candidates,
-            retry_processed_offset=retry_processed_offset,
-            resume_threat_analysis=resume_threat_analysis,
-            retry_threat_audit_task_ids=retry_threat_audit_task_ids,
-            output=process_output,
-            cancel_event=cancel_event,
-            report_vulnerabilities=report_values,
-        )
+        engine_kwargs = {
+            "engine_id": selection.engine_id,
+            "engine_label": selection.engine_label,
+            "scan_id": scan_id,
+            "project_path": project,
+            "code_scan_path": scan_root,
+            "scan_dir": scan_dir,
+            "work_dir": engine_work_dir,
+            "index_db_path": index_path,
+            "config": config,
+            "reporter": reporter,
+            "checker_names": list(checker_names),
+            "checker_packages": list(checker_packages),
+            "product": product,
+            "validation_environment": validation_environment,
+            "feedback_entries": list(feedback_entries),
+            "code_graph_mcp": copy.deepcopy(code_graph_mcp),
+            "is_resume": is_resume,
+            "retry_candidates": retry_candidates,
+            "retry_total_candidates": retry_total_candidates,
+            "retry_processed_offset": retry_processed_offset,
+            "resume_threat_analysis": resume_threat_analysis,
+            "retry_threat_audit_task_ids": retry_threat_audit_task_ids,
+            "output": process_output,
+            "cancel_event": cancel_event,
+            "report_vulnerabilities": report_values,
+        }
         try:
-            output = await run_mining_engine(loaded, context)
-            for vulnerability in output.vulnerabilities:
-                vulnerability.engine_id = selection.engine_id
-                vulnerability.engine_label = selection.engine_label
+            output = await run_mining_engine(loaded, **engine_kwargs)
+            vulnerabilities = output["vulnerabilities"]
             unreported: list[Vulnerability] = []
             remaining_reported = dict(reported_vulnerability_counts)
-            for vulnerability in output.vulnerabilities:
+            for vulnerability in vulnerabilities:
                 fingerprint = vulnerability.model_dump_json()
                 count = remaining_reported.get(fingerprint, 0)
                 if count > 0:
@@ -529,9 +534,12 @@ async def run_scan(
                 else:
                     unreported.append(vulnerability)
             if unreported:
-                await report_values(unreported)
-            run.status = output.status
-            run.error_message = output.error_message
+                await report_values([
+                    vulnerability.model_dump(mode="json")
+                    for vulnerability in unreported
+                ])
+            run.status = str(output["status"])
+            run.error_message = str(output["error_message"])
             return run, output
         except asyncio.CancelledError:
             run.status = "cancelled"
@@ -588,9 +596,9 @@ async def run_scan(
                 )
             if output is None:
                 continue
-            audited.extend(output.vulnerabilities)
-            total += output.total_candidates
-            processed += output.processed_candidates
+            audited.extend(output["vulnerabilities"])
+            total += int(output["total_candidates"])
+            processed += int(output["processed_candidates"])
 
         if cancel_event.is_set():
             status = "cancelled"

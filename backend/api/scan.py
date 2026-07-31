@@ -1607,7 +1607,7 @@ def _normalized_call_chain(value: object) -> list[dict[str, object]]:
 
 
 def _call_chain_label(item: dict[str, object]) -> str:
-    function = str(item.get("function") or "")
+    function = str(item.get("function") or "") or "未知函数"
     file_path = str(item.get("file") or "")
     line = int(item.get("line") or 0)
     if file_path and line > 0:
@@ -1632,10 +1632,17 @@ def _vuln_report_markdown(
     severity_text = (
         f"{severity_labels[severity]} ({severity})"
         if severity in severity_labels
-        else severity or "（无）"
+        else severity or "未知"
     )
+    vuln_type = str(vuln.vuln_type or "").strip() or "未知类型"
+    file_path = str(vuln.file or "").strip() or "未知文件"
+    line = int(vuln.line or 0)
+    line_text = str(line) if line > 0 else "未知"
+    function = str(vuln.function or "").strip() or "未知函数"
     lines: list[str] = []
-    lines.append(f"# 漏洞报告 — {vuln.vuln_type} @ {vuln.file}:{vuln.line}")
+    lines.append(
+        f"# 漏洞报告 — {vuln_type} @ {file_path}:{line_text}"
+    )
     lines.append("")
     lines.append("| 字段 | 内容 |")
     lines.append("| --- | --- |")
@@ -1644,10 +1651,10 @@ def _vuln_report_markdown(
         f"| 漏洞挖掘引擎 | {vuln.engine_label} ({vuln.engine_id}) |"
     )
     lines.append(f"| 严重程度 | {severity_text} |")
-    lines.append(f"| 漏洞文件 | {vuln.file} |")
-    lines.append(f"| 漏洞函数 | {vuln.function} |")
-    lines.append(f"| 漏洞行号 | {vuln.line} |")
-    lines.append(f"| 漏洞类型 | {vuln.vuln_type} |")
+    lines.append(f"| 漏洞文件 | {file_path} |")
+    lines.append(f"| 漏洞函数 | {function} |")
+    lines.append(f"| 漏洞行号 | {line_text} |")
+    lines.append(f"| 漏洞类型 | {vuln_type} |")
     call_chain = _normalized_call_chain(
         getattr(vuln, "call_chain", None) or [],
     )
@@ -1671,7 +1678,7 @@ def _vuln_report_markdown(
     lines.append("")
     lines.append("## 漏洞描述")
     lines.append("")
-    lines.append(vuln.description or "（无）")
+    lines.append(vuln.description or "未知")
     lines.append("")
     impact = str(getattr(vuln, "impact", "") or "").strip()
     if impact:
@@ -1707,7 +1714,7 @@ def _vuln_report_markdown(
         lines.append("")
     vulnerability_report = str(getattr(vuln, "vulnerability_report", "") or "").strip()
     if vulnerability_report:
-        lines.append("## 旧版模型漏洞报告")
+        lines.append("## 漏洞挖掘引擎报告")
         lines.append("")
         lines.append(vulnerability_report)
         lines.append("")
@@ -1780,7 +1787,11 @@ async def download_vulnerability_report(
     fp_map = _scan_fp_result_map(scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
     markdown = _vuln_report_markdown(idx, vuln, fp_map.get(idx), validation_map.get(idx))
-    fname = f"vuln-{idx}-{_safe_filename_part(vuln.file)}_{vuln.line}.md"
+    fname = (
+        f"vuln-{idx}-"
+        f"{_safe_filename_part(vuln.file or 'unknown')}_"
+        f"{vuln.line if vuln.line > 0 else 'unknown'}.md"
+    )
     return Response(
         content=markdown,
         media_type="text/markdown; charset=utf-8",
@@ -1828,7 +1839,12 @@ async def _trigger_vulnerability_validation(
         )
         if env_config is not None:
             supported = {str(item).strip().casefold() for item in env_config.supported_vulnerability_types}
-            if "*" not in supported and vuln.vuln_type.strip().casefold() not in supported:
+            vulnerability_type = vuln.vuln_type.strip().casefold()
+            if (
+                vulnerability_type
+                and "*" not in supported
+                and vulnerability_type not in supported
+            ):
                 raise HTTPException(
                     status_code=400,
                     detail=f"验证环境 {validation_environment} 不支持漏洞类型 {vuln.vuln_type}",
@@ -2033,10 +2049,17 @@ async def download_report_zip(
                     summary_content = warning + "\n\n" + summary_content
                 zf.writestr("fp-review-summary.md", summary_content)
             for i, v in confirmed:
-                entry = f"vuln-{i}-{_safe_filename_part(v.file)}_{v.line}.md"
+                export_file = v.file or "unknown"
+                export_line = v.line if v.line > 0 else "unknown"
+                entry = (
+                    f"vuln-{i}-{_safe_filename_part(export_file)}_"
+                    f"{export_line}.md"
+                )
                 index_lines.append(
-                    f"- [{v.engine_label} · {v.vuln_type} @ "
-                    f"{v.file}:{v.line}]({entry})"
+                    f"- [{v.engine_label} · "
+                    f"{v.vuln_type or '未知类型'} @ "
+                    f"{v.file or '未知文件'}:"
+                    f"{v.line if v.line > 0 else '未知'}]({entry})"
                 )
                 zf.writestr(entry, _vuln_report_markdown(i, v, fp_map.get(i), validation_map.get(i)))
             zf.writestr("README.md", "\n".join(index_lines) + "\n")

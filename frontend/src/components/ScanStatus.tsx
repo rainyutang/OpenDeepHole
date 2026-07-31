@@ -113,6 +113,22 @@ function isAiConfirmed(vuln: { ai_verdict?: string; confirmed?: boolean }): bool
   return vuln.ai_verdict === "confirmed" || (!vuln.ai_verdict && !!vuln.confirmed);
 }
 
+function vulnerabilityTypeLabel(vuln: Vulnerability): string {
+  return vuln.vuln_type?.trim() || "未知类型";
+}
+
+function vulnerabilityLocation(vuln: Vulnerability, short = false): string {
+  const file = vuln.file?.trim();
+  const fileLabel = file
+    ? (short ? file.split("/").pop() || file : file)
+    : "未知文件";
+  return `${fileLabel}:${vuln.line > 0 ? vuln.line : "未知行号"}`;
+}
+
+function vulnerabilityFunctionLabel(vuln: Vulnerability): string {
+  return vuln.function?.trim() || "未知函数";
+}
+
 function isStaticCandidateVulnerability(vuln: Vulnerability): boolean {
   return (vuln.analysis_source || "static_candidate") === "static_candidate";
 }
@@ -2773,10 +2789,10 @@ function ScanOverview({
               </div>
             ) : currentFpReviewTargets.length > 0 ? (
               <div className="mt-3 space-y-2">
-                {currentFpReviewTargets.map((item) => (
-                  <div key={`${item.file}:${item.line}:${item.function}`} className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-                    <div className="font-mono text-xs text-amber-100">{item.file}:{item.line}</div>
-                    <div className="mt-1 truncate font-mono text-xs text-slate-400">{item.function}</div>
+                {currentFpReviewTargets.map((item, index) => (
+                  <div key={`${index}:${item.file}:${item.line}:${item.function}`} className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+                    <div className="font-mono text-xs text-amber-100">{vulnerabilityLocation(item)}</div>
+                    <div className="mt-1 truncate font-mono text-xs text-slate-400">{vulnerabilityFunctionLabel(item)}</div>
                   </div>
                 ))}
               </div>
@@ -4087,7 +4103,6 @@ function FpReviewPanel({
               <ul className="divide-y divide-slate-800">
                 {items.map(({ vuln, index, result, running }) => {
                   const active = selectedIndex === index;
-                  const fileName = vuln.file.split("/").pop() || vuln.file;
                   return (
                     <li key={`${index}-${vuln.file}-${vuln.line}`}>
                       <button
@@ -4099,22 +4114,20 @@ function FpReviewPanel({
                       >
                         <div className="flex items-center gap-2">
                           <span className="font-mono text-[11px] text-slate-500">#{index}</span>
-                          <span className="truncate font-mono text-xs text-slate-200" title={`${vuln.file}:${vuln.line}`}>
-                            {fileName}:{vuln.line}
+                          <span className="truncate font-mono text-xs text-slate-200" title={vulnerabilityLocation(vuln)}>
+                            {vulnerabilityLocation(vuln, true)}
                           </span>
                           {running && <span className="ml-auto h-3 w-3 shrink-0 rounded-full border border-amber-500/30 border-t-amber-300 animate-spin" />}
                         </div>
                         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                           <span className="rounded bg-slate-700/50 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-400">
-                            {vuln.vuln_type}
+                            {vulnerabilityTypeLabel(vuln)}
                           </span>
                           <StatusPill label={fpReviewItemLabel(result, running)} tone={fpReviewItemTone(result, running)} />
                         </div>
-                        {vuln.function && (
-                          <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={vuln.function}>
-                            {vuln.function}
-                          </div>
-                        )}
+                        <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={vulnerabilityFunctionLabel(vuln)}>
+                          {vulnerabilityFunctionLabel(vuln)}
+                        </div>
                       </button>
                     </li>
                   );
@@ -4164,11 +4177,11 @@ function FpReviewDetail({
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-xs text-slate-500">#{index}</span>
-              <span className="text-sm font-semibold text-slate-100">{vulnerability.vuln_type}</span>
+              <span className="text-sm font-semibold text-slate-100">{vulnerabilityTypeLabel(vulnerability)}</span>
               <span className="text-xs text-slate-500">{vulnerabilitySeverityLabel(vulnerability.severity)}</span>
             </div>
-            <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerability.file}:{vulnerability.line}</div>
-            <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerability.function}</div>
+            <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerabilityLocation(vulnerability)}</div>
+            <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerabilityFunctionLabel(vulnerability)}</div>
           </div>
           <div className="flex items-center gap-2">
             {running && <span className="h-3 w-3 rounded-full border border-amber-500/30 border-t-amber-300 animate-spin" />}
@@ -4345,7 +4358,6 @@ function ValidationPanel({
                   const active = selectedIndex === index;
                   const statusText = validation?.status || "pending";
                   const itemTone = validationTone(validation);
-                  const fileName = vuln.file.split("/").pop() || vuln.file;
                   return (
                     <li key={`${index}-${vuln.file}-${vuln.line}`}>
                       <button
@@ -4356,22 +4368,20 @@ function ValidationPanel({
                         }`}
                       >
                         <div className="flex items-center gap-2">
-                          <span className="truncate font-mono text-xs text-slate-200" title={`${vuln.file}:${vuln.line}`}>
-                            {fileName}:{vuln.line}
+                          <span className="truncate font-mono text-xs text-slate-200" title={vulnerabilityLocation(vuln)}>
+                            {vulnerabilityLocation(vuln, true)}
                           </span>
                           {validation?.running && <span className="ml-auto h-3 w-3 shrink-0 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin" />}
                         </div>
                         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                           <span className="text-[10px] font-semibold uppercase text-slate-400 bg-slate-700/50 px-1.5 py-0.5 rounded">
-                            {vuln.vuln_type}
+                            {vulnerabilityTypeLabel(vuln)}
                           </span>
                           <StatusPill label={validationStatusLabel(statusText)} tone={itemTone} />
                         </div>
-                        {vuln.function && (
-                          <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={vuln.function}>
-                            {vuln.function}
-                          </div>
-                        )}
+                        <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={vulnerabilityFunctionLabel(vuln)}>
+                          {vulnerabilityFunctionLabel(vuln)}
+                        </div>
                       </button>
                     </li>
                   );
@@ -4425,11 +4435,11 @@ function ValidationDetail({
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-xs text-slate-500">#{index}</span>
-              <span className="text-sm font-semibold text-slate-100">{vulnerability.vuln_type}</span>
+              <span className="text-sm font-semibold text-slate-100">{vulnerabilityTypeLabel(vulnerability)}</span>
               <span className="text-xs text-slate-500">{vulnerabilitySeverityLabel(vulnerability.severity)}</span>
             </div>
-            <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerability.file}:{vulnerability.line}</div>
-            <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerability.function}</div>
+            <div className="mt-1 break-all font-mono text-xs text-slate-300">{vulnerabilityLocation(vulnerability)}</div>
+            <div className="mt-1 truncate font-mono text-xs text-slate-500">{vulnerabilityFunctionLabel(vulnerability)}</div>
           </div>
           <div className="flex items-center gap-2">
             {canStop && (
@@ -5099,7 +5109,7 @@ function vulnerabilitySeverityLabel(value: string): string {
   if (value === "high") return "严重";
   if (value === "medium") return "一般";
   if (value === "low") return "提示";
-  return value || "-";
+  return value || "未知严重性";
 }
 
 function statusLabel(value: string): string {
