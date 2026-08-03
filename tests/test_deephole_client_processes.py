@@ -370,6 +370,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         assert audit["status"] == "success"
         assert audit["vulnerabilities"][0]["analysis_source"] == "threat_audit"
         assert audit["vulnerabilities"][0]["confirmed"] is True
+        assert audit["vulnerabilities"][0]["vuln_type"] == "oob"
         assert audit["vulnerabilities"][0]["call_chain"][0] == {
             "function": "entry",
             "file": "src/entry.c",
@@ -1239,11 +1240,12 @@ def test_candidate_audit_streams_results_before_the_batch_finishes() -> None:
                 second_started.set()
                 await release_second.wait()
             return _task_result(_audit_item(
-                confirmed=False,
+                confirmed=True,
                 file=f"{'first' if audit_index == 0 else 'second'}.c",
                 line=audit_index + 1,
                 function="first" if audit_index == 0 else "second",
-                description="candidate is guarded",
+                description="candidate is vulnerable",
+                vuln_type="llm-invented-type",
             ))
 
         async def on_candidate_result(result: dict) -> None:
@@ -1290,6 +1292,14 @@ def test_candidate_audit_streams_results_before_the_batch_finishes() -> None:
 
         assert audited["status"] == "success"
         assert [item["audit_index"] for item in candidate_results] == [0, 1]
+        assert all(
+            item["vulnerabilities"][0]["vuln_type"] == "demo"
+            for item in candidate_results
+        )
+        assert all(
+            item["vuln_type"] == "demo"
+            for item in audited["vulnerabilities"]
+        )
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))
@@ -1330,6 +1340,7 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
                 line=9,
                 function="project_issue",
                 description="project-level issue",
+                vuln_type="project-sql-injection",
             ),
             _audit_item(
                 confirmed=True,
@@ -1337,6 +1348,7 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
                 line=12,
                 function="other_issue",
                 description="second project-level issue",
+                vuln_type="project-auth-bypass",
             ),
         ])
         candidates = [
@@ -1414,6 +1426,10 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
             item["ai_verdict"] == "confirmed"
             for item in by_index[4]["vulnerabilities"]
         )
+        assert [
+            item["vuln_type"]
+            for item in by_index[4]["vulnerabilities"]
+        ] == ["project-sql-injection", "project-auth-bypass"]
         assert by_index[4]["skill_reports"] == []
         project_call = run_task.await_args_list[-1]
         assert project_call.kwargs["output_schema"]["type"] == "array"

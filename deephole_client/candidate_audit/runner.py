@@ -114,6 +114,11 @@ def _normalize_vulnerability(
     raw: dict[str, Any], candidate: dict[str, Any], audit_index: int, source: dict[str, Any],
 ) -> dict[str, Any]:
     confirmed = bool(raw.get("confirmed"))
+    vuln_type = (
+        str(raw.get("vuln_type") or candidate.get("vuln_type") or "unknown")
+        if candidate.get("function") == PROJECT_LEVEL_FUNCTION
+        else str(candidate.get("vuln_type") or "unknown")
+    )
     return {
         "file": str(raw.get("file") or candidate.get("file") or "."),
         "line": max(1, int(raw.get("line") or candidate.get("line") or 1)),
@@ -129,7 +134,7 @@ def _normalize_vulnerability(
             and str(item.get("function") or "").strip()
             and str(item.get("file") or "").strip()
         ],
-        "vuln_type": str(raw.get("vuln_type") or candidate.get("vuln_type") or "unknown"),
+        "vuln_type": vuln_type,
         "severity": str(raw.get("severity") or ("unknown" if confirmed else "low")),
         "description": str(raw.get("description") or candidate.get("description") or ""),
         "impact": str(raw.get("impact") or ""),
