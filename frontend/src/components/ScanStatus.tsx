@@ -11,7 +11,7 @@ import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 import { ThemeToggle } from "./ThemeToggle";
 
-const MAX_LOG_LINES = 500;
+const MAX_LOG_LINES = 200;
 const STATIC_CANDIDATE_PAGE_SIZE = 20;
 const SCAN_QUEUE_PAGE_SIZE = 12;
 const AGENT_DISCONNECT_ERROR = "Agent 断开连接";

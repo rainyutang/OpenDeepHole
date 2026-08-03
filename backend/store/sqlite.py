@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.scan_metrics import VulnStat
+from backend.scan_event_log import (
+    SCAN_EVENT_RETENTION_LIMIT,
+    is_agent_local_task_output,
+    task_output_glob_patterns,
+)
 from backend.models import (
     Announcement,
     AgentMcpConfig,
@@ -505,6 +510,7 @@ CREATE INDEX IF NOT EXISTS idx_fp_review_scan ON fp_review_jobs(scan_id);
 CREATE INDEX IF NOT EXISTS idx_vulnerabilities_scan ON vulnerabilities(scan_id);
 CREATE INDEX IF NOT EXISTS idx_vulnerability_validations_scan ON vulnerability_validations(scan_id);
 CREATE INDEX IF NOT EXISTS idx_events_scan ON events(scan_id);
+CREATE INDEX IF NOT EXISTS idx_events_scan_id ON events(scan_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_fp_review_results_review ON fp_review_results(review_id);
 
 CREATE TABLE IF NOT EXISTS users (
@@ -1278,6 +1284,33 @@ class SqliteScanStore(ScanStoreBase):
         # user_id 列由上方 ALTER 迁移产生，索引只能建在迁移之后
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scans_user ON scans(user_id)"
+        )
+        task_output_patterns = task_output_glob_patterns()
+        task_output_clauses = " OR ".join(
+            "message GLOB ?" for _ in task_output_patterns
+        )
+        self._conn.execute(
+            f"DELETE FROM events WHERE {task_output_clauses}",
+            task_output_patterns,
+        )
+        self._conn.execute(
+            """\
+            DELETE FROM events
+            WHERE id IN (
+                SELECT id
+                FROM (
+                    SELECT
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY scan_id
+                            ORDER BY id DESC
+                        ) AS event_rank
+                    FROM events
+                )
+                WHERE event_rank > ?
+            )
+            """,
+            (SCAN_EVENT_RETENTION_LIMIT,),
         )
         self._conn.commit()
 
@@ -2973,6 +3006,8 @@ class SqliteScanStore(ScanStoreBase):
     # -- Events --
 
     def add_event(self, scan_id: str, event: ScanEvent) -> None:
+        if is_agent_local_task_output(event.message):
+            return
         with self._lock:
             self._conn.execute(
                 """\
@@ -2988,13 +3023,34 @@ class SqliteScanStore(ScanStoreBase):
                     event.candidate_index,
                 ),
             )
+            self._conn.execute(
+                """\
+                DELETE FROM events
+                WHERE scan_id = ?
+                  AND id NOT IN (
+                      SELECT id
+                      FROM events
+                      WHERE scan_id = ?
+                      ORDER BY id DESC
+                      LIMIT ?
+                  )
+                """,
+                (scan_id, scan_id, SCAN_EVENT_RETENTION_LIMIT),
+            )
             self._conn.commit()
 
     def get_events(self, scan_id: str) -> list[ScanEvent]:
         cur = self._conn.execute(
-            "SELECT * FROM events WHERE scan_id = ? ORDER BY id",
-            (scan_id,),
+            """\
+            SELECT *
+            FROM events
+            WHERE scan_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (scan_id, SCAN_EVENT_RETENTION_LIMIT),
         )
+        rows = list(reversed(cur.fetchall()))
         return [
             ScanEvent(
                 timestamp=r["timestamp"],
@@ -3002,7 +3058,7 @@ class SqliteScanStore(ScanStoreBase):
                 message=r["message"],
                 candidate_index=r["candidate_index"],
             )
-            for r in cur.fetchall()
+            for r in rows
         ]
 
     # -- Processed keys --

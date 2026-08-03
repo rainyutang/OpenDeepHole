@@ -6,11 +6,13 @@ from pathlib import Path
 from backend.models import (
     Candidate,
     FpReviewResult,
+    ScanEvent,
     ScanItemStatus,
     ScanMeta,
     ScanStatus,
     Vulnerability,
 )
+from backend.scan_event_log import SCAN_EVENT_RETENTION_LIMIT
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -59,6 +61,115 @@ def _make_vuln(
         user_verdict=user_verdict,
         audit_index=audit_index,
     )
+
+
+class ScanEventStoreTests(unittest.TestCase):
+    def test_add_event_filters_task_output_and_keeps_business_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(*_make_scan("scan-events"))
+
+            for message in (
+                "[threat_analysis][session-1][tool] name=read path=src/a.c",
+                "[threat_analysis][session-1][session]",
+                "[threat_analysis][session-1][step] TOOL START",
+                "[2026-08-03 12:00:00] "
+                "[candidate_audit][session-2][task] START",
+            ):
+                store.add_event(
+                    "scan-events",
+                    ScanEvent.create("auditing", message),
+                )
+            store.add_event(
+                "scan-events",
+                ScanEvent.create("auditing", "[1/3] NPD a.c:1 — f"),
+            )
+
+            events = store.get_events("scan-events")
+            self.assertEqual(
+                [event.message for event in events],
+                ["[1/3] NPD a.c:1 — f"],
+            )
+
+    def test_add_event_keeps_only_latest_events_in_chronological_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(*_make_scan("scan-events"))
+
+            for index in range(SCAN_EVENT_RETENTION_LIMIT + 5):
+                store.add_event(
+                    "scan-events",
+                    ScanEvent.create("phase", f"event-{index}"),
+                )
+
+            events = store.get_events("scan-events")
+            self.assertEqual(len(events), SCAN_EVENT_RETENTION_LIMIT)
+            self.assertEqual(events[0].message, "event-5")
+            self.assertEqual(
+                events[-1].message,
+                f"event-{SCAN_EVENT_RETENTION_LIMIT + 4}",
+            )
+            count = store._conn.execute(
+                "SELECT COUNT(*) FROM events WHERE scan_id = ?",
+                ("scan-events",),
+            ).fetchone()[0]
+            self.assertEqual(count, SCAN_EVENT_RETENTION_LIMIT)
+
+    def test_migration_filters_existing_task_output_and_prunes_history(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "scan.db"
+            store = SqliteScanStore(db_path)
+            store.save_scan(*_make_scan("scan-events"))
+            rows = [
+                (
+                    "scan-events",
+                    "2026-08-03T00:00:00+00:00",
+                    "phase",
+                    f"event-{index}",
+                    None,
+                )
+                for index in range(SCAN_EVENT_RETENTION_LIMIT + 5)
+            ]
+            rows.extend((
+                (
+                    "scan-events",
+                    "2026-08-03T00:00:00+00:00",
+                    "auditing",
+                    "[threat_analysis][session-1][session]",
+                    None,
+                ),
+                (
+                    "scan-events",
+                    "2026-08-03T00:00:00+00:00",
+                    "auditing",
+                    "[2026-08-03 12:00:00] "
+                    "[candidate_audit][session-2][skill] loaded",
+                    None,
+                ),
+            ))
+            store._conn.executemany(
+                """\
+                INSERT INTO events (
+                    scan_id, timestamp, phase, message, candidate_index
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            store._conn.commit()
+            store._conn.close()
+
+            migrated = SqliteScanStore(db_path)
+            events = migrated.get_events("scan-events")
+            self.assertEqual(len(events), SCAN_EVENT_RETENTION_LIMIT)
+            self.assertEqual(events[0].message, "event-5")
+            self.assertEqual(
+                events[-1].message,
+                f"event-{SCAN_EVENT_RETENTION_LIMIT + 4}",
+            )
 
 
 class VulnerabilityStoreTests(unittest.TestCase):

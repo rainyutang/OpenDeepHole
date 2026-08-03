@@ -773,6 +773,7 @@ int caller(void) {
         },
     ]
     progress: list[tuple[str, int, int]] = []
+    file_progress: list[tuple[int, int]] = []
     db = CodeDatabase(tmp_path / "code_index.db")
     analyzer = CppAnalyzer(db)
     analyzer._ensure_tools_available = lambda: None
@@ -781,6 +782,9 @@ int caller(void) {
     try:
         analyzer.analyze_directory(
             tmp_path,
+            on_progress=lambda current, total: file_progress.append(
+                (current, total)
+            ),
             on_stage_progress=lambda stage, current, total: progress.append(
                 (stage, current, total)
             ),
@@ -793,3 +797,5 @@ int caller(void) {
     assert ("ctags entries", 2, 2) in progress
     assert ("tree-sitter refs", 0, 2) in progress
     assert ("tree-sitter refs", 2, 2) in progress
+    assert file_progress[0] == (0, 1)
+    assert file_progress[-1] == (1, 1)

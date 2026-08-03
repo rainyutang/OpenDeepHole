@@ -336,6 +336,42 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.total_candidates, 7)
             self.assertEqual(stored.status, ScanItemStatus.ANALYZING)
 
+    def test_task_output_event_is_discarded_before_scan_state_and_sse(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.PENDING)
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = scan
+            published: list[tuple[str, str, dict]] = []
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.sse.publish",
+                    side_effect=lambda scan_id, event_type, data: published.append(
+                        (scan_id, event_type, data)
+                    ),
+                ),
+            ):
+                for message in (
+                    "[threat_analysis][session-1][tool] name=read path=src/a.c",
+                    "[threat_analysis][session-1][step] TOOL START",
+                    "[2026-08-03 12:00:00] "
+                    "[candidate_audit][session-2][task] START",
+                ):
+                    result = asyncio.run(agent_api.agent_scan_event(
+                        "scan-1",
+                        ScanEvent.create("auditing", message),
+                    ))
+                    self.assertEqual(result, {"ok": True, "discarded": True})
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.PENDING)
+            self.assertEqual(store.get_events("scan-1"), [])
+            self.assertEqual(published, [])
+
     def test_auditing_event_marks_static_analysis_done_if_done_push_was_missed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")

@@ -348,6 +348,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
     async def test_code_graph_stage_progress_keeps_source_file_counts(self) -> None:
         reporter = _reporter()
         config = AgentConfig()
+        task_log = "[threat_analysis][session-1][tool] name=read path=src/a.c"
+        validation_log = "explicit validation output"
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -355,6 +357,18 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             project.mkdir()
 
             async def graph(**kwargs):
+                await kwargs["output"]({
+                    "process": "threat_analysis",
+                    "kind": "log",
+                    "message": task_log,
+                    "data": {},
+                })
+                await kwargs["output"]({
+                    "process": "vulnerability_validation",
+                    "kind": "log",
+                    "message": validation_log,
+                    "data": {"title": "验证过程"},
+                })
                 await kwargs["output"]({
                     "process": "code_graph_build",
                     "kind": "progress",
@@ -380,6 +394,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     "deephole_client.scanner.run_code_graph_build",
                     side_effect=graph,
                 ),
+                patch("deephole_client.scanner.print") as console_print,
             ):
                 await run_scan(
                     config=config,
@@ -412,8 +427,14 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             call.args[1].message
             for call in reporter.send_event.await_args_list
         ]
-        self.assertIn("Indexing source files: 5/10 (50.0%)", messages)
-        self.assertIn("tree-sitter refs: 400/800 (50.0%)", messages)
+        self.assertNotIn("Indexing source files: 5/10 (50.0%)", messages)
+        self.assertNotIn("tree-sitter refs: 400/800 (50.0%)", messages)
+        self.assertNotIn(task_log, messages)
+        self.assertIn(validation_log, messages)
+        self.assertTrue(any(
+            call.args and call.args[0] == task_log
+            for call in console_print.call_args_list
+        ))
         self.assertEqual(reporter.finish_scan.await_args.args[2], "cancelled")
 
     async def test_code_graph_exception_finishes_scan_as_error(self) -> None:

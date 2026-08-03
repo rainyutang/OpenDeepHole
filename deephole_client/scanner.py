@@ -15,6 +15,7 @@ from backend.models import (
     ThreatAnalysisRunStatus,
     Vulnerability,
 )
+from backend.scan_event_log import is_agent_local_task_output
 from task_agent import opencode_task_context
 from task_agent.output_format import is_task_output_line
 
@@ -345,7 +346,15 @@ async def run_scan(
 
     async def process_output(event: dict[str, Any]) -> None:
         process = str(event.get("process") or "process")
+        kind = str(event.get("kind") or "")
         message = str(event.get("message") or "")
+        if message and (
+            (process == "threat_analysis" and kind == "log")
+            or is_agent_local_task_output(message)
+        ):
+            print(_format_process_console_line(process, message), flush=True)
+            return
+
         index_status: dict[str, Any] | None = None
         if process == "code_graph_build":
             counts = _event_progress_counts(event)
@@ -364,7 +373,7 @@ async def run_scan(
                     "stage_current": 0 if is_file_progress else current,
                     "stage_total": 0 if is_file_progress else total,
                 }
-            elif event.get("kind") == "progress":
+            elif kind == "progress":
                 index_status = {
                     "parsed_files": index_file_progress["current"],
                     "total_files": index_file_progress["total"],
@@ -372,7 +381,18 @@ async def run_scan(
                     "stage_current": 0,
                     "stage_total": 0,
                 }
-        if message:
+        is_code_graph_progress = (
+            process == "code_graph_build" and kind == "progress"
+        )
+        if message and is_code_graph_progress:
+            print(
+                _format_process_console_line(
+                    process,
+                    _format_process_event_message(event, message),
+                ),
+                flush=True,
+            )
+        elif message:
             await emit(
                 process,
                 _format_process_event_message(event, message),

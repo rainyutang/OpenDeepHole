@@ -81,6 +81,10 @@ from backend.models import (
     VulnerabilityValidation,
 )
 from backend.store import get_scan_store
+from backend.scan_event_log import (
+    SCAN_EVENT_RETENTION_LIMIT,
+    is_agent_local_task_output,
+)
 from backend.threat_data import parse_threat_analysis_data
 
 router = APIRouter(prefix="/api/agent")
@@ -2304,6 +2308,9 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
 @router.post("/scan/{scan_id}/event")
 async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
     """Agent pushes a progress event. Updates in-memory scan state and DB."""
+    if is_agent_local_task_output(event.message):
+        return {"ok": True, "discarded": True}
+
     store = get_scan_store()
     store.add_event(scan_id, event)
 
@@ -2312,8 +2319,8 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
         return {"ok": True}
 
     scan.events.append(event)
-    if len(scan.events) > 500:
-        scan.events = scan.events[-500:]
+    if len(scan.events) > SCAN_EVENT_RETENTION_LIMIT:
+        scan.events = scan.events[-SCAN_EVENT_RETENTION_LIMIT:]
 
     progress_kwargs: dict = {}
 

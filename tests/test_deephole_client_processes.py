@@ -17,6 +17,8 @@ from task_agent import OpenCodeResult
 from deephole_client.candidate_audit import run_candidate_audit
 from deephole_client.candidate_audit.runner import _candidate_prompt
 from deephole_client.code_graph_build import run_code_graph_build
+from deephole_client.code_graph_build.cpp_analyzer import CppAnalyzer
+from deephole_client.code_graph_build.runner import _StageProgressGate
 from deephole_client.fp_review import run_fp_review
 from deephole_client.fp_check_review import run_fp_check_review
 from deephole_client.static_analysis import run_static_analysis
@@ -222,6 +224,77 @@ def test_code_graph_build_stages_database_beside_final_index() -> None:
             assert database.is_index_complete()
         finally:
             database.close()
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_code_graph_progress_gate_reports_each_stage_by_decile() -> None:
+    gate = _StageProgressGate()
+
+    accepted = [
+        current
+        for current in (0, 1, 9, 10, 11, 19, 20, 95, 100, 100)
+        if gate.accepts("source files", current, 100)
+    ]
+    second_stage = [
+        current
+        for current in (0, 4, 5, 9, 10)
+        if gate.accepts("references", current, 10)
+    ]
+
+    assert accepted == [0, 10, 20, 95, 100]
+    assert second_stage == [0, 4, 5, 9, 10]
+    assert gate.accepts("empty", 0, 0)
+    assert not gate.accepts("empty", 0, 0)
+
+
+def test_code_graph_build_throttles_progress_before_output() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        events: list[dict] = []
+
+        def analyze(
+            _self,
+            _project,
+            *,
+            on_progress,
+            on_stage_progress,
+            cancel_check,
+        ) -> None:
+            del cancel_check
+            for current in (0, 1, 9, 10, 11, 19, 20, 95, 100):
+                on_progress(current, 100)
+            for current in (0, 5, 9, 10):
+                on_stage_progress("references", current, 10)
+
+        with patch.object(
+            CppAnalyzer,
+            "analyze_directory",
+            autospec=True,
+            side_effect=analyze,
+        ):
+            result = await run_code_graph_build(
+                project_path=project,
+                work_dir=root / "work",
+                reuse_cache=False,
+                output=events.append,
+            )
+
+        assert result["status"] == "success"
+        source_progress = [
+            event["data"]["current"]
+            for event in events
+            if event["message"] == "Indexing source files"
+        ]
+        reference_progress = [
+            event["data"]["current"]
+            for event in events
+            if event["message"] == "references"
+        ]
+        assert source_progress == [0, 10, 20, 95, 100]
+        assert reference_progress == [0, 5, 9, 10]
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))

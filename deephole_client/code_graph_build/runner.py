@@ -17,6 +17,7 @@ from .index_store import IndexStore
 
 
 PROCESS_NAME = "code_graph_build"
+_PROGRESS_DECILES = 10
 _ALLOWED_KEYS = {
     "project_path",
     "work_dir",
@@ -28,6 +29,41 @@ _ALLOWED_KEYS = {
     "cancel_event",
 }
 _REQUIRED_KEYS = {"project_path", "work_dir"}
+
+
+class _StageProgressGate:
+    """Allow one progress event per decile for each independent stage."""
+
+    def __init__(self) -> None:
+        self._last: dict[str, tuple[int, int, int]] = {}
+
+    def accepts(self, stage: str, current: int, total: int) -> bool:
+        normalized_current = max(0, current)
+        normalized_total = max(0, total)
+        previous = self._last.get(stage)
+
+        if normalized_total <= 0:
+            if previous == (normalized_current, normalized_total, 0):
+                return False
+            self._last[stage] = (normalized_current, normalized_total, 0)
+            return previous is None or previous[1] != normalized_total
+
+        clamped_current = min(normalized_current, normalized_total)
+        decile = min(
+            _PROGRESS_DECILES,
+            clamped_current * _PROGRESS_DECILES // normalized_total,
+        )
+        if (
+            previous is None
+            or previous[1] != normalized_total
+            or clamped_current < previous[0]
+        ):
+            self._last[stage] = (clamped_current, normalized_total, decile)
+            return True
+        if decile <= previous[2]:
+            return False
+        self._last[stage] = (clamped_current, normalized_total, decile)
+        return True
 
 
 async def _emit(output: Any, kind: str, message: str, **data: Any) -> None:
@@ -191,8 +227,21 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
     _remove_sqlite_files(temp_path)
     loop = asyncio.get_running_loop()
     local_cancel = threading.Event()
+    progress_gate = _StageProgressGate()
 
     def schedule(kind: str, message: str, **data: Any) -> None:
+        if kind == "progress":
+            current = data.get("current")
+            total = data.get("total")
+            if (
+                isinstance(current, int)
+                and not isinstance(current, bool)
+                and isinstance(total, int)
+                and not isinstance(total, bool)
+                and not progress_gate.accepts(message, current, total)
+            ):
+                return
+
         def create_event_task() -> None:
             loop.create_task(_emit(output, kind, message, **data))
 

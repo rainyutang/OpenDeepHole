@@ -260,6 +260,8 @@ class CppAnalyzer:
             self._ensure_tools_available(self.ctags_executable)
 
         source_cache: dict[str, list[str]] = {}
+        if on_progress:
+            on_progress(0, total)
         for idx, filepath in enumerate(files):
             if cancel_check and cancel_check():
                 return
