@@ -645,6 +645,9 @@ OpenCode 模型池统计：
 
 ## 本地开发
 
+框架整体流程、组件能力、输入输出契约和新增引擎、Checker、验证器的接入方法见
+[框架开发指南](docs/framework_development.md)。
+
 ```bash
 # 后端（含热重载）
 pip install -r requirements.txt
