@@ -192,6 +192,15 @@ class MiningEngineRunStatus(BaseModel):
     finished_at: str = ""
 
 
+class ThreatAnalysisRunStatus(BaseModel):
+    """Standalone threat-analysis lifecycle state within a scan."""
+
+    status: str = "pending"
+    error_message: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+
+
 class MiningEngineCatalogItem(BaseModel):
     engine_id: str
     label: str
@@ -560,6 +569,8 @@ class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
     scan_mode: str = "full"
+    threat_analysis_enabled: bool = False
+    threat_analysis_run: ThreatAnalysisRunStatus | None = None
     auto_fp_review: bool = True
     fp_review_method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
     product: str = ""
@@ -1152,6 +1163,7 @@ class CreateScanRequest(BaseModel):
     code_scan_path: str = ""
     scan_name: str = ""
     scan_mode: str = "full"
+    threat_analysis_enabled: bool | None = None
     product: str = ""
     validation_environment: str = ""
     checkers: list[str]
@@ -1183,6 +1195,7 @@ class ScanMeta(BaseModel):
     scan_items: list[str]
     created_at: str
     scan_mode: str = "full"
+    threat_analysis_enabled: bool = False
     mining_engines: list[MiningEngineSelection] = []
     feedback_ids: list[str] = []
     agent_id: str = ""
@@ -1211,6 +1224,7 @@ class ScanSummary(BaseModel):
     scan_id: str
     project_id: str
     scan_mode: str = "full"
+    threat_analysis_enabled: bool = False
     scan_name: str = ""
     product: str = ""
     validation_environment: str = ""

@@ -12,6 +12,7 @@ from typing import Any
 from backend.models import (
     MiningEngineSelection,
     ScanEvent,
+    ThreatAnalysisRunStatus,
     Vulnerability,
 )
 from task_agent import opencode_task_context
@@ -20,7 +21,9 @@ from task_agent.output_format import is_task_output_line
 from .code_graph_build import run_code_graph_build
 from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
+from .process_artifacts import collect_json_artifacts
 from .reporter import Reporter
+from .threat_analysis_runner import run_threat_analysis
 from .vulnerability_mining import (
     MiningEngineRun,
     load_mining_engines,
@@ -296,6 +299,7 @@ async def run_scan(
     resume_threat_analysis: bool = False,
     retry_threat_audit_task_ids: list[str] | None = None,
     scan_mode: str = SCAN_MODE_FULL,
+    threat_analysis_enabled: bool = False,
     code_graph_mcp: dict[str, Any] | None = None,
     mining_engines: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -318,6 +322,9 @@ async def run_scan(
     }:
         raise ValueError(f"Unknown scan mode: {scan_mode}")
     threat_only = normalized_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY
+    threat_analysis_selected = bool(
+        threat_analysis_enabled or threat_only
+    )
     registry, selections = _resolve_mining_engines(
         raw_selections=mining_engines,
         threat_only=threat_only,
@@ -388,6 +395,11 @@ async def run_scan(
     await emit("init", f"Scan mode: {normalized_mode}")
     await emit(
         "init",
+        "Threat analysis: "
+        + ("enabled" if threat_analysis_selected else "disabled"),
+    )
+    await emit(
+        "init",
         "Mining engines: "
         + (
             ", ".join(item.engine_label for item in enabled_selections)
@@ -398,7 +410,11 @@ async def run_scan(
     for error in registry.errors:
         await emit("mining_engine", f"Engine discovery warning: {error}")
 
-    if not enabled_selections:
+    threat_audit_selected = any(
+        item.engine_id == "threat_audit"
+        for item in enabled_selections
+    )
+    if threat_audit_selected and not threat_analysis_selected:
         await _finish_scan(
             reporter,
             scan_id,
@@ -406,7 +422,18 @@ async def run_scan(
             vulnerabilities=[],
             total=0,
             processed=0,
-            error="No vulnerability-mining engine is enabled",
+            error="Threat audit requires threat analysis",
+        )
+        return
+    if not enabled_selections and not threat_analysis_selected:
+        await _finish_scan(
+            reporter,
+            scan_id,
+            status="error",
+            vulnerabilities=[],
+            total=0,
+            processed=0,
+            error="No scan process or vulnerability-mining engine is enabled",
         )
         return
 
@@ -499,6 +526,9 @@ async def run_scan(
 
     pool_stop = asyncio.Event()
     pool_task: asyncio.Task[Any] | None = None
+    threat_analysis_task: asyncio.Task[
+        tuple[ThreatAnalysisRunStatus, dict[str, Any] | None]
+    ] | None = None
     engine_tasks: list[
         asyncio.Task[tuple[MiningEngineRun, dict[str, Any] | None]]
     ] = []
@@ -509,6 +539,60 @@ async def run_scan(
     def task_output(line: str) -> None:
         if line:
             print(str(line), flush=True)
+
+    async def execute_threat_analysis(
+    ) -> tuple[ThreatAnalysisRunStatus, dict[str, Any] | None]:
+        run = ThreatAnalysisRunStatus(
+            status="running",
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        await reporter.report_threat_analysis_run(
+            scan_id,
+            run.model_copy(deep=True),
+        )
+        output_path = scan_dir / "threat_analysis"
+        result: dict[str, Any] | None = None
+        try:
+            result = await run_threat_analysis(
+                code_path=scan_root,
+                output_path=output_path,
+                # The native process owns its cache and validates whether a
+                # completed stage can be reused for this scan path.
+                is_resume=True,
+                product_mcp=(
+                    config.product_info.name
+                    if config.product_info.enabled
+                    else None
+                ),
+                output=process_output,
+                cancel_event=cancel_event,
+            )
+            if result.get("result") is not True:
+                raise RuntimeError(
+                    str(result.get("reason") or "Threat analysis failed")
+                )
+            artifact_bundle = collect_json_artifacts(
+                result,
+                output_root=output_path,
+            )
+            await reporter.push_threat_analysis(scan_id, artifact_bundle)
+            run.status = "success"
+            return run, result
+        except asyncio.CancelledError:
+            run.status = "cancelled"
+            raise
+        except Exception as exc:
+            run.status = (
+                "cancelled" if cancel_event.is_set() else "error"
+            )
+            run.error_message = str(exc)
+            return run, None
+        finally:
+            run.finished_at = datetime.now(timezone.utc).isoformat()
+            await reporter.report_threat_analysis_run(
+                scan_id,
+                run.model_copy(deep=True),
+            )
 
     async def execute_engine(
         selection: MiningEngineSelection,
@@ -534,6 +618,31 @@ async def run_scan(
             run.finished_at = datetime.now(timezone.utc).isoformat()
             await _publish_engine_run(reporter, scan_id, run)
             return run, None
+
+        threat_analysis_result: dict[str, Any] | None = None
+        if selection.engine_id == "threat_audit":
+            if threat_analysis_task is None:
+                run.status = "error"
+                run.error_message = "Threat analysis was not started"
+                run.finished_at = datetime.now(timezone.utc).isoformat()
+                await _publish_engine_run(reporter, scan_id, run)
+                return run, None
+            analysis_run, threat_analysis_result = await threat_analysis_task
+            if (
+                analysis_run.status != "success"
+                or threat_analysis_result is None
+            ):
+                run.status = "error"
+                run.error_message = (
+                    "Threat analysis failed: "
+                    + (
+                        analysis_run.error_message
+                        or analysis_run.status
+                    )
+                )
+                run.finished_at = datetime.now(timezone.utc).isoformat()
+                await _publish_engine_run(reporter, scan_id, run)
+                return run, None
 
         run.status = "running"
         run.started_at = datetime.now(timezone.utc).isoformat()
@@ -605,6 +714,10 @@ async def run_scan(
             "cancel_event": cancel_event,
             "report_vulnerabilities": report_values,
         }
+        if selection.engine_id == "threat_audit":
+            engine_kwargs["threat_analysis_result"] = (
+                threat_analysis_result
+            )
         try:
             output = await run_mining_engine(loaded, **engine_kwargs)
             vulnerabilities = output["vulnerabilities"]
@@ -662,14 +775,43 @@ async def run_scan(
             output=task_output,
             cancel_event=cancel_event,
         ):
+            should_run_threat_analysis = (
+                threat_analysis_selected
+                and (
+                    not is_resume
+                    or resume_threat_analysis
+                    or threat_only
+                    or not enabled_selections
+                )
+            )
+            if should_run_threat_analysis:
+                threat_analysis_task = asyncio.create_task(
+                    execute_threat_analysis()
+                )
             engine_tasks = [
                 asyncio.create_task(execute_engine(selection))
                 for selection in enabled_selections
             ]
             results = await asyncio.gather(*engine_tasks)
+            threat_analysis_outcome = (
+                await threat_analysis_task
+                if threat_analysis_task is not None
+                else None
+            )
 
         successful_runs = 0
         failures: list[str] = []
+        if (
+            threat_analysis_outcome is not None
+            and threat_analysis_outcome[0].status == "error"
+        ):
+            failures.append(
+                "Threat analysis: "
+                + (
+                    threat_analysis_outcome[0].error_message
+                    or "analysis failed"
+                )
+            )
         for run, output in results:
             if run.status == "success":
                 successful_runs += 1
@@ -686,6 +828,15 @@ async def run_scan(
 
         if cancel_event.is_set():
             status = "cancelled"
+        elif not enabled_selections:
+            status = (
+                "complete"
+                if (
+                    threat_analysis_outcome is not None
+                    and threat_analysis_outcome[0].status == "success"
+                )
+                else "error"
+            )
         elif successful_runs == 0:
             status = "error"
         else:
@@ -720,6 +871,8 @@ async def run_scan(
         )
     except asyncio.CancelledError:
         cancel_event.set()
+        if threat_analysis_task is not None and not threat_analysis_task.done():
+            threat_analysis_task.cancel()
         for task in engine_tasks:
             if not task.done():
                 task.cancel()
@@ -734,6 +887,8 @@ async def run_scan(
         raise
     except Exception as exc:
         cancel_event.set()
+        if threat_analysis_task is not None and not threat_analysis_task.done():
+            threat_analysis_task.cancel()
         for task in engine_tasks:
             if not task.done():
                 task.cancel()

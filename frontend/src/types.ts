@@ -450,6 +450,8 @@ export interface ScanStatus {
   scan_id: string;
   project_id: string;
   scan_mode?: string;
+  threat_analysis_enabled: boolean;
+  threat_analysis_run?: ThreatAnalysisRunStatus | null;
   auto_fp_review?: boolean;
   fp_review_method?: FpReviewMethod;
   product: string;
@@ -532,6 +534,7 @@ export interface ScanSummary {
   scan_id: string;
   project_id: string;
   scan_mode?: string;
+  threat_analysis_enabled: boolean;
   scan_name: string;
   product: string;
   validation_environment: string;
@@ -682,6 +685,13 @@ export interface MiningEngineRunStatus {
   engine_id: string;
   engine_label: string;
   status: "pending" | "running" | "success" | "error" | "cancelled" | "skipped" | string;
+  error_message: string;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface ThreatAnalysisRunStatus {
+  status: "pending" | "running" | "success" | "error" | "cancelled" | string;
   error_message: string;
   started_at: string;
   finished_at: string;

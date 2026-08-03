@@ -16,6 +16,7 @@ from backend.models import (
     HistoryPattern,
     OutputSource,
     ScanEvent,
+    ThreatAnalysisRunStatus,
     ThreatAuditTask,
     Vulnerability,
     VulnerabilityValidation,
@@ -135,6 +136,28 @@ class Reporter:
         except Exception as exc:
             print(
                 "Warning: failed to upload mining-engine state: "
+                f"{exc}"
+            )
+
+    async def report_threat_analysis_run(
+        self,
+        scan_id: str,
+        run: ThreatAnalysisRunStatus,
+    ) -> None:
+        """Create or update the standalone threat-analysis lifecycle state."""
+        if self.dry_run:
+            print(f"  [THREAT_ANALYSIS] {run.status}")
+            return
+        try:
+            resp = await self._client.post(
+                f"{self.server_url}/api/agent/scan/{scan_id}/threat-analysis-run",
+                json=run.model_dump(mode="json"),
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            print(
+                "Warning: failed to upload threat-analysis state: "
                 f"{exc}"
             )
 

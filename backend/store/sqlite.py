@@ -36,6 +36,7 @@ from backend.models import (
     ScanSummary,
     SkillReport,
     ThreatAuditTask,
+    ThreatAnalysisRunStatus,
     ThreatCodePath,
     UserInDB,
     Vulnerability,
@@ -251,6 +252,8 @@ CREATE TABLE IF NOT EXISTS scans (
     scan_id            TEXT PRIMARY KEY,
     project_id         TEXT NOT NULL,
     scan_mode          TEXT NOT NULL DEFAULT 'full',
+    threat_analysis_enabled INTEGER NOT NULL DEFAULT 0,
+    threat_analysis_run_json TEXT NOT NULL DEFAULT '{}',
     auto_fp_review     INTEGER,
     fp_review_method   TEXT NOT NULL DEFAULT 'adversarial',
     scan_items         TEXT NOT NULL,
@@ -633,6 +636,62 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN workspace_path TEXT")
         if "scan_mode" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN scan_mode TEXT NOT NULL DEFAULT 'full'")
+        if "mining_engines_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN mining_engines_json TEXT NOT NULL DEFAULT '[]'"
+            )
+            cols.add("mining_engines_json")
+        if "threat_analysis_enabled" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN threat_analysis_enabled INTEGER"
+            )
+            # Empty engine snapshots predate explicit scan-level process
+            # selection. Materialize their historical defaults before an
+            # explicit empty list gains the new meaning "analysis only".
+            self._conn.execute(
+                """
+                UPDATE scans
+                SET mining_engines_json = CASE
+                    WHEN scan_mode = 'threat_analysis_only' THEN ?
+                    ELSE ?
+                END
+                WHERE TRIM(COALESCE(mining_engines_json, '')) IN ('', '[]')
+                """,
+                (
+                    json.dumps([{
+                        "engine_id": "threat_audit",
+                        "engine_label": "威胁审计",
+                        "enabled": True,
+                    }], ensure_ascii=False),
+                    json.dumps([
+                        {
+                            "engine_id": "static_candidate",
+                            "engine_label": "静态规则扫描 + 候选点审计",
+                            "enabled": True,
+                        },
+                        {
+                            "engine_id": "threat_audit",
+                            "engine_label": "威胁审计",
+                            "enabled": True,
+                        },
+                    ], ensure_ascii=False),
+                ),
+            )
+            self._conn.execute(
+                """
+                UPDATE scans
+                SET threat_analysis_enabled = CASE
+                    WHEN scan_mode = 'threat_analysis_only' THEN 1
+                    WHEN mining_engines_json LIKE '%\"engine_id\": \"threat_audit\"%' THEN 1
+                    WHEN mining_engines_json LIKE '%\"engine_id\":\"threat_audit\"%' THEN 1
+                    ELSE 0
+                END
+                """
+            )
+        if "threat_analysis_run_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN threat_analysis_run_json TEXT NOT NULL DEFAULT '{}'"
+            )
         if "static_total_files" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN static_total_files INTEGER DEFAULT 0")
         if "static_scanned_files" not in cols:
@@ -665,13 +724,33 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN opencode_pool TEXT NOT NULL DEFAULT '{}'")
         if "code_graph_mcp_json" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN code_graph_mcp_json TEXT")
-        if "mining_engines_json" not in cols:
-            self._conn.execute(
-                "ALTER TABLE scans ADD COLUMN mining_engines_json TEXT NOT NULL DEFAULT '[]'"
-            )
         if "mining_engine_runs_json" not in cols:
             self._conn.execute(
                 "ALTER TABLE scans ADD COLUMN mining_engine_runs_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        legacy_threat_label = "威胁分析 + 威胁审计"
+        threat_audit_label = "威胁审计"
+        escaped_legacy_threat_label = json.dumps(
+            legacy_threat_label,
+        )[1:-1]
+        escaped_threat_audit_label = json.dumps(
+            threat_audit_label,
+        )[1:-1]
+        for column in ("mining_engines_json", "mining_engine_runs_json"):
+            self._conn.execute(
+                f"""\
+                UPDATE scans
+                SET {column} = REPLACE(
+                    REPLACE({column}, ?, ?),
+                    ?, ?
+                )
+                """,
+                (
+                    legacy_threat_label,
+                    threat_audit_label,
+                    escaped_legacy_threat_label,
+                    escaped_threat_audit_label,
+                ),
             )
         if "auto_fp_review" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN auto_fp_review INTEGER")
@@ -834,11 +913,19 @@ class SqliteScanStore(ScanStoreBase):
                 UPDATE vulnerabilities
                 SET engine_label = CASE
                     WHEN analysis_source = 'threat_audit'
-                        THEN '威胁分析 + 威胁审计'
+                        THEN '威胁审计'
                     ELSE '静态规则扫描 + 候选点审计'
                 END
                 """
             )
+        self._conn.execute(
+            """\
+            UPDATE vulnerabilities
+            SET engine_label = '威胁审计'
+            WHERE engine_id = 'threat_audit'
+              AND engine_label = '威胁分析 + 威胁审计'
+            """
+        )
         if "fp_review_eligible" not in vuln_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN fp_review_eligible INTEGER NOT NULL DEFAULT 1"
@@ -1205,6 +1292,15 @@ class SqliteScanStore(ScanStoreBase):
             scan_id=row["scan_id"],
             project_id=row["project_id"],
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
+            threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
+            threat_analysis_run=(
+                ThreatAnalysisRunStatus.model_validate_json(
+                    row["threat_analysis_run_json"]
+                )
+                if row["threat_analysis_run_json"]
+                and row["threat_analysis_run_json"] != "{}"
+                else None
+            ),
             auto_fp_review=(
                 bool(row["auto_fp_review"])
                 if row["auto_fp_review"] is not None
@@ -1256,6 +1352,7 @@ class SqliteScanStore(ScanStoreBase):
             scan_items=json.loads(row["scan_items"]),
             created_at=row["created_at"],
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
+            threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
             mining_engines=_json_model_list(
                 row["mining_engines_json"],
                 MiningEngineSelection,
@@ -1303,11 +1400,12 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, agent_key, project_path, code_scan_path, scan_name,
-                     scan_mode, auto_fp_review, fp_review_method,
+                     scan_mode, threat_analysis_enabled, threat_analysis_run_json,
+                     auto_fp_review, fp_review_method,
                      product, validation_environment, public_access_token, opencode_pool,
                      code_graph_mcp_json, mining_engines_json,
                      mining_engine_runs_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan.scan_id,
@@ -1332,6 +1430,12 @@ class SqliteScanStore(ScanStoreBase):
                     meta.code_scan_path,
                     meta.scan_name,
                     meta.scan_mode,
+                    int(meta.threat_analysis_enabled),
+                    (
+                        scan.threat_analysis_run.model_dump_json()
+                        if scan.threat_analysis_run is not None
+                        else "{}"
+                    ),
                     int(meta.auto_fp_review),
                     meta.fp_review_method.value,
                     meta.product,
@@ -1401,6 +1505,19 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
             return ordered
 
+    def update_threat_analysis_run(
+        self,
+        scan_id: str,
+        run: ThreatAnalysisRunStatus,
+    ) -> ThreatAnalysisRunStatus | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE scans SET threat_analysis_run_json = ? WHERE scan_id = ?",
+                (run.model_dump_json(), scan_id),
+            )
+            self._conn.commit()
+            return run if cur.rowcount else None
+
     def load_scan(self, scan_id: str) -> tuple[ScanStatus, ScanMeta] | None:
         cur = self._conn.execute(
             "SELECT * FROM scans WHERE scan_id = ?", (scan_id,)
@@ -1423,6 +1540,7 @@ class SqliteScanStore(ScanStoreBase):
             scan_id=row["scan_id"],
             project_id=row["project_id"],
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
+            threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             product=row["product"] if row["product"] is not None else "",
             validation_environment=(
@@ -2424,7 +2542,7 @@ class SqliteScanStore(ScanStoreBase):
                 engine_label=(
                     (r["engine_label"] if "engine_label" in r.keys() else "")
                     or (
-                        "威胁分析 + 威胁审计"
+                        "威胁审计"
                         if (
                             r["analysis_source"]
                             if "analysis_source" in r.keys()

@@ -28,6 +28,7 @@ from backend.models import (
     ScanSummary,
     SkillReport,
     ThreatAuditTask,
+    ThreatAnalysisRunStatus,
     UserInDB,
     Vulnerability,
     VulnerabilityValidation,
@@ -70,6 +71,14 @@ class ScanStoreBase(ABC):
         run: MiningEngineRunStatus,
     ) -> list[MiningEngineRunStatus]:
         """Create or replace one mining-engine lifecycle row."""
+        raise NotImplementedError
+
+    def update_threat_analysis_run(
+        self,
+        scan_id: str,
+        run: ThreatAnalysisRunStatus,
+    ) -> ThreatAnalysisRunStatus | None:
+        """Replace the standalone threat-analysis lifecycle state."""
         raise NotImplementedError
 
     @abstractmethod

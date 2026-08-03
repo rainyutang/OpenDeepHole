@@ -16,6 +16,7 @@ class ScanTask:
     checkers: list[str]
     scan_name: str
     scan_mode: str = "full"
+    threat_analysis_enabled: bool = False
     product: str = ""
     validation_environment: str = ""
     code_graph_mcp: dict | None = None
@@ -43,6 +44,7 @@ class TaskManager:
         checkers: list[str],
         scan_name: str,
         scan_mode: str = "full",
+        threat_analysis_enabled: bool = False,
         product: str = "",
         validation_environment: str = "",
         code_graph_mcp: dict | None = None,
@@ -62,6 +64,7 @@ class TaskManager:
             checkers=checkers,
             scan_name=scan_name,
             scan_mode=scan_mode or "full",
+            threat_analysis_enabled=bool(threat_analysis_enabled),
             product=product,
             validation_environment=validation_environment,
             code_graph_mcp=(
@@ -119,6 +122,7 @@ class TaskManager:
                 "checkers": task.checkers,
                 "scan_name": task.scan_name,
                 "scan_mode": task.scan_mode,
+                "threat_analysis_enabled": task.threat_analysis_enabled,
                 "product": task.product,
                 "validation_environment": task.validation_environment,
                 "mining_engines": copy.deepcopy(task.mining_engines),

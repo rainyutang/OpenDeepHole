@@ -75,6 +75,7 @@ from backend.models import (
     ScanItemStatus,
     SkillReport,
     ThreatAuditTask,
+    ThreatAnalysisRunStatus,
     User,
     Vulnerability,
     VulnerabilityValidation,
@@ -2467,7 +2468,7 @@ def _stamp_vulnerability_engine(
 
     vuln.engine_id = requested_id
     if requested_id == "threat_audit":
-        vuln.engine_label = "威胁分析 + 威胁审计"
+        vuln.engine_label = "威胁审计"
     elif not str(vuln.engine_label or "").strip():
         vuln.engine_label = "静态规则扫描 + 候选点审计"
     return vuln
@@ -2523,6 +2524,47 @@ async def agent_report_mining_engine_run(
         "runs": [item.model_dump(mode="json") for item in runs],
     })
     return {"ok": True, "run": body.model_dump(mode="json")}
+
+
+@router.post("/scan/{scan_id}/threat-analysis-run")
+async def agent_report_threat_analysis_run(
+    scan_id: str,
+    body: ThreatAnalysisRunStatus,
+) -> dict:
+    """Agent reports the standalone threat-analysis lifecycle state."""
+    allowed_statuses = {
+        "pending",
+        "running",
+        "success",
+        "error",
+        "cancelled",
+    }
+    if body.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=422,
+            detail=f"无效的威胁分析状态：{body.status}",
+        )
+    store = get_scan_store()
+    loaded = store.load_scan(scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if not loaded[1].threat_analysis_enabled:
+        raise HTTPException(
+            status_code=422,
+            detail="本次扫描未启用威胁分析",
+        )
+    stored = store.update_threat_analysis_run(scan_id, body)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = _ensure_running_scan(scan_id)
+    if scan is not None:
+        scan.threat_analysis_run = stored
+    from backend.sse import publish
+
+    publish(scan_id, "threat_analysis_run", {
+        "run": stored.model_dump(mode="json"),
+    })
+    return {"ok": True, "run": stored.model_dump(mode="json")}
 
 
 @router.post("/scan/{scan_id}/vulnerability")

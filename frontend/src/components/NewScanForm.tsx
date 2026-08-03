@@ -27,6 +27,7 @@ interface Props {
 }
 
 const SCAN_MODE_FULL = "full";
+const THREAT_AUDIT_ENGINE_ID = "threat_audit";
 
 interface MiningEngineFormValue {
   selected: boolean;
@@ -50,6 +51,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [projectPath, setProjectPath] = useState<string>("");
   const [codeScanPath, setCodeScanPath] = useState<string>("");
   const [scanName, setScanName] = useState<string>("");
+  const [threatAnalysisEnabled, setThreatAnalysisEnabled] = useState(true);
   const [autoFpReview, setAutoFpReview] = useState(true);
   const [fpReviewMethod, setFpReviewMethod] = useState<FpReviewMethod>("adversarial");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
@@ -61,6 +63,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const builtinCheckers = checkers.filter((checker) => !checker.user_created);
   const userCheckers = checkers.filter((checker) => checker.user_created);
   const staticEngineEnabled = miningEngines.static_candidate?.selected ?? false;
+  const threatAuditEnabled = miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected ?? false;
   const enabledEngineCount = miningEngineCatalog.filter(
     (engine) => miningEngines[engine.engine_id]?.selected,
   ).length;
@@ -80,11 +83,11 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         setAgents(agentList);
         setCheckers(checkerList);
         setMiningEngineCatalog(engineCatalog.engines);
-        setMiningEngines(Object.fromEntries(
+        setMiningEngines((current) => Object.fromEntries(
           engineCatalog.engines.map((engine) => [
             engine.engine_id,
             {
-              selected: true,
+              selected: current[engine.engine_id]?.selected ?? true,
             },
           ]),
         ));
@@ -195,8 +198,12 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
       setError(codeGraphError);
       return;
     }
-    if (enabledEngineCount === 0) {
-      setError("请至少选择一个漏洞挖掘引擎");
+    if (enabledEngineCount === 0 && !threatAnalysisEnabled) {
+      setError("请至少启用威胁分析或选择一个漏洞挖掘引擎");
+      return;
+    }
+    if (threatAuditEnabled && !threatAnalysisEnabled) {
+      setError("威胁审计要求本次扫描启用威胁分析");
       return;
     }
     if (staticEngineEnabled && selectedCheckers.size === 0) {
@@ -212,6 +219,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         code_scan_path: codeScanPath.trim(),
         scan_name: scanName.trim(),
         scan_mode: SCAN_MODE_FULL,
+        threat_analysis_enabled: threatAnalysisEnabled,
         auto_fp_review: autoFpReview,
         fp_review_method: fpReviewMethod,
         product: selectedProduct,
@@ -327,6 +335,49 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
               )}
             </div>
 
+            {/* Threat analysis */}
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-slate-300">威胁分析</div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    独立生成价值资产、高风险模块和攻击树；可单独运行，也可为威胁审计提供输入。
+                  </p>
+                  {threatAuditEnabled && (
+                    <p className="mt-2 text-xs text-cyan-300">当前已选择威胁审计，因此必须启用威胁分析。</p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="启用威胁分析"
+                  aria-checked={threatAnalysisEnabled}
+                  onClick={() => {
+                    const next = !threatAnalysisEnabled;
+                    setThreatAnalysisEnabled(next);
+                    if (!next) {
+                      setMiningEngines((current) => ({
+                        ...current,
+                        [THREAT_AUDIT_ENGINE_ID]: {
+                          ...current[THREAT_AUDIT_ENGINE_ID],
+                          selected: false,
+                        },
+                      }));
+                    }
+                  }}
+                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full p-0 transition-colors ${
+                    threatAnalysisEnabled ? "bg-emerald-500" : "bg-slate-600"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                      threatAnalysisEnabled ? "translate-x-5" : "translate-x-0.5"
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
             {/* Mining engines */}
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
               <div className="mb-3">
@@ -359,13 +410,19 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                           <input
                             type="checkbox"
                             checked={enabled}
-                            onChange={(event) => setMiningEngines((current) => ({
-                              ...current,
-                              [engine.engine_id]: {
-                                ...current[engine.engine_id],
-                                selected: event.target.checked,
-                              },
-                            }))}
+                            onChange={(event) => {
+                              const selected = event.target.checked;
+                              setMiningEngines((current) => ({
+                                ...current,
+                                [engine.engine_id]: {
+                                  ...current[engine.engine_id],
+                                  selected,
+                                },
+                              }));
+                              if (engine.engine_id === THREAT_AUDIT_ENGINE_ID && selected) {
+                                setThreatAnalysisEnabled(true);
+                              }
+                            }}
                             className="mt-0.5 h-4 w-4 rounded border-slate-500 bg-slate-700 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
                           />
                           <span>

@@ -6,10 +6,39 @@ from unittest.mock import patch
 
 import httpx
 
+from backend.models import ThreatAnalysisRunStatus
 from deephole_client.reporter import Reporter
 
 
 class AgentReporterTests(unittest.TestCase):
+    def test_threat_analysis_run_uses_independent_endpoint(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.posts: list[dict] = []
+
+            async def post(self, url, json=None, timeout=None):
+                self.posts.append({"url": url, "json": json, "timeout": timeout})
+                request = httpx.Request("POST", url)
+                return httpx.Response(200, request=request)
+
+        reporter = Reporter("http://server")
+        fake_client = FakeClient()
+        reporter._client = fake_client  # type: ignore[assignment]
+
+        asyncio.run(reporter.report_threat_analysis_run(
+            "scan-1",
+            ThreatAnalysisRunStatus(
+                status="running",
+                started_at="2026-08-03T00:00:00+00:00",
+            ),
+        ))
+
+        self.assertEqual(len(fake_client.posts), 1)
+        self.assertTrue(fake_client.posts[0]["url"].endswith(
+            "/api/agent/scan/scan-1/threat-analysis-run",
+        ))
+        self.assertEqual(fake_client.posts[0]["json"]["status"], "running")
+
     def test_index_status_payload_includes_stage_and_stats(self) -> None:
         class FakeClient:
             def __init__(self) -> None:

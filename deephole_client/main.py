@@ -96,6 +96,9 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             checkers=msg.get("checkers", []),
             scan_name=msg.get("scan_name", ""),
             scan_mode=msg.get("scan_mode", "full"),
+            threat_analysis_enabled=bool(
+                msg.get("threat_analysis_enabled")
+            ),
             product=msg.get("product", ""),
             validation_environment=msg.get("validation_environment", ""),
             code_graph_mcp=(
@@ -123,6 +126,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             checkers=msg.get("checkers"),
             scan_name=msg.get("scan_name"),
             scan_mode=msg.get("scan_mode"),
+            threat_analysis_enabled=(
+                bool(msg.get("threat_analysis_enabled"))
+                if "threat_analysis_enabled" in msg
+                else None
+            ),
             product=msg.get("product"),
             validation_environment=msg.get("validation_environment"),
             code_graph_mcp=(

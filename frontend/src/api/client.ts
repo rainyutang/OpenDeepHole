@@ -271,6 +271,7 @@ export async function createScan(body: {
   code_scan_path?: string;
   scan_name: string;
   scan_mode?: string;
+  threat_analysis_enabled?: boolean;
   product?: string;
   validation_environment?: string;
   checkers: string[];

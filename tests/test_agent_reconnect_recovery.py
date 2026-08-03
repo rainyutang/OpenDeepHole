@@ -885,12 +885,26 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-1", ScanItemStatus.CANCELLED, total=3, processed=2)
             scan.static_analysis_done = True
+            scan.threat_analysis_enabled = True
+            scan.mining_engines = [
+                MiningEngineSelection(
+                    engine_id="static_candidate",
+                    engine_label="静态规则扫描 + 候选点审计",
+                ),
+                MiningEngineSelection(
+                    engine_id="threat_audit",
+                    engine_label="威胁审计",
+                ),
+            ]
             scan.candidates = [
                 ScanCandidate(idx=0, file="done.c", line=1, function="done", description="done", vuln_type="npd"),
                 ScanCandidate(idx=1, file="failed.c", line=2, function="failed", description="failed", vuln_type="npd"),
                 ScanCandidate(idx=2, file="pending.c", line=3, function="pending", description="pending", vuln_type="npd"),
             ]
-            store.save_scan(scan, _meta())
+            meta = _meta()
+            meta.threat_analysis_enabled = True
+            meta.mining_engines = scan.mining_engines
+            store.save_scan(scan, meta)
             store.add_processed_key("scan-1", ("done.c", 1, "done", "npd"))
             store.add_processed_key("scan-1", ("failed.c", 2, "failed", "npd"))
             store.add_vulnerability(
@@ -985,6 +999,58 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 {"hash": "remote-runtime", "archive_sha256": "archive-hash"},
             )
             self.assertEqual(store.get_processed_keys("scan-1"), {("done.c", 1, "done", "npd")})
+
+    def test_resume_preserves_analysis_only_empty_engine_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-analysis", ScanItemStatus.CANCELLED)
+            scan.scan_mode = "threat_analysis_only"
+            scan.threat_analysis_enabled = True
+            scan.mining_engines = []
+            meta = _meta()
+            meta.scan_mode = "threat_analysis_only"
+            meta.threat_analysis_enabled = True
+            meta.mining_engines = []
+            store.save_scan(scan, meta)
+            agent = AgentInfo(
+                agent_id="agent-old",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            user = User(user_id="user-1", username="alice", role="user")
+            sent: dict = {}
+
+            async def fake_send(_agent_id: str, payload: dict) -> bool:
+                sent.update(payload)
+                return True
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch.dict(
+                    "backend.api.agent._registered_agents",
+                    {"agent-old": agent},
+                    clear=True,
+                ),
+                patch(
+                    "backend.api.agent.send_agent_command",
+                    new=AsyncMock(side_effect=fake_send),
+                ),
+                patch(
+                    "backend.api.agent.create_agent_runtime_update_payload",
+                    return_value=None,
+                ),
+            ):
+                asyncio.run(scan_api.resume_scan(
+                    "scan-analysis",
+                    request=SimpleNamespace(base_url="http://testserver/"),
+                    current_user=user,
+                ))
+
+            self.assertTrue(sent["threat_analysis_enabled"])
+            self.assertTrue(sent["resume_threat_analysis"])
+            self.assertEqual(sent["mining_engines"], [])
 
     def test_upsert_incomplete_vulnerability_replaces_existing_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -12,6 +12,7 @@ import type {
   ScanEvent,
   ScanStatus,
   ThreatAnalysis,
+  ThreatAnalysisRunStatus,
   ThreatAuditTask,
   Vulnerability,
   VulnerabilityValidation,
@@ -114,6 +115,10 @@ interface ThreatAnalysisEvent {
   analysis: ThreatAnalysis;
 }
 
+interface ThreatAnalysisRunEvent {
+  run: ThreatAnalysisRunStatus;
+}
+
 interface ThreatAuditTaskEvent {
   task: ThreatAuditTask;
 }
@@ -142,6 +147,7 @@ export interface ScanSSEHandlers {
   onFpReviewSummaryFinish?: (data: FpReviewSummaryEvent) => void;
   onVulnerabilityValidation?: (data: VulnerabilityValidationEvent) => void;
   onThreatAnalysis?: (data: ThreatAnalysisEvent) => void;
+  onThreatAnalysisRun?: (data: ThreatAnalysisRunEvent) => void;
   onThreatAuditTask?: (data: ThreatAuditTaskEvent) => void;
   onMiningEngineRun?: (data: MiningEngineRunEvent) => void;
   onIndexStatus?: (data: IndexStatus) => void;
@@ -266,6 +272,7 @@ export function useScanSSE(
     handle<FpReviewSummaryEvent>("fp_review_summary_finish", (d) => handlersRef.current.onFpReviewSummaryFinish?.(d));
     handle<VulnerabilityValidationEvent>("vulnerability_validation", (d) => handlersRef.current.onVulnerabilityValidation?.(d));
     handle<ThreatAnalysisEvent>("threat_analysis", (d) => handlersRef.current.onThreatAnalysis?.(d));
+    handle<ThreatAnalysisRunEvent>("threat_analysis_run", (d) => handlersRef.current.onThreatAnalysisRun?.(d));
     handle<ThreatAuditTaskEvent>("threat_audit_task", (d) => handlersRef.current.onThreatAuditTask?.(d));
     handle<MiningEngineRunEvent>("mining_engine_run", (d) => handlersRef.current.onMiningEngineRun?.(d));
     handle<IndexStatus>("index_status", (d) => handlersRef.current.onIndexStatus?.(d));

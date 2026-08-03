@@ -52,6 +52,7 @@ from backend.models import (
     ScanSummary,
     SkillReport,
     ThreatAuditTask,
+    ThreatAnalysisRunStatus,
     UnmarkRequest,
     UpdateScanValidationTargetRequest,
     User,
@@ -125,16 +126,11 @@ def _resolve_scan_mining_engines(
     *,
     scan_overrides: list[MiningEngineRequest] | None,
     scan_mode: str,
+    threat_analysis_enabled: bool | None = None,
 ) -> list[MiningEngineSelection]:
     catalog = _repository_mining_engine_catalog()
     available = {item.engine_id: item for item in catalog.engines}
     requested = scan_overrides
-    if requested is not None and not requested:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one vulnerability-mining engine is required",
-        )
-
     requested_by_id = {}
     duplicate_ids: set[str] = set()
     for item in requested or []:
@@ -159,7 +155,13 @@ def _resolve_scan_mining_engines(
             ),
         )
 
-    if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
+    # Keep old callers that only supplied scan_mode working exactly as before.
+    # New callers send threat_analysis_enabled explicitly and may select no
+    # mining engine for a real analysis-only scan.
+    if (
+        scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY
+        and threat_analysis_enabled is None
+    ):
         threat_engine = available.get("threat_audit")
         if threat_engine is None:
             raise HTTPException(
@@ -176,13 +178,7 @@ def _resolve_scan_mining_engines(
         selected_ids = [item.engine_id for item in catalog.engines]
     else:
         selected_ids = [item.engine_id.strip() for item in requested]
-    if not selected_ids:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one vulnerability-mining engine is required",
-        )
-
-    return [
+    selections = [
         MiningEngineSelection(
             engine_id=engine_id,
             engine_label=available[engine_id].label,
@@ -190,6 +186,40 @@ def _resolve_scan_mining_engines(
         )
         for engine_id in selected_ids
     ]
+    effective_threat_analysis_enabled = _resolve_threat_analysis_enabled(
+        requested=threat_analysis_enabled,
+        scan_mode=scan_mode,
+        selections=selections,
+    )
+    if any(item.engine_id == "threat_audit" for item in selections) and not (
+        effective_threat_analysis_enabled
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="威胁审计要求本次扫描启用威胁分析",
+        )
+    if not selections and not effective_threat_analysis_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="请至少启用威胁分析或选择一个漏洞挖掘引擎",
+        )
+    return selections
+
+
+def _resolve_threat_analysis_enabled(
+    *,
+    requested: bool | None,
+    scan_mode: str,
+    selections: list[MiningEngineSelection],
+) -> bool:
+    if requested is not None:
+        return bool(requested)
+    if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
+        return True
+    return any(
+        item.enabled and item.engine_id == "threat_audit"
+        for item in selections
+    )
 
 
 def _has_final_user_verdict(vuln) -> bool:
@@ -814,10 +844,29 @@ async def create_agent_scan(
         )
         code_graph_mcp = body.code_graph_mcp.model_copy(deep=True)
 
-    scan_mode = _normalize_scan_mode(body.scan_mode)
+    requested_scan_mode = _normalize_scan_mode(body.scan_mode)
     mining_engine_selections = _resolve_scan_mining_engines(
         scan_overrides=body.mining_engines,
-        scan_mode=scan_mode,
+        scan_mode=requested_scan_mode,
+        threat_analysis_enabled=body.threat_analysis_enabled,
+    )
+    threat_analysis_enabled = _resolve_threat_analysis_enabled(
+        requested=body.threat_analysis_enabled,
+        scan_mode=requested_scan_mode,
+        selections=mining_engine_selections,
+    )
+    scan_mode = (
+        SCAN_MODE_THREAT_ANALYSIS_ONLY
+        if (
+            body.threat_analysis_enabled is not None
+            and threat_analysis_enabled
+            and not mining_engine_selections
+        )
+        else (
+            SCAN_MODE_FULL
+            if body.threat_analysis_enabled is not None
+            else requested_scan_mode
+        )
     )
     auto_fp_review = (
         body.auto_fp_review
@@ -866,6 +915,12 @@ async def create_agent_scan(
         scan_id=scan_id,
         project_id=scan_name,
         scan_mode=scan_mode,
+        threat_analysis_enabled=threat_analysis_enabled,
+        threat_analysis_run=(
+            ThreatAnalysisRunStatus()
+            if threat_analysis_enabled
+            else None
+        ),
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
         product=product,
@@ -893,6 +948,7 @@ async def create_agent_scan(
         scan_items=validated_checker_names,
         created_at=now,
         scan_mode=scan_mode,
+        threat_analysis_enabled=threat_analysis_enabled,
         mining_engines=mining_engine_selections,
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
@@ -928,6 +984,7 @@ async def create_agent_scan(
         "code_scan_path": code_scan_path,
         "checkers": validated_checker_names,
         "scan_mode": scan_mode,
+        "threat_analysis_enabled": threat_analysis_enabled,
         "scan_name": scan_name,
         "product": product,
         "validation_environment": validation_environment,
@@ -1176,9 +1233,22 @@ async def _continue_scan(
         scan.candidates or scan.static_analysis_done
     )
     candidate_payload = None if full_pipeline_resume else continue_candidates
-    resume_threat_analysis = bool(incomplete_threat_tasks) or (
-        resume_interrupted
-        and (scan.threat_analysis is None or not scan.threat_audit_tasks)
+    threat_audit_enabled = any(
+        item.enabled and item.engine_id == "threat_audit"
+        for item in meta.mining_engines
+    )
+    resume_threat_analysis = meta.threat_analysis_enabled and (
+        bool(incomplete_threat_tasks)
+        or (
+            resume_interrupted
+            and (
+                scan.threat_analysis is None
+                or (
+                    threat_audit_enabled
+                    and not scan.threat_audit_tasks
+                )
+            )
+        )
     )
     if resume_threat_analysis and not scan.threat_audit_tasks:
         threat_task_ids: list[str] | None = None
@@ -1265,6 +1335,7 @@ async def _continue_scan(
         "code_scan_path": meta.code_scan_path or meta.project_path,
         "checkers": meta.scan_items,
         "scan_mode": meta.scan_mode,
+        "threat_analysis_enabled": meta.threat_analysis_enabled,
         "scan_name": meta.scan_name,
         "product": meta.product,
         "validation_environment": meta.validation_environment,
@@ -1284,14 +1355,12 @@ async def _continue_scan(
             )
             else _checker_packages_for(meta.scan_items)
         ),
-        "mining_engines": (
-            [
-                item.model_dump(mode="json")
-                for item in meta.mining_engines
-            ]
-            if meta.mining_engines
-            else None
-        ),
+        # Empty is meaningful: it is the explicit analysis-only selection.
+        # Legacy rows with no snapshot are materialized during migration.
+        "mining_engines": [
+            item.model_dump(mode="json")
+            for item in meta.mining_engines
+        ],
         "retry_candidates": (
             [candidate.model_dump() for candidate in candidate_payload]
             if candidate_payload is not None

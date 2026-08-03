@@ -122,6 +122,7 @@ async def _run(task, is_resume: bool) -> None:
             reporter=_reporter,
             scan_name=task.scan_name,
             scan_mode=task.scan_mode,
+            threat_analysis_enabled=task.threat_analysis_enabled,
             product=task.product,
             validation_environment=task.validation_environment,
             checker_names=task.checkers,
@@ -149,6 +150,7 @@ async def handle_task(
     checkers: list[str],
     scan_name: str,
     scan_mode: str = "full",
+    threat_analysis_enabled: bool = False,
     product: str = "",
     validation_environment: str = "",
     code_graph_mcp: dict | None = None,
@@ -173,6 +175,7 @@ async def handle_task(
         checkers=checkers,
         scan_name=scan_name,
         scan_mode=scan_mode,
+        threat_analysis_enabled=threat_analysis_enabled,
         product=product,
         validation_environment=validation_environment,
         code_graph_mcp=code_graph_mcp,
@@ -202,6 +205,7 @@ async def handle_resume(
     checkers: Optional[list[str]] = None,
     scan_name: Optional[str] = None,
     scan_mode: Optional[str] = None,
+    threat_analysis_enabled: Optional[bool] = None,
     product: Optional[str] = None,
     validation_environment: Optional[str] = None,
     code_graph_mcp: Optional[dict] = None,
@@ -230,6 +234,7 @@ async def handle_resume(
             checkers=checkers or [],
             scan_name=scan_name or "",
             scan_mode=scan_mode or "full",
+            threat_analysis_enabled=bool(threat_analysis_enabled),
             product=product or "",
             validation_environment=validation_environment or "",
             code_graph_mcp=code_graph_mcp,
@@ -255,6 +260,8 @@ async def handle_resume(
             task.scan_name = scan_name
         if scan_mode is not None:
             task.scan_mode = scan_mode
+        if threat_analysis_enabled is not None:
+            task.threat_analysis_enabled = bool(threat_analysis_enabled)
         if product is not None:
             task.product = product
         if validation_environment is not None:
