@@ -489,6 +489,61 @@ export interface ScanStatus {
   // Agent 信息
   agent_name?: string;
   agent_online?: boolean;
+
+  detail_counts?: ScanDetailCounts;
+  detail_pages?: ScanDetailPages;
+}
+
+export interface ScanDetailCounts {
+  candidates: number;
+  vulnerabilities: number;
+  events: number;
+  threat_audit_tasks: number;
+  validations: number;
+  skill_reports: number;
+}
+
+export interface ScanDetailPages {
+  candidates_next_cursor: number | null;
+  vulnerabilities_next_cursor: number | null;
+  events_next_cursor: number | null;
+  threat_tasks_next_cursor: string | null;
+  validations_next_cursor: number | null;
+}
+
+export interface ScanCandidatePage {
+  items: ScanCandidate[];
+  next_cursor: number | null;
+  has_more: boolean;
+}
+
+export interface VulnerabilityPageItem {
+  index: number;
+  vulnerability: Vulnerability;
+}
+
+export interface VulnerabilityPage {
+  items: VulnerabilityPageItem[];
+  next_cursor: number | null;
+  has_more: boolean;
+}
+
+export interface ScanEventPage {
+  items: ScanEvent[];
+  next_cursor: number | null;
+  has_more: boolean;
+}
+
+export interface ThreatAuditTaskPage {
+  items: ThreatAuditTask[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+export interface VulnerabilityValidationPage {
+  items: VulnerabilityValidation[];
+  next_cursor: number | null;
+  has_more: boolean;
 }
 
 export interface FeedbackEntry {
@@ -555,6 +610,12 @@ export interface ScanSummary {
   username?: string;
   agent_name?: string;
   agent_online?: boolean;
+}
+
+export interface ScanSummaryPage {
+  items: ScanSummary[];
+  next_cursor: string | null;
+  has_more: boolean;
 }
 
 export interface AgentInfo {

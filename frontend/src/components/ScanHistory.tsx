@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getValidationTargets, getScans, resumeScan, stopScan, deleteScan, updateScanValidationTarget } from "../api/client";
+import { getValidationTargets, getScansPage, resumeScan, stopScan, deleteScan, updateScanValidationTarget } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User, ValidationTarget } from "../types";
 import AnnouncementBoard from "./AnnouncementBoard";
 import { ThemeToggle } from "./ThemeToggle";
@@ -211,6 +211,9 @@ function NavButton({
 
 export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig, onNewScan, user, onLogout, onManageUsers, onCheckerDashboard, onCheckerCatalog }: Props) {
   const [scans, setScans] = useState<ScanSummary[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadedOlderPagesRef = useRef(false);
   const [validationTargets, setValidationTargets] = useState<ValidationTarget[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -222,10 +225,20 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
   const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [announcementOpen, setAnnouncementOpen] = useState(false);
 
-  const fetchScans = async () => {
+  const fetchScans = async (initial = false) => {
     try {
-      const data = await getScans();
-      setScans(data);
+      const data = await getScansPage(50);
+      setScans((previous) => {
+        if (initial || !loadedOlderPagesRef.current) return data.items;
+        const refreshedIds = new Set(data.items.map((item) => item.scan_id));
+        return [
+          ...data.items,
+          ...previous.filter((item) => !refreshedIds.has(item.scan_id)),
+        ];
+      });
+      if (initial || !loadedOlderPagesRef.current) {
+        setNextCursor(data.next_cursor);
+      }
     } catch {
       // silently fail
     } finally {
@@ -240,7 +253,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
   hasRunningRef.current = hasRunningScans;
 
   useEffect(() => {
-    fetchScans();
+    fetchScans(true);
     getValidationTargets().then(setValidationTargets).catch(() => {});
 
     let lastFetch = Date.now();
@@ -265,6 +278,27 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
+
+  const handleLoadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const data = await getScansPage(50, nextCursor);
+      setScans((previous) => {
+        const existing = new Set(previous.map((item) => item.scan_id));
+        return [
+          ...previous,
+          ...data.items.filter((item) => !existing.has(item.scan_id)),
+        ];
+      });
+      loadedOlderPagesRef.current = true;
+      setNextCursor(data.next_cursor);
+    } catch {
+      // Keep the current page; the operator can retry.
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const handleContinue = async (scanId: string) => {
     setActionLoading(scanId);
@@ -494,8 +528,9 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
             <p className="text-sm mt-1">点击右上角「新建扫描」开始</p>
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-slate-700">
-            <table className="w-full min-w-[78rem] text-sm">
+          <div>
+            <div className="overflow-x-auto rounded-xl border border-slate-700">
+              <table className="w-full min-w-[78rem] text-sm">
               <thead>
                 <tr className="bg-slate-800 border-b border-slate-700">
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -694,7 +729,20 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                   </tr>
                 )}
               </tbody>
-            </table>
+              </table>
+            </div>
+            {nextCursor && (
+              <div className="mt-4 flex justify-center">
+                <button
+                  type="button"
+                  onClick={handleLoadMore}
+                  disabled={loadingMore}
+                  className="rounded-lg border border-slate-600 bg-slate-800 px-4 py-2 text-sm text-slate-200 transition-colors hover:bg-slate-700 disabled:opacity-50"
+                >
+                  {loadingMore ? "加载中..." : "加载更多"}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

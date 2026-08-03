@@ -610,6 +610,55 @@ class ScanStatus(BaseModel):
     agent_online: bool = False
 
 
+class ScanDetailCounts(BaseModel):
+    candidates: int = 0
+    vulnerabilities: int = 0
+    events: int = 0
+    threat_audit_tasks: int = 0
+    validations: int = 0
+    skill_reports: int = 0
+
+
+class ScanOverview(ScanStatus):
+    """Lightweight scan state; large detail collections are returned separately."""
+    detail_counts: ScanDetailCounts = ScanDetailCounts()
+
+
+class ScanCandidatePage(BaseModel):
+    items: list[ScanCandidate] = []
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
+class VulnerabilityPageItem(BaseModel):
+    index: int
+    vulnerability: Vulnerability
+
+
+class VulnerabilityPage(BaseModel):
+    items: list[VulnerabilityPageItem] = []
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
+class ScanEventPage(BaseModel):
+    items: list[ScanEvent] = []
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
+class ThreatAuditTaskPage(BaseModel):
+    items: list[ThreatAuditTask] = []
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class VulnerabilityValidationPage(BaseModel):
+    items: list[VulnerabilityValidation] = []
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
 # --- Agent API models ---
 
 class AgentScanRegister(BaseModel):
@@ -631,6 +680,38 @@ class AgentScanFinish(BaseModel):
 class AgentScanCandidates(BaseModel):
     """Sent by the agent after the final static candidate list is ready."""
     candidates: list[Candidate] = []
+
+
+class AgentScanCandidateBatch(BaseModel):
+    """Bounded v2 candidate chunk; offset is the persisted candidate index."""
+    offset: int = Field(ge=0)
+    candidates: list[Candidate] = Field(default_factory=list, max_length=500)
+    reset: bool = False
+    final: bool = False
+    total: int | None = Field(default=None, ge=0)
+
+
+class AgentScanEventBatch(BaseModel):
+    events: list[ScanEvent] = Field(default_factory=list, max_length=500)
+
+
+class AgentProcessedKey(BaseModel):
+    file: str
+    line: int
+    function: str
+    vuln_type: str
+
+
+class AgentProcessedKeyBatch(BaseModel):
+    items: list[AgentProcessedKey] = Field(default_factory=list, max_length=500)
+
+
+class AgentScanFinishV2(BaseModel):
+    """Lightweight terminal state; findings are streamed before this request."""
+    status: str
+    total_candidates: int = Field(ge=0)
+    processed_candidates: int = Field(ge=0)
+    error_message: str | None = None
 
 
 class AgentVulnerabilityValidationUpdate(BaseModel):
@@ -671,6 +752,7 @@ class AgentInfo(BaseModel):
     runtime_update_target_hash: str = ""
     runtime_update_error: str = ""
     accepting_tasks: bool = True
+    protocol_version: int = 1
 
 
 class AgentOpenCodeModelConfig(BaseModel):
@@ -1245,6 +1327,13 @@ class ScanSummary(BaseModel):
     username: str = ""
     agent_name: str = ""
     agent_online: bool = False
+
+
+class ScanSummaryPage(BaseModel):
+    """Cursor-paginated scan history response used by the v2 frontend."""
+    items: list[ScanSummary] = []
+    next_cursor: str | None = None
+    has_more: bool = False
 
 
 # --- Admin dashboard models ---

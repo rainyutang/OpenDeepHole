@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, OpenCodeTokenUsage, ScanStatus, ScanStartResponse, ScanSummary, SkillCreateJob, SkillImportFile, SkillReport, TokenResponse, User, UserFeedbackVerdict, ValidationTarget } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, OpenCodeTokenUsage, ScanCandidatePage, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, ValidationTarget, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -293,7 +293,84 @@ export async function getScanStatus(scanId: string): Promise<ScanStatus> {
     );
     return data;
   }
-  const { data } = await api.get<ScanStatus>(`/api/scan/${scanId}`);
+  const [overview, candidates, vulnerabilities, events, threatTasks, validations] = await Promise.all([
+    getScanOverview(scanId),
+    getScanCandidatesPage(scanId),
+    getScanVulnerabilitiesPage(scanId),
+    getScanEventsPage(scanId),
+    getScanThreatTasksPage(scanId),
+    getScanValidationsPage(scanId),
+  ]);
+  const indexedVulnerabilities = vulnerabilities.items.map((item) => item.vulnerability);
+  return {
+    ...overview,
+    candidates: candidates.items,
+    vulnerabilities: indexedVulnerabilities,
+    events: events.items,
+    threat_audit_tasks: threatTasks.items,
+    validations: validations.items,
+    detail_pages: {
+      candidates_next_cursor: candidates.next_cursor,
+      vulnerabilities_next_cursor: vulnerabilities.next_cursor,
+      events_next_cursor: events.next_cursor,
+      threat_tasks_next_cursor: threatTasks.next_cursor,
+      validations_next_cursor: validations.next_cursor,
+    },
+  };
+}
+
+export async function getScanOverview(scanId: string): Promise<ScanStatus> {
+  const { data } = await api.get<ScanStatus>(`/api/v2/scans/${scanId}/overview`);
+  return data;
+}
+
+export async function getScanCandidatesPage(
+  scanId: string,
+  after?: number | null,
+): Promise<ScanCandidatePage> {
+  const { data } = await api.get<ScanCandidatePage>(`/api/v2/scans/${scanId}/candidates`, {
+    params: after == null ? undefined : { after },
+  });
+  return data;
+}
+
+export async function getScanVulnerabilitiesPage(
+  scanId: string,
+  after?: number | null,
+): Promise<VulnerabilityPage> {
+  const { data } = await api.get<VulnerabilityPage>(`/api/v2/scans/${scanId}/vulnerabilities`, {
+    params: after == null ? undefined : { after },
+  });
+  return data;
+}
+
+export async function getScanEventsPage(
+  scanId: string,
+  before?: number | null,
+): Promise<ScanEventPage> {
+  const { data } = await api.get<ScanEventPage>(`/api/v2/scans/${scanId}/events`, {
+    params: before == null ? undefined : { before },
+  });
+  return data;
+}
+
+export async function getScanThreatTasksPage(
+  scanId: string,
+  cursor?: string | null,
+): Promise<ThreatAuditTaskPage> {
+  const { data } = await api.get<ThreatAuditTaskPage>(`/api/v2/scans/${scanId}/threat-audit-tasks`, {
+    params: cursor ? { cursor } : undefined,
+  });
+  return data;
+}
+
+export async function getScanValidationsPage(
+  scanId: string,
+  after?: number | null,
+): Promise<VulnerabilityValidationPage> {
+  const { data } = await api.get<VulnerabilityValidationPage>(`/api/v2/scans/${scanId}/validations`, {
+    params: after == null ? undefined : { after },
+  });
   return data;
 }
 
@@ -583,6 +660,16 @@ export async function getSkillContent(
 
 export async function getScans(): Promise<ScanSummary[]> {
   const { data } = await api.get<ScanSummary[]>("/api/scans");
+  return data;
+}
+
+export async function getScansPage(
+  limit = 50,
+  cursor?: string | null,
+): Promise<ScanSummaryPage> {
+  const { data } = await api.get<ScanSummaryPage>("/api/v2/scans", {
+    params: { limit, ...(cursor ? { cursor } : {}) },
+  });
   return data;
 }
 

@@ -172,6 +172,115 @@ class ScanEventStoreTests(unittest.TestCase):
             )
 
 
+class ScanHistoryPaginationTests(unittest.TestCase):
+    def test_cursor_page_is_stable_and_user_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            for scan_id, user_id in (
+                ("scan-a", "user-1"),
+                ("scan-b", "user-1"),
+                ("scan-c", "user-1"),
+                ("scan-z", "user-2"),
+            ):
+                store.save_scan(*_make_scan(scan_id, user_id=user_id))
+
+            first = store.list_scans_page(limit=2, user_id="user-1")
+            self.assertEqual([item.scan_id for item in first], ["scan-c", "scan-b"])
+
+            second = store.list_scans_page(
+                limit=2,
+                user_id="user-1",
+                before_created_at=first[-1].created_at,
+                before_scan_id=first[-1].scan_id,
+            )
+            self.assertEqual([item.scan_id for item in second], ["scan-a"])
+            self.assertNotIn("scan-z", {item.scan_id for item in first + second})
+
+    def test_history_query_uses_cursor_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            indexes = {
+                row[1]
+                for row in store._conn.execute("PRAGMA index_list(scans)").fetchall()
+            }
+            self.assertIn("idx_scans_created_cursor", indexes)
+            self.assertIn("idx_scans_user_created_cursor", indexes)
+
+    def test_overview_and_detail_pages_do_not_load_full_collections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(*_make_scan("scan-detail"))
+            store.replace_scan_candidates(
+                "scan-detail",
+                [
+                    Candidate(
+                        file=f"candidate-{index}.c",
+                        line=index + 1,
+                        function=f"candidate_{index}",
+                        description="candidate",
+                        vuln_type="npd",
+                    )
+                    for index in range(3)
+                ],
+            )
+            for index in range(3):
+                store.add_vulnerability("scan-detail", _make_vuln(index + 1))
+                store.add_event(
+                    "scan-detail",
+                    ScanEvent.create("auditing", f"event-{index}"),
+                )
+
+            loaded = store.load_scan_overview("scan-detail")
+            self.assertIsNotNone(loaded)
+            overview, _, counts = loaded
+            self.assertEqual(overview.candidates, [])
+            self.assertEqual(overview.vulnerabilities, [])
+            self.assertEqual(overview.events, [])
+            self.assertEqual(counts["candidates"], 3)
+            self.assertEqual(counts["vulnerabilities"], 3)
+            self.assertEqual(counts["events"], 3)
+
+            first_candidates = store.list_scan_candidates_page(
+                "scan-detail",
+                after_index=-1,
+                limit=2,
+            )
+            self.assertEqual([item.idx for item in first_candidates], [0, 1])
+            self.assertEqual(
+                [item.idx for item in store.list_scan_candidates_page(
+                    "scan-detail",
+                    after_index=first_candidates[-1].idx,
+                    limit=2,
+                )],
+                [2],
+            )
+
+            first_vulnerabilities = store.get_vulnerabilities_page(
+                "scan-detail",
+                after_index=-1,
+                limit=2,
+            )
+            self.assertEqual([index for index, _ in first_vulnerabilities], [0, 1])
+            latest_events = store.get_events_page(
+                "scan-detail",
+                before_id=None,
+                limit=2,
+            )
+            self.assertEqual(
+                [event.message for _, event in latest_events],
+                ["event-2", "event-1"],
+            )
+            older_events = store.get_events_page(
+                "scan-detail",
+                before_id=min(event_id for event_id, _ in latest_events),
+                limit=2,
+            )
+            self.assertEqual(
+                [event.message for _, event in older_events],
+                ["event-0"],
+            )
+
+
 class VulnerabilityStoreTests(unittest.TestCase):
     def test_structured_call_chain_round_trips_with_legacy_compatibility(
         self,

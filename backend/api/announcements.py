@@ -16,6 +16,7 @@ from backend.models import (
     User,
 )
 from backend.store import get_scan_store
+from backend.store.async_ops import run_store_call
 
 
 router = APIRouter()
@@ -41,7 +42,9 @@ async def list_published_announcements(
     limit: int = Query(default=3, ge=1, le=20),
     _current_user: User = Depends(get_current_user),
 ) -> list[Announcement]:
-    return get_scan_store().list_announcements(
+    return await run_store_call(
+        get_scan_store(),
+        "list_announcements",
         published_only=True,
         limit=limit,
     )
@@ -51,7 +54,7 @@ async def list_published_announcements(
 async def list_all_announcements(
     _current_user: User = Depends(require_admin),
 ) -> list[Announcement]:
-    return get_scan_store().list_announcements()
+    return await run_store_call(get_scan_store(), "list_announcements")
 
 
 @router.post("/api/admin/announcements", response_model=Announcement)
@@ -70,7 +73,11 @@ async def create_announcement(
         created_at=now,
         updated_at=now,
     )
-    get_scan_store().create_announcement(announcement)
+    await run_store_call(
+        get_scan_store(),
+        "create_announcement",
+        announcement,
+    )
     logger.info(
         "Admin '%s' created announcement %s (published=%s)",
         current_user.username,
@@ -87,7 +94,7 @@ async def update_announcement(
     current_user: User = Depends(require_admin),
 ) -> Announcement:
     store = get_scan_store()
-    existing = store.get_announcement(announcement_id)
+    existing = await run_store_call(store, "get_announcement", announcement_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="公告不存在")
 
@@ -107,7 +114,7 @@ async def update_announcement(
             "updated_at": now,
         }
     )
-    if not store.update_announcement(announcement):
+    if not await run_store_call(store, "update_announcement", announcement):
         raise HTTPException(status_code=404, detail="公告不存在")
     logger.info(
         "Admin '%s' updated announcement %s (published=%s)",
@@ -123,7 +130,11 @@ async def delete_announcement(
     announcement_id: str,
     current_user: User = Depends(require_admin),
 ) -> dict:
-    if not get_scan_store().delete_announcement(announcement_id):
+    if not await run_store_call(
+        get_scan_store(),
+        "delete_announcement",
+        announcement_id,
+    ):
         raise HTTPException(status_code=404, detail="公告不存在")
     logger.info(
         "Admin '%s' deleted announcement %s",

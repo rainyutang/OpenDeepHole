@@ -17,15 +17,25 @@ from backend.models import (
     User,
 )
 from backend.registry import refresh_registry
+from backend.runtime_metrics import runtime_metrics
 from backend.scan_metrics import (
     accuracy,
     calculate_issue_metrics,
     latest_fp_review_result_map,
 )
 from backend.store import get_scan_store
+from backend.store.async_ops import run_store_call
 
 router = APIRouter()
 UNCONFIGURED_PRODUCT = "__unconfigured__"
+
+
+@router.get("/api/admin/runtime/metrics")
+async def get_runtime_metrics(
+    _current_user: User = Depends(require_admin),
+) -> dict:
+    """Return per-worker request, event-loop, and database queue metrics."""
+    return runtime_metrics.snapshot()
 
 
 @dataclass
@@ -88,13 +98,11 @@ def _scan_stats_for_checker(
     )
 
 
-@router.get("/api/admin/checker-dashboard", response_model=CheckerDashboardResponse)
-async def get_checker_dashboard(
+def _build_checker_dashboard(
+    store,
     product: str | None = None,
-    _current_user: User = Depends(require_admin),
 ) -> CheckerDashboardResponse:
-    """Return checker/SKILL quality and usage stats for administrators."""
-    store = get_scan_store()
+    """Build the legacy aggregate without occupying the ASGI event loop."""
     registry = refresh_registry()
     summaries = store.list_scans()
 
@@ -230,3 +238,13 @@ async def get_checker_dashboard(
         ),
         checkers=checkers,
     )
+
+
+@router.get("/api/admin/checker-dashboard", response_model=CheckerDashboardResponse)
+async def get_checker_dashboard(
+    product: str | None = None,
+    _current_user: User = Depends(require_admin),
+) -> CheckerDashboardResponse:
+    """Return checker/SKILL quality and usage stats for administrators."""
+    store = get_scan_store()
+    return await run_store_call(store, _build_checker_dashboard, store, product)

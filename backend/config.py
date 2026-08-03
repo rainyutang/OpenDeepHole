@@ -150,6 +150,9 @@ class StorageConfig(BaseModel):
     scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
     user_skills_dir: str = str(_DEFAULT_DATA_ROOT / "user_skills")
     max_upload_size_mb: int = 2048
+    database_url: str = ""
+    postgres_pool_min_size: int = Field(default=1, ge=1, le=50)
+    postgres_pool_max_size: int = Field(default=10, ge=1, le=100)
 
 
 class LoggingConfig(BaseModel):
@@ -214,6 +217,13 @@ def load_config(config_path: str | None = None) -> AppConfig:
 
     if v := os.environ.get("NO_PROXY"):
         raw["no_proxy"] = v
+
+    if database_url := os.environ.get("OPENDEEPHOLE_DATABASE_URL"):
+        raw.setdefault("storage", {})["database_url"] = database_url
+    if pool_min := os.environ.get("OPENDEEPHOLE_POSTGRES_POOL_MIN_SIZE"):
+        raw.setdefault("storage", {})["postgres_pool_min_size"] = pool_min
+    if pool_max := os.environ.get("OPENDEEPHOLE_POSTGRES_POOL_MAX_SIZE"):
+        raw.setdefault("storage", {})["postgres_pool_max_size"] = pool_max
 
     return AppConfig(**raw)
 

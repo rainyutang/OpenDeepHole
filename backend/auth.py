@@ -11,6 +11,7 @@ from fastapi import HTTPException, Request
 from backend.config import get_auth_secret_key, get_config
 from backend.models import User, UserInDB
 from backend.store import get_scan_store
+from backend.store.async_ops import run_store_call
 
 
 def hash_password(password: str) -> str:
@@ -37,7 +38,7 @@ def decode_token(token: str) -> dict:
     return jwt.decode(token, get_auth_secret_key(), algorithms=["HS256"])
 
 
-def get_current_user(request: Request) -> User:
+async def get_current_user(request: Request) -> User:
     """FastAPI dependency: extract and validate Bearer token, return User."""
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -53,7 +54,7 @@ def get_current_user(request: Request) -> User:
 
     user_id = payload.get("sub", "")
     store = get_scan_store()
-    user_in_db = store.get_user_by_id(user_id)
+    user_in_db = await run_store_call(store, "get_user_by_id", user_id)
     if user_in_db is None:
         raise HTTPException(status_code=401, detail="User not found")
 
@@ -66,9 +67,9 @@ def get_current_user(request: Request) -> User:
     )
 
 
-def require_admin(request: Request) -> User:
+async def require_admin(request: Request) -> User:
     """FastAPI dependency: require the current user to be an admin."""
-    user = get_current_user(request)
+    user = await get_current_user(request)
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user

@@ -25,6 +25,20 @@ def get_scan_store() -> ScanStoreBase:
     global _store
     if _store is None:
         config = get_config()
-        db_path = Path(config.storage.scans_dir) / "scans.db"
-        _store = SqliteScanStore(db_path)
+        database_url = str(config.storage.database_url or "").strip()
+        if database_url.startswith(("postgresql://", "postgres://")):
+            from .postgres import PostgresScanStore
+
+            _store = PostgresScanStore(
+                database_url,
+                pool_min_size=config.storage.postgres_pool_min_size,
+                pool_max_size=config.storage.postgres_pool_max_size,
+            )
+        elif database_url:
+            raise RuntimeError(
+                "storage.database_url must use postgresql:// or postgres://"
+            )
+        else:
+            db_path = Path(config.storage.scans_dir) / "scans.db"
+            _store = SqliteScanStore(db_path)
     return _store

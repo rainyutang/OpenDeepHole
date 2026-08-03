@@ -47,6 +47,11 @@ storage:
   projects_dir: "../OpenDeepHoleData/projects"
   scans_dir: "../OpenDeepHoleData/scans"
   max_upload_size_mb: 2048
+  # 留空时使用兼容的 SQLite 单 Worker；生产环境建议通过
+  # OPENDEEPHOLE_DATABASE_URL 设置 postgresql://...，不要把密码提交到仓库。
+  database_url: ""
+  postgres_pool_min_size: 1
+  postgres_pool_max_size: 10
 
 logging:
   level: "DEBUG"  # DEBUG, INFO, WARNING, ERROR

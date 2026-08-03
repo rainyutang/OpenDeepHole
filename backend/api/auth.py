@@ -1,5 +1,6 @@
 """Auth API — login, user management."""
 
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +22,7 @@ from backend.models import (
     User,
 )
 from backend.store import get_scan_store
+from backend.store.async_ops import run_store_call
 
 router = APIRouter(prefix="/api/auth")
 logger = get_logger(__name__)
@@ -29,8 +31,17 @@ logger = get_logger(__name__)
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest) -> TokenResponse:
     store = get_scan_store()
-    user_in_db = store.get_user_by_username(body.username)
-    if user_in_db is None or not verify_password(body.password, user_in_db.password_hash):
+    user_in_db = await run_store_call(store, "get_user_by_username", body.username)
+    password_valid = (
+        await asyncio.to_thread(
+            verify_password,
+            body.password,
+            user_in_db.password_hash,
+        )
+        if user_in_db is not None
+        else False
+    )
+    if user_in_db is None or not password_valid:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     token = create_token(user_in_db.user_id, user_in_db.username, user_in_db.role)
@@ -53,12 +64,21 @@ async def register(body: RegisterRequest) -> TokenResponse:
         raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
 
     store = get_scan_store()
-    if store.get_user_by_username(body.username) is not None:
+    if await run_store_call(store, "get_user_by_username", body.username) is not None:
         raise HTTPException(status_code=409, detail="Username already exists")
 
     user_id = uuid.uuid4().hex
     agent_token = uuid.uuid4().hex
-    store.create_user(user_id, body.username, hash_password(body.password), "user", agent_token)
+    password_hash = await asyncio.to_thread(hash_password, body.password)
+    await run_store_call(
+        store,
+        "create_user",
+        user_id,
+        body.username,
+        password_hash,
+        "user",
+        agent_token,
+    )
 
     token = create_token(user_id, body.username, "user")
     user = User(
@@ -83,11 +103,26 @@ async def change_password(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     store = get_scan_store()
-    user_in_db = store.get_user_by_id(current_user.user_id)
-    if user_in_db is None or not verify_password(body.old_password, user_in_db.password_hash):
+    user_in_db = await run_store_call(store, "get_user_by_id", current_user.user_id)
+    password_valid = (
+        await asyncio.to_thread(
+            verify_password,
+            body.old_password,
+            user_in_db.password_hash,
+        )
+        if user_in_db is not None
+        else False
+    )
+    if user_in_db is None or not password_valid:
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
-    store.update_user_password(current_user.user_id, hash_password(body.new_password))
+    password_hash = await asyncio.to_thread(hash_password, body.new_password)
+    await run_store_call(
+        store,
+        "update_user_password",
+        current_user.user_id,
+        password_hash,
+    )
     logger.info("User '%s' changed password", current_user.username)
     return {"ok": True}
 
@@ -95,7 +130,7 @@ async def change_password(
 @router.get("/users", response_model=list[User])
 async def list_users(current_user: User = Depends(require_admin)) -> list[User]:
     store = get_scan_store()
-    users = store.list_users()
+    users = await run_store_call(store, "list_users")
     return [
         User(
             user_id=u.user_id,
@@ -121,12 +156,21 @@ async def create_user(
         raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
 
     store = get_scan_store()
-    if store.get_user_by_username(body.username) is not None:
+    if await run_store_call(store, "get_user_by_username", body.username) is not None:
         raise HTTPException(status_code=409, detail="Username already exists")
 
     user_id = uuid.uuid4().hex
     agent_token = uuid.uuid4().hex
-    store.create_user(user_id, body.username, hash_password(body.password), body.role, agent_token)
+    password_hash = await asyncio.to_thread(hash_password, body.password)
+    await run_store_call(
+        store,
+        "create_user",
+        user_id,
+        body.username,
+        password_hash,
+        body.role,
+        agent_token,
+    )
 
     logger.info("Admin '%s' created user '%s' (role=%s)", current_user.username, body.username, body.role)
     return User(
@@ -147,7 +191,7 @@ async def delete_user(
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
 
     store = get_scan_store()
-    if not store.delete_user(user_id):
+    if not await run_store_call(store, "delete_user", user_id):
         raise HTTPException(status_code=404, detail="User not found")
 
     logger.info("Admin '%s' deleted user %s", current_user.username, user_id)

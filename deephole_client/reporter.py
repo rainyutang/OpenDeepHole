@@ -25,6 +25,8 @@ from backend.models import (
 
 OPENCODE_POOL_DEBOUNCE_SECONDS = 2.0
 OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 60.0
+AGENT_BATCH_SIZE = 100
+AGENT_BATCH_FLUSH_SECONDS = 0.25
 
 
 def _snapshot_signature(snapshot: dict) -> str:
@@ -41,14 +43,24 @@ class Reporter:
         self.agent_id = ""
         self.agent_name = ""
         self.agent_session_id = uuid4().hex
+        self.protocol_version = 1
         self._client = httpx.AsyncClient(timeout=30.0)
         self._static_progress_warning_at: dict[str, float] = {}
+        self._batch_lock = asyncio.Lock()
+        self._event_buffers: dict[str, list[ScanEvent]] = {}
+        self._event_flush_tasks: dict[str, asyncio.Task] = {}
+        self._processed_buffers: dict[str, list[tuple[str, int, str, str]]] = {}
+        self._processed_flush_tasks: dict[str, asyncio.Task] = {}
+        self._undelivered_vulnerabilities: dict[str, list[Vulnerability]] = {}
 
     def set_agent_id(self, agent_id: str) -> None:
         self.agent_id = agent_id
 
     def set_agent_name(self, agent_name: str) -> None:
         self.agent_name = agent_name
+
+    def set_protocol_version(self, version: int) -> None:
+        self.protocol_version = 2 if int(version or 1) >= 2 else 1
 
     def _with_agent_source(self, source: OutputSource | None) -> OutputSource:
         next_source = source.model_copy() if source is not None else OutputSource()
@@ -76,6 +88,16 @@ class Reporter:
         except Exception:
             return None
 
+    async def fetch_resume_manifest(self, url: str) -> dict:
+        """Fetch a v2 resume payload outside the WebSocket command frame."""
+        target = url if url.startswith(("http://", "https://")) else f"{self.server_url}{url}"
+        response = await self._client.get(target, timeout=60.0)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("invalid resume manifest payload")
+        return payload
+
     # ---------------------------------------------------------------------------
     # Scan events / results
     # ---------------------------------------------------------------------------
@@ -85,6 +107,47 @@ class Reporter:
         if self.dry_run:
             print(f"  [CANDIDATES] {len(candidates)} static candidate(s)")
             return
+        if self.protocol_version >= 2:
+            chunks = [
+                candidates[index:index + AGENT_BATCH_SIZE]
+                for index in range(0, len(candidates), AGENT_BATCH_SIZE)
+            ] or [[]]
+            for chunk_index, chunk in enumerate(chunks):
+                offset = chunk_index * AGENT_BATCH_SIZE
+                for attempt in range(3):
+                    try:
+                        resp = await self._client.post(
+                            f"{self.server_url}/api/agent/v2/scan/{scan_id}/candidates",
+                            json={
+                                "offset": offset,
+                                "candidates": [candidate.model_dump() for candidate in chunk],
+                                "reset": chunk_index == 0,
+                                "final": chunk_index == len(chunks) - 1,
+                                "total": len(candidates),
+                            },
+                            timeout=30.0,
+                        )
+                        resp.raise_for_status()
+                        break
+                    except Exception as exc:
+                        if attempt < 2:
+                            await asyncio.sleep(2**attempt)
+                            continue
+                        print(
+                            "Warning: failed to upload static candidate batch "
+                            f"{chunk_index + 1}/{len(chunks)}: {exc}; "
+                            "falling back to the v1 endpoint"
+                        )
+                        await self._report_candidates_v1(scan_id, candidates)
+                        return
+            return
+        await self._report_candidates_v1(scan_id, candidates)
+
+    async def _report_candidates_v1(
+        self,
+        scan_id: str,
+        candidates: list[Candidate],
+    ) -> None:
         try:
             resp = await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/candidates",
@@ -111,6 +174,11 @@ class Reporter:
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
+            if self.protocol_version >= 2:
+                async with self._batch_lock:
+                    self._undelivered_vulnerabilities.setdefault(scan_id, []).append(
+                        vuln.model_copy(deep=True)
+                    )
             print(f"Warning: failed to upload vulnerability result: {e}")
             return None
 
@@ -282,6 +350,20 @@ class Reporter:
         """Push a progress event to the server (best-effort, never raises)."""
         if self.dry_run:
             return
+        if self.protocol_version >= 2:
+            flush_now = False
+            async with self._batch_lock:
+                buffer = self._event_buffers.setdefault(scan_id, [])
+                buffer.append(event)
+                flush_now = len(buffer) >= AGENT_BATCH_SIZE
+                task = self._event_flush_tasks.get(scan_id)
+                if task is None or task.done():
+                    self._event_flush_tasks[scan_id] = asyncio.create_task(
+                        self._flush_events_after_delay(scan_id)
+                    )
+            if flush_now:
+                await self._flush_events(scan_id)
+            return
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/event",
@@ -289,6 +371,40 @@ class Reporter:
                 timeout=10.0,
             )
         except Exception:
+            pass
+
+    async def _flush_events_after_delay(self, scan_id: str) -> None:
+        current = asyncio.current_task()
+        try:
+            await asyncio.sleep(AGENT_BATCH_FLUSH_SECONDS)
+            await self._flush_events(scan_id)
+        finally:
+            async with self._batch_lock:
+                if self._event_flush_tasks.get(scan_id) is current:
+                    self._event_flush_tasks.pop(scan_id, None)
+                if (
+                    self._event_buffers.get(scan_id)
+                    and scan_id not in self._event_flush_tasks
+                ):
+                    self._event_flush_tasks[scan_id] = asyncio.create_task(
+                        self._flush_events_after_delay(scan_id)
+                    )
+
+    async def _flush_events(self, scan_id: str) -> None:
+        async with self._batch_lock:
+            events = self._event_buffers.pop(scan_id, [])
+        if not events:
+            return
+        try:
+            response = await self._client.post(
+                f"{self.server_url}/api/agent/v2/scan/{scan_id}/events",
+                json={"events": [event.model_dump() for event in events]},
+                timeout=10.0,
+            )
+            response.raise_for_status()
+        except Exception:
+            # Events are best effort; authoritative progress/results use their
+            # own endpoints and the next overview refresh reconciles the UI.
             pass
 
     async def finish_scan(
@@ -318,14 +434,26 @@ class Reporter:
             "processed_candidates": processed_candidates,
             "error_message": error_message,
         }
+        await self._flush_scan_batches(scan_id)
+        async with self._batch_lock:
+            has_undelivered_vulnerabilities = bool(
+                self._undelivered_vulnerabilities.get(scan_id)
+            )
+        if self.protocol_version >= 2 and not has_undelivered_vulnerabilities:
+            payload.pop("vulnerabilities", None)
+            finish_path = f"/api/agent/v2/scan/{scan_id}/finish"
+        else:
+            finish_path = f"/api/agent/scan/{scan_id}/finish"
         for attempt in range(3):
             try:
                 resp = await self._client.post(
-                    f"{self.server_url}/api/agent/scan/{scan_id}/finish",
+                    f"{self.server_url}{finish_path}",
                     json=payload,
                     timeout=60.0,
                 )
                 resp.raise_for_status()
+                async with self._batch_lock:
+                    self._undelivered_vulnerabilities.pop(scan_id, None)
                 return
             except Exception as e:
                 if attempt == 2:
@@ -427,6 +555,20 @@ class Reporter:
         """Report a successfully processed candidate key (fire-and-forget)."""
         if self.dry_run:
             return
+        if self.protocol_version >= 2:
+            flush_now = False
+            async with self._batch_lock:
+                buffer = self._processed_buffers.setdefault(scan_id, [])
+                buffer.append((file, line, function, vuln_type))
+                flush_now = len(buffer) >= AGENT_BATCH_SIZE
+                task = self._processed_flush_tasks.get(scan_id)
+                if task is None or task.done():
+                    self._processed_flush_tasks[scan_id] = asyncio.create_task(
+                        self._flush_processed_after_delay(scan_id)
+                    )
+            if flush_now:
+                await self._flush_processed(scan_id)
+            return
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/processed",
@@ -435,6 +577,70 @@ class Reporter:
             )
         except Exception:
             pass
+
+    async def _flush_processed_after_delay(self, scan_id: str) -> None:
+        current = asyncio.current_task()
+        try:
+            await asyncio.sleep(AGENT_BATCH_FLUSH_SECONDS)
+            await self._flush_processed(scan_id)
+        finally:
+            async with self._batch_lock:
+                if self._processed_flush_tasks.get(scan_id) is current:
+                    self._processed_flush_tasks.pop(scan_id, None)
+                if (
+                    self._processed_buffers.get(scan_id)
+                    and scan_id not in self._processed_flush_tasks
+                ):
+                    self._processed_flush_tasks[scan_id] = asyncio.create_task(
+                        self._flush_processed_after_delay(scan_id)
+                    )
+
+    async def _flush_processed(self, scan_id: str) -> None:
+        async with self._batch_lock:
+            keys = self._processed_buffers.pop(scan_id, [])
+        if not keys:
+            return
+        payload = {
+            "items": [
+                {
+                    "file": file,
+                    "line": line,
+                    "function": function,
+                    "vuln_type": vuln_type,
+                }
+                for file, line, function, vuln_type in keys
+            ],
+        }
+        for attempt in range(3):
+            try:
+                response = await self._client.post(
+                    f"{self.server_url}/api/agent/v2/scan/{scan_id}/processed",
+                    json=payload,
+                    timeout=10.0,
+                )
+                response.raise_for_status()
+                return
+            except Exception:
+                if attempt < 2:
+                    await asyncio.sleep(2**attempt)
+        # Preserve at-least-once delivery within this Agent process.
+        async with self._batch_lock:
+            self._processed_buffers.setdefault(scan_id, [])[:0] = keys
+
+    async def _flush_scan_batches(self, scan_id: str) -> None:
+        event_task = self._event_flush_tasks.pop(scan_id, None)
+        processed_task = self._processed_flush_tasks.pop(scan_id, None)
+        for task in (event_task, processed_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (event_task, processed_task) if task is not None),
+            return_exceptions=True,
+        )
+        await asyncio.gather(
+            self._flush_events(scan_id),
+            self._flush_processed(scan_id),
+        )
 
     async def push_opencode_pool_status(self, scan_id: str, snapshot: dict) -> bool:
         """Push the latest OpenCode model-pool status snapshot."""
@@ -833,4 +1039,13 @@ class Reporter:
             print(f"Warning: failed to signal FP review summary finish: {e}")
 
     async def close(self) -> None:
+        tasks = [
+            *self._event_flush_tasks.values(),
+            *self._processed_flush_tasks.values(),
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self._client.aclose()

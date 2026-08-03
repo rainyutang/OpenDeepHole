@@ -48,6 +48,13 @@ class ScanStoreBase(ABC):
     def load_scan(self, scan_id: str) -> tuple[ScanStatus, ScanMeta] | None:
         """Load a single scan's full state. Returns *None* if not found."""
 
+    def load_scan_overview(
+        self,
+        scan_id: str,
+    ) -> tuple[ScanStatus, ScanMeta, dict[str, int]] | None:
+        """Load scan state without large detail collections plus their counts."""
+        raise NotImplementedError
+
     @abstractmethod
     def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
         """Load only a scan's metadata (no vulnerabilities/reports/events)."""
@@ -99,6 +106,17 @@ class ScanStoreBase(ABC):
     def list_scans(self) -> list[ScanSummary]:
         """List all scans as summaries, ordered by *created_at* descending."""
 
+    def list_scans_page(
+        self,
+        *,
+        limit: int,
+        user_id: str | None = None,
+        before_created_at: str | None = None,
+        before_scan_id: str | None = None,
+    ) -> list[ScanSummary]:
+        """Return a stable page ordered by ``(created_at, scan_id)`` descending."""
+        raise NotImplementedError
+
     @abstractmethod
     def delete_scan(self, scan_id: str) -> bool:
         """Delete a scan record. Returns whether the record existed."""
@@ -140,9 +158,30 @@ class ScanStoreBase(ABC):
     ) -> list[ScanCandidate]:
         """Replace the final static-analysis candidate list for a scan."""
 
+    def upsert_scan_candidates_batch(
+        self,
+        scan_id: str,
+        *,
+        offset: int,
+        candidates: list[Candidate],
+        reset: bool,
+        final: bool,
+        total: int | None,
+    ) -> list[ScanCandidate]:
+        raise NotImplementedError
+
     @abstractmethod
     def list_scan_candidates(self, scan_id: str) -> list[ScanCandidate]:
         """Return persisted static-analysis candidates for a scan, ordered by index."""
+
+    def list_scan_candidates_page(
+        self,
+        scan_id: str,
+        *,
+        after_index: int,
+        limit: int,
+    ) -> list[ScanCandidate]:
+        raise NotImplementedError
 
     # -- Vulnerabilities --
 
@@ -173,6 +212,15 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def get_vulnerabilities(self, scan_id: str) -> list[Vulnerability]:
         """Return all vulnerabilities for a scan, ordered by index."""
+
+    def get_vulnerabilities_page(
+        self,
+        scan_id: str,
+        *,
+        after_index: int,
+        limit: int,
+    ) -> list[tuple[int, Vulnerability]]:
+        raise NotImplementedError
 
     @abstractmethod
     def upsert_vulnerability_validation(
@@ -228,9 +276,22 @@ class ScanStoreBase(ABC):
     def add_event(self, scan_id: str, event: ScanEvent) -> None:
         """Append a scan event."""
 
+    def add_events_batch(self, scan_id: str, events: list[ScanEvent]) -> int:
+        raise NotImplementedError
+
     @abstractmethod
     def get_events(self, scan_id: str) -> list[ScanEvent]:
         """Return all events for a scan, ordered chronologically."""
+
+    def get_events_page(
+        self,
+        scan_id: str,
+        *,
+        before_id: int | None,
+        limit: int,
+    ) -> list[tuple[int, ScanEvent]]:
+        """Return newest events first so callers can page backward by id."""
+        raise NotImplementedError
 
     # -- Processed keys (for resume) --
 
@@ -240,11 +301,21 @@ class ScanStoreBase(ABC):
     ) -> None:
         """Record a processed candidate key ``(file, line, function, vuln_type)``."""
 
+    def add_processed_keys_batch(
+        self,
+        scan_id: str,
+        keys: list[tuple[str, int, str, str]],
+    ) -> int:
+        raise NotImplementedError
+
     @abstractmethod
     def get_processed_keys(
         self, scan_id: str
     ) -> set[tuple[str, int, str, str]]:
         """Return the set of already-processed candidate keys."""
+
+    def count_processed_keys(self, scan_id: str) -> int:
+        raise NotImplementedError
 
     @abstractmethod
     def remove_processed_keys(

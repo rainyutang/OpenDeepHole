@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 import uuid
 
@@ -35,6 +36,7 @@ from backend.models import (
 from backend.registry import CHECKER_VISIBILITY_PUBLIC, refresh_registry
 from backend.scan_metrics import calculate_issue_metrics
 from backend.store import get_scan_store
+from backend.store.async_ops import run_store_call
 
 router = APIRouter()
 
@@ -90,18 +92,7 @@ def _progress_api_url(request: Request, scan_id: str, token: str) -> str:
     return f"{_base_url(request)}/api/public/scans/{scan_id}/progress?token={token}"
 
 
-def _ensure_integration_user() -> User:
-    store = get_scan_store()
-    user = store.get_user_by_username(INTEGRATION_USERNAME)
-    if user is None:
-        store.create_user(
-            uuid.uuid4().hex,
-            INTEGRATION_USERNAME,
-            hash_password(INTEGRATION_PASSWORD),
-            "user",
-            INTEGRATION_TOKEN,
-        )
-        user = store.get_user_by_username(INTEGRATION_USERNAME)
+def _integration_user_model(user) -> User:
     if user is None:
         raise HTTPException(status_code=500, detail="Integration user unavailable")
     return User(
@@ -113,12 +104,67 @@ def _ensure_integration_user() -> User:
     )
 
 
+def _ensure_integration_user() -> User:
+    """Synchronous compatibility helper retained for direct callers/tests."""
+    store = get_scan_store()
+    user = store.get_user_by_username(INTEGRATION_USERNAME)
+    if user is None:
+        store.create_user(
+            uuid.uuid4().hex,
+            INTEGRATION_USERNAME,
+            hash_password(INTEGRATION_PASSWORD),
+            "user",
+            INTEGRATION_TOKEN,
+        )
+        user = store.get_user_by_username(INTEGRATION_USERNAME)
+    return _integration_user_model(user)
+
+
+async def _ensure_integration_user_async() -> User:
+    store = get_scan_store()
+    user = await run_store_call(
+        store,
+        "get_user_by_username",
+        INTEGRATION_USERNAME,
+    )
+    if user is None:
+        import asyncio
+
+        password_hash = await asyncio.to_thread(
+            hash_password,
+            INTEGRATION_PASSWORD,
+        )
+        await run_store_call(
+            store,
+            "create_user",
+            uuid.uuid4().hex,
+            INTEGRATION_USERNAME,
+            password_hash,
+            "user",
+            INTEGRATION_TOKEN,
+        )
+        user = await run_store_call(
+            store,
+            "get_user_by_username",
+            INTEGRATION_USERNAME,
+        )
+    return _integration_user_model(user)
+
+
 def _require_integration_token(
     token: str = Header("", alias="X-OpenDeepHole-Integration-Token"),
 ) -> User:
     if not secrets.compare_digest(token, INTEGRATION_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid integration token")
     return _ensure_integration_user()
+
+
+async def _require_integration_token_async(
+    token: str = Header("", alias="X-OpenDeepHole-Integration-Token"),
+) -> User:
+    if not secrets.compare_digest(token, INTEGRATION_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid integration token")
+    return await _ensure_integration_user_async()
 
 
 def _online_agents_by_name(agent_name: str) -> list[tuple[str, AgentInfo]]:
@@ -170,17 +216,7 @@ async def _sync_agent_config(agent_id: str, config: AgentRemoteConfig) -> None:
         raise HTTPException(status_code=502, detail="Agent not connected")
 
 
-def _public_user_for_scan(scan_id: str, token: str) -> User:
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing scan access token")
-    store = get_scan_store()
-    loaded = store.load_scan(scan_id)
-    if loaded is None:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    _, meta = loaded
-    if not meta.public_access_token or not secrets.compare_digest(token, meta.public_access_token):
-        raise HTTPException(status_code=403, detail="Invalid scan access token")
-    owner = store.get_user_by_id(meta.user_id) if meta.user_id else None
+def _public_user_model(meta, owner) -> User:
     if owner is None:
         return User(user_id=meta.user_id, username="", role="user")
     return User(
@@ -192,15 +228,51 @@ def _public_user_for_scan(scan_id: str, token: str) -> User:
     )
 
 
-def _public_user_dependency(scan_id: str, token: str = Query("")) -> User:
-    return _public_user_for_scan(scan_id, token)
+def _public_user_for_scan(scan_id: str, token: str) -> User:
+    """Synchronous compatibility helper retained for direct callers/tests."""
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing scan access token")
+    store = get_scan_store()
+    loaded = store.load_scan(scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    _, meta = loaded
+    if not meta.public_access_token or not secrets.compare_digest(token, meta.public_access_token):
+        raise HTTPException(status_code=403, detail="Invalid scan access token")
+    owner = store.get_user_by_id(meta.user_id) if meta.user_id else None
+    return _public_user_model(meta, owner)
+
+
+async def _public_user_for_scan_async(scan_id: str, token: str) -> User:
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing scan access token")
+    store = get_scan_store()
+    loaded = await run_store_call(store, "load_scan", scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    _, meta = loaded
+    if not meta.public_access_token or not secrets.compare_digest(
+        token,
+        meta.public_access_token,
+    ):
+        raise HTTPException(status_code=403, detail="Invalid scan access token")
+    owner = (
+        await run_store_call(store, "get_user_by_id", meta.user_id)
+        if meta.user_id
+        else None
+    )
+    return _public_user_model(meta, owner)
+
+
+async def _public_user_dependency(scan_id: str, token: str = Query("")) -> User:
+    return await _public_user_for_scan_async(scan_id, token)
 
 
 @router.post("/api/integration/scans", response_model=IntegrationScanResponse)
 async def create_integration_scan(
     body: IntegrationScanRequest,
     request: Request,
-    current_user: User = Depends(_require_integration_token),
+    current_user: User = Depends(_require_integration_token_async),
 ) -> IntegrationScanResponse:
     agent_id = _resolve_agent_id(body.agent_name)
     checker_names = _public_checker_names()
@@ -515,7 +587,11 @@ async def delete_public_feedback(
 
 
 @router.get("/api/public/scans/{scan_id}/events")
-async def public_scan_events_sse(scan_id: str, token: str = Query("")) -> Response:
+async def public_scan_events_sse(
+    scan_id: str,
+    request: Request,
+    token: str = Query(""),
+) -> Response:
     """SSE stream for public scan real-time status updates."""
     import asyncio
     from typing import AsyncGenerator
@@ -524,16 +600,43 @@ async def public_scan_events_sse(scan_id: str, token: str = Query("")) -> Respon
 
     from backend.sse import subscribe, unsubscribe, format_sse, SSE_KEEPALIVE
 
-    _public_user_for_scan(scan_id, token)
+    await _public_user_for_scan_async(scan_id, token)
 
     async def event_generator() -> AsyncGenerator[str, None]:
         queue = subscribe(scan_id)
         try:
+            last_event_id = 0
+            try:
+                last_event_id = max(
+                    0,
+                    int(request.headers.get("last-event-id") or 0),
+                )
+            except (TypeError, ValueError):
+                pass
+            store = get_scan_store()
+            if last_event_id and getattr(store, "distributed", False):
+                replay = await run_store_call(
+                    store,
+                    "list_stream_events",
+                    last_event_id,
+                    1000,
+                    scan_id=scan_id,
+                )
+                for item in replay:
+                    try:
+                        data = json.loads(str(item["data_json"]))
+                    except Exception:
+                        data = {}
+                    yield format_sse(
+                        str(item["event_type"]),
+                        data,
+                        int(item["id"]),
+                    )
             yield format_sse("connected", {"scan_id": scan_id})
             while True:
                 try:
                     msg = await asyncio.wait_for(queue.get(), timeout=30)
-                    yield format_sse(msg["event"], msg["data"])
+                    yield format_sse(msg["event"], msg["data"], msg.get("id"))
                 except asyncio.TimeoutError:
                     yield SSE_KEEPALIVE
         except (asyncio.CancelledError, GeneratorExit):

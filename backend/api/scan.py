@@ -9,10 +9,11 @@ import csv
 import io
 import json
 import re
+import secrets
 import shutil
 import uuid
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -45,18 +46,26 @@ from backend.models import (
     MiningEngineRunStatus,
     MiningEngineSelection,
     ScanItemStatus,
+    ScanCandidatePage,
+    ScanEventPage,
     ScanMeta,
+    ScanOverview,
     ScanValidationTargetList,
     ScanStartResponse,
     ScanStatus,
     ScanSummary,
+    ScanSummaryPage,
     SkillReport,
     ThreatAuditTask,
+    ThreatAuditTaskPage,
     ThreatAnalysisRunStatus,
     UnmarkRequest,
     UpdateScanValidationTargetRequest,
     User,
+    VulnerabilityPage,
+    VulnerabilityPageItem,
     VulnerabilityValidation,
+    VulnerabilityValidationPage,
 )
 from backend.feedback_format import build_feedback_section
 from backend.scan_metrics import (
@@ -65,6 +74,8 @@ from backend.scan_metrics import (
     latest_fp_review_result_map,
 )
 from backend.store import get_scan_store
+from backend.store.async_ops import run_store_call
+from backend.pagination import decode_cursor, encode_cursor
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
 
 router = APIRouter()
@@ -255,14 +266,13 @@ def _validate_validation_target(product: str, validation_environment: str) -> tu
     return normalized_product, normalized_environment
 
 
-def _check_scan_owner(scan_id: str, user: User) -> None:
+async def _check_scan_owner(scan_id: str, user: User) -> None:
     """Raise 403 if the user doesn't own the scan and isn't admin."""
     if user.role == "admin":
         return
     if scan_id in _scan_owners and _scan_owners[scan_id] == user.user_id:
         return
-    store = get_scan_store()
-    meta = store.get_scan_meta(scan_id)
+    meta = await run_store_call(get_scan_store(), "get_scan_meta", scan_id)
     if meta is not None and meta.user_id == user.user_id:
         return
     raise HTTPException(status_code=403, detail="Access denied")
@@ -573,11 +583,15 @@ def _selected_feedback_entries(scan_id: str, feedback_ids: list[str] | None = No
     return get_scan_store().get_feedback_by_ids(ids)
 
 
-def _resolve_scan_agent_id(meta: ScanMeta) -> str | None:
-    from backend.api.agent import _agent_ws, _registered_agents, resolve_agent_connection
+async def _resolve_scan_agent_id(meta: ScanMeta) -> str | None:
+    from backend.api.agent import (
+        _agent_ws,
+        _registered_agents,
+        resolve_agent_connection_async,
+    )
 
     if meta.agent_key:
-        resolved = resolve_agent_connection(meta.agent_key)
+        resolved = await resolve_agent_connection_async(meta.agent_key)
         if resolved is not None:
             return resolved[0]
     agent_id = meta.agent_id
@@ -587,6 +601,25 @@ def _resolve_scan_agent_id(meta: ScanMeta) -> str | None:
         for aid, ainfo in _registered_agents.items():
             if ainfo.name == meta.agent_name and aid in _agent_ws:
                 return aid
+    store = get_scan_store()
+    if getattr(store, "distributed", False):
+        if agent_id:
+            session = await run_store_call(
+                store,
+                "get_live_agent_session",
+                agent_id=agent_id,
+            )
+            if session is not None:
+                return str(session["agent_id"])
+        if meta.agent_name:
+            session = await run_store_call(
+                store,
+                "get_live_agent_session_by_name",
+                meta.agent_name,
+                user_id=meta.user_id or None,
+            )
+            if session is not None:
+                return str(session["agent_id"])
     return None
 
 
@@ -772,15 +805,22 @@ def _apply_task_progress(scan: ScanStatus | ScanSummary, pool=None) -> None:
 
 async def _push_feedback_selection_update(scan_id: str, feedback_ids: list[str]) -> None:
     """Best-effort update of the selected feedback entries on the owning agent."""
-    meta = get_scan_store().get_scan_meta(scan_id)
+    store = get_scan_store()
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
     if meta is None:
         return
-    agent_id = _resolve_scan_agent_id(meta)
+    agent_id = await _resolve_scan_agent_id(meta)
     if agent_id is None:
         return
     from backend.api.agent import send_agent_command
 
-    entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, feedback_ids)]
+    selected = await run_store_call(
+        store,
+        _selected_feedback_entries,
+        scan_id,
+        feedback_ids,
+    )
+    entries = [entry.model_dump() for entry in selected]
     await send_agent_command(agent_id, {
         "type": "feedback_selection_update",
         "scan_id": scan_id,
@@ -806,18 +846,24 @@ async def create_agent_scan(
     from backend.api.agent import (
         _registered_agents,
         agent_config_has_explicit_model,
-        ensure_agent_accepting_tasks,
-        get_managed_agent_config,
-        resolve_agent_connection,
+        ensure_agent_accepting_tasks_async,
+        get_managed_agent_config_async,
+        resolve_agent_connection_async,
+        resolve_agent_id_connection_async,
     )
 
     selected_agent_key = body.agent_key.strip()
-    resolved = resolve_agent_connection(selected_agent_key) if selected_agent_key else None
+    resolved = (
+        await resolve_agent_connection_async(selected_agent_key)
+        if selected_agent_key
+        else None
+    )
     if resolved is not None:
         agent_id, agent = resolved
     else:
         agent_id = body.agent_id.strip()
-        agent = _registered_agents.get(agent_id)
+        by_id = await resolve_agent_id_connection_async(agent_id) if agent_id else None
+        agent = by_id[1] if by_id is not None else _registered_agents.get(agent_id)
         if agent is not None:
             selected_agent_key = agent.agent_key
     if agent is None:
@@ -826,8 +872,12 @@ async def create_agent_scan(
     # Verify the agent belongs to this user (or user is admin)
     if enforce_agent_owner and current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Agent does not belong to you")
-    ensure_agent_accepting_tasks(selected_agent_key)
-    managed_config = get_managed_agent_config(selected_agent_key) if selected_agent_key else None
+    await ensure_agent_accepting_tasks_async(selected_agent_key)
+    managed_config = (
+        await get_managed_agent_config_async(selected_agent_key)
+        if selected_agent_key
+        else None
+    )
     if managed_config is not None and not agent_config_has_explicit_model(managed_config):
         raise HTTPException(
             status_code=400,
@@ -898,7 +948,11 @@ async def create_agent_scan(
     )
     if selected_agent_key and product and validation_environment:
         import json as _json
-        record = get_scan_store().get_agent_record(selected_agent_key)
+        record = await run_store_call(
+            get_scan_store(),
+            "get_agent_record",
+            selected_agent_key,
+        )
         try:
             registrations = (_json.loads(str(record.get("validator_catalog_json") or "{}")) if record else {}).get("registrations", [])
         except Exception:
@@ -967,16 +1021,22 @@ async def create_agent_scan(
     )
 
     store = get_scan_store()
-    store.save_scan(scan, meta)
+    await run_store_call(store, "save_scan", scan, meta)
     _running_scans[scan_id] = scan
     _scan_owners[scan_id] = current_user.user_id
 
     # Dispatch to agent via WebSocket
     from backend.api.agent import (
-        create_agent_task_runtime_update_payload,
+        create_agent_task_runtime_update_payload_async,
         send_agent_command,
     )
-    feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, body.feedback_ids)]
+    selected_feedback = await run_store_call(
+        store,
+        _selected_feedback_entries,
+        scan_id,
+        body.feedback_ids,
+    )
+    feedback_entries = [entry.model_dump() for entry in selected_feedback]
     ok = await send_agent_command(agent_id, {
         "type": "task",
         "scan_id": scan_id,
@@ -999,13 +1059,19 @@ async def create_agent_scan(
             if code_graph_mcp is not None
             else None
         ),
-        "agent_runtime_update": create_agent_task_runtime_update_payload(
+        "agent_runtime_update": await create_agent_task_runtime_update_payload_async(
             _server_url_from_request(request),
             selected_agent_key,
         ),
     })
     if not ok:
-        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
+        await run_store_call(
+            store,
+            "update_scan_progress",
+            scan_id,
+            status=ScanItemStatus.ERROR,
+            error_message="Agent not connected",
+        )
         scan.status = ScanItemStatus.ERROR
         _running_scans.pop(scan_id, None)
         logger.error("Failed to dispatch scan %s: agent %s not connected", scan_id, agent_id)
@@ -1033,28 +1099,47 @@ async def create_scan(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/scans", response_model=list[ScanSummary])
-async def list_scans(current_user: User = Depends(get_current_user)) -> list[ScanSummary]:
-    """List scans visible to the current user (admin sees all)."""
+async def _enrich_scan_summaries(
+    summaries: list[ScanSummary],
+) -> list[ScanSummary]:
+    """Add live state and effective issue metrics without blocking the loop."""
     from backend.api.agent import (
         reconcile_offline_agent_scan_state,
         reconcile_offline_agent_summary_state,
     )
 
     store = get_scan_store()
-    if current_user.role == "admin":
-        summaries = store.list_scans()
-    else:
-        summaries = store.list_scans_by_user(current_user.user_id)
-
-    stored_ids = [s.scan_id for s in summaries if s.scan_id not in _running_scans]
-    vuln_stats = store.get_vuln_stats_by_scans(stored_ids)
-    fp_verdicts = store.list_fp_review_verdicts_by_scans([s.scan_id for s in summaries])
-    incomplete_threat_counts = store.get_incomplete_threat_audit_counts(stored_ids)
+    distributed = bool(getattr(store, "distributed", False))
+    local_scan_ids = set() if distributed else set(_running_scans)
+    stored_ids = [s.scan_id for s in summaries if s.scan_id not in local_scan_ids]
+    vuln_stats, fp_verdicts, incomplete_threat_counts = await asyncio.gather(
+        run_store_call(store, "get_vuln_stats_by_scans", stored_ids),
+        run_store_call(
+            store,
+            "list_fp_review_verdicts_by_scans",
+            [s.scan_id for s in summaries],
+        ),
+        run_store_call(store, "get_incomplete_threat_audit_counts", stored_ids),
+    )
+    live_identities: set[tuple[str, str]] = set()
+    if distributed:
+        sessions = await run_store_call(store, "list_live_agent_sessions")
+        live_identities = {
+            (str(item["name"]), str(item["user_id"] or ""))
+            for item in sessions
+        }
+    running_ids = [s.scan_id for s in summaries if s.scan_id in local_scan_ids]
+    processed_by_scan = dict(zip(
+        running_ids,
+        await asyncio.gather(*(
+            run_store_call(store, "get_processed_keys", scan_id)
+            for scan_id in running_ids
+        )),
+    ))
 
     for s in summaries:
-        if s.scan_id in _running_scans:
-            processed_keys = store.get_processed_keys(s.scan_id)
+        if s.scan_id in local_scan_ids:
+            processed_keys = processed_by_scan.get(s.scan_id, set())
             live = _running_scans[s.scan_id]
             live.agent_name = s.agent_name or live.agent_name
             vulnerabilities = live.vulnerabilities
@@ -1068,7 +1153,14 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
             continuable_count = _continuable_task_count(live, processed_keys)
         else:
             # status/progress 等字段与 load_scan 同源于 scans 表同一行，直接用 summary 值
-            s = reconcile_offline_agent_summary_state(s)
+            if distributed:
+                s.agent_online = (
+                    (s.agent_name, s.user_id or "") in live_identities
+                    if s.agent_name
+                    else False
+                )
+            else:
+                s = reconcile_offline_agent_summary_state(s)
             vulnerabilities = vuln_stats.get(s.scan_id, [])
             continuable_count = (
                 max(s.total_candidates - s.processed_candidates, 0)
@@ -1089,6 +1181,53 @@ async def list_scans(current_user: User = Depends(get_current_user)) -> list[Sca
     return summaries
 
 
+@router.get("/api/scans", response_model=list[ScanSummary])
+async def list_scans(current_user: User = Depends(get_current_user)) -> list[ScanSummary]:
+    """Legacy unpaginated scan list retained for one Agent/UI release."""
+    store = get_scan_store()
+    operation = "list_scans" if current_user.role == "admin" else "list_scans_by_user"
+    args = () if current_user.role == "admin" else (current_user.user_id,)
+    summaries = await run_store_call(store, operation, *args)
+    return await _enrich_scan_summaries(summaries)
+
+
+@router.get("/api/v2/scans", response_model=ScanSummaryPage)
+async def list_scans_v2(
+    limit: int = Query(50, ge=1, le=100),
+    cursor: str | None = Query(None),
+    current_user: User = Depends(get_current_user),
+) -> ScanSummaryPage:
+    """Return a bounded, stable page of scans visible to the current user."""
+    before_created_at = None
+    before_scan_id = None
+    if cursor:
+        try:
+            before_created_at, before_scan_id = decode_cursor(cursor, size=2)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid scan cursor") from exc
+
+    store = get_scan_store()
+    summaries = await run_store_call(
+        store,
+        "list_scans_page",
+        limit=limit + 1,
+        user_id=None if current_user.role == "admin" else current_user.user_id,
+        before_created_at=before_created_at,
+        before_scan_id=before_scan_id,
+    )
+    has_more = len(summaries) > limit
+    items = await _enrich_scan_summaries(summaries[:limit])
+    next_cursor = None
+    if has_more and items:
+        last = items[-1]
+        next_cursor = encode_cursor(last.created_at, last.scan_id)
+    return ScanSummaryPage(
+        items=items,
+        next_cursor=next_cursor,
+        has_more=has_more,
+    )
+
+
 @router.get("/api/scan/validation-targets", response_model=ScanValidationTargetList)
 async def list_scan_validation_targets(
     _current_user: User = Depends(get_current_user),
@@ -1107,27 +1246,274 @@ async def get_scan_status(
     """Get the current status and results of a scan."""
     from backend.api.agent import reconcile_offline_agent_scan_state
 
-    _check_scan_owner(scan_id, current_user)
-    if scan_id in _running_scans:
+    await _check_scan_owner_v2(scan_id, current_user)
+    store = get_scan_store()
+    distributed = bool(getattr(store, "distributed", False))
+    meta = None
+    if not distributed and scan_id in _running_scans:
         scan = _running_scans[scan_id]
     else:
-        store = get_scan_store()
-        result = store.load_scan(scan_id)
+        result = await run_store_call(store, "load_scan", scan_id)
         if result is None:
             raise HTTPException(status_code=404, detail="Scan not found")
-        scan = result[0]
-        scan.agent_name = result[1].agent_name
-    scan = reconcile_offline_agent_scan_state(scan_id, scan)
+        scan, meta = result
+        scan.agent_name = meta.agent_name
+    if distributed:
+        session = (
+            await run_store_call(
+                store,
+                "get_live_agent_session_by_name",
+                meta.agent_name,
+                user_id=meta.user_id or None,
+            )
+            if meta is not None and meta.agent_name
+            else None
+        )
+        scan.agent_online = session is not None
+    else:
+        scan = reconcile_offline_agent_scan_state(scan_id, scan)
     scan.retryable_candidates_count = _retry_incomplete_count(scan)
     _apply_task_progress(scan)
+    processed_keys = await run_store_call(store, "get_processed_keys", scan_id)
     _apply_continue_capability(
         scan,
-        continuable_count=_continuable_task_count(
-            scan,
-            get_scan_store().get_processed_keys(scan_id),
-        ),
+        continuable_count=_continuable_task_count(scan, processed_keys),
     )
     return scan
+
+
+async def _check_scan_owner_v2(scan_id: str, current_user: User) -> None:
+    """Compatibility name used by the split v2 detail routes."""
+    await _check_scan_owner(scan_id, current_user)
+
+
+@router.get("/api/v2/scans/{scan_id}/overview", response_model=ScanOverview)
+async def get_scan_overview_v2(
+    scan_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ScanOverview:
+    """Return frequently refreshed state without large result collections."""
+    from backend.api.agent import reconcile_offline_agent_scan_state
+
+    store = get_scan_store()
+    distributed = bool(getattr(store, "distributed", False))
+    loaded = await run_store_call(store, "load_scan_overview", scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    stored_scan, meta, counts = loaded
+    if current_user.role != "admin" and meta.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if not distributed and scan_id in _running_scans:
+        scan = _running_scans[scan_id]
+        counts = {
+            **counts,
+            "candidates": max(counts["candidates"], len(scan.candidates)),
+            "vulnerabilities": max(counts["vulnerabilities"], len(scan.vulnerabilities)),
+            "events": max(counts["events"], len(scan.events)),
+            "threat_audit_tasks": max(
+                counts["threat_audit_tasks"],
+                len(scan.threat_audit_tasks),
+            ),
+            "validations": max(counts["validations"], len(scan.validations)),
+            "skill_reports": max(counts["skill_reports"], len(scan.skill_reports)),
+        }
+        processed_keys = await run_store_call(store, "get_processed_keys", scan_id)
+        scan.retryable_candidates_count = _retry_incomplete_count(scan)
+        continuable_count = _continuable_task_count(scan, processed_keys)
+    else:
+        scan = stored_scan
+        vuln_stats, incomplete_counts = await asyncio.gather(
+            run_store_call(store, "get_vuln_stats_by_scans", [scan_id]),
+            run_store_call(store, "get_incomplete_threat_audit_counts", [scan_id]),
+        )
+        vulnerabilities = vuln_stats.get(scan_id, [])
+        scan.retryable_candidates_count = sum(
+            1 for vuln in vulnerabilities if _is_retryable_vuln(vuln)
+        )
+        continuable_count = (
+            max(scan.total_candidates - scan.processed_candidates, 0)
+            + scan.retryable_candidates_count
+            + incomplete_counts.get(scan_id, 0)
+        )
+
+    scan.agent_name = meta.agent_name
+    if distributed:
+        session = (
+            await run_store_call(
+                store,
+                "get_live_agent_session_by_name",
+                meta.agent_name,
+                user_id=meta.user_id or None,
+            )
+            if meta.agent_name
+            else None
+        )
+        scan.agent_online = session is not None
+    else:
+        scan = reconcile_offline_agent_scan_state(scan_id, scan)
+    _apply_task_progress(scan)
+    _apply_continue_capability(scan, continuable_count=continuable_count)
+    payload = scan.model_dump(mode="python")
+    payload.update({
+        "candidates": [],
+        "vulnerabilities": [],
+        "skill_reports": [],
+        "threat_analysis": None,
+        "threat_audit_tasks": [],
+        "validations": [],
+        "events": [],
+        "detail_counts": counts,
+    })
+    return ScanOverview.model_validate(payload)
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/candidates",
+    response_model=ScanCandidatePage,
+)
+async def get_scan_candidates_v2(
+    scan_id: str,
+    limit: int = Query(200, ge=1, le=500),
+    after: int = Query(-1, ge=-1),
+    current_user: User = Depends(get_current_user),
+) -> ScanCandidatePage:
+    await _check_scan_owner_v2(scan_id, current_user)
+    rows = await run_store_call(
+        get_scan_store(),
+        "list_scan_candidates_page",
+        scan_id,
+        after_index=after,
+        limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    return ScanCandidatePage(
+        items=items,
+        has_more=has_more,
+        next_cursor=items[-1].idx if has_more and items else None,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/vulnerabilities",
+    response_model=VulnerabilityPage,
+)
+async def get_scan_vulnerabilities_v2(
+    scan_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    after: int = Query(-1, ge=-1),
+    current_user: User = Depends(get_current_user),
+) -> VulnerabilityPage:
+    await _check_scan_owner_v2(scan_id, current_user)
+    rows = await run_store_call(
+        get_scan_store(),
+        "get_vulnerabilities_page",
+        scan_id,
+        after_index=after,
+        limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [
+        VulnerabilityPageItem(index=index, vulnerability=vulnerability)
+        for index, vulnerability in rows
+    ]
+    return VulnerabilityPage(
+        items=items,
+        has_more=has_more,
+        next_cursor=items[-1].index if has_more and items else None,
+    )
+
+
+@router.get("/api/v2/scans/{scan_id}/events", response_model=ScanEventPage)
+async def get_scan_events_v2(
+    scan_id: str,
+    limit: int = Query(200, ge=1, le=500),
+    before: int | None = Query(None, ge=1),
+    current_user: User = Depends(get_current_user),
+) -> ScanEventPage:
+    await _check_scan_owner_v2(scan_id, current_user)
+    rows = await run_store_call(
+        get_scan_store(),
+        "get_events_page",
+        scan_id,
+        before_id=before,
+        limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_cursor = min((event_id for event_id, _ in rows), default=None)
+    return ScanEventPage(
+        items=[event for _, event in reversed(rows)],
+        has_more=has_more,
+        next_cursor=next_cursor if has_more else None,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/threat-audit-tasks",
+    response_model=ThreatAuditTaskPage,
+)
+async def get_scan_threat_audit_tasks_v2(
+    scan_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    cursor: str | None = Query(None),
+    current_user: User = Depends(get_current_user),
+) -> ThreatAuditTaskPage:
+    await _check_scan_owner_v2(scan_id, current_user)
+    after: tuple[str, str] | None = None
+    if cursor:
+        try:
+            after = decode_cursor(cursor, size=2)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid task cursor") from exc
+    tasks = await run_store_call(
+        get_scan_store(),
+        "list_threat_audit_tasks",
+        scan_id,
+        after_created_at=after[0] if after is not None else None,
+        after_task_id=after[1] if after is not None else None,
+        limit=limit + 1,
+    )
+    has_more = len(tasks) > limit
+    items = tasks[:limit]
+    next_cursor = None
+    if has_more and items:
+        last = items[-1]
+        next_cursor = encode_cursor(last.created_at or "", last.task_id)
+    return ThreatAuditTaskPage(
+        items=items,
+        has_more=has_more,
+        next_cursor=next_cursor,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/validations",
+    response_model=VulnerabilityValidationPage,
+)
+async def get_scan_validations_v2(
+    scan_id: str,
+    limit: int = Query(200, ge=1, le=500),
+    after: int = Query(-1, ge=-1),
+    current_user: User = Depends(get_current_user),
+) -> VulnerabilityValidationPage:
+    await _check_scan_owner_v2(scan_id, current_user)
+    rows = await run_store_call(
+        get_scan_store(),
+        "list_vulnerability_validations",
+        scan_id,
+        after_index=after,
+        limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    return VulnerabilityValidationPage(
+        items=items,
+        has_more=has_more,
+        next_cursor=items[-1].vuln_index if has_more and items else None,
+    )
 
 
 @router.put("/api/scan/{scan_id}/validation-target")
@@ -1137,18 +1523,24 @@ async def update_scan_validation_target(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Update the complete validation target associated with an existing scan."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     product, validation_environment = _validate_validation_target(
         body.product,
         body.validation_environment,
     )
     store = get_scan_store()
-    if store.get_scan_meta(scan_id) is None:
+    if await run_store_call(store, "get_scan_meta", scan_id) is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     if scan_id in _running_scans:
         _running_scans[scan_id].product = product
         _running_scans[scan_id].validation_environment = validation_environment
-    store.update_scan_validation_target(scan_id, product, validation_environment)
+    await run_store_call(
+        store,
+        "update_scan_validation_target",
+        scan_id,
+        product,
+        validation_environment,
+    )
     return {"ok": True}
 
 
@@ -1158,17 +1550,17 @@ async def stop_scan(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Immediately cancel the scan, then best-effort notify the agent."""
-    _check_scan_owner(scan_id, current_user)
-    from backend.api.agent import _registered_agents
-
+    await _check_scan_owner(scan_id, current_user)
     store = get_scan_store()
 
     # Resolve agent_id BEFORE popping from memory
-    meta = store.get_scan_meta(scan_id)
-    agent_id = _resolve_scan_agent_id(meta) if meta else ""
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    agent_id = await _resolve_scan_agent_id(meta) if meta else ""
 
     # Immediately mark as CANCELLED in DB and in-memory
-    store.update_scan_progress(
+    await run_store_call(
+        store,
+        "update_scan_progress",
         scan_id,
         status=ScanItemStatus.CANCELLED,
         error_message="用户手动停止",
@@ -1181,7 +1573,7 @@ async def stop_scan(
     _scan_owners.pop(scan_id, None)
 
     # Best-effort: send stop command to agent (fire-and-forget)
-    if agent_id and _registered_agents.get(agent_id):
+    if agent_id:
         from backend.api.agent import send_agent_command
         try:
             await send_agent_command(agent_id, {"type": "stop", "scan_id": scan_id})
@@ -1198,20 +1590,20 @@ async def _continue_scan(
     current_user: User,
 ) -> ScanStartResponse:
     """Continue all unfinished and retryable work for one scan."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner_v2(scan_id, current_user)
     from backend.api.agent import (
         _registered_agents,
         agent_config_has_explicit_model,
-        ensure_agent_accepting_tasks,
-        get_managed_agent_config,
-        resolve_agent_connection,
+        ensure_agent_accepting_tasks_async,
+        get_managed_agent_config_async,
+        resolve_agent_connection_async,
     )
 
     if scan_id in _running_scans:
         raise HTTPException(status_code=400, detail="Scan is already running")
 
     store = get_scan_store()
-    result = store.load_scan(scan_id)
+    result = await run_store_call(store, "load_scan", scan_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -1219,7 +1611,7 @@ async def _continue_scan(
     if scan.status in {ScanItemStatus.PENDING, ScanItemStatus.ANALYZING, ScanItemStatus.AUDITING}:
         raise HTTPException(status_code=400, detail="Scan is already running")
 
-    processed_keys = store.get_processed_keys(scan_id)
+    processed_keys = await run_store_call(store, "get_processed_keys", scan_id)
     continue_candidates = _continuable_candidates(scan, processed_keys)
     incomplete_threat_tasks = _incomplete_threat_audit_tasks(scan)
     continue_count = len(continue_candidates) + len(incomplete_threat_tasks)
@@ -1256,7 +1648,11 @@ async def _continue_scan(
         threat_task_ids = [task.task_id for task in incomplete_threat_tasks]
 
     # Only allow resume when the original agent (by name) is online
-    stable = resolve_agent_connection(meta.agent_key) if meta.agent_key else None
+    stable = (
+        await resolve_agent_connection_async(meta.agent_key)
+        if meta.agent_key
+        else None
+    )
     if stable is not None:
         agent_id, agent = stable
     else:
@@ -1279,8 +1675,13 @@ async def _continue_scan(
             detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
 
-    ensure_agent_accepting_tasks(meta.agent_key or agent.agent_key)
-    if meta.agent_key and not agent_config_has_explicit_model(get_managed_agent_config(meta.agent_key)):
+    await ensure_agent_accepting_tasks_async(meta.agent_key or agent.agent_key)
+    managed_config = (
+        await get_managed_agent_config_async(meta.agent_key)
+        if meta.agent_key
+        else None
+    )
+    if managed_config is not None and not agent_config_has_explicit_model(managed_config):
         raise HTTPException(
             status_code=400,
             detail="扫描关联的 Agent 尚未配置启用的显式模型，请先完成 Agent 模型配置",
@@ -1290,7 +1691,14 @@ async def _continue_scan(
     if agent_id != meta.agent_id:
         meta.agent_id = agent_id
         meta.agent_name = agent.name
-        store.update_scan_agent(scan_id, agent_id, agent.name, agent.agent_key)
+        await run_store_call(
+            store,
+            "update_scan_agent",
+            scan_id,
+            agent_id,
+            agent.name,
+            agent.agent_key,
+        )
 
     total_candidates = scan.total_candidates or len(scan.candidates) or len(scan.vulnerabilities)
     if candidate_payload is None:
@@ -1310,7 +1718,9 @@ async def _continue_scan(
     scan.agent_online = True
     scan.processed_candidates = processed_offset
     scan.progress = progress
-    store.update_scan_progress(
+    await run_store_call(
+        store,
+        "update_scan_progress",
         scan_id,
         status=ScanItemStatus.PENDING,
         processed_candidates=processed_offset,
@@ -1318,17 +1728,27 @@ async def _continue_scan(
         error_message="",
         clear_current_candidate=True,
     )
-    store.remove_processed_keys(scan_id, retry_keys)
+    await run_store_call(store, "remove_processed_keys", scan_id, retry_keys)
 
     _running_scans[scan_id] = scan
     _scan_owners[scan_id] = current_user.user_id
 
     from backend.api.agent import (
-        create_agent_task_runtime_update_payload,
+        create_agent_task_runtime_update_payload_async,
         send_agent_command,
     )
-    feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
-    ok = await send_agent_command(agent_id, {
+    selected_feedback = await run_store_call(
+        store,
+        _selected_feedback_entries,
+        scan_id,
+        meta.feedback_ids,
+    )
+    feedback_entries = [entry.model_dump() for entry in selected_feedback]
+    runtime_update = await create_agent_task_runtime_update_payload_async(
+        _server_url_from_request(request),
+        meta.agent_key,
+    )
+    resume_payload = {
         "type": "resume",
         "scan_id": scan_id,
         "project_path": meta.project_path,
@@ -1375,15 +1795,52 @@ async def _continue_scan(
             if meta.code_graph_mcp is not None
             else None
         ),
-        "agent_runtime_update": create_agent_task_runtime_update_payload(
-            _server_url_from_request(request),
-            meta.agent_key,
-        ),
-    })
+        "agent_runtime_update": runtime_update,
+    }
+    if agent.protocol_version >= 2:
+        manifest_token = secrets.token_urlsafe(32)
+        payload_json = await run_store_call(
+            store,
+            json.dumps,
+            resume_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        await run_store_call(
+            store,
+            "create_resume_manifest",
+            token=manifest_token,
+            scan_id=scan_id,
+            agent_key=meta.agent_key or agent.agent_key,
+            payload_json=payload_json,
+            expires_at=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+        )
+        command = {
+            "type": "resume",
+            "scan_id": scan_id,
+            "resume_manifest_url": (
+                f"{_server_url_from_request(request)}"
+                f"/api/agent/v2/resume-manifests/{manifest_token}"
+            ),
+            "agent_runtime_update": runtime_update,
+        }
+    else:
+        command = resume_payload
+    ok = await send_agent_command(agent_id, command)
     if not ok:
-        for key in removed_processed_keys:
-            store.add_processed_key(scan_id, key)
-        store.update_scan_progress(scan_id, status=ScanItemStatus.ERROR, error_message="Agent not connected")
+        await run_store_call(
+            store,
+            "add_processed_keys_batch",
+            scan_id,
+            removed_processed_keys,
+        )
+        await run_store_call(
+            store,
+            "update_scan_progress",
+            scan_id,
+            status=ScanItemStatus.ERROR,
+            error_message="Agent not connected",
+        )
         scan.status = ScanItemStatus.ERROR
         _running_scans.pop(scan_id, None)
         logger.error("Failed to resume scan %s: agent %s not connected", scan_id, agent_id)
@@ -1424,27 +1881,27 @@ async def delete_scan(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Delete a scan record and clean up project directory if orphaned."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     if scan_id in _running_scans:
         raise HTTPException(status_code=400, detail="Cannot delete a running scan")
     store = get_scan_store()
 
     # Load scan to get project_id before deletion
-    result = store.load_scan(scan_id)
+    result = await run_store_call(store, "load_scan", scan_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     scan, _meta = result
     project_id = scan.project_id
 
-    if not store.delete_scan(scan_id):
+    if not await run_store_call(store, "delete_scan", scan_id):
         raise HTTPException(status_code=404, detail="Scan not found")
 
     # Clean up project directory if no other scans reference it
-    if store.count_scans_for_project(project_id) == 0:
+    if await run_store_call(store, "count_scans_for_project", project_id) == 0:
         config = get_config()
         project_dir = Path(config.storage.projects_dir) / project_id
         if project_dir.is_dir():
-            shutil.rmtree(project_dir, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, project_dir, ignore_errors=True)
             logger.info("Cleaned up orphaned project directory: %s", project_dir)
 
     return {"ok": True}
@@ -1461,11 +1918,11 @@ async def download_report(
     current_user: User = Depends(get_current_user),
 ) -> Response:
     """Download the scan results as a CSV report."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    fp_map = _scan_fp_result_map(scan_id)
+    fp_map = await run_store_call(get_scan_store(), _scan_fp_result_map, scan_id)
     writer.writerow([
         "engine_id", "engine_label", "file", "line", "function",
         "vuln_type", "severity", "confirmed",
@@ -1848,12 +2305,12 @@ async def download_vulnerability_report(
     current_user: User = Depends(get_current_user),
 ) -> Response:
     """Download a single vulnerability's report (AI analysis + FP review) as Markdown."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     if idx < 0 or idx >= len(scan.vulnerabilities):
         raise HTTPException(status_code=404, detail="Vulnerability index out of range")
     vuln = scan.vulnerabilities[idx]
-    fp_map = _scan_fp_result_map(scan_id)
+    fp_map = await run_store_call(get_scan_store(), _scan_fp_result_map, scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
     markdown = _vuln_report_markdown(idx, vuln, fp_map.get(idx), validation_map.get(idx))
     fname = (
@@ -1875,13 +2332,13 @@ async def _trigger_vulnerability_validation(
 ) -> dict:
     """Start Agent-side local validation for one AI-confirmed vulnerability."""
     from backend.api.agent import (
-        create_agent_task_runtime_update_payload,
-        ensure_agent_accepting_tasks,
+        create_agent_task_runtime_update_payload_async,
+        ensure_agent_accepting_tasks_async,
         send_agent_command,
     )
 
     store = get_scan_store()
-    loaded = store.load_scan(scan_id)
+    loaded = await run_store_call(store, "load_scan", scan_id)
     if loaded is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     scan, meta = loaded
@@ -1901,9 +2358,10 @@ async def _trigger_vulnerability_validation(
             detail="Scan has no configured product validation target",
         )
     if meta.agent_key:
-        from backend.api.agent import get_managed_agent_config
+        from backend.api.agent import get_managed_agent_config_async
 
-        env_config = get_managed_agent_config(meta.agent_key).vulnerability_validation.environments.get(
+        managed_config = await get_managed_agent_config_async(meta.agent_key)
+        env_config = managed_config.vulnerability_validation.environments.get(
             validation_environment
         )
         if env_config is not None:
@@ -1925,18 +2383,27 @@ async def _trigger_vulnerability_validation(
 
     if not meta.agent_id and not meta.agent_name:
         raise HTTPException(status_code=400, detail="No agent associated with this scan")
-    agent_id = _resolve_scan_agent_id(meta)
+    agent_id = await _resolve_scan_agent_id(meta)
     if agent_id is None:
         raise HTTPException(
             status_code=400,
             detail=f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
-    ensure_agent_accepting_tasks(meta.agent_key)
+    await ensure_agent_accepting_tasks_async(meta.agent_key)
     if agent_id != meta.agent_id:
-        store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
+        await run_store_call(
+            store,
+            "update_scan_agent",
+            scan_id,
+            agent_id,
+            meta.agent_name,
+            meta.agent_key,
+        )
 
     now = _now_iso()
-    validation = store.upsert_vulnerability_validation(
+    validation = await run_store_call(
+        store,
+        "upsert_vulnerability_validation",
         scan_id,
         VulnerabilityValidation(
             scan_id=scan_id,
@@ -1952,7 +2419,7 @@ async def _trigger_vulnerability_validation(
     _publish_validation(scan_id, validation)
     _update_running_validation(scan_id, validation)
 
-    fp_map = _scan_fp_result_map(scan_id)
+    fp_map = await run_store_call(store, _scan_fp_result_map, scan_id)
     ok = await send_agent_command(agent_id, {
         "type": "vulnerability_validation",
         "scan_id": scan_id,
@@ -1968,13 +2435,15 @@ async def _trigger_vulnerability_validation(
             if meta.code_graph_mcp is not None
             else None
         ),
-        "agent_runtime_update": create_agent_task_runtime_update_payload(
+        "agent_runtime_update": await create_agent_task_runtime_update_payload_async(
             _server_url,
             meta.agent_key,
         ),
     })
     if not ok:
-        failed = store.upsert_vulnerability_validation(
+        failed = await run_store_call(
+            store,
+            "upsert_vulnerability_validation",
             scan_id,
             validation.model_copy(update={
                 "status": "error",
@@ -1998,7 +2467,7 @@ async def _stop_vulnerability_validation(scan_id: str, idx: int) -> dict:
     from backend.api.agent import send_agent_command
 
     store = get_scan_store()
-    loaded = store.load_scan(scan_id)
+    loaded = await run_store_call(store, "load_scan", scan_id)
     if loaded is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     scan, meta = loaded
@@ -2013,7 +2482,9 @@ async def _stop_vulnerability_validation(scan_id: str, idx: int) -> dict:
     active = existing.running or existing.status in {"pending", "queued", "running"}
     if active:
         now = _now_iso()
-        validation = store.upsert_vulnerability_validation(
+        validation = await run_store_call(
+            store,
+            "upsert_vulnerability_validation",
             scan_id,
             existing.model_copy(update={
                 "status": "cancelled",
@@ -2031,10 +2502,17 @@ async def _stop_vulnerability_validation(scan_id: str, idx: int) -> dict:
     else:
         validation = existing
 
-    agent_id = _resolve_scan_agent_id(meta)
+    agent_id = await _resolve_scan_agent_id(meta)
     if active and agent_id is not None:
         if agent_id != meta.agent_id:
-            store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
+            await run_store_call(
+                store,
+                "update_scan_agent",
+                scan_id,
+                agent_id,
+                meta.agent_name,
+                meta.agent_key,
+            )
         await send_agent_command(agent_id, {
             "type": "vulnerability_validation_stop",
             "scan_id": scan_id,
@@ -2053,7 +2531,7 @@ async def trigger_vulnerability_validation(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Manually start Agent-side local validation for one confirmed vulnerability."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     return await _trigger_vulnerability_validation(scan_id, idx, _server_url_from_request(request))
 
 
@@ -2064,7 +2542,7 @@ async def stop_vulnerability_validation(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Cancel Agent-side local validation for one vulnerability."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     return await _stop_vulnerability_validation(scan_id, idx)
 
 
@@ -2074,10 +2552,13 @@ async def download_report_zip(
     current_user: User = Depends(get_current_user),
 ) -> Response:
     """Download all AI-confirmed vulnerabilities as a zip of Markdown reports."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
-    fp_map = _scan_fp_result_map(scan_id)
-    fp_job = get_scan_store().get_fp_review_by_scan(scan_id)
+    store = get_scan_store()
+    fp_map, fp_job = await asyncio.gather(
+        run_store_call(store, _scan_fp_result_map, scan_id),
+        run_store_call(store, "get_fp_review_by_scan", scan_id),
+    )
     validation_map = {item.vuln_index: item for item in scan.validations}
 
     confirmed = [
@@ -2140,7 +2621,7 @@ async def download_report_zip(
     )
 
 
-def _mark_single(
+async def _mark_single(
     scan_id: str,
     scan: ScanStatus,
     store,
@@ -2161,7 +2642,12 @@ def _mark_single(
 
     removed_feedback_ids: list[str] = []
     if verdict == "pending_analysis":
-        removed_feedback_ids = store.clear_vulnerability_user_verdict(scan_id, index)
+        removed_feedback_ids = await run_store_call(
+            store,
+            "clear_vulnerability_user_verdict",
+            scan_id,
+            index,
+        )
 
     if scan_id in _running_scans:
         live = _running_scans[scan_id]
@@ -2176,7 +2662,9 @@ def _mark_single(
     vuln.ticket_submitted = ticket_submitted
     vuln.ticket_id = normalized_ticket_id
 
-    store.update_vulnerability(
+    await run_store_call(
+        store,
+        "update_vulnerability",
         scan_id,
         index,
         verdict,
@@ -2213,23 +2701,17 @@ def _mark_single(
         created_at=now,
         updated_at=now,
     )
-    entry = store.upsert_feedback_for_report(entry)
+    entry = await run_store_call(store, "upsert_feedback_for_report", entry)
     logger.info("Scan %s: vulnerability %d marked as %s, feedback %s", scan_id, index, verdict, entry.id)
 
     # Push feedback update to the agent that ran this scan (best-effort)
     try:
-        smeta = store.get_scan_meta(scan_id)
+        smeta = await run_store_call(store, "get_scan_meta", scan_id)
         if smeta is not None:
-            from backend.api.agent import _registered_agents, _agent_ws, send_agent_command
-            import asyncio
-            target_id = smeta.agent_id
-            # Resolve stale agent_id by name
-            if (not target_id or target_id not in _agent_ws) and smeta.agent_name:
-                for aid, ainfo in _registered_agents.items():
-                    if ainfo.name == smeta.agent_name and aid in _agent_ws:
-                        target_id = aid
-                        break
-            if target_id and target_id in _agent_ws:
+            from backend.api.agent import send_agent_command
+
+            target_id = await _resolve_scan_agent_id(smeta)
+            if target_id:
                 asyncio.create_task(send_agent_command(target_id, {
                     "type": "feedback_update",
                     "entry": entry.model_dump(),
@@ -2240,13 +2722,17 @@ def _mark_single(
     return entry.id, removed_feedback_ids
 
 
-def _remove_feedback_ids_from_scan(scan_id: str, scan: ScanStatus, feedback_ids: list[str]) -> None:
+async def _remove_feedback_ids_from_scan(
+    scan_id: str,
+    scan: ScanStatus,
+    feedback_ids: list[str],
+) -> None:
     if not feedback_ids:
         return
     removed = set(feedback_ids)
     next_ids = [fid for fid in scan.feedback_ids if fid not in removed]
     if next_ids == scan.feedback_ids:
-        loaded = get_scan_store().load_scan(scan_id)
+        loaded = await run_store_call(get_scan_store(), "load_scan", scan_id)
         if loaded is not None:
             next_ids = [fid for fid in loaded[1].feedback_ids if fid not in removed]
             if next_ids == loaded[1].feedback_ids:
@@ -2256,10 +2742,20 @@ def _remove_feedback_ids_from_scan(scan_id: str, scan: ScanStatus, feedback_ids:
     scan.feedback_ids = next_ids
     if scan_id in _running_scans:
         _running_scans[scan_id].feedback_ids = next_ids
-    get_scan_store().update_scan_feedback_ids(scan_id, next_ids)
+    await run_store_call(
+        get_scan_store(),
+        "update_scan_feedback_ids",
+        scan_id,
+        next_ids,
+    )
 
 
-def _unmark_single(scan_id: str, scan: ScanStatus, store, index: int) -> list[str]:
+async def _unmark_single(
+    scan_id: str,
+    scan: ScanStatus,
+    store,
+    index: int,
+) -> list[str]:
     """Clear a vulnerability's manual verdict and delete its same-source feedback."""
     if index < 0 or index >= len(scan.vulnerabilities):
         raise HTTPException(status_code=400, detail=f"Invalid vulnerability index: {index}")
@@ -2278,7 +2774,12 @@ def _unmark_single(scan_id: str, scan: ScanStatus, store, index: int) -> list[st
     vuln.ticket_submitted = False
     vuln.ticket_id = ""
 
-    removed_feedback_ids = store.clear_vulnerability_user_verdict(scan_id, index)
+    removed_feedback_ids = await run_store_call(
+        store,
+        "clear_vulnerability_user_verdict",
+        scan_id,
+        index,
+    )
     logger.info(
         "Scan %s: vulnerability %d manual verdict cleared, removed feedback IDs: %s",
         scan_id,
@@ -2295,10 +2796,10 @@ async def mark_vulnerability(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Mark a vulnerability with manual triage feedback."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
-    feedback_id, removed_feedback_ids = _mark_single(
+    feedback_id, removed_feedback_ids = await _mark_single(
         scan_id,
         scan,
         store,
@@ -2308,7 +2809,7 @@ async def mark_vulnerability(
         body.ticket_submitted,
         body.ticket_id,
     )
-    _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
+    await _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
     if removed_feedback_ids:
         await _push_feedback_selection_update(scan_id, scan.feedback_ids)
     return {"ok": True, "feedback_id": feedback_id, "removed_feedback_ids": removed_feedback_ids}
@@ -2321,11 +2822,16 @@ async def unmark_vulnerability(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Clear a vulnerability's manual verdict and remove its generated feedback."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
-    removed_feedback_ids = _unmark_single(scan_id, scan, store, body.index)
-    _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
+    removed_feedback_ids = await _unmark_single(
+        scan_id,
+        scan,
+        store,
+        body.index,
+    )
+    await _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
     if removed_feedback_ids:
         await _push_feedback_selection_update(scan_id, scan.feedback_ids)
     return {"ok": True, "removed_feedback_ids": removed_feedback_ids}
@@ -2338,7 +2844,7 @@ async def batch_mark_vulnerabilities(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Batch-mark multiple vulnerabilities with manual triage feedback."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     if not body.items:
         raise HTTPException(status_code=400, detail="No items provided")
     scan = await get_scan_status(scan_id, current_user)
@@ -2346,7 +2852,7 @@ async def batch_mark_vulnerabilities(
     feedback_ids: list[str] = []
     removed_feedback_ids: list[str] = []
     for item in body.items:
-        feedback_id, removed_ids = _mark_single(
+        feedback_id, removed_ids = await _mark_single(
             scan_id,
             scan,
             store,
@@ -2359,7 +2865,7 @@ async def batch_mark_vulnerabilities(
         if feedback_id is not None:
             feedback_ids.append(feedback_id)
         removed_feedback_ids.extend(removed_ids)
-    _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
+    await _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
     if removed_feedback_ids:
         await _push_feedback_selection_update(scan_id, scan.feedback_ids)
     return {"ok": True, "feedback_ids": feedback_ids, "removed_feedback_ids": removed_feedback_ids}
@@ -2372,15 +2878,17 @@ async def batch_unmark_vulnerabilities(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Clear manual verdicts and remove generated feedback for multiple vulnerabilities."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     if not body.indices:
         raise HTTPException(status_code=400, detail="No indices provided")
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
     removed_feedback_ids: list[str] = []
     for index in dict.fromkeys(body.indices):
-        removed_feedback_ids.extend(_unmark_single(scan_id, scan, store, index))
-    _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
+        removed_feedback_ids.extend(
+            await _unmark_single(scan_id, scan, store, index)
+        )
+    await _remove_feedback_ids_from_scan(scan_id, scan, removed_feedback_ids)
     if removed_feedback_ids:
         await _push_feedback_selection_update(scan_id, scan.feedback_ids)
     return {"ok": True, "removed_feedback_ids": removed_feedback_ids}
@@ -2406,8 +2914,8 @@ async def _start_fp_review(
     never breaks scan-finish handling.
     """
     from backend.api.agent import (
-        create_agent_task_runtime_update_payload,
-        ensure_agent_accepting_tasks,
+        create_agent_task_runtime_update_payload_async,
+        ensure_agent_accepting_tasks_async,
         send_agent_command,
     )
 
@@ -2421,16 +2929,16 @@ async def _start_fp_review(
     if scan_id in _running_scans:
         scan = _running_scans[scan_id]
     else:
-        loaded = store.load_scan(scan_id)
+        loaded = await run_store_call(store, "load_scan", scan_id)
         if loaded is None:
             return _fail(404, "Scan not found")
         scan = loaded[0]
 
-    meta = store.get_scan_meta(scan_id)
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
     if meta is None:
         return _fail(404, "Scan not found")
     try:
-        ensure_agent_accepting_tasks(meta.agent_key)
+        await ensure_agent_accepting_tasks_async(meta.agent_key)
     except HTTPException as exc:
         return _fail(exc.status_code, str(exc.detail))
 
@@ -2440,14 +2948,16 @@ async def _start_fp_review(
     # Resolve the Agent before creating/reopening the item job. Otherwise an
     # offline Agent can leave the persisted job looking "running" even though
     # no command was dispatched.
-    agent_id = _resolve_scan_agent_id(meta)
+    agent_id = await _resolve_scan_agent_id(meta)
     if agent_id is None:
         return _fail(
             400,
             f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
 
-    fp_job_info = _ensure_fp_review_job_for_scan(
+    fp_job_info = await run_store_call(
+        store,
+        _ensure_fp_review_job_for_scan,
         scan_id,
         scan,
         allow_cancelled=True,
@@ -2462,9 +2972,22 @@ async def _start_fp_review(
 
     # Update stored agent_id if it changed
     if agent_id != meta.agent_id:
-        store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
+        await run_store_call(
+            store,
+            "update_scan_agent",
+            scan_id,
+            agent_id,
+            meta.agent_name,
+            meta.agent_key,
+        )
 
-    feedback_entries = [entry.model_dump() for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)]
+    selected_feedback = await run_store_call(
+        store,
+        _selected_feedback_entries,
+        scan_id,
+        meta.feedback_ids,
+    )
+    feedback_entries = [entry.model_dump() for entry in selected_feedback]
 
     dispatched_items = not fp_job_info.get("no_unresolved")
     if dispatched_items:
@@ -2495,13 +3018,15 @@ async def _start_fp_review(
                 if meta.code_graph_mcp is not None
                 else None
             ),
-            "agent_runtime_update": create_agent_task_runtime_update_payload(
+            "agent_runtime_update": await create_agent_task_runtime_update_payload_async(
                 server_url,
                 meta.agent_key,
             ),
         })
         if not ok:
-            store.update_fp_review_job(
+            await run_store_call(
+                store,
+                "update_fp_review_job",
                 review_id,
                 status="error",
                 error_message="Agent not connected",
@@ -2560,8 +3085,8 @@ async def _start_fp_review_summary(
 ) -> dict | None:
     """Start only the independent fp-check chain analysis and summary."""
     from backend.api.agent import (
-        create_agent_task_runtime_update_payload,
-        ensure_agent_accepting_tasks,
+        create_agent_task_runtime_update_payload_async,
+        ensure_agent_accepting_tasks_async,
         send_agent_command,
     )
 
@@ -2572,13 +3097,13 @@ async def _start_fp_review_summary(
         return None
 
     store = get_scan_store()
-    loaded = store.load_scan(scan_id)
+    loaded = await run_store_call(store, "load_scan", scan_id)
     scan = _running_scans.get(scan_id) or (loaded[0] if loaded is not None else None)
     if scan is None:
         return _fail(404, "Scan not found")
     if scan.status != ScanItemStatus.COMPLETE:
         return _fail(409, "跨漏洞攻击链检查只能在扫描完成后启动")
-    job = store.get_fp_review_by_scan(scan_id)
+    job = await run_store_call(store, "get_fp_review_by_scan", scan_id)
     if job is None or job.method != FpReviewMethod.FP_CHECK:
         return _fail(404, "No Trail of Bits fp-check review found")
     if job.status == FpReviewStatus.CANCELLED:
@@ -2591,8 +3116,10 @@ async def _start_fp_review_summary(
             "already_running": True,
         }
 
-    def _mark_summary_error(message: str) -> None:
-        store.update_fp_review_job(
+    async def _mark_summary_error(message: str) -> None:
+        await run_store_call(
+            store,
+            "update_fp_review_job",
             job.review_id,
             summary_status=FpReviewStatus.ERROR.value,
             summary_error_message=message,
@@ -2606,31 +3133,43 @@ async def _start_fp_review_summary(
             "summary_output_source": None,
         })
 
-    meta = store.get_scan_meta(scan_id)
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
     if meta is None:
         return _fail(404, "Scan not found")
     try:
-        ensure_agent_accepting_tasks(meta.agent_key)
+        await ensure_agent_accepting_tasks_async(meta.agent_key)
     except HTTPException as exc:
-        _mark_summary_error(str(exc.detail))
+        await _mark_summary_error(str(exc.detail))
         return _fail(exc.status_code, str(exc.detail))
-    agent_id = _resolve_scan_agent_id(meta)
+    agent_id = await _resolve_scan_agent_id(meta)
     if agent_id is None:
-        _mark_summary_error("Agent not connected")
+        await _mark_summary_error("Agent not connected")
         return _fail(
             400,
             f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
         )
     if agent_id != meta.agent_id:
-        store.update_scan_agent(scan_id, agent_id, meta.agent_name, meta.agent_key)
-    feedback_entries = [
-        entry.model_dump()
-        for entry in _selected_feedback_entries(scan_id, meta.feedback_ids)
-    ]
+        await run_store_call(
+            store,
+            "update_scan_agent",
+            scan_id,
+            agent_id,
+            meta.agent_name,
+            meta.agent_key,
+        )
+    selected_feedback = await run_store_call(
+        store,
+        _selected_feedback_entries,
+        scan_id,
+        meta.feedback_ids,
+    )
+    feedback_entries = [entry.model_dump() for entry in selected_feedback]
     # Persist the running state before dispatch. A deterministic summary can
     # finish almost immediately; updating after the WebSocket send could race
     # with its completion callback and overwrite "complete" with "running".
-    store.update_fp_review_job(
+    await run_store_call(
+        store,
+        "update_fp_review_job",
         job.review_id,
         summary_status=FpReviewStatus.RUNNING.value,
         summary_error_message="",
@@ -2651,13 +3190,13 @@ async def _start_fp_review_summary(
             if meta.code_graph_mcp is not None
             else None
         ),
-        "agent_runtime_update": create_agent_task_runtime_update_payload(
+        "agent_runtime_update": await create_agent_task_runtime_update_payload_async(
             server_url,
             meta.agent_key,
         ),
     })
     if not ok:
-        _mark_summary_error("Agent not connected")
+        await _mark_summary_error("Agent not connected")
         return _fail(502, "Agent not connected")
     logger.info(
         "Independent fp-check summary %s triggered for scan %s",
@@ -2679,7 +3218,7 @@ async def trigger_fp_review(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Trigger AI false-positive review for all confirmed vulnerabilities in a scan."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     return await _start_fp_review(scan_id, _server_url_from_request(request), raise_on_error=True)
 
 
@@ -2690,7 +3229,7 @@ async def trigger_fp_review_summary(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Retry only the independent fp-check summary."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     result = await _start_fp_review_summary(
         scan_id,
         _server_url_from_request(request),
@@ -2706,11 +3245,11 @@ async def stop_fp_review(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Cancel the latest running FP review job for a scan."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     from backend.api.agent import send_agent_command
 
     store = get_scan_store()
-    job = store.get_fp_review_by_scan(scan_id)
+    job = await run_store_call(store, "get_fp_review_by_scan", scan_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No FP review found for this scan")
     item_running = job.status in {
@@ -2721,7 +3260,7 @@ async def stop_fp_review(
     if not item_running and not summary_running:
         return {"ok": True, "review_id": job.review_id}
 
-    meta = store.get_scan_meta(scan_id)
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -2737,9 +3276,14 @@ async def stop_fp_review(
             "summary_status": FpReviewStatus.CANCELLED.value,
             "summary_error_message": "用户手动停止",
         })
-    store.update_fp_review_job(job.review_id, **updates)
+    await run_store_call(
+        store,
+        "update_fp_review_job",
+        job.review_id,
+        **updates,
+    )
 
-    agent_id = _resolve_scan_agent_id(meta)
+    agent_id = await _resolve_scan_agent_id(meta)
     if agent_id is not None:
         await send_agent_command(agent_id, {
             "type": "fp_review_stop",
@@ -2757,12 +3301,17 @@ async def get_fp_review(
     current_user: User = Depends(get_current_user),
 ) -> FpReviewJob:
     """Get the latest FP review job and results for a scan."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     store = get_scan_store()
-    job = store.get_fp_review_by_scan(scan_id)
+    job = await run_store_call(store, "get_fp_review_by_scan", scan_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No FP review found for this scan")
-    return _merge_latest_fp_review_results(job, scan_id)
+    return await run_store_call(
+        store,
+        _merge_latest_fp_review_results,
+        job,
+        scan_id,
+    )
 
 
 @router.get("/api/scan/{scan_id}/git_history", response_model=list[HistoryPattern])
@@ -2771,8 +3320,12 @@ async def get_scan_git_history(
     current_user: User = Depends(get_current_user),
 ) -> list[HistoryPattern]:
     """Return the git-history security problem patterns mined for a scan."""
-    _check_scan_owner(scan_id, current_user)
-    return get_scan_store().get_git_history_patterns(scan_id)
+    await _check_scan_owner(scan_id, current_user)
+    return await run_store_call(
+        get_scan_store(),
+        "get_git_history_patterns",
+        scan_id,
+    )
 
 
 @router.get("/api/scan/{scan_id}/threat-analysis", response_model=dict)
@@ -2781,8 +3334,12 @@ async def get_scan_threat_analysis(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Return the opaque threat-analysis artifact bundle for a scan."""
-    _check_scan_owner(scan_id, current_user)
-    analysis = get_scan_store().get_threat_analysis(scan_id)
+    await _check_scan_owner(scan_id, current_user)
+    analysis = await run_store_call(
+        get_scan_store(),
+        "get_threat_analysis",
+        scan_id,
+    )
     if analysis is None:
         raise HTTPException(status_code=404, detail="No threat analysis found for this scan")
     return analysis
@@ -2794,12 +3351,20 @@ async def get_scan_threat_audit_tasks(
     current_user: User = Depends(get_current_user),
 ) -> list[ThreatAuditTask]:
     """Return threat-analysis-derived audit tasks for a scan."""
-    _check_scan_owner(scan_id, current_user)
-    return get_scan_store().list_threat_audit_tasks(scan_id)
+    await _check_scan_owner(scan_id, current_user)
+    return await run_store_call(
+        get_scan_store(),
+        "list_threat_audit_tasks",
+        scan_id,
+    )
 
 
 @router.get("/api/scan/{scan_id}/events")
-async def scan_events_sse(scan_id: str, token: str = Query(...)) -> StreamingResponse:
+async def scan_events_sse(
+    scan_id: str,
+    request: Request,
+    token: str = Query(...),
+) -> StreamingResponse:
     """SSE stream for real-time scan and FP review status updates.
 
     The browser EventSource API does not support custom headers, so the
@@ -2820,7 +3385,7 @@ async def scan_events_sse(scan_id: str, token: str = Query(...)) -> StreamingRes
     role = payload.get("role", "")
     if role != "admin":
         store = get_scan_store()
-        meta = store.get_scan_meta(scan_id)
+        meta = await run_store_call(store, "get_scan_meta", scan_id)
         if meta is not None:
             if meta.user_id != user_id:
                 raise HTTPException(status_code=403, detail="Access denied")
@@ -2830,11 +3395,34 @@ async def scan_events_sse(scan_id: str, token: str = Query(...)) -> StreamingRes
     async def event_generator() -> AsyncGenerator[str, None]:
         queue = subscribe(scan_id)
         try:
+            last_event_id = 0
+            try:
+                last_event_id = max(0, int(request.headers.get("last-event-id") or 0))
+            except (TypeError, ValueError):
+                pass
+            if last_event_id and getattr(get_scan_store(), "distributed", False):
+                replay = await run_store_call(
+                    get_scan_store(),
+                    "list_stream_events",
+                    last_event_id,
+                    1000,
+                    scan_id=scan_id,
+                )
+                for item in replay:
+                    try:
+                        data = json.loads(str(item["data_json"]))
+                    except Exception:
+                        data = {}
+                    yield format_sse(
+                        str(item["event_type"]),
+                        data,
+                        int(item["id"]),
+                    )
             yield format_sse("connected", {"scan_id": scan_id})
             while True:
                 try:
                     msg = await asyncio.wait_for(queue.get(), timeout=30)
-                    yield format_sse(msg["event"], msg["data"])
+                    yield format_sse(msg["event"], msg["data"], msg.get("id"))
                 except asyncio.TimeoutError:
                     yield SSE_KEEPALIVE
         except (asyncio.CancelledError, GeneratorExit):
@@ -2856,7 +3444,7 @@ async def scan_events_sse(scan_id: str, token: str = Query(...)) -> StreamingRes
 async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) -> dict:
     """Agent reports which vulnerability is currently being reviewed."""
     store = get_scan_store()
-    job = store.get_fp_review_job(body.review_id)
+    job = await run_store_call(store, "get_fp_review_job", body.review_id)
     if job is None or job.scan_id != scan_id:
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
@@ -2865,9 +3453,17 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
     # narrow race where a previous incremental wave finishes while a newly
     # queued item is already starting.
     if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
-        store.update_fp_review_job(body.review_id, status="running", error_message="")
+        await run_store_call(
+            store,
+            "update_fp_review_job",
+            body.review_id,
+            status="running",
+            error_message="",
+        )
         logger.info("FP review %s resumed from Agent progress", body.review_id)
-    store.update_fp_review_job(
+    await run_store_call(
+        store,
+        "update_fp_review_job",
         body.review_id,
         current_vuln_index=body.vuln_index,
         current_vuln_indices=body.active_indices,
@@ -2888,13 +3484,19 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
 async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dict:
     """Agent pushes a single FP review result."""
     store = get_scan_store()
-    job = store.get_fp_review_job(body.review_id)
+    job = await run_store_call(store, "get_fp_review_job", body.review_id)
     if job is None or job.scan_id != scan_id:
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
     if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
-        store.update_fp_review_job(body.review_id, status="running", error_message="")
+        await run_store_call(
+            store,
+            "update_fp_review_job",
+            body.review_id,
+            status="running",
+            error_message="",
+        )
         logger.info("FP review %s resumed from Agent result", body.review_id)
     now = datetime.now(timezone.utc).isoformat()
     # 去误报定级简化为二元：tp 且外部可触发（或命中历史/校验匹配）为 high，其余一律 low。
@@ -2912,12 +3514,19 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         output_source=body.output_source,
         created_at=now,
     )
-    store.add_fp_review_result(body.review_id, result)
+    await run_store_call(
+        store,
+        "add_fp_review_result",
+        body.review_id,
+        result,
+    )
     if (
         job.method == FpReviewMethod.FP_CHECK
         and job.summary_status != FpReviewStatus.RUNNING
     ):
-        store.update_fp_review_job(
+        await run_store_call(
+            store,
+            "update_fp_review_job",
             body.review_id,
             summary_status=FpReviewStatus.PENDING.value,
             summary_error_message="",
@@ -2944,18 +3553,26 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
 async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOutput) -> dict:
     """Agent pushes one stage's Markdown output while FP review is running."""
     store = get_scan_store()
-    job = store.get_fp_review_job(body.review_id)
+    job = await run_store_call(store, "get_fp_review_job", body.review_id)
     if job is None or job.scan_id != scan_id:
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
     if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
-        store.update_fp_review_job(body.review_id, status="running", error_message="")
+        await run_store_call(
+            store,
+            "update_fp_review_job",
+            body.review_id,
+            status="running",
+            error_message="",
+        )
         logger.info("FP review %s resumed from Agent stage output", body.review_id)
     if body.stage not in _FP_REVIEW_STAGE_KEYS[job.method]:
         raise HTTPException(status_code=400, detail="Invalid FP review stage")
     now = datetime.now(timezone.utc).isoformat()
-    store.upsert_fp_review_stage_output(
+    await run_store_call(
+        store,
+        "upsert_fp_review_stage_output",
         body.review_id,
         body.vuln_index,
         body.stage,
@@ -2980,7 +3597,7 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
 async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dict:
     """Agent signals the single-item FP review queue is complete."""
     store = get_scan_store()
-    job = store.get_fp_review_job(body.review_id)
+    job = await run_store_call(store, "get_fp_review_job", body.review_id)
     if job is None or job.scan_id != scan_id:
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
@@ -2999,7 +3616,12 @@ async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dic
             "summary_status": FpReviewStatus.COMPLETE.value,
             "summary_error_message": "",
         })
-    store.update_fp_review_job(body.review_id, **updates)
+    await run_store_call(
+        store,
+        "update_fp_review_job",
+        body.review_id,
+        **updates,
+    )
     from backend.sse import publish
     publish(scan_id, "fp_review_finish", {
         "review_id": body.review_id, "status": body.status,
@@ -3017,7 +3639,7 @@ async def agent_fp_review_summary_finish(
 ) -> dict:
     """Agent completes the independent fp-check summary lifecycle."""
     store = get_scan_store()
-    job = store.get_fp_review_job(body.review_id)
+    job = await run_store_call(store, "get_fp_review_job", body.review_id)
     if (
         job is None
         or job.scan_id != scan_id
@@ -3041,7 +3663,12 @@ async def agent_fp_review_summary_finish(
             "summary_markdown": body.summary_markdown,
             "summary_output_source": body.summary_output_source,
         })
-    store.update_fp_review_job(body.review_id, **updates)
+    await run_store_call(
+        store,
+        "update_fp_review_job",
+        body.review_id,
+        **updates,
+    )
     from backend.sse import publish
     publish(scan_id, "fp_review_summary_finish", {
         "review_id": body.review_id,
@@ -3073,12 +3700,17 @@ async def update_scan_feedback(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Update the feedback entry IDs associated with a scan."""
-    _check_scan_owner(scan_id, current_user)
+    await _check_scan_owner(scan_id, current_user)
     feedback_ids: list[str] = body.get("feedback_ids", [])
     store = get_scan_store()
     if scan_id in _running_scans:
         _running_scans[scan_id].feedback_ids = feedback_ids
-    store.update_scan_feedback_ids(scan_id, feedback_ids)
+    await run_store_call(
+        store,
+        "update_scan_feedback_ids",
+        scan_id,
+        feedback_ids,
+    )
     try:
         await _push_feedback_selection_update(scan_id, feedback_ids)
     except Exception as exc:
@@ -3117,7 +3749,11 @@ async def get_scan_skill(
         original = entry.skill_path.read_text(encoding="utf-8")
 
     # Collect only feedback entries selected for this scan.
-    all_fb: list[FeedbackEntry] = _selected_feedback_entries(scan_id)
+    all_fb: list[FeedbackEntry] = await run_store_call(
+        get_scan_store(),
+        _selected_feedback_entries,
+        scan_id,
+    )
 
     # Deduplicate by id
     seen: set[str] = set()
@@ -3142,8 +3778,13 @@ async def get_scan_skill_reports(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Return Markdown reports generated by report-mode user SKILLs."""
-    _check_scan_owner(scan_id, current_user)
-    reports = get_scan_store().list_skill_reports(scan_id, checker_name)
+    await _check_scan_owner(scan_id, current_user)
+    reports = await run_store_call(
+        get_scan_store(),
+        "list_skill_reports",
+        scan_id,
+        checker_name,
+    )
     return {"reports": [report.model_dump() for report in reports]}
 
 
@@ -3153,8 +3794,8 @@ async def get_fp_review_skill(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     """Return the FP review skill content, merged with user feedback for this scan."""
-    _check_scan_owner(scan_id, current_user)
-    meta = get_scan_store().get_scan_meta(scan_id)
+    await _check_scan_owner(scan_id, current_user)
+    meta = await run_store_call(get_scan_store(), "get_scan_meta", scan_id)
     method = (
         meta.fp_review_method
         if meta is not None
@@ -3187,7 +3828,11 @@ async def get_fp_review_skill(
         raise HTTPException(status_code=404, detail=f"FP review skill not found: {', '.join(missing)}")
 
     # Merge only feedback entries selected for this scan.
-    all_fb: list[FeedbackEntry] = _selected_feedback_entries(scan_id)
+    all_fb: list[FeedbackEntry] = await run_store_call(
+        get_scan_store(),
+        _selected_feedback_entries,
+        scan_id,
+    )
 
     seen: set[str] = set()
     unique_fb: list[FeedbackEntry] = []

@@ -1,4 +1,19 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: opendeephole
+      POSTGRES_USER: opendeephole
+      POSTGRES_PASSWORD: ${OPENDEEPHOLE_POSTGRES_PASSWORD:-opendeephole}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opendeephole -d opendeephole"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   opendeephole:
     build: .
     ports:
@@ -9,8 +24,16 @@ services:
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENCODE_MODEL=${OPENCODE_MODEL:-anthropic/claude-sonnet-4-20250514}
+      - OPENDEEPHOLE_DATABASE_URL=${OPENDEEPHOLE_DATABASE_URL:-postgresql://opendeephole:opendeephole@postgres:5432/opendeephole}
+      - OPENDEEPHOLE_SERVER_WORKERS=${OPENDEEPHOLE_SERVER_WORKERS:-4}
+      - OPENDEEPHOLE_POSTGRES_POOL_MIN_SIZE=${OPENDEEPHOLE_POSTGRES_POOL_MIN_SIZE:-1}
+      - OPENDEEPHOLE_POSTGRES_POOL_MAX_SIZE=${OPENDEEPHOLE_POSTGRES_POOL_MAX_SIZE:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   server-data:
   logs:
+  postgres-data:

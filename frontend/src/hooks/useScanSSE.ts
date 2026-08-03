@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { scanSSEUrl, getScanStatus, getFpReview, getAgentIndexStatus } from "../api/client";
+import { scanSSEUrl, getScanOverview, getFpReview, getAgentIndexStatus } from "../api/client";
 import { getScanThreatAnalysis } from "../features/threatAnalysis/api";
 import type {
   FpReviewJob,
@@ -40,6 +40,13 @@ interface ScanVulnerabilityEvent {
 
 interface ScanCandidatesEvent {
   candidates: ScanCandidate[];
+}
+
+interface ScanCandidatesChangedEvent {
+  offset: number;
+  count: number;
+  total_candidates: number;
+  final: boolean;
 }
 
 interface ScanEventPayload {
@@ -135,6 +142,7 @@ interface MiningEngineRunEvent {
 export interface ScanSSEHandlers {
   onScanStatus?: (data: ScanStatusEvent) => void;
   onScanCandidates?: (data: ScanCandidatesEvent) => void;
+  onScanCandidatesChanged?: (data: ScanCandidatesChangedEvent) => void;
   onScanVulnerability?: (data: ScanVulnerabilityEvent) => void;
   onScanEvent?: (data: ScanEventPayload) => void;
   onScanFinish?: (data: ScanFinishEvent) => void;
@@ -168,8 +176,18 @@ async function refreshFullState(
   { setScan, setFpReview, setIndexStatus }: SSEStateSetters,
 ) {
   try {
-    const data = await getScanStatus(scanId);
-    setScan(data);
+    const data = await getScanOverview(scanId);
+    setScan((previous) => previous ? {
+      ...data,
+      candidates: previous.candidates,
+      vulnerabilities: previous.vulnerabilities,
+      skill_reports: previous.skill_reports,
+      threat_analysis: previous.threat_analysis,
+      threat_audit_tasks: previous.threat_audit_tasks,
+      validations: previous.validations,
+      events: previous.events,
+      detail_pages: previous.detail_pages,
+    } : data);
   } catch {
     // transient — SSE will keep pushing
   }
@@ -260,6 +278,7 @@ export function useScanSSE(
     // Register typed event listeners
     handle<ScanStatusEvent>("scan_status", (d) => handlersRef.current.onScanStatus?.(d));
     handle<ScanCandidatesEvent>("scan_candidates", (d) => handlersRef.current.onScanCandidates?.(d));
+    handle<ScanCandidatesChangedEvent>("scan_candidates_changed", (d) => handlersRef.current.onScanCandidatesChanged?.(d));
     handle<ScanVulnerabilityEvent>("scan_vulnerability", (d) => handlersRef.current.onScanVulnerability?.(d));
     handle<ScanEventPayload>("scan_event", (d) => handlersRef.current.onScanEvent?.(d));
     handle<ScanFinishEvent>("scan_finish", (d) => handlersRef.current.onScanFinish?.(d));

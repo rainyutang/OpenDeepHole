@@ -119,6 +119,14 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
     elif cmd_type == "resume":
         from deephole_client.updater import ensure_runtime_updated
         await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        manifest_url = str(msg.get("resume_manifest_url") or "").strip()
+        if manifest_url:
+            manifest = await reporter.fetch_resume_manifest(manifest_url)
+            msg = {
+                **manifest,
+                "type": "resume",
+                "scan_id": msg["scan_id"],
+            }
         await agent_server.handle_resume(
             scan_id=msg["scan_id"],
             project_path=msg.get("project_path"),
@@ -370,6 +378,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 )
                 hello_msg = {
                     "type": "hello",
+                    "protocol_versions": [2, 1],
                     "name": name,
                     "machine_name": socket.gethostname(),
                     "config": remote_config_dict(config),
@@ -394,6 +403,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 agent_id = welcome["agent_id"]
                 agent_server._agent_id = agent_id
                 reporter.set_agent_id(agent_id)
+                reporter.set_protocol_version(int(welcome.get("protocol_version") or 1))
 
                 if welcome.get("config"):
                     from deephole_client.config import save_config

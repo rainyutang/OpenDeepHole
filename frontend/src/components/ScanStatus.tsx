@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, triggerFpReviewSummary, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import { getScanStatus, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, triggerFpReviewSummary, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
@@ -421,6 +421,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [exportingZip, setExportingZip] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [modelPoolOpen, setModelPoolOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [lastSeenEvents, setLastSeenEvents] = useState(0);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -520,6 +521,25 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     },
     onScanCandidates: (data) => {
       setScan((prev) => prev ? { ...prev, candidates: data.candidates, total_candidates: data.candidates.length } : prev);
+    },
+    onScanCandidatesChanged: (data) => {
+      if (!data.final) return;
+      getScanCandidatesPage(scanId)
+        .then((page) => {
+          setScan((prev) => prev ? {
+            ...prev,
+            candidates: page.items,
+            total_candidates: data.total_candidates,
+            detail_pages: {
+              candidates_next_cursor: page.next_cursor,
+              vulnerabilities_next_cursor: prev.detail_pages?.vulnerabilities_next_cursor ?? null,
+              events_next_cursor: prev.detail_pages?.events_next_cursor ?? null,
+              threat_tasks_next_cursor: prev.detail_pages?.threat_tasks_next_cursor ?? null,
+              validations_next_cursor: prev.detail_pages?.validations_next_cursor ?? null,
+            },
+          } : prev);
+        })
+        .catch(() => {});
     },
     onScanVulnerability: (data) => {
       setScan((prev) => {
@@ -890,6 +910,100 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     }
   };
 
+  const handleLoadMoreDetails = async () => {
+    const cursors = scan?.detail_pages;
+    if (!scan || !cursors || detailLoading) return;
+    setDetailLoading(true);
+    try {
+      const [candidatePage, vulnerabilityPage, eventPage, threatTaskPage, validationPage] = await Promise.all([
+        cursors.candidates_next_cursor == null
+          ? Promise.resolve(null)
+          : getScanCandidatesPage(scanId, cursors.candidates_next_cursor),
+        cursors.vulnerabilities_next_cursor == null
+          ? Promise.resolve(null)
+          : getScanVulnerabilitiesPage(scanId, cursors.vulnerabilities_next_cursor),
+        cursors.events_next_cursor == null
+          ? Promise.resolve(null)
+          : getScanEventsPage(scanId, cursors.events_next_cursor),
+        cursors.threat_tasks_next_cursor == null
+          ? Promise.resolve(null)
+          : getScanThreatTasksPage(scanId, cursors.threat_tasks_next_cursor),
+        cursors.validations_next_cursor == null
+          ? Promise.resolve(null)
+          : getScanValidationsPage(scanId, cursors.validations_next_cursor),
+      ]);
+      setScan((previous) => {
+        if (!previous) return previous;
+
+        const candidates = [...previous.candidates];
+        const candidateIndexes = new Set(candidates.map((item) => item.idx));
+        for (const item of candidatePage?.items ?? []) {
+          if (!candidateIndexes.has(item.idx)) candidates.push(item);
+        }
+        candidates.sort((left, right) => left.idx - right.idx);
+
+        const vulnerabilities = [...previous.vulnerabilities];
+        for (const item of vulnerabilityPage?.items ?? []) {
+          vulnerabilities[item.index] = item.vulnerability;
+        }
+
+        const eventKey = (item: ScanEvent) => [
+          item.timestamp,
+          item.phase,
+          item.message,
+          item.candidate_index ?? "",
+        ].join("\u0000");
+        const existingEventKeys = new Set(previous.events.map(eventKey));
+        const olderEvents = (eventPage?.items ?? []).filter(
+          (item) => !existingEventKeys.has(eventKey(item)),
+        );
+
+        const threatTasks = [...(previous.threat_audit_tasks ?? [])];
+        const threatTaskIds = new Set(threatTasks.map((item) => item.task_id));
+        for (const item of threatTaskPage?.items ?? []) {
+          if (!threatTaskIds.has(item.task_id)) threatTasks.push(item);
+        }
+
+        const validations = [...(previous.validations ?? [])];
+        const validationIndexes = new Set(validations.map((item) => item.vuln_index));
+        for (const item of validationPage?.items ?? []) {
+          if (!validationIndexes.has(item.vuln_index)) validations.push(item);
+        }
+        validations.sort((left, right) => left.vuln_index - right.vuln_index);
+
+        return {
+          ...previous,
+          candidates,
+          vulnerabilities,
+          events: [...olderEvents, ...previous.events],
+          threat_audit_tasks: threatTasks,
+          validations,
+          detail_pages: {
+            candidates_next_cursor: candidatePage
+              ? candidatePage.next_cursor
+              : cursors.candidates_next_cursor,
+            vulnerabilities_next_cursor: vulnerabilityPage
+              ? vulnerabilityPage.next_cursor
+              : cursors.vulnerabilities_next_cursor,
+            events_next_cursor: eventPage
+              ? eventPage.next_cursor
+              : cursors.events_next_cursor,
+            threat_tasks_next_cursor: threatTaskPage
+              ? threatTaskPage.next_cursor
+              : cursors.threat_tasks_next_cursor,
+            validations_next_cursor: validationPage
+              ? validationPage.next_cursor
+              : cursors.validations_next_cursor,
+          },
+        };
+      });
+    } catch {
+      // Keep already loaded detail pages; the user can retry.
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
   const handleDownloadReport = async () => {
     if (!scan) return;
     setDownloadingReport(true);
@@ -1102,6 +1216,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const miningEvents = filterEvents(scan.events, ["auditing", "fp_review", "opencode_output"]);
   const selectedFpReviewMethod = fpReview?.method ?? scan.fp_review_method ?? "adversarial";
   const validationEvents = filterEvents(scan.events, ["validation"]);
+  const hasMoreDetailPages = Boolean(
+    scan.detail_pages && Object.values(scan.detail_pages).some((value) => value != null),
+  );
   const issuesView = scan.vulnerabilities.length === 0 && isDone ? (
     <div className="flex items-center justify-center h-64 text-slate-400">
       <div className="text-center">
@@ -1361,6 +1478,22 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
       {/* Main content */}
       <div className="flex-1 overflow-auto px-4 py-4 sm:px-6">
+        {hasMoreDetailPages && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
+            <span>
+              当前按页展示详情，已加载 {scan.candidates.length} 个候选点、
+              {scan.vulnerabilities.filter(Boolean).length} 条漏洞结果和 {scan.events.length} 条日志。
+            </span>
+            <button
+              type="button"
+              onClick={handleLoadMoreDetails}
+              disabled={detailLoading}
+              className="rounded-md border border-blue-400/40 px-3 py-1.5 text-xs font-medium text-blue-100 transition-colors hover:bg-blue-400/10 disabled:opacity-50"
+            >
+              {detailLoading ? "加载中..." : "继续加载详情"}
+            </button>
+          </div>
+        )}
         {activeTab === "overview" && (
           <ScanOverview
             scan={scan}

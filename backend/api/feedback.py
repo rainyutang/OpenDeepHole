@@ -14,6 +14,7 @@ from backend.models import (
     User,
 )
 from backend.store import get_scan_store
+from backend.store.async_ops import run_store_call
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -27,7 +28,12 @@ async def list_feedback(
 ) -> list[FeedbackEntry]:
     """List feedback entries, optionally filtered by vuln_type and/or project_id."""
     store = get_scan_store()
-    return store.list_feedback(vuln_type, project_id)
+    return await run_store_call(
+        store,
+        "list_feedback",
+        vuln_type,
+        project_id,
+    )
 
 
 @router.post("/api/feedback", response_model=FeedbackEntry)
@@ -59,7 +65,7 @@ async def create_feedback(
         updated_at=now,
     )
     store = get_scan_store()
-    store.add_feedback(entry)
+    await run_store_call(store, "add_feedback", entry)
     logger.info("Created feedback %s for project %s (%s)", entry.id, body.project_id, body.vuln_type)
     return entry
 
@@ -75,7 +81,9 @@ async def update_feedback(
         raise HTTPException(status_code=400, detail="Invalid verdict")
 
     store = get_scan_store()
-    ok = store.update_feedback(
+    ok = await run_store_call(
+        store,
+        "update_feedback",
         feedback_id,
         body.verdict,
         body.reason,
@@ -86,7 +94,11 @@ async def update_feedback(
         raise HTTPException(status_code=404, detail="Feedback entry not found")
 
     # Return updated entry
-    entries = store.get_feedback_by_ids([feedback_id])
+    entries = await run_store_call(
+        store,
+        "get_feedback_by_ids",
+        [feedback_id],
+    )
     return entries[0]
 
 
@@ -97,6 +109,6 @@ async def delete_feedback(
 ) -> dict:
     """Delete a feedback entry."""
     store = get_scan_store()
-    if not store.delete_feedback(feedback_id):
+    if not await run_store_call(store, "delete_feedback", feedback_id):
         raise HTTPException(status_code=404, detail="Feedback entry not found")
     return {"ok": True}

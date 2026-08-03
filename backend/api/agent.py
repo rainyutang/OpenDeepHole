@@ -61,8 +61,12 @@ from backend.models import (
     AgentInfo,
     AgentRemoteConfig,
     AgentValidatorCatalog,
+    AgentProcessedKeyBatch,
+    AgentScanCandidateBatch,
     AgentScanCandidates,
+    AgentScanEventBatch,
     AgentScanFinish,
+    AgentScanFinishV2,
     AgentVulnerabilityValidationUpdate,
     FpReviewMethod,
     FpReviewStatus,
@@ -81,6 +85,7 @@ from backend.models import (
     VulnerabilityValidation,
 )
 from backend.store import get_scan_store
+from backend.store.async_ops import run_store_call
 from backend.scan_event_log import (
     SCAN_EVENT_RETENTION_LIMIT,
     is_agent_local_task_output,
@@ -102,6 +107,9 @@ _registered_agents: dict[str, AgentInfo] = {}
 _agent_ws: dict[str, WebSocket] = {}
 _agent_ws_locks: dict[str, asyncio.Lock] = {}
 _agent_disconnect_tasks: dict[str, asyncio.Task] = {}
+_agent_touch_tasks: dict[str, asyncio.Task] = {}
+_agent_touch_persisted_at: dict[str, float] = {}
+_AGENT_TOUCH_PERSIST_INTERVAL_SECONDS = 10.0
 
 # Compatibility cache.  New entries are keyed by stable agent_key; name keys
 # are still read for tests and pre-v2 HTTP agents.
@@ -222,6 +230,72 @@ def resolve_agent_connection(agent_key: str) -> tuple[str, AgentInfo] | None:
     return _live_agent_for_key(str(agent_key or "").strip())
 
 
+def _agent_info_from_shared_session(session: dict) -> AgentInfo:
+    agent_id = str(session["agent_id"])
+    return AgentInfo(
+        agent_id=agent_id,
+        agent_key=str(session["agent_key"]),
+        name=str(session["name"]),
+        machine_name=str(session["machine_name"] or ""),
+        ip="shared-worker",
+        last_seen=str(session["last_seen"]),
+        user_id=str(session["user_id"] or ""),
+        runtime_hash=str(session.get("runtime_hash") or ""),
+        agent_session_id=str(session.get("agent_session_id") or agent_id),
+        accepting_tasks=bool(session.get("accepting_tasks", 1)),
+        protocol_version=int(session["protocol_version"] or 1),
+    )
+
+
+async def resolve_agent_connection_async(
+    agent_key: str,
+) -> tuple[str, AgentInfo] | None:
+    """Resolve local or PostgreSQL-owned Agent sessions without blocking."""
+    normalized = str(agent_key or "").strip()
+    local = _live_agent_for_key(normalized)
+    if local is not None:
+        return local
+    store = get_scan_store()
+    if not getattr(store, "distributed", False):
+        return None
+    session = await run_store_call(
+        store,
+        "get_live_agent_session",
+        agent_key=normalized,
+        stale_seconds=_WEBSOCKET_AGENT_STALE_SECONDS,
+    )
+    if session is None:
+        return None
+    agent = _agent_info_from_shared_session(session)
+    return agent.agent_id, agent
+
+
+async def resolve_agent_id_connection_async(
+    agent_id: str,
+) -> tuple[str, AgentInfo] | None:
+    normalized = str(agent_id or "").strip()
+    local = _registered_agents.get(normalized)
+    store = get_scan_store()
+    if local is not None and (
+        normalized in _agent_ws
+        or local.port > 0
+        or not getattr(store, "distributed", False)
+    ):
+        return normalized, local
+    if not normalized or not getattr(store, "distributed", False):
+        return None
+    session = await run_store_call(
+        store,
+        "get_live_agent_session",
+        agent_id=normalized,
+        stale_seconds=_WEBSOCKET_AGENT_STALE_SECONDS,
+    )
+    if session is None:
+        return None
+    agent = _agent_info_from_shared_session(session)
+    return agent.agent_id, agent
+
+
 def _authorize_agent_record(record: dict | None, current_user: User) -> dict:
     if record is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -239,6 +313,18 @@ def agent_config_has_explicit_model(config: AgentRemoteConfig) -> bool:
 
 def get_managed_agent_config(agent_key: str) -> AgentRemoteConfig:
     record = get_scan_store().get_agent_record(str(agent_key or "").strip())
+    if record is None:
+        return AgentRemoteConfig()
+    return _stored_agent_config(record)
+
+
+async def get_managed_agent_config_async(agent_key: str) -> AgentRemoteConfig:
+    """Async request-path variant that cannot wait on the store lock in-loop."""
+    record = await run_store_call(
+        get_scan_store(),
+        "get_agent_record",
+        str(agent_key or "").strip(),
+    )
     if record is None:
         return AgentRemoteConfig()
     return _stored_agent_config(record)
@@ -446,6 +532,13 @@ _mcp_probe_waiters: dict[str, asyncio.Future] = {}
 _mcp_status_waiters: dict[str, asyncio.Future] = {}
 _mcp_reload_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_persist_locks: dict[str, asyncio.Lock] = {}
+_AGENT_RESPONSE_WAITERS = {
+    "opencode_models_result": _opencode_model_waiters,
+    "opencode_runtime_config_result": _opencode_runtime_config_waiters,
+    "mcp_probe_result": _mcp_probe_waiters,
+    "mcp_status_result": _mcp_status_waiters,
+    "mcp_reload_result": _mcp_reload_waiters,
+}
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
 _scan_index_statuses: dict[str, dict] = {}
@@ -473,6 +566,58 @@ _RUNTIME_UPDATE_POLL_SECONDS = 2
 _RUNTIME_UPDATE_TIMEOUT_SECONDS = 15 * 60
 
 
+async def _complete_agent_response(
+    incoming: dict,
+    waiters: dict[str, asyncio.Future],
+) -> None:
+    request_id = str(incoming.get("request_id") or "")
+    waiter = waiters.pop(request_id, None)
+    if waiter is not None and not waiter.done():
+        waiter.set_result(incoming)
+        return
+    store = get_scan_store()
+    if request_id and getattr(store, "distributed", False):
+        await run_store_call(
+            store,
+            "put_agent_rpc_response",
+            request_id,
+            incoming,
+        )
+
+
+async def _wait_agent_response(
+    request_id: str,
+    waiter: asyncio.Future,
+    *,
+    timeout: float,
+) -> dict:
+    store = get_scan_store()
+    if not getattr(store, "distributed", False):
+        return await asyncio.wait_for(waiter, timeout=timeout)
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        if waiter.done():
+            return waiter.result()
+        response = await run_store_call(
+            store,
+            "pop_agent_rpc_response",
+            request_id,
+        )
+        if response is not None:
+            return response
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        done, _pending = await asyncio.wait(
+            {waiter},
+            timeout=min(0.1, remaining),
+        )
+        if done:
+            return waiter.result()
+
+
 def _runtime_update_status(record: dict | None) -> str:
     return str((record or {}).get("runtime_update_status") or "")
 
@@ -487,6 +632,21 @@ def is_agent_accepting_tasks(agent_key: str) -> bool:
 
 def ensure_agent_accepting_tasks(agent_key: str) -> None:
     if not is_agent_accepting_tasks(agent_key):
+        raise HTTPException(
+            status_code=409,
+            detail="Agent 正在更新并等待重连，请稍后再提交任务",
+        )
+
+
+async def ensure_agent_accepting_tasks_async(agent_key: str) -> None:
+    if not agent_key:
+        return
+    record = await run_store_call(
+        get_scan_store(),
+        "get_agent_record",
+        agent_key,
+    )
+    if _runtime_update_status(record) == _RUNTIME_UPDATE_UPDATING:
         raise HTTPException(
             status_code=409,
             detail="Agent 正在更新并等待重连，请稍后再提交任务",
@@ -514,48 +674,25 @@ def _scan_belongs_to_agent(scan_id: str, agent_key: str, agent_id: str) -> bool:
     return bool(agent_id and meta.agent_id == agent_id)
 
 
-def _agent_has_active_work(agent_key: str, agent_id: str) -> bool:
+async def _agent_has_active_work(agent_key: str, agent_id: str) -> bool:
     """Check scan and post-scan work before allowing an update restart."""
     store = get_scan_store()
-    for scan_id, scan in _running_scans.items():
-        if scan.status in _RUNNING_SCAN_STATUSES and _scan_belongs_to_agent(
-            scan_id,
-            agent_key,
-            agent_id,
-        ):
-            return True
-
     pool = _agent_opencode_pool_latest.get(agent_id)
     if pool is not None and (pool.global_running > 0 or pool.global_queued > 0):
         return True
-
-    for summary in store.list_scans():
-        meta = store.get_scan_meta(summary.scan_id)
-        if meta is None:
-            continue
-        if agent_key and meta.agent_key:
-            matches = meta.agent_key == agent_key
-        else:
-            matches = bool(agent_id and meta.agent_id == agent_id)
-        if not matches:
-            continue
-
-        fp_job = store.get_fp_review_by_scan(summary.scan_id)
-        if fp_job is not None:
-            fp_status = getattr(fp_job.status, "value", fp_job.status)
-            if fp_status in {"pending", "running"}:
-                return True
-        if any(
-            validation.running
-            or validation.status in {"pending", "queued", "running"}
-            for validation in store.list_vulnerability_validations(summary.scan_id)
-        ):
-            return True
-    return False
+    return await run_store_call(
+        store,
+        "has_active_work_for_agent",
+        agent_key,
+        agent_id,
+    )
 
 
-def _clear_agent_runtime_update(agent_key: str) -> None:
-    get_scan_store().set_agent_runtime_update_record(
+async def _clear_agent_runtime_update(agent_key: str) -> None:
+    store = get_scan_store()
+    await run_store_call(
+        store,
+        "set_agent_runtime_update_record",
         agent_key,
         status="",
     )
@@ -564,17 +701,18 @@ def _clear_agent_runtime_update(agent_key: str) -> None:
 async def _process_agent_runtime_updates() -> None:
     """Advance all durable manual Agent update requests by one scheduler tick."""
     store = get_scan_store()
-    for record in store.list_agent_records():
+    records = await run_store_call(store, "list_agent_records")
+    for record in records:
         status = _runtime_update_status(record)
         if status not in _RUNTIME_UPDATE_ACTIVE_STATUSES:
             continue
 
         agent_key = str(record.get("agent_key") or "")
         target_hash = str(record.get("runtime_update_target_hash") or "")
-        live = _live_agent_for_key(agent_key)
+        live = await resolve_agent_connection_async(agent_key)
 
         if live is not None and target_hash and live[1].runtime_hash == target_hash:
-            _clear_agent_runtime_update(agent_key)
+            await _clear_agent_runtime_update(agent_key)
             logger.info("Agent runtime update completed: agent_key=%s", agent_key)
             continue
 
@@ -583,7 +721,9 @@ async def _process_agent_runtime_updates() -> None:
                 str(record.get("runtime_update_started_at") or "")
             )
             if age is not None and age > _RUNTIME_UPDATE_TIMEOUT_SECONDS:
-                store.set_agent_runtime_update_record(
+                await run_store_call(
+                    store,
+                    "set_agent_runtime_update_record",
                     agent_key,
                     status=_RUNTIME_UPDATE_FAILED,
                     target_hash=target_hash,
@@ -602,12 +742,14 @@ async def _process_agent_runtime_updates() -> None:
         if live is None:
             continue
         agent_id, agent = live
-        if _agent_has_active_work(agent_key, agent_id):
+        if await _agent_has_active_work(agent_key, agent_id):
             continue
 
         server_url = str(record.get("runtime_update_server_url") or "")
         if not server_url:
-            store.set_agent_runtime_update_record(
+            await run_store_call(
+                store,
+                "set_agent_runtime_update_record",
                 agent_key,
                 status=_RUNTIME_UPDATE_FAILED,
                 target_hash=target_hash,
@@ -617,12 +759,14 @@ async def _process_agent_runtime_updates() -> None:
             continue
 
         try:
-            target_hash = _agent_runtime_hash()
+            target_hash = await asyncio.to_thread(_agent_runtime_hash)
             if agent.runtime_hash and agent.runtime_hash == target_hash:
-                _clear_agent_runtime_update(agent_key)
+                await _clear_agent_runtime_update(agent_key)
                 continue
             now = datetime.now(timezone.utc).isoformat()
-            store.set_agent_runtime_update_record(
+            await run_store_call(
+                store,
+                "set_agent_runtime_update_record",
                 agent_key,
                 status=_RUNTIME_UPDATE_UPDATING,
                 target_hash=target_hash,
@@ -634,9 +778,11 @@ async def _process_agent_runtime_updates() -> None:
             # Let concurrent task-creation requests observe the updating state,
             # then recheck in case one was already committed before the handoff.
             await asyncio.sleep(0)
-            live = _live_agent_for_key(agent_key)
+            live = await resolve_agent_connection_async(agent_key)
             if live is None:
-                store.set_agent_runtime_update_record(
+                await run_store_call(
+                    store,
+                    "set_agent_runtime_update_record",
                     agent_key,
                     status=_RUNTIME_UPDATE_PENDING,
                     target_hash=target_hash,
@@ -645,8 +791,10 @@ async def _process_agent_runtime_updates() -> None:
                 )
                 continue
             agent_id, _agent = live
-            if _agent_has_active_work(agent_key, agent_id):
-                store.set_agent_runtime_update_record(
+            if await _agent_has_active_work(agent_key, agent_id):
+                await run_store_call(
+                    store,
+                    "set_agent_runtime_update_record",
                     agent_key,
                     status=_RUNTIME_UPDATE_PENDING,
                     target_hash=target_hash,
@@ -655,7 +803,10 @@ async def _process_agent_runtime_updates() -> None:
                 )
                 continue
 
-            update_payload = create_agent_runtime_update_payload(server_url)
+            update_payload = await asyncio.to_thread(
+                create_agent_runtime_update_payload,
+                server_url,
+            )
             sent = await send_agent_command(
                 agent_id,
                 {
@@ -665,7 +816,9 @@ async def _process_agent_runtime_updates() -> None:
                 },
             )
             if not sent:
-                store.set_agent_runtime_update_record(
+                await run_store_call(
+                    store,
+                    "set_agent_runtime_update_record",
                     agent_key,
                     status=_RUNTIME_UPDATE_PENDING,
                     target_hash=target_hash,
@@ -683,7 +836,9 @@ async def _process_agent_runtime_updates() -> None:
                 "Failed to dispatch Agent runtime update for %s",
                 agent_key,
             )
-            store.set_agent_runtime_update_record(
+            await run_store_call(
+                store,
+                "set_agent_runtime_update_record",
                 agent_key,
                 status=_RUNTIME_UPDATE_FAILED,
                 target_hash=target_hash,
@@ -716,15 +871,57 @@ def _purge_expired_runtime_downloads() -> None:
         _runtime_download_tokens.pop(token, None)
 
 
-def _touch_agent(agent_id: str) -> None:
+async def _persist_agent_touch(agent_id: str, delay: float) -> None:
+    try:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        agent = _registered_agents.get(agent_id)
+        if agent is None or not agent.agent_key:
+            return
+        try:
+            await run_store_call(
+                get_scan_store(),
+                "touch_agent_record",
+                agent.agent_key,
+                agent_id,
+                agent.last_seen,
+            )
+            store = get_scan_store()
+            if getattr(store, "distributed", False):
+                await run_store_call(
+                    store,
+                    "touch_agent_session",
+                    agent_id,
+                    agent.last_seen,
+                )
+            _agent_touch_persisted_at[agent_id] = time.monotonic()
+        except (NotImplementedError, AttributeError):
+            pass
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Failed to persist Agent heartbeat: %s", agent_id)
+    finally:
+        _agent_touch_tasks.pop(agent_id, None)
+
+
+def _schedule_agent_touch_persistence(agent_id: str) -> None:
+    task = _agent_touch_tasks.get(agent_id)
+    if task is not None and not task.done():
+        return
+    elapsed = time.monotonic() - _agent_touch_persisted_at.get(agent_id, 0.0)
+    delay = max(0.0, _AGENT_TOUCH_PERSIST_INTERVAL_SECONDS - elapsed)
+    _agent_touch_tasks[agent_id] = asyncio.create_task(
+        _persist_agent_touch(agent_id, delay)
+    )
+
+
+def _touch_agent(agent_id: str, *, persist: bool = True) -> None:
     agent = _registered_agents.get(agent_id)
     if agent is not None:
         agent.last_seen = datetime.now(timezone.utc).isoformat()
-        if agent.agent_key:
-            try:
-                get_scan_store().touch_agent_record(agent.agent_key, agent_id, agent.last_seen)
-            except (NotImplementedError, AttributeError):
-                pass
+        if persist and agent.agent_key:
+            _schedule_agent_touch_persistence(agent_id)
 
 
 def _is_agent_online(agent: AgentInfo) -> bool:
@@ -748,6 +945,9 @@ async def _send_agent_json(agent_id: str, payload: dict) -> None:
 
 
 def _schedule_agent_disconnect_cancel(agent_id: str) -> None:
+    agent_key = str(
+        getattr(_registered_agents.get(agent_id), "agent_key", "") or ""
+    )
     old_task = _agent_disconnect_tasks.pop(agent_id, None)
     if old_task is not None:
         old_task.cancel()
@@ -755,7 +955,17 @@ def _schedule_agent_disconnect_cancel(agent_id: str) -> None:
     async def _delayed_cancel() -> None:
         try:
             await asyncio.sleep(_AGENT_DISCONNECT_GRACE_SECONDS)
-            _mark_agent_scans_cancelled(agent_id)
+            store = get_scan_store()
+            if agent_key and getattr(store, "distributed", False):
+                live = await run_store_call(
+                    store,
+                    "get_live_agent_session",
+                    agent_key=agent_key,
+                    stale_seconds=_WEBSOCKET_AGENT_STALE_SECONDS,
+                )
+                if live is not None and str(live["agent_id"]) != agent_id:
+                    return
+            await _mark_agent_scans_cancelled_async(agent_id)
         except asyncio.CancelledError:
             return
         finally:
@@ -796,6 +1006,11 @@ def _cancel_scan_if_agent_offline(
 
     Returns ``(agent_online, cancelled)``.
     """
+    # In PostgreSQL mode the WebSocket may belong to another Uvicorn worker.
+    # The leader's durable stale-session sweep owns cancellation; a process-
+    # local registry must never cancel shared work.
+    if getattr(get_scan_store(), "distributed", False):
+        return False, False
     agent_online = is_agent_name_online(agent_name)
     if agent_online or status not in _RUNNING_SCAN_STATUSES:
         return agent_online, False
@@ -846,7 +1061,11 @@ def reconcile_offline_agent_summary_state(summary: ScanSummary) -> ScanSummary:
     return summary
 
 
-def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: list) -> None:
+async def _reattach_active_agent_scans_async(
+    agent_id: str,
+    agent: AgentInfo,
+    active_scans: list,
+) -> None:
     """Restore server-side running state for scans still running in this agent."""
     if not active_scans:
         return
@@ -859,7 +1078,7 @@ def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: 
         if not scan_id:
             continue
 
-        loaded = store.load_scan(scan_id)
+        loaded = await run_store_call(store, "load_scan", scan_id)
         if loaded is None:
             logger.warning("Agent %s reported unknown active scan %s", agent_id, scan_id)
             continue
@@ -897,8 +1116,17 @@ def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: 
         scan.agent_name = agent.name
         scan.agent_online = True
 
-        store.update_scan_agent(scan_id, agent_id, agent.name, agent.agent_key)
-        store.update_scan_progress(
+        await run_store_call(
+            store,
+            "update_scan_agent",
+            scan_id,
+            agent_id,
+            agent.name,
+            agent.agent_key,
+        )
+        await run_store_call(
+            store,
+            "update_scan_progress",
             scan_id,
             status=scan.status,
             error_message="",
@@ -910,7 +1138,11 @@ def _reattach_active_agent_scans(agent_id: str, agent: AgentInfo, active_scans: 
         logger.info("Reattached active scan %s from agent %s", scan_id, agent_id)
 
 
-def _reattach_active_fp_reviews(agent_id: str, agent: AgentInfo, active_fp_reviews: list) -> None:
+async def _reattach_active_fp_reviews_async(
+    agent_id: str,
+    agent: AgentInfo,
+    active_fp_reviews: list,
+) -> None:
     """Restore server-side running state for FP reviews still running in this agent.
 
     Re-pointing the scan at the new agent_id also keeps the old connection's
@@ -928,12 +1160,12 @@ def _reattach_active_fp_reviews(agent_id: str, agent: AgentInfo, active_fp_revie
         if not scan_id or not review_id:
             continue
 
-        job = store.get_fp_review_job(review_id)
+        job = await run_store_call(store, "get_fp_review_job", review_id)
         if job is None or job.scan_id != scan_id:
             logger.warning("Agent %s reported unknown active FP review %s", agent_id, review_id)
             continue
 
-        meta = store.get_scan_meta(scan_id)
+        meta = await run_store_call(store, "get_scan_meta", scan_id)
         if meta is None:
             continue
         if meta.agent_name and meta.agent_name != agent.name:
@@ -964,7 +1196,9 @@ def _reattach_active_fp_reviews(agent_id: str, agent: AgentInfo, active_fp_revie
                 job.status == FpReviewStatus.ERROR
                 and _is_agent_disconnect_error(job.error_message)
             ):
-                store.update_fp_review_job(
+                await run_store_call(
+                    store,
+                    "update_fp_review_job",
                     review_id,
                     status="running",
                     error_message="",
@@ -980,7 +1214,9 @@ def _reattach_active_fp_reviews(agent_id: str, agent: AgentInfo, active_fp_revie
                 job.summary_status == FpReviewStatus.ERROR
                 and _is_agent_disconnect_error(job.summary_error_message)
             ):
-                store.update_fp_review_job(
+                await run_store_call(
+                    store,
+                    "update_fp_review_job",
                     review_id,
                     summary_status="running",
                     summary_error_message="",
@@ -1001,11 +1237,22 @@ def _reattach_active_fp_reviews(agent_id: str, agent: AgentInfo, active_fp_revie
             )
             continue
 
-        store.update_scan_agent(scan_id, agent_id, agent.name, agent.agent_key)
+        await run_store_call(
+            store,
+            "update_scan_agent",
+            scan_id,
+            agent_id,
+            agent.name,
+            agent.agent_key,
+        )
         logger.info("Reattached active FP review %s from agent %s", review_id, agent_id)
 
 
-def _reattach_active_validations(agent_id: str, agent: AgentInfo, active_validations: list) -> list[dict]:
+async def _reattach_active_validations_async(
+    agent_id: str,
+    agent: AgentInfo,
+    active_validations: list,
+) -> list[dict]:
     """Restore server-side ownership for Agent validations and return stop commands for cancelled ones."""
     pending_stops: list[dict] = []
     if not active_validations:
@@ -1023,7 +1270,7 @@ def _reattach_active_validations(agent_id: str, agent: AgentInfo, active_validat
         if not scan_id or vuln_index < 0:
             continue
 
-        meta = store.get_scan_meta(scan_id)
+        meta = await run_store_call(store, "get_scan_meta", scan_id)
         if meta is None:
             continue
         if meta.agent_name and meta.agent_name != agent.name:
@@ -1044,15 +1291,27 @@ def _reattach_active_validations(agent_id: str, agent: AgentInfo, active_validat
             )
             continue
 
+        validations = await run_store_call(
+            store,
+            "list_vulnerability_validations",
+            scan_id,
+        )
         validation = next(
-            (entry for entry in store.list_vulnerability_validations(scan_id) if entry.vuln_index == vuln_index),
+            (entry for entry in validations if entry.vuln_index == vuln_index),
             None,
         )
         if validation is None:
             logger.warning("Agent %s reported unknown active validation %s#%s", agent_id, scan_id, vuln_index)
             continue
 
-        store.update_scan_agent(scan_id, agent_id, agent.name, agent.agent_key)
+        await run_store_call(
+            store,
+            "update_scan_agent",
+            scan_id,
+            agent_id,
+            agent.name,
+            agent.agent_key,
+        )
         if validation.status == "cancelled":
             pending_stops.append({
                 "type": "vulnerability_validation_stop",
@@ -1074,23 +1333,70 @@ def _reattach_active_validations(agent_id: str, agent: AgentInfo, active_validat
     return pending_stops
 
 
-def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
+def _run_reconnect_helper(coroutine):
+    """Keep the established synchronous test/maintenance helper contract."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    raise RuntimeError("Use the async reconnect helper from an event loop")
+
+
+def _reattach_active_agent_scans(
+    agent_id: str,
+    agent: AgentInfo,
+    active_scans: list,
+) -> None:
+    return _run_reconnect_helper(
+        _reattach_active_agent_scans_async(agent_id, agent, active_scans)
+    )
+
+
+def _reattach_active_fp_reviews(
+    agent_id: str,
+    agent: AgentInfo,
+    active_fp_reviews: list,
+) -> None:
+    return _run_reconnect_helper(
+        _reattach_active_fp_reviews_async(agent_id, agent, active_fp_reviews)
+    )
+
+
+def _reattach_active_validations(
+    agent_id: str,
+    agent: AgentInfo,
+    active_validations: list,
+) -> list[dict]:
+    return _run_reconnect_helper(
+        _reattach_active_validations_async(agent_id, agent, active_validations)
+    )
+
+
+async def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
     """Load a recoverable scan into memory when events arrive after restart."""
     scan = _running_scans.get(scan_id)
     if scan is not None:
         return scan
 
-    loaded = get_scan_store().load_scan(scan_id)
+    store = get_scan_store()
+    distributed = bool(getattr(store, "distributed", False))
+    loaded = await run_store_call(
+        store,
+        "load_scan_overview" if distributed else "load_scan",
+        scan_id,
+    )
     if loaded is None:
         return None
 
-    scan, meta = loaded
+    scan, meta = loaded[:2]
     if not _is_infrastructure_interruption(scan.status, scan.error_message):
         return None
 
     if scan.status not in _RUNNING_SCAN_STATUSES:
         scan.status = _best_running_status(scan.total_candidates, scan.static_analysis_done)
-        get_scan_store().update_scan_progress(
+        await run_store_call(
+            store,
+            "update_scan_progress",
             scan_id,
             status=scan.status,
             error_message="",
@@ -1100,7 +1406,9 @@ def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
         scan.current_candidate = None
 
     scan.agent_name = meta.agent_name
-    if meta.agent_name:
+    if distributed:
+        scan.agent_online = True
+    elif meta.agent_name:
         scan.agent_online = is_agent_name_online(meta.agent_name)
     _running_scans[scan_id] = scan
     if meta.user_id:
@@ -1172,25 +1480,31 @@ def _merge_completed_opencode_tasks(
 # ---------------------------------------------------------------------------
 
 
-def _mark_agent_scans_cancelled(agent_id: str) -> None:
+async def _mark_agent_scans_cancelled_async(agent_id: str) -> None:
     """Mark all running scans belonging to this agent as CANCELLED.
 
     Called when an agent disconnects so the frontend shows the correct state.
     """
     store = get_scan_store()
     cancelled_scan_ids = set(
-        store.mark_agent_scans_cancelled(agent_id, AGENT_DISCONNECT_ERROR)
+        await run_store_call(
+            store,
+            "mark_agent_scans_cancelled",
+            agent_id,
+            AGENT_DISCONNECT_ERROR,
+        )
     )
-    fp_review_count = store.mark_fp_reviews_for_agent_error(
+    fp_review_count = await run_store_call(
+        store,
+        "mark_fp_reviews_for_agent_error",
         agent_id,
         AGENT_DISCONNECT_ERROR,
     )
 
     for scan_id in list(_running_scans):
-        result = store.load_scan(scan_id)
-        if result is None:
+        meta = await run_store_call(store, "get_scan_meta", scan_id)
+        if meta is None:
             continue
-        _, meta = result
         if meta.agent_id != agent_id:
             continue
         scan = _running_scans.get(scan_id)
@@ -1213,6 +1527,10 @@ def _mark_agent_scans_cancelled(agent_id: str) -> None:
         )
 
 
+def _mark_agent_scans_cancelled(agent_id: str) -> None:
+    return _run_reconnect_helper(_mark_agent_scans_cancelled_async(agent_id))
+
+
 @router.websocket("/ws")
 async def agent_websocket(websocket: WebSocket) -> None:
     """Agent connects here and receives task/stop/resume commands."""
@@ -1227,6 +1545,10 @@ async def agent_websocket(websocket: WebSocket) -> None:
         name = str(msg.get("name") or socket.gethostname()).strip()
         machine_name = str(msg.get("machine_name") or name or socket.gethostname()).strip()
         owner_token = msg.get("owner_token", "")
+        offered_protocols = msg.get("protocol_versions")
+        if not isinstance(offered_protocols, list):
+            offered_protocols = [1]
+        protocol_version = 2 if 2 in offered_protocols else 1
         agent_id = uuid.uuid4().hex
         ip = websocket.client.host if websocket.client else "unknown"
         now = datetime.now(timezone.utc).isoformat()
@@ -1235,7 +1557,11 @@ async def agent_websocket(websocket: WebSocket) -> None:
         user_id = ""
         if owner_token:
             store = get_scan_store()
-            owner = store.get_user_by_agent_token(owner_token)
+            owner = await run_store_call(
+                store,
+                "get_user_by_agent_token",
+                owner_token,
+            )
             if owner:
                 user_id = owner.user_id
 
@@ -1265,9 +1591,17 @@ async def agent_websocket(websocket: WebSocket) -> None:
             initial_config = AgentRemoteConfig()
 
         store = get_scan_store()
-        existing = store.find_agent_record(user_id, ip, machine_name)
+        existing = await run_store_call(
+            store,
+            "find_agent_record",
+            user_id,
+            ip,
+            machine_name,
+        )
         stable_key = str(existing.get("agent_key") or "") if existing else uuid.uuid4().hex
-        record = store.upsert_agent_record(
+        record = await run_store_call(
+            store,
+            "upsert_agent_record",
             agent_key=stable_key,
             user_id=user_id,
             ip=ip,
@@ -1286,8 +1620,16 @@ async def agent_websocket(websocket: WebSocket) -> None:
             and update_target_hash
             and reported_runtime_hash == update_target_hash
         ):
-            _clear_agent_runtime_update(stable_key)
-            record = store.get_agent_record(stable_key) or record
+            await run_store_call(
+                store,
+                "set_agent_runtime_update_record",
+                stable_key,
+                status="",
+            )
+            record = (
+                await run_store_call(store, "get_agent_record", stable_key)
+                or record
+            )
         cfg = _stored_agent_config(record)
         _agent_configs[stable_key] = cfg
 
@@ -1308,14 +1650,32 @@ async def agent_websocket(websocket: WebSocket) -> None:
             ),
             runtime_update_error=str(record.get("runtime_update_error") or ""),
             accepting_tasks=_runtime_update_status(record) != _RUNTIME_UPDATE_UPDATING,
+            protocol_version=protocol_version,
         )
         _registered_agents[agent_id] = agent_info
         _agent_ws[agent_id] = websocket
         _agent_ws_locks[agent_id] = asyncio.Lock()
+        if getattr(store, "distributed", False):
+            from backend.distributed import WORKER_ID
 
-        _reattach_active_agent_scans(agent_id, agent_info, msg.get("active_scans") or [])
-        _reattach_active_fp_reviews(agent_id, agent_info, msg.get("active_fp_reviews") or [])
-        pending_validation_stops = _reattach_active_validations(
+            await run_store_call(
+                store,
+                "register_agent_session",
+                agent_info,
+                WORKER_ID,
+            )
+
+        await _reattach_active_agent_scans_async(
+            agent_id,
+            agent_info,
+            msg.get("active_scans") or [],
+        )
+        await _reattach_active_fp_reviews_async(
+            agent_id,
+            agent_info,
+            msg.get("active_fp_reviews") or [],
+        )
+        pending_validation_stops = await _reattach_active_validations_async(
             agent_id,
             agent_info,
             msg.get("active_validations") or [],
@@ -1326,6 +1686,13 @@ async def agent_websocket(websocket: WebSocket) -> None:
             "agent_id": agent_id,
             "agent_key": stable_key,
             "config": cfg.model_dump(),
+            "protocol_version": protocol_version,
+            "capabilities": {
+                "candidate_batches": protocol_version >= 2,
+                "event_batches": protocol_version >= 2,
+                "lightweight_finish": protocol_version >= 2,
+                "resume_manifest": protocol_version >= 2,
+            },
         })
         for command in pending_validation_stops:
             await send_agent_command(agent_id, command)
@@ -1335,39 +1702,21 @@ async def agent_websocket(websocket: WebSocket) -> None:
         # Keep connection alive; agent sends application-level heartbeats.
         while True:
             incoming = await websocket.receive_json()
-            _touch_agent(agent_id)
             if isinstance(incoming, dict) and incoming.get("type") == "heartbeat":
+                # Heartbeat health is independent from persistence latency: update
+                # memory, ACK immediately, then coalesce the durable write.
+                _touch_agent(agent_id, persist=False)
                 await _send_agent_json(agent_id, {"type": "heartbeat_ack"})
+                _schedule_agent_touch_persistence(agent_id)
                 continue
-            if isinstance(incoming, dict) and incoming.get("type") == "opencode_models_result":
-                request_id = str(incoming.get("request_id") or "")
-                waiter = _opencode_model_waiters.pop(request_id, None)
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(incoming)
-                continue
-            if isinstance(incoming, dict) and incoming.get("type") == "opencode_runtime_config_result":
-                request_id = str(incoming.get("request_id") or "")
-                waiter = _opencode_runtime_config_waiters.pop(request_id, None)
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(incoming)
-                continue
-            if isinstance(incoming, dict) and incoming.get("type") == "mcp_probe_result":
-                request_id = str(incoming.get("request_id") or "")
-                waiter = _mcp_probe_waiters.pop(request_id, None)
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(incoming)
-                continue
-            if isinstance(incoming, dict) and incoming.get("type") == "mcp_status_result":
-                request_id = str(incoming.get("request_id") or "")
-                waiter = _mcp_status_waiters.pop(request_id, None)
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(incoming)
-                continue
-            if isinstance(incoming, dict) and incoming.get("type") == "mcp_reload_result":
-                request_id = str(incoming.get("request_id") or "")
-                waiter = _mcp_reload_waiters.pop(request_id, None)
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(incoming)
+            _touch_agent(agent_id)
+            response_waiters = (
+                _AGENT_RESPONSE_WAITERS.get(str(incoming.get("type") or ""))
+                if isinstance(incoming, dict)
+                else None
+            )
+            if response_waiters is not None:
+                await _complete_agent_response(incoming, response_waiters)
                 continue
             if isinstance(incoming, dict) and incoming.get("type") == "skill_create_result":
                 from backend.api.skills import handle_skill_create_result
@@ -1381,6 +1730,16 @@ async def agent_websocket(websocket: WebSocket) -> None:
         logger.warning("Agent WebSocket error for %s: %s", agent_id, e)
     finally:
         if agent_id:
+            store = get_scan_store()
+            if getattr(store, "distributed", False):
+                try:
+                    await run_store_call(
+                        store,
+                        "unregister_agent_session",
+                        agent_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to unregister Agent session %s", agent_id)
             _schedule_agent_disconnect_cancel(agent_id)
             _agent_ws.pop(agent_id, None)
             _agent_ws_locks.pop(agent_id, None)
@@ -1401,6 +1760,15 @@ async def send_agent_command(agent_id: str, command: dict) -> bool:
     """Send a JSON command to an agent via its WebSocket. Returns True on success."""
     ws = _agent_ws.get(agent_id)
     if ws is None:
+        store = get_scan_store()
+        if getattr(store, "distributed", False):
+            command_id = await run_store_call(
+                store,
+                "enqueue_agent_command",
+                agent_id,
+                command,
+            )
+            return command_id is not None
         return False
     try:
         await _send_agent_json(agent_id, command)
@@ -1470,7 +1838,8 @@ async def agent_heartbeat(agent_id: str) -> dict:
 @router.post("/{agent_id}/opencode-pool")
 async def update_agent_opencode_pool(agent_id: str, status: OpenCodePoolStatus) -> dict:
     """Agent pushes its Agent-wide OpenCode model-pool status snapshot."""
-    agent = _registered_agents.get(agent_id)
+    resolved = await resolve_agent_id_connection_async(agent_id)
+    agent = resolved[1] if resolved is not None else None
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     status.agent_name = agent.name
@@ -1478,14 +1847,18 @@ async def update_agent_opencode_pool(agent_id: str, status: OpenCodePoolStatus) 
     _agent_opencode_pool_latest[agent_id] = status
     store = get_scan_store()
     if hasattr(store, "upsert_agent_opencode_pool_status"):
-        store.upsert_agent_opencode_pool_status(
+        await run_store_call(
+            store,
+            "upsert_agent_opencode_pool_status",
             agent_name=agent.agent_key or agent.name,
             user_id=agent.user_id,
             agent_session_id=status.agent_session_id,
             status=status,
         )
     if hasattr(store, "upsert_agent_opencode_token_usage") and agent.agent_key:
-        store.upsert_agent_opencode_token_usage(
+        await run_store_call(
+            store,
+            "upsert_agent_opencode_token_usage",
             agent_key=agent.agent_key,
             user_id=agent.user_id,
             agent_session_id=status.agent_session_id,
@@ -1500,15 +1873,22 @@ async def get_agent_opencode_pool(
     current_user: User = Depends(get_current_user),
 ) -> AgentOpenCodePoolStatus:
     """Return persisted per-model usage for one Agent plus current active tasks."""
-    agent = _registered_agents.get(agent_id)
+    resolved = await resolve_agent_id_connection_async(agent_id)
+    agent = resolved[1] if resolved is not None else None
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     if current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied")
-    online = _is_agent_online(agent)
+    online = (
+        _is_agent_online(agent)
+        if agent_id in _agent_ws
+        else resolved is not None
+    )
     store = get_scan_store()
     if hasattr(store, "get_agent_opencode_pool_status"):
-        result = store.get_agent_opencode_pool_status(
+        result = await run_store_call(
+            store,
+            "get_agent_opencode_pool_status",
             agent_name=agent.agent_key or agent.name,
             user_id=agent.user_id,
             agent_id=agent_id,
@@ -1524,7 +1904,9 @@ async def get_agent_opencode_pool(
         )
     result.agent_name = agent.name
     if hasattr(store, "get_agent_opencode_token_usage") and agent.agent_key:
-        result.token_usage = store.get_agent_opencode_token_usage(
+        result.token_usage = await run_store_call(
+            store,
+            "get_agent_opencode_token_usage",
             agent_key=agent.agent_key,
             user_id=agent.user_id,
         )
@@ -1612,7 +1994,7 @@ async def get_agent_opencode_models(
         _opencode_model_waiters.pop(request_id, None)
         raise HTTPException(status_code=502, detail="Agent not connected")
     try:
-        result = await asyncio.wait_for(waiter, timeout=60.0)
+        result = await _wait_agent_response(request_id, waiter, timeout=60.0)
     except asyncio.TimeoutError:
         _opencode_model_waiters.pop(request_id, None)
         raise HTTPException(status_code=504, detail="OpenCode model listing timed out")
@@ -1633,7 +2015,7 @@ async def agent_unregister(agent_id: str) -> dict:
     old_task = _agent_disconnect_tasks.pop(agent_id, None)
     if old_task is not None:
         old_task.cancel()
-    _mark_agent_scans_cancelled(agent_id)
+    await _mark_agent_scans_cancelled_async(agent_id)
     _registered_agents.pop(agent_id, None)
     _agent_ws.pop(agent_id, None)
     _agent_ws_locks.pop(agent_id, None)
@@ -1648,13 +2030,22 @@ async def get_agent_config(
     current_user: User = Depends(get_current_user),
 ) -> AgentRemoteConfig:
     """Return the server-managed config for an agent (defaults if not yet saved)."""
-    agent = _registered_agents.get(agent_id)
+    resolved = await resolve_agent_id_connection_async(agent_id)
+    agent = resolved[1] if resolved is not None else None
+    store = get_scan_store()
     if agent is None:
-        record = _authorize_agent_record(get_scan_store().get_agent_record(agent_id), current_user)
+        record = _authorize_agent_record(
+            await run_store_call(store, "get_agent_record", agent_id),
+            current_user,
+        )
         return _stored_agent_config(record)
     if current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied")
-    record = get_scan_store().get_agent_record(agent.agent_key) if agent.agent_key else None
+    record = (
+        await run_store_call(store, "get_agent_record", agent.agent_key)
+        if agent.agent_key
+        else None
+    )
     return _stored_agent_config(record) if record else _agent_configs.get(agent.name, AgentRemoteConfig())
 
 
@@ -1671,15 +2062,24 @@ async def update_agent_config(
     """
     agent = _registered_agents.get(agent_id)
     agent_key = agent.agent_key if agent is not None else agent_id
-    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    store = get_scan_store()
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     _validate_managed_config(
         body,
         _stored_validator_catalog(record),
     )
-    get_scan_store().update_agent_config_record(agent_key, body.model_dump_json())
+    await run_store_call(
+        store,
+        "update_agent_config_record",
+        agent_key,
+        body.model_dump_json(),
+    )
     _agent_configs[agent_key] = body
     logger.info("Config updated for stable agent %s", agent_key)
-    live = _live_agent_for_key(agent_key)
+    live = await resolve_agent_connection_async(agent_key)
     if live is not None:
         await send_agent_command(live[0], {"type": "config", "config": body.model_dump()})
     return {"ok": True}
@@ -1690,7 +2090,11 @@ async def get_stable_agent_config(
     agent_key: str,
     current_user: User = Depends(get_current_user),
 ) -> AgentRemoteConfig:
-    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    store = get_scan_store()
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     return _stored_agent_config(record)
 
 
@@ -1703,10 +2107,15 @@ async def get_stable_agent_opencode_usage(
     current_user: User = Depends(get_current_user),
 ) -> OpenCodeTokenUsage | None:
     store = get_scan_store()
-    record = _authorize_agent_record(store.get_agent_record(agent_key), current_user)
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     if not hasattr(store, "get_agent_opencode_token_usage"):
         return None
-    return store.get_agent_opencode_token_usage(
+    return await run_store_call(
+        store,
+        "get_agent_opencode_token_usage",
         agent_key=agent_key,
         user_id=str(record.get("user_id") or ""),
     )
@@ -1718,14 +2127,23 @@ async def update_stable_agent_config(
     body: AgentRemoteConfig,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    store = get_scan_store()
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     _validate_managed_config(
         body,
         _stored_validator_catalog(record),
     )
-    get_scan_store().update_agent_config_record(agent_key, body.model_dump_json())
+    await run_store_call(
+        store,
+        "update_agent_config_record",
+        agent_key,
+        body.model_dump_json(),
+    )
     _agent_configs[agent_key] = body
-    live = _live_agent_for_key(agent_key)
+    live = await resolve_agent_connection_async(agent_key)
     applied = False
     if live is not None:
         applied = await send_agent_command(live[0], {"type": "config", "config": body.model_dump()})
@@ -1739,14 +2157,22 @@ async def request_stable_agent_runtime_update(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     store = get_scan_store()
-    record = _authorize_agent_record(store.get_agent_record(agent_key), current_user)
-    live = _live_agent_for_key(agent_key)
-    if live is None or not _is_agent_online(live[1]):
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
+    live = await resolve_agent_connection_async(agent_key)
+    if live is None:
         raise HTTPException(status_code=409, detail="Agent 当前离线，无法提交更新")
 
     target_hash = _agent_runtime_hash()
     if live[1].runtime_hash and live[1].runtime_hash == target_hash:
-        _clear_agent_runtime_update(agent_key)
+        await run_store_call(
+            store,
+            "set_agent_runtime_update_record",
+            agent_key,
+            status="",
+        )
         return {
             "status": "up_to_date",
             "target_hash": target_hash,
@@ -1770,7 +2196,9 @@ async def request_stable_agent_runtime_update(
         }
 
     now = datetime.now(timezone.utc).isoformat()
-    store.set_agent_runtime_update_record(
+    await run_store_call(
+        store,
+        "set_agent_runtime_update_record",
         agent_key,
         status=_RUNTIME_UPDATE_PENDING,
         target_hash=target_hash,
@@ -1879,7 +2307,7 @@ def _opencode_runtime_response(
 async def _request_agent_opencode_runtime_config(
     agent_key: str,
 ) -> tuple[dict | None, str]:
-    live = _live_agent_for_key(agent_key)
+    live = await resolve_agent_connection_async(agent_key)
     if live is None:
         return None, "Agent 已离线"
     request_id = uuid.uuid4().hex
@@ -1892,7 +2320,7 @@ async def _request_agent_opencode_runtime_config(
         })
         if not sent:
             return None, "无法向 Agent 发送 OpenCode 配置读取请求"
-        incoming = await asyncio.wait_for(waiter, timeout=5.0)
+        incoming = await _wait_agent_response(request_id, waiter, timeout=5.0)
         if not isinstance(incoming, dict):
             return None, "Agent 返回了无效的 OpenCode 配置读取结果"
         return incoming, ""
@@ -1918,9 +2346,12 @@ async def get_stable_agent_opencode_runtime_config(
 ) -> AgentOpenCodeRuntimeConfigResponse:
     """Return the Agent runtime layer plus active Serve diagnostics or a snapshot."""
     store = get_scan_store()
-    record = _authorize_agent_record(store.get_agent_record(agent_key), current_user)
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     response.headers["Cache-Control"] = "no-store"
-    online = _live_agent_for_key(agent_key) is not None
+    online = await resolve_agent_connection_async(agent_key) is not None
     warning = ""
 
     if refresh and online:
@@ -1928,7 +2359,9 @@ async def get_stable_agent_opencode_runtime_config(
         if incoming is not None and bool(incoming.get("ok")):
             snapshot = _opencode_runtime_snapshot(incoming)
             if snapshot["exists"]:
-                store.update_agent_opencode_runtime_config_record(
+                await run_store_call(
+                    store,
+                    "update_agent_opencode_runtime_config_record",
                     agent_key,
                     json.dumps(snapshot, ensure_ascii=False),
                 )
@@ -1976,7 +2409,7 @@ async def _persist_mcp_probe(agent_key: str, result: AgentMcpProbeResult) -> Non
     lock = _mcp_probe_persist_locks.setdefault(agent_key, asyncio.Lock())
     async with lock:
         store = get_scan_store()
-        record = store.get_agent_record(agent_key)
+        record = await run_store_call(store, "get_agent_record", agent_key)
         payload: dict = {}
         if record is not None:
             try:
@@ -1986,7 +2419,9 @@ async def _persist_mcp_probe(agent_key: str, result: AgentMcpProbeResult) -> Non
             except Exception:
                 pass
         payload[result.target] = result.model_dump(mode="json")
-        store.update_agent_mcp_probe_record(
+        await run_store_call(
+            store,
+            "update_agent_mcp_probe_record",
             agent_key,
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
         )
@@ -2040,7 +2475,7 @@ def _agent_mcp_runtime(
 
 
 async def _request_agent_mcp_runtime(agent_key: str) -> dict[str, object] | None:
-    live = _live_agent_for_key(agent_key)
+    live = await resolve_agent_connection_async(agent_key)
     if live is None:
         return None
     request_id = uuid.uuid4().hex
@@ -2053,7 +2488,7 @@ async def _request_agent_mcp_runtime(agent_key: str) -> dict[str, object] | None
         })
         if not sent:
             return None
-        incoming = await asyncio.wait_for(waiter, timeout=5.0)
+        incoming = await _wait_agent_response(request_id, waiter, timeout=5.0)
         targets = incoming.get("targets") if isinstance(incoming, dict) else None
         return targets if isinstance(targets, dict) else None
     except asyncio.TimeoutError:
@@ -2073,10 +2508,14 @@ async def get_stable_agent_mcp_status(
     agent_key: str,
     current_user: User = Depends(get_current_user),
 ) -> AgentMcpStatusResponse:
-    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    store = get_scan_store()
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     config = _stored_agent_config(record)
     probes = _stored_mcp_probes(record)
-    online = _live_agent_for_key(agent_key) is not None
+    online = await resolve_agent_connection_async(agent_key) is not None
     live_runtime = await _request_agent_mcp_runtime(agent_key) if online else None
     return AgentMcpStatusResponse(
         agent_key=agent_key,
@@ -2099,12 +2538,16 @@ async def reload_stable_agent_mcp(
     target: str,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    store = get_scan_store()
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     config = _stored_agent_config(record)
     mcp_config = _mcp_target_config(config, target)
     if not mcp_config.enabled:
         raise HTTPException(status_code=400, detail="请先启用并保存该 MCP 配置")
-    live = _live_agent_for_key(agent_key)
+    live = await resolve_agent_connection_async(agent_key)
     if live is None:
         raise HTTPException(status_code=409, detail="Agent 离线，无法重新加载 MCP")
     request_id = uuid.uuid4().hex
@@ -2118,7 +2561,7 @@ async def reload_stable_agent_mcp(
         })
         if not sent:
             raise HTTPException(status_code=502, detail="Agent 连接已断开")
-        incoming = await asyncio.wait_for(waiter, timeout=5.0)
+        incoming = await _wait_agent_response(request_id, waiter, timeout=5.0)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="等待 Agent 接受 MCP 重载请求超时")
     finally:
@@ -2138,7 +2581,11 @@ async def probe_stable_agent_mcp(
     current_user: User = Depends(get_current_user),
     mcp_config: AgentMcpConfig | None = None,
 ) -> AgentMcpProbeResult:
-    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    store = get_scan_store()
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     transient = target == "scan_code_graph"
     if transient:
         if mcp_config is None:
@@ -2154,7 +2601,7 @@ async def probe_stable_agent_mcp(
     assert mcp_config is not None
     if not mcp_config.enabled:
         raise HTTPException(status_code=400, detail="请先启用并保存该 MCP 配置")
-    live = _live_agent_for_key(agent_key)
+    live = await resolve_agent_connection_async(agent_key)
     if live is None:
         raise HTTPException(status_code=409, detail="Agent 离线，无法执行 MCP 检测")
 
@@ -2173,7 +2620,11 @@ async def probe_stable_agent_mcp(
 
     wait_seconds = min(30, max(1, mcp_config.timeout_seconds)) + 5
     try:
-        incoming = await asyncio.wait_for(waiter, timeout=wait_seconds)
+        incoming = await _wait_agent_response(
+            request_id,
+            waiter,
+            timeout=wait_seconds,
+        )
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=504,
@@ -2219,7 +2670,11 @@ async def get_stable_agent_validator_catalog(
     product: str = "",
     current_user: User = Depends(get_current_user),
 ) -> AgentValidatorCatalog:
-    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    store = get_scan_store()
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     catalog = _stored_validator_catalog(record)
     if not product.strip():
         return catalog
@@ -2234,7 +2689,11 @@ async def get_stable_agent_validation_environments(
     product: str = "",
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    record = _authorize_agent_record(get_scan_store().get_agent_record(agent_key), current_user)
+    store = get_scan_store()
+    record = _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
     catalog = _stored_validator_catalog(record)
     selected_product = product.strip()
     environments = sorted({
@@ -2261,12 +2720,27 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
     Legacy HTTP agents: online = last heartbeat < 90 seconds ago.
     """
     store = get_scan_store()
-    records = store.list_agent_records(None if current_user.role == "admin" else current_user.user_id)
+    records = await run_store_call(
+        store,
+        "list_agent_records",
+        None if current_user.role == "admin" else current_user.user_id,
+    )
+    shared_by_key: dict[str, tuple[str, AgentInfo]] = {}
+    if getattr(store, "distributed", False):
+        sessions = await run_store_call(
+            store,
+            "list_live_agent_sessions",
+            _WEBSOCKET_AGENT_STALE_SECONDS,
+        )
+        for session in sessions:
+            agent = _agent_info_from_shared_session(session)
+            shared_by_key.setdefault(agent.agent_key, (agent.agent_id, agent))
     result = []
     known_keys: set[str] = set()
     for record in records:
         agent_key = str(record.get("agent_key") or "")
-        live = _live_agent_for_key(agent_key)
+        local_live = _live_agent_for_key(agent_key)
+        live = local_live or shared_by_key.get(agent_key)
         agent = live[1] if live else None
         known_keys.add(agent_key)
         result.append({
@@ -2280,7 +2754,14 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
             "user_id": str(record.get("user_id") or ""),
             "runtime_hash": agent.runtime_hash if agent else "",
             "agent_session_id": agent.agent_session_id if agent else "",
-            "online": bool(agent and _is_agent_online(agent)),
+            "online": bool(
+                agent
+                and (
+                    _is_agent_online(agent)
+                    if local_live is not None
+                    else live is not None
+                )
+            ),
             "runtime_update_status": _runtime_update_status(record),
             "runtime_update_target_hash": str(
                 record.get("runtime_update_target_hash") or ""
@@ -2305,37 +2786,22 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/scan/{scan_id}/event")
-async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
-    """Agent pushes a progress event. Updates in-memory scan state and DB."""
-    if is_agent_local_task_output(event.message):
-        return {"ok": True, "discarded": True}
-
-    store = get_scan_store()
-    store.add_event(scan_id, event)
-
-    scan = _ensure_running_scan(scan_id)
-    if scan is None:
-        return {"ok": True}
-
+def _apply_agent_event_to_scan(scan, event: ScanEvent) -> dict:
+    progress_kwargs: dict = {}
     scan.events.append(event)
     if len(scan.events) > SCAN_EVENT_RETENTION_LIMIT:
         scan.events = scan.events[-SCAN_EVENT_RETENTION_LIMIT:]
 
-    progress_kwargs: dict = {}
-
     if event.phase == "init":
         if scan.status == ScanItemStatus.PENDING:
             progress_kwargs["status"] = ScanItemStatus.PENDING
-
     elif event.phase == "static_analysis":
-        if scan.status in (ScanItemStatus.PENDING,):
+        if scan.status == ScanItemStatus.PENDING:
             scan.status = ScanItemStatus.ANALYZING
             progress_kwargs["status"] = ScanItemStatus.ANALYZING
         if event.candidate_index is not None:
             scan.total_candidates = event.candidate_index
             progress_kwargs["total_candidates"] = event.candidate_index
-
     elif event.phase == "auditing":
         if scan.status in (ScanItemStatus.PENDING, ScanItemStatus.ANALYZING):
             scan.status = ScanItemStatus.AUDITING
@@ -2343,11 +2809,12 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
         if not scan.static_analysis_done:
             scan.static_analysis_done = True
             progress_kwargs["static_analysis_done"] = True
+    return progress_kwargs
 
-    if progress_kwargs:
-        store.update_scan_progress(scan_id, **progress_kwargs)
 
+def _publish_agent_event_state(scan_id: str, scan, events: list[ScanEvent]) -> None:
     from backend.sse import publish
+
     publish(scan_id, "scan_status", {
         "status": scan.status if scan else None,
         "progress": scan.progress if scan else None,
@@ -2357,9 +2824,57 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
         "static_scanned_files": scan.static_scanned_files if scan else None,
         "static_analysis_done": scan.static_analysis_done if scan else None,
     })
-    publish(scan_id, "scan_event", {"event": event.model_dump()})
+    for event in events:
+        publish(scan_id, "scan_event", {"event": event.model_dump()})
+
+
+@router.post("/scan/{scan_id}/event")
+async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
+    """Agent pushes a progress event. Updates in-memory scan state and DB."""
+    if is_agent_local_task_output(event.message):
+        return {"ok": True, "discarded": True}
+
+    store = get_scan_store()
+    await run_store_call(store, "add_event", scan_id, event)
+
+    scan = await _ensure_running_scan(scan_id)
+    if scan is None:
+        return {"ok": True}
+
+    progress_kwargs = _apply_agent_event_to_scan(scan, event)
+
+    if progress_kwargs:
+        await run_store_call(store, "update_scan_progress", scan_id, **progress_kwargs)
+
+    _publish_agent_event_state(scan_id, scan, [event])
 
     return {"ok": True}
+
+
+@router.post("/v2/scan/{scan_id}/events")
+async def agent_scan_events_v2(
+    scan_id: str,
+    body: AgentScanEventBatch,
+) -> dict:
+    """Persist a bounded event chunk in one transaction and one progress write."""
+    events = [
+        event for event in body.events
+        if not is_agent_local_task_output(event.message)
+    ]
+    if not events:
+        return {"ok": True, "count": 0}
+    store = get_scan_store()
+    await run_store_call(store, "add_events_batch", scan_id, events)
+    scan = await _ensure_running_scan(scan_id)
+    if scan is None:
+        return {"ok": True, "count": len(events)}
+    progress_kwargs: dict = {}
+    for event in events:
+        progress_kwargs.update(_apply_agent_event_to_scan(scan, event))
+    if progress_kwargs:
+        await run_store_call(store, "update_scan_progress", scan_id, **progress_kwargs)
+    _publish_agent_event_state(scan_id, scan, events)
+    return {"ok": True, "count": len(events)}
 
 
 def _finish_vulnerability_identity(
@@ -2500,18 +3015,19 @@ async def agent_report_mining_engine_run(
             status_code=422,
             detail=f"无效的漏洞挖掘引擎状态：{body.status}",
         )
-    loaded = get_scan_store().load_scan(scan_id)
-    if loaded is None:
+    store = get_scan_store()
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     selection = next(
         (
             item
-            for item in loaded[1].mining_engines
+            for item in meta.mining_engines
             if item.engine_id == body.engine_id and item.enabled
         ),
         None,
     )
-    if loaded[1].mining_engines and selection is None:
+    if meta.mining_engines and selection is None:
         raise HTTPException(
             status_code=422,
             detail=f"未知或未启用的漏洞挖掘引擎：{body.engine_id}",
@@ -2520,8 +3036,8 @@ async def agent_report_mining_engine_run(
         body = body.model_copy(update={
             "engine_label": selection.engine_label,
         })
-    runs = get_scan_store().update_mining_engine_run(scan_id, body)
-    scan = _ensure_running_scan(scan_id)
+    runs = await run_store_call(store, "update_mining_engine_run", scan_id, body)
+    scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         scan.mining_engine_runs = runs
     from backend.sse import publish
@@ -2552,18 +3068,23 @@ async def agent_report_threat_analysis_run(
             detail=f"无效的威胁分析状态：{body.status}",
         )
     store = get_scan_store()
-    loaded = store.load_scan(scan_id)
-    if loaded is None:
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if not loaded[1].threat_analysis_enabled:
+    if not meta.threat_analysis_enabled:
         raise HTTPException(
             status_code=422,
             detail="本次扫描未启用威胁分析",
         )
-    stored = store.update_threat_analysis_run(scan_id, body)
+    stored = await run_store_call(
+        store,
+        "update_threat_analysis_run",
+        scan_id,
+        body,
+    )
     if stored is None:
         raise HTTPException(status_code=404, detail="Scan not found")
-    scan = _ensure_running_scan(scan_id)
+    scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         scan.threat_analysis_run = stored
     from backend.sse import publish
@@ -2578,19 +3099,40 @@ async def agent_report_threat_analysis_run(
 async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
     """Agent pushes a single vulnerability result immediately after auditing it."""
     store = get_scan_store()
-    vuln = _stamp_vulnerability_engine(scan_id, vuln)
-    existing_vulnerabilities = store.get_vulnerabilities(scan_id)
-    existing_report = _existing_threat_vulnerability(
-        existing_vulnerabilities,
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    vuln = _stamp_vulnerability_engine(
+        scan_id,
         vuln,
+        selections=meta.mining_engines if meta is not None else [],
     )
+    is_threat_report = (
+        str(vuln.analysis_source or "").strip() == "threat_audit"
+        or str(vuln.engine_id or "").strip() == "threat_audit"
+    )
+    live_scan = _running_scans.get(scan_id)
+    existing_report = None
+    if is_threat_report:
+        existing_vulnerabilities = (
+            live_scan.vulnerabilities
+            if live_scan is not None
+            else await run_store_call(store, "get_vulnerabilities", scan_id)
+        )
+        existing_report = _existing_threat_vulnerability(
+            existing_vulnerabilities,
+            vuln,
+        )
     is_new_report = existing_report is None
     if existing_report is None:
-        vuln_index = store.upsert_incomplete_vulnerability(scan_id, vuln)
+        vuln_index = await run_store_call(
+            store,
+            "upsert_incomplete_vulnerability",
+            scan_id,
+            vuln,
+        )
     else:
         vuln_index, vuln = existing_report
 
-    scan = _ensure_running_scan(scan_id)
+    scan = live_scan or await _ensure_running_scan(scan_id)
     if scan is not None:
         if vuln_index < len(scan.vulnerabilities):
             scan.vulnerabilities[vuln_index] = vuln
@@ -2693,11 +3235,21 @@ async def agent_report_scan_candidates(scan_id: str, body: AgentScanCandidates) 
         )
 
     store = get_scan_store()
-    candidates = store.replace_scan_candidates(scan_id, static_candidates)
+    candidates = await run_store_call(
+        store,
+        "replace_scan_candidates",
+        scan_id,
+        static_candidates,
+    )
     total = len(candidates)
-    store.update_scan_progress(scan_id, total_candidates=total)
+    await run_store_call(
+        store,
+        "update_scan_progress",
+        scan_id,
+        total_candidates=total,
+    )
 
-    scan = _ensure_running_scan(scan_id)
+    scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         scan.candidates = candidates
         scan.total_candidates = total
@@ -2717,6 +3269,71 @@ async def agent_report_scan_candidates(scan_id: str, body: AgentScanCandidates) 
     })
     logger.info("Stored %d static candidate(s) for scan %s", total, scan_id)
     return {"ok": True, "count": total}
+
+
+@router.post("/v2/scan/{scan_id}/candidates")
+async def agent_report_scan_candidates_v2(
+    scan_id: str,
+    body: AgentScanCandidateBatch,
+) -> dict:
+    """Persist one bounded candidate chunk without broadcasting the full list."""
+    static_candidates = []
+    for candidate in body.candidates:
+        metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+        is_threat_placeholder = (
+            str(candidate.vuln_type or "").strip().lower() == "threat_audit"
+            or str(metadata.get("source") or "").strip().lower() == "threat_analysis"
+        )
+        if not is_threat_placeholder:
+            static_candidates.append(candidate)
+
+    store = get_scan_store()
+    persisted = await run_store_call(
+        store,
+        "upsert_scan_candidates_batch",
+        scan_id,
+        offset=body.offset,
+        candidates=static_candidates,
+        reset=body.reset,
+        final=body.final,
+        total=body.total,
+    )
+    total = body.total if body.final and body.total is not None else body.offset + len(persisted)
+    await run_store_call(
+        store,
+        "update_scan_progress",
+        scan_id,
+        total_candidates=total,
+    )
+
+    scan = _running_scans.get(scan_id)
+    if scan is not None:
+        if body.reset:
+            scan.candidates = []
+        by_index = {candidate.idx: candidate for candidate in scan.candidates}
+        by_index.update({candidate.idx: candidate for candidate in persisted})
+        if body.final and body.total is not None:
+            by_index = {
+                index: candidate
+                for index, candidate in by_index.items()
+                if index < body.total
+            }
+        scan.candidates = [by_index[index] for index in sorted(by_index)]
+        scan.total_candidates = total
+
+    from backend.sse import publish
+    publish(scan_id, "scan_candidates_changed", {
+        "offset": body.offset,
+        "count": len(persisted),
+        "total_candidates": total,
+        "final": body.final,
+    })
+    return {
+        "ok": True,
+        "offset": body.offset,
+        "count": len(persisted),
+        "total": total,
+    }
 
 
 @router.post("/scan/{scan_id}/validation")
@@ -2747,9 +3364,14 @@ async def agent_report_vulnerability_validation(
         updated_at=body.updated_at,
     )
     store = get_scan_store()
-    validation = store.upsert_vulnerability_validation(scan_id, validation)
+    validation = await run_store_call(
+        store,
+        "upsert_vulnerability_validation",
+        scan_id,
+        validation,
+    )
 
-    scan = _ensure_running_scan(scan_id)
+    scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         existing = next(
             (idx for idx, item in enumerate(scan.validations) if item.vuln_index == validation.vuln_index),
@@ -2772,7 +3394,12 @@ async def agent_report_vulnerability_validation(
 async def agent_push_git_history(scan_id: str, body: AgentGitHistory) -> dict:
     """Agent uploads the mined git-history security problem patterns for a scan."""
     store = get_scan_store()
-    store.replace_git_history_patterns(scan_id, body.patterns)
+    await run_store_call(
+        store,
+        "replace_git_history_patterns",
+        scan_id,
+        body.patterns,
+    )
     from backend.sse import publish
     publish(scan_id, "git_history", {"count": len(body.patterns)})
     logger.info("Git history patterns stored for scan %s: %d", scan_id, len(body.patterns))
@@ -2782,7 +3409,8 @@ async def agent_push_git_history(scan_id: str, body: AgentGitHistory) -> dict:
 @router.get("/scan/{scan_id}/git_history")
 async def agent_get_git_history(scan_id: str) -> list[HistoryPattern]:
     """Return the mined git-history patterns for a scan (used by FP review)."""
-    return get_scan_store().get_git_history_patterns(scan_id)
+    store = get_scan_store()
+    return await run_store_call(store, "get_git_history_patterns", scan_id)
 
 
 @router.get("/scan/{scan_id}/fp-review/{review_id}/summary-context")
@@ -2792,16 +3420,16 @@ async def agent_get_fp_review_summary_context(
 ) -> dict:
     """Return persisted single-item results used by an independent summary."""
     store = get_scan_store()
-    job = store.get_fp_review_job(review_id)
+    job = await run_store_call(store, "get_fp_review_job", review_id)
     if (
         job is None
         or job.scan_id != scan_id
         or job.method != FpReviewMethod.FP_CHECK
     ):
         raise HTTPException(status_code=404, detail="fp-check review not found")
-    scan = _ensure_running_scan(scan_id)
+    scan = await _ensure_running_scan(scan_id)
     if scan is None:
-        loaded = store.load_scan(scan_id)
+        loaded = await run_store_call(store, "load_scan", scan_id)
         if loaded is None:
             raise HTTPException(status_code=404, detail="Scan not found")
         scan = loaded[0]
@@ -2833,9 +3461,14 @@ async def agent_push_threat_analysis(scan_id: str, body: dict) -> dict:
         raise HTTPException(status_code=400, detail=f"Invalid threat analysis JSON: {exc}") from exc
 
     store = get_scan_store()
-    analysis = store.replace_threat_analysis(scan_id, analysis)
+    analysis = await run_store_call(
+        store,
+        "replace_threat_analysis",
+        scan_id,
+        analysis,
+    )
 
-    scan = _ensure_running_scan(scan_id)
+    scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         scan.threat_analysis = analysis
 
@@ -2853,7 +3486,8 @@ async def agent_push_threat_analysis(scan_id: str, body: dict) -> dict:
 @router.get("/scan/{scan_id}/threat-analysis", response_model=dict)
 async def agent_get_threat_analysis(scan_id: str) -> dict:
     """Return the stored threat-analysis artifact bundle."""
-    analysis = get_scan_store().get_threat_analysis(scan_id)
+    store = get_scan_store()
+    analysis = await run_store_call(store, "get_threat_analysis", scan_id)
     if analysis is None:
         raise HTTPException(status_code=404, detail="No threat analysis found for this scan")
     return analysis
@@ -2868,9 +3502,14 @@ async def agent_upsert_threat_audit_task(scan_id: str, body: dict) -> dict:
         raise HTTPException(status_code=400, detail=f"Invalid threat audit task: {exc}") from exc
 
     store = get_scan_store()
-    task = store.upsert_threat_audit_task(scan_id, task)
+    task = await run_store_call(
+        store,
+        "upsert_threat_audit_task",
+        scan_id,
+        task,
+    )
 
-    scan = _ensure_running_scan(scan_id)
+    scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         tasks = [item for item in scan.threat_audit_tasks if item.task_id != task.task_id]
         tasks.append(task)
@@ -2885,7 +3524,8 @@ async def agent_upsert_threat_audit_task(scan_id: str, body: dict) -> dict:
 @router.get("/scan/{scan_id}/threat-audit-tasks", response_model=list[ThreatAuditTask])
 async def agent_list_threat_audit_tasks(scan_id: str) -> list[ThreatAuditTask]:
     """Return threat-analysis-derived audit tasks for scan resume."""
-    return get_scan_store().list_threat_audit_tasks(scan_id)
+    store = get_scan_store()
+    return await run_store_call(store, "list_threat_audit_tasks", scan_id)
 
 
 @router.post("/scan/{scan_id}/skill-report")
@@ -2912,9 +3552,15 @@ async def agent_replace_skill_reports(scan_id: str, body: dict) -> dict:
         if isinstance(item, dict) and str(item.get("filename") or "").strip()
     ]
     store = get_scan_store()
-    store.replace_skill_reports(scan_id, checker_name, reports)
+    await run_store_call(
+        store,
+        "replace_skill_reports",
+        scan_id,
+        checker_name,
+        reports,
+    )
 
-    scan = _ensure_running_scan(scan_id)
+    scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         scan.skill_reports = [
             report for report in scan.skill_reports
@@ -2940,7 +3586,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
     }
     final_status = status_map.get(body.status, ScanItemStatus.ERROR)
 
-    loaded = store.load_scan(scan_id)
+    loaded = await run_store_call(store, "load_scan_overview", scan_id)
     existing_scan = loaded[0] if loaded is not None else None
     final_total = body.total_candidates
     final_processed = body.processed_candidates
@@ -2956,7 +3602,11 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
 
     from backend.sse import publish
 
-    existing_vulnerabilities = store.get_vulnerabilities(scan_id)
+    existing_vulnerabilities = await run_store_call(
+        store,
+        "get_vulnerabilities",
+        scan_id,
+    )
     existing_identities = Counter(
         _finish_vulnerability_identity(vuln)
         for vuln in existing_vulnerabilities
@@ -2977,16 +3627,23 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         if existing_identities[identity] > 0:
             existing_identities[identity] -= 1
             continue
-        vuln_index = store.upsert_incomplete_vulnerability(scan_id, vuln)
+        vuln_index = await run_store_call(
+            store,
+            "upsert_incomplete_vulnerability",
+            scan_id,
+            vuln,
+        )
         reconciled_vulnerabilities.append((vuln_index, vuln))
 
     final_vulnerabilities = (
-        store.get_vulnerabilities(scan_id)
+        await run_store_call(store, "get_vulnerabilities", scan_id)
         if reconciled_vulnerabilities
         else existing_vulnerabilities
     )
 
-    store.update_scan_progress(
+    await run_store_call(
+        store,
+        "update_scan_progress",
         scan_id,
         status=final_status,
         progress=1.0 if final_status == ScanItemStatus.COMPLETE else None,
@@ -3001,7 +3658,12 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         scan.opencode_pool if scan is not None else (existing_scan.opencode_pool if existing_scan is not None else None)
     )
     if final_pool is not None:
-        store.update_opencode_pool_status(scan_id, final_pool)
+        await run_store_call(
+            store,
+            "update_opencode_pool_status",
+            scan_id,
+            final_pool,
+        )
     if scan is not None:
         scan.status = final_status
         scan.vulnerabilities = final_vulnerabilities
@@ -3048,8 +3710,12 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
 
     if final_status == ScanItemStatus.COMPLETE and confirmed > 0:
         try:
+            existing_job = await run_store_call(
+                store,
+                "get_fp_review_by_scan",
+                scan_id,
+            )
             if fp_review_method == FpReviewMethod.FP_CHECK:
-                existing_job = store.get_fp_review_by_scan(scan_id)
                 if auto_fp_review:
                     # Fill only findings that did not receive an immediate
                     # item result, then let the Agent summary wait for them.
@@ -3074,7 +3740,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
                     )
             elif (
                 auto_fp_review
-                and store.get_fp_review_by_scan(scan_id) is None
+                and existing_job is None
             ):
                 started = await _start_fp_review(
                     scan_id,
@@ -3092,9 +3758,79 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
     return {"ok": True}
 
 
+@router.post("/v2/scan/{scan_id}/finish")
+async def agent_finish_scan_v2(
+    scan_id: str,
+    body: AgentScanFinishV2,
+    request: Request,
+) -> dict:
+    """Finalize a v2 scan without resending every streamed finding."""
+    return await agent_finish_scan(
+        scan_id,
+        AgentScanFinish(
+            vulnerabilities=[],
+            status=body.status,
+            total_candidates=body.total_candidates,
+            processed_candidates=body.processed_candidates,
+            error_message=body.error_message,
+        ),
+        request,
+    )
+
+
+@router.get("/v2/resume-manifests/{token}")
+async def agent_get_resume_manifest_v2(token: str) -> Response:
+    """Return a durable resume payload outside the Agent WebSocket frame."""
+    record = await run_store_call(
+        get_scan_store(),
+        "get_resume_manifest",
+        token,
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="Resume manifest not found or expired")
+    return Response(
+        content=str(record["payload_json"]),
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-store",
+            # Avoid synchronous gzip CPU on a potentially large candidate list.
+            "Content-Encoding": "identity",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Processed keys (resume support)
 # ---------------------------------------------------------------------------
+
+
+async def _refresh_processed_progress(scan_id: str) -> int:
+    store = get_scan_store()
+    processed = await run_store_call(store, "count_processed_keys", scan_id)
+    live = _running_scans.get(scan_id)
+    if live is not None:
+        total_candidates = live.total_candidates
+        processed = max(processed, live.processed_candidates)
+    else:
+        loaded = await run_store_call(store, "load_scan_overview", scan_id)
+        if loaded is None:
+            return processed
+        overview, _meta, _counts = loaded
+        total_candidates = overview.total_candidates
+        processed = max(processed, overview.processed_candidates)
+    progress = processed / total_candidates if total_candidates > 0 else None
+    await run_store_call(
+        store,
+        "update_scan_progress",
+        scan_id,
+        processed_candidates=processed,
+        progress=progress,
+    )
+    if live is not None:
+        live.processed_candidates = processed
+        if progress is not None:
+            live.progress = progress
+    return processed
 
 
 @router.post("/scan/{scan_id}/processed")
@@ -3108,33 +3844,37 @@ async def agent_report_processed(scan_id: str, body: dict) -> dict:
             str(body["function"]),
             str(body["vuln_type"]),
         )
-        store.add_processed_key(scan_id, key)
-        processed = len(store.get_processed_keys(scan_id))
-        loaded = store.load_scan(scan_id)
-        if loaded is not None:
-            scan, _meta = loaded
-            processed = max(processed, scan.processed_candidates)
-            progress = processed / scan.total_candidates if scan.total_candidates > 0 else None
-            store.update_scan_progress(
-                scan_id,
-                processed_candidates=processed,
-                progress=progress,
-            )
-            live = _running_scans.get(scan_id)
-            if live is not None:
-                live.processed_candidates = processed
-                if progress is not None:
-                    live.progress = progress
+        await run_store_call(store, "add_processed_key", scan_id, key)
+        processed = await _refresh_processed_progress(scan_id)
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid processed key: {e}")
-    return {"ok": True}
+    return {"ok": True, "processed": processed}
+
+
+@router.post("/v2/scan/{scan_id}/processed")
+async def agent_report_processed_v2(
+    scan_id: str,
+    body: AgentProcessedKeyBatch,
+) -> dict:
+    keys = [
+        (item.file, item.line, item.function, item.vuln_type)
+        for item in body.items
+    ]
+    await run_store_call(
+        get_scan_store(),
+        "add_processed_keys_batch",
+        scan_id,
+        keys,
+    )
+    processed = await _refresh_processed_progress(scan_id)
+    return {"ok": True, "count": len(keys), "processed": processed}
 
 
 @router.get("/scan/{scan_id}/processed")
 async def agent_get_processed(scan_id: str) -> list:
     """Return all processed candidate keys for a scan (used by agent on resume)."""
     store = get_scan_store()
-    keys = store.get_processed_keys(scan_id)
+    keys = await run_store_call(store, "get_processed_keys", scan_id)
     return [
         {"file": f, "line": line, "function": fn, "vuln_type": vt}
         for f, line, fn, vt in keys
@@ -3181,13 +3921,15 @@ async def agent_push_index_status(scan_id: str, body: _IndexStatusBody) -> dict:
     # existing scan-status polling endpoint (scan.static_total_files, etc.)
     file_counts = _index_file_counts(body)
     store = get_scan_store()
-    scan = _ensure_running_scan(scan_id)
+    scan = await _ensure_running_scan(scan_id)
     if file_counts is not None:
         parsed_files, total_files = file_counts
         if scan is not None:
             scan.static_total_files = total_files
             scan.static_scanned_files = parsed_files
-        store.update_scan_progress(
+        await run_store_call(
+            store,
+            "update_scan_progress",
             scan_id,
             static_total_files=total_files,
             static_scanned_files=parsed_files,
@@ -3224,8 +3966,8 @@ class _StaticProgressBody(BaseModel):
 async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) -> dict:
     """Agent pushes static analysis progress (function/file counts)."""
     store = get_scan_store()
-    scan = _ensure_running_scan(scan_id)
-    loaded = store.load_scan(scan_id)
+    scan = await _ensure_running_scan(scan_id)
+    loaded = await run_store_call(store, "load_scan_overview", scan_id)
     stored_scan = loaded[0] if loaded is not None else None
     current_status = scan.status if scan is not None else (stored_scan.status if stored_scan is not None else None)
     effective_done = body.done or (scan.static_analysis_done if scan is not None else False)
@@ -3253,7 +3995,9 @@ async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) ->
         if status is not None:
             scan.status = status
 
-    store.update_scan_progress(
+    await run_store_call(
+        store,
+        "update_scan_progress",
         scan_id,
         status=status,
         static_total_files=reported_total,
@@ -3278,22 +4022,33 @@ async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) ->
 async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> dict:
     """Agent pushes the latest OpenCode model-pool status for one scan."""
     store = get_scan_store()
-    loaded = store.load_scan(scan_id)
+    loaded = await run_store_call(store, "load_scan_overview", scan_id)
     previous_pool = loaded[0].opencode_pool if loaded is not None else None
     body = _merge_completed_opencode_tasks(previous_pool, body)
     if hasattr(store, "upsert_scan_opencode_token_usage"):
-        store.upsert_scan_opencode_token_usage(
+        await run_store_call(
+            store,
+            "upsert_scan_opencode_token_usage",
             scan_id=scan_id,
             agent_session_id=body.agent_session_id,
             status=body,
         )
     if hasattr(store, "get_scan_opencode_token_usage"):
-        body.token_usage = store.get_scan_opencode_token_usage(scan_id)
+        body.token_usage = await run_store_call(
+            store,
+            "get_scan_opencode_token_usage",
+            scan_id,
+        )
     terminal = loaded is not None and loaded[0].status not in _RUNNING_SCAN_STATUSES
     status = _terminal_opencode_pool_status(body) if terminal else body
-    store.update_opencode_pool_status(scan_id, status)
+    await run_store_call(
+        store,
+        "update_opencode_pool_status",
+        scan_id,
+        status,
+    )
 
-    scan = None if terminal else _ensure_running_scan(scan_id)
+    scan = None if terminal else await _ensure_running_scan(scan_id)
     if scan is not None:
         scan.opencode_pool = status
 
@@ -3331,11 +4086,13 @@ async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
     store = get_scan_store()
     if vuln_types:
         names = [v.strip() for v in vuln_types.split(",") if v.strip()]
-        entries = []
-        for name in names:
-            entries.extend(store.list_feedback(vuln_type=name))
+        pages = await asyncio.gather(*(
+            run_store_call(store, "list_feedback", vuln_type=name)
+            for name in names
+        ))
+        entries = [entry for page in pages for entry in page]
     else:
-        entries = store.list_feedback()
+        entries = await run_store_call(store, "list_feedback")
     return [e.model_dump() for e in entries]
 
 
@@ -3494,6 +4251,23 @@ def create_agent_task_runtime_update_payload(
     return create_agent_runtime_update_payload(server_url)
 
 
+async def create_agent_task_runtime_update_payload_async(
+    server_url: str,
+    agent_key: str,
+) -> dict | None:
+    """Build the runtime archive off-loop after an async durable-state check."""
+    normalized_key = str(agent_key or "").strip()
+    if normalized_key:
+        record = await run_store_call(
+            get_scan_store(),
+            "get_agent_record",
+            normalized_key,
+        )
+        if _runtime_update_status(record) in _RUNTIME_UPDATE_ACTIVE_STATUSES:
+            return None
+    return await asyncio.to_thread(create_agent_runtime_update_payload, server_url)
+
+
 def _build_agent_zip(server_url: str = "", owner_token: str = "") -> bytes:
     """Build the agent zip in-memory from the project source."""
     buf = io.BytesIO()
@@ -3594,7 +4368,11 @@ async def agent_download(
     """Serve the agent package as a downloadable zip with server_url and owner_token pre-filled."""
     try:
         server_url = str(request.base_url).rstrip("/")
-        data = _build_agent_zip(server_url, owner_token=current_user.agent_token)
+        data = await asyncio.to_thread(
+            _build_agent_zip,
+            server_url,
+            current_user.agent_token,
+        )
     except Exception as exc:
         logger.exception("Failed to build agent zip")
         raise HTTPException(status_code=500, detail=f"Failed to build agent package: {exc}")
@@ -3609,15 +4387,18 @@ async def agent_download(
 @router.get("/runtime/manifest")
 async def agent_runtime_manifest() -> dict:
     """Return the current server-side Agent runtime hash."""
-    files = _read_agent_runtime_files()
-    runtime_hash = _agent_runtime_hash_for_files(files)
-    manifest = _agent_runtime_manifest_for_files(files)
-    manifest["runtime_hash"] = runtime_hash
-    return {
-        "hash": runtime_hash,
-        "hash_scope": manifest["hash_scope"],
-        "manifest": manifest,
-    }
+    def build_manifest() -> dict:
+        files = _read_agent_runtime_files()
+        runtime_hash = _agent_runtime_hash_for_files(files)
+        manifest = _agent_runtime_manifest_for_files(files)
+        manifest["runtime_hash"] = runtime_hash
+        return {
+            "hash": runtime_hash,
+            "hash_scope": manifest["hash_scope"],
+            "manifest": manifest,
+        }
+
+    return await asyncio.to_thread(build_manifest)
 
 
 @router.get("/runtime/download")
