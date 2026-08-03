@@ -7,8 +7,8 @@
 |---|---|
 | `code_graph_build/` | `run_code_graph_build(**kwargs)` |
 | `threat_analysis/` | `threat_analysis_runner.run_threat_analysis(**kwargs)` |
-| `static_analysis/` | `run_static_analysis(**kwargs)` |
-| `candidate_audit/` | `run_candidate_audit(**kwargs)` |
+| `vulnerability_mining/engines/static_candidate/static_analysis/` | `run_static_analysis(**kwargs)` |
+| `vulnerability_mining/engines/static_candidate/candidate_audit/` | `run_candidate_audit(**kwargs)` |
 | `threat_audit/` | `run_threat_audit(**kwargs)` |
 | `fp_review/` | `run_fp_review(**kwargs)` |
 | `fp_check_review/` | `run_fp_check_review(**kwargs)` |
@@ -19,9 +19,10 @@
 平台 README、runner 或 `__main__.py`。业务过程不导入 `backend`、`reporter`、`server` 或
 其它业务过程；需要模型时只调用 `task_agent.run_opencode_task()`。
 
-单独提取时复制目标过程目录即可；需要模型的过程还要让通用 `task_agent` 包可导入，并可通过
-`task_agent_config` 指向自己的 `task-agent.yaml`。不调用模型的代码图谱构建和静态规则分析
-无需 Task Agent 配置。
+单独提取普通过程时复制目标过程目录即可；提取静态分析或候选点审计时复制整个
+`vulnerability_mining/engines/static_candidate/`，以同时保留两个过程的公共规则树。需要模型的
+过程还要让通用 `task_agent` 包可导入，并可通过 `task_agent_config` 指向自己的
+`task-agent.yaml`。不调用模型的代码图谱构建和静态规则分析无需 Task Agent 配置。
 
 接入已有实现时，实现可以直接占用对应过程目录，平台适配器放在目录外，只负责参数校验、
 上下文绑定和调用。已有入口是同步函数也不需要修改实现，可由异步门面调用

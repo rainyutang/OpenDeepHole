@@ -14,15 +14,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from deephole_client.code_graph_build.code_database import CodeDatabase
 from task_agent import OpenCodeResult
 
-from deephole_client.candidate_audit import run_candidate_audit
-from deephole_client.candidate_audit.runner import _candidate_prompt
+from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit import run_candidate_audit
+from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.runner import _candidate_prompt
 from deephole_client.code_graph_build import run_code_graph_build
 from deephole_client.code_graph_build.cpp_analyzer import CppAnalyzer
 from deephole_client.code_graph_build.runner import _StageProgressGate
 from deephole_client.fp_review import run_fp_review
 from deephole_client.fp_check_review import run_fp_check_review
-from deephole_client.static_analysis import run_static_analysis
-from deephole_client.static_analysis.base import BaseAnalyzer, Candidate
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis import run_static_analysis
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.base import BaseAnalyzer, Candidate
 from deephole_client.threat_analysis_runner import run_threat_analysis
 from deephole_client.threat_audit import run_threat_audit
 from deephole_client.vulnerability_validation import run_vulnerability_validation
@@ -92,11 +92,17 @@ def _write_candidate_audit_rule(
 ) -> Path:
     checker = root / checker_name
     checker.mkdir(parents=True)
-    (checker / "audit.yaml").write_text(
-        f"name: {checker_name}\nlabel: Demo\nresult_mode: vulnerabilities\n",
+    (checker / "checker.yaml").write_text(
+        f"name: {checker_name}\n"
+        "label: Demo\n"
+        "mode: opencode\n"
+        "result_mode: vulnerabilities\n"
+        f"skill_name: {skill_name}\n",
         encoding="utf-8",
     )
-    (checker / "SKILL.md").write_text(
+    skill_dir = checker / "skills" / skill_name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
         "---\n"
         f"name: {skill_name}\n"
         "description: Audit demo candidates\n"
@@ -768,7 +774,7 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
             encoding="utf-8",
         )
         (static_checker / "analyzer.py").write_text(
-            "from ...base import BaseAnalyzer, Candidate\n"
+            "from ...static_analysis.base import BaseAnalyzer, Candidate\n"
             "class Analyzer(BaseAnalyzer):\n"
             "    vuln_type = 'demo'\n"
             "    def find_candidates(self, project_path, db=None):\n"
@@ -798,11 +804,11 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         task_context = MagicMock(return_value=nullcontext())
         with (
             patch(
-                "deephole_client.candidate_audit.runner.opencode_task_context",
+                "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.runner.opencode_task_context",
                 task_context,
             ),
             patch(
-                "deephole_client.candidate_audit.runner.run_opencode_task",
+                "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.runner.run_opencode_task",
                 new=AsyncMock(return_value=model_result),
             ) as run_task,
         ):
@@ -834,7 +840,7 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         assert run_task.await_args.kwargs["output_schema"]["type"] == "object"
         assert "output" not in run_task.await_args.kwargs
         assert task_context.call_args.kwargs["skill_paths"] == [
-            audit_root.resolve(),
+            (audit_root / "demo" / "skills").resolve(),
         ]
         assert candidate_results[0]["audit_index"] == 0
         assert candidate_results[0]["checker_name"] == "demo"
@@ -887,10 +893,10 @@ def test_static_analysis_keeps_event_loop_responsive_during_blocking_checker() -
 
         ticker_task = asyncio.create_task(ticker())
         with patch(
-            "deephole_client.static_analysis.runner.discover_checkers",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner.discover_checkers",
             return_value={"blocking": checker},
         ), patch(
-            "deephole_client.static_analysis.runner._PROGRESS_HEARTBEAT_SECONDS",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner._PROGRESS_HEARTBEAT_SECONDS",
             0.02,
         ):
             analysis_task = asyncio.create_task(run_static_analysis(
@@ -1013,7 +1019,7 @@ def test_static_analysis_emits_checker_lifecycle_and_candidate_counts() -> None:
             events.append(event)
 
         with patch(
-            "deephole_client.static_analysis.runner.discover_checkers",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner.discover_checkers",
             return_value=registry,
         ):
             result = await run_static_analysis(
@@ -1121,7 +1127,7 @@ def test_static_analysis_external_cancellation_resets_file_progress_callback() -
             cancel_event.set()
 
         with patch(
-            "deephole_client.static_analysis.runner.discover_checkers",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner.discover_checkers",
             return_value={"cancellable": checker},
         ):
             cancel_task = asyncio.create_task(cancel_after_start())
@@ -1191,7 +1197,7 @@ def test_static_analysis_task_cancellation_stops_bridge_and_cleans_callback() ->
         events: list[dict] = []
 
         with patch(
-            "deephole_client.static_analysis.runner.discover_checkers",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner.discover_checkers",
             return_value={"task_cancel": checker},
         ):
             analysis_task = asyncio.create_task(run_static_analysis(
@@ -1254,7 +1260,7 @@ def test_static_analysis_resets_file_progress_callback_after_checker_error() -> 
         events: list[dict] = []
 
         with patch(
-            "deephole_client.static_analysis.runner.discover_checkers",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner.discover_checkers",
             return_value={"failing": checker},
         ):
             try:
@@ -1327,7 +1333,7 @@ def test_candidate_audit_streams_results_before_the_batch_finishes() -> None:
                 first_reported.set()
 
         with patch(
-            "deephole_client.candidate_audit.runner.run_opencode_task",
+            "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.runner.run_opencode_task",
             side_effect=run_task,
         ):
             batch_task = asyncio.create_task(run_candidate_audit(
@@ -1463,7 +1469,7 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
         ]
 
         with patch(
-            "deephole_client.candidate_audit.runner.run_opencode_task",
+            "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.runner.run_opencode_task",
             new=AsyncMock(side_effect=[
                 not_confirmed,
                 no_result,

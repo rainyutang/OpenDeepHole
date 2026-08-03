@@ -59,13 +59,17 @@ class SkillMarketTests(unittest.TestCase):
                 registry = refresh_registry()
 
             checker_dir = user_skills_dir / "custom_audit"
+            skill_dir = checker_dir / "skills" / "custom_audit"
             self.assertTrue(response.ok)
             self.assertEqual(response.name, "custom_audit")
             self.assertTrue((checker_dir / "checker.yaml").is_file())
-            self.assertTrue((checker_dir / "SKILL.md").is_file())
-            self.assertTrue((checker_dir / "SCENARIOS.md").is_file())
-            self.assertEqual((checker_dir / "references" / "policy.md").read_text(encoding="utf-8"), "policy")
-            skill_text = (checker_dir / "SKILL.md").read_text(encoding="utf-8")
+            self.assertTrue((skill_dir / "SKILL.md").is_file())
+            self.assertTrue((skill_dir / "SCENARIOS.md").is_file())
+            self.assertEqual(
+                (skill_dir / "references" / "policy.md").read_text(encoding="utf-8"),
+                "policy",
+            )
+            skill_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
             self.assertIn("## 系统固定运行规则", skill_text)
             self.assertIn("custom_audit", registry)
             self.assertEqual(registry["custom_audit"].mode, "opencode")
@@ -213,7 +217,12 @@ class SkillMarketTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            (checker_dir / "SKILL.md").write_text("# Owned\n", encoding="utf-8")
+            skill_dir = checker_dir / "skills" / "owned_skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: owned_skill\ndescription: test\n---\n\n# Owned\n",
+                encoding="utf-8",
+            )
             cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(user_skills_dir)))
 
             with (

@@ -241,10 +241,23 @@ class AgentRuntimePackageTests(unittest.TestCase):
             names,
         )
         self.assertTrue(
-            any(name.startswith("deephole_client/static_analysis/rules/") for name in names)
+            any(
+                name.startswith(
+                    "deephole_client/vulnerability_mining/engines/static_candidate/rules/"
+                )
+                and name.endswith("/analyzer.py")
+                for name in names
+            )
         )
         self.assertTrue(
-            any(name.startswith("deephole_client/candidate_audit/rules/") for name in names)
+            any(
+                name.startswith(
+                    "deephole_client/vulnerability_mining/engines/static_candidate/rules/"
+                )
+                and "/skills/" in name
+                and name.endswith("/SKILL.md")
+                for name in names
+            )
         )
         self.assertIn("ctags-p6.2.20260517.0-x64/ctags.exe", names)
         self.assertIn("deephole_client/vulnerability_validation/product_validators/demo/validator.yaml", names)
@@ -346,7 +359,9 @@ class AgentRuntimePackageTests(unittest.TestCase):
             checker_dir = (
                 root
                 / "deephole_client"
-                / "static_analysis"
+                / "vulnerability_mining"
+                / "engines"
+                / "static_candidate"
                 / "rules"
                 / "demo"
             )

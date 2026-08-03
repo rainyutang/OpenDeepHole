@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from deephole_client.static_analysis.base import (
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.base import (
     in_scope,
     scope_prefix,
     scoped_functions,

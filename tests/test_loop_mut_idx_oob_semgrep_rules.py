@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from deephole_client.static_analysis.rules.loop_mut_idx_oob.analyzer import (
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.loop_mut_idx_oob.analyzer import (
     Analyzer as LoopMutIdxOobAnalyzer,
 )
 

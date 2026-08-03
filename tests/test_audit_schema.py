@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from deephole_client.candidate_audit.audit_schema import (
+from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.audit_schema import (
     VULNERABILITY_ITEM_SCHEMA,
     VULNERABILITY_LIST_SCHEMA,
     audit_output_instruction,

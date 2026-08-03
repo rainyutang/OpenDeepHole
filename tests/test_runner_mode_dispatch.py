@@ -22,6 +22,18 @@ FRAMEWORK_PROCESS_ENTRIES = {
     "vulnerability_validation": "run_vulnerability_validation",
 }
 PROCESS_NAMES = set(FRAMEWORK_PROCESS_ENTRIES) | {"threat_analysis"}
+PROCESS_IMPORT_PATHS = {
+    "static_analysis": (
+        "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis"
+    ),
+    "candidate_audit": (
+        "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit"
+    ),
+}
+PROCESS_SOURCE_PATHS = {
+    "static_analysis": Path("vulnerability_mining/engines/static_candidate/static_analysis"),
+    "candidate_audit": Path("vulnerability_mining/engines/static_candidate/candidate_audit"),
+}
 
 
 def _assert_async_kwargs_entry(module: object, entry_name: str) -> None:
@@ -36,7 +48,9 @@ def _assert_async_kwargs_entry(module: object, entry_name: str) -> None:
 
 def test_framework_process_packages_export_one_async_kwargs_entry() -> None:
     for package, entry_name in FRAMEWORK_PROCESS_ENTRIES.items():
-        module = importlib.import_module(f"deephole_client.{package}")
+        module = importlib.import_module(
+            PROCESS_IMPORT_PATHS.get(package, f"deephole_client.{package}")
+        )
         _assert_async_kwargs_entry(module, entry_name)
         assert list(module.__all__) == [entry_name]
 
@@ -51,7 +65,7 @@ def test_process_sources_do_not_import_platform_or_sibling_processes() -> None:
     client_root = Path(__file__).resolve().parents[1] / "deephole_client"
     violations: list[str] = []
     for package in PROCESS_NAMES:
-        package_root = client_root / package
+        package_root = client_root / PROCESS_SOURCE_PATHS.get(package, Path(package))
         for source in package_root.rglob("*.py"):
             tree = ast.parse(
                 source.read_text(encoding="utf-8"),
@@ -95,7 +109,7 @@ def test_framework_processes_can_be_imported_and_show_cli_help_after_extraction(
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
             shutil.copytree(
-                source_client / package,
+                source_client / PROCESS_SOURCE_PATHS.get(package, Path(package)),
                 target / package,
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
@@ -171,15 +185,21 @@ def test_native_threat_analysis_can_be_imported_after_extraction() -> None:
         assert imported.returncode == 0, imported.stderr
 
 
-def test_static_and_audit_rule_resources_are_physically_separate() -> None:
+def test_static_and_audit_rule_resources_share_one_rule_directory() -> None:
     client_root = Path(__file__).resolve().parents[1] / "deephole_client"
-    static_root = client_root / "static_analysis" / "rules"
-    audit_root = client_root / "candidate_audit" / "rules"
+    rules_root = (
+        client_root
+        / "vulnerability_mining"
+        / "engines"
+        / "static_candidate"
+        / "rules"
+    )
 
-    assert list(static_root.rglob("analyzer.py"))
-    assert list(audit_root.rglob("SKILL.md"))
-    assert not list(static_root.rglob("SKILL.md"))
-    assert not list(audit_root.rglob("analyzer.py"))
+    assert list(rules_root.glob("*/analyzer.py"))
+    assert list(rules_root.glob("*/skills/*/SKILL.md"))
+    assert not list(rules_root.glob("*/SKILL.md"))
+    assert not (client_root / "static_analysis").exists()
+    assert not (client_root / "candidate_audit").exists()
 
 
 @pytest.mark.parametrize(

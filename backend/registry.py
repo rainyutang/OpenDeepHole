@@ -1,4 +1,4 @@
-"""Metadata registry for the decoupled static and candidate-audit rules."""
+"""Metadata registry for unified static-candidate rule directories."""
 
 import os
 from dataclasses import dataclass, field
@@ -12,9 +12,13 @@ from backend.logger import get_logger
 logger = get_logger(__name__)
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-CHECKERS_DIR = _REPOSITORY_ROOT / "deephole_client" / "candidate_audit" / "rules"
-STATIC_CHECKERS_DIR = (
-    _REPOSITORY_ROOT / "deephole_client" / "static_analysis" / "rules"
+CHECKERS_DIR = (
+    _REPOSITORY_ROOT
+    / "deephole_client"
+    / "vulnerability_mining"
+    / "engines"
+    / "static_candidate"
+    / "rules"
 )
 CHECKERS_DIR_ENV = "OPENDEEPHOLE_CHECKERS_DIR"
 CHECKER_VISIBILITY_PUBLIC = "public"
@@ -45,7 +49,6 @@ class CheckerEntry:
     enabled: bool
     skill_path: Path
     directory: Path = field(default_factory=Path)
-    static_directory: Path = field(default_factory=Path)
     single_pass: bool = False
     mode: str = "opencode"           # "api" | "opencode"
     prompt_path: Path | None = None  # prompt.txt for API mode
@@ -128,12 +131,7 @@ def discover_checkers_from_dirs(checkers_dirs: tuple[Path, ...] | list[Path]) ->
 
 
 def discover_checkers(checkers_dir: Path, *, user_created: bool = False) -> dict[str, CheckerEntry]:
-    """Scan one candidate-audit metadata directory and build the registry.
-
-    Built-in audit resources and static rules live in separate roots. User
-    checkers may still provide both kinds of files in one directory; packaging
-    separates them before the client starts either process.
-    """
+    """Scan one unified rule root and build the enabled registry."""
     registry: dict[str, CheckerEntry] = {}
 
     if not checkers_dir.is_dir():
@@ -168,10 +166,57 @@ def discover_checkers(checkers_dir: Path, *, user_created: bool = False) -> dict
 
 def checker_manifest_path(checker_dir: Path) -> Path:
     """Resolve metadata without importing a static analyzer."""
-    local = checker_dir / "checker.yaml"
-    if local.is_file():
-        return local
-    return STATIC_CHECKERS_DIR / checker_dir.name / "checker.yaml"
+    return checker_dir / "checker.yaml"
+
+
+def resolve_checker_skill_path(checker_dir: Path, meta: dict) -> Path:
+    """Resolve one rule's primary nested Skill without loading its analyzer."""
+    skills: dict[str, Path] = {}
+    for skill_path in sorted((checker_dir / "skills").glob("*/SKILL.md")):
+        content = skill_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        if not lines or lines[0].strip() != "---":
+            raise ValueError(f"SKILL.md must start with YAML frontmatter: {skill_path}")
+        closing = next(
+            (
+                index
+                for index, line in enumerate(lines[1:], start=1)
+                if line.strip() == "---"
+            ),
+            None,
+        )
+        if closing is None:
+            raise ValueError(f"SKILL.md has unterminated frontmatter: {skill_path}")
+        frontmatter = yaml.safe_load("\n".join(lines[1:closing])) or {}
+        skill_name = (
+            str(frontmatter.get("name") or "").strip()
+            if isinstance(frontmatter, dict)
+            else ""
+        )
+        if not skill_name:
+            raise ValueError(f"SKILL.md frontmatter is missing name: {skill_path}")
+        if skill_path.parent.name != skill_name:
+            raise ValueError(
+                f"Skill directory {skill_path.parent.name!r} does not match "
+                f"frontmatter name {skill_name!r}: {skill_path}"
+            )
+        if skill_name in skills:
+            raise ValueError(f"Duplicate Skill name {skill_name!r} in {checker_dir}")
+        skills[skill_name] = skill_path
+
+    configured = str(meta.get("skill_name") or "").strip()
+    if configured:
+        skill_path = skills.get(configured)
+        if skill_path is None:
+            raise FileNotFoundError(
+                f"Skill {configured!r} not found under {checker_dir / 'skills'}"
+            )
+        return skill_path
+    if len(skills) != 1:
+        raise FileNotFoundError(
+            f"opencode checker requires exactly one skills/<name>/SKILL.md in {checker_dir}"
+        )
+    return next(iter(skills.values()))
 
 
 def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = False) -> CheckerEntry:
@@ -181,7 +226,7 @@ def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = Fa
 
     name = meta["name"]
     mode = meta.get("mode", "opencode")
-    skill_path = checker_dir / "SKILL.md"
+    skill_path = checker_dir / "skills"
     prompt_path: Path | None = None
 
     if mode == "api":
@@ -192,8 +237,7 @@ def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = Fa
             )
         # SKILL.md is optional for API mode checkers
     else:
-        if not skill_path.is_file():
-            raise FileNotFoundError(f"SKILL.md not found in {checker_dir}")
+        skill_path = resolve_checker_skill_path(checker_dir, meta)
 
     category = normalize_checker_category(meta.get("category"))
 
@@ -204,11 +248,14 @@ def _load_checker(checker_dir: Path, yaml_path: Path, *, user_created: bool = Fa
         enabled=meta.get("enabled", True),
         skill_path=skill_path,
         directory=checker_dir,
-        static_directory=yaml_path.parent,
         single_pass=meta.get("single_pass", False),
         mode=mode,
         prompt_path=prompt_path,
-        skill_name=meta.get("skill_name"),
+        skill_name=(
+            skill_path.parent.name
+            if mode != "api"
+            else str(meta.get("skill_name") or "").strip() or None
+        ),
         visibility=_normalize_visibility(meta.get("visibility", CHECKER_VISIBILITY_PUBLIC)),
         category=category,
         category_label=checker_category_label(category),

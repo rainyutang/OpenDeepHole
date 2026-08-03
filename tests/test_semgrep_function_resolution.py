@@ -6,19 +6,19 @@ from unittest.mock import patch
 
 import pytest
 
-from deephole_client.static_analysis.semgrep_locations import (
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_locations import (
     function_from_db_location,
 )
-from deephole_client.static_analysis.semgrep_runner import SemgrepRunResult
-from deephole_client.static_analysis.rules.bufoverflow import (
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner import SemgrepRunResult
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.bufoverflow import (
     analyzer as bufoverflow_analyzer,
 )
-from deephole_client.static_analysis.rules.double_free import (
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.double_free import (
     analyzer as double_free_analyzer,
 )
-from deephole_client.static_analysis.rules.inf_loop import analyzer as inf_loop_analyzer
-from deephole_client.static_analysis.rules.mp_npd import analyzer as mp_npd_analyzer
-from deephole_client.static_analysis.rules.mp_resouce_leak import (
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.inf_loop import analyzer as inf_loop_analyzer
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.mp_npd import analyzer as mp_npd_analyzer
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.mp_resouce_leak import (
     analyzer as mp_resouce_leak_analyzer,
 )
 

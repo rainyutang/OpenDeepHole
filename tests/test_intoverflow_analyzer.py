@@ -8,13 +8,13 @@ from unittest.mock import patch
 
 import yaml
 
-from deephole_client.static_analysis.rules.intoverflow.analyzer import (
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.intoverflow.analyzer import (
     Analyzer as IntOverflowAnalyzer,
 )
 
 
 RULE_FILE = Path(
-    "deephole_client/static_analysis/rules/intoverflow/intoverflow_semgrep.yml"
+    "deephole_client/vulnerability_mining/engines/static_candidate/rules/intoverflow/intoverflow_semgrep.yml"
 )
 
 
@@ -59,7 +59,7 @@ def test_intoverflow_semgrep_runner_arguments(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         assert list(IntOverflowAnalyzer().find_candidates(tmp_path)) == []
 
@@ -87,7 +87,7 @@ def test_intoverflow_result_uses_json_file_and_code_db(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(IntOverflowAnalyzer().find_candidates(tmp_path, FakeDb()))
 
@@ -141,7 +141,7 @@ def test_intoverflow_deduplicates_same_match(tmp_path: Path) -> None:
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "deephole_client.static_analysis.semgrep_runner.subprocess.run",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 1, stdout=json.dumps(payload), stderr=""),
         ),
     ):
@@ -170,7 +170,7 @@ def test_intoverflow_timeout_uses_partial_json(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(IntOverflowAnalyzer().find_candidates(tmp_path, FakeDb()))
 
@@ -182,7 +182,7 @@ def test_intoverflow_skips_tool_errors_and_bad_json(tmp_path: Path) -> None:
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "deephole_client.static_analysis.semgrep_runner.subprocess.run",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 2, stdout="", stderr="bad config"),
         ),
     ):
@@ -191,7 +191,7 @@ def test_intoverflow_skips_tool_errors_and_bad_json(tmp_path: Path) -> None:
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "deephole_client.static_analysis.semgrep_runner.subprocess.run",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 0, stdout="not-json", stderr=""),
         ),
     ):

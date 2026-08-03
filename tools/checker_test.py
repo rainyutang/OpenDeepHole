@@ -11,14 +11,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from deephole_client.candidate_audit import run_candidate_audit
+from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit import run_candidate_audit
 from deephole_client.code_graph_build import run_code_graph_build
-from deephole_client.static_analysis import run_static_analysis
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis import run_static_analysis
 
 
-_CLIENT_ROOT = Path(__file__).resolve().parents[1] / "deephole_client"
-_DEFAULT_STATIC_RULES = _CLIENT_ROOT / "static_analysis" / "rules"
-_DEFAULT_AUDIT_RULES = _CLIENT_ROOT / "candidate_audit" / "rules"
+_DEFAULT_RULES = (
+    Path(__file__).resolve().parents[1]
+    / "deephole_client"
+    / "vulnerability_mining"
+    / "engines"
+    / "static_candidate"
+    / "rules"
+)
 
 
 def _arguments(argv: list[str] | None) -> argparse.Namespace:
@@ -28,14 +33,9 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("checker")
     parser.add_argument("project_path", type=Path)
     parser.add_argument(
-        "--static-rules-dir",
+        "--rules-dir",
         type=Path,
-        default=_DEFAULT_STATIC_RULES,
-    )
-    parser.add_argument(
-        "--audit-rules-dir",
-        type=Path,
-        default=_DEFAULT_AUDIT_RULES,
+        default=_DEFAULT_RULES,
     )
     parser.add_argument("--index-db", type=Path)
     parser.add_argument("--work-dir", type=Path)
@@ -93,7 +93,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             project_path=project,
             work_dir=work_dir / "static_analysis",
             index_db_path=index_path,
-            checker_dirs=[args.static_rules_dir],
+            checker_dirs=[args.rules_dir],
             checker_names=[args.checker],
             output=event_output,
         )
@@ -124,7 +124,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 work_dir=work_dir / "candidate_audit",
                 scan_id="checker-test",
                 candidates=candidates[: args.audit_limit],
-                checker_dirs=[args.audit_rules_dir],
+                checker_dirs=[args.rules_dir],
                 index_db_path=index_path,
                 checker_names=[args.checker],
                 task_agent_config=args.task_agent_config,

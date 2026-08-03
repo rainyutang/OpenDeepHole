@@ -207,23 +207,25 @@ WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续�
 10. 每个阶段结束后页面实时展示对应中文 Markdown；结构化输出不完整时在同 Session 纠正，仍失败则明确结束为可重试错误并保留已有阶段证据，不生成 TP/FP。扫描完成后另行生成和导出批次攻击链汇总，旧成功汇总在更新失败时继续保留
 11. **断线续挂**：Agent WebSocket 重连时会在 hello 中上报仍在运行的 FP 复核任务，后端重新挂接并恢复 running 状态；progress/result/stage-output 上报也会自动把因断连误标为 error 的复核任务恢复为 running
 
-## 解耦的 Checker 架构
+## 统一的 Checker 架构
 
-内置 Checker 的静态召回和候选点 AI 审计位于两个互不依赖的过程目录：
+内置 `static_candidate` 引擎将静态召回实现、候选点 AI 审计实现和规则统一放在引擎目录中。每条规则独占一个目录，静态文件与它使用的 Skill 一起维护：
 
 ```text
-deephole_client/static_analysis/rules/<name>/
-├── checker.yaml    # 静态规则元数据
-├── analyzer.py     # 可选：导出 Analyzer(BaseAnalyzer)
-└── *.yml           # 可选：Semgrep 等静态规则
-
-deephole_client/candidate_audit/rules/<name>/
-├── SKILL.md        # AI 审计规则
-├── SCENARIOS.md    # 可选
-└── references/     # 可选
+deephole_client/vulnerability_mining/engines/static_candidate/
+├── static_analysis/          # 静态召回过程实现
+├── candidate_audit/          # 候选点审计过程实现
+└── rules/<name>/
+    ├── checker.yaml          # 规则元数据（格式保持不变）
+    ├── analyzer.py           # 可选：导出 Analyzer(BaseAnalyzer)
+    ├── *.yml                 # 可选：Semgrep 等静态规则
+    └── skills/<skill-name>/
+        ├── SKILL.md          # AI 审计规则
+        ├── SCENARIOS.md      # 可选
+        └── references/       # 可选
 ```
 
-后端只读取 Checker 元数据和构建传输包，不加载静态分析器，也不执行审计。传输包固定包含 `static/` 与 `audit/` 两个根；客户端分别交给 `run_static_analysis()` 和 `run_candidate_audit()`。
+后端只读取 Checker 元数据和构建传输包，不加载静态分析器，也不执行审计。源码和新 Agent 都使用统一规则树；传输包内部继续保留 `static/` 与 `audit/` 分区，以便滚动升级期间旧 Agent 仍能接收规则，新 Agent 解包后会还原为统一目录。
 
 **checker.yaml 格式：**
 
@@ -239,7 +241,7 @@ visibility: public    # public: 所有用户可见；admin: 仅管理员测试�
 # model_capability: high # 可选，any/low/medium/high；未配置默认 any
 ```
 
-新 Checker 应提供 `SKILL.md` 并使用默认 `mode: opencode`。历史 `mode: api` checker 仍可读取 `prompt.txt`，但运行时会包装成临时 SKILL 后提交 OpenCode session。
+新 Checker 应在 `skills/<skill-name>/SKILL.md` 提供 Skill，并使用默认 `mode: opencode`。Skill 的 YAML frontmatter `name` 必须与目录名一致；当一条规则包含多个 Skill 时，通过 `checker.yaml.skill_name` 选择。历史 `mode: api` checker 仍可读取 `prompt.txt`，但运行时会包装成临时 SKILL 后提交 OpenCode session。
 同一 `family` 的候选会在静态阶段按同文件同函数做跨规则合并，只保留一个代表候选进入 AI 审计；代表点和同模式过滤规则见上文“静态候选合并与同模式过滤”。
 新增或修改规则后无需重启后端；后端会在列表刷新和点击开始扫描时重新扫描元数据。测试阶段建议设置 `visibility: admin`，只有管理员能看到并启动该 Checker；测试完成后改为 `visibility: public` 即可对所有用户开放。
 
@@ -258,7 +260,7 @@ visibility: public    # public: 所有用户可见；admin: 仅管理员测试�
 
 ### 在 Web UI 在线创建用户 SKILL
 
-除直接在两个过程规则目录中开发内置 Checker 外，登录用户也可以在 Web UI 的 **SKILL 市场** 中创建项目级 SKILL。用户创建的 SKILL 会保存到服务端 `storage.user_skills_dir`，所有用户可在新建扫描页选择使用；服务端在传输时自动拆成静态和审计资源。
+除直接在统一规则目录中开发内置 Checker 外，登录用户也可以在 Web UI 的 **SKILL 市场** 中创建项目级 SKILL。用户创建的规则会保存为 `storage.user_skills_dir/<id>/checker.yaml` 和 `storage.user_skills_dir/<id>/skills/<skill-name>/SKILL.md`，所有用户可在新建扫描页选择使用；服务端在传输时自动拆成静态和审计资源。旧的 `<id>/SKILL.md` 平铺格式不再参与自动发现，需要按新目录结构手动整理。
 
 创建流程：
 
@@ -288,11 +290,10 @@ visibility: public    # public: 所有用户可见；admin: 仅管理员测试�
 **第 1 步：创建目录和元数据**
 
 ```bash
-mkdir -p deephole_client/static_analysis/rules/mycheck
-mkdir -p deephole_client/candidate_audit/rules/mycheck
+mkdir -p deephole_client/vulnerability_mining/engines/static_candidate/rules/mycheck/skills/mycheck
 ```
 
-`deephole_client/static_analysis/rules/mycheck/checker.yaml`：
+`deephole_client/vulnerability_mining/engines/static_candidate/rules/mycheck/checker.yaml`：
 
 ```yaml
 name: mycheck
@@ -304,7 +305,7 @@ mode: "opencode"
 
 **第 2 步：编写 SKILL.md**
 
-在 `deephole_client/candidate_audit/rules/mycheck/SKILL.md` 中定义审计步骤；可参考同目录树下的 `npd/SKILL.md`。
+在 `deephole_client/vulnerability_mining/engines/static_candidate/rules/mycheck/skills/mycheck/SKILL.md` 中定义审计步骤，并在 YAML frontmatter 中声明 `name: mycheck`；可参考同一规则树下的 `npd`。
 
 **第 3 步（可选）：编写 analyzer.py**
 
@@ -312,10 +313,10 @@ mode: "opencode"
 from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
-from ...base import BaseAnalyzer, Candidate, scoped_functions
+from ...static_analysis.base import BaseAnalyzer, Candidate, scoped_functions
 
 if TYPE_CHECKING:
-    from ...index_reader import CodeIndexReader
+    from ...static_analysis.index_reader import CodeIndexReader
 
 
 class Analyzer(BaseAnalyzer):
@@ -356,7 +357,7 @@ class Analyzer(BaseAnalyzer):
 - **必须**继承 `BaseAnalyzer`
 - `vuln_type` **必须**与 `checker.yaml` 中的 `name` 字段一致
 - `find_candidates()` 接收项目根目录路径，返回 `Iterable[Candidate]`（列表或 generator 均可）
-- 只从静态分析过程内使用相对导入，例如 `from ...base import BaseAnalyzer, Candidate`
+- 规则分析器通过相对导入使用同一引擎的静态分析公共 API，例如 `from ...static_analysis.base import BaseAnalyzer, Candidate`
 - 使用 DB 的 analyzer 应优先调用 `scoped_functions(db, project_path)`，让 `code_scan_path` 子目录扫描在 SQL 层收敛函数范围；无法判定范围时会自动退回全量。
 - `Candidate.description` 应尽量只包含必要审计问题（函数、变量/表达式、问题类型），不要写静态分析规则、命中路径或工具细节；`metadata.subject` 用于跨规则合并和同模式过滤。
 
@@ -385,19 +386,18 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source --expect-cand
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source \
   --audit --audit-limit 1 --task-agent-config ./task-agent.yaml
 
-# 测试仓库外的规则时，静态和审计资源目录必须分别指定
+# 测试仓库外的统一规则树
 PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source \
-  --static-rules-dir /path/to/static-rules \
-  --audit-rules-dir /path/to/audit-rules
+  --rules-dir /path/to/rules
 ```
 
 本地测试命令不依赖后端、Web UI 或在线 Agent。默认在临时工作目录构建并在退出时清理 `code_index.db`；可用 `--work-dir` 保留完整过程产物，或用 `--index-db /tmp/mycheck-code_index.db` 指定可复用索引。最终结果始终是 stdout 上的 JSON，过程事件默认写 stderr；`--json` 会关闭事件输出，`--json-output` 会把格式化 UTF-8 JSON 写入文件。代码图谱构建需要本机已安装 Universal Ctags。
 
 开发阶段显式指定 Checker 名称时，即使 `checker.yaml` 中设置了 `enabled: false` 也会执行；线上扫描入口仍遵循 `enabled` 和 `visibility` 配置。`--audit` 会实际调用模型或 OpenCode，请先确认 `task-agent.yaml` 可用，并用 `--audit-limit` 控制成本。
 
-新增或修改规则后无需重启后端；创建扫描时会把选中的静态资源和审计资源分开同步到客户端。
+新增规则目录或修改其中内容后无需重启后端；规则注册表、静态分析器和 Skill 会在后续列表刷新或扫描时自动发现。创建扫描时会把选中的静态资源和审计资源同步到客户端。
 
-**CodeIndexReader API 参考（`deephole_client/static_analysis/index_reader.py`）：**
+**CodeIndexReader API 参考（`deephole_client/vulnerability_mining/engines/static_candidate/static_analysis/index_reader.py`）：**
 
 当 `db` 参数非 `None` 时，可通过以下方法查询预构建的代码索引。所有查询方法返回 `list[sqlite3.Row]`，通过 `row["field_name"]` 访问字段。
 
@@ -413,7 +413,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source \
 | `db.get_global_variables_by_name(name)` | 按名称查询全局变量 | global_var_id, name, start_line, end_line, is_extern, is_static, definition, file_path |
 | `db.get_global_variable_reference_by_name(name)` | 查询全局变量的所有引用点 | reference_id, variable_name, function_id, line, column, context, access_type, file_path, function_name |
 
-**tree-sitter 辅助工具（`deephole_client/static_analysis/code_utils.py`）：**
+**tree-sitter 辅助工具（`deephole_client/vulnerability_mining/engines/static_candidate/static_analysis/code_utils.py`）：**
 
 如需在 analyzer 中对函数体进行 AST 分析，可结合 tree-sitter 和以下辅助函数：
 
@@ -430,7 +430,7 @@ PYTHONPATH=. python3 tools/checker_test.py mycheck /path/to/source \
 ```python
 import tree_sitter_cpp
 from tree_sitter import Language, Parser
-from deephole_client.static_analysis.code_utils import find_nodes_by_type
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.code_utils import find_nodes_by_type
 
 _CPP = Language(tree_sitter_cpp.language())
 parser = Parser(_CPP)
@@ -448,7 +448,7 @@ for call in find_nodes_by_type(tree.root_node, "call_expression"):
 *1. 遍历所有函数并分析*
 
 ```python
-from deephole_client.static_analysis.base import scoped_functions
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.base import scoped_functions
 
 for func in scoped_functions(db, project_path):
     name = func["name"]
@@ -694,8 +694,10 @@ OpenDeepHole/
 │   ├── code_graph_build/  # 独立代码图谱构建过程
 │   ├── threat_analysis/   # 原样平铺的威胁分析 harness
 │   ├── threat_analysis_runner.py # 威胁分析平台异步适配器
-│   ├── static_analysis/   # 独立静态规则分析过程及静态规则
-│   ├── candidate_audit/   # 独立候选点审计过程及审计规则
+│   ├── vulnerability_mining/engines/static_candidate/
+│   │   ├── static_analysis/ # 静态召回过程实现
+│   │   ├── candidate_audit/ # 候选点审计过程实现
+│   │   └── rules/          # 每规则一个目录，包含 analyzer 与 skills/
 │   ├── threat_audit/      # 独立威胁审计过程
 │   ├── fp_review/         # 对抗式复核（既有流程）
 │   ├── fp_check_review/   # Trail of Bits fp-check 单项复核、独立汇总与中文版 Skill

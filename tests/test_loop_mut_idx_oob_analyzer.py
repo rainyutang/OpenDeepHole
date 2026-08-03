@@ -8,13 +8,13 @@ from unittest.mock import patch
 
 import yaml
 
-from deephole_client.static_analysis.rules.loop_mut_idx_oob.analyzer import (
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.loop_mut_idx_oob.analyzer import (
     Analyzer as LoopMutIdxOobAnalyzer,
 )
 
 
 RULE_FILE = Path(
-    "deephole_client/static_analysis/rules/"
+    "deephole_client/vulnerability_mining/engines/static_candidate/rules/"
     "loop_mut_idx_oob/loop_mut_idx_oob_semgrep.yml"
 )
 
@@ -59,7 +59,7 @@ def test_loop_mut_idx_oob_semgrep_runner_arguments(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         assert list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path)) == []
 
@@ -87,7 +87,7 @@ def test_loop_mut_idx_oob_direct_result_uses_json_file_and_code_db(tmp_path: Pat
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path, FakeDb()))
 
@@ -123,7 +123,7 @@ def test_loop_mut_idx_oob_copy_from_user_result_names_focus_variable(tmp_path: P
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", return_value=output),
+        patch("deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run", return_value=output),
     ):
         candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path))
 
@@ -179,7 +179,7 @@ def test_loop_mut_idx_oob_derived_pointer_result_and_dedup(tmp_path: Path) -> No
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "deephole_client.static_analysis.semgrep_runner.subprocess.run",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 1, stdout=json.dumps(payload), stderr=""),
         ),
     ):
@@ -209,7 +209,7 @@ def test_loop_mut_idx_oob_timeout_uses_partial_json(tmp_path: Path) -> None:
 
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
-        patch("deephole_client.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
+        patch("deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run", side_effect=fake_run),
     ):
         candidates = list(LoopMutIdxOobAnalyzer().find_candidates(tmp_path, FakeDb()))
 
@@ -221,7 +221,7 @@ def test_loop_mut_idx_oob_skips_tool_errors_and_bad_json(tmp_path: Path) -> None
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "deephole_client.static_analysis.semgrep_runner.subprocess.run",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 2, stdout="", stderr="bad config"),
         ),
     ):
@@ -230,7 +230,7 @@ def test_loop_mut_idx_oob_skips_tool_errors_and_bad_json(tmp_path: Path) -> None
     with (
         patch("shutil.which", return_value="/usr/bin/semgrep"),
         patch(
-            "deephole_client.static_analysis.semgrep_runner.subprocess.run",
+            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.semgrep_runner.subprocess.run",
             return_value=CompletedProcess(["semgrep"], 0, stdout="not-json", stderr=""),
         ),
     ):

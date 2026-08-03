@@ -1,4 +1,4 @@
-"""Build transport archives for decoupled static and audit rule directories."""
+"""Build rolling-compatible transport archives from unified rule directories."""
 
 from __future__ import annotations
 
@@ -16,34 +16,41 @@ _SKIP_SUFFIXES = {".pyc", ".pyo"}
 
 
 def build_checker_package(entry: CheckerEntry) -> dict[str, str]:
-    """Build one archive with explicit ``static/`` and ``audit/`` roots."""
+    """Build one legacy-shaped archive from a unified rule directory."""
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for file_path in sorted(entry.static_directory.rglob("*")):
-            if not file_path.is_file() or _should_skip(file_path):
-                continue
-            if (
-                entry.static_directory == entry.directory
-                and _is_audit_resource(file_path, entry.directory)
-            ):
-                continue
-            arcname = (
-                Path("static")
-                / file_path.relative_to(entry.static_directory)
-            ).as_posix()
-            zf.write(file_path, arcname)
         for file_path in sorted(entry.directory.rglob("*")):
             if not file_path.is_file() or _should_skip(file_path):
                 continue
-            if (
-                entry.static_directory == entry.directory
-                and not _is_audit_resource(file_path, entry.directory)
-            ):
+            relative = file_path.relative_to(entry.directory)
+            if relative.parts and relative.parts[0] == "skills":
+                continue
+            if entry.mode == "api" and _is_api_audit_resource(relative):
                 continue
             arcname = (
-                Path("audit")
-                / file_path.relative_to(entry.directory)
+                Path("static")
+                / relative
             ).as_posix()
+            zf.write(file_path, arcname)
+
+        if entry.mode == "api":
+            audit_files = [
+                file_path
+                for file_path in sorted(entry.directory.rglob("*"))
+                if file_path.is_file()
+                and not _should_skip(file_path)
+                and _is_api_audit_resource(file_path.relative_to(entry.directory))
+            ]
+            audit_root = entry.directory
+        else:
+            audit_root = entry.skill_path.parent
+            audit_files = [
+                file_path
+                for file_path in sorted(audit_root.rglob("*"))
+                if file_path.is_file() and not _should_skip(file_path)
+            ]
+        for file_path in audit_files:
+            arcname = (Path("audit") / file_path.relative_to(audit_root)).as_posix()
             zf.write(file_path, arcname)
         zf.writestr(
             "audit/audit.yaml",
@@ -51,6 +58,7 @@ def build_checker_package(entry: CheckerEntry) -> dict[str, str]:
                 f"name: {entry.name}",
                 f"label: {entry.label}",
                 f"result_mode: {entry.result_mode}",
+                f"skill_name: {entry.skill_name or ''}",
                 "",
             )),
         )
@@ -74,9 +82,8 @@ def _should_skip(path: Path) -> bool:
     return any(part in _SKIP_DIRS for part in path.parts)
 
 
-def _is_audit_resource(path: Path, root: Path) -> bool:
-    relative = path.relative_to(root)
+def _is_api_audit_resource(relative: Path) -> bool:
     return (
-        relative.name in {"SKILL.md", "SCENARIOS.md", "prompt.txt"}
+        relative.name == "prompt.txt"
         or bool(relative.parts and relative.parts[0] in {"references", "scripts", "assets"})
     )

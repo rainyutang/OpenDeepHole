@@ -225,7 +225,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             async def static(**kwargs):
                 calls.append("static_analysis")
                 self.assertEqual(kwargs["index_db_path"], index_path)
-                self.assertIn("static_analysis/rules", kwargs["checker_dirs"][0].as_posix())
+                self.assertIn("static_candidate/rules", kwargs["checker_dirs"][0].as_posix())
                 return {
                     "status": "success",
                     "candidates": [{
@@ -240,7 +240,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             async def audit(**kwargs):
                 calls.append("candidate_audit")
                 self.assertEqual(kwargs["index_db_path"], index_path)
-                self.assertIn("candidate_audit/rules", kwargs["checker_dirs"][0].as_posix())
+                self.assertIn("static_candidate/rules", kwargs["checker_dirs"][0].as_posix())
                 self.assertEqual(kwargs["product_mcp"], "product-knowledge")
                 processed_key = {
                     "file": "src/a.c",
@@ -287,11 +287,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     side_effect=graph,
                 ),
                 patch(
-                    "deephole_client.static_analysis.run_static_analysis",
+                    "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.run_static_analysis",
                     side_effect=static,
                 ),
                 patch(
-                    "deephole_client.candidate_audit.run_candidate_audit",
+                    "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.run_candidate_audit",
                     side_effect=audit,
                 ),
             ):
@@ -677,11 +677,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     }),
                 ),
                 patch(
-                    "deephole_client.static_analysis.run_static_analysis",
+                    "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.run_static_analysis",
                     new=static,
                 ),
                 patch(
-                    "deephole_client.candidate_audit.run_candidate_audit",
+                    "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.run_candidate_audit",
                     new=audit,
                 ),
                 patch(
@@ -958,14 +958,14 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     }),
                 ),
                 patch(
-                    "deephole_client.static_analysis.run_static_analysis",
+                    "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.run_static_analysis",
                     new=AsyncMock(return_value={
                         "status": "success",
                         "candidates": [],
                     }),
                 ),
                 patch(
-                    "deephole_client.candidate_audit.run_candidate_audit",
+                    "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.run_candidate_audit",
                     new=AsyncMock(return_value={
                         "status": "success",
                         "vulnerabilities": [],

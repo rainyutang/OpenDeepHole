@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from deephole_client.static_analysis.rules.multi_ptr_leak2.analyzer import (
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.multi_ptr_leak2.analyzer import (
     Analyzer,
     _collect_source_files,
 )

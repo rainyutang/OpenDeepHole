@@ -12,6 +12,7 @@ from backend.registry import checker_category_label, checker_modified_sort_key, 
 from backend.registry import checker_manifest_path
 from backend.registry import current_checker_dirs
 from backend.registry import refresh_registry
+from backend.registry import resolve_checker_skill_path
 
 router = APIRouter()
 
@@ -47,7 +48,7 @@ async def list_checkers(current_user: User = Depends(get_current_user)) -> list[
 def _read_checker_intro(checker_dir: Path, skill_path: Path, description: str) -> tuple[str, str]:
     """Read the checker introduction shown in the SKILL catalog."""
     candidates = [
-        ("SCENARIOS.md", checker_dir / "SCENARIOS.md"),
+        ("SCENARIOS.md", skill_path.parent / "SCENARIOS.md"),
         ("SKILL.md", skill_path),
     ]
 
@@ -110,9 +111,16 @@ def _discover_catalog_items(checkers_dir: Path | None = None) -> list[CheckerCat
             description = meta.get("description", "")
             visibility = _normalize_visibility(meta.get("visibility", CHECKER_VISIBILITY_PUBLIC))
             category = normalize_checker_category(meta.get("category"))
+            if str(meta.get("mode") or "opencode") == "api":
+                skill_path = checker_dir / "skills"
+            else:
+                try:
+                    skill_path = resolve_checker_skill_path(checker_dir, meta)
+                except (FileNotFoundError, OSError, ValueError, yaml.YAMLError):
+                    continue
             introduction, source = _read_checker_intro(
                 checker_dir=checker_dir,
-                skill_path=checker_dir / "SKILL.md",
+                skill_path=skill_path,
                 description=description,
             )
             items.append(

@@ -18,9 +18,14 @@ class CheckerCatalogTests(unittest.TestCase):
                 "name: intoverflow\nlabel: Integer Overflow\ndescription: description\nenabled: true\n",
                 encoding="utf-8",
             )
-            skill_path = checker_dir / "SKILL.md"
-            skill_path.write_text("# Skill intro\n", encoding="utf-8")
-            (checker_dir / "SCENARIOS.md").write_text("# Scenario intro\n", encoding="utf-8")
+            skill_dir = checker_dir / "skills" / "intoverflow"
+            skill_dir.mkdir(parents=True)
+            skill_path = skill_dir / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: intoverflow\ndescription: test\n---\n\n# Skill intro\n",
+                encoding="utf-8",
+            )
+            (skill_dir / "SCENARIOS.md").write_text("# Scenario intro\n", encoding="utf-8")
 
             cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(Path(tmp))))
             with (
@@ -57,7 +62,12 @@ class CheckerCatalogTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            (npd_dir / "SKILL.md").write_text("# Skill only\n", encoding="utf-8")
+            skill_dir = npd_dir / "skills" / "npd"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: npd\ndescription: test\n---\n\n# Skill only\n",
+                encoding="utf-8",
+            )
 
             response = _discover_catalog_items(root)
 
@@ -66,7 +76,7 @@ class CheckerCatalogTests(unittest.TestCase):
         self.assertEqual(by_name["npd"].category, "illegal_memory_use")
         self.assertEqual(by_name["npd"].category_label, "非法内存使用")
         self.assertEqual(by_name["npd"].modified_at, "2026-05-20T12:00:00+08:00")
-        self.assertEqual(by_name["npd"].introduction, "# Skill only")
+        self.assertTrue(by_name["npd"].introduction.endswith("# Skill only"))
         self.assertEqual(by_name["npd"].introduction_source, "SKILL.md")
 
     def test_catalog_sorts_by_modified_at_descending_and_missing_values_last(self) -> None:
@@ -138,7 +148,12 @@ class CheckerCatalogTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            (owned / "SKILL.md").write_text("# Owned\n", encoding="utf-8")
+            skill_dir = owned / "skills" / "owned_skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: owned_skill\ndescription: test\n---\n\n# Owned\n",
+                encoding="utf-8",
+            )
             cfg = SimpleNamespace(storage=SimpleNamespace(user_skills_dir=str(user_skills)))
 
             with (
@@ -165,7 +180,8 @@ class CheckerCatalogTests(unittest.TestCase):
             checker_dir = root / "api_checker"
             checker_dir.mkdir()
             (checker_dir / "checker.yaml").write_text(
-                "name: api_checker\nlabel: API Checker\ndescription: api description\nenabled: false\n",
+                "name: api_checker\nlabel: API Checker\ndescription: api description\n"
+                "enabled: false\nmode: api\n",
                 encoding="utf-8",
             )
 
@@ -195,7 +211,16 @@ class CheckerCatalogTests(unittest.TestCase):
         if modified_at is not None:
             lines.append(f'modified_at: "{modified_at}"')
         (checker_dir / "checker.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        (checker_dir / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+        skill_dir = checker_dir / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            f"name: {name}\n"
+            f"description: {name} checker\n"
+            "---\n\n"
+            "# Skill\n",
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

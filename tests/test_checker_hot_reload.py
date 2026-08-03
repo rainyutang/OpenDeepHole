@@ -14,8 +14,10 @@ from backend.api.scan import _validated_checker_names
 from backend.checker_sync import build_checker_packages
 from backend.models import User
 from backend.registry import discover_checkers, refresh_registry
-from deephole_client.rule_packages import unpack_rule_packages
-from deephole_client.static_analysis.registry import (
+from deephole_client.vulnerability_mining.engines.static_candidate.rule_packages import (
+    unpack_rule_packages,
+)
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.registry import (
     discover_checkers as discover_static_checkers,
 )
 
@@ -77,28 +79,30 @@ class CheckerHotReloadTests(unittest.TestCase):
     def test_checker_package_loads_with_relative_imports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_root = Path(tmp) / "source"
-            static_root = Path(tmp) / "static"
-            audit_root = Path(tmp) / "audit"
+            rules_root = Path(tmp) / "rules"
             self._write_checker(source_root, "relcheck", with_analyzer=True)
             registry = discover_checkers(source_root)
             packages = build_checker_packages(registry, ["relcheck"])
 
             unpacked = unpack_rule_packages(
                 packages,
-                static_root,
-                audit_root,
+                rules_root,
             )
             synced_registry = discover_static_checkers(
-                [static_root],
+                [rules_root],
                 ["relcheck"],
             )
+            skill_exists = (
+                rules_root / "relcheck" / "skills" / "relcheck" / "SKILL.md"
+            ).is_file()
+            analyzer_exists = (rules_root / "relcheck" / "analyzer.py").is_file()
 
         self.assertEqual(unpacked, ["relcheck"])
         self.assertIn("relcheck", synced_registry)
         self.assertIsNotNone(synced_registry["relcheck"].analyzer)
         self.assertEqual(getattr(synced_registry["relcheck"].analyzer, "marker", ""), "relative-ok")
-        self.assertFalse((static_root / "relcheck" / "SKILL.md").exists())
-        self.assertFalse((audit_root / "relcheck" / "analyzer.py").exists())
+        self.assertTrue(skill_exists)
+        self.assertTrue(analyzer_exists)
 
     def test_refresh_registry_discovers_user_skill_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,9 +138,23 @@ class CheckerHotReloadTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 unpack_rule_packages(
                     [package],
-                    Path(tmp) / "static",
-                    Path(tmp) / "audit",
+                    Path(tmp) / "rules",
                 )
+
+    def test_legacy_root_skill_is_not_discovered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checker_dir = root / "legacy"
+            checker_dir.mkdir()
+            (checker_dir / "checker.yaml").write_text(
+                "name: legacy\nlabel: Legacy\nenabled: true\n",
+                encoding="utf-8",
+            )
+            (checker_dir / "SKILL.md").write_text("# Legacy\n", encoding="utf-8")
+
+            registry = discover_checkers(root)
+
+        self.assertNotIn("legacy", registry)
 
     def _write_checker(
         self,
@@ -165,11 +183,20 @@ class CheckerHotReloadTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (checker_dir / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+        skill_dir = checker_dir / "skills" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            f"name: {name}\n"
+            f"description: {name} checker\n"
+            "---\n\n"
+            "# Skill\n",
+            encoding="utf-8",
+        )
         if with_analyzer:
             (checker_dir / "helper.py").write_text("MARKER = 'relative-ok'\n", encoding="utf-8")
             (checker_dir / "analyzer.py").write_text(
-                "from ...base import BaseAnalyzer\n"
+                "from ...static_analysis.base import BaseAnalyzer\n"
                 "from .helper import MARKER\n\n"
                 "class Analyzer(BaseAnalyzer):\n"
                 f"    vuln_type = {name!r}\n"

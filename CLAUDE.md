@@ -71,11 +71,13 @@ analysis, prompting, auditing, review, or validation logic:
 7. translate process JSON/events to backend DTOs and upload them
 ```
 
-The seven process directories are independently runnable, expose exactly one
-public async `run_<process>(**kwargs)` entry, reject unknown keys, and document
-their accepted keys in their local README. A process may import only its own
-relative modules, third-party packages, and the public
-`task_agent.run_opencode_task()` facade.
+The business processes are independently runnable, expose exactly one public
+async `run_<process>(**kwargs)` entry, reject unknown keys, and document their
+accepted keys in their local README. Static analysis and candidate audit are
+implementation subpackages owned by
+`vulnerability_mining/engines/static_candidate/`, not top-level client
+packages. A process may import only its engine-owned modules, third-party
+packages, and the public `task_agent.run_opencode_task()` facade.
 
 **Static candidate controls**: DB-backed analyzers should use
 `scoped_functions(db, project_path)` so `code_scan_path` subdirectory scans do
@@ -100,35 +102,36 @@ worker only starts the process and uploads its returned stage/result data.
 - **Persistence**: stage Markdown is stored in `fp_review_stage_outputs`; `GET /api/scan/{id}/fp_review` merges it into results (placeholder entries with empty `reason` for vulns without a final verdict), so reloads keep showing in-progress/failed stage output. The frontend shows "复核失败" when a job has finished but a vuln has no final verdict.
 - **Detail UI** (`frontend/src/components/VulnerabilityList.tsx`): master-detail layout — left a compact issue list (file:line / function / type / severity + AI & FP-review status badges, variant/match markers) with severity & type filters on top; right the selected issue's detail, rendering `description`, `ai_analysis`, and each FP stage output (`history_match`/`prove_bug`/`prove_fp`/`final_judge`) as Markdown. **Default view shows only "issues"** — candidates that AI audit left unconfirmed (`confirmed=false`) or that FP review marked `fp` are hidden by default; a "显示全部" toggle reveals them.
 
-## Decoupled Checker Resources
+## Unified Static Candidate Rules
 
-Built-in static recall and candidate auditing are separate:
+Built-in static recall and candidate auditing share one rule directory:
 
 ```
-deephole_client/static_analysis/rules/<name>/
+deephole_client/vulnerability_mining/engines/static_candidate/rules/<name>/
 ├── checker.yaml
 ├── analyzer.py
-└── optional static rule files
-
-deephole_client/candidate_audit/rules/<name>/
-├── SKILL.md
-├── optional SCENARIOS.md
-└── optional references/
+├── optional static rule files
+└── skills/<skill-name>/
+    ├── SKILL.md
+    ├── optional SCENARIOS.md
+    └── optional references/
 ```
 
 The backend registry is metadata-only. It creates a transport archive with
-explicit `static/` and `audit/` roots; the client extracts these into distinct
-scan-local roots. Backend code must never import an analyzer or process skill.
+explicit `static/` and `audit/` roots for rolling compatibility with older
+Agents; current clients reconstruct one scan-local rule tree. Backend code must
+never import an analyzer or process Skill. Discovery accepts only nested
+`skills/<skill-name>/SKILL.md`; legacy rule-root `SKILL.md` files are ignored.
 
 ### analyzer.py conventions
 
 - Class name **must** be `Analyzer`
-- **Must** inherit `deephole_client.static_analysis.base.BaseAnalyzer`
+- **Must** inherit `deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.base.BaseAnalyzer`
 - `vuln_type` string **must** match the `name` field in `checker.yaml`
 - `find_candidates(project_path: Path, db=None) -> Iterable[Candidate]`; `db`
   is a read-only `CodeIndexReader`
-- Inside a rule package use `from ...base import BaseAnalyzer, Candidate,
-  scoped_functions`
+- Inside a rule package use `from ...static_analysis.base import BaseAnalyzer,
+  Candidate, scoped_functions`
 - `Candidate.file` should be relative to project root, `Candidate.description` is passed to AI as context
 - DB-backed analyzers should iterate `scoped_functions(db, project_path)` rather than `db.get_all_functions()`
 - Put the root variable/expression/function into `Candidate.metadata["subject"]` when possible; it drives cross-rule description merging and same-pattern filtering
@@ -185,7 +188,8 @@ tail -f logs/opendeephole.log
 `deephole_client/code_graph_build/` owns all writable index-building code.
 Its only public entry is `run_code_graph_build(**kwargs)`. Static analysis
 reads the finished SQLite database through its own read-only
-`static_analysis/index_reader.py`; MCP tools use `mcp_server/index_reader.py`.
+`vulnerability_mining/engines/static_candidate/static_analysis/index_reader.py`;
+MCP tools use `mcp_server/index_reader.py`.
 Neither consumer imports the graph-build implementation.
 
 Indexing requires `ctags` from Universal Ctags with JSON output support. The Windows Agent package includes `ctags-p6.2.20260517.0-x64/ctags.exe`; `run_agent.bat` and Git Bash/MSYS/Cygwin runs of `run_agent.sh` prepend that directory to `PATH`. Linux/macOS still require a system Universal Ctags install. Missing or incompatible tools are treated as hard indexing errors.
@@ -218,9 +222,12 @@ deephole_client/
   main.py         — Entry point; WebSocket client loop with auto-reconnect
   server.py       — Command handlers: handle_task(), handle_stop(), handle_resume()
   scanner.py      — Coordinates indexing, standalone processes, and platform reporting
-  code_graph_build/, static_analysis/, candidate_audit/, threat_analysis/
-  threat_audit/, fp_review/, vulnerability_validation/
-                  — Seven backend-free async processes with standalone CLIs
+  code_graph_build/, threat_analysis/, threat_audit/, fp_review/
+  fp_check_review/, vulnerability_validation/
+                  — Backend-free async processes with standalone CLIs
+  vulnerability_mining/engines/static_candidate/
+    static_analysis/, candidate_audit/, rules/
+                  — Static-candidate implementation and unified rule tree
   git_history.py  — Mines git-history security-fix patterns (one LLM call per commit)
   variant_hunter.py — Hunts whole-repo same-class sites per history pattern → variant candidates
   reporter.py     — HTTP client: pushes events/results/git-history to backend

@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.models import Candidate
-from deephole_client.candidate_audit.runner import _candidate_prompt
-from deephole_client.static_analysis.rules.sensitive_clear.analyzer import Analyzer
+from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.runner import _candidate_prompt
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.sensitive_clear.analyzer import Analyzer
 
 
 class _FakeDb:

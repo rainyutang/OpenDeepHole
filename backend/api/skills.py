@@ -332,6 +332,8 @@ async def import_skill(
     checker_dir = _user_skill_dir(skill_id)
     checker_dir.mkdir(parents=True, exist_ok=False)
     try:
+        skill_dir = checker_dir / "skills" / skill_id
+        skill_dir.mkdir(parents=True)
         modified_at = _market_time()
         checker_yaml = {
             "name": skill_id,
@@ -351,14 +353,14 @@ async def import_skill(
             yaml.safe_dump(checker_yaml, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
-        (checker_dir / "SKILL.md").write_text(
+        (skill_dir / "SKILL.md").write_text(
             _skill_md_with_frontmatter(skill_id, job.description, skill_md),
             encoding="utf-8",
         )
         scenarios_md = body.scenarios_md.strip()
         if scenarios_md:
-            (checker_dir / "SCENARIOS.md").write_text(scenarios_md + "\n", encoding="utf-8")
-        _write_resource_files(checker_dir, body.files)
+            (skill_dir / "SCENARIOS.md").write_text(scenarios_md + "\n", encoding="utf-8")
+        _write_resource_files(skill_dir, body.files)
     except Exception:
         import shutil
 

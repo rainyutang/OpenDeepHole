@@ -58,7 +58,7 @@ def test_checker_test_cli_runs_static_analysis(tmp_path: Path, capsys) -> None:
     rc = checker_test.main([
         "localcheck",
         str(project_dir),
-        "--static-rules-dir",
+        "--rules-dir",
         str(checkers_dir),
         "--expect-candidates",
         "1",
@@ -80,7 +80,7 @@ def test_checker_test_cli_allows_disabled_checker(tmp_path: Path, capsys) -> Non
     rc = checker_test.main([
         "disabledcheck",
         str(project_dir),
-        "--static-rules-dir",
+        "--rules-dir",
         str(checkers_dir),
         "--json",
     ])
@@ -104,7 +104,7 @@ def test_checker_test_cli_json_output_writes_pretty_unicode_file(tmp_path: Path,
     rc = checker_test.main([
         "unicodecheck",
         str(project_dir),
-        "--static-rules-dir",
+        "--rules-dir",
         str(checkers_dir),
         "--json-output",
         str(output_path),
@@ -129,7 +129,7 @@ def test_checker_test_cli_rejects_mismatched_vuln_type(tmp_path: Path, capsys) -
     rc = checker_test.main([
         "localcheck",
         str(project_dir),
-        "--static-rules-dir",
+        "--rules-dir",
         str(checkers_dir),
     ])
 
@@ -146,7 +146,7 @@ def test_checker_test_cli_candidate_count_assertion(tmp_path: Path, capsys) -> N
     rc = checker_test.main([
         "localcheck",
         str(project_dir),
-        "--static-rules-dir",
+        "--rules-dir",
         str(checkers_dir),
         "--expect-candidates",
         "2",
@@ -188,9 +188,7 @@ def test_checker_test_cli_audit_uses_existing_audit_path(tmp_path: Path, monkeyp
     rc = checker_test.main([
         "localcheck",
         str(project_dir),
-        "--static-rules-dir",
-        str(checkers_dir),
-        "--audit-rules-dir",
+        "--rules-dir",
         str(checkers_dir),
         "--audit",
         "--audit-limit",
@@ -214,7 +212,7 @@ def test_checker_test_cli_generates_project_candidate_for_skill_only_checker(tmp
     rc = checker_test.main([
         "skillonly",
         str(project_dir),
-        "--static-rules-dir",
+        "--rules-dir",
         str(checkers_dir),
         "--json",
     ])
@@ -269,9 +267,7 @@ def test_checker_test_cli_project_audit_returns_multiple_results(tmp_path: Path,
     rc = checker_test.main([
         "skillonly",
         str(project_dir),
-        "--static-rules-dir",
-        str(checkers_dir),
-        "--audit-rules-dir",
+        "--rules-dir",
         str(checkers_dir),
         "--audit",
         "--task-agent-config",
@@ -321,14 +317,23 @@ def _write_checker(
         + "\n",
         encoding="utf-8",
     )
-    (checker_dir / "SKILL.md").write_text("# Local checker\n", encoding="utf-8")
+    skill_dir = checker_dir / "skills" / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {name} checker\n"
+        "---\n\n"
+        "# Local checker\n",
+        encoding="utf-8",
+    )
     if with_analyzer:
         (checker_dir / "helper.py").write_text(
             f"VULN_TYPE = {vuln_type or name!r}\n",
             encoding="utf-8",
         )
         (checker_dir / "analyzer.py").write_text(
-            "from ...base import BaseAnalyzer, Candidate\n"
+            "from ...static_analysis.base import BaseAnalyzer, Candidate\n"
             "from .helper import VULN_TYPE\n\n"
             "class Analyzer(BaseAnalyzer):\n"
             "    vuln_type = VULN_TYPE\n\n"
