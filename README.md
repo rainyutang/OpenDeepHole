@@ -692,44 +692,102 @@ Agent 运行时会在以下位置产生数据：
 
 ```
 OpenDeepHole/
-├── task_agent/            # 可独立安装的任务/模型/Session/Serve 框架
-├── deephole_client/       # 本地客户端与过程协调器
-│   ├── code_graph_build/  # 独立代码图谱构建过程
-│   ├── threat_analysis/   # 原样平铺的威胁分析 harness
-│   ├── threat_analysis_runner.py # 威胁分析平台异步适配器
-│   ├── vulnerability_mining/engines/static_candidate/
-│   │   ├── static_analysis/ # 静态召回过程实现
-│   │   ├── candidate_audit/ # 候选点审计过程实现
-│   │   └── rules/          # 每规则一个目录，包含 analyzer 与 skills/
-│   ├── threat_audit/      # 独立威胁审计过程
-│   ├── fp_review/         # 对抗式复核（既有流程）
-│   ├── fp_check_review/   # Trail of Bits fp-check 单项复核、独立汇总与中文版 Skill
-│   ├── vulnerability_validation/ # 独立漏洞验证过程及验证器
-│   ├── config.py          # agent.yaml 配置加载
-│   ├── main.py            # 守护进程入口（WebSocket 连接 + 自动重连）
-│   ├── server.py          # WebSocket 命令处理（task/stop/resume）
-│   ├── task_manager.py    # 任务生命周期管理（创建/停止/恢复）
-│   ├── scanner.py         # 只负责过程协调与平台结果上报
-│   ├── reporter.py        # 向服务器上报进度和结果
-│   └── opencode_integration.py # 平台 Task Agent 宿主适配
-├── frontend/              # React + TypeScript + Vite + Tailwind CSS
-├── backend/
+├── backend/                       # FastAPI 控制面、任务分发、持久化与实时事件
 │   ├── api/
-│   │   ├── agent.py       # Agent WebSocket 连接、命令下发、结果接收、下载包
-│   │   ├── scan.py        # 扫描管理 API（新建/停止/恢复/查询）
-│   │   ├── feedback.py    # 误报反馈 CRUD
-│   │   ├── checkers.py    # Checker 列表 API
-│   │   └── auth.py        # 用户认证与管理 API
-│   └── registry.py        # 服务端 checker 元数据目录
-├── mcp_server/            # 可独立手动启动的源码查询 MCP（Agent 不会自动加载）
-├── agent.yaml             # Agent 配置模板
-├── run_agent.sh           # Agent 守护进程启动脚本（Linux/macOS）
-├── run_agent.bat          # Agent 守护进程启动脚本（Windows）
-├── requirements-agent.txt # Agent 最小依赖
-├── config.yaml            # 服务端全局配置
-├── start.sh               # 服务端一键启动脚本
+│   │   ├── agent.py               # Agent WebSocket、协议 v1/v2、命令与结果接收
+│   │   ├── scan.py                # 扫描生命周期、游标分页详情、报告和验证 API
+│   │   ├── integration.py         # 外部平台接入与公开扫描 API
+│   │   ├── auth.py                # 登录、注册和密码管理
+│   │   ├── admin.py               # 管理员接口与运行指标
+│   │   ├── checkers.py            # Checker 目录接口
+│   │   ├── skills.py              # 用户 SKILL 市场接口
+│   │   ├── feedback.py            # 误报反馈 CRUD
+│   │   └── announcements.py       # 首页公告 CRUD 与发布
+│   ├── store/
+│   │   ├── base.py                # 扫描、用户和运行状态的统一存储接口
+│   │   ├── sqlite.py              # SQLite 单 Worker 兼容实现
+│   │   ├── postgres.py            # PostgreSQL 多 Worker 生产实现
+│   │   ├── async_ops.py           # 同步存储的有界异步执行边界
+│   │   └── __init__.py            # 按 database_url 选择存储后端
+│   ├── distributed.py             # 跨 Worker Agent 命令、RPC 与 SSE 扇出
+│   ├── sse.py                     # 本地/分布式扫描事件发布与订阅
+│   ├── pagination.py              # v2 API 稳定游标编码与解析
+│   ├── runtime_metrics.py         # 请求、存储、事件循环和 SSE 队列指标
+│   ├── registry.py                # Checker 元数据发现
+│   ├── checker_sync.py            # 规则包构建与 Agent 同步
+│   ├── validation_catalog.py      # 产品验证器目录
+│   ├── models.py                  # 后端请求、响应和持久化模型
+│   ├── config.py                  # 服务端配置加载
+│   ├── main.py                    # FastAPI 入口与应用生命周期
+│   ├── static/                    # Vite 构建后的前端静态文件
+│   └── system_skills/             # 在线创建 SKILL 使用的系统 Skill
+├── frontend/                      # React + TypeScript + Vite + Tailwind CSS
+│   └── src/
+│       ├── api/                    # 后端 API 客户端
+│       ├── components/             # 扫描、Agent、Checker、反馈和管理页面
+│       ├── features/threatAnalysis/ # 威胁分析结果查看器
+│       ├── hooks/                  # SSE 等共享 React Hooks
+│       ├── theme/                  # 深色/浅色主题
+│       ├── types.ts                # 前端领域类型
+│       └── App.tsx                 # 页面路由与应用入口
+├── deephole_client/               # 本地 Agent、扫描协调器和独立业务过程
+│   ├── code_graph_build/           # code_index.db 构建与缓存复用
+│   ├── vulnerability_mining/
+│   │   ├── engines/
+│   │   │   ├── static_candidate/
+│   │   │   │   ├── static_analysis/ # 静态候选召回过程
+│   │   │   │   ├── candidate_audit/ # 候选点/项目级 AI 审计过程
+│   │   │   │   ├── rules/           # analyzer、静态资源与嵌套 Skill
+│   │   │   │   ├── engine.yaml
+│   │   │   │   └── engine.py
+│   │   │   └── threat_audit/       # 威胁审计引擎适配器
+│   │   ├── examples/               # 可复制的 Skill/外部 CLI 引擎示例
+│   │   ├── runtime.py              # 引擎发现、加载、校验和执行
+│   │   └── engine_report.py        # 引擎结构化结果转漏洞报告
+│   ├── threat_analysis/            # 原样平铺的威胁分析 harness 与内置 Skill
+│   ├── threat_analysis_runner.py   # 威胁分析平台异步适配器
+│   ├── threat_audit/               # 独立威胁审计过程与专用输出 Schema
+│   ├── fp_review/                  # 对抗式去误报复核
+│   ├── fp_check_review/            # Trail of Bits fp-check 单项复核与批次汇总
+│   ├── vulnerability_validation/   # 漏洞验证过程、SDK 与产品验证器
+│   ├── scanner.py                  # 代码图谱、威胁分析和引擎并发协调
+│   ├── reporter.py                 # 事件、批次、漏洞和最终状态上报
+│   ├── server.py                   # Agent 任务/停止/恢复/复核/验证命令处理
+│   ├── task_manager.py             # Agent 本地任务生命周期
+│   ├── opencode_integration.py     # OpenDeepHole 的 Task Agent 宿主适配
+│   ├── updater.py                  # Agent 运行时同步与安全更新
+│   ├── config.py                   # agent.yaml 配置加载
+│   └── main.py                     # Agent 守护进程和自动重连入口
+├── task_agent/                     # 可独立安装的模型任务、Session 与 Serve 框架
+│   ├── api.py                      # run_opencode_task() 公共入口
+│   ├── task_service.py             # 队列、权限、Session、纠错和重试
+│   ├── model_pool.py               # 模型 Lease、并发、能力与健康调度
+│   ├── serve_client.py             # OpenCode/nga Serve 生命周期与事件流
+│   ├── host.py                     # 嵌入宿主上下文边界
+│   ├── standalone.py               # 独立 YAML 自举与严格校验
+│   ├── token_usage.py              # 模型 Token 用量归集
+│   └── task-agent.example.yaml     # 独立组件配置模板
+├── mcp_server/                     # 可独立启动的源码索引查询 MCP（Agent 默认不加载）
+├── docs/
+│   ├── framework_development.md    # 框架流程和组件接入指南
+│   ├── opencode_task_service.md    # Task Agent 公共接口文档
+│   ├── vulnerability_validation.md # 产品漏洞验证方法文档
+│   └── production_scaling.md       # PostgreSQL、多 Worker、迁移和回滚指南
+├── tools/
+│   ├── checker_test.py             # Checker 静态召回/真实审计测试工具
+│   └── external_platform_scan.py   # 外部平台扫描调用工具
+├── scripts/
+│   └── migrate_sqlite_to_postgres.py # SQLite 在线快照迁移工具
+├── tests/                          # 后端、Agent、组件和规则的测试套件
+├── agent.yaml                      # Agent 配置模板
+├── requirements-agent.txt          # Agent 最小依赖
+├── run_agent.sh                    # Agent 启动脚本（Linux/macOS）
+├── run_agent.bat                   # Agent 启动脚本（Windows）
+├── config.yaml                     # 服务端配置（含存储后端和连接池）
+├── requirements.txt               # 服务端完整依赖
+├── start.sh                        # 前端构建与后端 Worker 启动脚本
 ├── Dockerfile
-└── docker-compose.yml
+└── docker-compose.yml             # OpenDeepHole + PostgreSQL 生产编排
 ```
 
 ## License
