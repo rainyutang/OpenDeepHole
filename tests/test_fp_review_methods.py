@@ -1,34 +1,58 @@
-import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
-from unittest.mock import AsyncMock
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
-from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.models import (
-    AgentFpReviewFinish,
-    AgentFpReviewSummaryFinish,
-    AgentFpReviewStageOutput,
     CreateScanRequest,
-    FpReviewMethod,
+    FpReviewMethodSelection,
     FpReviewResult,
-    MiningEngineSelection,
-    OutputSource,
+    FpReviewStageConfig,
     ScanItemStatus,
     ScanMeta,
     ScanStatus,
-    User,
     Vulnerability,
 )
 from backend.store.sqlite import SqliteScanStore
+from deephole_client.fp_review import (
+    build_fp_review_method_catalog,
+    discover_fp_review_method_manifests,
+    load_fp_review_methods,
+)
+from deephole_client.fp_review import runtime as fp_runtime
 
 
-def _vulnerability(name: str = "parse") -> Vulnerability:
+def _write_method(
+    root: Path,
+    method_id: str,
+    *,
+    default: bool,
+    entry: str = "async def run(**kwargs):\n    return {'status': 'cancelled'}\n",
+) -> None:
+    directory = root / method_id
+    directory.mkdir(parents=True)
+    (directory / "method.yaml").write_text(
+        "\n".join([
+            f"label: {method_id}",
+            "description: test method",
+            f"default: {'true' if default else 'false'}",
+            "max_concurrency: 2",
+            "stages:",
+            "  - key: verify",
+            "    label: Verify",
+            "documents: []",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    (directory / "method.py").write_text(entry, encoding="utf-8")
+
+
+def _vulnerability(name: str) -> Vulnerability:
     return Vulnerability(
         file=f"{name}.c",
         line=10,
@@ -42,111 +66,235 @@ def _vulnerability(name: str = "parse") -> Vulnerability:
     )
 
 
-def _scan(
-    now: str,
-    *,
-    status: ScanItemStatus = ScanItemStatus.COMPLETE,
-    method: FpReviewMethod = FpReviewMethod.FP_CHECK,
-) -> ScanStatus:
-    return ScanStatus(
-        scan_id="scan-1",
-        project_id="project",
-        scan_items=["out_of_bounds"],
-        created_at=now,
-        status=status,
-        progress=1.0 if status == ScanItemStatus.COMPLETE else 0.5,
-        total_candidates=2,
-        processed_candidates=2 if status == ScanItemStatus.COMPLETE else 1,
-        vulnerabilities=[_vulnerability("first"), _vulnerability("second")],
-        auto_fp_review=True,
-        fp_review_method=method,
-    )
+class FpReviewMethodDiscoveryTests(unittest.TestCase):
+    def test_repository_catalog_discovers_builtins_and_manifest_metadata(self) -> None:
+        catalog = build_fp_review_method_catalog()
+
+        self.assertEqual(catalog["errors"], [])
+        methods = {item["method_id"]: item for item in catalog["methods"]}
+        self.assertEqual(set(methods), {"adversarial", "fp_check"})
+        self.assertTrue(methods["adversarial"]["default"])
+        self.assertEqual(methods["adversarial"]["max_concurrency"], 1)
+        self.assertEqual(methods["fp_check"]["max_concurrency"], 4)
+        self.assertIn(
+            "gate_review",
+            {stage["key"] for stage in methods["fp_check"]["stages"]},
+        )
+
+    def test_discovery_is_strict_and_loader_requires_async_kwargs_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_method(root, "good", default=True)
+            _write_method(
+                root,
+                "bad_entry",
+                default=False,
+                entry="def run(value):\n    return value\n",
+            )
+            invalid = root / "bad_manifest"
+            invalid.mkdir()
+            (invalid / "method.py").write_text(
+                "async def run(**kwargs):\n    return {}\n",
+                encoding="utf-8",
+            )
+            (invalid / "method.yaml").write_text(
+                "label: bad\ndescription: bad\ndefault: false\n",
+                encoding="utf-8",
+            )
+
+            manifests, manifest_errors = discover_fp_review_method_manifests(root)
+            registry = load_fp_review_methods(root)
+
+        self.assertEqual({item.method_id for item in manifests}, {"good", "bad_entry"})
+        self.assertTrue(any("bad_manifest" in error for error in manifest_errors))
+        self.assertIsNotNone(registry.get("good"))
+        self.assertIsNone(registry.get("bad_entry"))
+        self.assertTrue(any("run" in error for error in registry.errors))
 
 
-def _meta(now: str, method: FpReviewMethod = FpReviewMethod.FP_CHECK) -> ScanMeta:
-    return ScanMeta(
-        scan_items=["out_of_bounds"],
-        created_at=now,
-        agent_id="agent-1",
-        agent_name="agent",
-        project_path="/repo/project",
-        scan_name="project",
-        user_id="owner",
-        auto_fp_review=True,
-        fp_review_method=method,
-    )
+class FpReviewRuntimeContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_method_receives_only_one_vulnerability_contract(self) -> None:
+        loaded = load_fp_review_methods().get("adversarial")
+        self.assertIsNotNone(loaded)
+        captured: dict = {}
+
+        async def run(**kwargs):
+            captured.update(kwargs)
+            return {
+                "status": "success",
+                "verdict": "true_positive",
+                "reason": "reachable",
+                "stage_outputs": {"prove_bug": "# evidence"},
+            }
+
+        registry = fp_runtime.FpReviewMethodRegistry([
+            fp_runtime.LoadedFpReviewMethod(
+                manifest=loaded.manifest,
+                run=run,
+            )
+        ])
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "deephole_client.fp_review.runtime.load_fp_review_methods",
+            return_value=registry,
+        ):
+            result = await fp_runtime.run_fp_review(
+                method_id="adversarial",
+                project_path=tmp,
+                code_scan_path=tmp,
+                work_dir=tmp,
+                scan_id="scan-1",
+                review_id="review-1",
+                vuln_index=7,
+                vulnerability={"index": 7, "description": "issue"},
+            )
+
+        self.assertEqual(result["verdict"], "true_positive")
+        self.assertEqual(captured["vuln_index"], 7)
+        self.assertEqual(captured["vulnerability"]["index"], 7)
+        self.assertNotIn("vulnerabilities", captured)
+        self.assertNotIn("method_label", captured)
+
+    async def test_runtime_rejects_undeclared_method_stage(self) -> None:
+        loaded = load_fp_review_methods().get("adversarial")
+        self.assertIsNotNone(loaded)
+
+        async def run(**_kwargs):
+            return {
+                "status": "success",
+                "verdict": "false_positive",
+                "reason": "guarded",
+                "stage_outputs": {"not_declared": "# invalid"},
+            }
+
+        registry = fp_runtime.FpReviewMethodRegistry([
+            fp_runtime.LoadedFpReviewMethod(
+                manifest=loaded.manifest,
+                run=run,
+            )
+        ])
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "deephole_client.fp_review.runtime.load_fp_review_methods",
+            return_value=registry,
+        ):
+            with self.assertRaisesRegex(ValueError, "undeclared stage"):
+                await fp_runtime.run_fp_review(
+                    method_id="adversarial",
+                    project_path=tmp,
+                    code_scan_path=tmp,
+                    work_dir=tmp,
+                    scan_id="scan-1",
+                    review_id="review-1",
+                    vuln_index=0,
+                    vulnerability={"index": 0},
+                )
 
 
-class FpReviewMethodTests(unittest.TestCase):
+class FpReviewMethodBackendTests(unittest.TestCase):
     def tearDown(self) -> None:
         scan_api._running_scans.clear()
         scan_api._scan_owners.clear()
-        agent_api._running_scans.clear()
 
-    def test_create_request_defaults_to_adversarial_and_global_auto_fallback(self) -> None:
-        request = CreateScanRequest(
-            project_path="/repo",
-            checkers=["out_of_bounds"],
-        )
+    def test_request_defers_default_to_catalog_and_rejects_unknown_method(self) -> None:
+        request = CreateScanRequest(project_path="/repo", checkers=[])
+        self.assertIsNone(request.fp_review_method)
 
-        self.assertIsNone(request.auto_fp_review)
-        self.assertEqual(request.fp_review_method, FpReviewMethod.ADVERSARIAL)
+        method_id, selection = scan_api._resolve_fp_review_method(None)
+        self.assertEqual(method_id, "adversarial")
+        self.assertEqual(selection.method_id, method_id)
+        self.assertTrue(selection.stages)
+        with self.assertRaises(HTTPException) as caught:
+            scan_api._resolve_fp_review_method("not-installed")
+        self.assertEqual(caught.exception.status_code, 400)
 
-    def test_scan_and_job_persist_method_auto_setting_and_summary(self) -> None:
+    def test_scan_persists_dynamic_method_and_immutable_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             now = datetime.now(timezone.utc).isoformat()
-            scan = _scan(now)
-            scan.auto_fp_review = False
-            meta = _meta(now)
-            meta.auto_fp_review = False
+            selection = FpReviewMethodSelection(
+                method_id="custom",
+                method_label="Custom",
+                description="snapshot",
+                stages=[FpReviewStageConfig(key="verify", label="Verify")],
+            )
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                created_at=now,
+                status=ScanItemStatus.COMPLETE,
+                progress=1.0,
+                total_candidates=0,
+                processed_candidates=0,
+                vulnerabilities=[],
+                fp_review_method="custom",
+                fp_review_method_selection=selection,
+            )
+            meta = ScanMeta(
+                scan_items=[],
+                created_at=now,
+                fp_review_method="custom",
+                fp_review_method_selection=selection,
+            )
             store.save_scan(scan, meta)
-            store.create_fp_review_job(
-                "review-1",
-                "scan-1",
-                2,
-                now,
-                FpReviewMethod.FP_CHECK.value,
-            )
-            store.update_fp_review_job(
-                "review-1",
-                summary_markdown="# 复核汇总",
-                summary_output_source=OutputSource(model="provider/model"),
-            )
+            store.create_fp_review_job("review-1", "scan-1", 0, now, "custom")
 
             loaded_scan, loaded_meta = store.load_scan("scan-1")
             job = store.get_fp_review_job("review-1")
+            store.close()
 
-        self.assertFalse(loaded_scan.auto_fp_review)
-        self.assertFalse(loaded_meta.auto_fp_review)
-        self.assertEqual(loaded_scan.fp_review_method, FpReviewMethod.FP_CHECK)
-        self.assertEqual(loaded_meta.fp_review_method, FpReviewMethod.FP_CHECK)
-        self.assertEqual(job.method, FpReviewMethod.FP_CHECK)
-        self.assertEqual(job.summary_markdown, "# 复核汇总")
-        self.assertEqual(job.summary_output_source.model, "provider/model")
+        self.assertEqual(loaded_scan.fp_review_method, "custom")
+        self.assertEqual(loaded_meta.fp_review_method_selection, selection)
+        self.assertEqual(job.method, "custom")
 
-    def test_fp_check_rerun_selects_only_unresolved_then_full_batch(self) -> None:
+    def test_report_stage_titles_use_persisted_method_snapshot(self) -> None:
+        selection = FpReviewMethodSelection(
+            method_id="removed_method",
+            method_label="Removed method",
+            stages=[FpReviewStageConfig(key="custom_stage", label="Custom stage")],
+        )
+        store = Mock()
+        store.get_scan_meta.return_value = ScanMeta(
+            scan_items=[],
+            created_at="2026-08-04T00:00:00+00:00",
+            fp_review_method="removed_method",
+            fp_review_method_selection=selection,
+        )
+
+        with patch("backend.api.scan.get_scan_store", return_value=store):
+            titles = scan_api._fp_review_stage_titles("scan-1")
+
+        self.assertEqual(titles, [("custom_stage", "Custom stage")])
+
+    def test_all_methods_use_unresolved_first_then_full_rerun(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             now = datetime.now(timezone.utc).isoformat()
-            scan = _scan(now)
-            store.save_scan(scan, _meta(now))
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                created_at=now,
+                status=ScanItemStatus.COMPLETE,
+                progress=1.0,
+                total_candidates=2,
+                processed_candidates=2,
+                vulnerabilities=[_vulnerability("first"), _vulnerability("second")],
+                fp_review_method="adversarial",
+            )
+            meta = ScanMeta(
+                scan_items=[],
+                created_at=now,
+                fp_review_method="adversarial",
+            )
+            store.save_scan(scan, meta)
             for vulnerability in scan.vulnerabilities:
                 store.add_vulnerability("scan-1", vulnerability)
-            store.create_fp_review_job(
-                "review-1",
-                "scan-1",
-                2,
-                now,
-                FpReviewMethod.FP_CHECK.value,
-            )
+            store.create_fp_review_job("review-1", "scan-1", 2, now, "adversarial")
             store.add_fp_review_result(
                 "review-1",
                 FpReviewResult(
                     vuln_index=0,
                     verdict="fp",
                     severity="low",
-                    reason="caller enforces the bound",
+                    reason="guarded",
                     created_at=now,
                 ),
             )
@@ -161,7 +309,7 @@ class FpReviewMethodTests(unittest.TestCase):
                         vuln_index=1,
                         verdict="tp",
                         severity="high",
-                        reason="all six gates pass",
+                        reason="reachable",
                         created_at=now,
                     ),
                 )
@@ -169,379 +317,7 @@ class FpReviewMethodTests(unittest.TestCase):
                     "scan-1",
                     publish_started=False,
                 )
+            store.close()
 
-        self.assertEqual(
-            [item["index"] for item in first["confirmed"]],
-            [1],
-        )
-        self.assertEqual(
-            [item["index"] for item in second["confirmed"]],
-            [0, 1],
-        )
-
-    def test_cancelled_retry_carries_last_successful_summary_to_new_job(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SqliteScanStore(Path(tmp) / "scans.db")
-            now = datetime.now(timezone.utc).isoformat()
-            scan = _scan(now)
-            store.save_scan(scan, _meta(now))
-            for vulnerability in scan.vulnerabilities:
-                store.add_vulnerability("scan-1", vulnerability)
-            store.create_fp_review_job(
-                "review-old",
-                "scan-1",
-                2,
-                now,
-                FpReviewMethod.FP_CHECK.value,
-            )
-            store.update_fp_review_job(
-                "review-old",
-                status="cancelled",
-                summary_status="complete",
-                summary_markdown="# last successful summary",
-                summary_output_source=OutputSource(model="provider/model"),
-            )
-            with patch("backend.api.scan.get_scan_store", return_value=store):
-                started = scan_api._ensure_fp_review_job_for_scan(
-                    "scan-1",
-                    allow_cancelled=True,
-                    publish_started=False,
-                )
-                job = store.get_fp_review_job(started["review_id"])
-
-        self.assertNotEqual(started["review_id"], "review-old")
-        self.assertEqual(job.summary_markdown, "# last successful summary")
-        self.assertEqual(job.summary_output_source.model, "provider/model")
-        self.assertEqual(job.summary_status.value, "pending")
-
-    def test_fp_check_manual_start_is_allowed_while_scan_runs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SqliteScanStore(Path(tmp) / "scans.db")
-            now = datetime.now(timezone.utc).isoformat()
-            running_scan = _scan(now, status=ScanItemStatus.AUDITING)
-            store.save_scan(running_scan, _meta(now))
-            scan_api._running_scans["scan-1"] = running_scan
-            send = AsyncMock(return_value=True)
-            with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks",
-                    return_value=None,
-                ),
-                patch(
-                    "backend.api.scan._resolve_scan_agent_id",
-                    return_value="agent-1",
-                ),
-                patch("backend.api.agent.send_agent_command", send),
-                patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload",
-                    return_value={},
-                ),
-            ):
-                started = asyncio.run(scan_api._start_fp_review(
-                        "scan-1",
-                        "http://127.0.0.1:8000",
-                        raise_on_error=True,
-                ))
-
-            self.assertTrue(started["items_dispatched"])
-            self.assertEqual(
-                send.await_args.args[1]["type"],
-                "fp_review",
-            )
-            self.assertEqual(
-                send.await_args.args[1]["method"],
-                "fp_check",
-            )
-
-    def test_offline_agent_does_not_leave_item_review_running(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SqliteScanStore(Path(tmp) / "scans.db")
-            now = datetime.now(timezone.utc).isoformat()
-            store.save_scan(_scan(now), _meta(now))
-            with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks",
-                    return_value=None,
-                ),
-                patch(
-                    "backend.api.scan._resolve_scan_agent_id",
-                    return_value=None,
-                ),
-                self.assertRaises(HTTPException) as raised,
-            ):
-                asyncio.run(scan_api._start_fp_review(
-                    "scan-1",
-                    "http://127.0.0.1:8000",
-                    raise_on_error=True,
-                ))
-
-            self.assertEqual(raised.exception.status_code, 400)
-            self.assertIsNone(store.get_fp_review_by_scan("scan-1"))
-
-    def test_fp_check_skill_preview_uses_chinese_runtime_copy(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SqliteScanStore(Path(tmp) / "scans.db")
-            now = datetime.now(timezone.utc).isoformat()
-            store.save_scan(_scan(now), _meta(now))
-            scan_api._scan_owners["scan-1"] = "owner"
-            with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch(
-                    "backend.api.scan._selected_feedback_entries",
-                    return_value=[],
-                ),
-            ):
-                result = asyncio.run(scan_api.get_fp_review_skill(
-                    "scan-1",
-                    current_user=User(
-                        user_id="owner",
-                        username="owner",
-                        role="user",
-                    ),
-                ))
-
-        self.assertIn("# Trail of Bits fp-check 复核", result["content"])
-        self.assertIn("# 六道门复核", result["content"])
-        self.assertIn("# 数据流分析器", result["content"])
-
-    def test_fp_check_stage_whitelist_and_independent_summary_endpoint(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SqliteScanStore(Path(tmp) / "scans.db")
-            now = datetime.now(timezone.utc).isoformat()
-            store.create_fp_review_job(
-                "review-1",
-                "scan-1",
-                1,
-                now,
-                FpReviewMethod.FP_CHECK.value,
-            )
-            store.update_fp_review_job(
-                "review-1",
-                summary_markdown="# 旧批次汇总",
-                summary_output_source=OutputSource(model="provider/old"),
-                summary_status="complete",
-            )
-            with patch("backend.api.scan.get_scan_store", return_value=store):
-                accepted = asyncio.run(scan_api.agent_fp_review_stage_output(
-                    "scan-1",
-                    AgentFpReviewStageOutput(
-                        review_id="review-1",
-                        vuln_index=0,
-                        stage="claim_context",
-                        markdown="# 主张与上下文",
-                    ),
-                ))
-                with self.assertRaises(HTTPException) as rejected:
-                    asyncio.run(scan_api.agent_fp_review_stage_output(
-                        "scan-1",
-                        AgentFpReviewStageOutput(
-                            review_id="review-1",
-                            vuln_index=0,
-                            stage="prove_bug",
-                            markdown="# wrong workflow",
-                        ),
-                    ))
-                asyncio.run(scan_api.agent_fp_review_finish(
-                    "scan-1",
-                    AgentFpReviewFinish(
-                        review_id="review-1",
-                        status="complete",
-                    ),
-                ))
-                asyncio.run(scan_api.agent_fp_review_summary_finish(
-                    "scan-1",
-                    AgentFpReviewSummaryFinish(
-                        review_id="review-1",
-                        status="error",
-                        error_message="chain schema failed",
-                    ),
-                ))
-                failed = store.get_fp_review_job("review-1")
-                asyncio.run(scan_api.agent_fp_review_summary_finish(
-                    "scan-1",
-                    AgentFpReviewSummaryFinish(
-                        review_id="review-1",
-                        status="complete",
-                        summary_markdown="# 新批次汇总",
-                        summary_output_source=OutputSource(model="provider/model"),
-                    ),
-                ))
-
-            job = store.get_fp_review_job("review-1")
-
-        self.assertTrue(accepted["ok"])
-        self.assertEqual(rejected.exception.status_code, 400)
-        self.assertEqual(failed.summary_markdown, "# 旧批次汇总")
-        self.assertEqual(failed.summary_status.value, "error")
-        self.assertEqual(failed.summary_error_message, "chain schema failed")
-        self.assertEqual(job.summary_markdown, "# 新批次汇总")
-        self.assertEqual(job.summary_status.value, "complete")
-        self.assertEqual(job.summary_output_source.model, "provider/model")
-
-    def test_fp_check_enqueues_incremental_review_on_vulnerability_report(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SqliteScanStore(Path(tmp) / "scans.db")
-            now = datetime.now(timezone.utc).isoformat()
-            scan = _scan(now, status=ScanItemStatus.AUDITING)
-            scan.vulnerabilities = []
-            store.save_scan(scan, _meta(now))
-            agent_api._running_scans["scan-1"] = scan
-            with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
-            ):
-                response = asyncio.run(agent_api.agent_report_vulnerability(
-                    "scan-1",
-                    _vulnerability(),
-                ))
-
-        self.assertEqual(response["fp_review"]["method"], "fp_check")
-        self.assertTrue(response["fp_review"]["queued"])
-        self.assertIsNotNone(store.get_fp_review_by_scan("scan-1"))
-
-    def test_fp_check_auto_off_does_not_enqueue_incremental_review(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SqliteScanStore(Path(tmp) / "scans.db")
-            now = datetime.now(timezone.utc).isoformat()
-            scan = _scan(now, status=ScanItemStatus.AUDITING)
-            scan.auto_fp_review = False
-            scan.vulnerabilities = []
-            meta = _meta(now)
-            meta.auto_fp_review = False
-            store.save_scan(scan, meta)
-            agent_api._running_scans["scan-1"] = scan
-            with (
-                patch("backend.api.agent.get_scan_store", return_value=store),
-                patch("backend.api.scan.get_scan_store", return_value=store),
-            ):
-                response = asyncio.run(agent_api.agent_report_vulnerability(
-                    "scan-1",
-                    _vulnerability(),
-                ))
-
-        self.assertNotIn("fp_review", response)
-        self.assertIsNone(store.get_fp_review_by_scan("scan-1"))
-
-    def test_summary_retry_sends_separate_command_and_retains_old_summary(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SqliteScanStore(Path(tmp) / "scans.db")
-            now = datetime.now(timezone.utc).isoformat()
-            store.save_scan(_scan(now), _meta(now))
-            store.create_fp_review_job(
-                "review-1",
-                "scan-1",
-                2,
-                now,
-                FpReviewMethod.FP_CHECK.value,
-            )
-            store.update_fp_review_job(
-                "review-1",
-                status="complete",
-                summary_status="complete",
-                summary_markdown="# old summary",
-            )
-            status_at_dispatch: list[str] = []
-
-            async def send_command(*_args, **_kwargs) -> bool:
-                current = store.get_fp_review_job("review-1")
-                status_at_dispatch.append(current.summary_status.value)
-                return True
-
-            send = AsyncMock(side_effect=send_command)
-            with (
-                patch("backend.api.scan.get_scan_store", return_value=store),
-                patch(
-                    "backend.api.agent.ensure_agent_accepting_tasks",
-                    return_value=None,
-                ),
-                patch(
-                    "backend.api.scan._resolve_scan_agent_id",
-                    return_value="agent-1",
-                ),
-                patch("backend.api.agent.send_agent_command", send),
-                patch(
-                    "backend.api.agent.create_agent_task_runtime_update_payload",
-                    return_value={"hash": "runtime"},
-                ),
-            ):
-                result = asyncio.run(scan_api._start_fp_review_summary(
-                    "scan-1",
-                    "http://127.0.0.1:8000",
-                ))
-
-            job = store.get_fp_review_job("review-1")
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(send.await_args.args[1]["type"], "fp_review_summary")
-        self.assertEqual(status_at_dispatch, ["running"])
-        self.assertEqual(job.status.value, "complete")
-        self.assertEqual(job.summary_status.value, "running")
-        self.assertEqual(job.summary_markdown, "# old summary")
-
-    def test_server_uses_platform_fp_flow_for_every_engine_result(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SqliteScanStore(Path(tmp) / "scans.db")
-            now = datetime.now(timezone.utc).isoformat()
-            selection = MiningEngineSelection.model_validate({
-                "engine_id": "direct_engine",
-                "engine_label": "Direct engine",
-                "enabled": True,
-                "fp_review_enabled": False,
-            })
-            scan = _scan(
-                now,
-                status=ScanItemStatus.AUDITING,
-                method=FpReviewMethod.ADVERSARIAL,
-            )
-            scan.vulnerabilities = []
-            scan.mining_engines = [selection]
-            meta = _meta(now, FpReviewMethod.ADVERSARIAL)
-            meta.mining_engines = [selection]
-            store.save_scan(scan, meta)
-            agent_api._running_scans["scan-1"] = scan
-            reported = Vulnerability.model_validate({
-                **_vulnerability().model_dump(),
-                "engine_id": "direct_engine",
-                "engine_label": "untrusted label",
-                "fp_review_eligible": False,
-            })
-
-            with (
-                patch(
-                    "backend.api.agent.get_scan_store",
-                    return_value=store,
-                ),
-                patch(
-                    "backend.api.scan.get_scan_store",
-                    return_value=store,
-                ),
-                patch(
-                    "backend.api.scan._ensure_fp_review_job_for_scan",
-                    return_value={
-                        "review_id": "review-1",
-                        "cancelled": False,
-                        "no_unresolved": False,
-                        "latest_results": {},
-                        "total": 1,
-                        "processed": 0,
-                    },
-                ),
-            ):
-                response = asyncio.run(
-                    agent_api.agent_report_vulnerability(
-                        "scan-1",
-                        reported,
-                    )
-                )
-
-            stored = store.get_vulnerabilities("scan-1")[0]
-
-        self.assertTrue(response["fp_review"]["queued"])
-        self.assertIn("Direct engine", response["report_markdown"])
-        self.assertEqual(stored.engine_id, "direct_engine")
-        self.assertEqual(stored.engine_label, "Direct engine")
-        self.assertFalse(hasattr(stored, "fp_review_eligible"))
+        self.assertEqual([item["index"] for item in first["confirmed"]], [1])
+        self.assertEqual([item["index"] for item in second["confirmed"]], [0, 1])

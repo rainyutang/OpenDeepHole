@@ -1,4 +1,4 @@
-"""Independent multi-stage false-positive review process."""
+"""Per-vulnerability adversarial false-positive review method."""
 
 from __future__ import annotations
 
@@ -13,15 +13,16 @@ from task_agent import run_opencode_task
 
 PROCESS_NAME = "fp_review"
 _ALLOWED_KEYS = {
+    "method_id",
     "project_path",
+    "code_scan_path",
     "work_dir",
     "scan_id",
     "review_id",
-    "vulnerabilities",
+    "vuln_index",
+    "vulnerability",
     "feedback_entries",
     "history",
-    "processed_offset",
-    "concurrency",
     "required_capability",
     "invalid_json_retry_count",
     "task_agent_config",
@@ -30,10 +31,12 @@ _ALLOWED_KEYS = {
 }
 _REQUIRED_KEYS = {
     "project_path",
+    "code_scan_path",
     "work_dir",
     "scan_id",
     "review_id",
-    "vulnerabilities",
+    "vuln_index",
+    "vulnerability",
 }
 _STAGE_FILES = {
     "history_match": "history_match.md",
@@ -86,11 +89,11 @@ def _cancelled(cancel_event: Any) -> bool:
     return bool(cancel_event is not None and cancel_event.is_set())
 
 
-def _normalize_vulnerability(value: Any, index: int) -> dict[str, Any]:
+def _normalize_vulnerability(value: Any) -> dict[str, Any]:
     if hasattr(value, "model_dump"):
         value = value.model_dump(mode="json")
     if not isinstance(value, dict):
-        raise TypeError(f"vulnerabilities[{index}] must be a dict")
+        raise TypeError("vulnerability must be a dict")
     return dict(value)
 
 
@@ -182,33 +185,33 @@ def _write_stage_artifact(
     )
 
 
-async def run_fp_review(**kwargs: Any) -> dict[str, Any]:
-    """Review a vulnerability batch with match, debate and final-judge stages."""
+async def run(**kwargs: Any) -> dict[str, Any]:
+    """Review exactly one vulnerability with debate and final-judge stages."""
     unknown = sorted(set(kwargs) - _ALLOWED_KEYS)
     if unknown:
         raise TypeError(
-            "run_fp_review() got unexpected key(s): " + ", ".join(unknown),
+            "run() got unexpected key(s): " + ", ".join(unknown),
         )
     missing = sorted(
         key for key in _REQUIRED_KEYS if kwargs.get(key) in (None, "")
     )
     if missing:
         raise TypeError(
-            "run_fp_review() missing required key(s): " + ", ".join(missing),
+            "run() missing required key(s): " + ", ".join(missing),
         )
 
     project = Path(kwargs["project_path"]).expanduser().resolve()
     if not project.is_dir():
         raise FileNotFoundError(f"project_path is not a directory: {project}")
+    code_scan_path = Path(kwargs["code_scan_path"]).expanduser().resolve()
+    if not code_scan_path.is_dir():
+        raise FileNotFoundError(
+            f"code_scan_path is not a directory: {code_scan_path}"
+        )
     work_dir = Path(kwargs["work_dir"]).expanduser().resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
-    raw_vulnerabilities = kwargs["vulnerabilities"]
-    if not isinstance(raw_vulnerabilities, list):
-        raise TypeError("vulnerabilities must be a list")
-    vulnerabilities = [
-        _normalize_vulnerability(value, index)
-        for index, value in enumerate(raw_vulnerabilities)
-    ]
+    vulnerability = _normalize_vulnerability(kwargs["vulnerability"])
+    vuln_index = int(kwargs["vuln_index"])
     feedback_entries = kwargs.get("feedback_entries") or []
     history = kwargs.get("history") or []
     if not isinstance(feedback_entries, list) or not all(
@@ -226,19 +229,15 @@ async def run_fp_review(**kwargs: Any) -> dict[str, Any]:
     capability = str(kwargs.get("required_capability") or "high").lower()
     if capability not in {"low", "high"}:
         raise ValueError("required_capability must be 'low' or 'high'")
-    concurrency = max(1, int(kwargs.get("concurrency") or 1))
     retry_count = max(0, int(kwargs.get("invalid_json_retry_count") or 2))
-    offset = max(0, int(kwargs.get("processed_offset") or 0))
     skills = _read_skills()
-    semaphore = asyncio.Semaphore(concurrency)
-    result_lock = asyncio.Lock()
-    ordered_results: list[tuple[int, dict[str, Any]]] = []
 
     await _emit(
         output,
         "progress",
-        f"Starting FP review of {len(vulnerabilities)} item(s)",
-        total=len(vulnerabilities),
+        f"Starting adversarial FP review for vulnerability {vuln_index}",
+        total=1,
+        vuln_index=vuln_index,
     )
 
     async def run_stage(
@@ -284,138 +283,155 @@ async def run_fp_review(**kwargs: Any) -> dict[str, Any]:
         )
         payload = _stage_payload(result)
         _write_stage_artifact(
-            work_dir / "artifacts" / str(item_index),
+            work_dir / "artifacts",
             stage,
             payload,
         )
         await _emit(
             output,
-            "item",
+            "stage",
             f"Completed {stage} for vulnerability {item_index}",
             vuln_index=item_index,
             stage=stage,
             verdict=payload["verdict"],
+            markdown=str(
+                payload.get("stage_markdown")
+                or payload.get("reason")
+                or ""
+            ),
+            output_source=dict(payload.get("output_source") or {}),
         )
         return payload
 
-    async def review(local_index: int, vulnerability: dict[str, Any]) -> None:
+    stages: dict[str, dict[str, Any]] = {}
+    final: dict[str, Any] | None = None
+    try:
         if _cancelled(cancel_event):
-            return
-        item_index = int(
-            vulnerability.get("index")
-            if vulnerability.get("index") is not None
-            else offset + local_index
-        )
-        async with semaphore:
-            stages: dict[str, dict[str, Any]] = {}
-            try:
-                if history or vulnerability.get("variant_of"):
-                    stages["history_match"] = await run_stage(
-                        item_index=item_index,
-                        vulnerability=vulnerability,
-                        stage="history_match",
-                        prior_stages=stages,
-                    )
-                if (
-                    stages.get("history_match", {}).get("verdict")
-                    == "true_positive"
-                ):
-                    final = stages["history_match"]
-                    final["revised_severity"] = (
-                        final.get("revised_severity") or "high"
-                    )
-                else:
-                    stages["prove_bug"] = await run_stage(
-                        item_index=item_index,
-                        vulnerability=vulnerability,
-                        stage="prove_bug",
-                        prior_stages=stages,
-                    )
-                    if stages["prove_bug"]["verdict"] == "false_positive":
-                        final = stages["prove_bug"]
-                        final["revised_severity"] = (
-                            final.get("revised_severity") or "low"
-                        )
-                    else:
-                        stages["prove_fp"] = await run_stage(
-                            item_index=item_index,
-                            vulnerability=vulnerability,
-                            stage="prove_fp",
-                            prior_stages=stages,
-                        )
-                        stages["final_judge"] = await run_stage(
-                            item_index=item_index,
-                            vulnerability=vulnerability,
-                            stage="final_judge",
-                            prior_stages=stages,
-                        )
-                        final = stages["final_judge"]
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                final = {
-                    "status": "failure",
-                    "verdict": "uncertain",
-                    "reason": str(exc),
-                    "evidence": [],
-                    "revised_severity": "",
-                    "vulnerability_report": "",
-                    "stage_markdown": "",
-                    "match_type": "",
-                    "match_reference": "",
-                    "output_source": {},
-                }
-                await _emit(
-                    output,
-                    "error",
-                    f"FP review failed for vulnerability {item_index}: {exc}",
-                    vuln_index=item_index,
-                )
-
-            item = {
-                "vuln_index": item_index,
-                "status": str(final.get("status") or "success"),
-                "verdict": str(final.get("verdict") or "uncertain"),
-                "reason": str(final.get("reason") or ""),
-                "evidence": list(final.get("evidence") or []),
-                "revised_severity": str(
-                    final.get("revised_severity")
-                    or vulnerability.get("severity")
-                    or ""
-                ),
-                "vulnerability_report": str(
-                    final.get("vulnerability_report") or ""
-                ),
-                "match_type": str(final.get("match_type") or ""),
-                "match_reference": str(
-                    final.get("match_reference")
-                    or vulnerability.get("variant_of")
-                    or ""
-                ),
-                "stage_outputs": {
-                    stage: str(payload.get("stage_markdown") or "")
-                    for stage, payload in stages.items()
-                },
-                "stage_output_sources": {
-                    stage: dict(payload.get("output_source") or {})
-                    for stage, payload in stages.items()
-                },
-                "output_source": dict(final.get("output_source") or {}),
+            return {
+                "status": "cancelled",
+                "error_message": "用户手动停止",
+                "stage_outputs": {},
+                "stage_output_sources": {},
             }
-            async with result_lock:
-                ordered_results.append((offset + local_index, item))
+        if history or vulnerability.get("variant_of"):
+            stages["history_match"] = await run_stage(
+                item_index=vuln_index,
+                vulnerability=vulnerability,
+                stage="history_match",
+                prior_stages=stages,
+            )
+        if (
+            stages.get("history_match", {}).get("verdict")
+            == "true_positive"
+        ):
+            final = stages["history_match"]
+            final["revised_severity"] = (
+                final.get("revised_severity") or "high"
+            )
+        else:
+            stages["prove_bug"] = await run_stage(
+                item_index=vuln_index,
+                vulnerability=vulnerability,
+                stage="prove_bug",
+                prior_stages=stages,
+            )
+            if stages["prove_bug"]["verdict"] == "false_positive":
+                final = stages["prove_bug"]
+                final["revised_severity"] = (
+                    final.get("revised_severity") or "low"
+                )
+            else:
+                stages["prove_fp"] = await run_stage(
+                    item_index=vuln_index,
+                    vulnerability=vulnerability,
+                    stage="prove_fp",
+                    prior_stages=stages,
+                )
+                stages["final_judge"] = await run_stage(
+                    item_index=vuln_index,
+                    vulnerability=vulnerability,
+                    stage="final_judge",
+                    prior_stages=stages,
+                )
+                final = stages["final_judge"]
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await _emit(
+            output,
+            "error",
+            f"FP review failed for vulnerability {vuln_index}: {exc}",
+            vuln_index=vuln_index,
+        )
+        return {
+            "status": "error",
+            "error_message": str(exc),
+            "stage_outputs": {
+                stage: str(payload.get("stage_markdown") or "")
+                for stage, payload in stages.items()
+            },
+            "stage_output_sources": {
+                stage: dict(payload.get("output_source") or {})
+                for stage, payload in stages.items()
+            },
+        }
 
-    await asyncio.gather(*(
-        review(index, vulnerability)
-        for index, vulnerability in enumerate(vulnerabilities)
-    ))
-    results = [
-        item
-        for _, item in sorted(ordered_results, key=lambda pair: pair[0])
-    ]
+    stage_outputs = {
+        stage: str(payload.get("stage_markdown") or "")
+        for stage, payload in stages.items()
+    }
+    stage_sources = {
+        stage: dict(payload.get("output_source") or {})
+        for stage, payload in stages.items()
+    }
+    if _cancelled(cancel_event):
+        return {
+            "status": "cancelled",
+            "error_message": "用户手动停止",
+            "stage_outputs": stage_outputs,
+            "stage_output_sources": stage_sources,
+        }
+    verdict = str((final or {}).get("verdict") or "uncertain")
+    reason = str((final or {}).get("reason") or "").strip()
+    if verdict not in {"true_positive", "false_positive"} or not reason:
+        error_message = reason or "单项复核未生成有效 TP/FP 结果"
+        await _emit(
+            output,
+            "error",
+            f"漏洞 {vuln_index} 复核失败：{error_message}",
+            vuln_index=vuln_index,
+        )
+        return {
+            "status": "error",
+            "error_message": error_message,
+            "stage_outputs": stage_outputs,
+            "stage_output_sources": stage_sources,
+        }
     return {
-        "status": "cancelled" if _cancelled(cancel_event) else "success",
-        "review_id": str(kwargs["review_id"]),
-        "results": results,
-        "processed": len(results),
+        "status": "success",
+        "verdict": verdict,
+        "reason": reason,
+        "revised_severity": str(
+            (final or {}).get("revised_severity")
+            or vulnerability.get("severity")
+            or ""
+        ),
+        "vulnerability_report": str(
+            (final or {}).get("vulnerability_report")
+            or (
+                vulnerability.get("vulnerability_report")
+                if verdict == "true_positive"
+                else ""
+            )
+            or ""
+        ),
+        "match_type": str((final or {}).get("match_type") or ""),
+        "match_reference": str(
+            (final or {}).get("match_reference")
+            or vulnerability.get("variant_of")
+            or ""
+        ),
+        "stage_outputs": stage_outputs,
+        "stage_output_sources": stage_sources,
+        "output_source": dict((final or {}).get("output_source") or {}),
     }

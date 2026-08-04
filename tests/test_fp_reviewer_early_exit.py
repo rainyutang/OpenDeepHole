@@ -47,24 +47,27 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
     async def test_prove_bug_false_positive_skips_later_stages(self) -> None:
         invoke = AsyncMock(return_value=_stage_result("false_positive"))
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "deephole_client.fp_review.runner.run_opencode_task",
+            "task_agent.run_opencode_task",
             new=invoke,
         ):
             result = await run_fp_review(
+                method_id="adversarial",
                 project_path=tmp,
+                code_scan_path=tmp,
                 work_dir=Path(tmp) / "work",
                 scan_id="scan-1",
                 review_id="review-1",
-                vulnerabilities=[_vulnerability()],
+                vuln_index=3,
+                vulnerability=_vulnerability(),
             )
 
         self.assertEqual(invoke.await_count, 1)
         self.assertIn("prove_bug", invoke.await_args.kwargs["task_name"])
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["results"][0]["verdict"], "false_positive")
-        self.assertEqual(result["results"][0]["revised_severity"], "low")
+        self.assertEqual(result["verdict"], "false_positive")
+        self.assertEqual(result["revised_severity"], "low")
         self.assertEqual(
-            list(result["results"][0]["stage_outputs"]),
+            list(result["stage_outputs"]),
             ["prove_bug"],
         )
 
@@ -75,15 +78,18 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
             _stage_result("true_positive", severity="high"),
         ])
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "deephole_client.fp_review.runner.run_opencode_task",
+            "task_agent.run_opencode_task",
             new=invoke,
         ):
             result = await run_fp_review(
+                method_id="adversarial",
                 project_path=tmp,
+                code_scan_path=tmp,
                 work_dir=Path(tmp) / "work",
                 scan_id="scan-1",
                 review_id="review-2",
-                vulnerabilities=[_vulnerability()],
+                vuln_index=3,
+                vulnerability=_vulnerability(),
             )
 
         self.assertEqual(invoke.await_count, 3)
@@ -94,25 +100,28 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
             ],
             ["prove_bug", "prove_fp", "final_judge"],
         )
-        self.assertEqual(result["results"][0]["verdict"], "true_positive")
-        self.assertEqual(result["results"][0]["revised_severity"], "high")
+        self.assertEqual(result["verdict"], "true_positive")
+        self.assertEqual(result["revised_severity"], "high")
 
     async def test_history_match_true_positive_short_circuits_debate(self) -> None:
         invoke = AsyncMock(return_value=_stage_result("true_positive"))
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "deephole_client.fp_review.runner.run_opencode_task",
+            "task_agent.run_opencode_task",
             new=invoke,
         ):
             result = await run_fp_review(
+                method_id="adversarial",
                 project_path=tmp,
+                code_scan_path=tmp,
                 work_dir=Path(tmp) / "work",
                 scan_id="scan-1",
                 review_id="review-3",
-                vulnerabilities=[_vulnerability()],
+                vuln_index=3,
+                vulnerability=_vulnerability(),
                 history=[{"reference": "known issue"}],
             )
 
         self.assertEqual(invoke.await_count, 1)
         self.assertIn("history_match", invoke.await_args.kwargs["task_name"])
-        self.assertEqual(result["results"][0]["verdict"], "true_positive")
-        self.assertEqual(result["results"][0]["revised_severity"], "high")
+        self.assertEqual(result["verdict"], "true_positive")
+        self.assertEqual(result["revised_severity"], "high")

@@ -1,5 +1,11 @@
 # 更新日志
 
+## 2026-08-04
+
+- **重构** `fp_review` 与原 `fp_check_review` 收敛到 `deephole_client/fp_review/methods/<method_id>/`；每个去误报方法通过自己的 `method.yaml` 和唯一 `async def run(**kwargs)` 入口自动发现，新增方法不再修改中央枚举或前端硬编码
+- **变更** 去误报入口统一按漏洞粒度接收 `project_path`、`code_scan_path`、`vuln_index` 和单个 `vulnerability`，平台负责扫描级队列、方法并发、取消、补跑与持久化；删除 fp-check 的跨漏洞攻击链和批次汇总生命周期
+- **新增** 后端提供去误报方法目录接口并在扫描中固化所选方法快照；Agent 并发、阶段白名单、Skill 路径、方法说明和前端阶段展示全部由方法清单驱动，内置 `adversarial` 与 `fp_check` 保持各自执行流程
+
 ## 2026-08-03
 
 - **重构** 威胁审计过程、独立 CLI 和专用输出 Schema 全部归入 `vulnerability_mining/engines/threat_audit`，删除旧顶层 `threat_audit` 与空的 `threat_audit_skills` 路径；引擎执行、任务粒度、续扫和无专用 Skill 语义保持不变

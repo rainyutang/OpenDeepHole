@@ -454,6 +454,7 @@ export interface ScanStatus {
   threat_analysis_run?: ThreatAnalysisRunStatus | null;
   auto_fp_review?: boolean;
   fp_review_method?: FpReviewMethod;
+  fp_review_method_selection?: FpReviewMethodSelection | null;
   product: string;
   validation_environment: string;
   scan_items: string[];
@@ -897,7 +898,34 @@ export interface AgentOpenCodeModelsResult {
 }
 
 export type FpReviewStatus = "pending" | "running" | "complete" | "error" | "cancelled";
-export type FpReviewMethod = "adversarial" | "fp_check";
+export type FpReviewMethod = string;
+
+export interface FpReviewStageConfig {
+  key: string;
+  label: string;
+}
+
+export interface FpReviewMethodCatalogItem {
+  method_id: string;
+  label: string;
+  description: string;
+  default: boolean;
+  max_concurrency: number;
+  stages: FpReviewStageConfig[];
+}
+
+export interface FpReviewMethodCatalog {
+  methods: FpReviewMethodCatalogItem[];
+  errors: string[];
+  updated_at: string;
+}
+
+export interface FpReviewMethodSelection {
+  method_id: string;
+  method_label: string;
+  description: string;
+  stages: FpReviewStageConfig[];
+}
 
 export interface FpReviewResult {
   vuln_index: number;
@@ -924,10 +952,6 @@ export interface FpReviewJob {
   current_vuln_index: number | null;
   current_vuln_indices?: number[];
   results: FpReviewResult[];
-  summary_markdown?: string;
-  summary_output_source?: OutputSource;
-  summary_status?: FpReviewStatus | null;
-  summary_error_message?: string | null;
   error_message: string | null;
 }
 

@@ -4,6 +4,7 @@ import {
   getAgents,
   getAgentValidatorCatalog,
   getCheckers,
+  getFpReviewMethodCatalog,
   getMiningEngineCatalog,
   probeScanCodeGraphMcp,
 } from "../api/client";
@@ -12,7 +13,7 @@ import type {
   AgentMcpProbeResult,
   AgentValidatorRegistration,
   CheckerInfo,
-  FpReviewMethod,
+  FpReviewMethodCatalogItem,
   MiningEngineCatalogItem,
 } from "../types";
 import ScanCodeGraphMcpEditor, {
@@ -42,6 +43,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [validationTargets, setValidationTargets] = useState<AgentValidatorRegistration[]>([]);
   const [miningEngineCatalog, setMiningEngineCatalog] = useState<MiningEngineCatalogItem[]>([]);
+  const [fpReviewMethodCatalog, setFpReviewMethodCatalog] = useState<FpReviewMethodCatalogItem[]>([]);
   const [miningEngines, setMiningEngines] = useState<Record<string, MiningEngineFormValue>>({});
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -53,7 +55,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const [scanName, setScanName] = useState<string>("");
   const [threatAnalysisEnabled, setThreatAnalysisEnabled] = useState(true);
   const [autoFpReview, setAutoFpReview] = useState(true);
-  const [fpReviewMethod, setFpReviewMethod] = useState<FpReviewMethod>("adversarial");
+  const [fpReviewMethod, setFpReviewMethod] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
   const [selectedValidationEnvironment, setSelectedValidationEnvironment] = useState<string>("");
   const [selectedCheckers, setSelectedCheckers] = useState<Set<string>>(new Set());
@@ -75,14 +77,23 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   useEffect(() => {
     const load = async () => {
       try {
-        const [agentList, checkerList, engineCatalog] = await Promise.all([
+        const [agentList, checkerList, engineCatalog, reviewCatalog] = await Promise.all([
           getAgents(),
           getCheckers(),
           getMiningEngineCatalog(),
+          getFpReviewMethodCatalog(),
         ]);
+        if (reviewCatalog.methods.length === 0) {
+          throw new Error("没有可用的去误报方法");
+        }
         setAgents(agentList);
         setCheckers(checkerList);
         setMiningEngineCatalog(engineCatalog.engines);
+        setFpReviewMethodCatalog(reviewCatalog.methods);
+        setFpReviewMethod(
+          reviewCatalog.methods.find((method) => method.default)?.method_id
+            ?? reviewCatalog.methods[0].method_id,
+        );
         setMiningEngines((current) => Object.fromEntries(
           engineCatalog.engines.map((engine) => [
             engine.engine_id,
@@ -208,6 +219,10 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
     }
     if (staticEngineEnabled && selectedCheckers.size === 0) {
       setError("请至少选择一个检查项");
+      return;
+    }
+    if (!fpReviewMethod) {
+      setError("没有可用的去误报方法");
       return;
     }
 
@@ -476,26 +491,11 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 </button>
               </div>
               <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-                {([
-                  {
-                    value: "adversarial" as const,
-                    title: "对抗式复核",
-                    description: "沿用现有正反论证流程，可随已确认问题增量复核。",
-                  },
-                  {
-                    value: "fp_check" as const,
-                    title: "Trail of Bits fp-check 复核",
-                    description: "确认问题后立即逐项执行标准/深度验证与六道门；扫描完成后另行生成跨漏洞攻击链和批次汇总。",
-                  },
-                ] satisfies Array<{
-                  value: FpReviewMethod;
-                  title: string;
-                  description: string;
-                }>).map((option) => (
+                {fpReviewMethodCatalog.map((option) => (
                   <label
-                    key={option.value}
+                    key={option.method_id}
                     className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors ${
-                      fpReviewMethod === option.value
+                      fpReviewMethod === option.method_id
                         ? "border-amber-500 bg-amber-500/10"
                         : "border-slate-600 hover:border-slate-500"
                     }`}
@@ -503,13 +503,13 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                     <input
                       type="radio"
                       name="fp_review_method"
-                      value={option.value}
-                      checked={fpReviewMethod === option.value}
-                      onChange={() => setFpReviewMethod(option.value)}
+                      value={option.method_id}
+                      checked={fpReviewMethod === option.method_id}
+                      onChange={() => setFpReviewMethod(option.method_id)}
                       className="mt-0.5 h-4 w-4 border-slate-500 bg-slate-700 text-amber-500 focus:ring-amber-500 focus:ring-offset-0"
                     />
                     <span>
-                      <span className="block text-sm font-medium text-white">{option.title}</span>
+                      <span className="block text-sm font-medium text-white">{option.label}</span>
                       <span className="mt-1 block text-xs text-slate-500">{option.description}</span>
                     </span>
                   </label>

@@ -22,6 +22,7 @@ from backend.models import (
     FeedbackEntry,
     FpReviewJob,
     FpReviewMethod,
+    FpReviewMethodSelection,
     FpReviewResult,
     FpReviewStageOutput,
     FpReviewStatus,
@@ -90,6 +91,21 @@ def _json_model_list(value: str | None, model_type) -> list:
         except Exception:
             continue
     return result
+
+
+def _fp_review_method_selection(
+    value: str | None,
+) -> FpReviewMethodSelection | None:
+    try:
+        data = json.loads(value or "{}")
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data:
+        return None
+    try:
+        return FpReviewMethodSelection.model_validate(data)
+    except Exception:
+        return None
 
 
 def _json_call_chain(value: str | None) -> list[dict | str]:
@@ -325,6 +341,7 @@ CREATE TABLE IF NOT EXISTS scans (
     threat_analysis_run_json TEXT NOT NULL DEFAULT '{}',
     auto_fp_review     INTEGER,
     fp_review_method   TEXT NOT NULL DEFAULT 'adversarial',
+    fp_review_method_selection_json TEXT NOT NULL DEFAULT '{}',
     scan_items         TEXT NOT NULL,
     status             TEXT NOT NULL DEFAULT 'pending',
     created_at         TEXT NOT NULL,
@@ -839,6 +856,11 @@ class SqliteScanStore(ScanStoreBase):
         if "fp_review_method" not in cols:
             self._conn.execute(
                 "ALTER TABLE scans ADD COLUMN fp_review_method TEXT NOT NULL DEFAULT 'adversarial'"
+            )
+        if "fp_review_method_selection_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN "
+                "fp_review_method_selection_json TEXT NOT NULL DEFAULT '{}'"
             )
         agent_cur = self._conn.execute("PRAGMA table_info(agents)")
         agent_cols = {r[1] for r in agent_cur.fetchall()}
@@ -1445,6 +1467,9 @@ class SqliteScanStore(ScanStoreBase):
                 if row["fp_review_method"] is not None
                 else FpReviewMethod.ADVERSARIAL.value
             ),
+            fp_review_method_selection=_fp_review_method_selection(
+                row["fp_review_method_selection_json"]
+            ),
             product=row["product"] if row["product"] is not None else "",
             validation_environment=(
                 row["validation_environment"] if row["validation_environment"] is not None else ""
@@ -1501,6 +1526,9 @@ class SqliteScanStore(ScanStoreBase):
                 if row["fp_review_method"] is not None
                 else FpReviewMethod.ADVERSARIAL.value
             ),
+            fp_review_method_selection=_fp_review_method_selection(
+                row["fp_review_method_selection_json"]
+            ),
             feedback_ids=json.loads(row["feedback_ids"] or "[]"),
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
             agent_key=row["agent_key"] if row["agent_key"] is not None else "",
@@ -1536,10 +1564,11 @@ class SqliteScanStore(ScanStoreBase):
                      user_id, agent_name, agent_id, agent_key, project_path, code_scan_path, scan_name,
                      scan_mode, threat_analysis_enabled, threat_analysis_run_json,
                      auto_fp_review, fp_review_method,
+                     fp_review_method_selection_json,
                      product, validation_environment, public_access_token, opencode_pool,
                      code_graph_mcp_json, mining_engines_json,
                      mining_engine_runs_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     scan_items = excluded.scan_items,
@@ -1566,6 +1595,7 @@ class SqliteScanStore(ScanStoreBase):
                     threat_analysis_run_json = excluded.threat_analysis_run_json,
                     auto_fp_review = excluded.auto_fp_review,
                     fp_review_method = excluded.fp_review_method,
+                    fp_review_method_selection_json = excluded.fp_review_method_selection_json,
                     product = excluded.product,
                     validation_environment = excluded.validation_environment,
                     public_access_token = excluded.public_access_token,
@@ -1604,7 +1634,18 @@ class SqliteScanStore(ScanStoreBase):
                         else "{}"
                     ),
                     int(meta.auto_fp_review),
-                    meta.fp_review_method.value,
+                    str(
+                        getattr(
+                            meta.fp_review_method,
+                            "value",
+                            meta.fp_review_method,
+                        )
+                    ),
+                    (
+                        meta.fp_review_method_selection.model_dump_json()
+                        if meta.fp_review_method_selection is not None
+                        else "{}"
+                    ),
                     meta.product,
                     meta.validation_environment,
                     meta.public_access_token,
@@ -3843,10 +3884,7 @@ class SqliteScanStore(ScanStoreBase):
                   OR EXISTS (
                       SELECT 1 FROM fp_review_jobs AS job
                       WHERE job.scan_id = s.scan_id
-                        AND (
-                            job.status IN ('pending', 'running')
-                            OR job.summary_status = 'running'
-                        )
+                        AND job.status IN ('pending', 'running')
                   )
                   OR EXISTS (
                       SELECT 1 FROM vulnerability_validations AS validation
@@ -3875,27 +3913,13 @@ class SqliteScanStore(ScanStoreBase):
                         ELSE status
                     END,
                     current_vuln_index = NULL,
-                    error_message = CASE
-                        WHEN status IN ('pending', 'running') THEN ?
-                        ELSE error_message
-                    END,
-                    summary_status = CASE
-                        WHEN summary_status = 'running' THEN 'error'
-                        ELSE summary_status
-                    END,
-                    summary_error_message = CASE
-                        WHEN summary_status = 'running' THEN ?
-                        ELSE summary_error_message
-                    END
-                WHERE (
-                    status IN ('pending', 'running')
-                    OR summary_status = 'running'
-                )
+                    error_message = ?
+                WHERE status IN ('pending', 'running')
                   AND scan_id IN (
                       SELECT scan_id FROM scans WHERE agent_id = ?
                   )
                 """,
-                (error_message, error_message, agent_id),
+                (error_message, agent_id),
             )
             self._conn.commit()
             return cur.rowcount
@@ -3910,25 +3934,11 @@ class SqliteScanStore(ScanStoreBase):
                         ELSE status
                     END,
                     current_vuln_index = NULL,
-                    error_message = CASE
-                        WHEN status IN ('pending', 'running') THEN ?
-                        ELSE error_message
-                    END,
-                    summary_status = CASE
-                        WHEN summary_status = 'running' THEN 'error'
-                        ELSE summary_status
-                    END,
-                    summary_error_message = CASE
-                        WHEN summary_status = 'running' THEN ?
-                        ELSE summary_error_message
-                    END
+                    error_message = ?
                 WHERE scan_id = ?
-                  AND (
-                      status IN ('pending', 'running')
-                      OR summary_status = 'running'
-                  )
+                  AND status IN ('pending', 'running')
                 """,
-                (error_message, error_message, scan_id),
+                (error_message, scan_id),
             )
             self._conn.commit()
             return cur.rowcount
@@ -4102,26 +4112,6 @@ class SqliteScanStore(ScanStoreBase):
             current_vuln_index=row["current_vuln_index"],
             current_vuln_indices=current_vuln_indices,
             results=results,
-            summary_markdown=(
-                row["summary_markdown"]
-                if "summary_markdown" in row.keys()
-                else ""
-            ) or "",
-            summary_output_source=_output_source(
-                row["summary_output_source"]
-                if "summary_output_source" in row.keys()
-                else "{}"
-            ),
-            summary_status=(
-                FpReviewStatus(row["summary_status"])
-                if "summary_status" in row.keys() and row["summary_status"]
-                else None
-            ),
-            summary_error_message=(
-                row["summary_error_message"]
-                if "summary_error_message" in row.keys()
-                else None
-            ),
             error_message=row["error_message"],
         )
 
@@ -4179,10 +4169,6 @@ class SqliteScanStore(ScanStoreBase):
         current_vuln_indices: list[int] | None = None,
         clear_current_vuln_index: bool = False,
         error_message: str | None = None,
-        summary_markdown: str | None = None,
-        summary_output_source: OutputSource | None = None,
-        summary_status: str | None = None,
-        summary_error_message: str | None = None,
     ) -> None:
         updates: list[str] = []
         params: list = []
@@ -4208,18 +4194,6 @@ class SqliteScanStore(ScanStoreBase):
         if error_message is not None:
             updates.append("error_message = ?")
             params.append(error_message)
-        if summary_markdown is not None:
-            updates.append("summary_markdown = ?")
-            params.append(summary_markdown)
-        if summary_output_source is not None:
-            updates.append("summary_output_source = ?")
-            params.append(summary_output_source.model_dump_json())
-        if summary_status is not None:
-            updates.append("summary_status = ?")
-            params.append(summary_status)
-        if summary_error_message is not None:
-            updates.append("summary_error_message = ?")
-            params.append(summary_error_message)
         if not updates:
             return
         with self._lock:

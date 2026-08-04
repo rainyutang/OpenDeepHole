@@ -39,8 +39,8 @@
 **扫描流程与威胁分析选择**：扫描详情固定展示静态分析、威胁分析、漏洞挖掘、漏洞验证和去误报，代码图谱构建作为底层能力单独显示。新建扫描通过 `threat_analysis_enabled` 独立选择威胁分析，并通过 `mining_engines` 选择漏洞挖掘引擎；可以只运行威胁分析，但选择 `threat_audit` 时必须同时启用威胁分析。代码图谱完成后，静态分析和威胁分析可以并行，威胁审计等待威胁分析成功后再启动，验证与去误报继续按确认问题增量触发。
 **git 历史问题挖掘 + 同类变体排查（当前硬禁用）**：默认扫描链路在完成代码索引和工作区准备后，会并行启动威胁分析和静态分析；静态分析完成后立即进入候选点 AI 审计，威胁分析结果生成后独立上报展示，并在扫描最终完成前收尾。git 历史问题挖掘及同类变体排查的实现代码仍保留，但当前版本不会执行该阶段，也不在 Agent 配置页面中暴露开关。
 
-**AI 去误报（扫描级开关与双方案）**：新建扫描时可选择是否自动去误报，并在两种固定方案中选择其一。`对抗式复核`（`adversarial`）完整保留原有 `history_match`、`prove-bug`、`prove-fp`、`final-judge` 流程，可随已确认问题增量排队；`Trail of Bits fp-check 复核`（`fp_check`）来源于 Trail of Bits Skills Marketplace 的 `fp-check`，每个确认问题会立即独立执行主张重述、标准/深度验证与六道门，最多并发四项。扫描完成后再单独检查跨漏洞攻击链并生成批次汇总；汇总不会修改单项 TP/FP，也不影响问题数量。六道门全部通过才生成 high/TP，任一失败生成 low/FP；阶段缺失或技术失败保留证据、显示失败原因并允许补跑。创建请求字段为 `auto_fp_review` 与 `fp_review_method`；前者省略时使用 `fp_review.auto_on_complete`，关闭时仍可手动启动单项复核，后者默认 `adversarial`，两项在创建后固定。
-**漏洞报告导出**：对每一个 AI 判定为「是问题」的扫描项可单独导出 Markdown 报告，包含对应方案的阶段证据；扫描详情页顶部「导出报告」会打包全部单项报告，Trail of Bits fp-check 复核存在批次汇总时额外包含 `fp-review-summary.md`。对应端点 `GET /api/scan/{id}/vulnerability/{idx}/report` 与 `GET /api/scan/{id}/report.zip`。
+**AI 去误报（扫描级开关与目录化方法）**：新建扫描时可选择是否自动去误报，并从 `deephole_client/fp_review/methods/` 自动发现的方法目录中选择一种。每个方法都通过统一的 `async def run(**kwargs)` 入口一次处理一个漏洞，输入包含本次扫描代码路径、漏洞索引和单个漏洞对象；平台负责扫描级排队、方法并发、取消、补跑和持久化。内置 `adversarial` 保留 `history_match`、`prove-bug`、`prove-fp`、`final-judge` 流程，内置 `fp_check` 执行主张重述、标准/深度验证与六道门，最多并发四项。方法名称、默认项、最大并发、阶段和说明文档均来自各自的 `method.yaml`，扫描创建后会固化所选方法快照；方法不得生成跨漏洞批次汇总或修改其它漏洞结论。创建请求字段为 `auto_fp_review` 与 `fp_review_method`；前者省略时使用 `fp_review.auto_on_complete`，关闭时仍可手动启动单项复核，后者省略时使用目录清单声明的默认方法。
+**漏洞报告导出**：对每一个 AI 判定为「是问题」的扫描项可单独导出 Markdown 报告，包含所选去误报方法的阶段证据；扫描详情页顶部「导出报告」会打包全部单项报告。对应端点 `GET /api/scan/{id}/vulnerability/{idx}/report` 与 `GET /api/scan/{id}/report.zip`。
 
 ### 静态候选合并与同模式过滤
 
@@ -164,7 +164,7 @@ OpenDeepHole Agent
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。Agent 默认允许接收最大 64 MiB 的单条
 WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续扫命令仍超过该限制，可设置正整数
 环境变量 `OPENDEEPHOLE_WS_MAX_MESSAGE_MB` 后重启 Agent。
-启动后的 Agent 支持任务执行前自动更新运行时代码。服务端更新 `deephole_client/`（包含八个独立过程及其规则、技能和验证器）、`task_agent/`、`backend/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描、恢复扫描、去误报或漏洞验证任务前下载最新 runtime 并重启后继续执行；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash。创建或恢复扫描时，选中的用户规则还会按 `static/` 与 `audit/` 两个根目录传输。如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
+启动后的 Agent 支持任务执行前自动更新运行时代码。服务端更新 `deephole_client/`（包含各独立过程及其规则、技能和验证器）、`task_agent/`、`backend/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描、恢复扫描、去误报或漏洞验证任务前下载最新 runtime 并重启后继续执行；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash。创建或恢复扫描时，选中的用户规则还会按 `static/` 与 `audit/` 两个根目录传输。如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
 
 验证方法的 manifest、kwargs、返回值和 OpenCode 调用约定见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
 
@@ -750,8 +750,11 @@ OpenDeepHole/
 │   │   └── engine_report.py        # 引擎结构化结果转漏洞报告
 │   ├── threat_analysis/            # 原样平铺的威胁分析 harness 与内置 Skill
 │   ├── threat_analysis_runner.py   # 威胁分析平台异步适配器
-│   ├── fp_review/                  # 对抗式去误报复核
-│   ├── fp_check_review/            # Trail of Bits fp-check 单项复核与批次汇总
+│   ├── fp_review/                  # 目录发现的单漏洞去误报方法框架
+│   │   ├── methods/
+│   │   │   ├── adversarial/       # 对抗式复核方法、清单和 Skill
+│   │   │   └── fp_check/          # Trail of Bits fp-check 方法、清单和 Skill
+│   │   └── runtime.py             # 方法发现、加载、校验和统一执行入口
 │   ├── vulnerability_validation/   # 漏洞验证过程、SDK 与产品验证器
 │   ├── scanner.py                  # 代码图谱、威胁分析和引擎并发协调
 │   ├── reporter.py                 # 事件、批次、漏洞和最终状态上报

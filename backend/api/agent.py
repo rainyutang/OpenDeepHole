@@ -68,7 +68,6 @@ from backend.models import (
     AgentScanFinish,
     AgentScanFinishV2,
     AgentVulnerabilityValidationUpdate,
-    FpReviewMethod,
     FpReviewStatus,
     HistoryPattern,
     MiningEngineRunStatus,
@@ -1186,8 +1185,7 @@ async def _reattach_active_fp_reviews_async(
 
         from backend.api.scan import _is_agent_disconnect_error
 
-        item_running = bool(item.get("item_running", "summary_running" not in item))
-        summary_running = bool(item.get("summary_running"))
+        item_running = bool(item.get("item_running", True))
         reattached = False
         if item_running:
             if job.status in (FpReviewStatus.PENDING, FpReviewStatus.RUNNING):
@@ -1204,36 +1202,13 @@ async def _reattach_active_fp_reviews_async(
                     error_message="",
                 )
                 reattached = True
-        if summary_running:
-            if job.summary_status in (
-                FpReviewStatus.PENDING,
-                FpReviewStatus.RUNNING,
-            ):
-                reattached = True
-            elif (
-                job.summary_status == FpReviewStatus.ERROR
-                and _is_agent_disconnect_error(job.summary_error_message)
-            ):
-                await run_store_call(
-                    store,
-                    "update_fp_review_job",
-                    review_id,
-                    summary_status="running",
-                    summary_error_message="",
-                )
-                reattached = True
         if not reattached:
             logger.info(
                 "Ignoring active FP review %s from agent %s: "
-                "item_status=%s summary_status=%s",
+                "item_status=%s",
                 review_id,
                 agent.name,
                 job.status.value,
-                (
-                    job.summary_status.value
-                    if job.summary_status is not None
-                    else None
-                ),
             )
             continue
 
@@ -3161,6 +3136,7 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
         try:
             from backend.api.scan import (
                 _ensure_fp_review_job_for_scan,
+                _fp_review_stage_titles,
                 _scan_fp_result_map,
                 _scan_fp_review_settings,
                 _vuln_report_markdown,
@@ -3170,6 +3146,7 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
                 vuln_index,
                 vuln,
                 _scan_fp_result_map(scan_id).get(vuln_index),
+                fp_review_stage_titles=_fp_review_stage_titles(scan_id),
             )
             auto_fp_review, fp_review_method = (
                 _scan_fp_review_settings(
@@ -3195,7 +3172,7 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
                     )
                     fp_review_info = {
                         "review_id": ensured["review_id"],
-                        "method": fp_review_method.value,
+                        "method": fp_review_method,
                         "vuln_index": vuln_index,
                         "queued": vuln_index not in latest_results,
                         "total": ensured["total"],
@@ -3411,45 +3388,6 @@ async def agent_get_git_history(scan_id: str) -> list[HistoryPattern]:
     """Return the mined git-history patterns for a scan (used by FP review)."""
     store = get_scan_store()
     return await run_store_call(store, "get_git_history_patterns", scan_id)
-
-
-@router.get("/scan/{scan_id}/fp-review/{review_id}/summary-context")
-async def agent_get_fp_review_summary_context(
-    scan_id: str,
-    review_id: str,
-) -> dict:
-    """Return persisted single-item results used by an independent summary."""
-    store = get_scan_store()
-    job = await run_store_call(store, "get_fp_review_job", review_id)
-    if (
-        job is None
-        or job.scan_id != scan_id
-        or job.method != FpReviewMethod.FP_CHECK
-    ):
-        raise HTTPException(status_code=404, detail="fp-check review not found")
-    scan = await _ensure_running_scan(scan_id)
-    if scan is None:
-        loaded = await run_store_call(store, "load_scan", scan_id)
-        if loaded is None:
-            raise HTTPException(status_code=404, detail="Scan not found")
-        scan = loaded[0]
-    from backend.api.scan import (
-        _latest_fp_review_result_map,
-        _ordered_fp_review_candidates,
-    )
-
-    latest = _latest_fp_review_result_map(scan_id)
-    vulnerabilities = _ordered_fp_review_candidates(scan, latest)
-    eligible_indices = {int(item["index"]) for item in vulnerabilities}
-    return {
-        "review_id": review_id,
-        "vulnerabilities": vulnerabilities,
-        "results": [
-            latest[index].model_dump(mode="json")
-            for index in sorted(eligible_indices & set(latest))
-        ],
-        "unresolved_indices": sorted(eligible_indices - set(latest)),
-    }
 
 
 @router.post("/scan/{scan_id}/threat-analysis")
@@ -3704,48 +3642,17 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         _scan_fp_review_settings,
         _server_url_from_request,
         _start_fp_review,
-        _start_fp_review_summary,
     )
-    auto_fp_review, fp_review_method = _scan_fp_review_settings(scan_id, scan)
+    auto_fp_review, _fp_review_method = _scan_fp_review_settings(scan_id, scan)
 
     if final_status == ScanItemStatus.COMPLETE and confirmed > 0:
         try:
-            existing_job = await run_store_call(
-                store,
-                "get_fp_review_by_scan",
-                scan_id,
-            )
-            if fp_review_method == FpReviewMethod.FP_CHECK:
-                if auto_fp_review:
-                    # Fill only findings that did not receive an immediate
-                    # item result, then let the Agent summary wait for them.
-                    started = await _start_fp_review(
-                        scan_id,
-                        _server_url_from_request(request),
-                        raise_on_error=False,
-                        require_unresolved=True,
-                    )
-                    if started is not None:
-                        logger.info(
-                            "Auto fp-check completion flow started for scan %s",
-                            scan_id,
-                        )
-                elif existing_job is not None:
-                    # Manual item reviews performed during the scan still get
-                    # an automatic independent summary at scan completion.
-                    await _start_fp_review_summary(
-                        scan_id,
-                        _server_url_from_request(request),
-                        raise_on_error=False,
-                    )
-            elif (
-                auto_fp_review
-                and existing_job is None
-            ):
+            if auto_fp_review:
                 started = await _start_fp_review(
                     scan_id,
                     _server_url_from_request(request),
                     raise_on_error=False,
+                    require_unresolved=True,
                 )
                 if started is not None:
                     logger.info(

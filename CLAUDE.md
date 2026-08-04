@@ -89,18 +89,18 @@ not parse whole-repo functions. Candidate descriptions should stay minimal;
 
 ## Agent — FP Review Process (`deephole_client/fp_review/`)
 
-The public entry is `run_fp_review(**kwargs)`. Per vulnerability it runs an
-optional `history_match`, then `prove_bug` → `prove_fp` → `final_judge`.
-Process-owned skills and artifacts live under `fp_review/`; the WebSocket
-worker only starts the process and uploads its returned stage/result data.
+FP-review methods are directory-owned under `fp_review/methods/<method_id>/`.
+Each directory contains `method.yaml`, one exact `async def run(**kwargs)` entry
+in `method.py`, and its own optional `skills/`. The runtime discovers valid
+directories and exposes the common `run_fp_review(**kwargs)` facade.
 
 - **Auto-trigger on completion**: when a scan finishes with status `complete` and ≥1 confirmed vulnerability, the backend automatically starts FP review at the end of `agent_finish_scan` (no manual click). Gated by config `fp_review.auto_on_complete` (default `true`) and skipped if the scan already has an FP review job (avoids duplicate triggers on resume/repeat finish). The shared trigger logic lives in `backend/api/scan.py::_start_fp_review` (used by both the manual `POST /api/scan/{id}/fp_review` endpoint and the auto path; `raise_on_error=False` on the auto path so a blocked review never breaks scan finish). The manual button is retained for re-runs / catching up unreviewed candidates.
-- **History match**: `history_match` runs when history is supplied or a vulnerability carries `variant_of`; a `true_positive` match skips the debate and defaults severity to `high`.
-- **Early exit**: `prove_bug.verdict=false_positive` skips `prove_fp` and `final_judge`; otherwise `final_judge` owns the final verdict.
-- **Concurrency**: the process applies the explicit `concurrency` kwarg; the server translates item/stage results into the existing FP progress and result endpoints.
+- **Vulnerability-grained contract**: every method call receives exactly one `vulnerability`, its `vuln_index`, `project_path`, and the scan's `code_scan_path`. The platform owns the scan-level queue and methods must not aggregate or modify other vulnerabilities.
+- **Manifest-driven behavior**: `method.yaml` owns the label, description, default selection, maximum concurrency, stage keys, and user-facing documents. The backend publishes the discovered catalog, freezes a method snapshot into each scan, and the frontend renders that snapshot instead of hard-coded method metadata.
+- **Built-ins**: `adversarial` runs optional `history_match`, then `prove_bug` → `prove_fp` → `final_judge`; `fp_check` independently applies claim/context, standard or deep verification, and gate review to each vulnerability.
 - **Reconnect resilience**: agent hello includes `active_fp_reviews`; backend `_reattach_active_fp_reviews()` re-points the scan at the new agent_id and recovers jobs error-marked by the disconnect grace task. The progress/result/stage-output endpoints also auto-recover disconnect-errored jobs to running.
 - **Persistence**: stage Markdown is stored in `fp_review_stage_outputs`; `GET /api/scan/{id}/fp_review` merges it into results (placeholder entries with empty `reason` for vulns without a final verdict), so reloads keep showing in-progress/failed stage output. The frontend shows "复核失败" when a job has finished but a vuln has no final verdict.
-- **Detail UI** (`frontend/src/components/VulnerabilityList.tsx`): master-detail layout — left a compact issue list (file:line / function / type / severity + AI & FP-review status badges, variant/match markers) with severity & type filters on top; right the selected issue's detail, rendering `description`, `ai_analysis`, and each FP stage output (`history_match`/`prove_bug`/`prove_fp`/`final_judge`) as Markdown. **Default view shows only "issues"** — candidates that AI audit left unconfirmed (`confirmed=false`) or that FP review marked `fp` are hidden by default; a "显示全部" toggle reveals them.
+- **Detail UI** (`frontend/src/components/VulnerabilityList.tsx`): master-detail layout — left a compact issue list (file:line / function / type / severity + AI & FP-review status badges, variant/match markers) with severity & type filters on top; right the selected issue's detail, rendering `description`, `ai_analysis`, and manifest-declared FP stage output as Markdown. **Default view shows only "issues"** — candidates that AI audit left unconfirmed (`confirmed=false`) or that FP review marked `fp` are hidden by default; a "显示全部" toggle reveals them.
 
 ## Unified Static Candidate Rules
 
@@ -222,8 +222,7 @@ deephole_client/
   main.py         — Entry point; WebSocket client loop with auto-reconnect
   server.py       — Command handlers: handle_task(), handle_stop(), handle_resume()
   scanner.py      — Coordinates indexing, standalone processes, and platform reporting
-  code_graph_build/, threat_analysis/, fp_review/
-  fp_check_review/, vulnerability_validation/
+  code_graph_build/, threat_analysis/, fp_review/, vulnerability_validation/
                   — Backend-free async processes with standalone CLIs
   vulnerability_mining/engines/static_candidate/
     static_analysis/, candidate_audit/, rules/

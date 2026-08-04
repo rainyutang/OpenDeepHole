@@ -1,5 +1,19 @@
-"""Standalone false-positive review process."""
+"""Directory-discovered, per-vulnerability false-positive review methods."""
 
-from .runner import run_fp_review
+from .runtime import (
+    FP_REVIEW_METHODS_DIR,
+    FpReviewMethodRegistry,
+    build_fp_review_method_catalog,
+    discover_fp_review_method_manifests,
+    load_fp_review_methods,
+    run_fp_review,
+)
 
-__all__ = ["run_fp_review"]
+__all__ = [
+    "FP_REVIEW_METHODS_DIR",
+    "FpReviewMethodRegistry",
+    "build_fp_review_method_catalog",
+    "discover_fp_review_method_manifests",
+    "load_fp_review_methods",
+    "run_fp_review",
+]

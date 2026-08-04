@@ -7,6 +7,7 @@
 
 - [客户端过程总览](../deephole_client/README.md)
 - [漏洞挖掘引擎扩展](../deephole_client/vulnerability_mining/README.md)
+- [去误报方法扩展](../deephole_client/fp_review/README.md)
 - [Task Agent 公共任务接口](opencode_task_service.md)
 - [漏洞验证方法](vulnerability_validation.md)
 
@@ -19,10 +20,11 @@ OpenDeepHole 并不是把所有新能力都注册成同一种插件。开始开�
 | --- | --- | --- |
 | 新增一套独立漏洞挖掘方法，并向平台返回漏洞列表 | 漏洞挖掘引擎 | 是 |
 | 在“静态召回 → 候选点 AI 审计”链路增加一种规则 | `static_candidate` Checker | 是 |
+| 对平台已确认的单个漏洞增加一种去误报方法 | 去误报方法 | 是 |
 | 针对某产品和验证环境实现漏洞复现或验证 | 产品验证器 | 是 |
 | 增加新的基础设施阶段、扫描级产物或全新任务生命周期 | 独立框架过程 | 否，需要显式接入协调器 |
 
-优先使用前三种扩展点。只有新能力无法表示为漏洞挖掘引擎、Checker 或产品验证器时，
+优先使用前四种扩展点。只有新能力无法表示为漏洞挖掘引擎、Checker、去误报方法或产品验证器时，
 才增加独立框架过程；独立过程会影响扫描依赖、持久化、状态展示和运行时分发，属于框架级改动。
 
 ## 2. 整体扫描流程
@@ -59,7 +61,6 @@ flowchart TD
 
     R --> F[汇总扫描过程并结束扫描]
     AR --> F
-    F -.fp-check 方案.-> FPS[生成独立批次汇总]
 ```
 
 实际调度遵循以下规则：
@@ -78,7 +79,7 @@ flowchart TD
 
 ## 3. 现有组件和返回结果
 
-下面列出 Agent 当前协调的八个业务过程。过程之间只通过参数、文件产物和返回值传递数据，
+下面列出 Agent 当前协调的七个业务过程。过程之间只通过参数、文件产物和返回值传递数据，
 不应直接导入其它业务过程的内部实现。
 
 | 过程 | 公开入口 | 主要输入 | 主要返回 |
@@ -88,8 +89,7 @@ flowchart TD
 | 静态分析 | `run_static_analysis(**kwargs)` | 代码索引、规则目录、Checker 选择 | `status`、`candidates`、`stats` |
 | 候选点审计 | `run_candidate_audit(**kwargs)` | 候选点、规则 Skill、代码索引 | `status`、`vulnerabilities`、`processed_keys` |
 | 威胁审计 | `run_threat_audit(**kwargs)` | 攻击树、高风险模块、扫描上下文 | `status`、`tasks`、`vulnerabilities` |
-| 对抗式去误报 | `run_fp_review(**kwargs)` | 漏洞批次、历史反馈 | `status`、`review_id`、`results`、`processed` |
-| Trail of Bits fp-check | `run_fp_check_review(**kwargs)` | 单项漏洞或批次汇总输入 | 单项结果、未解决索引或独立批次汇总 |
+| 去误报方法 | `run_fp_review(**kwargs)` | 方法 ID、代码路径、单个漏洞、历史反馈 | 单项 `status`、二元 `verdict`、`reason` 和阶段证据 |
 | 漏洞验证 | `run_vulnerability_validation(**kwargs)` | 产品、环境、漏洞批次、验证器配置 | `status`、`validations`，或验证器目录 `catalog` |
 
 普通框架过程的入口统一为异步 `run_<process>(**kwargs)`。每个过程自行校验允许的 key，
@@ -102,8 +102,7 @@ flowchart TD
 - [静态分析](../deephole_client/vulnerability_mining/engines/static_candidate/static_analysis/README.md)
 - [候选点审计](../deephole_client/vulnerability_mining/engines/static_candidate/candidate_audit/README.md)
 - [威胁审计](../deephole_client/vulnerability_mining/engines/threat_audit/README.md)
-- [对抗式去误报](../deephole_client/fp_review/README.md)
-- [Trail of Bits fp-check](../deephole_client/fp_check_review/README.md)
+- [去误报方法](../deephole_client/fp_review/README.md)
 - [漏洞验证过程](../deephole_client/vulnerability_validation/README.md)
 
 ## 4. 框架向组件提供什么
@@ -461,7 +460,41 @@ async def validate(**kwargs) -> ValidationResult:
 
 完整 manifest、kwargs 和示例见[漏洞验证方法](vulnerability_validation.md)。
 
-## 8. 新增独立框架过程
+## 8. 新增去误报方法
+
+在 `deephole_client/fp_review/methods/` 下创建方法目录，目录名就是 `method_id`：
+
+```text
+methods/
+└── my_method/
+    ├── method.yaml
+    ├── method.py
+    └── skills/             # 可选，自动加入当前任务的 Skill 搜索路径
+```
+
+`method.yaml` 必须声明非空 `label`、`description`，布尔值 `default`，正整数
+`max_concurrency`，以及 `stages` 和 `documents` 列表。仓库中必须恰好有一个可加载方法设置
+`default: true`；非法方法会被隔离并出现在目录接口的错误列表中。阶段 key、页面名称、说明文档
+和 Agent 并发度全部来自该清单，新增方法不修改中央枚举或前端组件。
+
+`method.py` 的唯一入口为：
+
+```python
+async def run(**kwargs) -> dict:
+    vulnerability = kwargs["vulnerability"]
+    vuln_index = kwargs["vuln_index"]
+    ...
+```
+
+每次调用只处理一个漏洞。必填参数为 `method_id`、`project_path`、`code_scan_path`、
+`work_dir`、`scan_id`、`review_id`、`vuln_index` 和 `vulnerability`；每个漏洞有独立工作目录。
+成功返回必须包含 `status="success"`、二元 `verdict`（`true_positive` 或
+`false_positive`）和非空 `reason`，阶段输出只能使用清单声明的 key。扫描级队列、并发、取消、
+补跑和持久化由平台负责；方法不得读取或汇总其它漏洞，也不得生成跨漏洞结论。
+
+完整清单、可选参数和 CLI 示例见[去误报方法扩展](../deephole_client/fp_review/README.md)。
+
+## 9. 新增独立框架过程
 
 独立过程不是目录自动发现插件。只有新能力具有自己的扫描级生命周期、产物或依赖关系时，
 才按下面步骤接入：
@@ -477,10 +510,11 @@ async def validate(**kwargs) -> ValidationResult:
    持久化、API/SSE 和前端生命周期。
 6. 增加独立抽取、公开入口、CLI、运行时打包和协调器分支测试。
 
-如果新过程只是产生漏洞列表，应改为漏洞挖掘引擎；如果只是增加静态规则或产品验证方式，
-应分别使用 Checker 或验证器扩展点，避免把业务逻辑硬编码进 `scanner.py`。
+如果新过程只是产生漏洞列表，应改为漏洞挖掘引擎；如果只是增加静态规则、单漏洞去误报方式
+或产品验证方式，应分别使用 Checker、去误报方法或验证器扩展点，避免把业务逻辑硬编码进
+`scanner.py`。
 
-## 9. 提交前检查
+## 10. 提交前检查
 
 ### 通用检查
 
@@ -495,6 +529,7 @@ async def validate(**kwargs) -> ValidationResult:
 
 - 新引擎：运行 `PYTHONPATH=. python3 -m pytest -q tests/test_vulnerability_mining_engines.py`。
 - 新 Checker：先运行 `tools/checker_test.py`，再运行对应 Analyzer/Semgrep 的定向测试。
+- 新去误报方法：运行 `PYTHONPATH=. python3 -m pytest -q tests/test_fp_review_methods.py`。
 - 新验证器：运行 `PYTHONPATH=. python3 -m pytest -q tests/test_vulnerability_validation.py`。
 - 新独立过程：运行 `PYTHONPATH=. python3 -m pytest -q tests/test_runner_mode_dispatch.py tests/test_deephole_client_processes.py`。
 - 涉及前端展示时，从 `frontend/` 运行 `npm run build`。

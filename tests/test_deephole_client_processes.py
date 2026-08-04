@@ -20,7 +20,6 @@ from deephole_client.code_graph_build import run_code_graph_build
 from deephole_client.code_graph_build.cpp_analyzer import CppAnalyzer
 from deephole_client.code_graph_build.runner import _StageProgressGate
 from deephole_client.fp_review import run_fp_review
-from deephole_client.fp_check_review import run_fp_check_review
 from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis import run_static_analysis
 from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.base import BaseAnalyzer, Candidate
 from deephole_client.threat_analysis_runner import run_threat_analysis
@@ -35,7 +34,6 @@ PROCESS_FUNCTIONS = (
     run_candidate_audit,
     run_threat_audit,
     run_fp_review,
-    run_fp_check_review,
     run_vulnerability_validation,
 )
 
@@ -1519,7 +1517,7 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
         asyncio.run(scenario(Path(temp)))
 
 
-def test_fp_review_and_validation_processes_run_in_batches() -> None:
+def test_fp_review_and_validation_processes_run_per_vulnerability() -> None:
     async def scenario(root: Path) -> None:
         project = root / "project"
         project.mkdir()
@@ -1531,21 +1529,24 @@ def test_fp_review_and_validation_processes_run_in_batches() -> None:
             "confirmed": True,
         }
         with patch(
-            "deephole_client.fp_review.runner.run_opencode_task",
+            "task_agent.run_opencode_task",
             new=AsyncMock(return_value=_task_result({
                 "verdict": "false_positive", "reason": "guarded", "evidence": ["check"],
                 "revised_severity": "low",
             })),
         ) as run_task:
             reviewed = await run_fp_review(
+                method_id="adversarial",
                 project_path=project,
+                code_scan_path=project,
                 work_dir=root / "fp",
                 scan_id="scan-1",
                 review_id="review-1",
-                vulnerabilities=[vulnerability],
+                vuln_index=7,
+                vulnerability=vulnerability,
             )
-        assert reviewed["processed"] == 1
-        assert reviewed["results"][0]["verdict"] == "false_positive"
+        assert reviewed["status"] == "success"
+        assert reviewed["verdict"] == "false_positive"
         assert run_task.await_count > 0
         assert all(
             "JSON Schema" in call.kwargs["prompt"]

@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from deephole_client.fp_check_review import run_fp_check_review
+from deephole_client.fp_review import run_fp_review
 
 
 GATES_PASS = {
@@ -27,18 +27,8 @@ STANDARD_COMPLETE = {
     "gate_review": True,
 }
 DEEP_COMPLETE = {
-    "data_flow": {
-        "phase_1_1": True,
-        "phase_1_2": True,
-        "phase_1_3": True,
-        "phase_1_4": True,
-    },
-    "exploitability": {
-        "phase_2_1": True,
-        "phase_2_2": True,
-        "phase_2_3": True,
-        "phase_2_4": True,
-    },
+    "data_flow": {f"phase_1_{index}": True for index in range(1, 5)},
+    "exploitability": {f"phase_2_{index}": True for index in range(1, 5)},
     "impact": {
         "confidentiality": True,
         "integrity": True,
@@ -47,21 +37,14 @@ DEEP_COMPLETE = {
         "authorization": True,
         "primary_vs_defense_in_depth": True,
     },
-    "poc": {
-        "phase_4_1": True,
-        "phase_4_2": True,
-        "phase_4_3": True,
-        "phase_4_4": True,
-        "phase_4_5": True,
-    },
+    "poc": {f"phase_4_{index}": True for index in range(1, 6)},
     "devil_advocate": {
-        f"challenge_{index}": True
-        for index in range(1, 14)
+        f"challenge_{index}": True for index in range(1, 14)
     },
 }
 
 
-def _result(structured: dict, *, status: str = "success") -> SimpleNamespace:
+def _task_result(structured: dict, *, status: str = "success") -> SimpleNamespace:
     return SimpleNamespace(
         status=status,
         text="" if status == "success" else "stage failed",
@@ -80,6 +63,7 @@ def _vulnerability(index: int) -> dict:
         "severity": "high",
         "description": f"finding {index}",
         "ai_analysis": "analysis",
+        "vulnerability_report": "# original report",
     }
 
 
@@ -96,207 +80,136 @@ def _claim(route: str) -> dict:
     }
 
 
-def _phase(stage: str) -> dict:
+def _standard(*, gates: dict | None = None) -> dict:
+    return {
+        "decision": "verdict",
+        "reason": "standard path complete",
+        "evidence": ["src/1.c:11"],
+        "gates": gates or GATES_PASS,
+        "completeness": STANDARD_COMPLETE,
+        "stage_markdown": "# 标准验证",
+    }
+
+
+def _deep_stage(stage: str) -> dict:
     value = {
         "complete": True,
         "reason": f"{stage} complete",
-        "evidence": ["src/1.c:11"],
+        "evidence": ["src/2.c:12"],
         "stage_markdown": f"# {stage}",
     }
     if stage in DEEP_COMPLETE:
         value["completeness"] = DEEP_COMPLETE[stage]
+    if stage == "gate_review":
+        value["gates"] = GATES_PASS
     return value
 
 
+async def _run(tmp: str, index: int, output=None):
+    return await run_fp_review(
+        method_id="fp_check",
+        project_path=tmp,
+        code_scan_path=tmp,
+        work_dir=Path(tmp) / "review" / str(index),
+        scan_id="scan-1",
+        review_id="review-1",
+        vuln_index=index,
+        vulnerability=_vulnerability(index),
+        required_capability="high",
+        output=output,
+    )
+
+
 class FpCheckReviewTests(unittest.IsolatedAsyncioTestCase):
-    async def test_item_operation_runs_standard_or_deep_stages(self) -> None:
+    async def test_standard_path_returns_one_binary_vulnerability_result(self) -> None:
         calls: list[str] = []
 
         async def invoke(**kwargs):
-            name = kwargs["task_name"]
-            calls.append(name)
-            if name.endswith("-1-claim_context"):
-                return _result(_claim("standard"))
-            if name.endswith("-2-claim_context"):
-                return _result(_claim("deep"))
-            if name.endswith("-1-standard_verification"):
-                gates = {**GATES_PASS, "reachability": False}
-                return _result({
-                    "decision": "verdict",
-                    "reason": "caller rejects the crafted length",
-                    "evidence": ["src/1.c:11"],
-                    "gates": gates,
-                    "completeness": STANDARD_COMPLETE,
-                    "stage_markdown": "# 标准验证",
-                })
-            if name.endswith("-2-gate_review"):
-                return _result({
-                    **_phase("gate_review"),
-                    "gates": GATES_PASS,
-                })
-            return _result(_phase(name.rsplit("-", 1)[-1]))
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "deephole_client.fp_check_review.runner.run_opencode_task",
-            new=invoke,
-        ):
-            standard_result = await run_fp_check_review(
-                operation="item",
-                project_path=tmp,
-                work_dir=Path(tmp) / "work",
-                scan_id="scan-1",
-                review_id="review-1",
-                vulnerabilities=[_vulnerability(1)],
-            )
-            deep_result = await run_fp_check_review(
-                operation="item",
-                project_path=tmp,
-                work_dir=Path(tmp) / "work",
-                scan_id="scan-1",
-                review_id="review-1",
-                vulnerabilities=[_vulnerability(2)],
-            )
-
-        self.assertEqual(
-            standard_result["results"][0]["verdict"],
-            "false_positive",
-        )
-        self.assertEqual(
-            deep_result["results"][0]["verdict"],
-            "true_positive",
-        )
-        deep_stages = [
-            "data_flow",
-            "exploitability",
-            "impact",
-            "poc",
-            "devil_advocate",
-            "gate_review",
-        ]
-        self.assertEqual(
-            [
-                name.rsplit("-", 1)[-1]
-                for name in calls
-                if any(name.endswith(f"-{stage}") for stage in deep_stages)
-            ],
-            deep_stages,
-        )
-
-    async def test_incomplete_stage_never_generates_binary_verdict(self) -> None:
-        async def invoke(**kwargs):
-            name = kwargs["task_name"]
-            if name.endswith("-claim_context"):
-                return _result(_claim("deep"))
-            if name.endswith("-data_flow"):
-                return _result({}, status="failure")
-            if name.endswith("-exploit-chain"):
-                return _result({
-                    "complete": True,
-                    "chains": [],
-                    "summary_markdown": "",
-                })
-            return _result(_phase(name.rsplit("-", 1)[-1]))
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "deephole_client.fp_check_review.runner.run_opencode_task",
-            new=invoke,
-        ):
-            result = await run_fp_check_review(
-                operation="item",
-                project_path=tmp,
-                work_dir=Path(tmp) / "work",
-                scan_id="scan-1",
-                review_id="review-2",
-                vulnerabilities=[_vulnerability(4)],
-            )
-
-        self.assertEqual(result["results"], [])
-        self.assertEqual(result["processed"], 1)
-        self.assertEqual(result["unresolved_indices"], [4])
-        self.assertEqual(result["status"], "error")
-        self.assertIn("stage failed", result["error_message"])
-        self.assertEqual(result["summary_markdown"], "")
-
-    async def test_valid_exploit_chain_is_summary_only(self) -> None:
-        async def invoke(**kwargs):
-            return _result({
-                "complete": True,
-                "chains": [{
-                    "title": "combined authorization bypass",
-                    "member_indices": [7, 8],
-                    "reason": "the first issue supplies the second precondition",
-                    "gates": GATES_PASS,
-                }],
-                "summary_markdown": "# 有效攻击链",
-            })
-
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "deephole_client.fp_check_review.runner.run_opencode_task",
-            new=invoke,
-        ):
-            result = await run_fp_check_review(
-                operation="summary",
-                project_path=tmp,
-                work_dir=Path(tmp) / "work",
-                scan_id="scan-1",
-                review_id="review-3",
-                vulnerabilities=[_vulnerability(7), _vulnerability(8)],
-                individual_results=[
-                    {
-                        "vuln_index": 7,
-                        "verdict": "fp",
-                        "reason": "individually blocked",
-                    },
-                    {
-                        "vuln_index": 8,
-                        "verdict": "fp",
-                        "reason": "individually blocked",
-                    },
-                ],
-                unresolved_indices=[],
-            )
-
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result["chains"][0]["member_indices"], [7, 8])
-        self.assertIn("漏洞 #7、漏洞 #8", result["summary_markdown"])
-        self.assertNotIn("results", result)
-
-    async def test_item_uses_tolerant_schema_retry_and_inherited_output(self) -> None:
-        calls: list[dict] = []
-
-        async def invoke(**kwargs):
-            calls.append(kwargs)
+            calls.append(kwargs["task_name"])
             if kwargs["task_name"].endswith("-claim_context"):
-                return _result(_claim("standard"))
-            return _result({
-                "decision": "verdict",
-                "reason": "validated",
-                "evidence": ["src/1.c:11"],
-                "gates": GATES_PASS,
-                "completeness": STANDARD_COMPLETE,
-                "stage_markdown": "# 标准验证",
-            })
+                return _task_result(_claim("standard"))
+            return _task_result(_standard())
 
+        events: list[dict] = []
         with tempfile.TemporaryDirectory() as tmp, patch(
-            "deephole_client.fp_check_review.runner.run_opencode_task",
+            "task_agent.run_opencode_task",
             new=invoke,
         ):
-            result = await run_fp_check_review(
-                operation="item",
-                project_path=tmp,
-                work_dir=Path(tmp) / "work",
-                scan_id="scan-1",
-                review_id="review-4",
-                vulnerabilities=[_vulnerability(1)],
-            )
+            result = await _run(tmp, 3, events.append)
 
         self.assertEqual(result["status"], "success")
-        self.assertTrue(all(
-            call["output_schema"]["additionalProperties"]
-            for call in calls
-        ))
-        self.assertTrue(all(
-            "invalid_json_retry_prompt" in call
-            for call in calls
-        ))
-        self.assertTrue(all("output" not in call for call in calls))
+        self.assertEqual(result["verdict"], "true_positive")
+        self.assertEqual(
+            set(result["stage_outputs"]),
+            {"claim_context", "standard_verification"},
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(event["data"].get("vuln_index") == 3 for event in events))
+
+    async def test_deep_path_runs_declared_stages_and_writes_per_vulnerability_artifacts(self) -> None:
+        async def invoke(**kwargs):
+            stage = kwargs["task_name"].rsplit("-", 1)[-1]
+            if kwargs["task_name"].endswith("-claim_context"):
+                return _task_result(_claim("deep"))
+            return _task_result(_deep_stage(stage))
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "task_agent.run_opencode_task",
+            new=invoke,
+        ):
+            result = await _run(tmp, 4)
+            artifacts = Path(tmp) / "review" / "4" / "artifacts"
+            gate_artifact_exists = (artifacts / "gate_review.json").is_file()
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["verdict"], "true_positive")
+        self.assertEqual(
+            set(result["stage_outputs"]),
+            {
+                "claim_context",
+                "data_flow",
+                "exploitability",
+                "impact",
+                "poc",
+                "devil_advocate",
+                "gate_review",
+            },
+        )
+        self.assertTrue(gate_artifact_exists)
+
+    async def test_incomplete_stage_returns_error_without_batch_fields(self) -> None:
+        async def invoke(**kwargs):
+            if kwargs["task_name"].endswith("-claim_context"):
+                return _task_result(_claim("standard"))
+            return _task_result({}, status="failure")
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "task_agent.run_opencode_task",
+            new=invoke,
+        ):
+            result = await _run(tmp, 5)
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(
+            set(result["stage_outputs"]),
+            {"claim_context", "standard_verification"},
+        )
+        self.assertNotIn("results", result)
+        self.assertNotIn("summary_markdown", result)
+        self.assertNotIn("unresolved_indices", result)
+
+    async def test_removed_batch_arguments_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(TypeError):
+                await run_fp_review(
+                    method_id="fp_check",
+                    project_path=tmp,
+                    code_scan_path=tmp,
+                    work_dir=tmp,
+                    scan_id="scan-1",
+                    review_id="review-1",
+                    vuln_index=0,
+                    vulnerability=_vulnerability(0),
+                    operation="summary",
+                    vulnerabilities=[_vulnerability(0)],
+                )

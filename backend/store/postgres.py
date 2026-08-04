@@ -879,19 +879,11 @@ class PostgresScanStore(SqliteScanStore):
                             WHEN status IN ('pending', 'running') THEN 'error'
                             ELSE status
                         END,
-                        summary_status = CASE
-                            WHEN summary_status = 'running' THEN 'error'
-                            ELSE summary_status
-                        END,
-                        error_message = ?,
-                        summary_error_message = ?
+                        error_message = ?
                     WHERE scan_id IN ({placeholders})
-                      AND (
-                          status IN ('pending', 'running')
-                          OR summary_status = 'running'
-                      )
+                      AND status IN ('pending', 'running')
                     """,
-                    (error_message, error_message, *scan_ids),
+                    (error_message, *scan_ids),
                 )
             self._conn.commit()
         return scan_ids

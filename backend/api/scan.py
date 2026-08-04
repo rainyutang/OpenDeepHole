@@ -28,7 +28,6 @@ from backend.models import (
     AgentFpReviewFinish,
     AgentFpReviewProgress,
     AgentFpReviewResult,
-    AgentFpReviewSummaryFinish,
     AgentFpReviewStageOutput,
     BatchMarkRequest,
     BatchUnmarkRequest,
@@ -36,6 +35,8 @@ from backend.models import (
     CreateScanRequest,
     FeedbackEntry,
     FpReviewJob,
+    FpReviewMethodCatalog,
+    FpReviewMethodSelection,
     FpReviewMethod,
     FpReviewResult,
     FpReviewStatus,
@@ -131,6 +132,73 @@ async def get_mining_engine_catalog(
 ) -> MiningEngineCatalog:
     """Return the mining engines shipped by this repository."""
     return _repository_mining_engine_catalog()
+
+
+def _repository_fp_review_method_catalog() -> FpReviewMethodCatalog:
+    from deephole_client.fp_review import build_fp_review_method_catalog
+
+    return FpReviewMethodCatalog.model_validate(
+        build_fp_review_method_catalog()
+    )
+
+
+@router.get("/api/fp-review-methods", response_model=FpReviewMethodCatalog)
+async def get_fp_review_method_catalog(
+    current_user: User = Depends(get_current_user),
+) -> FpReviewMethodCatalog:
+    """Return repository-owned false-positive review methods."""
+    return _repository_fp_review_method_catalog()
+
+
+def _resolve_fp_review_method(
+    requested: str | None,
+) -> tuple[str, FpReviewMethodSelection]:
+    catalog = _repository_fp_review_method_catalog()
+    available = {item.method_id: item for item in catalog.methods}
+    method_id = str(requested or "").strip()
+    if not method_id:
+        defaults = [item for item in catalog.methods if item.default]
+        if len(defaults) != 1:
+            detail = "; ".join(catalog.errors)
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "FP review method catalog must declare exactly one default"
+                    + (f": {detail}" if detail else "")
+                ),
+            )
+        selected = defaults[0]
+    else:
+        selected = available.get(method_id)
+        if selected is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown FP review method: {method_id}",
+            )
+    selection = FpReviewMethodSelection(
+        method_id=selected.method_id,
+        method_label=selected.label,
+        description=selected.description,
+        stages=selected.stages,
+    )
+    return selected.method_id, selection
+
+
+def _hydrate_fp_review_method_selection(
+    scan: ScanStatus,
+) -> None:
+    """Hydrate legacy scans that predate persisted method metadata."""
+    if scan.fp_review_method_selection is not None:
+        return
+    try:
+        _, selection = _resolve_fp_review_method(scan.fp_review_method)
+    except HTTPException:
+        selection = FpReviewMethodSelection(
+            method_id=scan.fp_review_method,
+            method_label=scan.fp_review_method,
+            stages=[],
+        )
+    scan.fp_review_method_selection = selection
 
 
 def _resolve_scan_mining_engines(
@@ -292,7 +360,7 @@ def _latest_fp_review_result_map(scan_id: str) -> dict[int, FpReviewResult]:
 def _scan_fp_review_settings(
     scan_id: str,
     scan: ScanStatus | None = None,
-) -> tuple[bool, FpReviewMethod]:
+) -> tuple[bool, str]:
     """Return the immutable FP-review settings selected when the scan was created."""
     meta = get_scan_store().get_scan_meta(scan_id)
     if meta is not None:
@@ -301,7 +369,7 @@ def _scan_fp_review_settings(
         return scan.auto_fp_review, scan.fp_review_method
     return (
         get_config().fp_review.auto_on_complete,
-        FpReviewMethod.ADVERSARIAL,
+        FpReviewMethod.ADVERSARIAL.value,
     )
 
 
@@ -365,51 +433,26 @@ def _ensure_fp_review_job_for_scan(
     latest_fp_results = _latest_fp_review_result_map(scan_id)
     ordered = _ordered_fp_review_candidates(scan, latest_fp_results)
     _, method = _scan_fp_review_settings(scan_id, scan)
-    if method == FpReviewMethod.FP_CHECK:
-        unresolved = [
-            item for item in ordered
-            if int(item["index"]) not in latest_fp_results
-        ]
-        confirmed = unresolved or ordered
-        total = len(ordered)
-        processed = (
-            len(ordered) - len(unresolved)
-            if unresolved
-            else 0
-        )
-    else:
-        confirmed = ordered
-        total = len(confirmed)
-        processed = sum(
-            1
-            for item in confirmed
-            if int(item["index"]) in latest_fp_results
-        )
+    unresolved = [
+        item for item in ordered
+        if int(item["index"]) not in latest_fp_results
+    ]
+    confirmed = unresolved or ordered
+    total = len(ordered)
+    processed = len(ordered) - len(unresolved) if unresolved else 0
     if not confirmed:
         return None
 
     job = store.get_fp_review_by_scan(scan_id)
     created = False
-    if (
-        method == FpReviewMethod.FP_CHECK
-        and require_unresolved
-        and not unresolved
-    ) or (
-        method != FpReviewMethod.FP_CHECK
-        and require_unresolved
-        and processed >= len(confirmed)
-    ):
+    if require_unresolved and not unresolved:
         if job is None:
             return None
         return {
             "review_id": job.review_id,
-            "method": method.value,
+            "method": method,
             "total": total,
-            "processed": (
-                len(ordered)
-                if method == FpReviewMethod.FP_CHECK
-                else processed
-            ),
+            "processed": len(ordered),
             "confirmed": [],
             "latest_results": latest_fp_results,
             "created": False,
@@ -419,7 +462,7 @@ def _ensure_fp_review_job_for_scan(
     if job is not None and job.status == FpReviewStatus.CANCELLED and not allow_cancelled:
         return {
             "review_id": job.review_id,
-            "method": method.value,
+            "method": method,
             "total": total,
             "processed": job.processed,
             "confirmed": confirmed,
@@ -427,7 +470,6 @@ def _ensure_fp_review_job_for_scan(
             "created": False,
             "cancelled": True,
         }
-    previous_job = job
     if job is None or (job.status == FpReviewStatus.CANCELLED and allow_cancelled):
         review_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
@@ -436,24 +478,10 @@ def _ensure_fp_review_job_for_scan(
             scan_id,
             total,
             now,
-            method.value,
+            method,
         )
         job = store.get_fp_review_job(review_id)
         created = True
-        if (
-            job is not None
-            and previous_job is not None
-            and method == FpReviewMethod.FP_CHECK
-            and previous_job.summary_markdown.strip()
-        ):
-            # A cancelled Agent task gets a fresh review_id so late callbacks
-            # cannot corrupt the retry. Carry only the last successful summary
-            # presentation forward; the new run will mark it stale below.
-            store.update_fp_review_job(
-                review_id,
-                summary_markdown=previous_job.summary_markdown,
-                summary_output_source=previous_job.summary_output_source,
-            )
     if job is None:
         return None
 
@@ -463,29 +491,19 @@ def _ensure_fp_review_job_for_scan(
         "processed": processed,
         "error_message": "",
     }
-    if method == FpReviewMethod.FP_CHECK:
-        update_values.update({
-            "summary_status": FpReviewStatus.PENDING.value,
-            "summary_error_message": "",
-        })
     store.update_fp_review_job(job.review_id, **update_values)
     if publish_started:
         from backend.sse import publish
         publish(scan_id, "fp_review_started", {
             "review_id": job.review_id,
-            "method": method.value,
+            "method": method,
             "status": FpReviewStatus.RUNNING.value,
             "total": total,
             "processed": processed,
-            "summary_status": (
-                FpReviewStatus.PENDING.value
-                if method == FpReviewMethod.FP_CHECK
-                else None
-            ),
         })
     return {
         "review_id": job.review_id,
-        "method": method.value,
+        "method": method,
         "total": total,
         "processed": processed,
         "confirmed": confirmed,
@@ -533,11 +551,7 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
         # placeholder entry (same shape the SSE stage_output handler builds).
         merged.append(FpReviewResult(
             vuln_index=vuln_index,
-            verdict=(
-                "uncertain"
-                if job.method == FpReviewMethod.FP_CHECK
-                else "tp"
-            ),
+            verdict="uncertain",
             severity="low",
             reason="",
             vulnerability_report="",
@@ -558,10 +572,6 @@ def _merge_latest_fp_review_results(job: FpReviewJob, scan_id: str) -> FpReviewJ
         current_vuln_index=job.current_vuln_index,
         current_vuln_indices=job.current_vuln_indices,
         results=merged,
-        summary_markdown=job.summary_markdown,
-        summary_output_source=job.summary_output_source,
-        summary_status=job.summary_status,
-        summary_error_message=job.summary_error_message,
         error_message=job.error_message,
     )
 
@@ -923,7 +933,9 @@ async def create_agent_scan(
         if body.auto_fp_review is not None
         else get_config().fp_review.auto_on_complete
     )
-    fp_review_method = body.fp_review_method
+    fp_review_method, fp_review_method_selection = _resolve_fp_review_method(
+        body.fp_review_method
+    )
     selected_checkers = checker_names if checker_names is not None else body.checkers
     static_engine_enabled = any(
         item.enabled and item.engine_id == "static_candidate"
@@ -977,6 +989,7 @@ async def create_agent_scan(
         ),
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
+        fp_review_method_selection=fp_review_method_selection,
         product=product,
         validation_environment=validation_environment,
         scan_items=validated_checker_names,
@@ -1006,6 +1019,7 @@ async def create_agent_scan(
         mining_engines=mining_engine_selections,
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
+        fp_review_method_selection=fp_review_method_selection,
         feedback_ids=body.feedback_ids,
         agent_id=agent_id,
         agent_key=selected_agent_key,
@@ -1279,6 +1293,7 @@ async def get_scan_status(
         scan,
         continuable_count=_continuable_task_count(scan, processed_keys),
     )
+    _hydrate_fp_review_method_selection(scan)
     return scan
 
 
@@ -1354,6 +1369,7 @@ async def get_scan_overview_v2(
         scan = reconcile_offline_agent_scan_state(scan_id, scan)
     _apply_task_progress(scan)
     _apply_continue_capability(scan, continuable_count=continuable_count)
+    _hydrate_fp_review_method_selection(scan)
     payload = scan.model_dump(mode="python")
     payload.update({
         "candidates": [],
@@ -1948,27 +1964,36 @@ async def download_report(
     )
 
 
-# Stage key -> Chinese title for the FP-review debate sections.
-_FP_STAGE_TITLES = [
-    ("history_match", "历史/校验匹配 (history_match)"),
-    ("prove_bug", "确认漏洞 (prove_bug)"),
-    ("prove_fp", "证明误报 (prove_fp)"),
-    ("final_judge", "最终裁定 (final_judge)"),
-]
-_FP_CHECK_STAGE_TITLES = [
-    ("claim_context", "主张与上下文"),
-    ("standard_verification", "标准验证"),
-    ("data_flow", "数据流分析"),
-    ("exploitability", "可利用性验证"),
-    ("impact", "影响评估"),
-    ("poc", "PoC 构建"),
-    ("devil_advocate", "反方审查"),
-    ("gate_review", "六道门复核"),
-]
-_FP_REVIEW_STAGE_KEYS = {
-    FpReviewMethod.ADVERSARIAL: {key for key, _ in _FP_STAGE_TITLES},
-    FpReviewMethod.FP_CHECK: {key for key, _ in _FP_CHECK_STAGE_TITLES},
-}
+def _fp_review_stage_titles(scan_id: str | None = None) -> list[tuple[str, str]]:
+    """Return snapshot stage labels, falling back to the repository catalog."""
+    if scan_id:
+        meta = get_scan_store().get_scan_meta(scan_id)
+        selection = (
+            meta.fp_review_method_selection
+            if meta is not None
+            else None
+        )
+        if selection is not None:
+            return [(stage.key, stage.label) for stage in selection.stages]
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for method in _repository_fp_review_method_catalog().methods:
+        for stage in method.stages:
+            if stage.key not in seen:
+                seen.add(stage.key)
+                result.append((stage.key, stage.label))
+    return result
+
+
+def _fp_review_stage_keys_for_scan(scan_id: str, method_id: str) -> set[str]:
+    meta = get_scan_store().get_scan_meta(scan_id)
+    selection = meta.fp_review_method_selection if meta is not None else None
+    if selection is not None and selection.method_id == method_id:
+        return {stage.key for stage in selection.stages}
+    for method in _repository_fp_review_method_catalog().methods:
+        if method.method_id == method_id:
+            return {stage.key for stage in method.stages}
+    return set()
 
 
 def _scan_fp_result_map(scan_id: str) -> dict[int, FpReviewResult]:
@@ -2146,6 +2171,7 @@ def _vuln_report_markdown(
     vuln,
     fp_result: FpReviewResult | None,
     validation: VulnerabilityValidation | None = None,
+    fp_review_stage_titles: list[tuple[str, str]] | None = None,
 ) -> str:
     """Render a single vulnerability (AI analysis + FP-review stages) as Markdown."""
     severity_labels = {
@@ -2280,7 +2306,11 @@ def _vuln_report_markdown(
         if fp_result.reason:
             lines.append(f"- **理由**：{fp_result.reason}")
         lines.append("")
-        for key, title in _FP_STAGE_TITLES + _FP_CHECK_STAGE_TITLES:
+        for key, title in (
+            fp_review_stage_titles
+            if fp_review_stage_titles is not None
+            else _fp_review_stage_titles()
+        ):
             stage_md = (fp_result.stage_outputs or {}).get(key)
             if not stage_md:
                 continue
@@ -2312,7 +2342,13 @@ async def download_vulnerability_report(
     vuln = scan.vulnerabilities[idx]
     fp_map = await run_store_call(get_scan_store(), _scan_fp_result_map, scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
-    markdown = _vuln_report_markdown(idx, vuln, fp_map.get(idx), validation_map.get(idx))
+    markdown = _vuln_report_markdown(
+        idx,
+        vuln,
+        fp_map.get(idx),
+        validation_map.get(idx),
+        _fp_review_stage_titles(scan_id),
+    )
     fname = (
         f"vuln-{idx}-"
         f"{_safe_filename_part(vuln.file or 'unknown')}_"
@@ -2429,7 +2465,12 @@ async def _trigger_vulnerability_validation(
         "product": product,
         "validation_environment": validation_environment,
         "vulnerability": vuln.model_dump(),
-        "report_markdown": _vuln_report_markdown(idx, vuln, fp_map.get(idx)),
+        "report_markdown": _vuln_report_markdown(
+            idx,
+            vuln,
+            fp_map.get(idx),
+            fp_review_stage_titles=_fp_review_stage_titles(scan_id),
+        ),
         "code_graph_mcp": (
             meta.code_graph_mcp.model_dump(mode="json")
             if meta.code_graph_mcp is not None
@@ -2555,10 +2596,7 @@ async def download_report_zip(
     await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
-    fp_map, fp_job = await asyncio.gather(
-        run_store_call(store, _scan_fp_result_map, scan_id),
-        run_store_call(store, "get_fp_review_by_scan", scan_id),
-    )
+    fp_map = await run_store_call(store, _scan_fp_result_map, scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
 
     confirmed = [
@@ -2572,32 +2610,6 @@ async def download_report_zip(
             zf.writestr("README.md", f"# 扫描 {scan_id}\n\n本次扫描没有 AI 确认为问题的漏洞。\n")
         else:
             index_lines = [f"# 扫描 {scan_id} 漏洞报告索引", "", f"共 {len(confirmed)} 个 AI 确认问题：", ""]
-            if fp_job is not None and fp_job.summary_markdown:
-                index_lines.extend([
-                    f"- [{'Trail of Bits fp-check 复核' if fp_job.method == FpReviewMethod.FP_CHECK else '对抗式复核'}批次汇总](fp-review-summary.md)",
-                    "",
-                ])
-                summary_content = fp_job.summary_markdown.rstrip() + "\n"
-                if (
-                    fp_job.method == FpReviewMethod.FP_CHECK
-                    and fp_job.summary_status != FpReviewStatus.COMPLETE
-                ):
-                    summary_state = (
-                        fp_job.summary_status.value
-                        if fp_job.summary_status is not None
-                        else "pending"
-                    )
-                    warning = (
-                        "> 注意：这是上一次成功生成的批次汇总，"
-                        f"当前汇总状态为 `{summary_state}`，内容可能已过期。"
-                    )
-                    if fp_job.summary_error_message:
-                        warning += (
-                            "\n>\n> 最近一次更新失败原因："
-                            + fp_job.summary_error_message
-                        )
-                    summary_content = warning + "\n\n" + summary_content
-                zf.writestr("fp-review-summary.md", summary_content)
             for i, v in confirmed:
                 export_file = v.file or "unknown"
                 export_line = v.line if v.line > 0 else "unknown"
@@ -2611,7 +2623,16 @@ async def download_report_zip(
                     f"{v.file or '未知文件'}:"
                     f"{v.line if v.line > 0 else '未知'}]({entry})"
                 )
-                zf.writestr(entry, _vuln_report_markdown(i, v, fp_map.get(i), validation_map.get(i)))
+                zf.writestr(
+                    entry,
+                    _vuln_report_markdown(
+                        i,
+                        v,
+                        fp_map.get(i),
+                        validation_map.get(i),
+                        _fp_review_stage_titles(scan_id),
+                    ),
+                )
             zf.writestr("README.md", "\n".join(index_lines) + "\n")
     buf.seek(0)
     return Response(
@@ -2968,7 +2989,7 @@ async def _start_fp_review(
         return _fail(400, "No confirmed vulnerabilities to review")
     confirmed = fp_job_info["confirmed"]
     review_id = str(fp_job_info["review_id"])
-    method = FpReviewMethod(str(fp_job_info["method"]))
+    method = str(fp_job_info["method"])
 
     # Update stored agent_id if it changed
     if agent_id != meta.agent_id:
@@ -2994,22 +3015,18 @@ async def _start_fp_review(
         from backend.sse import publish
         publish(scan_id, "fp_review_started", {
             "review_id": review_id,
-            "method": method.value,
+            "method": method,
             "status": "running",
             "total": int(fp_job_info.get("total") or len(confirmed)),
             "processed": int(fp_job_info.get("processed") or 0),
-            "summary_status": (
-                "pending"
-                if method == FpReviewMethod.FP_CHECK
-                else None
-            ),
         })
         ok = await send_agent_command(agent_id, {
             "type": "fp_review",
             "scan_id": scan_id,
             "review_id": review_id,
-            "method": method.value,
+            "method": method,
             "project_path": meta.project_path,
+            "code_scan_path": meta.code_scan_path or meta.project_path,
             "vulnerabilities": confirmed,
             "feedback_entries": feedback_entries,
             "processed_offset": int(fp_job_info.get("processed") or 0),
@@ -3034,7 +3051,7 @@ async def _start_fp_review(
             publish(scan_id, "fp_review_finish", {
                 "review_id": review_id,
                 "status": FpReviewStatus.ERROR.value,
-                "method": method.value,
+                "method": method,
                 "error_message": "Agent not connected",
             })
             return _fail(502, "Agent not connected")
@@ -3046,169 +3063,16 @@ async def _start_fp_review(
             len(confirmed),
         )
 
-    summary_started = None
-    if (
-        method == FpReviewMethod.FP_CHECK
-        and scan.status == ScanItemStatus.COMPLETE
-    ):
-        summary_started = await _start_fp_review_summary(
-            scan_id,
-            server_url,
-            raise_on_error=raise_on_error,
-        )
     return {
         "ok": True,
         "review_id": review_id,
-        "method": method.value,
+        "method": method,
         "status": "running" if dispatched_items else fp_job_info.get("status", "complete"),
         "total": int(fp_job_info.get("total") or len(confirmed)),
         "processed": int(fp_job_info.get("processed") or 0),
         "items_dispatched": dispatched_items,
-        "summary_started": bool(summary_started),
-        "summary_status": (
-            summary_started.get("status")
-            if isinstance(summary_started, dict)
-            else (
-                FpReviewStatus.PENDING.value
-                if method == FpReviewMethod.FP_CHECK
-                else None
-            )
-        ),
     }
 
-
-async def _start_fp_review_summary(
-    scan_id: str,
-    server_url: str,
-    *,
-    raise_on_error: bool = True,
-) -> dict | None:
-    """Start only the independent fp-check chain analysis and summary."""
-    from backend.api.agent import (
-        create_agent_task_runtime_update_payload_async,
-        ensure_agent_accepting_tasks_async,
-        send_agent_command,
-    )
-
-    def _fail(status_code: int, detail: str) -> None:
-        if raise_on_error:
-            raise HTTPException(status_code=status_code, detail=detail)
-        logger.warning("FP review summary for scan %s skipped: %s", scan_id, detail)
-        return None
-
-    store = get_scan_store()
-    loaded = await run_store_call(store, "load_scan", scan_id)
-    scan = _running_scans.get(scan_id) or (loaded[0] if loaded is not None else None)
-    if scan is None:
-        return _fail(404, "Scan not found")
-    if scan.status != ScanItemStatus.COMPLETE:
-        return _fail(409, "跨漏洞攻击链检查只能在扫描完成后启动")
-    job = await run_store_call(store, "get_fp_review_by_scan", scan_id)
-    if job is None or job.method != FpReviewMethod.FP_CHECK:
-        return _fail(404, "No Trail of Bits fp-check review found")
-    if job.status == FpReviewStatus.CANCELLED:
-        return _fail(409, "FP review was cancelled; restart item review first")
-    if job.summary_status == FpReviewStatus.RUNNING:
-        return {
-            "ok": True,
-            "review_id": job.review_id,
-            "status": FpReviewStatus.RUNNING.value,
-            "already_running": True,
-        }
-
-    async def _mark_summary_error(message: str) -> None:
-        await run_store_call(
-            store,
-            "update_fp_review_job",
-            job.review_id,
-            summary_status=FpReviewStatus.ERROR.value,
-            summary_error_message=message,
-        )
-        from backend.sse import publish
-        publish(scan_id, "fp_review_summary_finish", {
-            "review_id": job.review_id,
-            "status": FpReviewStatus.ERROR.value,
-            "error_message": message,
-            "summary_markdown": None,
-            "summary_output_source": None,
-        })
-
-    meta = await run_store_call(store, "get_scan_meta", scan_id)
-    if meta is None:
-        return _fail(404, "Scan not found")
-    try:
-        await ensure_agent_accepting_tasks_async(meta.agent_key)
-    except HTTPException as exc:
-        await _mark_summary_error(str(exc.detail))
-        return _fail(exc.status_code, str(exc.detail))
-    agent_id = await _resolve_scan_agent_id(meta)
-    if agent_id is None:
-        await _mark_summary_error("Agent not connected")
-        return _fail(
-            400,
-            f"扫描关联的 Agent「{meta.agent_name or '未知'}」不在线，请先启动该 Agent",
-        )
-    if agent_id != meta.agent_id:
-        await run_store_call(
-            store,
-            "update_scan_agent",
-            scan_id,
-            agent_id,
-            meta.agent_name,
-            meta.agent_key,
-        )
-    selected_feedback = await run_store_call(
-        store,
-        _selected_feedback_entries,
-        scan_id,
-        meta.feedback_ids,
-    )
-    feedback_entries = [entry.model_dump() for entry in selected_feedback]
-    # Persist the running state before dispatch. A deterministic summary can
-    # finish almost immediately; updating after the WebSocket send could race
-    # with its completion callback and overwrite "complete" with "running".
-    await run_store_call(
-        store,
-        "update_fp_review_job",
-        job.review_id,
-        summary_status=FpReviewStatus.RUNNING.value,
-        summary_error_message="",
-    )
-    from backend.sse import publish
-    publish(scan_id, "fp_review_summary_started", {
-        "review_id": job.review_id,
-        "status": FpReviewStatus.RUNNING.value,
-    })
-    ok = await send_agent_command(agent_id, {
-        "type": "fp_review_summary",
-        "scan_id": scan_id,
-        "review_id": job.review_id,
-        "project_path": meta.project_path,
-        "feedback_entries": feedback_entries,
-        "code_graph_mcp": (
-            meta.code_graph_mcp.model_dump(mode="json")
-            if meta.code_graph_mcp is not None
-            else None
-        ),
-        "agent_runtime_update": await create_agent_task_runtime_update_payload_async(
-            server_url,
-            meta.agent_key,
-        ),
-    })
-    if not ok:
-        await _mark_summary_error("Agent not connected")
-        return _fail(502, "Agent not connected")
-    logger.info(
-        "Independent fp-check summary %s triggered for scan %s",
-        job.review_id,
-        scan_id,
-    )
-    return {
-        "ok": True,
-        "review_id": job.review_id,
-        "status": FpReviewStatus.RUNNING.value,
-        "already_running": False,
-    }
 
 
 @router.post("/api/scan/{scan_id}/fp_review", response_model=dict)
@@ -3222,21 +3086,6 @@ async def trigger_fp_review(
     return await _start_fp_review(scan_id, _server_url_from_request(request), raise_on_error=True)
 
 
-@router.post("/api/scan/{scan_id}/fp_review/summary", response_model=dict)
-async def trigger_fp_review_summary(
-    scan_id: str,
-    request: Request,
-    current_user: User = Depends(get_current_user),
-) -> dict:
-    """Retry only the independent fp-check summary."""
-    await _check_scan_owner(scan_id, current_user)
-    result = await _start_fp_review_summary(
-        scan_id,
-        _server_url_from_request(request),
-        raise_on_error=True,
-    )
-    assert result is not None
-    return result
 
 
 @router.post("/api/scan/{scan_id}/fp_review/stop")
@@ -3256,31 +3105,20 @@ async def stop_fp_review(
         FpReviewStatus.PENDING,
         FpReviewStatus.RUNNING,
     }
-    summary_running = job.summary_status == FpReviewStatus.RUNNING
-    if not item_running and not summary_running:
+    if not item_running:
         return {"ok": True, "review_id": job.review_id}
 
     meta = await run_store_call(store, "get_scan_meta", scan_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    updates: dict = {}
-    if item_running:
-        updates.update({
-            "status": FpReviewStatus.CANCELLED.value,
-            "clear_current_vuln_index": True,
-            "error_message": "用户手动停止",
-        })
-    if summary_running:
-        updates.update({
-            "summary_status": FpReviewStatus.CANCELLED.value,
-            "summary_error_message": "用户手动停止",
-        })
     await run_store_call(
         store,
         "update_fp_review_job",
         job.review_id,
-        **updates,
+        status=FpReviewStatus.CANCELLED.value,
+        clear_current_vuln_index=True,
+        error_message="用户手动停止",
     )
 
     agent_id = await _resolve_scan_agent_id(meta)
@@ -3472,7 +3310,7 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
     from backend.sse import publish
     publish(scan_id, "fp_review_progress", {
         "review_id": body.review_id, "vuln_index": body.vuln_index,
-        "method": job.method.value,
+        "method": job.method,
         "active_indices": body.active_indices,
         "processed": body.processed, "total": job.total,
     })
@@ -3520,21 +3358,10 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
         body.review_id,
         result,
     )
-    if (
-        job.method == FpReviewMethod.FP_CHECK
-        and job.summary_status != FpReviewStatus.RUNNING
-    ):
-        await run_store_call(
-            store,
-            "update_fp_review_job",
-            body.review_id,
-            summary_status=FpReviewStatus.PENDING.value,
-            summary_error_message="",
-        )
     from backend.sse import publish
     publish(scan_id, "fp_review_result", {
         "review_id": body.review_id, "vuln_index": body.vuln_index,
-        "method": job.method.value,
+        "method": job.method,
         "verdict": body.verdict, "severity": severity, "reason": body.reason,
         "vulnerability_report": result.vulnerability_report,
         "stage_outputs": result.stage_outputs,
@@ -3567,7 +3394,7 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
             error_message="",
         )
         logger.info("FP review %s resumed from Agent stage output", body.review_id)
-    if body.stage not in _FP_REVIEW_STAGE_KEYS[job.method]:
+    if body.stage not in _fp_review_stage_keys_for_scan(scan_id, job.method):
         raise HTTPException(status_code=400, detail="Invalid FP review stage")
     now = datetime.now(timezone.utc).isoformat()
     await run_store_call(
@@ -3583,7 +3410,7 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
     from backend.sse import publish
     publish(scan_id, "fp_review_stage_output", {
         "review_id": body.review_id,
-        "method": job.method.value,
+        "method": job.method,
         "vuln_index": body.vuln_index,
         "stage": body.stage,
         "markdown": body.markdown,
@@ -3602,95 +3429,23 @@ async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dic
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
-    updates: dict = {
-        "status": body.status,
-        "clear_current_vuln_index": True,
-        "error_message": body.error_message or "",
-    }
-    # Backward compatibility for an older batch fp-check Agent. Empty legacy
-    # fields must never erase a separately persisted successful summary.
-    if body.summary_markdown.strip():
-        updates.update({
-            "summary_markdown": body.summary_markdown,
-            "summary_output_source": body.summary_output_source,
-            "summary_status": FpReviewStatus.COMPLETE.value,
-            "summary_error_message": "",
-        })
     await run_store_call(
         store,
         "update_fp_review_job",
         body.review_id,
-        **updates,
+        status=body.status,
+        clear_current_vuln_index=True,
+        error_message=body.error_message or "",
     )
     from backend.sse import publish
     publish(scan_id, "fp_review_finish", {
         "review_id": body.review_id, "status": body.status,
-        "method": job.method.value,
+        "method": job.method,
         "error_message": body.error_message,
     })
     logger.info("FP review %s finished with status %s", body.review_id, body.status)
     return {"ok": True}
 
-
-@router.post("/api/scan/{scan_id}/fp_review/summary/finish")
-async def agent_fp_review_summary_finish(
-    scan_id: str,
-    body: AgentFpReviewSummaryFinish,
-) -> dict:
-    """Agent completes the independent fp-check summary lifecycle."""
-    store = get_scan_store()
-    job = await run_store_call(store, "get_fp_review_job", body.review_id)
-    if (
-        job is None
-        or job.scan_id != scan_id
-        or job.method != FpReviewMethod.FP_CHECK
-    ):
-        raise HTTPException(status_code=404, detail="fp-check review not found")
-    if (
-        job.summary_status == FpReviewStatus.CANCELLED
-        and body.status != FpReviewStatus.CANCELLED.value
-    ):
-        return {"ok": True}
-    updates: dict = {
-        "summary_status": body.status,
-        "summary_error_message": body.error_message or "",
-    }
-    if (
-        body.status == FpReviewStatus.COMPLETE.value
-        and body.summary_markdown.strip()
-    ):
-        updates.update({
-            "summary_markdown": body.summary_markdown,
-            "summary_output_source": body.summary_output_source,
-        })
-    await run_store_call(
-        store,
-        "update_fp_review_job",
-        body.review_id,
-        **updates,
-    )
-    from backend.sse import publish
-    publish(scan_id, "fp_review_summary_finish", {
-        "review_id": body.review_id,
-        "status": body.status,
-        "error_message": body.error_message,
-        "summary_markdown": (
-            body.summary_markdown
-            if body.status == FpReviewStatus.COMPLETE.value
-            else None
-        ),
-        "summary_output_source": (
-            body.summary_output_source.model_dump()
-            if body.status == FpReviewStatus.COMPLETE.value
-            else None
-        ),
-    })
-    logger.info(
-        "FP review summary %s finished with status %s",
-        body.review_id,
-        body.status,
-    )
-    return {"ok": True}
 
 
 @router.put("/api/scan/{scan_id}/feedback")
@@ -3796,36 +3551,23 @@ async def get_fp_review_skill(
     """Return the FP review skill content, merged with user feedback for this scan."""
     await _check_scan_owner(scan_id, current_user)
     meta = await run_store_call(get_scan_store(), "get_scan_meta", scan_id)
-    method = (
+    method_id = (
         meta.fp_review_method
         if meta is not None
-        else FpReviewMethod.ADVERSARIAL
+        else FpReviewMethod.ADVERSARIAL.value
     )
-    package_root = Path(__file__).resolve().parent.parent.parent / "deephole_client"
-    if method == FpReviewMethod.FP_CHECK:
-        skills_dir = package_root / "fp_check_review" / "skills" / "fp-check"
-        skill_paths = [
-            ("Trail of Bits fp-check 复核", skills_dir / "SKILL.md"),
-            ("标准验证", skills_dir / "references" / "standard-verification.md"),
-            ("深度验证", skills_dir / "references" / "deep-verification.md"),
-            ("六道门复核", skills_dir / "references" / "gate-reviews.md"),
-            ("漏洞类别验证", skills_dir / "references" / "bug-class-verification.md"),
-            ("误报模式", skills_dir / "references" / "false-positive-patterns.md"),
-            ("证据模板", skills_dir / "references" / "evidence-templates.md"),
-            ("数据流分析器", skills_dir / "agents" / "data-flow-analyzer.md"),
-            ("可利用性验证器", skills_dir / "agents" / "exploitability-verifier.md"),
-            ("PoC 构建器", skills_dir / "agents" / "poc-builder.md"),
-        ]
-    else:
-        skills_dir = package_root / "fp_review" / "skills"
-        skill_paths = [
-            ("prove-bug", skills_dir / "prove_bug.md"),
-            ("prove-fp", skills_dir / "prove_fp.md"),
-            ("final-judge", skills_dir / "final_judge.md"),
-        ]
-    missing = [path.name for _, path in skill_paths if not path.is_file()]
-    if missing:
-        raise HTTPException(status_code=404, detail=f"FP review skill not found: {', '.join(missing)}")
+    from deephole_client.fp_review import load_fp_review_methods
+
+    loaded = load_fp_review_methods().get(method_id)
+    if loaded is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"FP review method not found: {method_id}",
+        )
+    skill_paths = [
+        (document.label, document.path)
+        for document in loaded.manifest.documents
+    ]
 
     # Merge only feedback entries selected for this scan.
     all_fb: list[FeedbackEntry] = await run_store_call(

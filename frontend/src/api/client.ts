@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, OpenCodeTokenUsage, ScanCandidatePage, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, ValidationTarget, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, OpenCodeTokenUsage, ScanCandidatePage, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, ValidationTarget, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -773,6 +773,11 @@ export async function getMiningEngineCatalog(): Promise<MiningEngineCatalog> {
   return data;
 }
 
+export async function getFpReviewMethodCatalog(): Promise<FpReviewMethodCatalog> {
+  const { data } = await api.get<FpReviewMethodCatalog>("/api/fp-review-methods");
+  return data;
+}
+
 export async function getAgentValidationEnvironments(agentKey: string, product: string): Promise<string[]> {
   const { data } = await api.get<{ validation_environments: string[] }>(
     `/api/agent-configs/${agentKey}/validation-environments`,
@@ -799,7 +804,6 @@ export async function triggerFpReview(scanId: string): Promise<{
   total?: number;
   processed?: number;
   method?: FpReviewJob["method"];
-  summary_status?: FpReviewJob["summary_status"];
 }> {
   if (isPublicScan(scanId)) {
     const { data } = await api.post(publicScanPath("/fp_review"), null, { params: publicParams() });
@@ -815,24 +819,6 @@ export async function stopFpReview(scanId: string): Promise<{ ok: boolean; revie
     return data;
   }
   const { data } = await api.post(`/api/scan/${scanId}/fp_review/stop`);
-  return data;
-}
-
-export async function triggerFpReviewSummary(scanId: string): Promise<{
-  ok: boolean;
-  review_id: string;
-  status: FpReviewJob["status"];
-  already_running?: boolean;
-}> {
-  if (isPublicScan(scanId)) {
-    const { data } = await api.post(
-      publicScanPath("/fp_review/summary"),
-      null,
-      { params: publicParams() },
-    );
-    return data;
-  }
-  const { data } = await api.post(`/api/scan/${scanId}/fp_review/summary`);
   return data;
 }
 

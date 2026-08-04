@@ -223,6 +223,7 @@ async def _report_process_vulnerabilities(
                     method=str(fp_info.get("method") or "adversarial"),
                     vulnerability=payload,
                     project_path=str(project_path),
+                    code_scan_path=str(code_scan_path),
                     feedback_entries=feedback_entries,
                     processed_offset=int(fp_info.get("processed") or 0),
                     code_graph_mcp=code_graph_mcp,

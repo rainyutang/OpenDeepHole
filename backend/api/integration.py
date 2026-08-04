@@ -26,7 +26,6 @@ from backend.models import (
     FeedbackEntry,
     FeedbackUpdateRequest,
     FpReviewJob,
-    FpReviewMethod,
     HistoryPattern,
     MarkRequest,
     ScanStatus,
@@ -53,7 +52,7 @@ class IntegrationScanRequest(BaseModel):
     product: str = ""
     validation_environment: str = ""
     auto_fp_review: bool | None = None
-    fp_review_method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
+    fp_review_method: str | None = None
     agent_config: AgentRemoteConfig = Field(default_factory=AgentRemoteConfig)
     code_graph_mcp: AgentMcpConfig | None = None
 
@@ -487,19 +486,6 @@ async def stop_public_fp_review(
     current_user: User = Depends(_public_user_dependency),
 ) -> dict:
     return await scan_api.stop_fp_review(scan_id, current_user)
-
-
-@router.post("/api/public/scans/{scan_id}/fp_review/summary", response_model=dict)
-async def trigger_public_fp_review_summary(
-    scan_id: str,
-    request: Request,
-    current_user: User = Depends(_public_user_dependency),
-) -> dict:
-    return await scan_api.trigger_fp_review_summary(
-        scan_id,
-        request,
-        current_user,
-    )
 
 
 @router.get("/api/public/scans/{scan_id}/fp_review", response_model=FpReviewJob)

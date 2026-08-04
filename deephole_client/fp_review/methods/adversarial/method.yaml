@@ -1,0 +1,22 @@
+label: 对抗式复核
+description: 通过历史匹配、正报论证、误报论证和最终裁决逐项复核已确认问题。
+default: true
+max_concurrency: 1
+stages:
+  - key: history_match
+    label: 历史/校验匹配
+  - key: prove_bug
+    label: 确认漏洞
+  - key: prove_fp
+    label: 证明误报
+  - key: final_judge
+    label: 最终裁定
+documents:
+  - label: 历史/校验匹配
+    path: skills/history_match.md
+  - label: 确认漏洞
+    path: skills/prove_bug.md
+  - label: 证明误报
+    path: skills/prove_fp.md
+  - label: 最终裁定
+    path: skills/final_judge.md

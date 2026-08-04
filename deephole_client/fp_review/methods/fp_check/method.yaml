@@ -1,0 +1,42 @@
+label: Trail of Bits fp-check 复核
+description: 对单个确认问题执行主张重述、标准或深度验证以及六道门证据复核。
+default: false
+max_concurrency: 4
+stages:
+  - key: claim_context
+    label: 主张与上下文
+  - key: standard_verification
+    label: 标准验证
+  - key: data_flow
+    label: 数据流分析
+  - key: exploitability
+    label: 可利用性验证
+  - key: impact
+    label: 影响评估
+  - key: poc
+    label: PoC 构建
+  - key: devil_advocate
+    label: 反方审查
+  - key: gate_review
+    label: 六道门复核
+documents:
+  - label: Trail of Bits fp-check 复核
+    path: skills/fp-check/SKILL.md
+  - label: 标准验证
+    path: skills/fp-check/references/standard-verification.md
+  - label: 深度验证
+    path: skills/fp-check/references/deep-verification.md
+  - label: 六道门复核
+    path: skills/fp-check/references/gate-reviews.md
+  - label: 漏洞类别验证
+    path: skills/fp-check/references/bug-class-verification.md
+  - label: 误报模式
+    path: skills/fp-check/references/false-positive-patterns.md
+  - label: 证据模板
+    path: skills/fp-check/references/evidence-templates.md
+  - label: 数据流分析器
+    path: skills/fp-check/agents/data-flow-analyzer.md
+  - label: 可利用性验证器
+    path: skills/fp-check/agents/exploitability-verifier.md
+  - label: PoC 构建器
+    path: skills/fp-check/agents/poc-builder.md

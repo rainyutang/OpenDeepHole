@@ -214,6 +214,35 @@ class MiningEngineCatalog(BaseModel):
     updated_at: str = ""
 
 
+class FpReviewStageConfig(BaseModel):
+    key: str
+    label: str
+
+
+class FpReviewMethodCatalogItem(BaseModel):
+    method_id: str
+    label: str
+    description: str
+    default: bool = False
+    max_concurrency: int = 1
+    stages: list[FpReviewStageConfig] = Field(default_factory=list)
+
+
+class FpReviewMethodCatalog(BaseModel):
+    methods: list[FpReviewMethodCatalogItem] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    updated_at: str = ""
+
+
+class FpReviewMethodSelection(BaseModel):
+    """Immutable method metadata captured when a scan is created."""
+
+    method_id: str
+    method_label: str
+    description: str = ""
+    stages: list[FpReviewStageConfig] = Field(default_factory=list)
+
+
 # --- API request/response models ---
 
 class CheckerInfo(BaseModel):
@@ -572,7 +601,8 @@ class ScanStatus(BaseModel):
     threat_analysis_enabled: bool = False
     threat_analysis_run: ThreatAnalysisRunStatus | None = None
     auto_fp_review: bool = True
-    fp_review_method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
+    fp_review_method: str = FpReviewMethod.ADVERSARIAL.value
+    fp_review_method_selection: FpReviewMethodSelection | None = None
     product: str = ""
     validation_environment: str = ""
     scan_items: list[str] = []
@@ -1253,7 +1283,7 @@ class CreateScanRequest(BaseModel):
     feedback_ids: list[str] = []
     code_graph_mcp: AgentMcpConfig | None = None
     auto_fp_review: bool | None = None
-    fp_review_method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
+    fp_review_method: str | None = None
 
 
 class ValidationTarget(BaseModel):
@@ -1287,7 +1317,8 @@ class ScanMeta(BaseModel):
     code_scan_path: str = ""
     scan_name: str = ""
     auto_fp_review: bool = True
-    fp_review_method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
+    fp_review_method: str = FpReviewMethod.ADVERSARIAL.value
+    fp_review_method_selection: FpReviewMethodSelection | None = None
     product: str = ""
     validation_environment: str = ""
     user_id: str = ""
@@ -1462,7 +1493,7 @@ class FpReviewJob(BaseModel):
     """A false-positive review job for a scan."""
     review_id: str
     scan_id: str
-    method: FpReviewMethod = FpReviewMethod.ADVERSARIAL
+    method: str = FpReviewMethod.ADVERSARIAL.value
     status: FpReviewStatus
     created_at: str
     total: int = 0
@@ -1470,10 +1501,6 @@ class FpReviewJob(BaseModel):
     current_vuln_index: int | None = None
     current_vuln_indices: list[int] = []
     results: list[FpReviewResult] = []
-    summary_markdown: str = ""
-    summary_output_source: OutputSource = Field(default_factory=OutputSource)
-    summary_status: FpReviewStatus | None = None
-    summary_error_message: str | None = None
     error_message: str | None = None
 
 
@@ -1519,16 +1546,3 @@ class AgentFpReviewFinish(BaseModel):
     review_id: str
     status: str        # "complete" | "error" | "cancelled"
     error_message: str | None = None
-    # Kept for compatibility with older Agents. New fp-check Agents publish
-    # summaries through AgentFpReviewSummaryFinish instead.
-    summary_markdown: str = ""
-    summary_output_source: OutputSource = Field(default_factory=OutputSource)
-
-
-class AgentFpReviewSummaryFinish(BaseModel):
-    """Sent by the agent when an independent fp-check summary run finishes."""
-    review_id: str
-    status: str        # "complete" | "error" | "cancelled"
-    error_message: str | None = None
-    summary_markdown: str = ""
-    summary_output_source: OutputSource = Field(default_factory=OutputSource)
