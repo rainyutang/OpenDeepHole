@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import { getScanStatus, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
@@ -421,7 +421,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [activeEngineId, setActiveEngineId] = useState("");
   const [stopping, setStopping] = useState(false);
   const [continuing, setContinuing] = useState(false);
-  const [downloadingReport, setDownloadingReport] = useState(false);
   const [exportingZip, setExportingZip] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [modelPoolOpen, setModelPoolOpen] = useState(false);
@@ -948,27 +947,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     }
   };
 
-  const handleDownloadReport = async () => {
-    if (!scan) return;
-    setDownloadingReport(true);
-    try {
-      const blob = await downloadScanReport(scan.scan_id);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `report-${scan.scan_id}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "未知错误";
-      alert(`下载 CSV 失败：${msg}`);
-    } finally {
-      setDownloadingReport(false);
-    }
-  };
-
   const handleExportZip = async () => {
     if (!scan) return;
     setExportingZip(true);
@@ -1167,14 +1145,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const hasMoreDetailPages = Boolean(
     scan.detail_pages && Object.values(scan.detail_pages).some((value) => value != null),
   );
-  const issuesView = scan.vulnerabilities.length === 0 && isDone ? (
-    <div className="flex items-center justify-center h-64 text-slate-400">
-      <div className="text-center">
-        <p className="text-lg font-medium">未发现漏洞</p>
-        <p className="text-sm mt-1 text-slate-500">当前扫描没有可展示的问题</p>
-      </div>
-    </div>
-  ) : (
+  const issuesView = (
     <VulnerabilityList
       scanId={scanId}
       vulnerabilities={scan.vulnerabilities}
@@ -1190,6 +1161,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       validatingIndices={launchingValidations}
       stoppingValidationIndices={stoppingValidations}
       agentOnline={!!scan.agent_online}
+      enableCsvExport
       onTriggerValidation={handleTriggerValidation}
       onStopValidation={handleStopValidation}
       onFeedbackCreated={addSelectedFeedbackIds}
@@ -1374,15 +1346,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed rounded-lg transition-colors"
               >
                 {exportingZip ? "导出中..." : "导出报告"}
-              </button>
-            )}
-            {isDone && (
-              <button
-                onClick={handleDownloadReport}
-                disabled={downloadingReport}
-                className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed rounded-lg transition-colors"
-              >
-                {downloadingReport ? "下载中..." : "下载 CSV"}
               </button>
             )}
             {isRunning && (

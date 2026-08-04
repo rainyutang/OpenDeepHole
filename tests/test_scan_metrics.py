@@ -1,10 +1,31 @@
 import unittest
 
-from backend.models import Vulnerability
-from backend.scan_metrics import calculate_issue_metrics
+from backend.models import FpReviewResult, Vulnerability
+from backend.scan_metrics import calculate_issue_metrics, is_effective_fp_review_result
 
 
 class ScanMetricsTests(unittest.TestCase):
+    def test_effective_fp_result_requires_a_final_conclusion(self) -> None:
+        base = {
+            "vuln_index": 0,
+            "verdict": "tp",
+            "severity": "high",
+            "created_at": "2026-08-04T00:00:00+00:00",
+        }
+
+        self.assertFalse(is_effective_fp_review_result(FpReviewResult(
+            **base,
+            reason="",
+        )))
+        self.assertFalse(is_effective_fp_review_result(FpReviewResult(
+            **base,
+            reason="Review incomplete: no result",
+        )))
+        self.assertTrue(is_effective_fp_review_result(FpReviewResult(
+            **base,
+            reason="reachable",
+        )))
+
     def test_pending_analysis_is_not_counted_as_human_verdict(self) -> None:
         metrics = calculate_issue_metrics(
             [

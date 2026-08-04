@@ -68,8 +68,10 @@ def latest_fp_review_result_map(
 
 
 def is_effective_fp_review_result(result: FpReviewResult) -> bool:
-    """Return True for actual tp/fp conclusions, excluding legacy no-result placeholders."""
+    """Return True for actual tp/fp conclusions with usable final output."""
     if result.verdict not in {"tp", "fp"}:
+        return False
+    if not (result.reason or result.vulnerability_report):
         return False
     return not (result.reason or "").startswith(FP_REVIEW_NO_RESULT_REASON)
 

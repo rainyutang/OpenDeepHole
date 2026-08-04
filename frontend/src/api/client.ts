@@ -398,15 +398,41 @@ export async function stopScan(scanId: string): Promise<void> {
   await api.post(`/api/scan/${scanId}/stop`);
 }
 
-export async function downloadScanReport(scanId: string): Promise<Blob> {
+export type ReportValidationState = "unverified" | "running" | "verified";
+export type ReportFpReviewState = "no_conclusion" | "tp" | "fp";
+
+export interface ScanReportFilters {
+  showAll: boolean;
+  severity?: string;
+  vulnType?: string;
+  engineId?: string;
+  validationState?: ReportValidationState;
+  fpReviewState?: ReportFpReviewState;
+}
+
+function scanReportParams(filters?: ScanReportFilters): Record<string, string | boolean> | undefined {
+  if (!filters) return undefined;
+  return {
+    filtered: true,
+    show_all: filters.showAll,
+    ...(filters.severity ? { severity: filters.severity } : {}),
+    ...(filters.vulnType ? { vuln_type: filters.vulnType } : {}),
+    ...(filters.engineId ? { engine_id: filters.engineId } : {}),
+    ...(filters.validationState ? { validation_state: filters.validationState } : {}),
+    ...(filters.fpReviewState ? { fp_review_state: filters.fpReviewState } : {}),
+  };
+}
+
+export async function downloadScanReport(scanId: string, filters?: ScanReportFilters): Promise<Blob> {
+  const params = scanReportParams(filters);
   if (isPublicScan(scanId)) {
     const { data } = await api.get<Blob>(
       publicScanPath("/report"),
-      { params: publicParams(), responseType: "blob" },
+      { params: { ...(publicParams() ?? {}), ...(params ?? {}) }, responseType: "blob" },
     );
     return data;
   }
-  const { data } = await api.get<Blob>(`/api/scan/${scanId}/report`, { responseType: "blob" });
+  const { data } = await api.get<Blob>(`/api/scan/${scanId}/report`, { params, responseType: "blob" });
   return data;
 }
 

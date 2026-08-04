@@ -15,7 +15,7 @@ import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -63,6 +63,7 @@ from backend.models import (
     UnmarkRequest,
     UpdateScanValidationTargetRequest,
     User,
+    Vulnerability,
     VulnerabilityPage,
     VulnerabilityPageItem,
     VulnerabilityValidation,
@@ -72,6 +73,7 @@ from backend.feedback_format import build_feedback_section
 from backend.scan_metrics import (
     calculate_issue_metrics,
     is_effective_fp_review_result,
+    is_llm_issue,
     latest_fp_review_result_map,
 )
 from backend.store import get_scan_store
@@ -1932,6 +1934,14 @@ async def delete_scan(
 async def download_report(
     scan_id: str,
     current_user: User = Depends(get_current_user),
+    *,
+    filtered: bool = False,
+    show_all: bool = False,
+    severity: str | None = None,
+    vuln_type: str | None = None,
+    engine_id: str | None = None,
+    validation_state: Literal["unverified", "running", "verified"] | None = None,
+    fp_review_state: Literal["no_conclusion", "tp", "fp"] | None = None,
 ) -> Response:
     """Download the scan results as a CSV report."""
     await _check_scan_owner(scan_id, current_user)
@@ -1939,6 +1949,7 @@ async def download_report(
     buf = io.StringIO()
     writer = csv.writer(buf)
     fp_map = await run_store_call(get_scan_store(), _scan_fp_result_map, scan_id)
+    validation_map = {item.vuln_index: item for item in scan.validations}
     writer.writerow([
         "engine_id", "engine_label", "file", "line", "function",
         "vuln_type", "severity", "confirmed",
@@ -1946,7 +1957,30 @@ async def download_report(
         "match_type", "match_reference", "variant_of",
         "description", "ai_analysis",
     ])
-    for i, v in enumerate(scan.vulnerabilities):
+    indexed_vulnerabilities = list(enumerate(scan.vulnerabilities))
+    if filtered:
+        indexed_vulnerabilities = [
+            (index, vuln)
+            for index, vuln in indexed_vulnerabilities
+            if _matches_report_filters(
+                vuln,
+                fp_map.get(index),
+                validation_map.get(index),
+                show_all=show_all,
+                severity=severity,
+                vuln_type=vuln_type,
+                engine_id=engine_id,
+                validation_state=validation_state,
+                fp_review_state=fp_review_state,
+            )
+        ]
+        indexed_vulnerabilities.sort(
+            key=lambda item: (
+                item[1].audit_index if item[1].audit_index is not None else item[0],
+                item[0],
+            )
+        )
+    for i, v in indexed_vulnerabilities:
         fp = fp_map.get(i)
         writer.writerow([
             v.engine_id, v.engine_label, v.file, v.line, v.function,
@@ -1962,6 +1996,74 @@ async def download_report(
         media_type="text/csv; charset=utf-8-sig",
         headers={"Content-Disposition": f'attachment; filename="report-{scan_id}.csv"'},
     )
+
+
+def _report_validation_state(
+    validation: VulnerabilityValidation | None,
+) -> Literal["unverified", "running", "verified"]:
+    if validation is None:
+        return "unverified"
+    if validation.running or validation.status in {"queued", "running"}:
+        return "running"
+    if validation.status in {
+        "verified",
+        "success",
+        "failed",
+        "error",
+        "timeout",
+        "cancelled",
+        "skipped",
+    }:
+        return "verified"
+    return "unverified"
+
+
+def _report_fp_review_state(
+    result: FpReviewResult | None,
+) -> Literal["no_conclusion", "tp", "fp"]:
+    if result is None or not is_effective_fp_review_result(result):
+        return "no_conclusion"
+    return "fp" if result.verdict == "fp" else "tp"
+
+
+def _matches_report_filters(
+    vuln: Vulnerability,
+    fp_result: FpReviewResult | None,
+    validation: VulnerabilityValidation | None,
+    *,
+    show_all: bool,
+    severity: str | None,
+    vuln_type: str | None,
+    engine_id: str | None,
+    validation_state: Literal["unverified", "running", "verified"] | None,
+    fp_review_state: Literal["no_conclusion", "tp", "fp"] | None,
+) -> bool:
+    llm_issue = is_llm_issue(vuln)
+    fp_non_problem = (
+        llm_issue
+        and _report_fp_review_state(fp_result) == "fp"
+    )
+    problem = llm_issue and not fp_non_problem
+
+    if not show_all and not (problem or fp_non_problem):
+        return False
+    if severity and vuln.severity != severity:
+        return False
+    if vuln_type and vuln.vuln_type != vuln_type:
+        return False
+    effective_engine_id = vuln.engine_id or (
+        "threat_audit" if vuln.analysis_source == "threat_audit" else "static_candidate"
+    )
+    if engine_id and effective_engine_id != engine_id:
+        return False
+    if fp_review_state and _report_fp_review_state(fp_result) != fp_review_state:
+        return False
+    if validation_state:
+        if not problem:
+            return False
+        if _report_validation_state(validation) != validation_state:
+            return False
+    return True
 
 
 def _fp_review_stage_titles(scan_id: str | None = None) -> list[tuple[str, str]]:
