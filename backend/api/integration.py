@@ -204,16 +204,32 @@ async def _sync_agent_config(agent_id: str, config: AgentRemoteConfig) -> None:
     from backend.api import agent as agent_api
 
     agent_api._validate_managed_config(config)
+    if not agent_api.agent_config_has_explicit_model(config):
+        raise HTTPException(
+            status_code=400,
+            detail="所选客户端尚未配置启用的显式模型，请先完成客户端模型配置",
+        )
     agent = agent_api._registered_agents.get(agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    agent_api._agent_configs[agent.name] = config
     ok = await agent_api.send_agent_command(
         agent_id,
         {"type": "config", "config": config.model_dump()},
     )
     if not ok:
         raise HTTPException(status_code=502, detail="Agent not connected")
+    agent_api._agent_configs[agent.name] = config
+    if agent.agent_key:
+        agent_api._agent_configs[agent.agent_key] = config
+        store = get_scan_store()
+        record = await run_store_call(store, "get_agent_record", agent.agent_key)
+        if record is not None:
+            await run_store_call(
+                store,
+                "update_agent_config_record",
+                agent.agent_key,
+                config.model_dump_json(),
+            )
 
 
 def _public_user_model(meta, owner) -> User:

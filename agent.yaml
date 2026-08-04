@@ -1,6 +1,6 @@
 # OpenDeepHole Agent bootstrap and managed configuration.
 # server_url / agent_name / owner_token are local-only; the remaining v4
-# sections are managed by the Web "Agent 配置" page after first connection.
+# sections are managed by the Web "客户端配置" page after first connection.
 
 server_url: "http://your-server:8000"
 agent_name: ""
@@ -8,8 +8,6 @@ owner_token: ""
 checkers: []
 
 schema_version: 4
-opencode_config: |
-  {}
 base:
   tool: "opencode"
   executable: "opencode"
@@ -20,29 +18,7 @@ base:
 model_pool:
   global_concurrency: 4
   # A scan cannot start until at least one enabled row has an explicit model.
-  models:
-  - capability: high
-    enabled: false
-    executable: ''
-    id: deepseek/deepseek-v4-pro
-    max_concurrency: 1
-    max_retries: null
-    model: deepseek/deepseek-v4-pro
-    time_windows: []
-    timeout: null
-    tool: ''
-    weight: 1.0
-  - capability: high
-    enabled: true
-    executable: ''
-    id: deepseek/deepseek-v4-flash
-    max_concurrency: 1
-    max_retries: null
-    model: deepseek/deepseek-v4-flash
-    time_windows: []
-    timeout: null
-    tool: ''
-    weight: 1.0
+  models: []
 
 threat_analysis:
   enabled: true

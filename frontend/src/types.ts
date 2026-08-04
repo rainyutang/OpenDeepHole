@@ -634,6 +634,7 @@ export interface AgentInfo {
   runtime_update_target_hash?: string;
   runtime_update_error?: string;
   accepting_tasks?: boolean;
+  has_explicit_model: boolean;
 }
 
 export interface AgentRuntimeManifest {
@@ -774,7 +775,6 @@ export interface MiningEngineCatalog {
 
 export interface AgentRemoteConfig {
   schema_version: 4;
-  opencode_config: string;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;
@@ -823,64 +823,6 @@ export interface AgentMcpStatusResponse {
   agent_key: string;
   online: boolean;
   product_info: AgentMcpTargetStatus;
-}
-
-export type AgentOpenCodeRuntimeSource = "live" | "snapshot" | "none";
-
-export type AgentOpenCodeConfigRisk = "pass" | "warning" | "high" | "unknown";
-
-export interface AgentOpenCodeRiskFinding {
-  level: "warning" | "high" | "unknown" | string;
-  code: string;
-  message: string;
-}
-
-export interface AgentOpenCodeModelRuntimeStatus {
-  model: string;
-  provider_id: string;
-  model_id: string;
-  name: string;
-  resolved: boolean;
-  limit: {
-    context: number | null;
-    input: number | null;
-    output: number | null;
-  };
-  compaction: {
-    auto: boolean | null;
-    prune: boolean | null;
-    reserved: number | null;
-    effective_reserved: number | null;
-  };
-  estimated_compaction_threshold: number | null;
-  risk: AgentOpenCodeConfigRisk;
-  findings: AgentOpenCodeRiskFinding[];
-}
-
-export interface AgentOpenCodeRuntimeDiagnostics {
-  available: boolean;
-  current: boolean;
-  serve_version: string;
-  error: string;
-  models: AgentOpenCodeModelRuntimeStatus[];
-}
-
-export interface AgentOpenCodeRuntimeConfig {
-  agent_key: string;
-  online: boolean;
-  exists: boolean;
-  source: AgentOpenCodeRuntimeSource;
-  content: string;
-  redacted: boolean;
-  path: string;
-  captured_at: string;
-  modified_at: string;
-  sha256: string;
-  size_bytes: number;
-  runtime_state: AgentMcpRuntimeState;
-  active_sessions: number;
-  warning: string;
-  diagnostics: AgentOpenCodeRuntimeDiagnostics;
 }
 
 export interface AgentOpenCodeModelListItem {
@@ -955,7 +897,7 @@ export interface FpReviewJob {
   error_message: string | null;
 }
 
-// --- Admin dashboard ---
+// --- Caller-scoped result dashboard ---
 
 export interface CheckerScanDashboardStats {
   scan_id: string;
@@ -1016,7 +958,29 @@ export interface CheckerDashboardSummary {
   ticket_accuracy: number | null;
 }
 
+export interface CheckerDashboardAgentTokenUsage {
+  agent_key: string;
+  agent_name: string;
+  machine_name: string;
+  ip: string;
+  owner_user_id: string;
+  owner_username: string;
+  scan_count: number;
+  tracked_scan_count: number;
+  usage: OpenCodeTokenUsage;
+}
+
+export interface CheckerDashboardTokenUsage {
+  scan_count: number;
+  tracked_scan_count: number;
+  usage: OpenCodeTokenUsage;
+  agents: CheckerDashboardAgentTokenUsage[];
+}
+
 export interface CheckerDashboardResponse {
   summary: CheckerDashboardSummary;
   checkers: CheckerDashboardStats[];
+  products: string[];
+  has_unconfigured_product: boolean;
+  token_usage: CheckerDashboardTokenUsage;
 }

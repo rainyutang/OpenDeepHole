@@ -31,7 +31,6 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.opencode.config_paths, [])
         self.assertEqual(cfg.opencode.proxy_url, "")
         self.assertEqual(cfg.opencode.no_proxy, "")
-        self.assertEqual(cfg.opencode.config_jsonc, "{}")
         self.assertIsNone(cfg.fp_review_cli)
         self.assertTrue(cfg.memory_api_discovery.enabled)
         self.assertEqual(cfg.memory_api_discovery.batch_size, 8)
@@ -53,12 +52,11 @@ class AgentConfigTests(unittest.TestCase):
     def test_backend_and_remote_v4_defaults(self) -> None:
         self.assertFalse(BackendGitHistoryConfig().enabled)
         self.assertEqual(AgentRemoteConfig().schema_version, 4)
-        self.assertEqual(AgentRemoteConfig().opencode_config, "{}")
+        self.assertNotIn("opencode_config", AgentRemoteConfig().model_dump())
         self.assertEqual(AgentRemoteConfig().base.no_proxy, "10.0.0.0/8")
         self.assertIsNone(AgentRemoteConfig().base.opencode_serve_port)
         self.assertEqual(AgentRemoteConfig().opencode.tool, "nga")
         self.assertEqual(AgentRemoteConfig().opencode.executable, "nga")
-        self.assertEqual(AgentRemoteConfig().opencode.config_jsonc, "{}")
         self.assertEqual(AgentRemoteConfig().model_pool.models, [])
         self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
         self.assertTrue(AgentRemoteConfig().threat_analysis.enabled)
@@ -72,7 +70,6 @@ class AgentConfigTests(unittest.TestCase):
         cfg = AgentConfig()
         cfg.opencode.tool = "nga"
         cfg.opencode.executable = "nga"
-        cfg.opencode.config_jsonc = '{\n  // kept verbatim\n  "model": "corp/model",\n}'
 
         apply_remote_config(cfg, AgentRemoteConfig().model_dump())
 
@@ -315,7 +312,7 @@ class AgentConfigTests(unittest.TestCase):
         remote = remote_config_dict(cfg)
 
         self.assertEqual(remote["schema_version"], 4)
-        self.assertEqual(remote["opencode_config"], cfg.opencode.config_jsonc)
+        self.assertNotIn("opencode_config", remote)
         self.assertNotIn("llm_api", remote)
         self.assertEqual(remote["base"], {
             "tool": "nga",
@@ -352,7 +349,13 @@ class AgentConfigTests(unittest.TestCase):
                         "server_url": "http://example.test",
                         "agent_name": "local-agent",
                         "llm_api": {"stream": True, "timeout": 120},
-                        "opencode": {"executable": "nga", "timeout": 300, "max_retries": 4},
+                        "opencode_config": '{"model": "retired/root"}',
+                        "opencode": {
+                            "executable": "nga",
+                            "timeout": 300,
+                            "max_retries": 4,
+                            "config_jsonc": '{"model": "retired/nested"}',
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -424,10 +427,7 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["server_url"], "http://example.test")
             self.assertEqual(raw["agent_name"], "local-agent")
             self.assertEqual(raw["schema_version"], 4)
-            self.assertEqual(
-                raw["opencode_config"],
-                '{\n  // managed on the Web\n  "model": "provider/model",\n}',
-            )
+            self.assertNotIn("opencode_config", raw)
             self.assertNotIn("llm_api", raw)
             self.assertEqual(raw["base"]["tool"], "opencode")
             self.assertEqual(raw["base"]["no_proxy"], "10.0.0.0/8")
@@ -460,21 +460,19 @@ class AgentConfigTests(unittest.TestCase):
                 self.assertNotIn(legacy_key, raw)
 
             reloaded = load_config(path)
-            self.assertEqual(reloaded.opencode.config_jsonc, raw["opencode_config"])
+            self.assertEqual(reloaded.opencode.tool, "opencode")
 
-    def test_remote_opencode_jsonc_is_validated_and_applied(self) -> None:
-        from fastapi import HTTPException
-
-        from backend.api.agent import _validate_managed_config
-
-        config = AgentRemoteConfig(opencode_config='{"model": "corp/model", // comment\n}')
+    def test_retired_remote_opencode_jsonc_is_ignored(self) -> None:
+        config = AgentRemoteConfig.model_validate({
+            "opencode_config": '{"model": }',
+            "base": {"tool": "opencode", "executable": "opencode"},
+        })
         agent_config = AgentConfig()
 
         apply_remote_config(agent_config, config.model_dump(mode="json"))
 
-        self.assertEqual(agent_config.opencode.config_jsonc, config.opencode_config)
-        with self.assertRaisesRegex(HTTPException, "JSONC 格式错误"):
-            _validate_managed_config(AgentRemoteConfig(opencode_config='{"model": }'))
+        self.assertNotIn("opencode_config", config.model_dump())
+        self.assertEqual(agent_config.opencode.tool, "opencode")
 
     def test_invalid_pattern_filter_scope_falls_back_to_directory(self) -> None:
         cfg = AgentConfig()
@@ -706,7 +704,7 @@ class AgentConfigTests(unittest.TestCase):
 
         self.assertEqual(config.schema_version, 4)
         self.assertEqual(config.base.no_proxy, "localhost")
-        self.assertEqual(config.opencode_config, '{"model": "legacy/model"}')
+        self.assertNotIn("opencode_config", config.model_dump())
         self.assertEqual(config.model_pool.global_concurrency, 2)
         self.assertFalse(config.model_pool.models[0].enabled)
         self.assertEqual(config.model_pool.models[0].model, "")

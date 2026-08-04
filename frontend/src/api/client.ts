@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentOpenCodeRuntimeConfig, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, OpenCodeTokenUsage, ScanCandidatePage, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, ValidationTarget, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, ValidationTarget, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -710,7 +710,7 @@ export async function deleteScan(scanId: string): Promise<void> {
 
 export async function getCheckerDashboard(product?: string): Promise<CheckerDashboardResponse> {
   const params = product ? { product } : undefined;
-  const { data } = await api.get<CheckerDashboardResponse>("/api/admin/checker-dashboard", { params });
+  const { data } = await api.get<CheckerDashboardResponse>("/api/checker-dashboard", { params });
   return data;
 }
 
@@ -726,29 +726,10 @@ export async function getAgentOpenCodePool(agentId: string): Promise<AgentOpenCo
   return data;
 }
 
-export async function getAgentOpenCodeUsage(agentKey: string): Promise<OpenCodeTokenUsage | null> {
-  const { data } = await api.get<OpenCodeTokenUsage | null>(
-    `/api/agent-configs/${agentKey}/opencode-usage`,
-  );
-  return data;
-}
-
 export async function getAgentOpenCodeModels(agentId: string, refresh = false): Promise<AgentOpenCodeModelsResult> {
   const { data } = await api.get<AgentOpenCodeModelsResult>(
     `/api/agent/${agentId}/opencode/models`,
     { params: { refresh } },
-  );
-  return data;
-}
-
-export async function getAgentOpenCodeRuntimeConfig(
-  agentKey: string,
-  refresh = true,
-  includeSecrets = false,
-): Promise<AgentOpenCodeRuntimeConfig> {
-  const { data } = await api.get<AgentOpenCodeRuntimeConfig>(
-    `/api/agent-configs/${agentKey}/opencode-runtime-config`,
-    { params: { refresh, include_secrets: includeSecrets } },
   );
   return data;
 }

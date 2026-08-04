@@ -859,7 +859,7 @@ async def create_agent_scan(
         _registered_agents,
         agent_config_has_explicit_model,
         ensure_agent_accepting_tasks_async,
-        get_managed_agent_config_async,
+        get_scan_agent_config_async,
         resolve_agent_connection_async,
         resolve_agent_id_connection_async,
     )
@@ -885,15 +885,11 @@ async def create_agent_scan(
     if enforce_agent_owner and current_user.role != "admin" and agent.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Agent does not belong to you")
     await ensure_agent_accepting_tasks_async(selected_agent_key)
-    managed_config = (
-        await get_managed_agent_config_async(selected_agent_key)
-        if selected_agent_key
-        else None
-    )
-    if managed_config is not None and not agent_config_has_explicit_model(managed_config):
+    managed_config = await get_scan_agent_config_async(agent, selected_agent_key)
+    if not agent_config_has_explicit_model(managed_config):
         raise HTTPException(
             status_code=400,
-            detail="所选 Agent 尚未配置启用的显式模型，请先在 Agent 配置页面手动添加模型",
+            detail="所选客户端尚未配置启用的显式模型，请先在客户端配置页面手动添加模型",
         )
     code_graph_mcp = None
     if body.code_graph_mcp is not None and body.code_graph_mcp.enabled:
@@ -1613,7 +1609,7 @@ async def _continue_scan(
         _registered_agents,
         agent_config_has_explicit_model,
         ensure_agent_accepting_tasks_async,
-        get_managed_agent_config_async,
+        get_scan_agent_config_async,
         resolve_agent_connection_async,
     )
 
@@ -1694,15 +1690,11 @@ async def _continue_scan(
         )
 
     await ensure_agent_accepting_tasks_async(meta.agent_key or agent.agent_key)
-    managed_config = (
-        await get_managed_agent_config_async(meta.agent_key)
-        if meta.agent_key
-        else None
-    )
-    if managed_config is not None and not agent_config_has_explicit_model(managed_config):
+    managed_config = await get_scan_agent_config_async(agent, meta.agent_key)
+    if not agent_config_has_explicit_model(managed_config):
         raise HTTPException(
             status_code=400,
-            detail="扫描关联的 Agent 尚未配置启用的显式模型，请先完成 Agent 模型配置",
+            detail="扫描关联的客户端尚未配置启用的显式模型，请先完成客户端模型配置",
         )
 
     # Update scan meta with new agent_id if it changed

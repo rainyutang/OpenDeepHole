@@ -782,6 +782,7 @@ class AgentInfo(BaseModel):
     runtime_update_target_hash: str = ""
     runtime_update_error: str = ""
     accepting_tasks: bool = True
+    has_explicit_model: bool = False
     protocol_version: int = 1
 
 
@@ -813,7 +814,6 @@ class AgentOpenCodeConfig(BaseModel):
     config_paths: list[str] = []
     proxy_url: str = ""
     no_proxy: str = ""
-    config_jsonc: str = "{}"
 
 
 class AgentBaseConfig(BaseModel):
@@ -906,70 +906,6 @@ class AgentMcpStatusResponse(BaseModel):
     agent_key: str
     online: bool = False
     product_info: AgentMcpTargetStatus = AgentMcpTargetStatus()
-
-
-class AgentOpenCodeRiskFinding(BaseModel):
-    level: str = "unknown"
-    code: str = ""
-    message: str = ""
-
-
-class AgentOpenCodeModelLimitStatus(BaseModel):
-    context: int | None = None
-    input: int | None = None
-    output: int | None = None
-
-
-class AgentOpenCodeCompactionStatus(BaseModel):
-    auto: bool | None = None
-    prune: bool | None = None
-    reserved: int | None = None
-    effective_reserved: int | None = None
-
-
-class AgentOpenCodeModelRuntimeStatus(BaseModel):
-    model: str = ""
-    provider_id: str = ""
-    model_id: str = ""
-    name: str = ""
-    resolved: bool = False
-    limit: AgentOpenCodeModelLimitStatus = Field(
-        default_factory=AgentOpenCodeModelLimitStatus,
-    )
-    compaction: AgentOpenCodeCompactionStatus = Field(
-        default_factory=AgentOpenCodeCompactionStatus,
-    )
-    estimated_compaction_threshold: int | None = None
-    risk: str = "unknown"
-    findings: list[AgentOpenCodeRiskFinding] = Field(default_factory=list)
-
-
-class AgentOpenCodeRuntimeDiagnostics(BaseModel):
-    available: bool = False
-    current: bool = False
-    serve_version: str = ""
-    error: str = ""
-    models: list[AgentOpenCodeModelRuntimeStatus] = Field(default_factory=list)
-
-
-class AgentOpenCodeRuntimeConfigResponse(BaseModel):
-    agent_key: str
-    online: bool = False
-    exists: bool = False
-    source: str = "none"
-    content: str = ""
-    redacted: bool = True
-    path: str = ""
-    captured_at: str = ""
-    modified_at: str = ""
-    sha256: str = ""
-    size_bytes: int = 0
-    runtime_state: str = "next_task"
-    active_sessions: int = 0
-    warning: str = ""
-    diagnostics: AgentOpenCodeRuntimeDiagnostics = Field(
-        default_factory=AgentOpenCodeRuntimeDiagnostics,
-    )
 
 
 class AgentValidationEnvironmentConfig(BaseModel):
@@ -1116,7 +1052,6 @@ class AgentVulnerabilityValidationConfig(BaseModel):
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
     schema_version: int = 4
-    opencode_config: str = "{}"
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
@@ -1150,19 +1085,23 @@ class AgentRemoteConfig(BaseModel):
             return value
         if not value:
             return value
+        value = copy.deepcopy(value)
+        # Web-managed OpenCode JSONC was removed.  Accept old payloads during
+        # rolling upgrades, but never expose or persist that custom layer.
+        value.pop("opencode_config", None)
         try:
             schema_version = int(value.get("schema_version", 0) or 0)
         except (TypeError, ValueError):
             schema_version = 0
         if schema_version >= 5:
-            migrated = copy.deepcopy(value)
+            migrated = value
             migrated["schema_version"] = 4
             migrated.pop("mining_engines", None)
             return migrated
         if schema_version >= 4:
             return value
         if schema_version == 3:
-            migrated = copy.deepcopy(value)
+            migrated = value
             migrated["schema_version"] = 4
             return migrated
         if schema_version == 2 or "base" in value or "model_pool" in value:
@@ -1210,9 +1149,6 @@ class AgentRemoteConfig(BaseModel):
         fp_retries = _safe_policy_int(fp_cli.get("max_retries"), retries, minimum=0)
         migrated = {
             "schema_version": 2,
-            "opencode_config": str(
-                legacy.get("opencode_config") or opencode.get("config_jsonc") or "{}"
-            ),
             "base": {
                 "tool": opencode.get("tool", "nga"),
                 "executable": opencode.get("executable", "nga"),
@@ -1263,7 +1199,6 @@ class AgentRemoteConfig(BaseModel):
             serve_port=self.base.opencode_serve_port,
             models=self.model_pool.models,
             no_proxy=self.base.no_proxy,
-            config_jsonc=self.opencode_config,
         )
 
 
@@ -1415,7 +1350,7 @@ class CheckerDashboardStats(BaseModel):
 
 
 class CheckerDashboardSummary(BaseModel):
-    """Top-level summary for the admin checker dashboard."""
+    """Top-level summary for the caller-scoped result dashboard."""
     checker_count: int = 0
     scan_count: int = 0
     project_count: int = 0
@@ -1431,10 +1366,36 @@ class CheckerDashboardSummary(BaseModel):
     ticket_accuracy: float | None = None
 
 
+class CheckerDashboardAgentTokenUsage(BaseModel):
+    """Token usage for scans assigned to one Agent in the dashboard scope."""
+    agent_key: str = ""
+    agent_name: str = ""
+    machine_name: str = ""
+    ip: str = ""
+    owner_user_id: str = ""
+    owner_username: str = ""
+    scan_count: int = 0
+    tracked_scan_count: int = 0
+    usage: OpenCodeTokenUsage = Field(default_factory=OpenCodeTokenUsage)
+
+
+class CheckerDashboardTokenUsage(BaseModel):
+    """Token totals for every scan visible to the dashboard caller."""
+    scan_count: int = 0
+    tracked_scan_count: int = 0
+    usage: OpenCodeTokenUsage = Field(default_factory=OpenCodeTokenUsage)
+    agents: list[CheckerDashboardAgentTokenUsage] = Field(default_factory=list)
+
+
 class CheckerDashboardResponse(BaseModel):
-    """Admin checker dashboard response."""
+    """Checker dashboard response scoped to the authenticated caller."""
     summary: CheckerDashboardSummary
     checkers: list[CheckerDashboardStats]
+    products: list[str] = Field(default_factory=list)
+    has_unconfigured_product: bool = False
+    token_usage: CheckerDashboardTokenUsage = Field(
+        default_factory=CheckerDashboardTokenUsage,
+    )
 
 
 # --- Git history mining models ---

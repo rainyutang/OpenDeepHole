@@ -447,3 +447,72 @@ def test_agent_mcp_probe_column_is_added_to_legacy_agents_table(tmp_path: Path) 
     }
     assert "mcp_probe_json" in columns
     store.close()
+
+
+def test_agent_migration_removes_retired_opencode_config_and_snapshot(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy-opencode.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """\
+        CREATE TABLE agents (
+            agent_key TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL DEFAULT '',
+            ip TEXT NOT NULL,
+            machine_name TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            config_json TEXT NOT NULL DEFAULT '{}',
+            validator_catalog_json TEXT NOT NULL DEFAULT '{}',
+            mcp_probe_json TEXT NOT NULL DEFAULT '{}',
+            opencode_runtime_config_json TEXT NOT NULL DEFAULT '{}',
+            last_agent_id TEXT NOT NULL DEFAULT '',
+            last_seen TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id, ip, machine_name)
+        )
+        """
+    )
+    connection.execute(
+        """\
+        INSERT INTO agents (
+            agent_key, user_id, ip, machine_name, config_json,
+            opencode_runtime_config_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "legacy-agent",
+            "user-1",
+            "127.0.0.1",
+            "legacy-machine",
+            json.dumps({
+                "schema_version": 4,
+                "opencode_config": '{"model": "root/model"}',
+                "opencode": {
+                    "config_jsonc": '{"model": "nested/model"}',
+                    "models": [{"id": "kept", "model": "provider/model"}],
+                },
+                "base": {"tool": "nga"},
+            }),
+            json.dumps({"config_content": "secret"}),
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    store = SqliteScanStore(db_path)
+    columns = {
+        row[1]
+        for row in store._conn.execute("PRAGMA table_info(agents)").fetchall()
+    }
+    migrated = json.loads(store.get_agent_record("legacy-agent")["config_json"])
+
+    assert "opencode_runtime_config_json" not in columns
+    assert "opencode_config" not in migrated
+    assert "config_jsonc" not in migrated["opencode"]
+    assert migrated["opencode"]["models"][0]["model"] == "provider/model"
+    assert migrated["base"] == {"tool": "nga"}
+    store.close()

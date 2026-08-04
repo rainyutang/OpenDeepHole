@@ -48,7 +48,6 @@ from backend.api.scan import _running_scans, _scan_owners
 from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
-from backend.opencode_config import parse_opencode_jsonc, redact_opencode_config_content
 from backend.models import (
     AgentGitHistory,
     AgentMcpConfig,
@@ -57,7 +56,6 @@ from backend.models import (
     AgentMcpStatusResponse,
     AgentMcpTargetStatus,
     AgentOpenCodePoolStatus,
-    AgentOpenCodeRuntimeConfigResponse,
     AgentInfo,
     AgentRemoteConfig,
     AgentValidatorCatalog,
@@ -158,21 +156,6 @@ def _stored_mcp_probes(record: dict | None) -> dict[str, AgentMcpProbeResult]:
         except Exception as exc:
             logger.warning("Ignoring invalid persisted %s MCP probe result: %s", target, exc)
     return results
-
-
-def _stored_opencode_runtime_config(record: dict | None) -> dict | None:
-    if not record:
-        return None
-    try:
-        payload = json.loads(str(record.get("opencode_runtime_config_json") or "{}"))
-    except Exception as exc:
-        logger.warning("Ignoring invalid persisted OpenCode runtime config metadata: %s", exc)
-        return None
-    if not isinstance(payload, dict) or not payload.get("exists"):
-        return None
-    if not isinstance(payload.get("content"), str):
-        return None
-    return payload
 
 
 def _mcp_config_fingerprint(config: AgentMcpConfig) -> str:
@@ -329,6 +312,27 @@ async def get_managed_agent_config_async(agent_key: str) -> AgentRemoteConfig:
     return _stored_agent_config(record)
 
 
+async def get_scan_agent_config_async(
+    agent: AgentInfo,
+    agent_key: str = "",
+) -> AgentRemoteConfig:
+    """Resolve scan readiness config for stable and legacy Agent connections."""
+    stable_key = str(agent_key or agent.agent_key or "").strip()
+    if stable_key:
+        record = await run_store_call(
+            get_scan_store(),
+            "get_agent_record",
+            stable_key,
+        )
+        if record is not None:
+            return _stored_agent_config(record)
+    return (
+        _agent_configs.get(stable_key)
+        or _agent_configs.get(agent.name)
+        or AgentRemoteConfig()
+    )
+
+
 def _validate_mcp_config(
     mcp,
     *,
@@ -375,10 +379,6 @@ def _validate_managed_config(
     config: AgentRemoteConfig,
     catalog: AgentValidatorCatalog | None = None,
 ) -> None:
-    try:
-        parse_opencode_jsonc(config.opencode_config, source="OpenCode 配置")
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if config.base.tool not in {"nga", "opencode"}:
         raise HTTPException(status_code=422, detail="基础配置中的工具只能是 nga 或 opencode")
     if not config.base.executable.strip():
@@ -526,14 +526,12 @@ class _RuntimeDownload:
 # Short-lived tokens used by online agents to fetch runtime update archives.
 _runtime_download_tokens: dict[str, _RuntimeDownload] = {}
 _opencode_model_waiters: dict[str, asyncio.Future] = {}
-_opencode_runtime_config_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_waiters: dict[str, asyncio.Future] = {}
 _mcp_status_waiters: dict[str, asyncio.Future] = {}
 _mcp_reload_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_persist_locks: dict[str, asyncio.Lock] = {}
 _AGENT_RESPONSE_WAITERS = {
     "opencode_models_result": _opencode_model_waiters,
-    "opencode_runtime_config_result": _opencode_runtime_config_waiters,
     "mcp_probe_result": _mcp_probe_waiters,
     "mcp_status_result": _mcp_status_waiters,
     "mcp_reload_result": _mcp_reload_waiters,
@@ -1573,6 +1571,11 @@ async def agent_websocket(websocket: WebSocket) -> None:
             ip,
             machine_name,
         )
+        if existing is None:
+            # A newly registered client always starts without model capacity.
+            # Other reported settings are retained, while existing stable
+            # records continue using their persisted model pool on reconnect.
+            initial_config.model_pool.models = []
         stable_key = str(existing.get("agent_key") or "") if existing else uuid.uuid4().hex
         record = await run_store_call(
             store,
@@ -2193,193 +2196,6 @@ async def request_stable_agent_runtime_update(
     }
 
 
-_OPENCODE_RUNTIME_STATES = {"active", "reload_pending", "next_task"}
-
-
-def _opencode_runtime_snapshot(incoming: dict) -> dict:
-    content = str(incoming.get("content") or "")
-    raw = content.encode("utf-8")
-    runtime_state = str(incoming.get("runtime_state") or "next_task")
-    if runtime_state not in _OPENCODE_RUNTIME_STATES:
-        runtime_state = "next_task"
-    return {
-        "exists": bool(incoming.get("exists")),
-        "content": content,
-        "path": str(incoming.get("path") or ""),
-        "captured_at": str(incoming.get("captured_at") or datetime.now(timezone.utc).isoformat()),
-        "modified_at": str(incoming.get("modified_at") or ""),
-        "sha256": hashlib.sha256(raw).hexdigest() if incoming.get("exists") else "",
-        "size_bytes": len(raw) if incoming.get("exists") else 0,
-        "runtime_state": runtime_state,
-        "active_sessions": _nonnegative_int(incoming.get("active_sessions")),
-        "diagnostics": (
-            copy.deepcopy(incoming.get("diagnostics"))
-            if isinstance(incoming.get("diagnostics"), dict)
-            else {}
-        ),
-    }
-
-
-def _opencode_runtime_response(
-    *,
-    agent_key: str,
-    online: bool,
-    source: str,
-    snapshot: dict | None,
-    include_secrets: bool,
-    warning: str = "",
-) -> AgentOpenCodeRuntimeConfigResponse:
-    payload = snapshot or {}
-    exists = bool(payload.get("exists"))
-    raw_content = str(payload.get("content") or "") if exists else ""
-    content = (
-        raw_content
-        if include_secrets
-        else redact_opencode_config_content(raw_content, pretty=True)
-    )
-    runtime_state = str(payload.get("runtime_state") or "next_task")
-    if runtime_state not in _OPENCODE_RUNTIME_STATES:
-        runtime_state = "next_task"
-    diagnostics = (
-        copy.deepcopy(payload.get("diagnostics"))
-        if isinstance(payload.get("diagnostics"), dict)
-        else {}
-    )
-    if source != "live":
-        diagnostics["current"] = False
-        for item in diagnostics.get("models", []):
-            if not isinstance(item, dict):
-                continue
-            item["risk"] = "unknown"
-            findings = item.get("findings")
-            if not isinstance(findings, list):
-                findings = []
-                item["findings"] = findings
-            findings.insert(0, {
-                "level": "unknown",
-                "code": "snapshot_not_current",
-                "message": "这是历史快照，不能代表当前 Serve 的生效配置。",
-            })
-    return AgentOpenCodeRuntimeConfigResponse(
-        agent_key=agent_key,
-        online=online,
-        exists=exists,
-        source=source,
-        content=content,
-        redacted=not include_secrets,
-        path=str(payload.get("path") or ""),
-        captured_at=str(payload.get("captured_at") or ""),
-        modified_at=str(payload.get("modified_at") or ""),
-        sha256=str(payload.get("sha256") or ""),
-        size_bytes=_nonnegative_int(payload.get("size_bytes")),
-        runtime_state=runtime_state,
-        active_sessions=_nonnegative_int(payload.get("active_sessions")),
-        warning=str(warning or "")[:2000],
-        diagnostics=diagnostics,
-    )
-
-
-async def _request_agent_opencode_runtime_config(
-    agent_key: str,
-) -> tuple[dict | None, str]:
-    live = await resolve_agent_connection_async(agent_key)
-    if live is None:
-        return None, "Agent 已离线"
-    request_id = uuid.uuid4().hex
-    waiter = asyncio.get_running_loop().create_future()
-    _opencode_runtime_config_waiters[request_id] = waiter
-    try:
-        sent = await send_agent_command(live[0], {
-            "type": "opencode_runtime_config",
-            "request_id": request_id,
-        })
-        if not sent:
-            return None, "无法向 Agent 发送 OpenCode 配置读取请求"
-        incoming = await _wait_agent_response(request_id, waiter, timeout=5.0)
-        if not isinstance(incoming, dict):
-            return None, "Agent 返回了无效的 OpenCode 配置读取结果"
-        return incoming, ""
-    except asyncio.TimeoutError:
-        return None, "读取 Agent 当前 opencode.json 超时"
-    except Exception as exc:
-        logger.debug("Unable to query OpenCode runtime config for %s: %s", agent_key, exc)
-        return None, "读取 Agent 当前 opencode.json 失败"
-    finally:
-        _opencode_runtime_config_waiters.pop(request_id, None)
-
-
-@public_router.get(
-    "/api/agent-configs/{agent_key}/opencode-runtime-config",
-    response_model=AgentOpenCodeRuntimeConfigResponse,
-)
-async def get_stable_agent_opencode_runtime_config(
-    agent_key: str,
-    response: Response,
-    refresh: bool = True,
-    include_secrets: bool = False,
-    current_user: User = Depends(get_current_user),
-) -> AgentOpenCodeRuntimeConfigResponse:
-    """Return the Agent runtime layer plus active Serve diagnostics or a snapshot."""
-    store = get_scan_store()
-    record = _authorize_agent_record(
-        await run_store_call(store, "get_agent_record", agent_key),
-        current_user,
-    )
-    response.headers["Cache-Control"] = "no-store"
-    online = await resolve_agent_connection_async(agent_key) is not None
-    warning = ""
-
-    if refresh and online:
-        incoming, warning = await _request_agent_opencode_runtime_config(agent_key)
-        if incoming is not None and bool(incoming.get("ok")):
-            snapshot = _opencode_runtime_snapshot(incoming)
-            if snapshot["exists"]:
-                await run_store_call(
-                    store,
-                    "update_agent_opencode_runtime_config_record",
-                    agent_key,
-                    json.dumps(snapshot, ensure_ascii=False),
-                )
-            else:
-                warning = str(incoming.get("message") or "OpenCode Serve 尚未生成 opencode.json")
-            return _opencode_runtime_response(
-                agent_key=agent_key,
-                online=True,
-                source="live",
-                snapshot=snapshot,
-                include_secrets=include_secrets,
-                warning=warning,
-            )
-        if incoming is not None:
-            warning = str(incoming.get("message") or "读取 Agent 当前 opencode.json 失败")
-
-    snapshot = _stored_opencode_runtime_config(record)
-    if snapshot is not None:
-        if not warning and not online:
-            warning = "Agent 已离线，当前显示最近一次成功读取的历史快照"
-        elif warning:
-            warning = f"{warning}；当前显示最近一次成功读取的历史快照"
-        return _opencode_runtime_response(
-            agent_key=agent_key,
-            online=online,
-            source="snapshot",
-            snapshot=snapshot,
-            include_secrets=include_secrets,
-            warning=warning,
-        )
-
-    if not warning:
-        warning = "尚未保存过该 Agent 的 opencode.json 快照"
-    return _opencode_runtime_response(
-        agent_key=agent_key,
-        online=online,
-        source="none",
-        snapshot=None,
-        include_secrets=include_secrets,
-        warning=warning,
-    )
-
-
 async def _persist_mcp_probe(agent_key: str, result: AgentMcpProbeResult) -> None:
     lock = _mcp_probe_persist_locks.setdefault(agent_key, asyncio.Lock())
     async with lock:
@@ -2745,6 +2561,9 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
             "accepting_tasks": (
                 _runtime_update_status(record) != _RUNTIME_UPDATE_UPDATING
             ),
+            "has_explicit_model": agent_config_has_explicit_model(
+                _stored_agent_config(record)
+            ),
         })
     # Keep legacy HTTP agents visible until they migrate to the stable catalog.
     for agent in _registered_agents.values():
@@ -2752,7 +2571,18 @@ async def list_agents(current_user: User = Depends(get_current_user)) -> list:
             continue
         if current_user.role != "admin" and agent.user_id != current_user.user_id:
             continue
-        result.append({**agent.model_dump(), "online": _is_agent_online(agent)})
+        compatibility_config = (
+            _agent_configs.get(agent.agent_key)
+            or _agent_configs.get(agent.name)
+            or AgentRemoteConfig()
+        )
+        result.append({
+            **agent.model_dump(),
+            "online": _is_agent_online(agent),
+            "has_explicit_model": agent_config_has_explicit_model(
+                compatibility_config
+            ),
+        })
     return result
 
 
@@ -4220,7 +4050,7 @@ OpenDeepHole Agent
 Setup
 -----
 1. agent.yaml already contains the server_url and owner_token from the Web UI.
-   Start the Agent once, then use the Web "Agent 配置" page to configure the
+   Start the Agent once, then use the Web "客户端配置" page to configure the
    tool, explicit model pool, phase policies, MCP servers and validation
    environments. A scan cannot start without an enabled explicit model.
 

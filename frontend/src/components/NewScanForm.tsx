@@ -25,6 +25,7 @@ import { ThemeToggle } from "./ThemeToggle";
 interface Props {
   onScanStarted: (scanId: string) => void;
   onBack: () => void;
+  onConfigureAgent: (agentKey: string) => void;
 }
 
 const SCAN_MODE_FULL = "full";
@@ -38,7 +39,7 @@ function agentAcceptsTasks(agent: AgentInfo) {
   return agent.online && agent.accepting_tasks !== false;
 }
 
-export default function NewScanForm({ onScanStarted, onBack }: Props) {
+export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }: Props) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [validationTargets, setValidationTargets] = useState<AgentValidatorRegistration[]>([]);
@@ -73,6 +74,12 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
   const validationEnvironments = validationTargets
     .filter((target) => target.product === selectedProduct)
     .map((target) => target.environment);
+  const selectedAgentInfo = agents.find((agent) => agent.agent_key === selectedAgent);
+  const selectedAgentReady = Boolean(
+    selectedAgentInfo
+    && agentAcceptsTasks(selectedAgentInfo)
+    && selectedAgentInfo.has_explicit_model,
+  );
 
   useEffect(() => {
     const load = async () => {
@@ -104,8 +111,11 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
         ));
         // Pre-select all checkers
         setSelectedCheckers(new Set(checkerList.filter((c) => !c.user_created).map((c) => c.name)));
-        // Pre-select first online agent
-        const onlineAgent = agentList.find(agentAcceptsTasks);
+        // Prefer a ready online client, but keep an unconfigured client
+        // selectable so the page can explain how to fix it.
+        const onlineAgent = agentList.find((agent) => (
+          agentAcceptsTasks(agent) && agent.has_explicit_model
+        )) || agentList.find(agentAcceptsTasks);
         if (onlineAgent) setSelectedAgent(onlineAgent.agent_key);
       } catch (e) {
         setError("加载数据失败，请重试");
@@ -197,7 +207,11 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
     setError(null);
 
     if (!selectedAgent) {
-      setError("请选择一个 Agent");
+      setError("请选择一个客户端");
+      return;
+    }
+    if (!selectedAgentReady) {
+      setError("所选客户端尚未配置模型，请先前往客户端配置添加并启用模型");
       return;
     }
     if (!projectPath.trim()) {
@@ -251,7 +265,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
     } catch (e: unknown) {
       const msg =
         (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        "创建扫描失败，请检查 Agent 是否在线";
+        "创建扫描失败，请检查客户端是否在线且已配置模型";
       setError(msg);
     } finally {
       setSubmitting(false);
@@ -291,13 +305,13 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-6">
-            {/* Agent selection */}
+            {/* Client selection */}
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-5">
               <label className="block text-sm font-medium text-slate-300 mb-3">
-                选择 Agent
+                选择客户端
               </label>
               {agents.length === 0 ? (
-                <p className="text-sm text-slate-500">暂无在线 Agent。请先运行 ./run_agent.sh</p>
+                <p className="text-sm text-slate-500">暂无客户端。请先运行 ./run_agent.sh</p>
               ) : (
                 <div className="space-y-2">
                   {agents.map((agent) => (
@@ -344,8 +358,25 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                           ? agent.accepting_tasks === false ? "更新中" : "在线"
                           : "离线"}
                       </span>
+                      {!agent.has_explicit_model && (
+                        <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">
+                          未配置模型
+                        </span>
+                      )}
                     </label>
                   ))}
+                </div>
+              )}
+              {selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && !selectedAgentInfo.has_explicit_model && (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+                  <p className="text-sm text-amber-200">该客户端没有已启用的显式模型，暂时不能创建扫描。</p>
+                  <button
+                    type="button"
+                    onClick={() => onConfigureAgent(selectedAgentInfo.agent_key)}
+                    className="rounded-md border border-amber-400/40 px-3 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/10"
+                  >
+                    去客户端配置
+                  </button>
                 </div>
               )}
             </div>
@@ -709,9 +740,7 @@ export default function NewScanForm({ onScanStarted, onBack }: Props) {
                 type="submit"
                 disabled={
                   submitting
-                  || !agents.some((agent) => (
-                    agent.agent_key === selectedAgent && agentAcceptsTasks(agent)
-                  ))
+                  || !selectedAgentReady
                 }
                 className="flex-1 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
               >

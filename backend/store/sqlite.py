@@ -77,6 +77,25 @@ def _json_string_list(value: str | None) -> list[str]:
     return [str(item).strip() for item in data if str(item).strip()]
 
 
+def _retire_agent_opencode_config(value: str | None) -> str | None:
+    """Remove the retired Web-managed OpenCode layer from stored Agent JSON."""
+    try:
+        data = json.loads(value or "{}")
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    changed = "opencode_config" in data
+    data.pop("opencode_config", None)
+    opencode = data.get("opencode")
+    if isinstance(opencode, dict) and "config_jsonc" in opencode:
+        opencode.pop("config_jsonc", None)
+        changed = True
+    if not changed:
+        return None
+    return json.dumps(data, ensure_ascii=False)
+
+
 def _json_model_list(value: str | None, model_type) -> list:
     try:
         data = json.loads(value or "[]")
@@ -624,7 +643,6 @@ CREATE TABLE IF NOT EXISTS agents (
     config_json           TEXT NOT NULL DEFAULT '{}',
     validator_catalog_json TEXT NOT NULL DEFAULT '{}',
     mcp_probe_json        TEXT NOT NULL DEFAULT '{}',
-    opencode_runtime_config_json TEXT NOT NULL DEFAULT '{}',
     last_agent_id         TEXT NOT NULL DEFAULT '',
     last_seen             TEXT NOT NULL DEFAULT '',
     created_at            TEXT NOT NULL,
@@ -868,10 +886,20 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE agents ADD COLUMN mcp_probe_json TEXT NOT NULL DEFAULT '{}'"
             )
-        if "opencode_runtime_config_json" not in agent_cols:
+        if "opencode_runtime_config_json" in agent_cols:
             self._conn.execute(
-                "ALTER TABLE agents ADD COLUMN opencode_runtime_config_json TEXT NOT NULL DEFAULT '{}'"
+                "ALTER TABLE agents DROP COLUMN opencode_runtime_config_json"
             )
+            agent_cols.remove("opencode_runtime_config_json")
+        for row in self._conn.execute(
+            "SELECT agent_key, config_json FROM agents"
+        ).fetchall():
+            migrated_config = _retire_agent_opencode_config(row[1])
+            if migrated_config is not None:
+                self._conn.execute(
+                    "UPDATE agents SET config_json = ? WHERE agent_key = ?",
+                    (migrated_config, row[0]),
+                )
         for column in (
             "runtime_update_status",
             "runtime_update_target_hash",
@@ -930,14 +958,14 @@ class SqliteScanStore(ScanStoreBase):
                 ),
                 (
                     "release-2026-07-28-opencode-runtime",
-                    "Agent 运行配置更透明",
-                    "Agent 配置页现在可以查看 OpenCode 实际运行配置、模型限制、自动压缩和工具输出裁剪状态。",
+                    "客户端配置更清晰",
+                    "客户端配置整合为基础配置与高级配置，模型池与常用参数集中展示。",
                     "2026-07-28T00:00:00+00:00",
                 ),
                 (
                     "release-2026-07-27-token-usage",
                     "Token 用量统计上线",
-                    "扫描详情和 Agent 配置页新增 Token 用量统计，可查看输入、输出、推理和缓存 Token。",
+                    "扫描详情和结果看板提供 Token 用量统计，可查看输入、输出、推理和缓存 Token。",
                     "2026-07-27T00:00:00+00:00",
                 ),
             )
@@ -952,6 +980,34 @@ class SqliteScanStore(ScanStoreBase):
                     for announcement_id, title, content, published_at in initial_announcements
                 ],
             )
+        self._conn.execute(
+            """\
+            UPDATE announcements
+            SET title = ?, content = ?, updated_at = ?
+            WHERE announcement_id = ? AND title = ? AND content = ?
+            """,
+            (
+                "客户端配置更清晰",
+                "客户端配置整合为基础配置与高级配置，模型池与常用参数集中展示。",
+                datetime.now(timezone.utc).isoformat(),
+                "release-2026-07-28-opencode-runtime",
+                "Agent 运行配置更透明",
+                "Agent 配置页现在可以查看 OpenCode 实际运行配置、模型限制、自动压缩和工具输出裁剪状态。",
+            ),
+        )
+        self._conn.execute(
+            """\
+            UPDATE announcements
+            SET content = ?, updated_at = ?
+            WHERE announcement_id = ? AND content = ?
+            """,
+            (
+                "扫描详情和结果看板提供 Token 用量统计，可查看输入、输出、推理和缓存 Token。",
+                datetime.now(timezone.utc).isoformat(),
+                "release-2026-07-27-token-usage",
+                "扫描详情和 Agent 配置页新增 Token 用量统计，可查看输入、输出、推理和缓存 Token。",
+            ),
+        )
         # vulnerabilities 表迁移
         vuln_cur = self._conn.execute("PRAGMA table_info(vulnerabilities)")
         vuln_cols = {r[1] for r in vuln_cur.fetchall()}
@@ -4543,20 +4599,6 @@ class SqliteScanStore(ScanStoreBase):
             cur = self._conn.execute(
                 "UPDATE agents SET mcp_probe_json = ?, updated_at = ? WHERE agent_key = ?",
                 (mcp_probe_json, now, agent_key),
-            )
-            self._conn.commit()
-        return cur.rowcount > 0
-
-    def update_agent_opencode_runtime_config_record(
-        self,
-        agent_key: str,
-        runtime_config_json: str,
-    ) -> bool:
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE agents SET opencode_runtime_config_json = ?, updated_at = ? WHERE agent_key = ?",
-                (runtime_config_json, now, agent_key),
             )
             self._conn.commit()
         return cur.rowcount > 0

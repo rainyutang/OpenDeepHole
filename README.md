@@ -37,7 +37,7 @@
 **误报反馈闭环**：用户在 Web UI 标记正报或误报后，选中的经验会注入 SKILL 中减少重复误判；也可将问题标为“待分析”作为人工待处理状态，该状态不进入经验库且仍可继续 AI 去误报复核；已标记问题也可以取消标记，取消后会移除该标记生成的经验并重新进入 AI 去误报候选。
 **静态候选收敛、同类合并与同模式过滤**：DB 类 checker 会按本次 `code_scan_path` 在 SQL 层收敛函数范围；静态候选进入 AI 前会按 checker `family` 做函数级同类合并，并只向 OpenCode 提供“函数/变量或表达式/问题类型”的最小审计问题。AI 审计确认某个同模式代表点为非问题后，可通过 `pattern_filter` 自动过滤同 `vuln_type + subject + scope` 的后续候选。详细规则见下文“静态候选合并与同模式过滤”。
 **扫描流程与威胁分析选择**：扫描详情固定展示静态分析、威胁分析、漏洞挖掘、漏洞验证和去误报，代码图谱构建作为底层能力单独显示。新建扫描通过 `threat_analysis_enabled` 独立选择威胁分析，并通过 `mining_engines` 选择漏洞挖掘引擎；可以只运行威胁分析，但选择 `threat_audit` 时必须同时启用威胁分析。代码图谱完成后，静态分析和威胁分析可以并行，威胁审计等待威胁分析成功后再启动，验证与去误报继续按确认问题增量触发。
-**git 历史问题挖掘 + 同类变体排查（当前硬禁用）**：默认扫描链路在完成代码索引和工作区准备后，会并行启动威胁分析和静态分析；静态分析完成后立即进入候选点 AI 审计，威胁分析结果生成后独立上报展示，并在扫描最终完成前收尾。git 历史问题挖掘及同类变体排查的实现代码仍保留，但当前版本不会执行该阶段，也不在 Agent 配置页面中暴露开关。
+**git 历史问题挖掘 + 同类变体排查（当前硬禁用）**：默认扫描链路在完成代码索引和工作区准备后，会并行启动威胁分析和静态分析；静态分析完成后立即进入候选点 AI 审计，威胁分析结果生成后独立上报展示，并在扫描最终完成前收尾。git 历史问题挖掘及同类变体排查的实现代码仍保留，但当前版本不会执行该阶段，也不在客户端配置页面中暴露开关。
 
 **AI 去误报（扫描级开关与目录化方法）**：新建扫描时可选择是否自动去误报，并从 `deephole_client/fp_review/methods/` 自动发现的方法目录中选择一种。每个方法都通过统一的 `async def run(**kwargs)` 入口一次处理一个漏洞，输入包含本次扫描代码路径、漏洞索引和单个漏洞对象；平台负责扫描级排队、方法并发、取消、补跑和持久化。内置 `adversarial` 保留 `history_match`、`prove-bug`、`prove-fp`、`final-judge` 流程，内置 `fp_check` 执行主张重述、标准/深度验证与六道门，最多并发四项。方法名称、默认项、最大并发、阶段和说明文档均来自各自的 `method.yaml`，扫描创建后会固化所选方法快照；方法不得生成跨漏洞批次汇总或修改其它漏洞结论。创建请求字段为 `auto_fp_review` 与 `fp_review_method`；前者省略时使用 `fp_review.auto_on_complete`，关闭时仍可手动启动单项复核，后者省略时使用目录清单声明的默认方法。
 **漏洞报告导出**：对每一个 AI 判定为「是问题」的扫描项可单独导出 Markdown 报告，包含所选去误报方法的阶段证据；扫描详情页顶部「导出报告」会打包全部单项报告。对应端点 `GET /api/scan/{id}/vulnerability/{idx}/report` 与 `GET /api/scan/{id}/report.zip`。
@@ -110,7 +110,9 @@ agent_name: "my-agent"
 owner_token: ""
 ```
 
-下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「Agent 配置」** 页面按机器名与 IP 选择 Agent，统一配置基础工具、显式模型池、完整 OpenCode JSONC、漏洞挖掘模型策略、产品信息 MCP、去误报和各验证环境。服务端会持久化配置并推送给在线 Agent；离线编辑会在重连后生效。
+下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「客户端配置」** 页面按机器名与 IP 选择客户端。页面只有「基础配置」和「高级配置」两个子页：基础配置包含基础参数与模型配置，高级配置包含威胁分析、产品信息、漏洞挖掘、去误报和漏洞验证。新注册客户端的模型列表固定为空；必须手动添加并启用至少一个明确的 `provider/model` 后才能创建或续建扫描。服务端会持久化配置并推送给在线客户端，已有稳定客户端重连时保留原配置，离线编辑会在重连后生效。
+
+所有登录用户都可以打开 **「结果看板」**。管理员查看全部扫描，普通用户只汇总自己创建的扫描；看板顶部的 Token 总计覆盖当前权限范围内的全部扫描，按 Agent 分组且不受产品筛选影响。单次扫描的模型和任务 Token 明细仍保留在扫描详情中。
 
 **「新建扫描」** 页面会直接读取当前代码仓 `deephole_client/vulnerability_mining/engines/` 中的引擎清单，可为一次扫描选择一个或多个引擎；这个选择与 Agent 无关，不需要等待 Agent 上报引擎。每个已选引擎还可独立配置其结果是否进入去误报，解析后的选择会随扫描固化。
 
@@ -191,7 +193,7 @@ WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续�
 
 - **停止**：在扫描详情页点击「停止扫描」，服务器直接通知 Agent 停止。当前候选处理完成后立即停止，已处理的结果保留。
 - **恢复**：在扫描列表页点击「恢复」，服务器通知 Agent 继续同一扫描任务，自动跳过已处理的候选，从断点继续。无需重新启动 Agent 或重新索引代码。
-- **配置更新**：运行中的扫描收到新的 Agent 配置后，不会中断当前 OpenCode 任务；排队任务会按新模型配置重新调度，后续任务使用最新工具、模型池和代理绕过配置。
+- **配置更新**：运行中的扫描收到新的客户端配置后，不会中断当前 OpenCode 任务；排队任务会按新模型配置重新调度，后续任务使用最新工具、模型池和代理绕过配置。
 
 ## 误报反馈机制
 
@@ -545,8 +547,6 @@ agent_name: ""
 owner_token: ""
 checkers: []
 schema_version: 4
-opencode_config: |
-  {}
 base:
   tool: "nga"
   executable: "nga"
@@ -555,25 +555,16 @@ base:
   opencode_serve_port: null
 model_pool:
   global_concurrency: 4
-  models:
-    - id: "night-model"
-      model: "provider/model"
-      capability: "high"
-      max_concurrency: 1
-      enabled: true
-      time_windows:
-        - weekdays: [1, 2, 3, 4, 5, 6]  # 周一至周六
-          start: "22:00"
-          end: "06:00"
+  models: []
 ```
 
-`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v4 字段由 Web **「Agent 配置」** 页面管理并写回。`opencode_config` 是完整 JSONC 用户配置层，支持注释和尾随逗号。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定 Agent 身份，Agent 离线或重连后仍使用同一份服务端配置。威胁分析和漏洞挖掘引擎都不属于 Agent 配置，而是在新建扫描时分别选择；引擎清单直接来自当前代码仓。短暂使用过的 v5 Agent 配置会保留其它字段、移除 `mining_engines` 并归一为 v4。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；v3 中的全局代码图谱只作为旧集成请求的扫描级迁移输入，不再写回 Agent 配置。模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。
+`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v4 字段由 Web **「客户端配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定客户端身份，客户端离线或重连后仍使用同一份服务端配置。新客户端注册时服务端不会采用本地模板上报的模型，模型池保持为空，直到用户在 Web 中明确配置。威胁分析和漏洞挖掘引擎都不属于客户端配置，而是在新建扫描时分别选择；引擎清单直接来自当前代码仓。短暂使用过的 v5 配置会保留其它字段、移除 `mining_engines` 并归一为 v4。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；v3 中的全局代码图谱只作为旧集成请求的扫描级迁移输入，不再写回客户端配置。模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。旧 Web `opencode_config` 字段与运行配置快照会在升级时清理，不再提供编辑或查看入口。
 
 新增漏洞挖掘引擎只需创建独立目录并实现固定适配契约，详见 [漏洞挖掘引擎扩展](deephole_client/vulnerability_mining/README.md)。
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“本机发现及显式指定的配置 < Web `opencode_config` < OpenDeepHole 受管字段”合并。受管字段包括 `$schema`、已启用的全局产品知识 MCP、公共技能路径和运行权限；这些值不能从 Web 配置覆盖。产品知识 MCP 由 Agent 配置中的 `product_info` 管理，既写入受管 `opencode.json`，也会通过带目录上下文的 `/mcp` 接口热加载到已经使用过的 OpenCode 工作目录，并跨扫描、跨 Session 保持可用。扫描代码图谱 MCP 使用相同的底层配置格式和 `/mcp` 接口，但只按扫描快照临时连接，任务结束后释放。Agent 每次初始化全局 workspace 时，会把原生威胁分析 harness 的四个 SKILL 连同 `references/attack_mode.json` 同步到 `~/.opendeephole/opencode_workspace/.opencode/skills`，并在最终全局 `opencode.json` 中显式允许读取该 `.opencode` 目录及全部后代；威胁分析任务只使用该全局路径，不再把 Agent 安装目录临时追加到 `skills.paths`。API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
+OpenCode 最终配置按“本机发现及显式指定的配置 < OpenDeepHole 受管字段”合并，不再接受 Web 自定义 JSONC 层。受管字段包括 `$schema`、已启用的全局产品知识 MCP、公共技能路径和运行权限。产品知识 MCP 由客户端配置中的 `product_info` 管理，既写入受管 `opencode.json`，也会通过带目录上下文的 `/mcp` 接口热加载到已经使用过的 OpenCode 工作目录，并跨扫描、跨 Session 保持可用。扫描代码图谱 MCP 使用相同的底层配置格式和 `/mcp` 接口，但只按扫描快照临时连接，任务结束后释放。Agent 每次初始化全局 workspace 时，会把原生威胁分析 harness 的四个 SKILL 连同 `references/attack_mode.json` 同步到 `~/.opendeephole/opencode_workspace/.opencode/skills`，并在最终全局 `opencode.json` 中显式允许读取该 `.opencode` 目录及全部后代；威胁分析任务只使用该全局路径，不再把 Agent 安装目录临时追加到 `skills.paths`。产品 MCP 的 API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
 
 配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），设置 `OPENCODE_CONFIG_DIR` 并显式清除 `OPENCODE_CONFIG_CONTENT`；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。
 
@@ -785,7 +776,7 @@ OpenDeepHole/
 ├── scripts/
 │   └── migrate_sqlite_to_postgres.py # SQLite 在线快照迁移工具
 ├── tests/                          # 后端、Agent、组件和规则的测试套件
-├── agent.yaml                      # Agent 配置模板
+├── agent.yaml                      # 客户端配置模板
 ├── requirements-agent.txt          # Agent 最小依赖
 ├── run_agent.sh                    # Agent 启动脚本（Linux/macOS）
 ├── run_agent.bat                   # Agent 启动脚本（Windows）

@@ -98,7 +98,7 @@ export default function AgentDownload({ onBack }: Props) {
             </button>
             <div className="min-w-0">
               <h1 className="text-xl font-bold text-white">客户端下载</h1>
-              <p className="mt-1 text-sm text-slate-400">Agent 配置已迁移到独立的“Agent 配置”页面。</p>
+              <p className="mt-1 text-sm text-slate-400">客户端配置已迁移到独立的“客户端配置”页面。</p>
             </div>
           </div>
           <ThemeToggle />

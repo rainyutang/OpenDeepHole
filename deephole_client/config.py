@@ -47,7 +47,6 @@ class OpenCodeConfig:
     config_paths: list[str] = field(default_factory=list)  # optional OpenCode config files to merge
     proxy_url: str = ""           # legacy compatibility; Serve ignores proxy URL injection
     no_proxy: str = ""            # optional no_proxy override for opencode/nga child processes
-    config_jsonc: str = "{}"       # complete JSONC config layer managed by the server
 
 
 @dataclass
@@ -147,7 +146,6 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
         config.config_paths = [path] if path else []
     config.proxy_url = str(getattr(config, "proxy_url", "") or "").strip()
     config.no_proxy = str(getattr(config, "no_proxy", "") or "").strip()
-    config.config_jsonc = str(getattr(config, "config_jsonc", "{}") or "{}")
     raw_serve_port = getattr(config, "serve_port", None)
     if raw_serve_port in (None, ""):
         config.serve_port = None
@@ -360,23 +358,25 @@ def _upgrade_managed_policy(
 
 def _upgrade_managed_remote(remote: dict) -> dict:
     """Upgrade managed payloads to the Agent v4 contract."""
+    remote = copy.deepcopy(remote)
+    remote.pop("opencode_config", None)
     try:
         schema_version = int(remote.get("schema_version", 0) or 0)
     except (TypeError, ValueError):
         schema_version = 0
     if schema_version >= 5:
-        migrated = copy.deepcopy(remote)
+        migrated = remote
         migrated["schema_version"] = 4
         migrated.pop("mining_engines", None)
         return migrated
     if schema_version >= 4:
         if "mining_engines" not in remote:
             return remote
-        migrated = copy.deepcopy(remote)
+        migrated = remote
         migrated.pop("mining_engines", None)
         return migrated
     if schema_version == 3:
-        migrated = copy.deepcopy(remote)
+        migrated = remote
         migrated["schema_version"] = 4
         migrated.pop("code_graph", None)
         migrated.pop("mining_engines", None)
@@ -386,7 +386,7 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         or isinstance(remote.get("base"), dict)
         or isinstance(remote.get("model_pool"), dict)
     ):
-        migrated = copy.deepcopy(remote)
+        migrated = remote
         for key in ("opencode", "fp_review_cli"):
             section = migrated.get(key)
             if (
@@ -402,7 +402,7 @@ def _upgrade_managed_remote(remote: dict) -> dict:
             )
         return migrated
 
-    migrated = copy.deepcopy(remote)
+    migrated = remote
     migrated["schema_version"] = 4
     migrated.pop("code_graph", None)
     migrated.pop("mining_engines", None)
@@ -515,8 +515,6 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
             config.opencode.executable = str(base.get("executable") or "")
         if "opencode_serve_port" in base:
             config.opencode.serve_port = base.get("opencode_serve_port")
-        if "opencode_config" in remote:
-            config.opencode.config_jsonc = str(remote.get("opencode_config") or "{}")
         if isinstance(model_pool.get("models"), list):
             fields = {item.name for item in dataclasses.fields(OpenCodeModelConfig)}
             config.opencode.models = [
@@ -547,8 +545,6 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
 
     if "no_proxy" in remote and remote["no_proxy"] is not None:
         config.no_proxy = remote["no_proxy"]
-    if "opencode_config" in remote:
-        config.opencode.config_jsonc = str(remote.get("opencode_config") or "{}")
     section = remote.get("opencode") or {}
     if isinstance(section, dict) and "tool" not in section and "executable" in section:
         config.opencode.tool = ""
@@ -670,7 +666,6 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_runtime_models.add(signature)
     return {
         "schema_version": 4,
-        "opencode_config": config.opencode.config_jsonc,
         "base": {
             "tool": config.opencode.tool,
             "executable": config.opencode.executable,
@@ -727,8 +722,6 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
         schema_version = 0
     if schema_version < 3 and str(oc_raw.get("timeout") or "").strip() == "1200":
         oc_raw["timeout"] = 3600
-    if "opencode_config" in raw:
-        oc_raw["config_jsonc"] = str(raw.get("opencode_config") or "{}")
     if isinstance(oc_raw.get("models"), list):
         oc_raw["models"] = [
             OpenCodeModelConfig(**{k: v for k, v in item.items() if k in model_fields})

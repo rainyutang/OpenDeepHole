@@ -1,12 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { getCheckerDashboard, getValidationTargets } from "../api/client";
-import type { CheckerDashboardResponse, CheckerDashboardStats, CheckerScanDashboardStats, ScanItemStatus } from "../types";
+import { getCheckerDashboard } from "../api/client";
+import type {
+  CheckerDashboardResponse,
+  CheckerDashboardStats,
+  CheckerDashboardTokenUsage,
+  CheckerScanDashboardStats,
+  ScanItemStatus,
+  User,
+} from "../types";
 import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
   onBack: () => void;
   onViewScan: (scanId: string) => void;
+  user: User;
 }
 
 const STATUS_STYLES: Record<ScanItemStatus, { label: string; cls: string }> = {
@@ -20,12 +28,11 @@ const STATUS_STYLES: Record<ScanItemStatus, { label: string; cls: string }> = {
 
 const UNCONFIGURED_PRODUCT = "__unconfigured__";
 
-export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
+export default function CheckerDashboardPage({ onBack, onViewScan, user }: Props) {
   const [data, setData] = useState<CheckerDashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [activeChecker, setActiveChecker] = useState<string | null>(null);
-  const [products, setProducts] = useState<string[]>([]);
   const [productFilter, setProductFilter] = useState("");
 
   const refresh = async (nextProduct = productFilter) => {
@@ -43,9 +50,6 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
   };
 
   useEffect(() => {
-    getValidationTargets()
-      .then((targets) => setProducts(Array.from(new Set(targets.map((target) => target.product))).sort()))
-      .catch(() => {});
     refresh("");
   }, []);
 
@@ -73,7 +77,9 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
             <div>
               <h1 className="text-lg font-bold text-white">结果看板</h1>
               <p className="text-sm text-slate-400 mt-0.5">
-                按 SKILL 汇总扫描覆盖、问题确认和人工反馈准确率
+                {user.role === "admin"
+                  ? "汇总全部用户的扫描结果、问题确认和 Token 用量"
+                  : "汇总你创建的扫描结果、问题确认和 Token 用量"}
               </p>
             </div>
           </div>
@@ -84,8 +90,8 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
               className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
             >
               <option value="">全部产品</option>
-              <option value={UNCONFIGURED_PRODUCT}>未配置</option>
-              {products.map((product) => (
+              {data?.has_unconfigured_product && <option value={UNCONFIGURED_PRODUCT}>未配置</option>}
+              {(data?.products || []).map((product) => (
                 <option key={product} value={product}>
                   {product}
                 </option>
@@ -113,6 +119,11 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
           </div>
         ) : data ? (
           <div className="max-w-7xl mx-auto">
+            <DashboardTokenUsagePanel
+              data={data.token_usage}
+              showOwner={user.role === "admin"}
+            />
+
             <div className="grid grid-cols-2 md:grid-cols-5 xl:grid-cols-10 gap-3 mb-6">
               <MetricTile label="SKILL" value={data.summary.checker_count} />
               <MetricTile label="扫描次数" value={data.summary.scan_count} />
@@ -175,7 +186,11 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
 
               <div className="min-w-0">
                 {selected ? (
-                  <CheckerDetail checker={selected} onViewScan={onViewScan} />
+                  <CheckerDetail
+                    checker={selected}
+                    onViewScan={onViewScan}
+                    showCreator={user.role === "admin"}
+                  />
                 ) : (
                   <div className="border border-slate-800 rounded-lg p-8 text-center text-slate-500">
                     暂无可展示的 SKILL
@@ -187,6 +202,106 @@ export default function AdminCheckerDashboard({ onBack, onViewScan }: Props) {
         ) : null}
       </div>
     </div>
+  );
+}
+
+function DashboardTokenUsagePanel({
+  data,
+  showOwner,
+}: {
+  data: CheckerDashboardTokenUsage;
+  showOwner: boolean;
+}) {
+  const metrics = [
+    ["总 Token", data.usage.total_tokens],
+    ["输入", data.usage.input_tokens],
+    ["输出", data.usage.output_tokens],
+    ["推理", data.usage.reasoning_tokens],
+    ["缓存读取", data.usage.cache_read_tokens],
+    ["缓存写入", data.usage.cache_write_tokens],
+  ] as const;
+  const columns = showOwner ? 10 : 9;
+
+  return (
+    <section className="mb-6 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-800 px-5 py-4">
+        <div>
+          <h2 className="text-base font-semibold text-white">Token 总计</h2>
+          <p className="mt-1 text-xs text-slate-400">
+            覆盖当前权限范围内的全部扫描，不受产品筛选影响，并按 Agent 分组。
+          </p>
+        </div>
+        <span className={`rounded-full border px-2.5 py-1 text-xs ${data.usage.complete
+          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+          : "border-amber-500/30 bg-amber-500/10 text-amber-300"}`}>
+          已统计 {data.tracked_scan_count}/{data.scan_count} 个扫描
+        </span>
+      </div>
+      {!data.usage.complete && data.scan_count > 0 && (
+        <div className="border-b border-amber-500/20 bg-amber-500/10 px-5 py-3 text-xs text-amber-200">
+          部分历史扫描没有 Token 数据或会话统计不完整，当前总数仅包含可用记录，不会回填升级前数据。
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-px bg-slate-800 sm:grid-cols-3 xl:grid-cols-6">
+        {metrics.map(([label, value]) => (
+          <div key={label} className="bg-slate-900/90 px-4 py-4">
+            <div className="text-xs text-slate-500">{label}</div>
+            <div className="mt-1 font-mono text-xl font-semibold text-slate-100">
+              {formatTokenCount(value)}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="overflow-x-auto border-t border-slate-800">
+        <table className="w-full min-w-[64rem] text-sm">
+          <thead className="bg-slate-950/50 text-left text-xs text-slate-500">
+            <tr>
+              <Th>Agent</Th>
+              {showOwner && <Th>所属用户</Th>}
+              <Th>扫描覆盖</Th>
+              <Th>输入</Th>
+              <Th>输出</Th>
+              <Th>推理</Th>
+              <Th>缓存读取</Th>
+              <Th>缓存写入</Th>
+              <Th>总计</Th>
+              <Th>状态</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.agents.length === 0 ? (
+              <tr>
+                <td colSpan={columns} className="px-4 py-8 text-center text-sm text-slate-500">
+                  暂无扫描 Token 数据
+                </td>
+              </tr>
+            ) : data.agents.map((agent, index) => (
+              <tr key={agent.agent_key || `${agent.owner_user_id}:${agent.agent_name}:${index}`} className="border-t border-slate-800">
+                <td className="px-4 py-3">
+                  <div className="text-sm font-medium text-slate-200">{agent.machine_name || agent.agent_name || "未知 Agent"}</div>
+                  <div className="mt-0.5 text-xs text-slate-500">{agent.ip || agent.agent_name || "无客户端信息"}</div>
+                </td>
+                {showOwner && <td className="px-4 py-3 text-xs text-slate-400">{agent.owner_username || "-"}</td>}
+                <td className="px-4 py-3 font-mono text-xs text-slate-300">{agent.tracked_scan_count}/{agent.scan_count}</td>
+                {[
+                  agent.usage.input_tokens,
+                  agent.usage.output_tokens,
+                  agent.usage.reasoning_tokens,
+                  agent.usage.cache_read_tokens,
+                  agent.usage.cache_write_tokens,
+                  agent.usage.total_tokens,
+                ].map((value, valueIndex) => (
+                  <td key={valueIndex} className="px-4 py-3 font-mono text-xs text-slate-300">{formatTokenCount(value)}</td>
+                ))}
+                <td className={`px-4 py-3 text-xs ${agent.usage.complete ? "text-emerald-300" : "text-amber-300"}`}>
+                  {agent.usage.complete ? "完整" : "不完整"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -254,9 +369,11 @@ function CheckerCard({
 function CheckerDetail({
   checker,
   onViewScan,
+  showCreator,
 }: {
   checker: CheckerDashboardStats;
   onViewScan: (scanId: string) => void;
+  showCreator: boolean;
 }) {
   return (
     <div className="border border-slate-800 bg-slate-900/70 rounded-lg overflow-hidden">
@@ -322,7 +439,7 @@ function CheckerDetail({
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[76rem] text-sm">
+        <table className={`w-full text-sm ${showCreator ? "min-w-[76rem]" : "min-w-[70rem]"}`}>
           <thead>
             <tr className="bg-slate-950/40 border-b border-slate-800">
               <Th>扫描</Th>
@@ -336,20 +453,20 @@ function CheckerDetail({
               <Th>已提单</Th>
               <Th>人工准确率</Th>
               <Th>提单准确率</Th>
-              <Th>创建者</Th>
+              {showCreator && <Th>创建者</Th>}
               <Th>时间</Th>
             </tr>
           </thead>
           <tbody>
             {checker.scans.length === 0 ? (
               <tr>
-                <td colSpan={13} className="px-4 py-10 text-center text-sm text-slate-500">
+                <td colSpan={showCreator ? 13 : 12} className="px-4 py-10 text-center text-sm text-slate-500">
                   这个 SKILL 还没有扫描记录
                 </td>
               </tr>
             ) : (
               checker.scans.map((scan) => (
-                <ScanRow key={scan.scan_id} scan={scan} onViewScan={onViewScan} />
+                <ScanRow key={scan.scan_id} scan={scan} onViewScan={onViewScan} showCreator={showCreator} />
               ))
             )}
           </tbody>
@@ -362,9 +479,11 @@ function CheckerDetail({
 function ScanRow({
   scan,
   onViewScan,
+  showCreator,
 }: {
   scan: CheckerScanDashboardStats;
   onViewScan: (scanId: string) => void;
+  showCreator: boolean;
 }) {
   const st = STATUS_STYLES[scan.status];
   const project = scan.scan_name || scan.project_id;
@@ -410,7 +529,7 @@ function ScanRow({
           {formatAccuracy(scan.ticket_accuracy)}
         </span>
       </td>
-      <td className="px-4 py-3 text-xs text-slate-400">{scan.username || "-"}</td>
+      {showCreator && <td className="px-4 py-3 text-xs text-slate-400">{scan.username || "-"}</td>}
       <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">{formatTime(scan.created_at)}</td>
     </tr>
   );
@@ -464,4 +583,8 @@ function formatTime(iso: string) {
   } catch {
     return iso;
   }
+}
+
+function formatTokenCount(value: number) {
+  return new Intl.NumberFormat("zh-CN").format(value || 0);
 }

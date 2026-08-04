@@ -136,7 +136,6 @@ def _effective_model_config(cli_config, model_option) -> dict:
         "executable": choose("executable", ""),
         "model": "" if use_default_model else choose("model", ""),
         "config_paths": _config_value(cli_config, "config_paths", []) or [],
-        "config_jsonc": str(_config_value(cli_config, "config_jsonc", "{}") or "{}"),
         "proxy_url": str(_config_value(cli_config, "proxy_url", "") or ""),
         "no_proxy": str(_config_value(cli_config, "no_proxy", "") or ""),
         "serve_port": _config_value(cli_config, "serve_port", None),
@@ -201,7 +200,7 @@ def _runtime_config_content(
     effective: dict,
     project_dir: Path,
 ) -> str:
-    from task_agent.config_json import dump_opencode_config, parse_opencode_jsonc
+    from task_agent.config_json import dump_opencode_config
 
     merged: dict = {}
     raw_paths = effective.get("config_paths") or []
@@ -223,12 +222,6 @@ def _runtime_config_content(
         project_dir / ".opencode" / "opencode.jsonc",
     ):
         merged = _deep_merge(merged, _read_runtime_config(candidate))
-    web_config = parse_opencode_jsonc(
-        str(effective.get("config_jsonc") or "{}"),
-        source="Agent OpenCode config",
-    )
-    if isinstance(web_config, dict):
-        merged = _deep_merge(merged, web_config)
     merged = _deep_merge(
         merged,
         _read_runtime_config(managed_opencode_config_path(workspace)),
@@ -286,11 +279,6 @@ def get_workspace_lock(workspace: Path) -> threading.RLock:
 def managed_opencode_config_path(workspace: Path) -> Path:
     """Return the private OpenDeepHole-owned config layer for one workspace."""
     return workspace / _MANAGED_CONFIG_FILENAME
-
-
-def opencode_runtime_config_path() -> Path:
-    """Return the Agent-wide resolved Serve config path without initializing it."""
-    return _GLOBAL_WORKSPACE / "opencode.json"
 
 
 def _directory_manifest(root: Path) -> dict[str, str] | None:

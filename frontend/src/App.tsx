@@ -31,6 +31,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("history");
   const [authPage, setAuthPage] = useState<AuthPage>("login");
   const [scanId, setScanId] = useState<string>("");
+  const [preferredAgentKey, setPreferredAgentKey] = useState("");
   const [publicAccess, setPublicAccess] = useState<{ scanId: string; token: string } | null>(
     parsePublicScanAccess,
   );
@@ -101,7 +102,10 @@ export default function App() {
         <ScanHistory
           onViewScan={handleViewScan}
           onDownloadAgent={() => setPage("agent")}
-          onAgentConfig={() => setPage("agentConfig")}
+          onAgentConfig={() => {
+            setPreferredAgentKey("");
+            setPage("agentConfig");
+          }}
           onNewScan={() => setPage("newScan")}
           user={user}
           onLogout={handleLogout}
@@ -111,7 +115,14 @@ export default function App() {
         />
       )}
       {page === "newScan" && (
-        <NewScanForm onScanStarted={handleScanStarted} onBack={handleBack} />
+        <NewScanForm
+          onScanStarted={handleScanStarted}
+          onBack={handleBack}
+          onConfigureAgent={(agentKey) => {
+            setPreferredAgentKey(agentKey);
+            setPage("agentConfig");
+          }}
+        />
       )}
       {page === "scanning" && (
         <ScanStatusView scanId={scanId} onBack={handleBack} />
@@ -120,13 +131,13 @@ export default function App() {
         <AgentDownload onBack={handleBack} />
       )}
       {page === "agentConfig" && (
-        <AgentConfigPage onBack={handleBack} />
+        <AgentConfigPage onBack={handleBack} initialAgentKey={preferredAgentKey} />
       )}
       {page === "users" && (
         <UserManagement onBack={handleBack} user={user} />
       )}
       {page === "checkerDashboard" && (
-        <AdminCheckerDashboard onBack={handleBack} onViewScan={handleViewScan} />
+        <AdminCheckerDashboard onBack={handleBack} onViewScan={handleViewScan} user={user} />
       )}
       {page === "checkerCatalog" && (
         <CheckerCatalogPage onBack={handleBack} />

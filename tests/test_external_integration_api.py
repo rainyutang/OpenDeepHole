@@ -35,6 +35,11 @@ def _request() -> SimpleNamespace:
     )
 
 
+async def _direct_store_call(store, operation, *args, **kwargs):
+    function = getattr(store, operation) if isinstance(operation, str) else operation
+    return function(*args, **kwargs)
+
+
 class ExternalIntegrationApiTests(unittest.TestCase):
     def setUp(self) -> None:
         agent_api._registered_agents.clear()
@@ -57,6 +62,28 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             integration_api._require_integration_token("wrong-token")
 
         self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_integration_scan_config_requires_an_explicit_model(self) -> None:
+        agent_api._registered_agents["agent-1"] = AgentInfo(
+            agent_id="agent-1",
+            name="integration-client",
+            ip="127.0.0.1",
+            last_seen=datetime.now(timezone.utc).isoformat(),
+        )
+        send = AsyncMock(return_value=True)
+
+        with patch("backend.api.agent.send_agent_command", send):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(
+                    integration_api._sync_agent_config(
+                        "agent-1",
+                        AgentRemoteConfig(),
+                    )
+                )
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("客户端", ctx.exception.detail)
+        send.assert_not_awaited()
 
     def test_create_integration_scan_syncs_config_before_task_and_uses_public_checkers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,9 +121,20 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             with (
                 patch("backend.api.integration.get_scan_store", return_value=store),
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.integration.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+                patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
                 patch("backend.api.scan.refresh_registry", return_value=registry),
                 patch("backend.api.integration.refresh_registry", return_value=registry),
                 patch("backend.api.scan.build_checker_packages", return_value=[]),
+                patch(
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    AsyncMock(return_value=None),
+                ),
                 patch(
                     "backend.validation_catalog.find_validation_target",
                     return_value=SimpleNamespace(
@@ -115,7 +153,13 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                             product="LTE",
                             validation_environment="仿真UBBPi板环境",
                             agent_config=AgentRemoteConfig(
-                                opencode={"tool": "opencode", "executable": "opencode", "model": "model"},
+                                model_pool={
+                                    "models": [{
+                                        "id": "integration",
+                                        "model": "provider/model",
+                                        "enabled": True,
+                                    }],
+                                },
                             ),
                             code_graph_mcp=scan_graph,
                         ),
@@ -132,10 +176,12 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                             product="LTE",
                             validation_environment="仿真UBBPi板环境",
                             agent_config=AgentRemoteConfig(
-                                opencode={
-                                    "tool": "opencode",
-                                    "executable": "opencode",
-                                    "model": "model",
+                                model_pool={
+                                    "models": [{
+                                        "id": "integration",
+                                        "model": "provider/model",
+                                        "enabled": True,
+                                    }],
                                 },
                             ),
                             code_graph_mcp=AgentMcpConfig(enabled=False),

@@ -290,8 +290,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
         parsed = yaml.safe_load(agent_yaml)
         self.assertEqual(parsed["schema_version"], 4)
         self.assertNotIn("code_graph", parsed)
-        self.assertTrue(parsed["model_pool"]["models"])
-        self.assertTrue(all(model.get("model") for model in parsed["model_pool"]["models"]))
+        self.assertEqual(parsed["model_pool"]["models"], [])
+        self.assertNotIn("opencode_config", parsed)
         self.assertNotIn("llm_api", parsed)
 
     def test_launchers_do_not_auto_install_ctags_system_packages(self) -> None:

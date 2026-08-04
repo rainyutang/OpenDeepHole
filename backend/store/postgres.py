@@ -21,7 +21,7 @@ from typing import Any, Iterable
 
 from backend.models import AgentInfo
 
-from .sqlite import SqliteScanStore
+from .sqlite import SqliteScanStore, _retire_agent_opencode_config
 
 
 _QUESTION_MARK = re.compile(r"\?")
@@ -402,6 +402,19 @@ class PostgresScanStore(SqliteScanStore):
                 "ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS "
                 "accepting_tasks INTEGER NOT NULL DEFAULT 1"
             )
+            connection.execute(
+                "ALTER TABLE agents DROP COLUMN IF EXISTS "
+                "opencode_runtime_config_json"
+            )
+            for row in connection.execute(
+                "SELECT agent_key, config_json FROM agents"
+            ).fetchall():
+                migrated_config = _retire_agent_opencode_config(row["config_json"])
+                if migrated_config is not None:
+                    connection.execute(
+                        "UPDATE agents SET config_json = %s WHERE agent_key = %s",
+                        (migrated_config, row["agent_key"]),
+                    )
             # SQLite uses rowid to break equal created_at ties for FP jobs.
             # PostgreSQL needs an explicit monotonic key to preserve the same
             # "most recently inserted" contract across workers.

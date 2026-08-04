@@ -455,13 +455,15 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                 </span>
               )}
             </span>
+            <NavButton
+              label="结果看板"
+              description={user.role === "admin"
+                ? "汇总全部扫描结果和 Token 用量"
+                : "汇总我创建的扫描结果和 Token 用量"}
+              onClick={onCheckerDashboard}
+            />
             {user.role === "admin" && (
               <>
-                <NavButton
-                  label="结果看板"
-                  description="按 SKILL 汇总扫描结果、问题数量和确认情况"
-                  onClick={onCheckerDashboard}
-                />
                 <NavButton
                   label="用户管理"
                   description="管理系统用户账号和权限"
@@ -480,8 +482,8 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
               onClick={onDownloadAgent}
             />
             <NavButton
-              label="Agent 配置"
-              description="按机器名和 IP 配置 Agent 扫描能力"
+              label="客户端配置"
+              description="按机器名和 IP 配置客户端扫描能力"
               onClick={onAgentConfig}
             />
             <NavButton

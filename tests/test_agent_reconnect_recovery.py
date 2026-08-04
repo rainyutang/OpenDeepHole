@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -68,6 +69,20 @@ def _meta(
         scan_name="project",
         user_id=user_id,
     )
+
+
+async def _run_websocket_and_cancel_disconnect(websocket) -> None:
+    await agent_api.agent_websocket(websocket)
+    tasks = list(agent_api._agent_disconnect_tasks.values())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _direct_store_call(store, operation, *args, **kwargs):
+    function = getattr(store, operation) if isinstance(operation, str) else operation
+    return function(*args, **kwargs)
 
 
 class AgentReconnectRecoveryTests(unittest.TestCase):
@@ -169,6 +184,125 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 asyncio.run(agent_api.agent_websocket(ws))
 
         self.assertEqual(ws.captured_runtime_hash, "old-runtime")
+
+    def test_new_client_discards_reported_models_until_user_configures_it(self) -> None:
+        class FakeClient:
+            host = "127.0.0.1"
+
+        class FakeWebSocket:
+            client = FakeClient()
+
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+                self.messages = [{
+                    "type": "hello",
+                    "name": "new-client",
+                    "machine_name": "new-machine",
+                    "active_scans": [],
+                    "config": {
+                        "model_pool": {
+                            "models": [{
+                                "id": "reported",
+                                "model": "provider/reported",
+                                "enabled": True,
+                            }],
+                        },
+                    },
+                }]
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive_json(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                raise agent_api.WebSocketDisconnect()
+
+            async def send_json(self, payload: dict) -> None:
+                self.sent.append(payload)
+
+            async def close(self, code: int = 1000) -> None:
+                return None
+
+        ws = FakeWebSocket()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
+            ):
+                asyncio.run(_run_websocket_and_cancel_disconnect(ws))
+            record = store.list_agent_records()[0]
+            stored_config = json.loads(record["config_json"])
+            store.close()
+
+        self.assertEqual(ws.sent[0]["config"]["model_pool"]["models"], [])
+        self.assertEqual(stored_config["model_pool"]["models"], [])
+
+    def test_existing_client_preserves_persisted_models_on_reconnect(self) -> None:
+        class FakeClient:
+            host = "127.0.0.1"
+
+        class FakeWebSocket:
+            client = FakeClient()
+
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+                self.messages = [{
+                    "type": "hello",
+                    "name": "existing-client",
+                    "machine_name": "existing-machine",
+                    "active_scans": [],
+                    "config": {"model_pool": {"models": []}},
+                }]
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive_json(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                raise agent_api.WebSocketDisconnect()
+
+            async def send_json(self, payload: dict) -> None:
+                self.sent.append(payload)
+
+            async def close(self, code: int = 1000) -> None:
+                return None
+
+        ws = FakeWebSocket()
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.upsert_agent_record(
+                agent_key="stable-client",
+                user_id="",
+                ip="127.0.0.1",
+                machine_name="existing-machine",
+                display_name="existing-client",
+                agent_id="old-session",
+                last_seen="2026-01-01T00:00:00+00:00",
+                initial_config_json=json.dumps({
+                    "model_pool": {
+                        "models": [{
+                            "id": "persisted",
+                            "model": "provider/persisted",
+                            "enabled": True,
+                        }],
+                    },
+                }),
+            )
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
+            ):
+                asyncio.run(_run_websocket_and_cancel_disconnect(ws))
+            record = store.get_agent_record("stable-client")
+            store.close()
+
+        models = ws.sent[0]["config"]["model_pool"]["models"]
+        self.assertEqual(models[0]["model"], "provider/persisted")
+        persisted_models = json.loads(record["config_json"])["model_pool"]["models"]
+        self.assertEqual(persisted_models[0]["model"], "provider/persisted")
 
     def test_websocket_agent_online_requires_fresh_last_seen(self) -> None:
         fresh = datetime.now(timezone.utc).isoformat()
