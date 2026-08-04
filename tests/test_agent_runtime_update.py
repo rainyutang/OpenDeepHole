@@ -170,6 +170,25 @@ class AgentRuntimePackageTests(unittest.TestCase):
             names,
         )
         self.assertIn(
+            "deephole_client/vulnerability_mining/"
+            "engines/threat_audit/runner.py",
+            names,
+        )
+        self.assertIn(
+            "deephole_client/vulnerability_mining/"
+            "engines/threat_audit/audit_schema.py",
+            names,
+        )
+        self.assertFalse(
+            any(name.startswith("deephole_client/threat_audit/") for name in names)
+        )
+        self.assertFalse(
+            any(
+                name.startswith("deephole_client/threat_audit_skills/")
+                for name in names
+            )
+        )
+        self.assertIn(
             "deephole_client/threat_analysis/threat_analysis.py",
             names,
         )

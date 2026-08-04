@@ -9,7 +9,7 @@ from deephole_client.vulnerability_mining.engines.static_candidate.candidate_aud
     VULNERABILITY_LIST_SCHEMA,
     audit_output_instruction,
 )
-from deephole_client.threat_audit.audit_schema import (
+from deephole_client.vulnerability_mining.engines.threat_audit.audit_schema import (
     THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
     threat_audit_output_instruction,
 )

@@ -101,7 +101,7 @@ flowchart TD
 - [代码图谱构建](../deephole_client/code_graph_build/README.md)
 - [静态分析](../deephole_client/vulnerability_mining/engines/static_candidate/static_analysis/README.md)
 - [候选点审计](../deephole_client/vulnerability_mining/engines/static_candidate/candidate_audit/README.md)
-- [威胁审计](../deephole_client/threat_audit/README.md)
+- [威胁审计](../deephole_client/vulnerability_mining/engines/threat_audit/README.md)
 - [对抗式去误报](../deephole_client/fp_review/README.md)
 - [Trail of Bits fp-check](../deephole_client/fp_check_review/README.md)
 - [漏洞验证过程](../deephole_client/vulnerability_validation/README.md)

@@ -740,13 +740,16 @@ OpenDeepHole/
 │   │   │   │   ├── rules/           # analyzer、静态资源与嵌套 Skill
 │   │   │   │   ├── engine.yaml
 │   │   │   │   └── engine.py
-│   │   │   └── threat_audit/       # 威胁审计引擎适配器
+│   │   │   └── threat_audit/       # 威胁审计引擎与完整过程实现
+│   │   │       ├── runner.py       # 威胁任务派生、模型审计与结果汇总
+│   │   │       ├── audit_schema.py # 专用结构化输出 Schema
+│   │   │       ├── engine.yaml
+│   │   │       └── engine.py       # 平台引擎适配器
 │   │   ├── examples/               # 可复制的 Skill/外部 CLI 引擎示例
 │   │   ├── runtime.py              # 引擎发现、加载、校验和执行
 │   │   └── engine_report.py        # 引擎结构化结果转漏洞报告
 │   ├── threat_analysis/            # 原样平铺的威胁分析 harness 与内置 Skill
 │   ├── threat_analysis_runner.py   # 威胁分析平台异步适配器
-│   ├── threat_audit/               # 独立威胁审计过程与专用输出 Schema
 │   ├── fp_review/                  # 对抗式去误报复核
 │   ├── fp_check_review/            # Trail of Bits fp-check 单项复核与批次汇总
 │   ├── vulnerability_validation/   # 漏洞验证过程、SDK 与产品验证器

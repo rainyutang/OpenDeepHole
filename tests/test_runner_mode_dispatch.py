@@ -29,10 +29,14 @@ PROCESS_IMPORT_PATHS = {
     "candidate_audit": (
         "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit"
     ),
+    "threat_audit": (
+        "deephole_client.vulnerability_mining.engines.threat_audit"
+    ),
 }
 PROCESS_SOURCE_PATHS = {
     "static_analysis": Path("vulnerability_mining/engines/static_candidate/static_analysis"),
     "candidate_audit": Path("vulnerability_mining/engines/static_candidate/candidate_audit"),
+    "threat_audit": Path("vulnerability_mining/engines/threat_audit"),
 }
 
 
@@ -67,6 +71,8 @@ def test_process_sources_do_not_import_platform_or_sibling_processes() -> None:
     for package in PROCESS_NAMES:
         package_root = client_root / PROCESS_SOURCE_PATHS.get(package, Path(package))
         for source in package_root.rglob("*.py"):
+            if package == "threat_audit" and source == package_root / "engine.py":
+                continue
             tree = ast.parse(
                 source.read_text(encoding="utf-8"),
                 filename=str(source),
@@ -200,6 +206,24 @@ def test_static_and_audit_rule_resources_share_one_rule_directory() -> None:
     assert not list(rules_root.glob("*/SKILL.md"))
     assert not (client_root / "static_analysis").exists()
     assert not (client_root / "candidate_audit").exists()
+
+
+def test_threat_audit_process_is_owned_by_engine() -> None:
+    client_root = Path(__file__).resolve().parents[1] / "deephole_client"
+    engine_root = client_root / "vulnerability_mining" / "engines" / "threat_audit"
+
+    for name in (
+        "engine.yaml",
+        "engine.py",
+        "runner.py",
+        "audit_schema.py",
+        "__init__.py",
+        "__main__.py",
+        "README.md",
+    ):
+        assert (engine_root / name).is_file()
+    assert not (client_root / "threat_audit").exists()
+    assert not (client_root / "threat_audit_skills").exists()
 
 
 @pytest.mark.parametrize(

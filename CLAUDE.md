@@ -222,12 +222,15 @@ deephole_client/
   main.py         — Entry point; WebSocket client loop with auto-reconnect
   server.py       — Command handlers: handle_task(), handle_stop(), handle_resume()
   scanner.py      — Coordinates indexing, standalone processes, and platform reporting
-  code_graph_build/, threat_analysis/, threat_audit/, fp_review/
+  code_graph_build/, threat_analysis/, fp_review/
   fp_check_review/, vulnerability_validation/
                   — Backend-free async processes with standalone CLIs
   vulnerability_mining/engines/static_candidate/
     static_analysis/, candidate_audit/, rules/
                   — Static-candidate implementation and unified rule tree
+  vulnerability_mining/engines/threat_audit/
+    runner.py, audit_schema.py, engine.py
+                  — Threat-audit process and platform engine adapter
   git_history.py  — Mines git-history security-fix patterns (one LLM call per commit)
   variant_hunter.py — Hunts whole-repo same-class sites per history pattern → variant candidates
   reporter.py     — HTTP client: pushes events/results/git-history to backend

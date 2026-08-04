@@ -16,7 +16,10 @@ from backend.store.sqlite import SqliteScanStore
 from backend.threat_data import parse_threat_analysis_data
 from deephole_client.process_artifacts import collect_json_artifacts
 from deephole_client.threat_analysis_runner import run_threat_analysis
-from deephole_client.threat_audit.runner import _tasks, _threat_prompt
+from deephole_client.vulnerability_mining.engines.threat_audit.runner import (
+    _tasks,
+    _threat_prompt,
+)
 from task_agent import OpenCodeResult, run_opencode_task, run_sync_component
 from task_agent.task_service import get_opencode_execution_context
 

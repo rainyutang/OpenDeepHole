@@ -20,6 +20,10 @@ from deephole_client.scanner import (
     run_scan,
 )
 from backend.models import MiningEngineSelection, Vulnerability
+from deephole_client.vulnerability_mining import runtime as mining_runtime
+from deephole_client.vulnerability_mining.engines.threat_audit import (
+    engine as threat_audit_engine_module,
+)
 from deephole_client.vulnerability_mining.engines.threat_audit.engine import (
     run as run_threat_audit_engine,
 )
@@ -653,6 +657,13 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "vulnerabilities": threat_vulnerabilities,
             }
 
+        original_load_module = mining_runtime._load_module
+
+        def load_engine_module(manifest):
+            if manifest.engine_id == "threat_audit":
+                return threat_audit_engine_module
+            return original_load_module(manifest)
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project = root / "project"
@@ -697,7 +708,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     return_value={"artifacts": {}},
                 ),
                 patch(
-                    "deephole_client.threat_audit.run_threat_audit",
+                    "deephole_client.vulnerability_mining.runtime._load_module",
+                    side_effect=load_engine_module,
+                ),
+                patch(
+                    "deephole_client.vulnerability_mining.engines.threat_audit.engine.run_threat_audit",
                     new=AsyncMock(side_effect=threat_audit_run),
                 ),
             ):

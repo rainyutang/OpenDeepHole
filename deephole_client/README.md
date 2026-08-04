@@ -9,7 +9,7 @@
 | `threat_analysis/` | `threat_analysis_runner.run_threat_analysis(**kwargs)` |
 | `vulnerability_mining/engines/static_candidate/static_analysis/` | `run_static_analysis(**kwargs)` |
 | `vulnerability_mining/engines/static_candidate/candidate_audit/` | `run_candidate_audit(**kwargs)` |
-| `threat_audit/` | `run_threat_audit(**kwargs)` |
+| `vulnerability_mining/engines/threat_audit/` | `run_threat_audit(**kwargs)` |
 | `fp_review/` | `run_fp_review(**kwargs)` |
 | `fp_check_review/` | `run_fp_check_review(**kwargs)` |
 | `vulnerability_validation/` | `run_vulnerability_validation(**kwargs)` |
@@ -36,6 +36,10 @@ SKILL；内置威胁分析不使用这条路径：完整 Agent 会把它的四�
 Task Agent 的 `skill_paths`。完整 Agent 会把整个全局 `.opencode` 目录的只读规则写入最终
 `opencode.json`，因此 SKILL 加载后的 `references/`、`assets/` 和 `scripts/` 不依赖
 Session 级权限。
+
+威胁审计过程及专用输出 Schema 由 `vulnerability_mining/engines/threat_audit/` 直接拥有，
+不再使用顶层 `threat_audit/` 或专用 `threat_audit_skills/`；该过程继续直接构造 Prompt，
+不加载 Skill。
 
 ## 威胁分析入口
 

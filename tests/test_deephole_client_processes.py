@@ -24,7 +24,7 @@ from deephole_client.fp_check_review import run_fp_check_review
 from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis import run_static_analysis
 from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.base import BaseAnalyzer, Candidate
 from deephole_client.threat_analysis_runner import run_threat_analysis
-from deephole_client.threat_audit import run_threat_audit
+from deephole_client.vulnerability_mining.engines.threat_audit import run_threat_audit
 from deephole_client.vulnerability_validation import run_vulnerability_validation
 
 
@@ -434,7 +434,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             vuln_type="oob",
         )])
         with patch(
-            "deephole_client.threat_audit.runner.run_opencode_task",
+            "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
             new=AsyncMock(return_value=audit_task_result),
         ) as run_task:
             audit_events: list[dict] = []
@@ -487,7 +487,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         )
 
         with patch(
-            "deephole_client.threat_audit.runner.run_opencode_task",
+            "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
             new=AsyncMock(return_value=_task_result([])),
         ):
             empty_audit = await run_threat_audit(
@@ -503,7 +503,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         assert empty_audit["tasks"][0]["result_count"] == 0
 
         with patch(
-            "deephole_client.threat_audit.runner.run_opencode_task",
+            "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
             new=AsyncMock(side_effect=RuntimeError("model unavailable")),
         ):
             failed_events: list[dict] = []
@@ -526,7 +526,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         cancelled = threading.Event()
         cancelled.set()
         with patch(
-            "deephole_client.threat_audit.runner.run_opencode_task",
+            "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
             new=AsyncMock(),
         ) as cancelled_run_task:
             cancelled_events: list[dict] = []
@@ -574,7 +574,7 @@ def test_threat_audit_calls_sync_callback_with_completed_task_result() -> None:
         )])
 
         with patch(
-            "deephole_client.threat_audit.runner.run_opencode_task",
+            "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
             new=AsyncMock(return_value=model_result),
         ):
             audited = await run_threat_audit(
@@ -620,7 +620,7 @@ def test_threat_audit_callback_failure_does_not_fail_completed_task() -> None:
             raise RuntimeError("report transport unavailable")
 
         with patch(
-            "deephole_client.threat_audit.runner.run_opencode_task",
+            "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
             new=AsyncMock(return_value=_task_result([_audit_item(
                 confirmed=True,
                 file="src/parser.c",
@@ -713,7 +713,7 @@ def test_threat_audit_streams_async_task_results_before_batch_finishes() -> None
                 ready_reported.set()
 
         with patch(
-            "deephole_client.threat_audit.runner.run_opencode_task",
+            "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
             side_effect=run_task,
         ):
             batch_task = asyncio.create_task(run_threat_audit(
