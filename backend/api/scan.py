@@ -72,6 +72,7 @@ from backend.models import (
 from backend.feedback_format import build_feedback_section
 from backend.scan_metrics import (
     calculate_issue_metrics,
+    calculate_validated_issue_count,
     is_effective_fp_review_result,
     is_llm_issue,
     latest_fp_review_result_map,
@@ -1331,14 +1332,24 @@ async def get_scan_overview_v2(
             "validations": max(counts["validations"], len(scan.validations)),
             "skill_reports": max(counts["skill_reports"], len(scan.skill_reports)),
         }
-        processed_keys = await run_store_call(store, "get_processed_keys", scan_id)
+        processed_keys, fp_verdicts = await asyncio.gather(
+            run_store_call(store, "get_processed_keys", scan_id),
+            run_store_call(store, "list_fp_review_verdicts_by_scans", [scan_id]),
+        )
         scan.retryable_candidates_count = _retry_incomplete_count(scan)
         continuable_count = _continuable_task_count(scan, processed_keys)
+        vulnerabilities = scan.vulnerabilities
+        validation_states = {
+            validation.vuln_index: (validation.status, validation.running)
+            for validation in scan.validations
+        }
     else:
         scan = stored_scan
-        vuln_stats, incomplete_counts = await asyncio.gather(
+        vuln_stats, incomplete_counts, validation_states, fp_verdicts = await asyncio.gather(
             run_store_call(store, "get_vuln_stats_by_scans", [scan_id]),
             run_store_call(store, "get_incomplete_threat_audit_counts", [scan_id]),
+            run_store_call(store, "get_vulnerability_validation_states", scan_id),
+            run_store_call(store, "list_fp_review_verdicts_by_scans", [scan_id]),
         )
         vulnerabilities = vuln_stats.get(scan_id, [])
         scan.retryable_candidates_count = sum(
@@ -1349,6 +1360,18 @@ async def get_scan_overview_v2(
             + scan.retryable_candidates_count
             + incomplete_counts.get(scan_id, 0)
         )
+
+    fp_result_map = latest_fp_review_result_map(fp_verdicts.get(scan_id, []))
+    issue_metrics = calculate_issue_metrics(vulnerabilities, fp_result_map)
+    counts.update({
+        "effective_issue_count": issue_metrics.effective_issue_count,
+        "validated_issue_count": calculate_validated_issue_count(
+            vulnerabilities,
+            fp_result_map,
+            validation_states,
+        ),
+    })
+    scan.total_candidates = max(scan.total_candidates, counts["candidates"])
 
     scan.agent_name = meta.agent_name
     if distributed:

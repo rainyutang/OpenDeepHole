@@ -234,6 +234,13 @@ class ScanStoreBase(ABC):
     def list_vulnerability_validations(self, scan_id: str) -> list[VulnerabilityValidation]:
         """Return validation statuses for a scan, ordered by vulnerability index."""
 
+    def get_vulnerability_validation_states(
+        self,
+        scan_id: str,
+    ) -> dict[int, tuple[str, bool]]:
+        """Return lightweight validation status/running values keyed by vulnerability index."""
+        raise NotImplementedError
+
     @abstractmethod
     def get_vuln_stats_by_scans(self, scan_ids: list[str]) -> dict[str, list[VulnStat]]:
         """Return lightweight per-vulnerability stats grouped by scan, ordered by index."""

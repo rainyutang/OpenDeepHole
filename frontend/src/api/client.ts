@@ -304,6 +304,10 @@ export async function getScanStatus(scanId: string): Promise<ScanStatus> {
   const indexedVulnerabilities = vulnerabilities.items.map((item) => item.vulnerability);
   return {
     ...overview,
+    total_candidates: Math.max(
+      overview.total_candidates,
+      overview.detail_counts?.candidates ?? 0,
+    ),
     candidates: candidates.items,
     vulnerabilities: indexedVulnerabilities,
     events: events.items,
@@ -327,9 +331,11 @@ export async function getScanOverview(scanId: string): Promise<ScanStatus> {
 export async function getScanCandidatesPage(
   scanId: string,
   after?: number | null,
+  signal?: AbortSignal,
 ): Promise<ScanCandidatePage> {
   const { data } = await api.get<ScanCandidatePage>(`/api/v2/scans/${scanId}/candidates`, {
     params: after == null ? undefined : { after },
+    signal,
   });
   return data;
 }
@@ -337,9 +343,11 @@ export async function getScanCandidatesPage(
 export async function getScanVulnerabilitiesPage(
   scanId: string,
   after?: number | null,
+  signal?: AbortSignal,
 ): Promise<VulnerabilityPage> {
   const { data } = await api.get<VulnerabilityPage>(`/api/v2/scans/${scanId}/vulnerabilities`, {
     params: after == null ? undefined : { after },
+    signal,
   });
   return data;
 }
@@ -347,9 +355,11 @@ export async function getScanVulnerabilitiesPage(
 export async function getScanEventsPage(
   scanId: string,
   before?: number | null,
+  signal?: AbortSignal,
 ): Promise<ScanEventPage> {
   const { data } = await api.get<ScanEventPage>(`/api/v2/scans/${scanId}/events`, {
     params: before == null ? undefined : { before },
+    signal,
   });
   return data;
 }
@@ -357,9 +367,11 @@ export async function getScanEventsPage(
 export async function getScanThreatTasksPage(
   scanId: string,
   cursor?: string | null,
+  signal?: AbortSignal,
 ): Promise<ThreatAuditTaskPage> {
   const { data } = await api.get<ThreatAuditTaskPage>(`/api/v2/scans/${scanId}/threat-audit-tasks`, {
     params: cursor ? { cursor } : undefined,
+    signal,
   });
   return data;
 }
@@ -367,9 +379,11 @@ export async function getScanThreatTasksPage(
 export async function getScanValidationsPage(
   scanId: string,
   after?: number | null,
+  signal?: AbortSignal,
 ): Promise<VulnerabilityValidationPage> {
   const { data } = await api.get<VulnerabilityValidationPage>(`/api/v2/scans/${scanId}/validations`, {
     params: after == null ? undefined : { after },
+    signal,
   });
   return data;
 }

@@ -498,6 +498,8 @@ export interface ScanStatus {
 export interface ScanDetailCounts {
   candidates: number;
   vulnerabilities: number;
+  effective_issue_count?: number;
+  validated_issue_count?: number;
   events: number;
   threat_audit_tasks: number;
   validations: number;

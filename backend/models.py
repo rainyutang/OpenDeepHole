@@ -643,6 +643,8 @@ class ScanStatus(BaseModel):
 class ScanDetailCounts(BaseModel):
     candidates: int = 0
     vulnerabilities: int = 0
+    effective_issue_count: int = 0
+    validated_issue_count: int = 0
     events: int = 0
     threat_audit_tasks: int = 0
     validations: int = 0

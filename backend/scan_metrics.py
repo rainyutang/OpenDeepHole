@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
 from backend.models import FpReviewResult
 
 FP_REVIEW_NO_RESULT_REASON = "Review incomplete"
+VALIDATION_TERMINAL_STATUSES = frozenset({
+    "verified",
+    "success",
+    "failed",
+    "error",
+    "timeout",
+    "cancelled",
+    "skipped",
+})
 
 
 class VulnLike(Protocol):
@@ -127,3 +136,23 @@ def calculate_issue_metrics(
         accuracy_basis_count=accuracy_basis_count,
         accuracy=accuracy(human_confirmed_count, accuracy_basis_count),
     )
+
+
+def calculate_validated_issue_count(
+    vulnerabilities: Sequence[VulnLike],
+    fp_results: Mapping[int, FpReviewResult],
+    validation_states: Mapping[int, tuple[str, bool]],
+) -> int:
+    """Count effective issues that have reached a terminal validation state."""
+
+    total = 0
+    for index, vulnerability in enumerate(vulnerabilities):
+        if not is_llm_issue(vulnerability):
+            continue
+        fp_result = fp_results.get(index)
+        if fp_result is not None and fp_result.verdict == "fp":
+            continue
+        status, running = validation_states.get(index, ("", False))
+        if not running and status in VALIDATION_TERMINAL_STATUSES:
+            total += 1
+    return total

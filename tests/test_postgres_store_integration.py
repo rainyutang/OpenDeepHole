@@ -22,6 +22,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     Vulnerability,
+    VulnerabilityValidation,
 )
 from backend.store.postgres import PostgresScanStore
 from backend.store.sqlite import SqliteScanStore
@@ -102,6 +103,14 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
             "postgres-integration-scan",
             _vulnerability(),
         )
+        source.upsert_vulnerability_validation(
+            "postgres-integration-scan",
+            VulnerabilityValidation(
+                vuln_index=0,
+                status="verified",
+                running=False,
+            ),
+        )
         source.add_event(
             "postgres-integration-scan",
             ScanEvent.create("auditing", "candidate audit started"),
@@ -129,9 +138,12 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
             "vulnerabilities": 1,
             "events": 1,
             "threat_audit_tasks": 0,
-            "validations": 0,
+            "validations": 1,
             "skill_reports": 0,
         }
+        assert store.get_vulnerability_validation_states(
+            "postgres-integration-scan",
+        ) == {0: ("verified", False)}
         assert len(store.list_scan_candidates_page(
             "postgres-integration-scan",
             after_index=-1,

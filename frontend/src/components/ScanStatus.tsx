@@ -1,7 +1,7 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import { getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
@@ -30,6 +30,7 @@ const THREAT_ENGINE_ID = "threat_audit";
 const THREAT_AUDIT_PAGE_SIZE = 20;
 
 type MainTab = "overview" | "index" | "static" | "threat" | "mining" | "validation" | "fp_review" | "issues";
+type DetailResource = "candidates" | "vulnerabilities" | "events" | "threat_tasks" | "validations";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failure" | "timeout" | "cancelled" | "unknown";
 type FlowNodeId = "index" | "static" | "threat" | "fp_review" | "validation" | `engine:${string}`;
@@ -130,6 +131,9 @@ function isStaticCandidate(item: Candidate): boolean {
 }
 
 function effectiveIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
+  if (scan.detail_counts?.effective_issue_count != null) {
+    return scan.detail_counts.effective_issue_count;
+  }
   const fpMap = new Map(
     (fpReview?.results ?? [])
       .filter(isEffectiveFpReviewResult)
@@ -158,11 +162,155 @@ function isValidationTerminalStatus(status: string): boolean {
 }
 
 function validatedIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
+  if (scan.detail_counts?.validated_issue_count != null) {
+    return scan.detail_counts.validated_issue_count;
+  }
   const validationMap = new Map((scan.validations ?? []).map((item) => [item.vuln_index, item]));
   return issueItems(scan, fpReview).filter(({ index }) => {
     const validation = validationMap.get(index);
     return Boolean(validation && !validation.running && isValidationTerminalStatus(validation.status));
   }).length;
+}
+
+function scanEventKey(item: ScanEvent): string {
+  return [
+    item.timestamp,
+    item.phase,
+    item.message,
+    item.candidate_index ?? "",
+  ].join("\u0000");
+}
+
+function detailResourcesForTab(tab: MainTab, engineId: string): DetailResource[] {
+  if (tab === "static") {
+    return ["candidates", "vulnerabilities", "validations", "events"];
+  }
+  if (tab === "issues" || tab === "validation" || tab === "fp_review") {
+    return ["vulnerabilities", "validations", "events"];
+  }
+  if (tab === "mining") {
+    if (engineId === THREAT_ENGINE_ID) return ["threat_tasks", "events"];
+    if (engineId && engineId !== STATIC_ENGINE_ID) {
+      return ["vulnerabilities", "validations", "events"];
+    }
+    return ["events"];
+  }
+  if (tab === "index" || tab === "threat") return ["events"];
+  return [];
+}
+
+type LoadedDetailPage =
+  | { resource: "candidates"; items: ScanCandidate[]; nextCursor: number | null }
+  | { resource: "vulnerabilities"; items: { index: number; vulnerability: Vulnerability }[]; nextCursor: number | null }
+  | { resource: "events"; items: ScanEvent[]; nextCursor: number | null }
+  | { resource: "threat_tasks"; items: ThreatAuditTask[]; nextCursor: string | null }
+  | { resource: "validations"; items: VulnerabilityValidation[]; nextCursor: number | null };
+
+function detailCursor(
+  scan: ScanStatusType,
+  resource: DetailResource,
+): number | string | null {
+  const pages = scan.detail_pages;
+  if (!pages) return null;
+  if (resource === "candidates") return pages.candidates_next_cursor;
+  if (resource === "vulnerabilities") return pages.vulnerabilities_next_cursor;
+  if (resource === "events") return pages.events_next_cursor;
+  if (resource === "threat_tasks") return pages.threat_tasks_next_cursor;
+  return pages.validations_next_cursor;
+}
+
+async function fetchDetailPage(
+  scanId: string,
+  resource: DetailResource,
+  cursor: number | string,
+  signal: AbortSignal,
+): Promise<LoadedDetailPage> {
+  if (resource === "candidates") {
+    const page = await getScanCandidatesPage(scanId, Number(cursor), signal);
+    return { resource, items: page.items, nextCursor: page.next_cursor };
+  }
+  if (resource === "vulnerabilities") {
+    const page = await getScanVulnerabilitiesPage(scanId, Number(cursor), signal);
+    return { resource, items: page.items, nextCursor: page.next_cursor };
+  }
+  if (resource === "events") {
+    const page = await getScanEventsPage(scanId, Number(cursor), signal);
+    return { resource, items: page.items, nextCursor: page.next_cursor };
+  }
+  if (resource === "threat_tasks") {
+    const page = await getScanThreatTasksPage(scanId, String(cursor), signal);
+    return { resource, items: page.items, nextCursor: page.next_cursor };
+  }
+  const page = await getScanValidationsPage(scanId, Number(cursor), signal);
+  return { resource, items: page.items, nextCursor: page.next_cursor };
+}
+
+function mergeDetailPage(previous: ScanStatusType, page: LoadedDetailPage): ScanStatusType {
+  const detailPages = previous.detail_pages;
+  if (!detailPages) return previous;
+
+  if (page.resource === "candidates") {
+    const candidates = [...previous.candidates];
+    const indexes = new Set(candidates.map((item) => item.idx));
+    for (const item of page.items) {
+      if (!indexes.has(item.idx)) candidates.push(item);
+    }
+    candidates.sort((left, right) => left.idx - right.idx);
+    return {
+      ...previous,
+      candidates,
+      detail_pages: { ...detailPages, candidates_next_cursor: page.nextCursor },
+    };
+  }
+
+  if (page.resource === "vulnerabilities") {
+    const vulnerabilities = [...previous.vulnerabilities];
+    for (const item of page.items) vulnerabilities[item.index] = item.vulnerability;
+    return {
+      ...previous,
+      vulnerabilities,
+      detail_pages: { ...detailPages, vulnerabilities_next_cursor: page.nextCursor },
+    };
+  }
+
+  if (page.resource === "events") {
+    const existingKeys = new Set(previous.events.map(scanEventKey));
+    const olderEvents = page.items.filter((item) => !existingKeys.has(scanEventKey(item)));
+    return {
+      ...previous,
+      events: [...olderEvents, ...previous.events],
+      detail_pages: { ...detailPages, events_next_cursor: page.nextCursor },
+    };
+  }
+
+  if (page.resource === "threat_tasks") {
+    const threatTasks = [...(previous.threat_audit_tasks ?? [])];
+    const taskIds = new Set(threatTasks.map((item) => item.task_id));
+    for (const item of page.items) {
+      if (!taskIds.has(item.task_id)) threatTasks.push(item);
+    }
+    threatTasks.sort((left, right) => (
+      String(left.created_at || "").localeCompare(String(right.created_at || ""))
+      || left.task_id.localeCompare(right.task_id)
+    ));
+    return {
+      ...previous,
+      threat_audit_tasks: threatTasks,
+      detail_pages: { ...detailPages, threat_tasks_next_cursor: page.nextCursor },
+    };
+  }
+
+  const validations = [...(previous.validations ?? [])];
+  const validationIndexes = new Set(validations.map((item) => item.vuln_index));
+  for (const item of page.items) {
+    if (!validationIndexes.has(item.vuln_index)) validations.push(item);
+  }
+  validations.sort((left, right) => left.vuln_index - right.vuln_index);
+  return {
+    ...previous,
+    validations,
+    detail_pages: { ...detailPages, validations_next_cursor: page.nextCursor },
+  };
 }
 
 function candidateKey(item: Pick<Candidate, "file" | "line" | "function" | "vuln_type">): string {
@@ -424,9 +572,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [exportingZip, setExportingZip] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [modelPoolOpen, setModelPoolOpen] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailLoadingResources, setDetailLoadingResources] = useState<Set<DetailResource>>(new Set());
+  const [detailFailedResources, setDetailFailedResources] = useState<Set<DetailResource>>(new Set());
   const [lastSeenEvents, setLastSeenEvents] = useState(0);
   const logRef = useRef<HTMLDivElement>(null);
+  const scanRef = useRef<ScanStatusType | null>(null);
+  const detailLoadingRef = useRef<Set<DetailResource>>(new Set());
+  const detailAbortControllerRef = useRef(new AbortController());
+  const summaryRefreshTimerRef = useRef<number | null>(null);
+  const summaryRefreshInFlightRef = useRef(false);
 
   // Feedback panel state
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -471,6 +625,129 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     || scan.status === "cancelled"
     || (scan.status === "complete" && !completeButThreatActive)
   );
+
+  useEffect(() => {
+    scanRef.current = scan;
+  }, [scan]);
+
+  useEffect(() => {
+    detailAbortControllerRef.current.abort();
+    detailAbortControllerRef.current = new AbortController();
+    detailLoadingRef.current.clear();
+    setDetailLoadingResources(new Set());
+    setDetailFailedResources(new Set());
+    if (summaryRefreshTimerRef.current != null) {
+      window.clearTimeout(summaryRefreshTimerRef.current);
+      summaryRefreshTimerRef.current = null;
+    }
+    summaryRefreshInFlightRef.current = false;
+    return () => {
+      detailAbortControllerRef.current.abort();
+      if (summaryRefreshTimerRef.current != null) {
+        window.clearTimeout(summaryRefreshTimerRef.current);
+        summaryRefreshTimerRef.current = null;
+      }
+    };
+  }, [scanId]);
+
+  const refreshOverviewSummary = useCallback(async () => {
+    const current = scanRef.current;
+    if (!current?.detail_counts || summaryRefreshInFlightRef.current) return;
+    summaryRefreshInFlightRef.current = true;
+    try {
+      const overview = await getScanOverview(scanId);
+      setScan((previous) => {
+        if (!previous || previous.scan_id !== overview.scan_id) return previous;
+        return {
+          ...previous,
+          total_candidates: Math.max(
+            previous.total_candidates,
+            overview.total_candidates,
+            overview.detail_counts?.candidates ?? 0,
+          ),
+          processed_candidates: overview.processed_candidates,
+          retryable_candidates_count: overview.retryable_candidates_count,
+          continuable_task_count: overview.continuable_task_count,
+          can_continue: overview.can_continue,
+          detail_counts: overview.detail_counts ?? previous.detail_counts,
+        };
+      });
+    } catch {
+      // SSE and the running-scan fallback poll will try again.
+    } finally {
+      summaryRefreshInFlightRef.current = false;
+    }
+  }, [scanId]);
+
+  const scheduleOverviewSummaryRefresh = useCallback((delayMs = 1000) => {
+    if (summaryRefreshTimerRef.current != null) {
+      window.clearTimeout(summaryRefreshTimerRef.current);
+    }
+    summaryRefreshTimerRef.current = window.setTimeout(() => {
+      summaryRefreshTimerRef.current = null;
+      void refreshOverviewSummary();
+    }, delayMs);
+  }, [refreshOverviewSummary]);
+
+  const loadDetailResource = useCallback(async (resource: DetailResource) => {
+    if (detailLoadingRef.current.has(resource)) return;
+    const current = scanRef.current;
+    let cursor = current ? detailCursor(current, resource) : null;
+    if (cursor == null) return;
+
+    detailLoadingRef.current.add(resource);
+    setDetailLoadingResources(new Set(detailLoadingRef.current));
+    setDetailFailedResources((previous) => {
+      if (!previous.has(resource)) return previous;
+      const next = new Set(previous);
+      next.delete(resource);
+      return next;
+    });
+    const signal = detailAbortControllerRef.current.signal;
+    let failed = false;
+    try {
+      while (cursor != null && !signal.aborted) {
+        let page: LoadedDetailPage | null = null;
+        let lastError: unknown = null;
+        for (let attempt = 0; attempt < 4 && !signal.aborted; attempt += 1) {
+          try {
+            page = await fetchDetailPage(scanId, resource, cursor, signal);
+            break;
+          } catch (error) {
+            lastError = error;
+            if (signal.aborted) break;
+            if (attempt < 3) {
+              await new Promise((resolve) => window.setTimeout(resolve, 250 * (2 ** attempt)));
+            }
+          }
+        }
+        if (signal.aborted) return;
+        if (!page) throw lastError ?? new Error("详情分页加载失败");
+        if (page.nextCursor != null && page.nextCursor === cursor) {
+          throw new Error(`详情游标未前进: ${resource}`);
+        }
+        setScan((previous) => previous ? mergeDetailPage(previous, page) : previous);
+        cursor = page.nextCursor;
+      }
+    } catch (error) {
+      if (!signal.aborted) {
+        failed = true;
+        console.warn(`自动加载扫描详情失败 (${resource})`, error);
+        setDetailFailedResources((previous) => new Set(previous).add(resource));
+      }
+    } finally {
+      detailLoadingRef.current.delete(resource);
+      setDetailLoadingResources(new Set(detailLoadingRef.current));
+      if (!failed) {
+        setDetailFailedResources((previous) => {
+          if (!previous.has(resource)) return previous;
+          const next = new Set(previous);
+          next.delete(resource);
+          return next;
+        });
+      }
+    }
+  }, [scanId]);
 
   useEffect(() => {
     getCheckers().then(setCheckers).catch(() => {});
@@ -520,26 +797,54 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         if (data.opencode_pool !== undefined) patch.opencode_pool = data.opencode_pool;
         return { ...prev, ...patch };
       });
+      scheduleOverviewSummaryRefresh();
     },
     onScanCandidates: (data) => {
       setScan((prev) => prev ? { ...prev, candidates: data.candidates, total_candidates: data.candidates.length } : prev);
+      scheduleOverviewSummaryRefresh();
     },
     onScanCandidatesChanged: (data) => {
+      setScan((prev) => prev ? {
+        ...prev,
+        total_candidates: data.total_candidates,
+        detail_counts: prev.detail_counts ? {
+          ...prev.detail_counts,
+          candidates: data.total_candidates,
+        } : prev.detail_counts,
+      } : prev);
+      scheduleOverviewSummaryRefresh(data.final ? 0 : 1000);
       if (!data.final) return;
-      getScanCandidatesPage(scanId)
+      getScanCandidatesPage(scanId, null, detailAbortControllerRef.current.signal)
         .then((page) => {
-          setScan((prev) => prev ? {
-            ...prev,
-            candidates: page.items,
-            total_candidates: data.total_candidates,
-            detail_pages: {
-              candidates_next_cursor: page.next_cursor,
-              vulnerabilities_next_cursor: prev.detail_pages?.vulnerabilities_next_cursor ?? null,
-              events_next_cursor: prev.detail_pages?.events_next_cursor ?? null,
-              threat_tasks_next_cursor: prev.detail_pages?.threat_tasks_next_cursor ?? null,
-              validations_next_cursor: prev.detail_pages?.validations_next_cursor ?? null,
-            },
-          } : prev);
+          setScan((prev) => {
+            if (!prev) return prev;
+            const active = detailLoadingRef.current.has("candidates");
+            const candidates = active
+              ? mergeDetailPage(prev, {
+                  resource: "candidates",
+                  items: page.items,
+                  nextCursor: prev.detail_pages?.candidates_next_cursor ?? page.next_cursor,
+                }).candidates
+              : page.items;
+            return {
+              ...prev,
+              candidates,
+              total_candidates: data.total_candidates,
+              detail_counts: prev.detail_counts ? {
+                ...prev.detail_counts,
+                candidates: data.total_candidates,
+              } : prev.detail_counts,
+              detail_pages: {
+                candidates_next_cursor: active && prev.detail_pages?.candidates_next_cursor != null
+                  ? prev.detail_pages.candidates_next_cursor
+                  : page.next_cursor,
+                vulnerabilities_next_cursor: prev.detail_pages?.vulnerabilities_next_cursor ?? null,
+                events_next_cursor: prev.detail_pages?.events_next_cursor ?? null,
+                threat_tasks_next_cursor: prev.detail_pages?.threat_tasks_next_cursor ?? null,
+                validations_next_cursor: prev.detail_pages?.validations_next_cursor ?? null,
+              },
+            };
+          });
         })
         .catch(() => {});
     },
@@ -550,6 +855,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         vulns[data.index] = data.vulnerability;
         return { ...prev, vulnerabilities: vulns };
       });
+      scheduleOverviewSummaryRefresh();
     },
     onVulnerabilityValidation: (data) => {
       setLaunchingValidations((prev) => {
@@ -576,6 +882,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         }
         return { ...prev, validations };
       });
+      scheduleOverviewSummaryRefresh();
     },
     onThreatAnalysis: (data) => {
       setThreatAnalysisLoading(false);
@@ -600,6 +907,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         tasks.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")) || a.task_id.localeCompare(b.task_id));
         return { ...prev, threat_audit_tasks: tasks };
       });
+      scheduleOverviewSummaryRefresh();
     },
     onMiningEngineRun: (data) => {
       setScan((prev) => prev ? {
@@ -618,6 +926,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       setScan((prev) =>
         prev ? { ...prev, status: data.status as ScanItemStatus, error_message: data.error_message } : prev,
       );
+      scheduleOverviewSummaryRefresh(0);
     },
     onFpReviewStarted: (data) => {
       setFpReview((prev) => ({
@@ -712,6 +1021,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           ],
         };
       });
+      scheduleOverviewSummaryRefresh();
     },
     onFpReviewFinish: (data) => {
       setFpReview((prev) => {
@@ -724,6 +1034,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           current_vuln_indices: [],
         };
       });
+      scheduleOverviewSummaryRefresh(0);
     },
     onIndexStatus: (data) => {
       setIndexStatus(data);
@@ -739,7 +1050,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         } : prev);
       }
     },
-  }), [scanId]);
+  }), [scanId, scheduleOverviewSummaryRefresh]);
 
   const sseStateSetters = useMemo<SSEStateSetters>(() => ({
     setScan,
@@ -748,6 +1059,53 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   }), []);
 
   useScanSSE(scanId, sseHandlers, sseStateSetters);
+
+  const requiredDetailResources = useMemo(() => {
+    const resources = detailResourcesForTab(activeTab, activeEngineId);
+    return Array.from(new Set<DetailResource>([
+      ...resources,
+      ...(logOpen ? ["events" as DetailResource] : []),
+    ]));
+  }, [activeEngineId, activeTab, logOpen]);
+
+  useEffect(() => {
+    setDetailFailedResources((previous) => {
+      const next = new Set(previous);
+      let changed = false;
+      for (const resource of requiredDetailResources) {
+        if (next.delete(resource)) changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [activeEngineId, activeTab, logOpen]);
+
+  useEffect(() => {
+    if (!scan?.detail_pages) return;
+    const availableSlots = Math.max(0, 2 - detailLoadingResources.size);
+    if (availableSlots === 0) return;
+    const pending = requiredDetailResources.filter((resource) => (
+      detailCursor(scan, resource) != null
+      && !detailLoadingResources.has(resource)
+      && !detailFailedResources.has(resource)
+    ));
+    for (const resource of pending.slice(0, availableSlots)) {
+      void loadDetailResource(resource);
+    }
+  }, [
+    detailFailedResources,
+    detailLoadingResources,
+    loadDetailResource,
+    requiredDetailResources,
+    scan?.detail_pages,
+  ]);
+
+  useEffect(() => {
+    if (!isRunning || !scan?.detail_counts) return;
+    const interval = window.setInterval(() => {
+      void refreshOverviewSummary();
+    }, 10_000);
+    return () => window.clearInterval(interval);
+  }, [isRunning, refreshOverviewSummary, scan?.detail_counts]);
 
   const handleFpReview = async () => {
     setFpReviewLoading(true);
@@ -850,100 +1208,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       alert(`续扫失败：${msg || "未知错误"}`);
     } finally {
       setContinuing(false);
-    }
-  };
-
-  const handleLoadMoreDetails = async () => {
-    const cursors = scan?.detail_pages;
-    if (!scan || !cursors || detailLoading) return;
-    setDetailLoading(true);
-    try {
-      const [candidatePage, vulnerabilityPage, eventPage, threatTaskPage, validationPage] = await Promise.all([
-        cursors.candidates_next_cursor == null
-          ? Promise.resolve(null)
-          : getScanCandidatesPage(scanId, cursors.candidates_next_cursor),
-        cursors.vulnerabilities_next_cursor == null
-          ? Promise.resolve(null)
-          : getScanVulnerabilitiesPage(scanId, cursors.vulnerabilities_next_cursor),
-        cursors.events_next_cursor == null
-          ? Promise.resolve(null)
-          : getScanEventsPage(scanId, cursors.events_next_cursor),
-        cursors.threat_tasks_next_cursor == null
-          ? Promise.resolve(null)
-          : getScanThreatTasksPage(scanId, cursors.threat_tasks_next_cursor),
-        cursors.validations_next_cursor == null
-          ? Promise.resolve(null)
-          : getScanValidationsPage(scanId, cursors.validations_next_cursor),
-      ]);
-      setScan((previous) => {
-        if (!previous) return previous;
-
-        const candidates = [...previous.candidates];
-        const candidateIndexes = new Set(candidates.map((item) => item.idx));
-        for (const item of candidatePage?.items ?? []) {
-          if (!candidateIndexes.has(item.idx)) candidates.push(item);
-        }
-        candidates.sort((left, right) => left.idx - right.idx);
-
-        const vulnerabilities = [...previous.vulnerabilities];
-        for (const item of vulnerabilityPage?.items ?? []) {
-          vulnerabilities[item.index] = item.vulnerability;
-        }
-
-        const eventKey = (item: ScanEvent) => [
-          item.timestamp,
-          item.phase,
-          item.message,
-          item.candidate_index ?? "",
-        ].join("\u0000");
-        const existingEventKeys = new Set(previous.events.map(eventKey));
-        const olderEvents = (eventPage?.items ?? []).filter(
-          (item) => !existingEventKeys.has(eventKey(item)),
-        );
-
-        const threatTasks = [...(previous.threat_audit_tasks ?? [])];
-        const threatTaskIds = new Set(threatTasks.map((item) => item.task_id));
-        for (const item of threatTaskPage?.items ?? []) {
-          if (!threatTaskIds.has(item.task_id)) threatTasks.push(item);
-        }
-
-        const validations = [...(previous.validations ?? [])];
-        const validationIndexes = new Set(validations.map((item) => item.vuln_index));
-        for (const item of validationPage?.items ?? []) {
-          if (!validationIndexes.has(item.vuln_index)) validations.push(item);
-        }
-        validations.sort((left, right) => left.vuln_index - right.vuln_index);
-
-        return {
-          ...previous,
-          candidates,
-          vulnerabilities,
-          events: [...olderEvents, ...previous.events],
-          threat_audit_tasks: threatTasks,
-          validations,
-          detail_pages: {
-            candidates_next_cursor: candidatePage
-              ? candidatePage.next_cursor
-              : cursors.candidates_next_cursor,
-            vulnerabilities_next_cursor: vulnerabilityPage
-              ? vulnerabilityPage.next_cursor
-              : cursors.vulnerabilities_next_cursor,
-            events_next_cursor: eventPage
-              ? eventPage.next_cursor
-              : cursors.events_next_cursor,
-            threat_tasks_next_cursor: threatTaskPage
-              ? threatTaskPage.next_cursor
-              : cursors.threat_tasks_next_cursor,
-            validations_next_cursor: validationPage
-              ? validationPage.next_cursor
-              : cursors.validations_next_cursor,
-          },
-        };
-      });
-    } catch {
-      // Keep already loaded detail pages; the user can retry.
-    } finally {
-      setDetailLoading(false);
     }
   };
 
@@ -1142,9 +1406,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     : null;
   const selectedFpReviewStages = selectedFpReviewSelection?.stages ?? [];
   const validationEvents = filterEvents(scan.events, ["validation"]);
-  const hasMoreDetailPages = Boolean(
-    scan.detail_pages && Object.values(scan.detail_pages).some((value) => value != null),
-  );
+  const activeDetailLoading = requiredDetailResources.some((resource) => detailLoadingResources.has(resource));
+  const activeDetailFailed = requiredDetailResources.some((resource) => detailFailedResources.has(resource));
   const issuesView = (
     <VulnerabilityList
       scanId={scanId}
@@ -1390,20 +1653,18 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
       {/* Main content */}
       <div className="flex-1 overflow-auto px-4 py-4 sm:px-6">
-        {hasMoreDetailPages && (
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
-            <span>
-              当前按页展示详情，已加载 {scan.candidates.length} 个候选点、
-              {scan.vulnerabilities.filter(Boolean).length} 条漏洞结果和 {scan.events.length} 条日志。
-            </span>
-            <button
-              type="button"
-              onClick={handleLoadMoreDetails}
-              disabled={detailLoading}
-              className="rounded-md border border-blue-400/40 px-3 py-1.5 text-xs font-medium text-blue-100 transition-colors hover:bg-blue-400/10 disabled:opacity-50"
-            >
-              {detailLoading ? "加载中..." : "继续加载详情"}
-            </button>
+        {(activeDetailLoading || activeDetailFailed) && (
+          <div
+            role="status"
+            className={`mb-4 rounded-lg border px-4 py-3 text-sm ${
+              activeDetailFailed
+                ? "border-amber-500/30 bg-amber-500/10 text-amber-100"
+                : "border-blue-500/30 bg-blue-500/10 text-blue-100"
+            }`}
+          >
+            {activeDetailFailed
+              ? "部分详情自动加载失败；重新进入该页签时会从当前进度继续。"
+              : "正在自动分批加载当前页签的完整详情…"}
           </div>
         )}
         {activeTab === "overview" && (

@@ -3080,6 +3080,28 @@ class SqliteScanStore(ScanStoreBase):
             for r in cur.fetchall()
         ]
 
+    def get_vulnerability_validation_states(
+        self,
+        scan_id: str,
+    ) -> dict[int, tuple[str, bool]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """\
+                SELECT vuln_index, status, running
+                FROM vulnerability_validations
+                WHERE scan_id = ?
+                ORDER BY vuln_index
+                """,
+                (scan_id,),
+            ).fetchall()
+        return {
+            int(row["vuln_index"]): (
+                str(row["status"] or "pending"),
+                bool(row["running"]),
+            )
+            for row in rows
+        }
+
     def get_vuln_stats_by_scans(self, scan_ids: list[str]) -> dict[str, list[VulnStat]]:
         out: dict[str, list[VulnStat]] = {sid: [] for sid in scan_ids}
         with self._lock:
