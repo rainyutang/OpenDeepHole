@@ -2,6 +2,7 @@
 
 ## 2026-08-05
 
+- **修复** OpenCode 消息接口偶发返回 HTTP 200 空正文或非 JSON 时，Task Agent 会从同一 Session 恢复本次已完成的 assistant 消息并继续解析，不再泄漏底层 `JSONDecodeError`；无法确认新消息时以不降权的健康中性失败进入 fresh Session 换模重试，错误仅记录状态码、Content-Type 和响应字节数，不记录原始正文
 - **变更** 产品展示名称统一为「DeepHole 2.0」，同步更新 Web、浏览器标题、API、Agent、MCP、任务标题和现行文档；既有路径、环境变量、协议 Header、包名和下载文件名保持兼容，历史文案沿用「DeepHole」
 - **优化** 扫描详情首屏直接使用完整候选点、有效问题和已验证问题汇总，不再随已加载分页数量变化；移除“继续加载详情”按钮，进入具体页签后自动按游标分批加载完整详情，并通过 SSE 防抖刷新和运行中轻量轮询保持统计自动更新
 - **重构** 威胁分析改为 `threat_analysis/methods/<method_id>/` 目录自动发现；清单只保留 `label` 和 `description`，内置 `deephole_threat_analysis` 在界面显示为“DeepHole威胁分析”，用户选择及方法快照贯穿创建、持久化、Agent 下发和续扫

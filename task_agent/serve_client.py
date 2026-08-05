@@ -2586,6 +2586,91 @@ def _latest_assistant_message(value: object, session_id: str) -> dict[str, Any] 
     return None
 
 
+def _assistant_message_is_terminal(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    info = value.get("info")
+    if not isinstance(info, dict):
+        return False
+    if info.get("error") is not None:
+        return True
+    message_time = info.get("time")
+    if isinstance(message_time, dict) and message_time.get("completed") is not None:
+        return True
+    if str(info.get("finish") or "").strip():
+        return True
+    return False
+
+
+def _prompt_response_diagnostic(response: object) -> tuple[str, int, int, str]:
+    content = getattr(response, "content", b"")
+    if isinstance(content, str):
+        body = content.encode("utf-8", errors="replace")
+    elif isinstance(content, (bytes, bytearray)):
+        body = bytes(content)
+    else:
+        body = str(content or "").encode("utf-8", errors="replace")
+    reason = "empty_body" if not body.strip() else "invalid_json"
+    try:
+        status_code = int(getattr(response, "status_code", 0) or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    headers = getattr(response, "headers", {})
+    content_type = ""
+    if hasattr(headers, "get"):
+        content_type = _one_line_preview(headers.get("content-type") or "")
+    return reason, status_code, len(body), content_type
+
+
+async def _recover_prompt_response(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    params: dict[str, str],
+    headers: dict[str, str],
+    baseline_message_id: str,
+    cancel_event: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    poll_params = dict(params)
+    poll_params["limit"] = "2"
+    deadline = (
+        asyncio.get_running_loop().time()
+        + _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS
+    )
+    failure_reason = "no_new_completed_assistant"
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
+        try:
+            history_response = await client.get(
+                f"/session/{session_id}/message",
+                params=poll_params,
+                headers=headers,
+            )
+            history_response.raise_for_status()
+            messages = history_response.json()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None, "session_history_unavailable"
+        if not isinstance(messages, list):
+            return None, "invalid_session_history"
+        candidate = _latest_assistant_message(messages, session_id)
+        candidate_id = _response_message_id(candidate)
+        if not candidate_id:
+            failure_reason = "no_new_completed_assistant"
+        elif candidate_id == baseline_message_id:
+            failure_reason = "no_new_completed_assistant"
+        elif _assistant_message_is_terminal(candidate):
+            return candidate, ""
+        else:
+            failure_reason = "assistant_message_incomplete"
+        now = asyncio.get_running_loop().time()
+        if now >= deadline:
+            return None, failure_reason
+        await asyncio.sleep(min(0.05, max(0.0, deadline - now)))
+
+
 def _next_event_reconnect_delay(current: float) -> float:
     return min(current * 2, _SERVE_EVENT_RECONNECT_MAX_SECONDS)
 
@@ -3644,22 +3729,43 @@ class OpenCodeServeManager:
                     )
                     session_started = True
                 ignored_file_message_ids: tuple[str, ...] = ()
-                if on_file_write is not None and session_mode == "continued":
+                response_baseline_known = session_mode != "continued"
+                response_baseline_message_id = ""
+                if session_mode == "continued":
                     baseline_params = dict(params)
                     baseline_params["limit"] = "2"
-                    baseline_response = await client.get(
-                        f"/session/{active_session_id}/message",
-                        params=baseline_params,
-                        headers=headers,
-                    )
-                    baseline_response.raise_for_status()
-                    baseline_message = _latest_assistant_message(
-                        baseline_response.json(),
-                        active_session_id,
-                    )
-                    baseline_message_id = _response_message_id(baseline_message)
-                    if baseline_message_id:
-                        ignored_file_message_ids = (baseline_message_id,)
+                    try:
+                        baseline_response = await client.get(
+                            f"/session/{active_session_id}/message",
+                            params=baseline_params,
+                            headers=headers,
+                        )
+                        baseline_response.raise_for_status()
+                        baseline_messages = baseline_response.json()
+                        if not isinstance(baseline_messages, list):
+                            raise RuntimeError(
+                                "OpenCode session history did not return a message list"
+                            )
+                        baseline_message = _latest_assistant_message(
+                            baseline_messages,
+                            active_session_id,
+                        )
+                        response_baseline_message_id = _response_message_id(
+                            baseline_message
+                        )
+                        response_baseline_known = True
+                    except Exception:
+                        if on_file_write is not None:
+                            raise
+                        logger.debug(
+                            "Failed to capture OpenCode response baseline for session %s",
+                            active_session_id,
+                            exc_info=True,
+                        )
+                    if response_baseline_message_id:
+                        ignored_file_message_ids = (
+                            response_baseline_message_id,
+                        )
                 if on_line is not None or on_file_write is not None:
                     event_state = _ServeEventState(
                         tool,
@@ -3788,7 +3894,57 @@ class OpenCodeServeManager:
                         await self._unregister_event_state(active_session_id)
                         event_registered = False
                     event_state.flush()
-                response_data = response.json()
+                try:
+                    response_data = response.json()
+                except ValueError:
+                    (
+                        response_failure_reason,
+                        response_status_code,
+                        response_body_bytes,
+                        response_content_type,
+                    ) = _prompt_response_diagnostic(response)
+                    recovered_response: dict[str, Any] | None = None
+                    recovery_failure = "baseline_unknown"
+                    if response_baseline_known:
+                        recovered_response, recovery_failure = (
+                            await _recover_prompt_response(
+                                client,
+                                session_id=active_session_id,
+                                params=params,
+                                headers=headers,
+                                baseline_message_id=response_baseline_message_id,
+                                cancel_event=cancel_event,
+                            )
+                        )
+                    if recovered_response is None:
+                        await emit_model_request_failure("neutral")
+                        await capture_token_usage()
+                        response_description = (
+                            "an empty response body"
+                            if response_failure_reason == "empty_body"
+                            else "a non-JSON response"
+                        )
+                        content_type_note = (
+                            response_content_type or "<missing>"
+                        )
+                        raise RuntimeError(
+                            "OpenCode message endpoint returned "
+                            f"{response_description} "
+                            f"(status={response_status_code}, "
+                            f"content_type={content_type_note}, "
+                            f"bytes={response_body_bytes}); "
+                            "Session recovery failed: "
+                            f"{recovery_failure}"
+                        ) from None
+                    response_data = recovered_response
+                    emit(
+                        "session",
+                        "RESPONSE_RECOVERED "
+                        f"reason={response_failure_reason} "
+                        "source=session_messages "
+                        f"status={response_status_code} "
+                        f"bytes={response_body_bytes}",
+                    )
                 await capture_token_usage(response_data)
                 response_model = _response_model(response_data)
                 if response_model and on_response_model:

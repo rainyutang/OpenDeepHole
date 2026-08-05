@@ -57,16 +57,25 @@ class _FakeResponse:
         error: Exception | None = None,
         status_code: int = 200,
         content_type: str = "application/json",
+        json_error: Exception | None = None,
+        content: bytes | None = None,
     ) -> None:
         self._data = data
         self._error = error
+        self._json_error = json_error
         self.status_code = status_code
         self.headers = {"content-type": content_type}
         self.json_calls = 0
-        self.content = b"" if data is None else b"json"
+        self.content = (
+            content
+            if content is not None
+            else (b"" if data is None else b"json")
+        )
 
     def json(self):
         self.json_calls += 1
+        if self._json_error is not None:
+            raise self._json_error
         return self._data
 
     def raise_for_status(self) -> None:
@@ -706,6 +715,247 @@ def test_run_prompt_reports_message_request_failure(
             )
 
         assert request_failures == ["failure"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("response_content", "content_type", "expected_reason"),
+    [
+        (b"", "application/json", "empty_body"),
+        (b"secret provider response body", "text/html", "invalid_json"),
+    ],
+)
+def test_run_prompt_recovers_invalid_message_response_from_session_history(
+    monkeypatch,
+    tmp_path: Path,
+    response_content: bytes,
+    content_type: str,
+    expected_reason: str,
+) -> None:
+    recovered_message = {
+        "info": {
+            "id": "message-recovered",
+            "sessionID": "session-1",
+            "role": "assistant",
+            "providerID": "provider",
+            "modelID": "actual",
+            "time": {"created": 1, "completed": 2},
+        },
+        "parts": [{"type": "text", "text": "recovered answer"}],
+    }
+
+    class InvalidMessageAsyncClient(_FakeAsyncClient):
+        session_messages = [recovered_message]
+
+        async def post(self, path: str, **kwargs):
+            if path.startswith("/session/") and path.endswith("/message"):
+                self.posts.append({"path": path, **kwargs})
+                await asyncio.sleep(0)
+                self.message_response = _FakeResponse(
+                    None,
+                    content_type=content_type,
+                    json_error=json.JSONDecodeError("Expecting value", "", 0),
+                    content=response_content,
+                )
+                return self.message_response
+            return await super().post(path, **kwargs)
+
+    async def run() -> None:
+        InvalidMessageAsyncClient.instances = []
+        InvalidMessageAsyncClient.event_lines = []
+        InvalidMessageAsyncClient.tool_ids = []
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            InvalidMessageAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        output: list[str] = []
+        request_failures: list[str] = []
+        response_models: list[str] = []
+
+        result = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=tmp_path,
+            prompt="recover",
+            model="provider/requested",
+            timeout=1,
+            on_line=output.append,
+            on_model_request_failure=request_failures.append,
+            on_response_model=response_models.append,
+            return_details=True,
+        )
+
+        assert isinstance(result, OpenCodePromptResult)
+        assert result.session_id == "session-1"
+        assert result.message_id == "message-recovered"
+        assert result.text == "recovered answer"
+        assert result.model == "provider/actual"
+        assert result.raw == recovered_message
+        assert request_failures == []
+        assert response_models == ["provider/actual"]
+        assert any(
+            line == (
+                "[opencode][session-1][session] RESPONSE_RECOVERED "
+                f"reason={expected_reason} source=session_messages "
+                f"status=200 bytes={len(response_content)}"
+            )
+            for line in output
+        )
+        assert output[-1] == (
+            "[opencode][session-1][session] STOP status=success retained=true"
+        )
+        assert "secret provider response body" not in "\n".join(output)
+
+    asyncio.run(run())
+
+
+def test_run_prompt_rejects_stale_session_history_after_empty_response(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    previous_message = {
+        "info": {
+            "id": "message-previous",
+            "sessionID": "session-1",
+            "role": "assistant",
+            "time": {"created": 1, "completed": 2},
+        },
+        "parts": [{"type": "text", "text": "previous secret answer"}],
+    }
+
+    class EmptyMessageAsyncClient(_FakeAsyncClient):
+        session_messages = [previous_message]
+
+        async def post(self, path: str, **kwargs):
+            if path.startswith("/session/") and path.endswith("/message"):
+                self.posts.append({"path": path, **kwargs})
+                await asyncio.sleep(0)
+                self.message_response = _FakeResponse(
+                    None,
+                    json_error=json.JSONDecodeError("Expecting value", "", 0),
+                    content=b"",
+                )
+                return self.message_response
+            return await super().post(path, **kwargs)
+
+    async def run() -> None:
+        EmptyMessageAsyncClient.instances = []
+        EmptyMessageAsyncClient.event_lines = []
+        EmptyMessageAsyncClient.tool_ids = []
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            EmptyMessageAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        output: list[str] = []
+        request_failures: list[str] = []
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="continue",
+                model="provider/model",
+                timeout=1,
+                session_id="session-1",
+                on_line=output.append,
+                on_model_request_failure=request_failures.append,
+            )
+
+        error = str(exc_info.value)
+        assert "OpenCode message endpoint returned an empty response body" in error
+        assert "status=200" in error
+        assert "bytes=0" in error
+        assert "no_new_completed_assistant" in error
+        assert "Expecting value" not in error
+        assert "previous secret answer" not in error
+        assert request_failures == ["neutral"]
+        assert not any("RESPONSE_RECOVERED" in line for line in output)
+        assert output[-1].startswith(
+            "[opencode][session-1][session] STOP status=failure retained=true"
+        )
+        assert "previous secret answer" not in "\n".join(output)
+
+    asyncio.run(run())
+
+
+def test_run_prompt_classifies_recovered_assistant_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    recovered_error = {
+        "info": {
+            "id": "message-error",
+            "sessionID": "session-1",
+            "role": "assistant",
+            "providerID": "provider",
+            "modelID": "actual",
+            "error": {
+                "name": "APIError",
+                "data": {"message": "recovered provider failure"},
+            },
+            "time": {"created": 1},
+        },
+        "parts": [],
+    }
+
+    class EmptyMessageAsyncClient(_FakeAsyncClient):
+        session_messages = [recovered_error]
+
+        async def post(self, path: str, **kwargs):
+            if path.startswith("/session/") and path.endswith("/message"):
+                self.posts.append({"path": path, **kwargs})
+                return _FakeResponse(
+                    None,
+                    json_error=json.JSONDecodeError("Expecting value", "", 0),
+                    content=b"",
+                )
+            return await super().post(path, **kwargs)
+
+    async def run() -> None:
+        EmptyMessageAsyncClient.instances = []
+        EmptyMessageAsyncClient.event_lines = []
+        EmptyMessageAsyncClient.tool_ids = []
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            EmptyMessageAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        output: list[str] = []
+        request_failures: list[str] = []
+        response_models: list[str] = []
+
+        with pytest.raises(RuntimeError, match="recovered provider failure"):
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="fail",
+                model="provider/model",
+                timeout=1,
+                on_line=output.append,
+                on_model_request_failure=request_failures.append,
+                on_response_model=response_models.append,
+            )
+
+        assert request_failures == ["failure"]
+        assert response_models == ["provider/actual"]
+        assert any("RESPONSE_RECOVERED reason=empty_body" in line for line in output)
 
     asyncio.run(run())
 
