@@ -50,6 +50,7 @@ class OpenCodeSessionRuntime:
     config_workspace: Path | None = None
     config_content: str | None = None
     env_overrides: dict[str, str] = field(default_factory=dict)
+    serve_port_auto: bool = False
 
     def kwargs(self) -> dict[str, Any]:
         return {
@@ -59,6 +60,7 @@ class OpenCodeSessionRuntime:
             "config_workspace": self.config_workspace,
             "config_content": self.config_content,
             "env_overrides": dict(self.env_overrides),
+            "serve_port_auto": self.serve_port_auto,
         }
 
 

@@ -42,6 +42,14 @@ def _short_event_drain_for_tests(monkeypatch) -> None:
         "task_agent.serve_client._SERVE_EVENT_DRAIN_TIMEOUT_SECONDS",
         0.05,
     )
+    monkeypatch.setattr(
+        "task_agent.serve_client._port_bind_error",
+        lambda _port: None,
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._run_command_text",
+        lambda cmd, timeout=3.0: "test-version" if "--version" in cmd else "",
+    )
     _FakeAsyncClient.message_parts = None
     _FakeAsyncClient.session_messages = []
     yield
@@ -357,6 +365,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             prompt="hello",
             model="anthropic/claude-sonnet",
             timeout=30,
+            serve_port_auto=True,
             env_overrides={
                 "HTTPS_PROXY": "http://127.0.0.1:3131",
                 "NO_PROXY": "127.0.0.1,localhost",
@@ -375,6 +384,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             model="",
             timeout=30,
             on_session_id=sessions.append,
+            serve_port_auto=True,
             env_overrides={
                 "HTTPS_PROXY": "http://127.0.0.1:3131",
                 "NO_PROXY": "127.0.0.1,localhost",
@@ -401,6 +411,7 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             executable="opencode",
             env_hash=expected_env_hash,
             config_hash=expected_hash,
+            serve_port_auto=True,
             env_overrides=expected_env_overrides,
         )
         assert manager._acquire_session.await_args.kwargs["startup_cwd"] == config_workspace
@@ -626,7 +637,7 @@ def test_run_prompt_emits_debug_serve_status(
 
         assert output[0] == (
             "[validation][pending][task] "
-            "SERVE PREPARING executable=opencode port=12345"
+            "SERVE PREPARING executable=opencode port=12345 port_mode=fixed"
         )
         assert output[1] == (
             f"[validation][pending][task] SERVE READY mode={serve_mode} "
@@ -3885,7 +3896,7 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         git_init_cwds: list[Path] = []
         marker_path = tmp_path / "serve-marker.json"
         startup_log_path = tmp_path / "serve-startup.log"
-        project = tmp_path / "project"
+        project = tmp_path / "project with 空格"
         startup_cwd = project / ".opendeephole" / "opencode" / "serve-test"
         project.mkdir()
         startup_cwd.mkdir(parents=True)
@@ -3931,6 +3942,9 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         monkeypatch.setenv("https_proxy", "http://system.example:8080")
         monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9999")
         monkeypatch.setenv("all_proxy", "http://127.0.0.1:9999")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ambient-config"))
+        monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "ambient.json"))
+        monkeypatch.setenv("OPENCODE_CONFIG_PATH", str(tmp_path / "legacy.json"))
         monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", '{"stale": true}')
 
         await manager._start_locked(OpenCodeServeKey(
@@ -3964,8 +3978,15 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert marker["tool"] == "opencode"
         assert marker["config_hash"] == "abc123"
         assert registered == [(manager._proc, marker_path)]
+        assert "OPENCODE_CONFIG" not in envs[0]
+        assert "OPENCODE_CONFIG_PATH" not in envs[0]
         assert "OPENCODE_CONFIG_CONTENT" not in envs[0]
         assert envs[0]["OPENCODE_CONFIG_DIR"] == str(startup_cwd)
+        assert envs[0]["XDG_CONFIG_HOME"] == str(
+            startup_cwd / ".opendeephole-xdg-config"
+        )
+        assert Path(envs[0]["XDG_CONFIG_HOME"]).is_dir()
+        assert envs[0]["OPENCODE_SERVE_PORT"] == "4096"
         runtime_config_path = startup_cwd / "opencode.json"
         assert json.loads(runtime_config_path.read_text(encoding="utf-8")) == {"mcp": {}}
         assert runtime_config_path.stat().st_mode & 0o777 == 0o600
@@ -3991,6 +4012,9 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert "OpenCode serve startup debug:" in log_text
         assert "executable_config=opencode" in log_text
         assert "executable_resolved=/bin/opencode" in log_text
+        assert "executable_version=test-version" in log_text
+        assert "port_mode=fixed" in log_text
+        assert "startup_attempt=1" in log_text
         assert f"cwd={startup_cwd}" in log_text
         assert f"marker_path={marker_path}" in log_text
         assert f"startup_log_path={startup_log_path}" in log_text
@@ -4007,6 +4031,7 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert "configured.example" not in log_text
         assert "NO_PROXY=127.0.0.1,localhost" in log_text
         assert "OPENCODE_CONFIG_CONTENT=(unset)" in log_text
+        assert f"XDG_CONFIG_HOME={startup_cwd / '.opendeephole-xdg-config'}" in log_text
         assert f"OPENCODE_CONFIG_DIR={startup_cwd}" in log_text
         assert f"config_file_path={runtime_config_path}" in log_text
         assert 'config_content_redacted={"mcp": {}}' in log_text
@@ -4430,6 +4455,7 @@ def test_start_locked_stops_previous_agent_owned_marker(monkeypatch, tmp_path: P
                 "port": 4096,
                 "tool": "opencode",
                 "executable": "opencode",
+                "listener_pids": [22222],
             }),
             encoding="utf-8",
         )
@@ -4478,6 +4504,7 @@ def test_start_locked_reclaims_stale_child_listener_after_marker_parent_exits(mo
                 "port": 4096,
                 "tool": "opencode",
                 "executable": "opencode",
+                "listener_pids": [22222],
             }),
             encoding="utf-8",
         )
@@ -4611,6 +4638,7 @@ def test_stop_locked_reclaims_listener_when_parent_already_exited(monkeypatch, t
         manager = OpenCodeServeManager()
         manager._proc = FakeProc()
         manager._port = 4096
+        manager._listener_pids = {44444}
 
         await manager._stop_locked()
 
@@ -4649,7 +4677,10 @@ def test_stop_owned_serve_removes_stale_marker_without_terminating(monkeypatch, 
     asyncio.run(run())
 
 
-def test_start_locked_reports_listener_pid_when_reclaim_fails(monkeypatch, tmp_path: Path) -> None:
+def test_start_locked_reports_foreign_listener_without_terminating_it(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     async def run() -> None:
         terminated: list[int] = []
 
@@ -4661,7 +4692,6 @@ def test_start_locked_reports_listener_pid_when_reclaim_fails(monkeypatch, tmp_p
         monkeypatch.setattr("task_agent.serve_client._port_is_in_use", lambda port: True)
         monkeypatch.setattr("task_agent.serve_client._listener_pids_for_port", lambda port: {22222})
         monkeypatch.setattr("task_agent.serve_client._terminate_process_tree", lambda pid: terminated.append(pid))
-        monkeypatch.setattr("task_agent.serve_client._wait_port_released", lambda port: False)
         monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
 
         manager = OpenCodeServeManager()
@@ -4669,9 +4699,316 @@ def test_start_locked_reports_listener_pid_when_reclaim_fails(monkeypatch, tmp_p
         with pytest.raises(RuntimeError) as excinfo:
             await manager._start_locked(OpenCodeServeKey(tool="opencode", executable="opencode"))
 
-        assert terminated == [22222]
+        assert terminated == []
         assert "already in use" in str(excinfo.value)
         assert "listener_pid(s)=22222" in str(excinfo.value)
+
+    asyncio.run(run())
+
+
+def test_start_locked_auto_port_skips_foreign_listener(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        startup_cwd = tmp_path / "auto port workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+        terminated: list[int] = []
+
+        monkeypatch.setenv(
+            "OPENCODE_SERVE_MARKER",
+            str(tmp_path / "missing-marker.json"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda port: port == 4096,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {22222} if port == 4096 else set(),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            lambda excluded: 43123,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            lambda pid: terminated.append(pid),
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock()
+        await manager._start_locked(
+            OpenCodeServeKey(
+                tool="opencode",
+                executable="opencode",
+                serve_port_auto=True,
+                config_content="{}",
+                env_overrides=(("OPENCODE_SERVE_PORT", "4096"),),
+            ),
+            startup_cwd=startup_cwd,
+        )
+
+        assert terminated == []
+        assert manager._auto_port == 43123
+        assert manager._start_once_locked.await_count == 1
+        assert manager._start_once_locked.await_args.kwargs["port"] == 43123
+        assert manager._start_once_locked.await_args.kwargs["attempt"] == 2
+
+    asyncio.run(run())
+
+
+def test_start_locked_auto_port_retries_generic_early_exit_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+        allocated: list[set[int]] = []
+
+        monkeypatch.setenv(
+            "OPENCODE_SERVE_MARKER",
+            str(tmp_path / "missing-marker.json"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda _port: False,
+        )
+
+        def allocate(excluded: set[int]) -> int:
+            allocated.append(set(excluded))
+            return 43124
+
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            allocate,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock(side_effect=[
+            RuntimeError(
+                "OpenCode serve exited during startup with code 1\n\n"
+                "OpenCode serve startup output:\nError: Unexpected error"
+            ),
+            None,
+        ])
+        await manager._start_locked(
+            OpenCodeServeKey(
+                tool="opencode",
+                executable="opencode",
+                serve_port_auto=True,
+                config_content="{}",
+                env_overrides=(("OPENCODE_SERVE_PORT", "4096"),),
+            ),
+            startup_cwd=startup_cwd,
+        )
+
+        assert allocated == [{4096}]
+        assert [
+            call.kwargs["port"]
+            for call in manager._start_once_locked.await_args_list
+        ] == [4096, 43124]
+        assert manager._auto_port == 43124
+
+    asyncio.run(run())
+
+
+def test_start_locked_auto_port_stops_after_one_generic_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+        allocated: list[set[int]] = []
+
+        monkeypatch.setenv(
+            "OPENCODE_SERVE_MARKER",
+            str(tmp_path / "missing-marker.json"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda _port: False,
+        )
+
+        def allocate(excluded: set[int]) -> int:
+            allocated.append(set(excluded))
+            return 43125
+
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            allocate,
+        )
+
+        error = RuntimeError("Error: Unexpected error")
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock(side_effect=error)
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager._start_locked(
+                OpenCodeServeKey(
+                    tool="opencode",
+                    executable="opencode",
+                    serve_port_auto=True,
+                    config_content="{}",
+                    env_overrides=(("OPENCODE_SERVE_PORT", "4096"),),
+                ),
+                startup_cwd=startup_cwd,
+            )
+
+        assert allocated == [{4096}]
+        assert manager._start_once_locked.await_count == 2
+        assert "attempted_ports=4096,43125" in str(excinfo.value)
+
+    asyncio.run(run())
+
+
+def test_start_locked_auto_port_does_not_retry_non_port_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+
+        monkeypatch.setenv(
+            "OPENCODE_SERVE_MARKER",
+            str(tmp_path / "missing-marker.json"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda _port: False,
+        )
+        allocate = pytest.fail
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            allocate,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock(
+            side_effect=RuntimeError("ConfigError: failed to parse opencode.json")
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager._start_locked(
+                OpenCodeServeKey(
+                    tool="opencode",
+                    executable="opencode",
+                    serve_port_auto=True,
+                    config_content="{}",
+                    env_overrides=(("OPENCODE_SERVE_PORT", "4096"),),
+                ),
+                startup_cwd=startup_cwd,
+            )
+
+        assert manager._start_once_locked.await_count == 1
+        assert "port_mode=auto" in str(excinfo.value)
+        assert "attempted_ports=4096" in str(excinfo.value)
+
+    asyncio.run(run())
+
+
+def test_start_locked_fixed_port_reports_bind_denial_without_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+
+        monkeypatch.setenv(
+            "OPENCODE_SERVE_MARKER",
+            str(tmp_path / "missing-marker.json"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda _port: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda _port: PermissionError(10013, "access permissions"),
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock()
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager._start_locked(
+                OpenCodeServeKey(
+                    tool="opencode",
+                    executable="opencode",
+                    config_content="{}",
+                    env_overrides=(("OPENCODE_SERVE_PORT", "4096"),),
+                ),
+                startup_cwd=startup_cwd,
+            )
+
+        message = str(excinfo.value)
+        manager._start_once_locked.assert_not_awaited()
+        assert "excluded/reserved" in message
+        assert "access permissions" in message
+        assert "port_mode=fixed" in message
+        assert "attempted_ports=4096" in message
+
+    asyncio.run(run())
+
+
+def test_wait_health_redacts_startup_output_and_explains_password_warning(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        class ExitedProc:
+            pid = 12345
+            returncode = 1
+
+            def poll(self):
+                return self.returncode
+
+        startup_log_path = tmp_path / "serve-startup.log"
+        startup_log_path.write_text(
+            "Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.\n"
+            "Error: Unexpected error apiKey=super-secret-key\n",
+            encoding="utf-8",
+        )
+        manager = OpenCodeServeManager()
+        manager._proc = ExitedProc()
+        manager._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+            config_content=json.dumps({
+                "provider": {"corp": {"options": {"apiKey": "super-secret-key"}}}
+            }),
+        )
+        manager._try_adopt_owned_listener_locked = AsyncMock(return_value=False)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager._wait_health_locked(startup_log_path)
+
+        message = str(excinfo.value)
+        assert "super-secret-key" not in message
+        assert "apiKey=***" in message
+        assert "warning is expected" in message
+        assert "did not cause this exit" in message
 
     asyncio.run(run())
 

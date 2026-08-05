@@ -8,7 +8,10 @@ from unittest.mock import patch
 
 from deephole_client import codegraph as codegraph_runtime
 from deephole_client.opencode_integration import (
+    _config_home_candidates,
+    _resolve_serve_port,
     _resolved_serve_port,
+    _runtime_config_content,
     _runtime_environment,
     build_opencode_config,
     configure_opencode_component,
@@ -111,6 +114,8 @@ class OpencodeWorkspaceTests(unittest.TestCase):
         with patch.dict(os.environ, {"OPENCODE_SERVE_PORT": "4100"}, clear=False):
             self.assertEqual(_resolved_serve_port(4200), 4200)
             self.assertEqual(_resolved_serve_port(None), 4100)
+            self.assertFalse(_resolve_serve_port(4200).auto_selected)
+            self.assertFalse(_resolve_serve_port(None).auto_selected)
 
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -123,10 +128,140 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             )
             first = _resolved_serve_port(None)
             second = _resolved_serve_port(None)
+            resolved = _resolve_serve_port(None)
 
         self.assertGreaterEqual(first, 1)
         self.assertLessEqual(first, 65535)
         self.assertEqual(second, first)
+        self.assertEqual(resolved.port, first)
+        self.assertTrue(resolved.auto_selected)
+
+    def test_runtime_config_discovery_is_controlled_and_managed_fields_win(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            executable_dir = root / "portable"
+            project = root / "project"
+            configured_dir = root / "configured"
+            env_dir = root / "env-dir"
+            workspace = root / "workspace"
+            for path in (
+                home / ".config" / "opencode",
+                executable_dir / ".opencode",
+                project / ".opencode",
+                configured_dir,
+                env_dir,
+                workspace,
+            ):
+                path.mkdir(parents=True, exist_ok=True)
+
+            (home / ".config" / "opencode" / "opencode.json").write_text(
+                json.dumps({"source": "global", "provider": {"corp": {"global": True}}}),
+                encoding="utf-8",
+            )
+            (executable_dir / ".opencode" / "config.json").write_text(
+                json.dumps({"source": "executable", "provider": {"corp": {"portable": True}}}),
+                encoding="utf-8",
+            )
+            (project / "opencode.jsonc").write_text(
+                '{"source": "project", "mcp": {"user": {"enabled": true}}}',
+                encoding="utf-8",
+            )
+            (project / "config.json").write_text(
+                json.dumps({"unrelated_project_config": True}),
+                encoding="utf-8",
+            )
+            (configured_dir / "opencode.json").write_text(
+                json.dumps({"source": "configured"}),
+                encoding="utf-8",
+            )
+            env_path = root / "from-env.json"
+            env_path.write_text(json.dumps({"source": "env-path"}), encoding="utf-8")
+            official_path = root / "official.json"
+            official_path.write_text(json.dumps({"source": "official"}), encoding="utf-8")
+            (env_dir / "opencode.json").write_text(
+                json.dumps({
+                    "source": "env-dir",
+                    "permission": {"bash": "allow"},
+                    "skills": {"paths": ["user-skill"]},
+                    "mcp": {"managed": {"enabled": False}},
+                }),
+                encoding="utf-8",
+            )
+            managed_opencode_config_path(workspace).write_text(
+                json.dumps({
+                    "$schema": "https://opencode.ai/config.json",
+                    "permission": {"bash": "deny"},
+                    "skills": {"paths": ["managed-skill"]},
+                    "mcp": {"managed": {"enabled": True}},
+                }),
+                encoding="utf-8",
+            )
+            effective = {
+                "tool": "opencode",
+                "executable": str(executable_dir / "opencode.exe"),
+                "config_paths": [str(configured_dir)],
+            }
+            with patch.dict(os.environ, {
+                "HOME": str(home),
+                "OPENCODE_CONFIG_PATH": str(env_path),
+                "OPENCODE_CONFIG": str(official_path),
+                "OPENCODE_CONFIG_DIR": str(env_dir),
+            }, clear=True):
+                config = json.loads(
+                    _runtime_config_content(workspace, effective, project)
+                )
+
+            self.assertEqual(config["source"], "env-dir")
+            self.assertNotIn("unrelated_project_config", config)
+            self.assertEqual(config["provider"]["corp"], {
+                "global": True,
+                "portable": True,
+            })
+            self.assertIn("user", config["mcp"])
+            self.assertEqual(config["mcp"]["managed"], {"enabled": True})
+            self.assertEqual(config["permission"], {"bash": "deny"})
+            self.assertEqual(config["skills"], {"paths": ["managed-skill"]})
+
+    def test_invalid_ambient_config_is_ignored_before_runtime_file_generation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            global_dir = root / "home" / ".config" / "opencode"
+            workspace = root / "workspace"
+            project = root / "project"
+            global_dir.mkdir(parents=True)
+            workspace.mkdir()
+            project.mkdir()
+            (global_dir / "opencode.json").write_text("{ broken", encoding="utf-8")
+            managed_opencode_config_path(workspace).write_text(
+                json.dumps({"permission": {"bash": "deny"}}),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"HOME": str(root / "home")}, clear=True):
+                config = json.loads(_runtime_config_content(
+                    workspace,
+                    {"tool": "opencode", "executable": ""},
+                    project,
+                ))
+
+            self.assertEqual(config, {"permission": {"bash": "deny"}})
+
+    def test_windows_config_home_candidates_include_userprofile_and_appdata(
+        self,
+    ) -> None:
+        with patch("deephole_client.opencode_integration.sys.platform", "win32"):
+            candidates = _config_home_candidates({
+                "USERPROFILE": r"C:\Users\demo",
+                "APPDATA": r"C:\Users\demo\AppData\Roaming",
+            })
+
+        self.assertIn(Path(r"C:\Users\demo") / ".config", candidates)
+        self.assertIn(Path(r"C:\Users\demo\AppData\Roaming"), candidates)
 
     def test_writable_edit_patterns_include_windows_slash_variants(self) -> None:
         path = PureWindowsPath(

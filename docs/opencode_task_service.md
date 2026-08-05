@@ -188,7 +188,7 @@ model_pool:
 
 嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，`bash` 始终禁用。只有显式传入 `writable_paths` 时，额外动态路径才通过 Session 权限覆盖下发，不进入 Serve 配置哈希。
 
-`workspace_dir` 中生成的 `opencode.json` 包含 `serve.opencode_config` 的实际内容，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。
+`workspace_dir` 中生成的 `opencode.json` 包含 `serve.opencode_config` 的实际内容，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该已解析配置，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再合并调用者机器上的环境配置。standalone 只以 YAML 中的 `serve.opencode_config` 为用户配置源；完整 Agent 则在进入 Task Agent 前按受控顺序合并已发现的全局、可执行文件目录、项目和显式配置。
 
 ### Serve 参数
 
@@ -196,7 +196,7 @@ model_pool:
 | --- | --- | --- |
 | `serve.tool` | 默认 `opencode` | Serve 实现，只能是 `opencode` 或 `nga`。 |
 | `serve.executable` | 默认等于 `serve.tool` | 启动 Serve 的可执行文件名或路径。 |
-| `serve.port` | 默认 `4096`，范围 `1..65535` | 本机 Serve 监听端口。该值会成为最终的 `OPENCODE_SERVE_PORT`，覆盖 `serve.environment` 中的同名值。 |
+| `serve.port` | 默认 `4096`，范围 `1..65535` | 本机 Serve 固定监听端口。该值会成为最终的 `OPENCODE_SERVE_PORT`，覆盖 `serve.environment` 中的同名值；standalone 不会自动改号。 |
 | `serve.timeout` | 默认 `3600`，最小 `1` | 默认单次模型消息执行超时，单位为秒；排队等待模型 Lease 的时间不计入。 |
 | `serve.max_retries` | 默认 `2`，最小 `0` | 首次 Session 之外最多创建多少个全新 Session 进行重试；不等同于同 Session 的 JSON 纠正次数。 |
 | `serve.environment` | 默认 `{}` | 附加或覆盖到 Serve 子进程的环境变量。键转为字符串，值必须是标量并会转为字符串；`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式会被忽略并从父进程环境清除，只允许 `NO_PROXY`/`no_proxy` 代理绕过变量。 |
@@ -287,7 +287,9 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 - `project_dir` 不存在、模型列表不是数组、没有任何可用模型、端口或数值超出范围、环境变量值不是标量时，首次调用会立即失败。
 - 首个独立调用会锁定配置路径，并在同一进程内复用同一个任务服务和 Serve 单例。同一路径可重复传入；若要切换 YAML，必须先执行 `await shutdown_opencode()`。
 - 单个任务返回不会停止 Serve；这是同一 Python 进程内跨阶段、跨任务复用的基础。显式调用 `await shutdown_opencode()` 会终止组件实际启动的 Serve 进程树并清除单例。
+- standalone 的 `serve.port` 是显式固定端口，占用时会报告外部监听 PID，无监听却绑定失败时会提示 Windows 排除/保留端口或端点安全软件，不会换号或终止未证明属于本组件的进程。完整 Agent 在未配置端口时才使用自动模式：最多尝试 3 个端口，并只对一次无明确原因的 `Error: Unexpected error` 早退作恢复性换号。
 - 未显式 shutdown 时，组件会登记自己通过 `Popen` 启动的精确 PID，在解释器正常退出、`SIGINT`（Ctrl-C）或 `SIGTERM` 时同步清理该进程树，再恢复或转交宿主原有信号处理器；退出清理不会根据端口终止未知进程，也只会删除 PID 仍匹配的归属标记。
+- 启动失败会同时报告固定/自动端口模式、已尝试端口和可执行文件版本，并附上脱敏后的启动日志尾部。`OPENCODE_SERVER_PASSWORD is not set` 是 Agent 仅监听 `127.0.0.1` 时的预期警告，日志会明确说明它不是 Serve 退出原因。
 - `SIGKILL` 和 `os._exit()` 不运行 Python 的信号处理器或 `atexit` 回调，无法保证当场清理；下次启动会继续使用既有归属标记和端口恢复逻辑回收残留 Serve。
 - 若应用已经注册后端宿主绑定，则完全使用宿主配置，不读取独立 YAML；此时再传 `config_path` 会报冲突。
 

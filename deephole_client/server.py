@@ -1170,6 +1170,7 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             config_workspace=runtime.config_workspace,
             config_content=runtime.config_content,
             env_overrides=runtime.env_overrides,
+            serve_port_auto=runtime.serve_port_auto,
             refresh=refresh,
         )
         return {

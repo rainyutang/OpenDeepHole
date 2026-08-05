@@ -56,12 +56,36 @@ _SERVE_EVENT_POLL_INTERVAL_SECONDS = 1.0
 _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS = 1.0
 _SERVE_EVENT_PREVIEW_LIMIT = 500
 _SERVE_STARTUP_LOG_TAIL_LIMIT = 4000
+_SERVE_AUTO_PORT_MAX_ATTEMPTS = 3
 _DEFAULT_SERVE_PORT = 4096
 _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
 _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
+_SERVE_ISOLATED_CONFIG_DIRNAME = ".opendeephole-xdg-config"
 _LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX = "opendeephole-scan-codegraph-"
+_EXPECTED_PASSWORD_WARNING = (
+    "Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured."
+)
+_SERVE_BIND_FAILURE_MARKERS = (
+    "serveerror",
+    "eaddrinuse",
+    "eacces",
+    "wsaeacces",
+    "address already in use",
+    "failed to listen",
+    "failed to bind",
+    "forbidden by its access permissions",
+    "only one usage of each socket address",
+)
+_SERVE_NON_PORT_FAILURE_MARKERS = (
+    "filesystem.open",
+    "configerror",
+    "jsonerror",
+    "syntaxerror",
+    "failed to parse",
+    "plugin",
+)
 _SENSITIVE_EVENT_KEY_RE = re.compile(
     r"(api[_-]?key|apikey|token|secret|password|authorization|cookie|credential|"
     r"prompt|content|body)",
@@ -79,6 +103,9 @@ _SERVE_DEBUG_ENV_NAMES = (
     "all_proxy",
     "NO_PROXY",
     "no_proxy",
+    "XDG_CONFIG_HOME",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_PATH",
     "OPENCODE_CONFIG_DIR",
     "OPENCODE_CONFIG_CONTENT",
 )
@@ -91,6 +118,7 @@ class OpenCodeServeKey:
     executable: str
     env_hash: str = ""
     config_hash: str = ""
+    serve_port_auto: bool = False
     config_content: str = field(default="", compare=False, repr=False)
     env_overrides: tuple[tuple[str, str], ...] = field(default_factory=tuple, compare=False, repr=False)
 
@@ -189,6 +217,27 @@ def _port_is_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
         return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _port_bind_error(port: int) -> OSError | None:
+    """Return the loopback bind error even when no listener is connectable."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", int(port)))
+    except OSError as exc:
+        return exc
+    return None
+
+
+def _allocate_loopback_port(excluded: set[int] | None = None) -> int:
+    excluded = set(excluded or ())
+    for _ in range(20):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if port not in excluded:
+            return port
+    raise RuntimeError("Unable to allocate a distinct loopback port for OpenCode serve")
 
 
 def _wait_port_released(port: int, timeout: float = _SERVE_STOP_TIMEOUT_SECONDS) -> bool:
@@ -307,7 +356,50 @@ def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
     return config_path
 
 
-def _read_serve_startup_log_tail(path: Path | None) -> str:
+def _config_secret_values(value: Any, *, sensitive: bool = False) -> set[str]:
+    secrets: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            secrets.update(_config_secret_values(
+                item,
+                sensitive=sensitive or is_sensitive_opencode_config_key(str(key)),
+            ))
+    elif isinstance(value, list):
+        for item in value:
+            secrets.update(_config_secret_values(item, sensitive=sensitive))
+    elif sensitive and value is not None:
+        text = str(value)
+        if len(text) >= 4:
+            secrets.add(text)
+    return secrets
+
+
+def _redact_serve_startup_text(text: str, config_content: str = "") -> str:
+    redacted = str(text or "")
+    try:
+        config = json.loads(config_content or "{}")
+    except Exception:
+        config = {}
+    for secret in sorted(
+        _config_secret_values(config),
+        key=len,
+        reverse=True,
+    ):
+        redacted = redacted.replace(secret, "***")
+    redacted = re.sub(
+        r"(?i)((?:api[_-]?key|apikey|token|secret|password|authorization|"
+        r"cookie|credential)\s*[\"']?\s*[:=]\s*[\"']?)([^\s,\"']+)",
+        r"\1***",
+        redacted,
+    )
+    return redacted
+
+
+def _read_serve_startup_log_tail(
+    path: Path | None,
+    *,
+    config_content: str = "",
+) -> str:
     if path is None:
         return ""
     try:
@@ -316,14 +408,55 @@ def _read_serve_startup_log_tail(path: Path | None) -> str:
         return ""
     if len(text) > _SERVE_STARTUP_LOG_TAIL_LIMIT:
         text = text[-_SERVE_STARTUP_LOG_TAIL_LIMIT:]
-    return text
+    return _redact_serve_startup_text(text, config_content)
 
 
-def _with_serve_startup_log(message: str, path: Path | None) -> str:
-    tail = _read_serve_startup_log_tail(path)
+def _with_serve_startup_log(
+    message: str,
+    path: Path | None,
+    *,
+    config_content: str = "",
+) -> str:
+    tail = _read_serve_startup_log_tail(
+        path,
+        config_content=config_content,
+    )
     if not tail:
         return message
-    return f"{message}\n\nOpenCode serve startup output:\n{tail}"
+    warning_note = ""
+    if _EXPECTED_PASSWORD_WARNING in tail:
+        warning_note = (
+            "\n\nNote: the OPENCODE_SERVER_PASSWORD warning is expected for "
+            "the Agent-owned 127.0.0.1 listener and did not cause this exit."
+        )
+    return f"{message}\n\nOpenCode serve startup output:\n{tail}{warning_note}"
+
+
+def _serve_startup_retry_kind(error: BaseException) -> str:
+    text = str(error).lower()
+    if any(marker in text for marker in _SERVE_NON_PORT_FAILURE_MARKERS):
+        return ""
+    if any(marker in text for marker in _SERVE_BIND_FAILURE_MARKERS):
+        return "bind"
+    if "error: unexpected error" in text:
+        return "generic"
+    return ""
+
+
+def _serve_startup_context_message(
+    error: BaseException,
+    *,
+    auto_port: bool,
+    attempted_ports: list[int],
+    executable_version: str,
+) -> str:
+    version = executable_version or "unknown"
+    return (
+        f"{error}\n\nOpenCode serve startup context: "
+        f"port_mode={'auto' if auto_port else 'fixed'} "
+        f"attempted_ports={','.join(str(port) for port in attempted_ports)} "
+        f"executable_version={version}"
+    )
 
 
 def _serve_debug_env_value(name: str, value: str | None) -> str | None:
@@ -368,6 +501,9 @@ def _log_serve_startup_debug(
     popen_kwargs: dict[str, Any],
     marker_path: Path,
     config_path: Path,
+    port_mode: str,
+    attempt: int,
+    executable_version: str,
 ) -> None:
     try:
         config_content = config_path.read_text(encoding="utf-8")
@@ -378,7 +514,10 @@ def _log_serve_startup_debug(
         f"  tool={key.tool}",
         f"  executable_config={key.executable}",
         f"  executable_resolved={cmd[0]}",
+        f"  executable_version={executable_version or '(unknown)'}",
         f"  port={port}",
+        f"  port_mode={port_mode}",
+        f"  startup_attempt={attempt}",
         f"  cwd={cwd}",
         f"  marker_path={marker_path}",
         f"  startup_log_path={startup_log_path}",
@@ -651,15 +790,29 @@ class _PortReclaimResult:
     detail: str = ""
 
 
-def _reclaim_serve_port(port: int, *, reason: str) -> _PortReclaimResult:
+def _reclaim_serve_port(
+    port: int,
+    *,
+    reason: str,
+    allowed_pids: set[int] | tuple[int, ...] = (),
+) -> _PortReclaimResult:
     if not _port_is_in_use(port):
         return _PortReclaimResult(attempted=False, released=True, detail="port already free")
-    pids = tuple(sorted(pid for pid in _listener_pids_for_port(port) if pid > 0 and pid != os.getpid()))
+    allowed = {
+        int(pid)
+        for pid in allowed_pids
+        if int(pid) > 0 and int(pid) != os.getpid()
+    }
+    pids = tuple(sorted(
+        pid
+        for pid in _listener_pids_for_port(port)
+        if pid in allowed
+    ))
     if not pids:
         return _PortReclaimResult(
             attempted=False,
             released=False,
-            detail="could not identify listener pid",
+            detail="listener ownership was not proven",
         )
 
     for pid in pids:
@@ -679,14 +832,38 @@ def _reclaim_serve_port(port: int, *, reason: str) -> _PortReclaimResult:
     )
 
 
-def _port_busy_message(port: int, reclaim: _PortReclaimResult | None) -> str:
-    detail = ""
-    if reclaim is not None:
-        pid_note = f" listener_pid(s)={','.join(str(pid) for pid in reclaim.pids)}." if reclaim.pids else ""
-        detail = f" Reclaim detail: {reclaim.detail}.{pid_note}"
+def _port_busy_message(
+    port: int,
+    *,
+    auto_port: bool = False,
+    listener_pids: set[int] | tuple[int, ...] = (),
+    bind_error: OSError | None = None,
+) -> str:
+    pids = sorted({int(pid) for pid in listener_pids if int(pid) > 0})
+    pid_note = f" listener_pid(s)={','.join(str(pid) for pid in pids)}." if pids else ""
+    bind_note = f" Bind error: {bind_error}." if bind_error is not None else ""
+    if pids:
+        cause = "is already in use by a process not proven to belong to this Agent"
+    else:
+        cause = (
+            "cannot be bound even though no TCP listener was detected; on Windows "
+            "the port may be excluded/reserved or blocked by endpoint security"
+        )
+    if auto_port:
+        action = (
+            " Automatic port recovery was exhausted; inspect the reported "
+            "listeners, Windows excluded/reserved ranges, and endpoint security."
+        )
+        mode = "Automatic"
+    else:
+        action = (
+            " Stop the listener or unset/change the explicit OpenCode serve "
+            "port to use automatic allocation."
+        )
+        mode = "Configured"
     return (
-        f"OpenCode serve port 127.0.0.1:{port} is already in use and could not be reclaimed."
-        f"{detail} Stop the listener process or set OPENCODE_SERVE_PORT."
+        f"{mode} OpenCode serve port 127.0.0.1:{port} {cause}."
+        f"{pid_note}{bind_note}{action}"
     )
 
 
@@ -710,6 +887,17 @@ def _read_marker(path: Path) -> dict[str, Any] | None:
         logger.warning("Failed to read OpenCode serve marker %s: %s", path, exc)
         return None
     return data if isinstance(data, dict) else None
+
+
+def _marker_listener_pids(marker: dict[str, Any]) -> set[int]:
+    raw = marker.get("listener_pids")
+    if not isinstance(raw, list):
+        return set()
+    return {
+        int(pid)
+        for pid in raw
+        if str(pid).isdigit() and int(pid) > 0
+    }
 
 
 def _write_marker(
@@ -2733,6 +2921,7 @@ class OpenCodeServeManager:
         self._proc: subprocess.Popen | _AdoptedServeProcess | None = None
         self._key: OpenCodeServeKey | None = None
         self._port: int | None = None
+        self._auto_port: int | None = None
         self._listener_pids: set[int] = set()
         self._startup_log_path: Path | None = None
         self._startup_cwd: Path | None = None
@@ -3546,6 +3735,7 @@ class OpenCodeServeManager:
         on_file_write=None,
         cancel_event=None,
         env_overrides: dict[str, str] | None = None,
+        serve_port_auto: bool = False,
         session_id: str | None = None,
         session_title: str = "DeepHole 2.0 task",
         mcp_tools: list[str] | tuple[str, ...] | None = None,
@@ -3598,6 +3788,7 @@ class OpenCodeServeManager:
             executable=executable,
             env_hash=_env_hash(normalized_env_overrides),
             config_hash=_config_hash(config_content),
+            serve_port_auto=bool(serve_port_auto),
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
@@ -3605,7 +3796,8 @@ class OpenCodeServeManager:
             emit(
                 "task",
                 f"SERVE PREPARING executable={executable} "
-                f"port={_serve_port(normalized_env_overrides)}"
+                f"port={_serve_port(normalized_env_overrides)} "
+                f"port_mode={'auto' if serve_port_auto else 'fixed'}"
             )
         try:
             serve_mode = await self._acquire_session(
@@ -4134,6 +4326,7 @@ class OpenCodeServeManager:
         config_workspace: Path | None = None,
         config_content: str | None = None,
         env_overrides: dict[str, str] | None = None,
+        serve_port_auto: bool = False,
         json_body: Any = None,
     ) -> Any:
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
@@ -4142,6 +4335,7 @@ class OpenCodeServeManager:
             executable=executable,
             env_hash=_env_hash(normalized_env_overrides),
             config_hash=_config_hash(config_content),
+            serve_port_auto=bool(serve_port_auto),
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
@@ -4561,6 +4755,7 @@ class OpenCodeServeManager:
         config_workspace: Path | None = None,
         config_content: str | None = None,
         env_overrides: dict[str, str] | None = None,
+        serve_port_auto: bool = False,
         refresh: bool = False,
     ) -> OpenCodeModelListResult:
         normalized_env_overrides = _normalized_env_overrides(env_overrides)
@@ -4569,6 +4764,7 @@ class OpenCodeServeManager:
             executable=executable,
             env_hash=_env_hash(normalized_env_overrides),
             config_hash=_config_hash(config_content),
+            serve_port_auto=bool(serve_port_auto),
             config_content=config_content or "",
             env_overrides=normalized_env_overrides,
         )
@@ -5057,6 +5253,7 @@ class OpenCodeServeManager:
             and current.tool == requested.tool
             and current.executable == requested.executable
             and current.env_hash == requested.env_hash
+            and current.serve_port_auto == requested.serve_port_auto
         )
 
     async def _wait_until_idle_locked(self) -> None:
@@ -5064,20 +5261,121 @@ class OpenCodeServeManager:
             async with self._idle:
                 await self._idle.wait()
 
-    async def _start_locked(self, key: OpenCodeServeKey, startup_cwd: Path | None = None) -> None:
+    async def _start_locked(
+        self,
+        key: OpenCodeServeKey,
+        startup_cwd: Path | None = None,
+    ) -> None:
         executable = _resolve_executable(key.executable)
-        port = _serve_port(key.env_overrides)
+        executable_version = _one_line_preview(
+            _run_command_text([executable, "--version"]),
+            200,
+        )
+        requested_port = _serve_port(key.env_overrides)
+        port = (
+            self._auto_port
+            if key.serve_port_auto and self._auto_port is not None
+            else requested_port
+        )
         await self._stop_owned_serve_on_port(port)
-        if _port_is_in_use(port):
-            reclaim = await asyncio.to_thread(
-                _reclaim_serve_port,
-                port,
-                reason="serve startup",
-            )
-            if _port_is_in_use(port):
-                raise RuntimeError(_port_busy_message(port, reclaim))
         prepared_cwd = _prepare_serve_startup_cwd(key.tool, startup_cwd)
         config_path = _write_serve_config_file(prepared_cwd, key.config_content)
+        attempted_ports: list[int] = []
+        generic_retry_used = False
+
+        while True:
+            listeners = (
+                set(_listener_pids_for_port(port))
+                if _port_is_in_use(port)
+                else set()
+            )
+            bind_error = None if listeners else _port_bind_error(port)
+            if listeners or bind_error is not None:
+                attempted_ports.append(port)
+                if (
+                    key.serve_port_auto
+                    and len(attempted_ports) < _SERVE_AUTO_PORT_MAX_ATTEMPTS
+                ):
+                    next_port = _allocate_loopback_port(set(attempted_ports))
+                    logger.warning(
+                        "OpenCode auto port 127.0.0.1:%s is unavailable; "
+                        "retrying on 127.0.0.1:%s listeners=%s bind_error=%s",
+                        port,
+                        next_port,
+                        sorted(listeners),
+                        bind_error or "",
+                    )
+                    port = next_port
+                    continue
+                error = RuntimeError(_port_busy_message(
+                    port,
+                    auto_port=key.serve_port_auto,
+                    listener_pids=listeners,
+                    bind_error=bind_error,
+                ))
+                raise RuntimeError(_serve_startup_context_message(
+                    error,
+                    auto_port=key.serve_port_auto,
+                    attempted_ports=attempted_ports,
+                    executable_version=executable_version,
+                )) from error
+
+            attempted_ports.append(port)
+            try:
+                await self._start_once_locked(
+                    key,
+                    executable=executable,
+                    executable_version=executable_version,
+                    port=port,
+                    prepared_cwd=prepared_cwd,
+                    config_path=config_path,
+                    attempt=len(attempted_ports),
+                )
+            except Exception as exc:
+                retry_kind = _serve_startup_retry_kind(exc)
+                can_retry = (
+                    key.serve_port_auto
+                    and len(attempted_ports) < _SERVE_AUTO_PORT_MAX_ATTEMPTS
+                    and (
+                        retry_kind == "bind"
+                        or (retry_kind == "generic" and not generic_retry_used)
+                    )
+                )
+                if can_retry:
+                    if retry_kind == "generic":
+                        generic_retry_used = True
+                    next_port = _allocate_loopback_port(set(attempted_ports))
+                    logger.warning(
+                        "OpenCode serve startup failed on auto port %s (%s); "
+                        "retrying on port %s",
+                        port,
+                        retry_kind,
+                        next_port,
+                    )
+                    port = next_port
+                    continue
+                raise RuntimeError(_serve_startup_context_message(
+                    exc,
+                    auto_port=key.serve_port_auto,
+                    attempted_ports=attempted_ports,
+                    executable_version=executable_version,
+                )) from exc
+
+            if key.serve_port_auto:
+                self._auto_port = port
+            return
+
+    async def _start_once_locked(
+        self,
+        key: OpenCodeServeKey,
+        *,
+        executable: str,
+        executable_version: str,
+        port: int,
+        prepared_cwd: Path,
+        config_path: Path,
+        attempt: int,
+    ) -> None:
         env = {
             name: value
             for name, value in os.environ.items()
@@ -5091,9 +5389,18 @@ class OpenCodeServeManager:
                 continue
             env[name] = value
         # The resolved config is file-backed. Environment overrides are never
-        # allowed to re-introduce content injection or redirect the config dir.
-        env.pop("OPENCODE_CONFIG_CONTENT", None)
+        # allowed to re-introduce content injection or ambient user config.
+        for name in (
+            "OPENCODE_CONFIG",
+            "OPENCODE_CONFIG_PATH",
+            "OPENCODE_CONFIG_CONTENT",
+        ):
+            env.pop(name, None)
+        isolated_config_home = prepared_cwd / _SERVE_ISOLATED_CONFIG_DIRNAME
+        isolated_config_home.mkdir(parents=True, exist_ok=True)
+        env["XDG_CONFIG_HOME"] = str(isolated_config_home)
         env["OPENCODE_CONFIG_DIR"] = str(prepared_cwd)
+        env[_SERVE_PORT_ENV] = str(port)
         env.pop("OPENCODE_SERVER_PASSWORD", None)
         env.pop("OPENCODE_SERVER_USERNAME", None)
         cmd = [
@@ -5119,6 +5426,9 @@ class OpenCodeServeManager:
             popen_kwargs=kwargs,
             marker_path=self._marker_path,
             config_path=config_path,
+            port_mode="auto" if key.serve_port_auto else "fixed",
+            attempt=attempt,
+            executable_version=executable_version,
         )
         try:
             with startup_log_path.open("ab") as startup_log:
@@ -5148,22 +5458,41 @@ class OpenCodeServeManager:
             raise
         _remove_file(startup_log_path)
         config_note = f" config_hash={key.config_hash[:12]}" if key.config_hash else ""
-        logger.info("Started %s serve on 127.0.0.1:%s cwd=%s%s", key.tool, port, prepared_cwd, config_note)
+        logger.info(
+            "Started %s serve on 127.0.0.1:%s cwd=%s port_mode=%s%s",
+            key.tool,
+            port,
+            prepared_cwd,
+            "auto" if key.serve_port_auto else "fixed",
+            config_note,
+        )
 
     async def _stop_owned_serve_on_port(self, port: int) -> None:
         marker = _read_marker(self._marker_path)
-        if marker is None:
+        if marker is None or marker.get("owner") != _SERVE_MARKER_OWNER:
             return
-        if int(marker.get("port") or 0) != int(port):
+        marker_agent_pid = int(marker.get("agent_pid") or 0)
+        if (
+            marker_agent_pid > 0
+            and marker_agent_pid != os.getpid()
+            and _pid_is_running(marker_agent_pid)
+        ):
+            logger.info(
+                "Leaving OpenCode serve marker owned by live Agent pid %s unchanged",
+                marker_agent_pid,
+            )
             return
+        marker_port = int(marker.get("port") or port)
         pid = int(marker.get("pid") or 0)
+        known_listener_pids = _marker_listener_pids(marker)
         if not _pid_is_running(pid):
             _remove_marker(self._marker_path)
-            if _port_is_in_use(port):
+            if marker_port > 0 and known_listener_pids and _port_is_in_use(marker_port):
                 await asyncio.to_thread(
                     _reclaim_serve_port,
-                    port,
+                    marker_port,
                     reason="stale Agent-owned serve marker",
+                    allowed_pids=known_listener_pids,
                 )
             return
         if not _marker_matches_serve_process(marker):
@@ -5172,15 +5501,16 @@ class OpenCodeServeManager:
             "Stopping previous Agent-owned %s serve pid %s on 127.0.0.1:%s",
             marker.get("tool") or "opencode",
             pid,
-            port,
+            marker_port,
         )
         await asyncio.to_thread(_terminate_process_tree, pid)
         _remove_marker(self._marker_path)
-        if _port_is_in_use(port):
+        if marker_port > 0 and known_listener_pids and _port_is_in_use(marker_port):
             await asyncio.to_thread(
                 _reclaim_serve_port,
-                port,
+                marker_port,
                 reason="Agent-owned serve process tree left listener behind",
+                allowed_pids=known_listener_pids,
             )
 
     async def _wait_health_locked(self, startup_log_path: Path | None = None) -> None:
@@ -5193,6 +5523,7 @@ class OpenCodeServeManager:
                 raise RuntimeError(_with_serve_startup_log(
                     f"OpenCode serve exited during startup with code {self._proc.returncode}{cwd_note}",
                     startup_log_path,
+                    config_content=(self._key.config_content if self._key else ""),
                 ))
             try:
                 async with httpx.AsyncClient(
@@ -5241,6 +5572,9 @@ class OpenCodeServeManager:
                                     "OpenCode serve exited during startup with code "
                                     f"{self._proc.returncode}{cwd_note}",
                                     startup_log_path,
+                                    config_content=(
+                                        self._key.config_content if self._key else ""
+                                    ),
                                 ))
                             return
             except Exception:
@@ -5256,12 +5590,14 @@ class OpenCodeServeManager:
                         "OpenCode serve exited during startup with code "
                         f"{self._proc.returncode}{cwd_note}",
                         startup_log_path,
+                        config_content=(self._key.config_content if self._key else ""),
                     ))
             await asyncio.sleep(_SERVE_HEALTH_POLL_INTERVAL_SECONDS)
         cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
         raise TimeoutError(_with_serve_startup_log(
             f"OpenCode serve did not become healthy{cwd_note}",
             startup_log_path,
+            config_content=(self._key.config_content if self._key else ""),
         ))
 
     async def _abort_session(
@@ -5335,6 +5671,7 @@ class OpenCodeServeManager:
         await self._stop_event_hub()
         proc = self._proc
         port = self._port
+        listener_pids = set(self._listener_pids)
         startup_log_path = self._startup_log_path
         self._proc = None
         self._port = None
@@ -5348,11 +5685,12 @@ class OpenCodeServeManager:
         if proc.poll() is not None:
             try:
                 _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
-                if port is not None and _port_is_in_use(port):
+                if port is not None and listener_pids and _port_is_in_use(port):
                     await asyncio.to_thread(
                         _reclaim_serve_port,
                         port,
                         reason="serve parent process already exited",
+                        allowed_pids=listener_pids,
                     )
             finally:
                 try:
@@ -5371,11 +5709,12 @@ class OpenCodeServeManager:
         finally:
             try:
                 _remove_marker_for_pid(self._marker_path, getattr(proc, "pid", None))
-                if port is not None and _port_is_in_use(port):
+                if port is not None and listener_pids and _port_is_in_use(port):
                     await asyncio.to_thread(
                         _reclaim_serve_port,
                         port,
                         reason="serve shutdown",
+                        allowed_pids=listener_pids,
                     )
             finally:
                 try:

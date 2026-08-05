@@ -7,7 +7,9 @@ import json
 import os
 import shutil
 import socket
+import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from backend.config import get_config
@@ -30,11 +32,31 @@ _LEGACY_MANAGED_THREAT_ANALYSIS_SKILLS = (
     "high-risk-module-merge",
     "attack-tree-by-asset",
 )
+_GLOBAL_OPENCODE_CONFIG_FILENAMES = (
+    "config.json",
+    "opencode.json",
+    "opencode.jsonc",
+)
+_PROJECT_OPENCODE_CONFIG_FILENAMES = (
+    "opencode.json",
+    "opencode.jsonc",
+)
+_EXPLICIT_OPENCODE_CONFIG_ENV_NAMES = (
+    "OPENCODE_CONFIG_PATH",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_DIR",
+)
 
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
 _auto_serve_port: int | None = None
 _auto_serve_port_guard = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _ResolvedServePort:
+    port: int
+    auto_selected: bool
 
 
 def _config_value(value, name: str, default=None):
@@ -62,9 +84,8 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
     model = str(effective["model"] or "")
     workspace = get_global_opencode_workspace()
     serve_env = _runtime_environment(effective)
-    serve_env["OPENCODE_SERVE_PORT"] = str(
-        _resolved_serve_port(effective.get("serve_port"))
-    )
+    resolved_port = _resolve_serve_port(effective.get("serve_port"))
+    serve_env["OPENCODE_SERVE_PORT"] = str(resolved_port.port)
     config_content = _runtime_config_content(
         workspace,
         effective,
@@ -77,6 +98,7 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
         model=model,
         config_workspace=workspace,
         config_content=config_content,
+        serve_port_auto=resolved_port.auto_selected,
         env_overrides={
             key: serve_env[key]
             for key in (
@@ -124,8 +146,8 @@ def _effective_model_config(cli_config, model_option) -> dict:
     }
 
 
-def _resolved_serve_port(configured_port: object = None) -> int:
-    """Resolve one Agent-wide Serve port, choosing an auto port once per process."""
+def _resolve_serve_port(configured_port: object = None) -> _ResolvedServePort:
+    """Resolve the Agent-wide port and retain whether its value was automatic."""
     raw = configured_port
     if raw in (None, ""):
         raw = os.environ.get("OPENCODE_SERVE_PORT", "")
@@ -140,7 +162,7 @@ def _resolved_serve_port(configured_port: object = None) -> int:
             raise ValueError(
                 f"OPENCODE_SERVE_PORT must be between 1 and 65535: {raw!r}"
             )
-        return port
+        return _ResolvedServePort(port=port, auto_selected=False)
 
     global _auto_serve_port
     with _auto_serve_port_guard:
@@ -148,7 +170,12 @@ def _resolved_serve_port(configured_port: object = None) -> int:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.bind(("127.0.0.1", 0))
                 _auto_serve_port = int(sock.getsockname()[1])
-        return _auto_serve_port
+        return _ResolvedServePort(port=_auto_serve_port, auto_selected=True)
+
+
+def _resolved_serve_port(configured_port: object = None) -> int:
+    """Compatibility helper returning only the resolved Serve port."""
+    return _resolve_serve_port(configured_port).port
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -177,6 +204,134 @@ def _read_runtime_config(path: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _config_home_candidates(env: dict[str, str]) -> list[Path]:
+    candidates: list[Path] = []
+    xdg_config_home = str(env.get("XDG_CONFIG_HOME") or "").strip()
+    if xdg_config_home:
+        candidates.append(Path(os.path.expandvars(xdg_config_home)).expanduser())
+
+    home = str(env.get("HOME") or "").strip()
+    if not home and sys.platform == "win32":
+        home = str(env.get("USERPROFILE") or "").strip()
+    if home:
+        candidates.append(
+            Path(os.path.expandvars(home)).expanduser() / ".config"
+        )
+    else:
+        candidates.append(Path.home() / ".config")
+
+    if sys.platform == "win32":
+        appdata = str(env.get("APPDATA") or "").strip()
+        if appdata:
+            candidates.append(
+                Path(os.path.expandvars(appdata)).expanduser()
+            )
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = os.path.normcase(os.path.abspath(str(candidate)))
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _split_config_path_value(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
+    if not text:
+        return []
+    result: list[str] = []
+    for line in text.splitlines():
+        for item in line.split(os.pathsep):
+            item = item.strip()
+            if item:
+                result.append(item)
+    return result
+
+
+def _expand_config_path(raw_path: str) -> list[Path]:
+    path = Path(os.path.expandvars(raw_path)).expanduser()
+    if path.is_dir():
+        return [path / name for name in _GLOBAL_OPENCODE_CONFIG_FILENAMES]
+    return [path]
+
+
+def _runtime_config_candidates(
+    effective: dict,
+    project_dir: Path,
+    env: dict[str, str],
+) -> list[tuple[str, Path]]:
+    candidates: list[tuple[str, Path]] = []
+    tool = str(effective.get("tool") or "opencode").strip().lower()
+    config_dir_names = ["opencode"]
+    if tool and tool != "opencode":
+        config_dir_names.append(tool)
+    for config_home in _config_home_candidates(env):
+        for config_dir_name in config_dir_names:
+            config_dir = config_home / config_dir_name
+            candidates.extend(
+                ("global", config_dir / filename)
+                for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES
+            )
+
+    executable = str(effective.get("executable") or tool).strip()
+    if executable:
+        resolved_executable = shutil.which(executable) or executable
+        executable_parent = Path(resolved_executable).expanduser().parent
+        if str(executable_parent) not in {"", "."}:
+            candidates.extend(
+                ("executable", executable_parent / filename)
+                for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES
+            )
+            candidates.extend(
+                ("executable", executable_parent / ".opencode" / filename)
+                for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES
+            )
+
+    candidates.extend(
+        ("project", project_dir / filename)
+        for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES
+    )
+    candidates.extend(
+        ("project", project_dir / ".opencode" / filename)
+        for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES
+    )
+
+    for raw_path in _split_config_path_value(effective.get("config_paths")):
+        candidates.extend(
+            ("configured", path) for path in _expand_config_path(raw_path)
+        )
+    for env_name in _EXPLICIT_OPENCODE_CONFIG_ENV_NAMES:
+        for raw_path in _split_config_path_value(env.get(env_name)):
+            candidates.extend(
+                (env_name, path) for path in _expand_config_path(raw_path)
+            )
+    return candidates
+
+
+def _merge_managed_runtime_config(base: dict, managed: dict) -> dict:
+    merged = _deep_merge(base, managed)
+    for key in ("$schema", "skills", "permission"):
+        if key in managed:
+            merged[key] = json.loads(json.dumps(managed[key]))
+    for section_name in ("mcp", "agent"):
+        managed_section = managed.get(section_name)
+        if not isinstance(managed_section, dict):
+            continue
+        merged_section = merged.setdefault(section_name, {})
+        if not isinstance(merged_section, dict):
+            merged_section = {}
+            merged[section_name] = merged_section
+        for name, value in managed_section.items():
+            merged_section[name] = json.loads(json.dumps(value))
+    return merged
+
+
 def _runtime_config_content(
     workspace: Path,
     effective: dict,
@@ -185,28 +340,32 @@ def _runtime_config_content(
     from task_agent.config_json import dump_opencode_config
 
     merged: dict = {}
-    raw_paths = effective.get("config_paths") or []
-    if isinstance(raw_paths, str):
-        raw_paths = [raw_paths]
-    for raw_path in raw_paths:
-        path = Path(str(raw_path)).expanduser()
-        candidates = (
-            [path / "opencode.json", path / "opencode.jsonc"]
-            if path.is_dir()
-            else [path]
-        )
-        for candidate in candidates:
-            merged = _deep_merge(merged, _read_runtime_config(candidate))
-    for candidate in (
-        project_dir / "opencode.json",
-        project_dir / "opencode.jsonc",
-        project_dir / ".opencode" / "opencode.json",
-        project_dir / ".opencode" / "opencode.jsonc",
+    loaded: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for source, candidate in _runtime_config_candidates(
+        effective,
+        project_dir,
+        dict(os.environ),
     ):
-        merged = _deep_merge(merged, _read_runtime_config(candidate))
-    merged = _deep_merge(
-        merged,
-        _read_runtime_config(managed_opencode_config_path(workspace)),
+        key = os.path.normcase(os.path.abspath(str(candidate)))
+        if key in seen:
+            continue
+        seen.add(key)
+        config = _read_runtime_config(candidate)
+        if config:
+            merged = _deep_merge(merged, config)
+            loaded.append({
+                "source": source,
+                "path": str(candidate),
+                "keys": sorted(str(item) for item in config),
+            })
+    managed = _read_runtime_config(managed_opencode_config_path(workspace))
+    merged = _merge_managed_runtime_config(merged, managed)
+    logger.info(
+        "OpenCode runtime config discovery: project_dir=%s loaded=%s merged_top_keys=%s",
+        project_dir,
+        loaded,
+        sorted(str(key) for key in merged),
     )
     return dump_opencode_config(merged)
 
