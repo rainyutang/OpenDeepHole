@@ -71,14 +71,17 @@ def _scan(scan_id: str) -> tuple[ScanStatus, ScanMeta]:
     return scan, meta
 
 
-def test_flattened_harness_contains_only_native_files_and_private_skills() -> None:
+def test_builtin_method_contains_native_files_and_private_skills() -> None:
     root = (
         Path(__file__).resolve().parents[1]
         / "deephole_client"
         / "threat_analysis"
+        / "methods"
+        / "deephole_threat_analysis"
     )
     expected = {
         "__init__.py",
+        "method.yaml",
         "artifacts.py",
         "errors.py",
         "main.py",
@@ -110,12 +113,14 @@ def test_flattened_harness_contains_only_native_files_and_private_skills() -> No
     assert actual == expected
 
 
-def test_adapter_loads_flattened_harness_under_native_package_name() -> None:
+def test_adapter_loads_selected_method_under_native_package_name() -> None:
     module = threat_analysis_runner._load_implementation()
     expected = (
         Path(__file__).resolve().parents[1]
         / "deephole_client"
         / "threat_analysis"
+        / "methods"
+        / "deephole_threat_analysis"
         / "__init__.py"
     )
 
@@ -188,7 +193,9 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
         if use_standalone_config
         else None
     )
-    assert captured["skill_paths"] == ()
+    assert {
+        path.name for path in captured["skill_paths"]
+    } == {"attack-trees", "high-risk-modules", "value-assets"}
     assert events[0]["process"] == "threat_analysis"
     assert events[-1]["kind"] == "artifact"
 

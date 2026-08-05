@@ -24,6 +24,37 @@
   --threat-leaf-surface: #ecfdf5;
 }
 
+.threat-analysis-viewer__error {
+  padding: 14px 16px;
+  border: 1px solid rgb(248 113 113 / 45%);
+  border-radius: 10px;
+  background: rgb(127 29 29 / 18%);
+  color: #fecaca;
+}
+
+.threat-analysis-viewer__error strong {
+  display: block;
+  color: #fca5a5;
+  font-size: 14px;
+}
+
+.threat-analysis-viewer__error p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+[data-theme="light"] .threat-analysis-viewer__error {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+[data-theme="light"] .threat-analysis-viewer__error strong {
+  color: #b91c1c;
+}
+
 .threat-analysis-viewer__header {
   margin-bottom: 16px;
 }

@@ -554,10 +554,15 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     scan_id="scan-analysis-only",
                     cancel_event=threading.Event(),
                     threat_analysis_enabled=True,
+                    threat_analysis_method="custom_threat_analysis",
                     mining_engines=[],
                 )
 
         analysis.assert_awaited_once()
+        self.assertEqual(
+            analysis.await_args.kwargs["method_id"],
+            "custom_threat_analysis",
+        )
         mining.assert_not_awaited()
         reporter.push_threat_analysis.assert_awaited_once()
         self.assertEqual(
@@ -568,6 +573,69 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             ["running", "success"],
         )
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
+
+    async def test_threat_analysis_error_is_reported_and_kept_visible(self) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=AsyncMock(return_value={
+                        "result": False,
+                        "reason": "Threat model service unavailable",
+                    }),
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="analysis-error",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-analysis-error",
+                    cancel_event=threading.Event(),
+                    threat_analysis_enabled=True,
+                    mining_engines=[],
+                )
+
+        reported_runs = [
+            call.args[1]
+            for call in reporter.report_threat_analysis_run.await_args_list
+        ]
+        self.assertEqual([run.status for run in reported_runs], ["running", "error"])
+        self.assertEqual(
+            reported_runs[-1].error_message,
+            "Threat model service unavailable",
+        )
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "error")
+        self.assertIn(
+            "Threat model service unavailable",
+            reporter.finish_scan.await_args.kwargs["error_message"],
+        )
 
     async def test_threat_only_mode_does_not_start_static_processes(self) -> None:
         reporter = _reporter()

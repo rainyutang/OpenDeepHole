@@ -1198,6 +1198,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
 
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.scan.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
                 patch.dict(
                     "backend.api.agent._registered_agents",
                     {"agent-old": agent},
@@ -1208,8 +1212,16 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     new=AsyncMock(side_effect=fake_send),
                 ),
                 patch(
-                    "backend.api.agent.create_agent_runtime_update_payload",
-                    return_value=None,
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "backend.api.agent.get_scan_agent_config_async",
+                    new=AsyncMock(return_value=object()),
+                ),
+                patch(
+                    "backend.api.agent.agent_config_has_explicit_model",
+                    return_value=True,
                 ),
             ):
                 asyncio.run(scan_api.resume_scan(
@@ -1219,6 +1231,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ))
 
             self.assertTrue(sent["threat_analysis_enabled"])
+            self.assertEqual(
+                sent["threat_analysis_method"],
+                "deephole_threat_analysis",
+            )
             self.assertTrue(sent["resume_threat_analysis"])
             self.assertEqual(sent["mining_engines"], [])
 

@@ -451,6 +451,8 @@ export interface ScanStatus {
   project_id: string;
   scan_mode?: string;
   threat_analysis_enabled: boolean;
+  threat_analysis_method: string;
+  threat_analysis_method_selection?: ThreatAnalysisMethodSelection | null;
   threat_analysis_run?: ThreatAnalysisRunStatus | null;
   auto_fp_review?: boolean;
   fp_review_method?: FpReviewMethod;
@@ -760,6 +762,24 @@ export interface ThreatAnalysisRunStatus {
   error_message: string;
   started_at: string;
   finished_at: string;
+}
+
+export interface ThreatAnalysisMethodSelection {
+  method_id: string;
+  method_label: string;
+  description: string;
+}
+
+export interface ThreatAnalysisMethodCatalogItem {
+  method_id: string;
+  label: string;
+  description: string;
+}
+
+export interface ThreatAnalysisMethodCatalog {
+  methods: ThreatAnalysisMethodCatalogItem[];
+  errors: string[];
+  updated_at: string;
 }
 
 export interface MiningEngineCatalogItem {

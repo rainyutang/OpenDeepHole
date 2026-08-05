@@ -17,6 +17,7 @@ class ScanTask:
     scan_name: str
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
+    threat_analysis_method: str = "deephole_threat_analysis"
     product: str = ""
     validation_environment: str = ""
     code_graph_mcp: dict | None = None
@@ -45,6 +46,7 @@ class TaskManager:
         scan_name: str,
         scan_mode: str = "full",
         threat_analysis_enabled: bool = False,
+        threat_analysis_method: str = "deephole_threat_analysis",
         product: str = "",
         validation_environment: str = "",
         code_graph_mcp: dict | None = None,
@@ -65,6 +67,10 @@ class TaskManager:
             scan_name=scan_name,
             scan_mode=scan_mode or "full",
             threat_analysis_enabled=bool(threat_analysis_enabled),
+            threat_analysis_method=(
+                str(threat_analysis_method or "deephole_threat_analysis").strip()
+                or "deephole_threat_analysis"
+            ),
             product=product,
             validation_environment=validation_environment,
             code_graph_mcp=(
@@ -123,6 +129,7 @@ class TaskManager:
                 "scan_name": task.scan_name,
                 "scan_mode": task.scan_mode,
                 "threat_analysis_enabled": task.threat_analysis_enabled,
+                "threat_analysis_method": task.threat_analysis_method,
                 "product": task.product,
                 "validation_environment": task.validation_environment,
                 "mining_engines": copy.deepcopy(task.mining_engines),

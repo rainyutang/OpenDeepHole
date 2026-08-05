@@ -201,6 +201,26 @@ class ThreatAnalysisRunStatus(BaseModel):
     finished_at: str = ""
 
 
+class ThreatAnalysisMethodSelection(BaseModel):
+    """Resolved immutable threat-analysis method snapshot stored on a scan."""
+
+    method_id: str
+    method_label: str
+    description: str = ""
+
+
+class ThreatAnalysisMethodCatalogItem(BaseModel):
+    method_id: str
+    label: str
+    description: str
+
+
+class ThreatAnalysisMethodCatalog(BaseModel):
+    methods: list[ThreatAnalysisMethodCatalogItem] = []
+    errors: list[str] = []
+    updated_at: str = ""
+
+
 class MiningEngineCatalogItem(BaseModel):
     engine_id: str
     label: str
@@ -599,6 +619,8 @@ class ScanStatus(BaseModel):
     project_id: str = ""
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
+    threat_analysis_method: str = "deephole_threat_analysis"
+    threat_analysis_method_selection: ThreatAnalysisMethodSelection | None = None
     threat_analysis_run: ThreatAnalysisRunStatus | None = None
     auto_fp_review: bool = True
     fp_review_method: str = FpReviewMethod.ADVERSARIAL.value
@@ -1213,6 +1235,7 @@ class CreateScanRequest(BaseModel):
     scan_name: str = ""
     scan_mode: str = "full"
     threat_analysis_enabled: bool | None = None
+    threat_analysis_method: str | None = None
     product: str = ""
     validation_environment: str = ""
     checkers: list[str]
@@ -1245,6 +1268,8 @@ class ScanMeta(BaseModel):
     created_at: str
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
+    threat_analysis_method: str = "deephole_threat_analysis"
+    threat_analysis_method_selection: ThreatAnalysisMethodSelection | None = None
     mining_engines: list[MiningEngineSelection] = []
     feedback_ids: list[str] = []
     agent_id: str = ""

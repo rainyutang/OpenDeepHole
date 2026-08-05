@@ -224,7 +224,7 @@ Skill 有两种常用放置方式：
 1. 项目专用 Skill 放在 `<project_dir>/.opencode/skills/<skill-name>/SKILL.md`，由以 `project_dir` 为 Session 目录的 OpenCode 按项目发现。
 2. 多个任务共享的 standalone Skill 推荐放在 `<workspace_dir>/.opencode/skills/<skill-name>/SKILL.md`，并将 `<workspace_dir>/.opencode/skills` 的绝对路径写入 `serve.opencode_config.skills.paths`。
 
-standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导全局配置中的显式读取和外部目录权限，使 Skill 内的 `references/`、`assets/`、`scripts/` 一并可读。嵌入完整 OpenDeepHole Agent 时，`deephole_client/opencode_integration.py` 会在每次初始化全局 workspace 时，将安装包内的 `value-asset-map`、`high-risk-module-map`、`high-risk-module-merge`、`attack-tree-by-asset` 及其资源同步到 `~/.opendeephole/opencode_workspace/.opencode/skills`，生成全局 `skills.paths`，并显式允许读取整个 `.opencode` 目录；威胁分析入口不会再把 Agent 安装目录追加为任务级 Skill 路径。
+standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导全局配置中的显式读取和外部目录权限，使 Skill 内的 `references/`、`assets/`、`scripts/` 一并可读。嵌入完整 OpenDeepHole Agent 时，威胁分析适配器会把当前所选方法相邻 `skills/` 中的 Skill 根作为任务级 `skill_paths` 绑定；它们不会复制到全局 workspace，其它威胁分析方法的 Skill 也不会注册到当前任务。升级时只会清理旧版曾全局注入的四个受管 Skill，不删除其它 workspace Skill。
 
 ### 模型池参数
 
@@ -336,7 +336,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - `writable_paths`：调用方显式授权的额外文件或目录；相对路径以 `project_dir` 为基准，绝对路径允许位于项目外，但不接受 `*`、`?` 或文件系统根目录。
 - `scan_id`、任务元数据、输出回调和取消事件：由编排层绑定并在异步任务树中自动继承。
 - `config_path`：独立过程可绑定自己的 Task Agent YAML；其中的 `serve.opencode_config.skills.paths` 是 standalone Skill 的唯一显式注册来源。
-- `skill_paths`：仍保留给确实需要临时 Skill 根的通用过程；内置威胁分析不再使用它，也不会把 Agent 安装目录加入运行配置。
+- `skill_paths`：为确实需要临时 Skill 根的过程提供任务级注册；威胁分析只绑定当前所选方法的 Skill 根，不把方法目录写入全局运行配置。
 
 后端模式没有绑定 `project_dir` 或 `work_dir` 时，调用会立即失败，不会回退到进程当前目录。独立模式始终使用 YAML 中固定的两个目录，因此 Session continuation 不会改变权限边界。
 

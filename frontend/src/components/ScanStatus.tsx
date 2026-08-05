@@ -344,15 +344,23 @@ function isThreatAnalysisSelected(scan: ScanStatusType): boolean {
   return scan.threat_analysis_enabled || scan.scan_mode === "threat_analysis_only";
 }
 
+function threatAnalysisMethodLabel(scan: ScanStatusType): string {
+  const snapshot = scan.threat_analysis_method_selection;
+  if (snapshot?.method_label) return snapshot.method_label;
+  if (scan.threat_analysis_method === "deephole_threat_analysis") {
+    return "DeepHole威胁分析";
+  }
+  return scan.threat_analysis_method || "威胁分析";
+}
+
 function threatAnalysisFlowStatus(scan: ScanStatusType): FlowNodeStatus {
   if (!isThreatAnalysisSelected(scan)) return "skipped";
-  if (scan.threat_analysis) return "done";
   const status = scan.threat_analysis_run?.status;
   if (status === "running") return "running";
-  if (status === "success") return "done";
   if (status === "error") return "error";
   if (status === "cancelled") return "cancelled";
   if (status === "skipped") return "skipped";
+  if (status === "success" || scan.threat_analysis) return "done";
   return "pending";
 }
 
@@ -1720,6 +1728,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             events={threatAnalysisEvents}
             loading={(threatAnalysisLoading || scan.threat_analysis_run?.status === "running") && !scan.threat_analysis}
             isDone={!!isDone}
+            methodLabel={threatAnalysisMethodLabel(scan)}
+            errorMessage={scan.threat_analysis_run?.status === "error"
+              ? scan.threat_analysis_run.error_message
+              : ""}
           />
         )}
         {activeTab === "threat" && !isThreatAnalysisSelected(scan) && (
@@ -2187,12 +2199,14 @@ function ProcessFlowNav({
   }
   const threatAnalysisNode: FlowNodeView = {
     id: "threat",
-    label: "威胁分析",
-    detail: scan.threat_analysis
-      ? threatAnalysisSummary(scan.threat_analysis)
-      : !threatSelected
-        ? "本次扫描未选择威胁分析"
-        : scan.threat_analysis_run?.error_message || "等待生成攻击树",
+    label: threatAnalysisMethodLabel(scan),
+    detail: scan.threat_analysis_run?.status === "error"
+      ? scan.threat_analysis_run.error_message || "威胁分析执行失败"
+      : scan.threat_analysis
+        ? threatAnalysisSummary(scan.threat_analysis)
+        : !threatSelected
+          ? "本次扫描未选择威胁分析"
+          : scan.threat_analysis_run?.error_message || "等待生成攻击树",
     status: threatAnalysisStatus,
     active: activeTab === "threat",
     tone: "green",
@@ -3061,14 +3075,16 @@ function ScanOverview({
                 : "本次扫描未选择静态候选引擎"}
             />
             <TaskSummaryRow
-              label="威胁分析"
+              label={threatAnalysisMethodLabel(scan)}
               status={flowStatusLabel(threatAnalysisStatus)}
               tone={flowStatusTone(threatAnalysisStatus, "green")}
-              detail={scan.threat_analysis
-                ? threatAnalysisSummary(scan.threat_analysis)
-                : isThreatAnalysisSelected(scan)
-                  ? scan.threat_analysis_run?.error_message || "等待生成攻击树"
-                  : "本次扫描未选择威胁分析"}
+              detail={scan.threat_analysis_run?.status === "error"
+                ? scan.threat_analysis_run.error_message || "威胁分析执行失败"
+                : scan.threat_analysis
+                  ? threatAnalysisSummary(scan.threat_analysis)
+                  : isThreatAnalysisSelected(scan)
+                    ? scan.threat_analysis_run?.error_message || "等待生成攻击树"
+                    : "本次扫描未选择威胁分析"}
             />
             {engines.map((engine) => {
               const run = miningEngineRun(scan, engine.engine_id);

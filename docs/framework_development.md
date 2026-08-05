@@ -6,6 +6,7 @@
 本文负责描述统一边界和接入决策；各过程的完整参数仍以对应目录的 README 和实际代码为准：
 
 - [客户端过程总览](../deephole_client/README.md)
+- [威胁分析方法扩展](../deephole_client/threat_analysis/README.md)
 - [漏洞挖掘引擎扩展](../deephole_client/vulnerability_mining/README.md)
 - [去误报方法扩展](../deephole_client/fp_review/README.md)
 - [Task Agent 公共任务接口](opencode_task_service.md)
@@ -18,13 +19,14 @@ OpenDeepHole 并不是把所有新能力都注册成同一种插件。开始开�
 
 | 需求 | 应选择的扩展类型 | 是否自动发现 |
 | --- | --- | --- |
+| 新增一套价值资产、高风险模块和攻击树生成方法 | 威胁分析方法 | 是 |
 | 新增一套独立漏洞挖掘方法，并向平台返回漏洞列表 | 漏洞挖掘引擎 | 是 |
 | 在“静态召回 → 候选点 AI 审计”链路增加一种规则 | `static_candidate` Checker | 是 |
 | 对平台已确认的单个漏洞增加一种去误报方法 | 去误报方法 | 是 |
 | 针对某产品和验证环境实现漏洞复现或验证 | 产品验证器 | 是 |
-| 增加新的基础设施阶段、扫描级产物或全新任务生命周期 | 独立框架过程 | 否，需要显式接入协调器 |
+| 增加新的基础设施阶段、其它扫描级产物或全新任务生命周期 | 独立框架过程 | 否，需要显式接入协调器 |
 
-优先使用前四种扩展点。只有新能力无法表示为漏洞挖掘引擎、Checker、去误报方法或产品验证器时，
+优先使用前五种扩展点。只有新能力无法表示为威胁分析方法、漏洞挖掘引擎、Checker、去误报方法或产品验证器时，
 才增加独立框架过程；独立过程会影响扫描依赖、持久化、状态展示和运行时分发，属于框架级改动。
 
 ## 2. 整体扫描流程
@@ -93,17 +95,50 @@ flowchart TD
 | 漏洞验证 | `run_vulnerability_validation(**kwargs)` | 产品、环境、漏洞批次、验证器配置 | `status`、`validations`，或验证器目录 `catalog` |
 
 普通框架过程的入口统一为异步 `run_<process>(**kwargs)`。每个过程自行校验允许的 key，
-未知 key 应立即报错；返回值应可 JSON 序列化。威胁分析目录是外部原生实现的镜像，由相邻的
-`threat_analysis_runner.py` 适配，不在镜像目录中加入平台代码。
+未知 key 应立即报错；返回值应可 JSON 序列化。威胁分析的外层入口仍由相邻的
+`threat_analysis_runner.py` 提供，所选方法的原生实现位于
+`threat_analysis/methods/<method_id>/`，方法目录中不加入平台协调代码。
 
 过程的详细契约见：
 
 - [代码图谱构建](../deephole_client/code_graph_build/README.md)
+- [威胁分析方法](../deephole_client/threat_analysis/README.md)
 - [静态分析](../deephole_client/vulnerability_mining/engines/static_candidate/static_analysis/README.md)
 - [候选点审计](../deephole_client/vulnerability_mining/engines/static_candidate/candidate_audit/README.md)
 - [威胁审计](../deephole_client/vulnerability_mining/engines/threat_audit/README.md)
 - [去误报方法](../deephole_client/fp_review/README.md)
 - [漏洞验证过程](../deephole_client/vulnerability_validation/README.md)
+
+### 3.1 威胁分析方法的原生契约
+
+威胁分析方法按目录自动发现，一个扫描固化并执行一个方法。`method_id` 直接使用目录名；
+`method.yaml` 只包含非空 `label` 和 `description`，不配置 `package_name` 或 `default`。平台
+缺省固定选择 `deephole_threat_analysis`。
+
+每个方法在 `threat_analysis.py` 定义同步入口，并由 `__init__.py` 导出：
+
+```python
+def run_threat_analysis(
+    code_path,
+    output_path,
+    is_resume=False,
+    product_mcp=None,
+    attack_modes=None,
+) -> dict:
+    ...
+```
+
+成功结果必须设置 `result=True`，并返回 `output_path` 内三份有效 JSON 的
+`value_asset_path`、`attack_tree_path`、`high_risk_modules_path`；对应顶层结构分别为数组、
+含 `attack_trees` 数组的对象、数组。失败结果必须设置 `result=False` 并提供非空 `reason`。
+异常或失败原因会保存到 `ThreatAnalysisRunStatus.error_message`，通过 SSE 和刷新继续显示；
+取消使用独立状态。
+
+更新内置实现时，可把 `ThreatAnalysis/src/threat_analysis_harness/.` 直接复制到
+`deephole_client/threat_analysis/methods/deephole_threat_analysis/`，保留该目录的平台
+`method.yaml`。原生 `threat_analysis_harness` 绝对导入无需修改。新增方法也沿用相同目录和入口，
+只需换目录名并提供清单。完整参数、返回示例和 Skill 注册规则见
+[威胁分析方法扩展](../deephole_client/threat_analysis/README.md)。
 
 ## 4. 框架向组件提供什么
 
@@ -204,6 +239,8 @@ with opencode_task_context(
 - 收到 `asyncio.CancelledError` 时先做必要清理，然后继续抛出；不要把平台取消伪装成普通成功。
 - 外部命令使用独立 argv 启动，取消时先终止，超时后再强制结束；不要拼接 shell 字符串。
 - 组件错误应带可操作的 `error_message`，框架负责隔离单引擎失败并发布生命周期。
+- 威胁分析方法可以返回非空 `reason` 或抛出异常；框架会持久化简明错误并在详情页展示，
+  但组件不得上传完整堆栈、模型正文或密钥。
 - `report_vulnerabilities()` 用于尽早展示结果。已经流式上报的漏洞仍必须出现在最终
   `vulnerabilities` 中，框架会做本次运行内的去重和收尾补报。
 

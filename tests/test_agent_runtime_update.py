@@ -189,16 +189,19 @@ class AgentRuntimePackageTests(unittest.TestCase):
             )
         )
         self.assertIn(
-            "deephole_client/threat_analysis/threat_analysis.py",
+            "deephole_client/threat_analysis/methods/"
+            "deephole_threat_analysis/threat_analysis.py",
             names,
         )
         self.assertIn(
-            "deephole_client/threat_analysis/skills/attack-trees/"
+            "deephole_client/threat_analysis/methods/deephole_threat_analysis/"
+            "skills/attack-trees/"
             "attack-tree-by-asset/SKILL.md",
             names,
         )
         self.assertIn(
-            "deephole_client/threat_analysis/skills/attack-trees/"
+            "deephole_client/threat_analysis/methods/deephole_threat_analysis/"
+            "skills/attack-trees/"
             "attack-tree-by-asset/references/attack_mode.json",
             names,
         )
@@ -241,16 +244,19 @@ class AgentRuntimePackageTests(unittest.TestCase):
             names,
         )
         self.assertIn(
-            "deephole_client/threat_analysis/threat_analysis.py",
+            "deephole_client/threat_analysis/methods/"
+            "deephole_threat_analysis/threat_analysis.py",
             names,
         )
         self.assertIn(
-            "deephole_client/threat_analysis/skills/attack-trees/"
+            "deephole_client/threat_analysis/methods/deephole_threat_analysis/"
+            "skills/attack-trees/"
             "attack-tree-by-asset/SKILL.md",
             names,
         )
         self.assertIn(
-            "deephole_client/threat_analysis/skills/attack-trees/"
+            "deephole_client/threat_analysis/methods/deephole_threat_analysis/"
+            "skills/attack-trees/"
             "attack-tree-by-asset/references/attack_mode.json",
             names,
         )

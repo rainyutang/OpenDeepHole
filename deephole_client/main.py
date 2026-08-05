@@ -99,6 +99,10 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             threat_analysis_enabled=bool(
                 msg.get("threat_analysis_enabled")
             ),
+            threat_analysis_method=str(
+                msg.get("threat_analysis_method")
+                or "deephole_threat_analysis"
+            ),
             product=msg.get("product", ""),
             validation_environment=msg.get("validation_environment", ""),
             code_graph_mcp=(
@@ -137,6 +141,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             threat_analysis_enabled=(
                 bool(msg.get("threat_analysis_enabled"))
                 if "threat_analysis_enabled" in msg
+                else None
+            ),
+            threat_analysis_method=(
+                str(msg.get("threat_analysis_method") or "")
+                if "threat_analysis_method" in msg
                 else None
             ),
             product=msg.get("product"),

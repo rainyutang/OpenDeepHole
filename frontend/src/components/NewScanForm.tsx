@@ -6,6 +6,7 @@ import {
   getCheckers,
   getFpReviewMethodCatalog,
   getMiningEngineCatalog,
+  getThreatAnalysisMethodCatalog,
   probeScanCodeGraphMcp,
 } from "../api/client";
 import type {
@@ -15,6 +16,7 @@ import type {
   CheckerInfo,
   FpReviewMethodCatalogItem,
   MiningEngineCatalogItem,
+  ThreatAnalysisMethodCatalogItem,
 } from "../types";
 import ScanCodeGraphMcpEditor, {
   defaultScanCodeGraphMcp,
@@ -44,6 +46,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
   const [validationTargets, setValidationTargets] = useState<AgentValidatorRegistration[]>([]);
   const [miningEngineCatalog, setMiningEngineCatalog] = useState<MiningEngineCatalogItem[]>([]);
+  const [threatAnalysisMethodCatalog, setThreatAnalysisMethodCatalog] = useState<ThreatAnalysisMethodCatalogItem[]>([]);
   const [fpReviewMethodCatalog, setFpReviewMethodCatalog] = useState<FpReviewMethodCatalogItem[]>([]);
   const [miningEngines, setMiningEngines] = useState<Record<string, MiningEngineFormValue>>({});
   const [loading, setLoading] = useState(true);
@@ -55,6 +58,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const [codeScanPath, setCodeScanPath] = useState<string>("");
   const [scanName, setScanName] = useState<string>("");
   const [threatAnalysisEnabled, setThreatAnalysisEnabled] = useState(true);
+  const [threatAnalysisMethod, setThreatAnalysisMethod] = useState("");
   const [autoFpReview, setAutoFpReview] = useState(true);
   const [fpReviewMethod, setFpReviewMethod] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
@@ -84,18 +88,27 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   useEffect(() => {
     const load = async () => {
       try {
-        const [agentList, checkerList, engineCatalog, reviewCatalog] = await Promise.all([
+        const [agentList, checkerList, engineCatalog, threatCatalog, reviewCatalog] = await Promise.all([
           getAgents(),
           getCheckers(),
           getMiningEngineCatalog(),
+          getThreatAnalysisMethodCatalog(),
           getFpReviewMethodCatalog(),
         ]);
+        if (threatCatalog.methods.length === 0) {
+          throw new Error("没有可用的威胁分析方法");
+        }
         if (reviewCatalog.methods.length === 0) {
           throw new Error("没有可用的去误报方法");
         }
         setAgents(agentList);
         setCheckers(checkerList);
         setMiningEngineCatalog(engineCatalog.engines);
+        setThreatAnalysisMethodCatalog(threatCatalog.methods);
+        setThreatAnalysisMethod(
+          threatCatalog.methods.find((method) => method.method_id === "deephole_threat_analysis")?.method_id
+            ?? threatCatalog.methods[0].method_id,
+        );
         setFpReviewMethodCatalog(reviewCatalog.methods);
         setFpReviewMethod(
           reviewCatalog.methods.find((method) => method.default)?.method_id
@@ -231,6 +244,10 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       setError("威胁审计要求本次扫描启用威胁分析");
       return;
     }
+    if (!threatAnalysisMethod) {
+      setError("没有可用的威胁分析方法");
+      return;
+    }
     if (staticEngineEnabled && selectedCheckers.size === 0) {
       setError("请至少选择一个检查项");
       return;
@@ -249,6 +266,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
         scan_name: scanName.trim(),
         scan_mode: SCAN_MODE_FULL,
         threat_analysis_enabled: threatAnalysisEnabled,
+        threat_analysis_method: threatAnalysisMethod,
         auto_fp_review: autoFpReview,
         fp_review_method: fpReviewMethod,
         product: selectedProduct,
@@ -422,6 +440,46 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
                   />
                 </button>
               </div>
+              <fieldset className="mt-4 border-t border-slate-700/70 pt-4" disabled={!threatAnalysisEnabled}>
+                <legend className="mb-3 text-xs font-medium text-slate-400">
+                  威胁分析方法
+                </legend>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {threatAnalysisMethodCatalog.map((method) => {
+                    const selected = threatAnalysisMethod === method.method_id;
+                    return (
+                      <label
+                        key={method.method_id}
+                        className={`rounded-lg border p-3 transition-colors ${
+                          !threatAnalysisEnabled
+                            ? "cursor-not-allowed border-slate-700 bg-slate-900/30 opacity-60"
+                            : selected
+                              ? "cursor-pointer border-emerald-500 bg-emerald-500/10"
+                              : "cursor-pointer border-slate-600 bg-slate-900/40 hover:border-slate-500"
+                        }`}
+                      >
+                        <span className="flex items-start gap-3">
+                          <input
+                            type="radio"
+                            name="threat-analysis-method"
+                            value={method.method_id}
+                            checked={selected}
+                            onChange={() => setThreatAnalysisMethod(method.method_id)}
+                            className="mt-0.5 h-4 w-4 border-slate-500 bg-slate-700 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-0"
+                          />
+                          <span>
+                            <span className="block text-sm font-medium text-white">{method.label}</span>
+                            <span className="mt-1 block text-xs text-slate-500">{method.description}</span>
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                {!threatAnalysisEnabled && (
+                  <p className="mt-3 text-xs text-slate-500">重新启用后会继续使用当前选择。</p>
+                )}
+              </fieldset>
             </div>
 
             {/* Mining engines */}

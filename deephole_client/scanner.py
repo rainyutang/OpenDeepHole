@@ -302,6 +302,7 @@ async def run_scan(
     retry_threat_audit_task_ids: list[str] | None = None,
     scan_mode: str = SCAN_MODE_FULL,
     threat_analysis_enabled: bool = False,
+    threat_analysis_method: str = "deephole_threat_analysis",
     code_graph_mcp: dict[str, Any] | None = None,
     mining_engines: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -326,6 +327,10 @@ async def run_scan(
     threat_only = normalized_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY
     threat_analysis_selected = bool(
         threat_analysis_enabled or threat_only
+    )
+    threat_analysis_method_id = (
+        str(threat_analysis_method or "deephole_threat_analysis").strip()
+        or "deephole_threat_analysis"
     )
     registry, selections = _resolve_mining_engines(
         raw_selections=mining_engines,
@@ -417,7 +422,11 @@ async def run_scan(
     await emit(
         "init",
         "Threat analysis: "
-        + ("enabled" if threat_analysis_selected else "disabled"),
+        + (
+            f"enabled ({threat_analysis_method_id})"
+            if threat_analysis_selected
+            else "disabled"
+        ),
     )
     await emit(
         "init",
@@ -575,6 +584,7 @@ async def run_scan(
         result: dict[str, Any] | None = None
         try:
             result = await run_threat_analysis(
+                method_id=threat_analysis_method_id,
                 code_path=scan_root,
                 output_path=output_path,
                 # The native process owns its cache and validates whether a
@@ -606,7 +616,7 @@ async def run_scan(
             run.status = (
                 "cancelled" if cancel_event.is_set() else "error"
             )
-            run.error_message = str(exc)
+            run.error_message = str(exc).strip() or type(exc).__name__
             return run, None
         finally:
             run.finished_at = datetime.now(timezone.utc).isoformat()

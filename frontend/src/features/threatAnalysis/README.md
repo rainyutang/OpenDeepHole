@@ -3,7 +3,7 @@
 威胁分析前端代码集中在本目录：
 
 - `api.ts`：威胁分析结果请求，复用全局鉴权和公开扫描访问逻辑。
-- `ThreatAnalysisPanel.tsx`：独立面板组件，只通过 props 接收数据。
+- `ThreatAnalysisPanel.tsx`：独立面板组件，只通过 props 接收数据、所选方法名和错误信息。
 - `index.ts`：feature 对外出口。
 
 面板直接读取后端保存的原生 artifact bundle，不再依赖旧版归一化
@@ -16,3 +16,5 @@ import { ThreatAnalysisPanel, getScanThreatAnalysis } from "../features/threatAn
 ```
 
 扫描页只负责加载数据和处理 SSE，攻击树展示细节不再放在 `ScanStatus.tsx`。
+`threat_analysis_run.status=error` 时，面板在有无历史产物的情况下都会继续显示已持久化的
+`error_message`，不会被空状态或旧产物覆盖。

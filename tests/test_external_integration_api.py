@@ -152,6 +152,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                             scan_name="project",
                             product="LTE",
                             validation_environment="仿真UBBPi板环境",
+                            threat_analysis_method="deephole_threat_analysis",
                             agent_config=AgentRemoteConfig(
                                 model_pool={
                                     "models": [{
@@ -197,6 +198,10 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded[1].scan_items, ["public_check"])
             self.assertEqual(loaded[1].validation_environment, "仿真UBBPi板环境")
+            self.assertEqual(
+                loaded[1].threat_analysis_method,
+                "deephole_threat_analysis",
+            )
             self.assertTrue(loaded[1].public_access_token)
             self.assertEqual(loaded[1].code_graph_mcp, scan_graph)
             self.assertNotIn("code_graph_mcp", loaded[1].model_dump())
@@ -205,6 +210,10 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                 ["config", "task", "config", "task"],
             )
             self.assertEqual(send.call_args_list[1].args[1]["validation_environment"], "仿真UBBPi板环境")
+            self.assertEqual(
+                send.call_args_list[1].args[1]["threat_analysis_method"],
+                "deephole_threat_analysis",
+            )
             self.assertEqual(
                 send.call_args_list[1].args[1]["code_graph_mcp"],
                 scan_graph.model_dump(mode="json"),

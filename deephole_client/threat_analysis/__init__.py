@@ -1,14 +1,19 @@
-"""Business orchestration for repository threat analysis."""
+"""Directory-discovered threat-analysis methods."""
 
-from threat_analysis_harness.artifacts import ThreatAnalysisLayout
-from threat_analysis_harness.pipeline import ThreatAnalysisPipeline, ThreatAnalysisResult
-from threat_analysis_harness.task_agent_submitter import TaskAgentSubmitter
-from threat_analysis_harness.threat_analysis import run_threat_analysis
+from .runtime import (
+    DEFAULT_THREAT_ANALYSIS_METHOD_ID,
+    THREAT_ANALYSIS_METHODS_DIR,
+    ThreatAnalysisMethodManifest,
+    build_threat_analysis_method_catalog,
+    discover_threat_analysis_method_manifests,
+    resolve_threat_analysis_method,
+)
 
 __all__ = [
-    "TaskAgentSubmitter",
-    "ThreatAnalysisLayout",
-    "ThreatAnalysisPipeline",
-    "ThreatAnalysisResult",
-    "run_threat_analysis",
+    "DEFAULT_THREAT_ANALYSIS_METHOD_ID",
+    "THREAT_ANALYSIS_METHODS_DIR",
+    "ThreatAnalysisMethodManifest",
+    "build_threat_analysis_method_catalog",
+    "discover_threat_analysis_method_manifests",
+    "resolve_threat_analysis_method",
 ]

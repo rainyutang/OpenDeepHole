@@ -118,6 +118,7 @@ async def _run(task, is_resume: bool) -> None:
             scan_name=task.scan_name,
             scan_mode=task.scan_mode,
             threat_analysis_enabled=task.threat_analysis_enabled,
+            threat_analysis_method=task.threat_analysis_method,
             product=task.product,
             validation_environment=task.validation_environment,
             checker_names=task.checkers,
@@ -146,6 +147,7 @@ async def handle_task(
     scan_name: str,
     scan_mode: str = "full",
     threat_analysis_enabled: bool = False,
+    threat_analysis_method: str = "deephole_threat_analysis",
     product: str = "",
     validation_environment: str = "",
     code_graph_mcp: dict | None = None,
@@ -171,6 +173,7 @@ async def handle_task(
         scan_name=scan_name,
         scan_mode=scan_mode,
         threat_analysis_enabled=threat_analysis_enabled,
+        threat_analysis_method=threat_analysis_method,
         product=product,
         validation_environment=validation_environment,
         code_graph_mcp=code_graph_mcp,
@@ -201,6 +204,7 @@ async def handle_resume(
     scan_name: Optional[str] = None,
     scan_mode: Optional[str] = None,
     threat_analysis_enabled: Optional[bool] = None,
+    threat_analysis_method: Optional[str] = None,
     product: Optional[str] = None,
     validation_environment: Optional[str] = None,
     code_graph_mcp: Optional[dict] = None,
@@ -230,6 +234,9 @@ async def handle_resume(
             scan_name=scan_name or "",
             scan_mode=scan_mode or "full",
             threat_analysis_enabled=bool(threat_analysis_enabled),
+            threat_analysis_method=(
+                threat_analysis_method or "deephole_threat_analysis"
+            ),
             product=product or "",
             validation_environment=validation_environment or "",
             code_graph_mcp=code_graph_mcp,
@@ -257,6 +264,11 @@ async def handle_resume(
             task.scan_mode = scan_mode
         if threat_analysis_enabled is not None:
             task.threat_analysis_enabled = bool(threat_analysis_enabled)
+        if threat_analysis_method is not None:
+            task.threat_analysis_method = (
+                str(threat_analysis_method).strip()
+                or "deephole_threat_analysis"
+            )
         if product is not None:
             task.product = product
         if validation_environment is not None:

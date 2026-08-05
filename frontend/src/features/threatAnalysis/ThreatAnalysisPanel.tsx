@@ -16,6 +16,8 @@ interface ThreatAnalysisPanelProps {
   events: ScanEvent[];
   loading: boolean;
   isDone: boolean;
+  methodLabel: string;
+  errorMessage?: string;
 }
 
 type Tab = "valueAssets" | "highRiskModules" | "internalNodes" | "attackTrees";
@@ -60,6 +62,8 @@ export function ThreatAnalysisPanel({
   events,
   loading,
   isDone,
+  methodLabel,
+  errorMessage = "",
 }: ThreatAnalysisPanelProps) {
   const [tab, setTab] = useState<Tab>("valueAssets");
   const assets = artifactArray<NativeThreatValueAsset>(
@@ -76,6 +80,9 @@ export function ThreatAnalysisPanel({
   if (!analysis) {
     return (
       <div className="space-y-4">
+        {errorMessage && (
+          <ThreatAnalysisError methodLabel={methodLabel} message={errorMessage} />
+        )}
         <EmptyState
           text={
             loading
@@ -97,6 +104,9 @@ export function ThreatAnalysisPanel({
   ) {
     return (
       <div className="space-y-4">
+        {errorMessage && (
+          <ThreatAnalysisError methodLabel={methodLabel} message={errorMessage} />
+        )}
         <EmptyState text="该扫描使用旧版威胁分析格式，当前版本不再提供兼容展示。" />
         <ThreatEventList events={events} />
       </div>
@@ -129,11 +139,14 @@ export function ThreatAnalysisPanel({
 
   return (
     <div className="space-y-4">
+      {errorMessage && (
+        <ThreatAnalysisError methodLabel={methodLabel} message={errorMessage} />
+      )}
       <section className="threat-analysis-viewer">
         <header className="threat-analysis-viewer__header">
           <h2 className="threat-analysis-viewer__title">威胁分析结果</h2>
           <p className="threat-analysis-viewer__summary">
-            {assets.length} 个价值资产 / {modules.length} 个高风险模块 /{" "}
+            方法：{methodLabel} · {assets.length} 个价值资产 / {modules.length} 个高风险模块 /{" "}
             {internalNodes.length} 个内部节点 / {trees.length} 棵攻击树
           </p>
         </header>
@@ -184,6 +197,21 @@ export function ThreatAnalysisPanel({
       <ArtifactPaths analysis={analysis} />
       <ThreatEventList events={events} />
     </div>
+  );
+}
+
+function ThreatAnalysisError({
+  methodLabel,
+  message,
+}: {
+  methodLabel: string;
+  message: string;
+}) {
+  return (
+    <section className="threat-analysis-viewer__error" role="alert">
+      <strong>{methodLabel}执行失败</strong>
+      <p>{message}</p>
+    </section>
   );
 }
 

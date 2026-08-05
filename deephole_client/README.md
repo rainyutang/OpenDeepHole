@@ -6,7 +6,7 @@
 | 过程实现 | 平台异步入口 |
 |---|---|
 | `code_graph_build/` | `run_code_graph_build(**kwargs)` |
-| `threat_analysis/` | `threat_analysis_runner.run_threat_analysis(**kwargs)` |
+| `threat_analysis/methods/<method_id>/` | `threat_analysis_runner.run_threat_analysis(**kwargs)` |
 | `vulnerability_mining/engines/static_candidate/static_analysis/` | `run_static_analysis(**kwargs)` |
 | `vulnerability_mining/engines/static_candidate/candidate_audit/` | `run_candidate_audit(**kwargs)` |
 | `vulnerability_mining/engines/threat_audit/` | `run_threat_audit(**kwargs)` |
@@ -14,9 +14,9 @@
 | `vulnerability_validation/` | `run_vulnerability_validation(**kwargs)` |
 
 平台入口均为 `async`，只接受 `**kwargs`，未知 key 会报错。框架自有过程通过各目录 README
-记录输入契约并可按需提供 `__main__.py`；威胁分析目录是原生实现的逐文件镜像，不向其中加入
-平台 README、runner 或 `__main__.py`。业务过程不导入 `backend`、`reporter`、`server` 或
-其它业务过程；需要模型时只调用 `task_agent.run_opencode_task()`。
+记录输入契约并可按需提供 `__main__.py`；每个威胁分析方法目录保留原生同步入口，平台发现、
+选择和适配代码位于方法目录外。业务过程不导入 `backend`、`reporter`、`server` 或其它业务
+过程；需要模型时只调用 `task_agent.run_opencode_task()`。
 
 单独提取普通过程时复制目标过程目录即可；提取静态分析或候选点审计时复制整个
 `vulnerability_mining/engines/static_candidate/`，以同时保留两个过程的公共规则树。需要模型的
@@ -27,14 +27,14 @@
 上下文绑定和调用。已有入口是同步函数也不需要修改实现，可由异步门面调用
 `task_agent.run_sync_component()`；同步实现内部仍可正常使用
 `task_agent.run_opencode_task()`。通用过程仍可通过门面的 `skill_paths` 上下文临时合并自己的
-SKILL；内置威胁分析不使用这条路径：完整 Agent 会把它的四个 SKILL 及 reference 同步到
-`~/.opendeephole/opencode_workspace/.opencode/skills`，脱离 Agent 时则只读取
-`task-agent.yaml` 的 `serve.opencode_config.skills.paths`。`threat_analysis/` 与来源
-`ThreatAnalysis/src/threat_analysis_harness` 逐文件一致；相邻的
-`threat_analysis_runner.py` 将它按原包名加载，不修改原生绝对导入，也不会把安装目录加入
-Task Agent 的 `skill_paths`。完整 Agent 会把整个全局 `.opencode` 目录的只读规则写入最终
-`opencode.json`，因此 SKILL 加载后的 `references/`、`assets/` 和 `scripts/` 不依赖
-Session 级权限。
+Skill。威胁分析同样只把本次所选方法相邻 `skills/` 中的 Skill 根加入任务上下文，不再把
+内置方法的 Skill 全局复制到 Agent workspace。内置
+`threat_analysis/methods/deephole_threat_analysis/` 可由
+`ThreatAnalysis/src/threat_analysis_harness` 的内容直接覆盖；相邻的
+`threat_analysis_runner.py` 将所选方法按原包名加载，不修改原生绝对导入。
+
+完整的威胁分析方法目录、清单、原生五参数入口和三份 JSON 返回契约见
+[威胁分析方法扩展](threat_analysis/README.md)。
 
 威胁审计过程及专用输出 Schema 由 `vulnerability_mining/engines/threat_audit/` 直接拥有，
 不再使用顶层 `threat_audit/` 或专用 `threat_audit_skills/`；该过程继续直接构造 Prompt，
@@ -46,6 +46,7 @@ Session 级权限。
 from deephole_client.threat_analysis_runner import run_threat_analysis
 
 result = await run_threat_analysis(
+    method_id="deephole_threat_analysis",
     code_path="/src/project",
     output_path="/tmp/threat-analysis",
     is_resume=True,
@@ -55,6 +56,7 @@ result = await run_threat_analysis(
 
 | key | 必填 | 类型 | 说明 |
 |---|---:|---|---|
+| `method_id` | 否 | str | 威胁分析方法目录名，默认 `deephole_threat_analysis` |
 | `code_path` | 是 | path | 待分析代码目录 |
 | `output_path` | 是 | path | 原生产物输出目录；不存在时创建 |
 | `is_resume` | 否 | bool | 是否复用原生阶段产物，默认 `false` |
@@ -64,8 +66,9 @@ result = await run_threat_analysis(
 | `output` | 否 | callable | 同步或异步事件回调 |
 | `cancel_event` | 否 | event | 提供 `is_set()` 的取消信号 |
 
-返回值不做平台格式转换。成功时包含 `result=true`、`value_asset_path`、
-`attack_tree_path` 和 `high_risk_modules_path`；失败时包含 `result=false` 与 `reason`。
+成功时必须包含 `result=true`、`value_asset_path`、`attack_tree_path` 和
+`high_risk_modules_path`；失败时必须包含 `result=false` 与非空 `reason`。外层适配器保留原生
+返回字段，同时校验方法签名和返回契约。
 
 统一事件格式：
 

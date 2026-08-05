@@ -59,6 +59,8 @@ from backend.models import (
     SkillReport,
     ThreatAuditTask,
     ThreatAuditTaskPage,
+    ThreatAnalysisMethodCatalog,
+    ThreatAnalysisMethodSelection,
     ThreatAnalysisRunStatus,
     UnmarkRequest,
     UpdateScanValidationTargetRequest,
@@ -151,6 +153,69 @@ async def get_fp_review_method_catalog(
 ) -> FpReviewMethodCatalog:
     """Return repository-owned false-positive review methods."""
     return _repository_fp_review_method_catalog()
+
+
+def _repository_threat_analysis_method_catalog() -> ThreatAnalysisMethodCatalog:
+    from deephole_client.threat_analysis import (
+        build_threat_analysis_method_catalog,
+    )
+
+    return ThreatAnalysisMethodCatalog.model_validate(
+        build_threat_analysis_method_catalog()
+    )
+
+
+@router.get(
+    "/api/threat-analysis-methods",
+    response_model=ThreatAnalysisMethodCatalog,
+)
+async def get_threat_analysis_method_catalog(
+    current_user: User = Depends(get_current_user),
+) -> ThreatAnalysisMethodCatalog:
+    """Return repository-owned threat-analysis methods."""
+    return _repository_threat_analysis_method_catalog()
+
+
+def _resolve_threat_analysis_method(
+    requested: str | None,
+) -> tuple[str, ThreatAnalysisMethodSelection]:
+    from deephole_client.threat_analysis import (
+        DEFAULT_THREAT_ANALYSIS_METHOD_ID,
+    )
+
+    catalog = _repository_threat_analysis_method_catalog()
+    available = {item.method_id: item for item in catalog.methods}
+    requested_id = str(requested or "").strip()
+    method_id = requested_id or DEFAULT_THREAT_ANALYSIS_METHOD_ID
+    selected = available.get(method_id)
+    if selected is None:
+        status_code = 500 if not requested_id else 400
+        detail = f"Unknown threat-analysis method: {method_id}"
+        if status_code == 500 and catalog.errors:
+            detail += ": " + "; ".join(catalog.errors)
+        raise HTTPException(status_code=status_code, detail=detail)
+    return selected.method_id, ThreatAnalysisMethodSelection(
+        method_id=selected.method_id,
+        method_label=selected.label,
+        description=selected.description,
+    )
+
+
+def _hydrate_threat_analysis_method_selection(scan: ScanStatus) -> None:
+    """Hydrate legacy scans while preserving unavailable method snapshots."""
+    if scan.threat_analysis_method_selection is not None:
+        return
+    try:
+        method_id, selection = _resolve_threat_analysis_method(
+            scan.threat_analysis_method
+        )
+        scan.threat_analysis_method = method_id
+    except HTTPException:
+        selection = ThreatAnalysisMethodSelection(
+            method_id=scan.threat_analysis_method,
+            method_label=scan.threat_analysis_method,
+        )
+    scan.threat_analysis_method_selection = selection
 
 
 def _resolve_fp_review_method(
@@ -927,6 +992,9 @@ async def create_agent_scan(
             else requested_scan_mode
         )
     )
+    threat_analysis_method, threat_analysis_method_selection = (
+        _resolve_threat_analysis_method(body.threat_analysis_method)
+    )
     auto_fp_review = (
         body.auto_fp_review
         if body.auto_fp_review is not None
@@ -981,6 +1049,8 @@ async def create_agent_scan(
         project_id=scan_name,
         scan_mode=scan_mode,
         threat_analysis_enabled=threat_analysis_enabled,
+        threat_analysis_method=threat_analysis_method,
+        threat_analysis_method_selection=threat_analysis_method_selection,
         threat_analysis_run=(
             ThreatAnalysisRunStatus()
             if threat_analysis_enabled
@@ -1015,6 +1085,8 @@ async def create_agent_scan(
         created_at=now,
         scan_mode=scan_mode,
         threat_analysis_enabled=threat_analysis_enabled,
+        threat_analysis_method=threat_analysis_method,
+        threat_analysis_method_selection=threat_analysis_method_selection,
         mining_engines=mining_engine_selections,
         auto_fp_review=auto_fp_review,
         fp_review_method=fp_review_method,
@@ -1058,6 +1130,7 @@ async def create_agent_scan(
         "checkers": validated_checker_names,
         "scan_mode": scan_mode,
         "threat_analysis_enabled": threat_analysis_enabled,
+        "threat_analysis_method": threat_analysis_method,
         "scan_name": scan_name,
         "product": product,
         "validation_environment": validation_environment,
@@ -1292,6 +1365,7 @@ async def get_scan_status(
         scan,
         continuable_count=_continuable_task_count(scan, processed_keys),
     )
+    _hydrate_threat_analysis_method_selection(scan)
     _hydrate_fp_review_method_selection(scan)
     return scan
 
@@ -1390,6 +1464,7 @@ async def get_scan_overview_v2(
         scan = reconcile_offline_agent_scan_state(scan_id, scan)
     _apply_task_progress(scan)
     _apply_continue_capability(scan, continuable_count=continuable_count)
+    _hydrate_threat_analysis_method_selection(scan)
     _hydrate_fp_review_method_selection(scan)
     payload = scan.model_dump(mode="python")
     payload.update({
@@ -1679,6 +1754,17 @@ async def _continue_scan(
             )
         )
     )
+    if meta.threat_analysis_enabled:
+        try:
+            _resolve_threat_analysis_method(meta.threat_analysis_method)
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "扫描关联的威胁分析方法当前不可用："
+                    f"{meta.threat_analysis_method}"
+                ),
+            ) from exc
     if resume_threat_analysis and not scan.threat_audit_tasks:
         threat_task_ids: list[str] | None = None
     else:
@@ -1789,6 +1875,7 @@ async def _continue_scan(
         "checkers": meta.scan_items,
         "scan_mode": meta.scan_mode,
         "threat_analysis_enabled": meta.threat_analysis_enabled,
+        "threat_analysis_method": meta.threat_analysis_method,
         "scan_name": meta.scan_name,
         "product": meta.product,
         "validation_environment": meta.validation_environment,

@@ -172,7 +172,10 @@ def test_native_threat_analysis_can_be_imported_after_extraction() -> None:
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
         shutil.copytree(
-            source_client / "threat_analysis",
+            source_client
+            / "threat_analysis"
+            / "methods"
+            / "deephole_threat_analysis",
             root / "threat_analysis_harness",
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )

@@ -384,6 +384,15 @@ class PostgresScanStore(SqliteScanStore):
                 connection.execute(statement)
             # Safe for databases initialized by an earlier pre-release build.
             connection.execute(
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS "
+                "threat_analysis_method TEXT NOT NULL "
+                "DEFAULT 'deephole_threat_analysis'"
+            )
+            connection.execute(
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS "
+                "threat_analysis_method_selection_json TEXT NOT NULL DEFAULT '{}'"
+            )
+            connection.execute(
                 "ALTER TABLE agent_commands ADD COLUMN IF NOT EXISTS "
                 "attempts INTEGER NOT NULL DEFAULT 0"
             )

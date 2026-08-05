@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import socket
-import tempfile
 import threading
 from pathlib import Path
 
@@ -25,29 +24,12 @@ _AGENT_WRITABLE_EXTERNAL_ROOTS = (
     "~/.opendeephole/vulnerability_validation",
     "~/.opendeephole/skill_create",
 )
-_THREAT_ANALYSIS_SKILLS_ROOT = (
-    Path(__file__).resolve().parent / "threat_analysis" / "skills"
+_LEGACY_MANAGED_THREAT_ANALYSIS_SKILLS = (
+    "value-asset-map",
+    "high-risk-module-map",
+    "high-risk-module-merge",
+    "attack-tree-by-asset",
 )
-_MANAGED_THREAT_ANALYSIS_SKILLS = {
-    "value-asset-map": (
-        _THREAT_ANALYSIS_SKILLS_ROOT / "value-assets" / "value-asset-map"
-    ),
-    "high-risk-module-map": (
-        _THREAT_ANALYSIS_SKILLS_ROOT
-        / "high-risk-modules"
-        / "high-risk-module-map"
-    ),
-    "high-risk-module-merge": (
-        _THREAT_ANALYSIS_SKILLS_ROOT
-        / "high-risk-modules"
-        / "high-risk-module-merge"
-    ),
-    "attack-tree-by-asset": (
-        _THREAT_ANALYSIS_SKILLS_ROOT
-        / "attack-trees"
-        / "attack-tree-by-asset"
-    ),
-}
 
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
@@ -281,26 +263,6 @@ def managed_opencode_config_path(workspace: Path) -> Path:
     return workspace / _MANAGED_CONFIG_FILENAME
 
 
-def _directory_manifest(root: Path) -> dict[str, str] | None:
-    """Return a content manifest, including unexpected stale files."""
-    if root.is_symlink() or not root.is_dir():
-        return None
-    manifest: dict[str, str] = {}
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root).as_posix()
-        if path.is_symlink():
-            manifest[relative] = f"symlink:{os.readlink(path)}"
-        elif path.is_dir():
-            manifest[relative] = "directory"
-        elif path.is_file():
-            manifest[relative] = (
-                "file:" + hashlib.sha256(path.read_bytes()).hexdigest()
-            )
-        else:
-            manifest[relative] = "other"
-    return manifest
-
-
 def _remove_path(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink(missing_ok=True)
@@ -308,45 +270,12 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _replace_directory(source: Path, destination: Path) -> None:
-    """Replace one managed directory without exposing a partially copied tree."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary_root = Path(tempfile.mkdtemp(
-        prefix=f".{destination.name}.sync-",
-        dir=destination.parent,
-    ))
-    staged = temporary_root / "next"
-    backup = temporary_root / "previous"
-    had_destination = destination.exists() or destination.is_symlink()
-    try:
-        shutil.copytree(source, staged)
-        if had_destination:
-            os.replace(destination, backup)
-        try:
-            os.replace(staged, destination)
-        except BaseException:
-            if had_destination and not (
-                destination.exists() or destination.is_symlink()
-            ):
-                os.replace(backup, destination)
-            raise
-        _remove_path(backup)
-    finally:
-        _remove_path(temporary_root)
-
-
-def _sync_managed_threat_analysis_skills(workspace: Path) -> Path:
-    """Synchronize the four bundled threat-analysis Skills into the workspace."""
+def _remove_legacy_managed_threat_analysis_skills(workspace: Path) -> Path:
+    """Remove globally injected Skills now supplied by each selected method."""
     skills_dir = workspace / ".opencode" / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
-    for name, source in _MANAGED_THREAT_ANALYSIS_SKILLS.items():
-        if not (source / "SKILL.md").is_file():
-            raise FileNotFoundError(
-                f"Bundled threat-analysis Skill is missing: {source / 'SKILL.md'}"
-            )
-        destination = skills_dir / name
-        if _directory_manifest(source) != _directory_manifest(destination):
-            _replace_directory(source, destination)
+    for name in _LEGACY_MANAGED_THREAT_ANALYSIS_SKILLS:
+        _remove_path(skills_dir / name)
     return skills_dir
 
 
@@ -361,7 +290,7 @@ def get_global_opencode_workspace() -> Path:
     workspace = _GLOBAL_WORKSPACE
     workspace.mkdir(parents=True, exist_ok=True)
     with get_workspace_lock(workspace):
-        _sync_managed_threat_analysis_skills(workspace)
+        _remove_legacy_managed_threat_analysis_skills(workspace)
         config_path = managed_opencode_config_path(workspace)
         config_missing = not config_path.is_file()
         permissions_stale = (

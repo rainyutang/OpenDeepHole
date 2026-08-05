@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, ValidationTarget, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, ValidationTarget, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -272,6 +272,7 @@ export async function createScan(body: {
   scan_name: string;
   scan_mode?: string;
   threat_analysis_enabled?: boolean;
+  threat_analysis_method?: string;
   product?: string;
   validation_environment?: string;
   checkers: string[];
@@ -791,6 +792,11 @@ export async function getAgentValidatorCatalog(agentKey: string, product = ""): 
 
 export async function getMiningEngineCatalog(): Promise<MiningEngineCatalog> {
   const { data } = await api.get<MiningEngineCatalog>("/api/mining-engines");
+  return data;
+}
+
+export async function getThreatAnalysisMethodCatalog(): Promise<ThreatAnalysisMethodCatalog> {
+  const { data } = await api.get<ThreatAnalysisMethodCatalog>("/api/threat-analysis-methods");
   return data;
 }
 

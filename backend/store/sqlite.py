@@ -42,6 +42,7 @@ from backend.models import (
     ScanSummary,
     SkillReport,
     ThreatAuditTask,
+    ThreatAnalysisMethodSelection,
     ThreatAnalysisRunStatus,
     ThreatCodePath,
     UserInDB,
@@ -123,6 +124,21 @@ def _fp_review_method_selection(
         return None
     try:
         return FpReviewMethodSelection.model_validate(data)
+    except Exception:
+        return None
+
+
+def _threat_analysis_method_selection(
+    value: str | None,
+) -> ThreatAnalysisMethodSelection | None:
+    try:
+        data = json.loads(value or "{}")
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data:
+        return None
+    try:
+        return ThreatAnalysisMethodSelection.model_validate(data)
     except Exception:
         return None
 
@@ -357,6 +373,8 @@ CREATE TABLE IF NOT EXISTS scans (
     project_id         TEXT NOT NULL,
     scan_mode          TEXT NOT NULL DEFAULT 'full',
     threat_analysis_enabled INTEGER NOT NULL DEFAULT 0,
+    threat_analysis_method TEXT NOT NULL DEFAULT 'deephole_threat_analysis',
+    threat_analysis_method_selection_json TEXT NOT NULL DEFAULT '{}',
     threat_analysis_run_json TEXT NOT NULL DEFAULT '{}',
     auto_fp_review     INTEGER,
     fp_review_method   TEXT NOT NULL DEFAULT 'adversarial',
@@ -808,6 +826,16 @@ class SqliteScanStore(ScanStoreBase):
         if "threat_analysis_run_json" not in cols:
             self._conn.execute(
                 "ALTER TABLE scans ADD COLUMN threat_analysis_run_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "threat_analysis_method" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN threat_analysis_method "
+                "TEXT NOT NULL DEFAULT 'deephole_threat_analysis'"
+            )
+        if "threat_analysis_method_selection_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN "
+                "threat_analysis_method_selection_json TEXT NOT NULL DEFAULT '{}'"
             )
         if "static_total_files" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN static_total_files INTEGER DEFAULT 0")
@@ -1505,6 +1533,14 @@ class SqliteScanStore(ScanStoreBase):
             project_id=row["project_id"],
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
+            threat_analysis_method=(
+                row["threat_analysis_method"]
+                if row["threat_analysis_method"] is not None
+                else "deephole_threat_analysis"
+            ),
+            threat_analysis_method_selection=_threat_analysis_method_selection(
+                row["threat_analysis_method_selection_json"]
+            ),
             threat_analysis_run=(
                 ThreatAnalysisRunStatus.model_validate_json(
                     row["threat_analysis_run_json"]
@@ -1568,6 +1604,14 @@ class SqliteScanStore(ScanStoreBase):
             created_at=row["created_at"],
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
+            threat_analysis_method=(
+                row["threat_analysis_method"]
+                if row["threat_analysis_method"] is not None
+                else "deephole_threat_analysis"
+            ),
+            threat_analysis_method_selection=_threat_analysis_method_selection(
+                row["threat_analysis_method_selection_json"]
+            ),
             mining_engines=_json_model_list(
                 row["mining_engines_json"],
                 MiningEngineSelection,
@@ -1618,13 +1662,15 @@ class SqliteScanStore(ScanStoreBase):
                      current_candidate, error_message, feedback_ids,
                      static_total_files, static_scanned_files, static_analysis_done,
                      user_id, agent_name, agent_id, agent_key, project_path, code_scan_path, scan_name,
-                     scan_mode, threat_analysis_enabled, threat_analysis_run_json,
+                     scan_mode, threat_analysis_enabled, threat_analysis_method,
+                     threat_analysis_method_selection_json,
+                     threat_analysis_run_json,
                      auto_fp_review, fp_review_method,
                      fp_review_method_selection_json,
                      product, validation_environment, public_access_token, opencode_pool,
                      code_graph_mcp_json, mining_engines_json,
                      mining_engine_runs_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     scan_items = excluded.scan_items,
@@ -1648,6 +1694,8 @@ class SqliteScanStore(ScanStoreBase):
                     scan_name = excluded.scan_name,
                     scan_mode = excluded.scan_mode,
                     threat_analysis_enabled = excluded.threat_analysis_enabled,
+                    threat_analysis_method = excluded.threat_analysis_method,
+                    threat_analysis_method_selection_json = excluded.threat_analysis_method_selection_json,
                     threat_analysis_run_json = excluded.threat_analysis_run_json,
                     auto_fp_review = excluded.auto_fp_review,
                     fp_review_method = excluded.fp_review_method,
@@ -1684,6 +1732,12 @@ class SqliteScanStore(ScanStoreBase):
                     meta.scan_name,
                     meta.scan_mode,
                     int(meta.threat_analysis_enabled),
+                    meta.threat_analysis_method,
+                    (
+                        meta.threat_analysis_method_selection.model_dump_json()
+                        if meta.threat_analysis_method_selection is not None
+                        else "{}"
+                    ),
                     (
                         scan.threat_analysis_run.model_dump_json()
                         if scan.threat_analysis_run is not None

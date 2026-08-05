@@ -226,7 +226,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             self.assertTrue(codegraph_runtime.is_codegraph_ready(nested))
             self.assertIn(root.resolve(), codegraph_runtime._ready_projects)
 
-    def test_global_workspace_syncs_threat_analysis_skills_and_references(
+    def test_global_workspace_does_not_inject_threat_analysis_method_skills(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -266,30 +266,9 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 "attack-tree-by-asset",
             ):
                 installed = skills_dir / name
-                self.assertFalse(installed.is_symlink())
-                self.assertTrue((installed / "SKILL.md").is_file())
-            source_reference = (
-                Path(__file__).resolve().parents[1]
-                / "deephole_client"
-                / "threat_analysis"
-                / "skills"
-                / "attack-trees"
-                / "attack-tree-by-asset"
-                / "references"
-                / "attack_mode.json"
-            )
-            installed_reference = (
-                skills_dir
-                / "attack-tree-by-asset"
-                / "references"
-                / "attack_mode.json"
-            )
-            self.assertEqual(
-                installed_reference.read_bytes(),
-                source_reference.read_bytes(),
-            )
+                self.assertFalse(installed.exists())
 
-    def test_global_workspace_replaces_stale_managed_skill_only(self) -> None:
+    def test_global_workspace_removes_legacy_managed_skill_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace_path = Path(tmp) / "opencode_workspace"
             skills_dir = workspace_path / ".opencode" / "skills"
@@ -321,15 +300,11 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
             self.assertFalse((managed / "stale.txt").exists())
             self.assertFalse((managed / "stale-empty-directory").exists())
-            self.assertTrue((managed / "SKILL.md").is_file())
+            self.assertFalse(managed.exists())
             self.assertEqual(
                 (unrelated / "SKILL.md").read_text(encoding="utf-8"),
                 "user-owned",
             )
-            self.assertFalse(any(
-                path.name.startswith(".attack-tree-by-asset.sync-")
-                for path in skills_dir.iterdir()
-            ))
 
     def test_stale_permissions_are_refreshed_and_obsolete_builtin_mcp_is_removed(
         self,
