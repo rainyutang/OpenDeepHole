@@ -550,9 +550,14 @@ def _normalize_attack_paths(
             if node is not None:
                 node_module_id = str(node.get("module_id") or "").strip()
                 if node_module_id and node_module_id != reference.module_id:
-                    raise ArtifactConsistencyError(
-                        "Related high-risk module_id does not match its node: "
-                        f"related={reference.module_id}, node={node_module_id}, node_id={node_id}"
+                    # Nodes have already been normalized against the final high-risk
+                    # module list. Treat that mapping as authoritative when the model
+                    # associates a different (but otherwise valid) module with the
+                    # same node in an attack path.
+                    reference = _require_high_risk_module(
+                        _find_high_risk_module(module_index, node_module_id),
+                        "Path node",
+                        node_module_id,
                     )
                 _apply_high_risk_module_to_node(node, reference)
             if reference.module_id in seen_modules:
