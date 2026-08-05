@@ -5,7 +5,7 @@ description: 系统验证已经发现的安全问题，通过完整证据链排�
 
 # Trail of Bits fp-check 复核
 
-本 Skill 来源于 Trail of Bits Skills Marketplace 的 `fp-check`，并针对 OpenDeepHole 运行流程完成中文化适配。
+本 Skill 来源于 Trail of Bits Skills Marketplace 的 `fp-check`，并针对 DeepHole 2.0 运行流程完成中文化适配。
 
 ## 适用范围
 
@@ -61,7 +61,7 @@ description: 系统验证已经发现的安全问题，通过完整证据链排�
 
 执行 `references/deep-verification.md`。
 
-## OpenDeepHole 单漏洞流程
+## DeepHole 2.0 单漏洞流程
 
 1. 每个已确认漏洞立即独立执行步骤 0，并选择标准或深度路径。
 2. 深度路径严格按依赖顺序执行数据流、可利用性、影响、PoC、反方审查和六道门。

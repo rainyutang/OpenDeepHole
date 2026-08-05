@@ -1,4 +1,4 @@
-"""OpenDeepHole integration for the self-contained Task Agent component."""
+"""DeepHole 2.0 integration for the self-contained Task Agent component."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def _disabled_source_mcp_tools(directory: Path) -> tuple[str, ...]:
 
 
 def _build_session_runtime(cli_config, model_option, directory: Path):
-    """Resolve the existing OpenDeepHole Serve configuration for the component."""
+    """Resolve the existing DeepHole 2.0 Serve configuration for the component."""
     from task_agent import OpenCodeSessionRuntime
     effective = _effective_model_config(cli_config, model_option)
     tool = str(effective["tool"] or "opencode").strip().lower()
@@ -221,7 +221,7 @@ def _runtime_environment(effective: dict) -> dict[str, str]:
 
 
 def configure_opencode_component() -> None:
-    """Register OpenDeepHole host bindings without starting OpenCode Serve."""
+    """Register DeepHole 2.0 host bindings without starting OpenCode Serve."""
     from task_agent import OpenCodeHostBindings, configure_opencode
 
     configure_opencode(OpenCodeHostBindings(
@@ -259,7 +259,7 @@ def get_workspace_lock(workspace: Path) -> threading.RLock:
 
 
 def managed_opencode_config_path(workspace: Path) -> Path:
-    """Return the private OpenDeepHole-owned config layer for one workspace."""
+    """Return the private DeepHole 2.0-owned config layer for one workspace."""
     return workspace / _MANAGED_CONFIG_FILENAME
 
 
@@ -363,7 +363,7 @@ def build_opencode_config(
     writable_paths: list[str] | None = None,
     readable_paths: list[str] | None = None,
 ) -> dict:
-    """Build the canonical opencode.json content for OpenDeepHole workspaces."""
+    """Build the canonical opencode.json content for DeepHole 2.0 workspaces."""
     read_permissions = {"*": "allow"}
     external_permissions = {"*": "deny"}
     edit_permissions = {"*": "deny"}
@@ -549,7 +549,7 @@ def build_managed_mcp_runtime_specs(runtime_config=None) -> dict[str, dict]:
                     "url": url,
                     "enabled": True,
                     "timeout": normalized["timeout_seconds"] * 1000,
-                    # OpenDeepHole currently supports static request-header auth.
+                    # DeepHole 2.0 currently supports static request-header auth.
                     # Disable OpenCode's interactive OAuth auto-discovery so a bad
                     # Bearer token is reported as a connection failure instead.
                     "oauth": False,
@@ -587,7 +587,7 @@ def build_managed_mcp_runtime_specs(runtime_config=None) -> dict[str, dict]:
 
 
 def _write_opencode_config(workspace: Path) -> None:
-    """Generate the private OpenDeepHole-owned runtime configuration layer."""
+    """Generate the private DeepHole 2.0-owned runtime configuration layer."""
     config_path = managed_opencode_config_path(workspace)
     skills_dir = (workspace / ".opencode" / "skills").resolve()
     _write_text_atomic(

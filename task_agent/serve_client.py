@@ -3430,7 +3430,7 @@ class OpenCodeServeManager:
         cancel_event=None,
         env_overrides: dict[str, str] | None = None,
         session_id: str | None = None,
-        session_title: str = "OpenDeepHole task",
+        session_title: str = "DeepHole 2.0 task",
         mcp_tools: list[str] | tuple[str, ...] | None = None,
         disabled_mcp_tools: list[str] | tuple[str, ...] | None = None,
         scan_id: str = "",
@@ -3602,7 +3602,7 @@ class OpenCodeServeManager:
                         )
                 if not active_session_id:
                     create_payload: dict[str, Any] = {
-                        "title": str(session_title or "").strip() or "OpenDeepHole task",
+                        "title": str(session_title or "").strip() or "DeepHole 2.0 task",
                     }
                     if permissions is not None:
                         create_payload["permission"] = permissions

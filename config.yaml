@@ -1,4 +1,4 @@
-# OpenDeepHole Configuration
+# DeepHole 2.0 Configuration
 
 no_proxy: "10.0.0.0/8"  # 逗号分隔的不走代理地址，如 "localhost,127.0.0.1,10.0.0.0/8"
 

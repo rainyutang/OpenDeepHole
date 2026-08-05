@@ -150,7 +150,7 @@ export default function UploadForm({ onBack }: Props) {
           </button>
           <div className="text-center">
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight">
-              OpenDeepHole
+              DeepHole 2.0
             </h1>
             <p className="text-sm text-slate-500 mt-1">
               C/C++ Source Code Audit Tool

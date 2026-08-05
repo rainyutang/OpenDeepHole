@@ -40,7 +40,7 @@ export default function RegisterPage({ onRegister, onGoLogin }: Props) {
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center px-4 py-8 sm:px-6">
       <div className="w-full max-w-sm">
         <div className="text-center mb-6 sm:mb-8">
-          <h1 className="text-2xl font-bold text-white">OpenDeepHole</h1>
+          <h1 className="text-2xl font-bold text-white">DeepHole 2.0</h1>
           <p className="text-sm text-slate-400 mt-1">C/C++ Source Code Audit Tool</p>
         </div>
 

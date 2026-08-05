@@ -10,7 +10,7 @@ from .runner import run_code_graph_build
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build OpenDeepHole's local code graph")
+    parser = argparse.ArgumentParser(description="Build DeepHole 2.0's local code graph")
     parser.add_argument("--project-path", required=True)
     parser.add_argument("--work-dir", required=True)
     parser.add_argument("--code-scan-path")

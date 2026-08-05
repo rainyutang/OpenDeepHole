@@ -1,4 +1,4 @@
-"""Shared construction for OpenDeepHole MCP server instances."""
+"""Shared construction for DeepHole 2.0 MCP server instances."""
 
 from pathlib import Path
 
@@ -8,7 +8,7 @@ from pydantic import ValidationError as PydanticValidationError
 from mcp_server.tools import _mcp_log_error, register_tools
 
 
-MCP_SERVER_NAME = "OpenDeepHole Code Tools"
+MCP_SERVER_NAME = "DeepHole 2.0 Code Tools"
 MCP_SERVER_INSTRUCTIONS = (
     "源码查询规则：当需要阅读或定位源码时，优先使用 deephole-code MCP Server 提供的 "
     "`view_function_code`、`view_struct_code`、`view_global_variable_definition` 工具。"

@@ -1,4 +1,4 @@
-# OpenDeepHole
+# DeepHole 2.0
 
 基于 SKILL 的 C/C++ 源码白盒审计工具。核心漏洞挖掘在用户本地 Agent 上执行，源码不离开本机，结果汇报到 Web 服务器统一展示。
 
@@ -156,7 +156,7 @@ run_agent.bat
 启动成功后，终端输出类似：
 
 ```
-OpenDeepHole Agent
+DeepHole 2.0 Agent
   Name    : my-agent
   Server  : http://your-server:8000
 
@@ -537,7 +537,7 @@ logging:
   file: "logs/opendeephole.log"
 ```
 
-`storage` 中的相对路径会按 `config.yaml` 所在目录解析；默认会落到 OpenDeepHole 项目上层的 `OpenDeepHoleData/`。
+`storage` 中的相对路径会按 `config.yaml` 所在目录解析；默认会落到 DeepHole 2.0 项目上层的 `OpenDeepHoleData/`。
 
 ### Agent agent.yaml
 
@@ -565,7 +565,7 @@ model_pool:
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“本机发现及显式指定的配置 < OpenDeepHole 受管字段”合并，不再接受 Web 自定义 JSONC 层。受管字段包括 `$schema`、已启用的全局产品知识 MCP、公共技能路径和运行权限。产品知识 MCP 由客户端配置中的 `product_info` 管理，既写入受管 `opencode.json`，也会通过带目录上下文的 `/mcp` 接口热加载到已经使用过的 OpenCode 工作目录，并跨扫描、跨 Session 保持可用。扫描代码图谱 MCP 使用相同的底层配置格式和 `/mcp` 接口，但只按扫描快照临时连接，任务结束后释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。产品 MCP 的 API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
+OpenCode 最终配置按“本机发现及显式指定的配置 < DeepHole 2.0 受管字段”合并，不再接受 Web 自定义 JSONC 层。受管字段包括 `$schema`、已启用的全局产品知识 MCP、公共技能路径和运行权限。产品知识 MCP 由客户端配置中的 `product_info` 管理，既写入受管 `opencode.json`，也会通过带目录上下文的 `/mcp` 接口热加载到已经使用过的 OpenCode 工作目录，并跨扫描、跨 Session 保持可用。扫描代码图谱 MCP 使用相同的底层配置格式和 `/mcp` 接口，但只按扫描快照临时连接，任务结束后释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。产品 MCP 的 API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
 
 配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），设置 `OPENCODE_CONFIG_DIR` 并显式清除 `OPENCODE_CONFIG_CONTENT`；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。
 
@@ -622,7 +622,7 @@ continued = await run_opencode_task(
 )
 ```
 
-`task_agent` 目录也可脱离 OpenDeepHole 使用：将整个目录放到其它项目的 Python 导入根目录，或执行 `python -m pip install ./task_agent` 后，任意位置的业务代码都继续使用 `from task_agent import run_opencode_task`。未注册后端宿主绑定时，该函数会从显式 `config_path`、`TASK_AGENT_CONFIG` 或当前目录的 `task-agent.yaml` 读取固定项目/工作上下文、Serve 参数和模型池，然后惰性启动同一个 Serve 单例。格式模板见 `task_agent/task-agent.example.yaml`；首次配置在 `shutdown_opencode()` 前不可切换。
+`task_agent` 目录也可脱离 DeepHole 2.0 使用：将整个目录放到其它项目的 Python 导入根目录，或执行 `python -m pip install ./task_agent` 后，任意位置的业务代码都继续使用 `from task_agent import run_opencode_task`。未注册后端宿主绑定时，该函数会从显式 `config_path`、`TASK_AGENT_CONFIG` 或当前目录的 `task-agent.yaml` 读取固定项目/工作上下文、Serve 参数和模型池，然后惰性启动同一个 Serve 单例。格式模板见 `task_agent/task-agent.example.yaml`；首次配置在 `shutdown_opencode()` 前不可切换。
 
 OpenCode 模型池统计：
 
@@ -756,7 +756,7 @@ OpenDeepHole/
 │   ├── reporter.py                 # 事件、批次、漏洞和最终状态上报
 │   ├── server.py                   # Agent 任务/停止/恢复/复核/验证命令处理
 │   ├── task_manager.py             # Agent 本地任务生命周期
-│   ├── opencode_integration.py     # OpenDeepHole 的 Task Agent 宿主适配
+│   ├── opencode_integration.py     # DeepHole 2.0 的 Task Agent 宿主适配
 │   ├── updater.py                  # Agent 运行时同步与安全更新
 │   ├── config.py                   # agent.yaml 配置加载
 │   └── main.py                     # Agent 守护进程和自动重连入口
@@ -789,7 +789,7 @@ OpenDeepHole/
 ├── requirements.txt               # 服务端完整依赖
 ├── start.sh                        # 前端构建与后端 Worker 启动脚本
 ├── Dockerfile
-└── docker-compose.yml             # OpenDeepHole + PostgreSQL 生产编排
+└── docker-compose.yml             # DeepHole 2.0 + PostgreSQL 生产编排
 ```
 
 ## License

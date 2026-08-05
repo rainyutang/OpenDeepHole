@@ -117,7 +117,7 @@ export default function AgentDownload({ onBack }: Props) {
             disabled={downloading}
             className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-900"
           >
-            {downloading ? "正在下载…" : "下载 opendeephole-agent.zip"}
+            {downloading ? "正在下载…" : "下载 DeepHole 2.0 Agent"}
           </button>
           <p className="mt-3 text-xs text-slate-500">
             安装包需要 Python 3.10+，其中 agent.yaml 已填入当前服务地址。

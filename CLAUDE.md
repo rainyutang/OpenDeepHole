@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenDeepHole is a SKILL-based C/C++ source code white-box audit tool. It uses static analysis to find candidate vulnerability locations, then submits every model-backed operation through a unified OpenCode task/session service with specialized skills and MCP tools.
+DeepHole 2.0 is a SKILL-based C/C++ source code white-box audit tool. It uses static analysis to find candidate vulnerability locations, then submits every model-backed operation through a unified OpenCode task/session service with specialized skills and MCP tools.
 
 ## Architecture
 

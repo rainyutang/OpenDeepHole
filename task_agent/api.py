@@ -1,4 +1,4 @@
-"""The single public OpenCode task interface used by OpenDeepHole components."""
+"""The single public OpenCode task interface used by DeepHole 2.0 components."""
 
 from __future__ import annotations
 

@@ -1,11 +1,11 @@
 ---
 name: deephole-skill-creator
-description: Create concise OpenDeepHole project-level audit skills from a user-provided name, description, and task input.
+description: Create concise DeepHole 2.0 project-level audit skills from a user-provided name, description, and task input.
 ---
 
 # DeepHole Skill Creator
 
-Create a single OpenDeepHole project-level audit skill from the supplied name, description, and user input.
+Create a single DeepHole 2.0 project-level audit skill from the supplied name, description, and user input.
 
 ## Output Contract
 

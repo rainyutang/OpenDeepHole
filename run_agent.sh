@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpenDeepHole Agent — Linux/macOS startup script
+# DeepHole 2.0 Agent — Linux/macOS startup script
 #
 # Usage:
 #   ./run_agent.sh <project_path> [OPTIONS]

@@ -1,5 +1,5 @@
 @echo off
-REM OpenDeepHole Agent - Windows startup script
+REM DeepHole 2.0 Agent - Windows startup script
 REM
 REM Usage:
 REM   run_agent.bat <project_path> [OPTIONS]

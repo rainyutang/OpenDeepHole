@@ -4044,7 +4044,7 @@ def _build_agent_zip(server_url: str = "", owner_token: str = "") -> bytes:
 
 
 _AGENT_README = """\
-OpenDeepHole Agent
+DeepHole 2.0 Agent
 ==================
 
 Setup

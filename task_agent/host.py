@@ -32,7 +32,7 @@ class OpenCodeInvocationMetadata:
     serve_session_id: str = ""
 
     def model_dump(self) -> dict[str, Any]:
-        """Match the small serialization surface used by OpenDeepHole callers."""
+        """Match the small serialization surface used by DeepHole 2.0 callers."""
         return {
             name: getattr(self, name)
             for name in self.__dataclass_fields__

@@ -1,10 +1,10 @@
 # Task Agent 公共任务接口
 
-OpenDeepHole 中所有模型任务统一调用 `task_agent.run_opencode_task()`。业务组件不直接启动 CLI，不访问任务队列，也不自行创建、查询、取消或删除 OpenCode Session。
+DeepHole 2.0 中所有模型任务统一调用 `task_agent.run_opencode_task()`。业务组件不直接启动 CLI，不访问任务队列，也不自行创建、查询、取消或删除 OpenCode Session。
 
 > 模型任务只使用 OpenCode/nga serve 与 OpenCode Session，没有 LLM API 降级路径。
 
-Agent 启动时只注册一次 OpenDeepHole 的后端配置、workspace 与 MCP/SKILL 适配，不创建 Serve 进程。首次 `run_opencode_task()` 会惰性创建共享任务服务和 Serve 管理单例；组件在真正发送 prompt 前检查 Serve，按现有规则启动、复用兼容进程或恢复异常进程。没有后端宿主绑定时，公共函数改从组件自己的 YAML 配置自举，仍不存在额外的组件 CLI。
+Agent 启动时只注册一次 DeepHole 2.0 的后端配置、workspace 与 MCP/SKILL 适配，不创建 Serve 进程。首次 `run_opencode_task()` 会惰性创建共享任务服务和 Serve 管理单例；组件在真正发送 prompt 前检查 Serve，按现有规则启动、复用兼容进程或恢复异常进程。没有后端宿主绑定时，公共函数改从组件自己的 YAML 配置自举，仍不存在额外的组件 CLI。
 
 ## 唯一调用接口
 
@@ -224,7 +224,7 @@ Skill 有两种常用放置方式：
 1. 项目专用 Skill 放在 `<project_dir>/.opencode/skills/<skill-name>/SKILL.md`，由以 `project_dir` 为 Session 目录的 OpenCode 按项目发现。
 2. 多个任务共享的 standalone Skill 推荐放在 `<workspace_dir>/.opencode/skills/<skill-name>/SKILL.md`，并将 `<workspace_dir>/.opencode/skills` 的绝对路径写入 `serve.opencode_config.skills.paths`。
 
-standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导全局配置中的显式读取和外部目录权限，使 Skill 内的 `references/`、`assets/`、`scripts/` 一并可读。嵌入完整 OpenDeepHole Agent 时，威胁分析适配器会把当前所选方法相邻 `skills/` 中的 Skill 根作为任务级 `skill_paths` 绑定；它们不会复制到全局 workspace，其它威胁分析方法的 Skill 也不会注册到当前任务。升级时只会清理旧版曾全局注入的四个受管 Skill，不删除其它 workspace Skill。
+standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复制或注册任何 Skill，也不会把 `context.workspace_dir` 变量插值到 `skills.paths`。因此两处路径应手工保持一致，推荐都填写绝对路径；Task Agent 会从最终生效的 `skills.paths` 推导全局配置中的显式读取和外部目录权限，使 Skill 内的 `references/`、`assets/`、`scripts/` 一并可读。嵌入完整 DeepHole 2.0 Agent 时，威胁分析适配器会把当前所选方法相邻 `skills/` 中的 Skill 根作为任务级 `skill_paths` 绑定；它们不会复制到全局 workspace，其它威胁分析方法的 Skill 也不会注册到当前任务。升级时只会清理旧版曾全局注入的四个受管 Skill，不删除其它 workspace Skill。
 
 ### 模型池参数
 
@@ -465,7 +465,7 @@ validator 不创建 OpenCode workspace、MCP Server 或 CLI 子进程，也不�
 - `task_agent/serve_client.py`：Serve 生命周期、Session API、事件与消息流。
 - `task_agent/host.py`：自包含组件与宿主之间的最小配置回调边界。
 - `task_agent/standalone.py`：独立 YAML 的校验、发现、宿主适配和一次性自举。
-- `deephole_client/opencode_integration.py`：OpenDeepHole 全局 workspace、SKILL、MCP 与运行配置适配。
-- `deephole_client/<process>/`：OpenDeepHole 各业务过程的独立目录；过程只通过公开的 `run_opencode_task()` 调用 Task Agent。
+- `deephole_client/opencode_integration.py`：DeepHole 2.0 全局 workspace、SKILL、MCP 与运行配置适配。
+- `deephole_client/<process>/`：DeepHole 2.0 各业务过程的独立目录；过程只通过公开的 `run_opencode_task()` 调用 Task Agent。
 
-`task_agent/` 内不导入 OpenDeepHole 的 `deephole_client`、`backend` 或 `mcp_server` 模块。单独复制该目录后，可以放到目标项目的 Python 导入根目录，或执行 `python -m pip install ./task_agent`；两种方式都使用 `from task_agent import run_opencode_task`，不因业务代码所在目录变化而改名。组件提供独立配置即可运行，也可由其它应用注册自己的 `OpenCodeHostBindings`。OpenDeepHole 业务阶段只能从 `task_agent` 导入公共类型和函数，不应直接依赖 `task_service.py` 中的内部任务记录、句柄或 Session 管理方法。
+`task_agent/` 内不导入 DeepHole 2.0 的 `deephole_client`、`backend` 或 `mcp_server` 模块。单独复制该目录后，可以放到目标项目的 Python 导入根目录，或执行 `python -m pip install ./task_agent`；两种方式都使用 `from task_agent import run_opencode_task`，不因业务代码所在目录变化而改名。组件提供独立配置即可运行，也可由其它应用注册自己的 `OpenCodeHostBindings`。DeepHole 2.0 业务阶段只能从 `task_agent` 导入公共类型和函数，不应直接依赖 `task_service.py` 中的内部任务记录、句柄或 Session 管理方法。

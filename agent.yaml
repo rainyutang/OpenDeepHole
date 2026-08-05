@@ -1,4 +1,4 @@
-# OpenDeepHole Agent bootstrap and managed configuration.
+# DeepHole 2.0 Agent bootstrap and managed configuration.
 # server_url / agent_name / owner_token are local-only; the remaining v4
 # sections are managed by the Web "客户端配置" page after first connection.
 

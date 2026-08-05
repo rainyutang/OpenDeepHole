@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Copy a maintenance-mode OpenDeepHole SQLite database to PostgreSQL.
+"""Copy a maintenance-mode DeepHole 2.0 SQLite database to PostgreSQL.
 
 The source is first snapshotted with SQLite's online backup API so WAL content
 is included and the original file is never migrated or modified in place.  The
-target must contain no OpenDeepHole business rows; this prevents an accidental
+target must contain no DeepHole 2.0 business rows; this prevents an accidental
 merge from silently producing mixed ownership or duplicate scan data.
 """
 

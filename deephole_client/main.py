@@ -1,4 +1,4 @@
-"""OpenDeepHole Agent Daemon — WebSocket client that connects to the web server.
+"""DeepHole 2.0 Agent Daemon — WebSocket client that connects to the web server.
 
 The agent connects to the server, receives task/stop/resume commands via WebSocket,
 and pushes scan events and results back via HTTP POST.
@@ -65,7 +65,7 @@ def _ws_message_too_big_hint(error: Exception, max_message_mb: int) -> str:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="agent",
-        description="OpenDeepHole agent daemon — connects to web server and executes scan tasks",
+        description="DeepHole 2.0 agent daemon — connects to web server and executes scan tasks",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -514,7 +514,7 @@ async def _main() -> None:
 
     name = config.agent_name or socket.gethostname()
 
-    print("OpenDeepHole Agent Daemon")
+    print("DeepHole 2.0 Agent Daemon")
     print(f"  Name    : {name}")
     print(f"  Server  : {config.server_url}")
     print()

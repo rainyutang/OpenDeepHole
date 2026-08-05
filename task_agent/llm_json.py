@@ -189,7 +189,7 @@ def _matches_schema(value: Any, schema: Any, *, allow_extra_keys: bool) -> bool:
 
 
 def _matches_json_schema(value: Any, schema: Any) -> bool:
-    """Match the JSON Schema features used by OpenDeepHole result contracts."""
+    """Match the JSON Schema features used by DeepHole 2.0 result contracts."""
     if schema is True:
         return True
     if schema is False or not isinstance(schema, dict):

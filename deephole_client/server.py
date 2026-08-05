@@ -1332,7 +1332,7 @@ def _write_skill_creator_package(package: dict, skills_root: Path) -> None:
 
 def _skill_creator_prompt(name: str, description: str, user_input: str) -> str:
     return (
-        "使用 `deephole-skill-creator` 技能，为 OpenDeepHole 创建一个纯 SKILL 项目级审计检查项草稿。"
+        "使用 `deephole-skill-creator` 技能，为 DeepHole 2.0 创建一个纯 SKILL 项目级审计检查项草稿。"
         "不要创建 analyzer.py、脚本或资源文件。"
         "只输出一个 JSON 对象，不要输出 Markdown 代码围栏之外的解释。"
         "JSON 字段必须包含："

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create an OpenDeepHole scan from an external reverse-engineering platform."""
+"""Create a DeepHole 2.0 scan from an external reverse-engineering platform."""
 
 from __future__ import annotations
 

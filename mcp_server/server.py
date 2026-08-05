@@ -1,4 +1,4 @@
-"""OpenDeepHole MCP Server — provides source code query tools for opencode."""
+"""DeepHole 2.0 MCP Server — provides source code query tools for opencode."""
 
 import uvicorn
 from mcp_server.factory import create_mcp_server

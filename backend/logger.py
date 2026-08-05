@@ -1,4 +1,4 @@
-"""Unified logging configuration for OpenDeepHole."""
+"""Unified logging configuration for DeepHole 2.0."""
 
 import logging
 import logging.handlers

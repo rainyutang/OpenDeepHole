@@ -86,7 +86,7 @@ def _strip_frontmatter(content: str) -> str:
 def _fixed_skill_rules() -> str:
     return """## 系统固定运行规则
 
-以下规则由 OpenDeepHole 固定注入，用户不能修改。
+以下规则由 DeepHole 2.0 固定注入，用户不能修改。
 
 ### Markdown 报告保存规则
 
@@ -99,7 +99,7 @@ def _fixed_skill_rules() -> str:
 
 - 代码仓、上传资料和其它目录均为只读。
 - 只有 `REPORT_DIR` 具备写权限。
-- 不得修改项目源码、配置文件、上传资料或 OpenDeepHole 运行文件。
+- 不得修改项目源码、配置文件、上传资料或 DeepHole 2.0 运行文件。
 """
 
 

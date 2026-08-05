@@ -2,6 +2,7 @@
 
 ## 2026-08-05
 
+- **变更** 产品展示名称统一为「DeepHole 2.0」，同步更新 Web、浏览器标题、API、Agent、MCP、任务标题和现行文档；既有路径、环境变量、协议 Header、包名和下载文件名保持兼容，历史文案沿用「DeepHole」
 - **优化** 扫描详情首屏直接使用完整候选点、有效问题和已验证问题汇总，不再随已加载分页数量变化；移除“继续加载详情”按钮，进入具体页签后自动按游标分批加载完整详情，并通过 SSE 防抖刷新和运行中轻量轮询保持统计自动更新
 - **重构** 威胁分析改为 `threat_analysis/methods/<method_id>/` 目录自动发现；清单只保留 `label` 和 `description`，内置 `deephole_threat_analysis` 在界面显示为“DeepHole威胁分析”，用户选择及方法快照贯穿创建、持久化、Agent 下发和续扫
 - **修复** 威胁分析返回失败或抛出异常时持久化错误原因，并在扫描详情中持续显示；只注册当前所选方法的 Skill，避免多方法间上下文污染
@@ -117,7 +118,7 @@
 - **新增** Web 新建扫描必须配置本次扫描专属的代码图谱 MCP，支持本地进程或远端服务、环境变量、静态请求头和 MCP 调用超时，并可在提交前通过目标 Agent 临时检测连接；配置作为私有快照持久化并贯穿扫描、续扫、去误报和漏洞验证，不再写入 Agent 全局配置
 - **变更** 扫描代码图谱 MCP 调用超时按秒填写并作为正整数校验，运行时转换为 OpenCode 使用的毫秒值；例如 `timeout_seconds: 300` 会生成 `"enabled": true, "timeout": 300000`
 - **安全** OpenCode 按扫描动态连接代码图谱 MCP；同一源码目录内相同扫描可并发共享连接，不同扫描会等待并切换，且会断开内置或其它扫描的源码图谱，避免跨扫描串用；连接或初始化失败时继续使用文件工具，不回退到其它代码图谱
-- **修复** 扫描代码图谱 MCP 注册到 OpenCode 时严格使用用户配置的名称，不再追加 OpenDeepHole 前缀、扫描 ID 或哈希；例如 `static-mcp` 的 `static_read` 工具保持为 `static-mcp_static_read`，扫描隔离改由不暴露给模型的内部租约身份保证
+- **修复** 扫描代码图谱 MCP 注册到 OpenCode 时严格使用用户配置的名称，不再追加 DeepHole 前缀、扫描 ID 或哈希；例如 `static-mcp` 的 `static_read` 工具保持为 `static-mcp_static_read`，扫描隔离改由不暴露给模型的内部租约身份保证
 - **测试** 增加可独立启动的确定性假代码图谱 MCP Server，并通过真实 OpenCode Serve 验证两套图谱的工具发现、连接切换和并发隔离
 
 ## 2026-07-24
@@ -183,14 +184,14 @@
 - **变更** 所有 Agent 组件和 validator 统一改用唯一公共入口 `agent.task_agent.run_opencode_task()`；调用参数只保留任务名称、受控任务类型、提示词、低/高能力、输出 Schema、非法 JSON 纠正次数和可选 Session ID，返回只保留 Session ID、`success/failure/timeout`、文本、结构化值和实际模型
 - **变更** OpenCode 的项目目录、工作目录、超时、优先级、模型重试、输出回调和取消信号全部由 Agent 执行上下文及任务策略提供；旧 `any` 任务能力自动迁移为 `low`，旧 `medium` 自动迁移为 `high`，任务策略配置页只保留低/高两档
 - **安全** 每个 OpenCode Session 自动获得项目目录只读权限，并只允许文件工具写当前 `.opendeephole` 工作目录；全局及 Session 级 `bash` 均禁用，主动取消直接传播 `asyncio.CancelledError` 并终止排队、当前请求、JSON 纠正和后续重试，不再暴露公共 `cancelled` 结果
-- **新增** Agent 配置页的「OpenCode 配置」改为优先展示 Agent 当前实际生成的 `~/.opendeephole/opencode_workspace/opencode.json`，完整覆盖本机原配置、Web 自定义层和 OpenDeepHole 添加的 MCP、技能、权限及子 Agent 字段；页面区分在线当前文件、Serve 待重载、未运行和离线历史快照，并保留手动刷新、文件时间、哈希与大小信息
+- **新增** Agent 配置页的「OpenCode 配置」改为优先展示 Agent 当前实际生成的 `~/.opendeephole/opencode_workspace/opencode.json`，完整覆盖本机原配置、Web 自定义层和 DeepHole 添加的 MCP、技能、权限及子 Agent 字段；页面区分在线当前文件、Serve 待重载、未运行和离线历史快照，并保留手动刷新、文件时间、哈希与大小信息
 - **安全** 当前 OpenCode 运行文件默认遮罩 API Key、Token、Authorization、Header、Password 等敏感字段，只有显式操作后才返回并复制完整原文；响应禁止缓存且配置内容不写入日志，最近一次完整快照按稳定 Agent 身份持久化以供离线查看
 - **变更** OpenCode JSONC 修改区降级为折叠的「自定义配置（次要）」；保存后页面继续展示当前实际文件并明确标记等待 Serve 重载，不再把待生效的 Web 配置层误认为当前 `opencode.json`
 
 ## 2026-07-20
 
 - **新增** 扫描详情首页的 OpenCode 任务队列在展开任务后显示完整 Session ID；成功、失败、超时和取消任务均持久保留最后一个已创建的 Session，即使最终重试在新 Session 创建前失败也不会丢失上一 Session
-- **新增** Agent 配置页增加「OpenCode 配置」页签，可编辑并原样持久化完整 JSONC 用户配置层（支持注释和尾随逗号）；配置按“本机发现配置 < Web JSONC < OpenDeepHole 受管字段”合并，MCP、技能、权限和威胁分析子 Agent 等运行必需字段继续由 Agent 强制管理
+- **新增** Agent 配置页增加「OpenCode 配置」页签，可编辑并原样持久化完整 JSONC 用户配置层（支持注释和尾随逗号）；配置按“本机发现配置 < Web JSONC < DeepHole 受管字段”合并，MCP、技能、权限和威胁分析子 Agent 等运行必需字段继续由 Agent 强制管理
 - **变更** OpenCode/nga serve 不再通过 `OPENCODE_CONFIG_CONTENT` 注入配置；Agent 在 Serve 空闲重启边界原子写入 `~/.opendeephole/opencode_workspace/opencode.json`，以 `OPENCODE_CONFIG_DIR` 指向该目录并显式清除旧内容变量，运行时文件权限设为 `0600`
 - **优化** OpenCode 受管配置源与最终运行文件分离，配置删除后不再因读取旧运行文件而残留；活动 Session 不会被配置更新打断，启动日志改为记录配置路径、哈希、字节数和脱敏内容
 
@@ -576,7 +577,7 @@
 - **新增** Agent 配置页支持校验当前表单中的 LLM API 配置，校验请求在 Agent 所在机器上执行，便于确认 API 地址、Key 和模型是否可用
 - **优化** 在线修改 Agent 配置会推送到运行中的 Agent，扫描从下一个候选点开始重新加载 LLM API、opencode 和代理配置
 - **新增** 新建扫描支持分别配置“项目总路径”和“代码扫描路径”：代码索引与 opencode 使用项目总路径，静态分析仅扫描指定子目录，并统一候选路径以保证 MCP 源码查询可命中全量索引
-- **新增** 前端页面 favicon 图标，浏览器标签页可显示 OpenDeepHole 项目标识
+- **新增** 前端页面 favicon 图标，浏览器标签页可显示 DeepHole 项目标识
 - **新增** `safe_mem_oob` checker，使用 semgrep 扫描安全内存/字符串函数中成员目标、偏移目标、指针 `sizeof`、`dstsz` 与拷贝长度复用等高风险 `dst/dstsz` 不匹配场景，并配套 SKILL 与场景文档
 - **新增** Agent 初始化完成后输出代码索引统计，包含文件、函数、结构体/类/联合体、全局变量、函数调用关系和全局变量引用数量，便于判断 ctags/tree-sitter 建库是否异常
 - **优化** 函数调用关系和 `g_` 全局变量引用改为基于 tree-sitter 遍历 ctags 已提取函数体生成，不再启动 cscope，也不再按全局变量逐个正则扫描全项目源码

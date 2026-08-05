@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI):
             run_distributed_runtime(store, leader=is_leader)
         )
     event_loop_monitor_task = asyncio.create_task(monitor_event_loop_lag())
-    logger.info("OpenDeepHole backend started on port %d", config.server.port)
+    logger.info("DeepHole 2.0 backend started on port %d", config.server.port)
     try:
         yield
     finally:
@@ -120,11 +120,11 @@ async def lifespan(app: FastAPI):
             pass
         await run_store_call(store, "close")
         await shutdown_store_executor()
-        logger.info("OpenDeepHole backend shutting down")
+        logger.info("DeepHole 2.0 backend shutting down")
 
 
 app = FastAPI(
-    title="OpenDeepHole",
+    title="DeepHole 2.0",
     description="SKILL-based C/C++ source code white-box audit tool",
     version="0.1.0",
     lifespan=lifespan,

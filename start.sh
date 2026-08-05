@@ -4,7 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "=== OpenDeepHole 一键构建重启 ==="
+echo "=== DeepHole 2.0 一键构建重启 ==="
 
 # 1. 停止已有进程
 echo "[1/3] 停止已有进程..."

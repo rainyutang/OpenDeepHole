@@ -1,6 +1,6 @@
 # Task Agent 组件
 
-`task_agent` 是供 OpenDeepHole Agent 使用的、自包含任务管理框架。它负责驱动 OpenCode/nga Serve，并管理延迟初始化的 Serve 单例、任务队列、模型租约、会话续接、权限、重试、事件流和 JSON 结果校验；它本身不实现 OpenCode，也不提供或启动单独的 CLI，模型任务仍通过现有的 `opencode serve` 或 `nga serve` 进程运行。
+`task_agent` 是供 DeepHole 2.0 Agent 使用的、自包含任务管理框架。它负责驱动 OpenCode/nga Serve，并管理延迟初始化的 Serve 单例、任务队列、模型租约、会话续接、权限、重试、事件流和 JSON 结果校验；它本身不实现 OpenCode，也不提供或启动单独的 CLI，模型任务仍通过现有的 `opencode serve` 或 `nga serve` 进程运行。
 
 该目录本身就是顶层 Python 包。在源码项目中可以直接把整个 `task_agent/` 放到项目根目录；也可以从其父目录执行 `python -m pip install ./task_agent`，安装后调用代码放在任何目录都继续使用同一个公开包名。
 
@@ -89,7 +89,7 @@ result = await run_opencode_task(
 
 漏洞挖掘中的候选点审计、项目级审计和威胁审计都传 `task_type="vulnerability_mining"`。内置调用分别使用 `candidate-audit-*`、`project-audit-*` 和 `threat-audit-*` 任务名前缀，模型看板据此显示具体子任务；自定义名称无法匹配这些前缀时统一显示为“漏洞挖掘”。
 
-嵌入 OpenDeepHole 时，宿主会在启动期间注册一次 `OpenCodeHostBindings`。注册过程会提供后端配置、共享工作区、解析后的 Serve 进程设置以及可选的 MCP 选择；它不会实例化管理器或启动 Serve。首次调用 `run_opencode_task()` 时，系统会按需创建共享任务服务和 Serve 管理器。在发送提示词之前，该管理器会在 Serve 尚未运行时启动它、复用兼容的进程，或执行既有的重启与恢复逻辑。
+嵌入 DeepHole 2.0 时，宿主会在启动期间注册一次 `OpenCodeHostBindings`。注册过程会提供后端配置、共享工作区、解析后的 Serve 进程设置以及可选的 MCP 选择；它不会实例化管理器或启动 Serve。首次调用 `run_opencode_task()` 时，系统会按需创建共享任务服务和 Serve 管理器。在发送提示词之前，该管理器会在 Serve 尚未运行时启动它、复用兼容的进程，或执行既有的重启与恢复逻辑。
 
 未注册宿主时，同一函数会从组件自有的 YAML 文件完成初始化。可以传入 `config_path=...`、设置 `TASK_AGENT_CONFIG`，或将 `task-agent.yaml` 放在当前目录中。请复制 `task-agent.example.yaml` 作为起点。在单例的整个生命周期内，该配置会固定项目、可写工作目录、组件工作区、Serve 进程设置和显式模型池。只有执行 `await shutdown_opencode()` 后才能选择其他配置。
 
@@ -103,4 +103,4 @@ OpenCode 的原生配置放在 `serve.opencode_config` 下，其中 MCP 配置�
 
 模型配置中的 `weight` 始终是不会被运行时改写的基础权重。Task Agent 只在当前进程内维护健康惩罚等级，并以 `基础权重 × max(10%, 0.5^惩罚等级)` 计算有效权重；等级范围为 `0..4`，对应系数 `100%`、`50%`、`25%`、`12.5%` 和 `10%`。只有已经进入模型消息请求后的 Provider/Auth/API 失败或超时才会增加一级惩罚；Serve 启动、配置、MCP、回调、主动取消、无可用模型、上下文/输出长度错误以及 JSON/结构化输出失败都不会降权。其中已实际执行消息的健康中性失败仍会换模重试。一次最终成功，或连续 10 分钟没有新的模型消息请求故障，会恢复一级；JSON 纠错耗尽会换模重试，但本身既不降权也不恢复。基础权重和有效权重会分别出现在模型池运行状态中；健康状态不持久化，Agent/Task Agent 进程重启后恢复为健康基础权重。
 
-此目录不会从 OpenDeepHole 的 `deephole_client`、`backend` 或 `mcp_server` 包中导入任何内容。如需提取给其它平台，请复制整个目录并将其放到平台的 Python 导入根目录，或直接安装该目录；依赖会由包元数据安装。随后提供 `task-agent.yaml`，并让所有调用点继续使用上文所示的公开导入方式。已有自身配置系统的应用也可以改为注册 `OpenCodeHostBindings`；宿主绑定的优先级始终高于独立配置文件发现机制。
+此目录不会从 DeepHole 2.0 的 `deephole_client`、`backend` 或 `mcp_server` 包中导入任何内容。如需提取给其它平台，请复制整个目录并将其放到平台的 Python 导入根目录，或直接安装该目录；依赖会由包元数据安装。随后提供 `task-agent.yaml`，并让所有调用点继续使用上文所示的公开导入方式。已有自身配置系统的应用也可以改为注册 `OpenCodeHostBindings`；宿主绑定的优先级始终高于独立配置文件发现机制。

@@ -1464,7 +1464,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               </svg>
               返回
             </button>
-            <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
+            <h1 className="text-lg font-bold text-white">DeepHole 2.0</h1>
             <span className="text-sm text-slate-400">
               {scan.status === "cancelled"
                 ? (agentDisconnectError ? (scan.agent_online ? "扫描已中断" : "Agent 断开，已中断") : "已取消")

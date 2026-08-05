@@ -443,7 +443,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
       <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
         <div className="mx-auto flex max-w-[100rem] flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div className="shrink-0">
-            <h1 className="text-lg font-bold text-white">OpenDeepHole</h1>
+            <h1 className="text-lg font-bold text-white">DeepHole 2.0</h1>
             <p className="text-sm text-slate-400 mt-0.5">C/C++ Source Code Audit Tool</p>
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end">
