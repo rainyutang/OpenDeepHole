@@ -16,7 +16,7 @@ function parsePairs(text: string): Record<string, string> {
   return result;
 }
 
-function pairsText(value: Record<string, string>): string {
+export function pairsText(value: Record<string, string>): string {
   return Object.entries(value)
     .map(([key, item]) => `${key}=${item}`)
     .join("\n");
@@ -62,13 +62,6 @@ export function defaultScanCodeGraphMcp(): AgentMcpConfig {
 
 export function validateScanCodeGraphMcp(value: AgentMcpConfig): string {
   if (!value.enabled) return "";
-  if (!value.name.trim()) return "请输入扫描代码图谱 MCP 名称";
-  if (!Number.isFinite(value.timeout_seconds) || value.timeout_seconds < 1) {
-    return "扫描代码图谱 MCP 调用超时必须大于 0";
-  }
-  if (value.transport === "local" && !value.local.executable.trim()) {
-    return "请输入扫描代码图谱 MCP 可执行文件";
-  }
   if (value.transport === "remote" && !value.remote.url.trim()) {
     return "请输入扫描代码图谱 MCP 远端 URL";
   }
@@ -99,7 +92,7 @@ export default function ScanCodeGraphMcpEditor({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-medium text-slate-200">
-            扫描代码图谱 MCP <span className="font-normal text-slate-500">（可选）</span>
+            代码图谱 MCP <span className="font-normal text-slate-500">（可选）</span>
           </h3>
           <p className="mt-1 text-xs leading-5 text-slate-500">
             启用后，此配置会保存为本次扫描的独立快照，并用于扫描、恢复、去误报和漏洞验证。
@@ -146,14 +139,7 @@ export default function ScanCodeGraphMcpEditor({
         </div>
       )}
 
-      {value.enabled && <div className="grid gap-4 md:grid-cols-3">
-        <Field label="MCP 名称">
-          <input
-            className={input}
-            value={value.name}
-            onChange={(event) => onChange({ ...value, name: event.target.value })}
-          />
-        </Field>
+      {value.enabled && <div className="grid gap-4 md:grid-cols-2">
         <Field label="连接方式">
           <select
             className={input}
@@ -166,71 +152,11 @@ export default function ScanCodeGraphMcpEditor({
             <option value="remote">远端服务</option>
           </select>
         </Field>
-        <Field
-          label="MCP 调用超时（秒）"
-          hint="同时用于连接、工具发现和工具调用；300 秒生成 timeout: 300000"
-        >
-          <input
-            className={input}
-            type="number"
-            min={1}
-            value={value.timeout_seconds}
-            onChange={(event) =>
-              onChange({ ...value, timeout_seconds: Number(event.target.value) })
-            }
-          />
-        </Field>
       </div>}
 
       {value.enabled && (value.transport === "local" ? (
-        <div className="grid gap-4 md:grid-cols-2">
-          <Field label="可执行文件">
-            <input
-              className={input}
-              value={value.local.executable}
-              onChange={(event) =>
-                onChange({
-                  ...value,
-                  local: { ...value.local, executable: event.target.value },
-                })
-              }
-            />
-          </Field>
-          <Field label="启动参数" hint="每行一个">
-            <textarea
-              className={input}
-              rows={4}
-              value={value.local.args.join("\n")}
-              onChange={(event) =>
-                onChange({
-                  ...value,
-                  local: {
-                    ...value.local,
-                    args: event.target.value
-                      .split(/\r?\n/)
-                      .map((item) => item.trim())
-                      .filter(Boolean),
-                  },
-                })
-              }
-            />
-          </Field>
-          <Field label="环境变量" hint="每行 KEY=VALUE">
-            <textarea
-              className={input}
-              rows={5}
-              value={pairsText(value.local.environment)}
-              onChange={(event) =>
-                onChange({
-                  ...value,
-                  local: {
-                    ...value.local,
-                    environment: parsePairs(event.target.value),
-                  },
-                })
-              }
-            />
-          </Field>
+        <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-3 text-xs leading-5 text-slate-400">
+          本地模式使用内置默认参数：<span className="font-mono text-slate-300">codegraph serve --mcp</span>。无需额外配置。
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">

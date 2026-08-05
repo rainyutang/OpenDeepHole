@@ -129,6 +129,11 @@ class VulnerabilityValidationConfig:
     # deadline; model calls and the injected run_command helper own their
     # separate timeouts.
     timeout_seconds: int = 7200
+    supported_vulnerability_types: list[str] = field(default_factory=lambda: ["*"])
+    concurrency: int = 1
+    validation_max_retries: int = 0
+    model_policy: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
+    # Legacy local-config input only. Web-managed v5 scans do not consult it.
     environments: dict[str, ValidationEnvironmentConfig] = field(default_factory=dict)
 
 
@@ -357,7 +362,7 @@ def _upgrade_managed_policy(
 
 
 def _upgrade_managed_remote(remote: dict) -> dict:
-    """Upgrade managed payloads to the Agent v4 contract."""
+    """Upgrade managed payloads to the Agent v5 contract."""
     remote = copy.deepcopy(remote)
     remote.pop("opencode_config", None)
     try:
@@ -366,20 +371,25 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         schema_version = 0
     if schema_version >= 5:
         migrated = remote
-        migrated["schema_version"] = 4
+        migrated["schema_version"] = 5
         migrated.pop("mining_engines", None)
         return migrated
     if schema_version >= 4:
-        if "mining_engines" not in remote:
-            return remote
         migrated = remote
+        migrated["schema_version"] = 5
         migrated.pop("mining_engines", None)
+        migrated.pop("product_info", None)
+        migrated["vulnerability_validation"] = {}
+        migrated.setdefault("checker_selection", {"disabled_checkers": []})
         return migrated
     if schema_version == 3:
         migrated = remote
-        migrated["schema_version"] = 4
+        migrated["schema_version"] = 5
         migrated.pop("code_graph", None)
         migrated.pop("mining_engines", None)
+        migrated.pop("product_info", None)
+        migrated["vulnerability_validation"] = {}
+        migrated.setdefault("checker_selection", {"disabled_checkers": []})
         return migrated
     if not (
         schema_version == 2
@@ -403,7 +413,7 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         return migrated
 
     migrated = remote
-    migrated["schema_version"] = 4
+    migrated["schema_version"] = 5
     migrated.pop("code_graph", None)
     migrated.pop("mining_engines", None)
     base = migrated.get("base")
@@ -421,19 +431,9 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         threat.get("model_policy"),
         migrate_threat_retry_default=True,
     )
-    validation = migrated.get("vulnerability_validation")
-    if not isinstance(validation, dict):
-        validation = {}
-        migrated["vulnerability_validation"] = validation
-    environments = validation.get("environments")
-    if not isinstance(environments, dict):
-        environments = {}
-        validation["environments"] = environments
-    for raw_environment in environments.values():
-        if isinstance(raw_environment, dict):
-            raw_environment["model_policy"] = _upgrade_managed_policy(
-                raw_environment.get("model_policy")
-            )
+    migrated.pop("product_info", None)
+    migrated["vulnerability_validation"] = {}
+    migrated.setdefault("checker_selection", {"disabled_checkers": []})
     return migrated
 
 
@@ -496,6 +496,30 @@ def _validation_environments(raw: object) -> dict[str, ValidationEnvironmentConf
     return result
 
 
+def _apply_validation_policy(
+    target: VulnerabilityValidationConfig,
+    raw: object,
+) -> None:
+    if not isinstance(target.model_policy, ModelTaskPolicyConfig):
+        normalized_policy = ModelTaskPolicyConfig()
+        _apply_policy(normalized_policy, target.model_policy)
+        target.model_policy = normalized_policy
+    if not isinstance(raw, dict):
+        return
+    supported = [
+        str(item).strip()
+        for item in (raw.get("supported_vulnerability_types") or ["*"])
+        if str(item).strip()
+    ]
+    target.supported_vulnerability_types = supported or ["*"]
+    target.concurrency = _bounded_int(raw.get("concurrency"), 1, 1, 64)
+    target.validation_max_retries = _bounded_int(
+        raw.get("validation_max_retries"), 0, 0, 20
+    )
+    _apply_policy(target.model_policy, raw.get("model_policy"))
+    target.environments = {}
+
+
 def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     """Apply a server-managed config dict onto a local AgentConfig in-place.
 
@@ -535,12 +559,8 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         _normalize_threat_analysis_config(config.threat_analysis)
         _apply_policy(config.vulnerability_mining, remote.get("vulnerability_mining"))
         _apply_policy(config.false_positive, remote.get("false_positive"))
-        config.product_info = _mcp_config(remote.get("product_info"), config.product_info)
         validation = remote.get("vulnerability_validation")
-        if isinstance(validation, dict):
-            config.vulnerability_validation.environments = _validation_environments(
-                validation.get("environments")
-            )
+        _apply_validation_policy(config.vulnerability_validation, validation)
         return
 
     if "no_proxy" in remote and remote["no_proxy"] is not None:
@@ -665,7 +685,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "base": {
             "tool": config.opencode.tool,
             "executable": config.opencode.executable,
@@ -680,15 +700,21 @@ def remote_config_dict(config: AgentConfig) -> dict:
             "enabled": config.threat_analysis.enabled,
             "model_policy": dataclasses.asdict(config.threat_analysis.model_policy),
         },
-        "product_info": dataclasses.asdict(config.product_info),
         "vulnerability_mining": dataclasses.asdict(config.vulnerability_mining),
         "false_positive": dataclasses.asdict(config.false_positive),
         "vulnerability_validation": {
-            "environments": {
-                name: dataclasses.asdict(value)
-                for name, value in config.vulnerability_validation.environments.items()
-            },
+            "supported_vulnerability_types": list(
+                config.vulnerability_validation.supported_vulnerability_types
+            ),
+            "concurrency": config.vulnerability_validation.concurrency,
+            "validation_max_retries": (
+                config.vulnerability_validation.validation_max_retries
+            ),
+            "model_policy": dataclasses.asdict(
+                config.vulnerability_validation.model_policy
+            ),
         },
+        "checker_selection": {"disabled_checkers": []},
     }
 
 
@@ -813,7 +839,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v4 remotely-managed fields while preserving local bootstrap fields."""
+    """Persist v5 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return

@@ -45,11 +45,15 @@ class _ValidationQueueItem:
     project_path: str
     code_scan_path: str
     product: str
-    validation_environment: str
+    validation_method_id: str
+    validation_method_label: str
+    validation_values: dict
+    validation_policy: dict
     vulnerability: dict
     report_markdown: str
     cancel_event: threading.Event
     code_graph_mcp: dict | None = None
+    knowledge_base_mcp: dict | None = None
 
 
 @dataclass
@@ -65,6 +69,7 @@ class _FpReviewQueueItem:
     feedback_entries: list[dict]
     cancel_event: threading.Event
     code_graph_mcp: dict | None = None
+    knowledge_base_mcp: dict | None = None
     processed_offset: int = 0
     planned_task_id: str = ""
 
@@ -121,6 +126,7 @@ async def _run(task, is_resume: bool) -> None:
             threat_analysis_method=task.threat_analysis_method,
             product=task.product,
             validation_environment=task.validation_environment,
+            vulnerability_validation=task.vulnerability_validation,
             checker_names=task.checkers,
             scan_id=task.scan_id,
             cancel_event=task.cancel_event,
@@ -133,6 +139,7 @@ async def _run(task, is_resume: bool) -> None:
             resume_threat_analysis=task.resume_threat_analysis,
             retry_threat_audit_task_ids=task.retry_threat_audit_task_ids,
             code_graph_mcp=task.code_graph_mcp,
+            knowledge_base_mcp=task.knowledge_base_mcp,
             mining_engines=task.mining_engines,
         )
     finally:
@@ -150,7 +157,9 @@ async def handle_task(
     threat_analysis_method: str = "deephole_threat_analysis",
     product: str = "",
     validation_environment: str = "",
+    vulnerability_validation: dict | None = None,
     code_graph_mcp: dict | None = None,
+    knowledge_base_mcp: dict | None = None,
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
     mining_engines: list[dict] | None = None,
@@ -176,7 +185,9 @@ async def handle_task(
         threat_analysis_method=threat_analysis_method,
         product=product,
         validation_environment=validation_environment,
+        vulnerability_validation=vulnerability_validation,
         code_graph_mcp=code_graph_mcp,
+        knowledge_base_mcp=knowledge_base_mcp,
         feedback_entries=feedback_entries,
         checker_packages=checker_packages,
         mining_engines=mining_engines,
@@ -207,7 +218,9 @@ async def handle_resume(
     threat_analysis_method: Optional[str] = None,
     product: Optional[str] = None,
     validation_environment: Optional[str] = None,
+    vulnerability_validation: Optional[dict] = None,
     code_graph_mcp: Optional[dict] = None,
+    knowledge_base_mcp: Optional[dict] = None,
     feedback_entries: Optional[list[dict]] = None,
     checker_packages: Optional[list[dict]] = None,
     mining_engines: Optional[list[dict]] = None,
@@ -239,7 +252,9 @@ async def handle_resume(
             ),
             product=product or "",
             validation_environment=validation_environment or "",
+            vulnerability_validation=vulnerability_validation,
             code_graph_mcp=code_graph_mcp,
+            knowledge_base_mcp=knowledge_base_mcp,
             feedback_entries=feedback_entries,
             checker_packages=checker_packages,
             mining_engines=mining_engines,
@@ -273,9 +288,19 @@ async def handle_resume(
             task.product = product
         if validation_environment is not None:
             task.validation_environment = validation_environment
+        task.vulnerability_validation = (
+            copy.deepcopy(vulnerability_validation)
+            if isinstance(vulnerability_validation, dict)
+            else None
+        )
         task.code_graph_mcp = (
             copy.deepcopy(code_graph_mcp)
             if isinstance(code_graph_mcp, dict)
+            else None
+        )
+        task.knowledge_base_mcp = (
+            copy.deepcopy(knowledge_base_mcp)
+            if isinstance(knowledge_base_mcp, dict)
             else None
         )
         if feedback_entries is not None:
@@ -311,6 +336,7 @@ async def handle_fp_review(
     feedback_entries: list[dict] | None = None,
     processed_offset: int = 0,
     code_graph_mcp: dict | None = None,
+    knowledge_base_mcp: dict | None = None,
 ) -> None:
     """Handle an 'fp_review' command — queue AI false-positive review items."""
     if _config is None or _reporter is None:
@@ -337,6 +363,7 @@ async def handle_fp_review(
             feedback_entries=feedback_entries or [],
             processed_offset=processed_offset + offset,
             code_graph_mcp=code_graph_mcp,
+            knowledge_base_mcp=knowledge_base_mcp,
         )
     print(
         f"Queued {len(vulnerabilities)} {method} FP review item(s) "
@@ -355,6 +382,7 @@ async def enqueue_fp_review(
     feedback_entries: list[dict] | None = None,
     processed_offset: int = 0,
     code_graph_mcp: dict | None = None,
+    knowledge_base_mcp: dict | None = None,
     config: Any | None = None,
     reporter: Any | None = None,
 ) -> bool:
@@ -404,6 +432,11 @@ async def enqueue_fp_review(
         code_graph_mcp=(
             copy.deepcopy(code_graph_mcp)
             if isinstance(code_graph_mcp, dict)
+            else None
+        ),
+        knowledge_base_mcp=(
+            copy.deepcopy(knowledge_base_mcp)
+            if isinstance(knowledge_base_mcp, dict)
             else None
         ),
         cancel_event=cancel_event,
@@ -659,6 +692,7 @@ async def _run_single_fp_review_item(
         work_dir=review_dir,
         feedback_entries=item.feedback_entries,
         code_graph_mcp=item.code_graph_mcp,
+        knowledge_base_mcp=item.knowledge_base_mcp,
         cancel_event=item.cancel_event,
         skill_paths=list(loaded.manifest.skill_paths) or None,
     ):
@@ -732,22 +766,30 @@ async def handle_vulnerability_validation(
     project_path: str,
     code_scan_path: str,
     product: str,
-    validation_environment: str,
+    validation_method_id: str,
+    validation_method_label: str,
+    validation_values: dict,
+    validation_policy: dict,
     vulnerability: dict,
     report_markdown: str,
     code_graph_mcp: dict | None = None,
+    knowledge_base_mcp: dict | None = None,
 ) -> None:
-    """Handle a validation command using the Agent-wide environment queue."""
+    """Handle a validation command using the Agent-wide shared queue."""
     await enqueue_vulnerability_validation(
         scan_id=scan_id,
         vuln_index=vuln_index,
         project_path=project_path,
         code_scan_path=code_scan_path,
         product=product,
-        validation_environment=validation_environment,
+        validation_method_id=validation_method_id,
+        validation_method_label=validation_method_label,
+        validation_values=validation_values,
+        validation_policy=validation_policy,
         vulnerability=vulnerability,
         report_markdown=report_markdown,
         code_graph_mcp=code_graph_mcp,
+        knowledge_base_mcp=knowledge_base_mcp,
     )
 
 
@@ -758,10 +800,14 @@ async def enqueue_vulnerability_validation(
     project_path: str,
     code_scan_path: str,
     product: str,
-    validation_environment: str,
+    validation_method_id: str,
+    validation_method_label: str,
+    validation_values: dict,
+    validation_policy: dict,
     vulnerability: dict,
     report_markdown: str,
     code_graph_mcp: dict | None = None,
+    knowledge_base_mcp: dict | None = None,
     config: Any | None = None,
     reporter: Any | None = None,
     report_queued: bool = False,
@@ -787,12 +833,20 @@ async def enqueue_vulnerability_validation(
         project_path=project_path,
         code_scan_path=code_scan_path,
         product=product,
-        validation_environment=validation_environment,
+        validation_method_id=validation_method_id,
+        validation_method_label=validation_method_label,
+        validation_values=copy.deepcopy(validation_values),
+        validation_policy=copy.deepcopy(validation_policy),
         vulnerability=vulnerability,
         report_markdown=report_markdown,
         code_graph_mcp=(
             copy.deepcopy(code_graph_mcp)
             if isinstance(code_graph_mcp, dict)
+            else None
+        ),
+        knowledge_base_mcp=(
+            copy.deepcopy(knowledge_base_mcp)
+            if isinstance(knowledge_base_mcp, dict)
             else None
         ),
         cancel_event=cancel_event,
@@ -801,13 +855,13 @@ async def enqueue_vulnerability_validation(
     if report_queued:
         await _report_validation_queued(item)
 
-    environment_key = validation_environment.strip()
-    queue = _validation_queues.setdefault(environment_key, deque())
+    queue_key = "shared"
+    queue = _validation_queues.setdefault(queue_key, deque())
     queue.append(item)
     marker = asyncio.get_running_loop().create_future()
     _validation_tasks[task_key] = marker
     _validation_cancel_events[task_key] = cancel_event
-    _pump_validation_environment(environment_key)
+    _pump_validation_environment(queue_key)
 
     path_hint = f" ({project_path})" if project_path else ""
     print(f"Queued vulnerability validation {scan_id}#{vuln_index}{path_hint}")
@@ -827,7 +881,8 @@ async def _report_validation_queued(item: _ValidationQueueItem) -> None:
                 status="queued",
                 running=True,
                 product=item.product,
-                validation_environment=item.validation_environment,
+                validation_method_id=item.validation_method_id,
+                validation_method_label=item.validation_method_label,
                 started_at=now,
                 updated_at=now,
             ),
@@ -837,9 +892,7 @@ async def _report_validation_queued(item: _ValidationQueueItem) -> None:
 
 
 def _validation_environment_capacity(item: _ValidationQueueItem) -> int:
-    environments = getattr(item.config.vulnerability_validation, "environments", {}) or {}
-    environment = environments.get(item.validation_environment)
-    return max(1, int(getattr(environment, "concurrency", 1) or 1))
+    return max(1, int(item.validation_policy.get("concurrency") or 1))
 
 
 def _pump_validation_environment(environment_key: str) -> None:
@@ -945,7 +998,8 @@ async def _report_validation_cancelled(item: _ValidationQueueItem) -> None:
                 status="cancelled",
                 running=False,
                 product=item.product,
-                validation_environment=item.validation_environment,
+                validation_method_id=item.validation_method_id,
+                validation_method_label=item.validation_method_label,
                 validation_success=False,
                 requires_human_intervention=True,
                 validation_output="Validation cancelled before execution",
@@ -962,8 +1016,6 @@ async def _report_validation_cancelled(item: _ValidationQueueItem) -> None:
 
 
 async def _run_single_validation(item: _ValidationQueueItem) -> None:
-    import dataclasses
-
     from deephole_client.config import apply_network_env, apply_remote_config
     from deephole_client.vulnerability_validation import (
         run_vulnerability_validation,
@@ -981,19 +1033,16 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
             pass
     try:
         work_root = Path.home() / ".opendeephole" / "vulnerability_validation" / "runs" / item.scan_id
-        environment = (
-            getattr(item.config.vulnerability_validation, "environments", {}) or {}
-        ).get(item.validation_environment)
-        environment_config = dataclasses.asdict(environment) if environment is not None else {}
-        model_policy = environment_config.pop("model_policy", {})
+        validation_policy = copy.deepcopy(item.validation_policy)
+        model_policy = validation_policy.pop("model_policy", {})
         if isinstance(model_policy, dict):
-            environment_config["required_capability"] = model_policy.get(
+            validation_policy["required_capability"] = model_policy.get(
                 "required_capability", "high"
             )
-            environment_config["timeout_seconds"] = model_policy.get(
+            validation_policy["timeout_seconds"] = model_policy.get(
                 "timeout_seconds", 3600
             )
-            environment_config["model_max_retries"] = model_policy.get(
+            validation_policy["model_max_retries"] = model_policy.get(
                 "max_retries", 2
             )
 
@@ -1012,6 +1061,10 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
             project_dir=project,
             work_dir=validation_work_dir,
             code_graph_mcp=item.code_graph_mcp,
+            knowledge_base_mcp=item.knowledge_base_mcp,
+            task_metadata={
+                "validation_model_policy": copy.deepcopy(model_policy),
+            },
             cancel_event=item.cancel_event,
         ):
             result = await run_vulnerability_validation(
@@ -1020,13 +1073,15 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
                 work_dir=work_root / "validation",
                 scan_id=item.scan_id,
                 product=item.product,
-                environment=item.validation_environment,
+                method_id=item.validation_method_id,
+                method_label=item.validation_method_label,
                 validation_items=[{
                     "vuln_index": item.vuln_index,
                     "vulnerability": item.vulnerability,
                     "report_markdown": item.report_markdown,
                 }],
-                environment_config=environment_config,
+                validation_policy=validation_policy,
+                method_values=item.validation_values,
                 output=process_output,
                 cancel_event=item.cancel_event,
             )
@@ -1049,7 +1104,8 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
                     status="error",
                     running=False,
                     product=item.product,
-                    validation_environment=item.validation_environment,
+                    validation_method_id=item.validation_method_id,
+                    validation_method_label=item.validation_method_label,
                     validation_success=False,
                     requires_human_intervention=True,
                     validation_output=f"Validation setup failed: {exc}",

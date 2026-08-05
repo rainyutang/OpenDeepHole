@@ -1658,6 +1658,7 @@ def test_run_prompt_logs_selected_source_mcp_input_in_full(
         manager.ensure_managed_mcp = AsyncMock()
         manager._acquire_scan_mcp = AsyncMock(return_value=_ScanMcpLease(
             directory_key="project",
+            state_key="project\0code_graph",
             identity="scan-1:static-mcp",
             name="static-mcp",
             fingerprint="fingerprint",

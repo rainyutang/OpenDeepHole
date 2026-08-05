@@ -49,9 +49,9 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 7200)
         self.assertEqual(cfg.opencode_concurrency, 4)
 
-    def test_backend_and_remote_v4_defaults(self) -> None:
+    def test_backend_and_remote_v5_defaults(self) -> None:
         self.assertFalse(BackendGitHistoryConfig().enabled)
-        self.assertEqual(AgentRemoteConfig().schema_version, 4)
+        self.assertEqual(AgentRemoteConfig().schema_version, 5)
         self.assertNotIn("opencode_config", AgentRemoteConfig().model_dump())
         self.assertEqual(AgentRemoteConfig().base.no_proxy, "10.0.0.0/8")
         self.assertIsNone(AgentRemoteConfig().base.opencode_serve_port)
@@ -65,6 +65,8 @@ class AgentConfigTests(unittest.TestCase):
             3600,
         )
         self.assertNotIn("code_graph", AgentRemoteConfig().model_dump())
+        self.assertNotIn("product_info", AgentRemoteConfig().model_dump())
+        self.assertEqual(AgentRemoteConfig().checker_selection.disabled_checkers, [])
 
     def test_full_remote_defaults_do_not_switch_agent_to_opencode(self) -> None:
         cfg = AgentConfig()
@@ -119,7 +121,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 4)
+        self.assertEqual(config.schema_version, 5)
         self.assertEqual(config.vulnerability_mining.required_capability, "high")
         self.assertEqual(config.vulnerability_mining.timeout_seconds, 3600)
         self.assertEqual(config.vulnerability_mining.max_retries, 4)
@@ -127,10 +129,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(config.false_positive.timeout_seconds, 777)
         self.assertEqual(config.threat_analysis.model_policy.timeout_seconds, 3600)
         self.assertEqual(config.threat_analysis.model_policy.max_retries, 2)
-        self.assertEqual(
-            config.vulnerability_validation.environments["lab"].model_policy.timeout_seconds,
-            3600,
-        )
+        self.assertEqual(config.vulnerability_validation.supported_vulnerability_types, ["*"])
+        self.assertEqual(config.vulnerability_validation.concurrency, 1)
         self.assertEqual(config.model_pool.models[0].capability, "low")
         self.assertEqual(config.model_pool.models[0].timeout, 1200)
 
@@ -183,9 +183,8 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 4)
-        self.assertTrue(config.code_graph.enabled)
-        self.assertEqual(config.code_graph.remote.url, "http://graph.test/mcp")
+        self.assertEqual(config.schema_version, 5)
+        self.assertFalse(config.code_graph.enabled)
         self.assertNotIn("code_graph", config.model_dump(mode="json"))
 
     def test_transient_v5_engine_config_is_removed(self) -> None:
@@ -202,14 +201,14 @@ class AgentConfigTests(unittest.TestCase):
         }
         config = AgentRemoteConfig.model_validate(payload)
 
-        self.assertEqual(config.schema_version, 4)
+        self.assertEqual(config.schema_version, 5)
         self.assertEqual(config.base.opencode_serve_port, 4317)
         self.assertNotIn("mining_engines", config.model_dump())
 
         local = AgentConfig()
         apply_remote_config(local, payload)
         exported = remote_config_dict(local)
-        self.assertEqual(exported["schema_version"], 4)
+        self.assertEqual(exported["schema_version"], 5)
         self.assertEqual(exported["base"]["opencode_serve_port"], 4317)
         self.assertNotIn("mining_engines", exported)
 
@@ -311,7 +310,7 @@ class AgentConfigTests(unittest.TestCase):
 
         remote = remote_config_dict(cfg)
 
-        self.assertEqual(remote["schema_version"], 4)
+        self.assertEqual(remote["schema_version"], 5)
         self.assertNotIn("opencode_config", remote)
         self.assertNotIn("llm_api", remote)
         self.assertEqual(remote["base"], {
@@ -335,7 +334,17 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["vulnerability_mining"]["required_capability"], "high")
         self.assertNotIn("mining_engines", remote)
         self.assertEqual(remote["false_positive"]["required_capability"], "high")
-        self.assertEqual(remote["vulnerability_validation"], {"environments": {}})
+        self.assertEqual(remote["vulnerability_validation"], {
+            "supported_vulnerability_types": ["*"],
+            "concurrency": 1,
+            "validation_max_retries": 0,
+            "model_policy": {
+                "required_capability": "high",
+                "timeout_seconds": 3600,
+                "max_retries": 2,
+            },
+        })
+        self.assertEqual(remote["checker_selection"], {"disabled_checkers": []})
         self.assertNotIn("code_graph", remote)
         self.assertNotIn("git_history", remote)
         self.assertNotIn("pattern_filter", remote)
@@ -426,7 +435,7 @@ class AgentConfigTests(unittest.TestCase):
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["server_url"], "http://example.test")
             self.assertEqual(raw["agent_name"], "local-agent")
-            self.assertEqual(raw["schema_version"], 4)
+            self.assertEqual(raw["schema_version"], 5)
             self.assertNotIn("opencode_config", raw)
             self.assertNotIn("llm_api", raw)
             self.assertEqual(raw["base"]["tool"], "opencode")
@@ -447,12 +456,9 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["vulnerability_mining"]["required_capability"], "high")
             self.assertNotIn("mining_engines", raw)
             self.assertEqual(raw["false_positive"]["timeout_seconds"], 700)
-            self.assertEqual(raw["vulnerability_validation"]["environments"]["lab"]["concurrency"], 2)
-            self.assertEqual(
-                raw["vulnerability_validation"]["environments"]["lab"]["methods"]
-                ["demo:LTE:lab"]["target_ip"],
-                "10.0.0.8",
-            )
+            self.assertEqual(raw["vulnerability_validation"]["concurrency"], 1)
+            self.assertEqual(raw["vulnerability_validation"]["supported_vulnerability_types"], ["*"])
+            self.assertEqual(raw["checker_selection"], {"disabled_checkers": []})
             for legacy_key in (
                 "no_proxy", "opencode", "opencode_concurrency", "fp_review_cli",
                 "memory_api_discovery", "git_history", "static_dedup", "pattern_filter",
@@ -649,31 +655,27 @@ class AgentConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(HTTPException, error_text):
                     _validate_managed_config(config)
 
-    def test_managed_config_accepts_bearer_authorization_header(self) -> None:
-        from backend.api.agent import _validate_managed_config
-        from deephole_client.opencode_integration import managed_mcp_config_fingerprint
+    def test_scan_knowledge_base_accepts_bearer_authorization_header(self) -> None:
+        from backend.api.scan import _knowledge_base_mcp
+        from backend.models import ScanKnowledgeBaseRequest
 
-        config = AgentRemoteConfig()
-        config.product_info.enabled = True
-        config.product_info.transport = "remote"
-        config.product_info.remote.url = "http://product.test/mcp"
-        config.product_info.remote.headers = {
+        config = _knowledge_base_mcp(ScanKnowledgeBaseRequest(
+            enabled=True,
+            url="http://product.test/mcp",
+            headers={
             "Authorization": "Bearer test-secret-123",
-        }
+            },
+        ))
 
-        _validate_managed_config(config)
+        self.assertIsNotNone(config)
+        self.assertEqual(config.remote.headers["Authorization"], "Bearer test-secret-123")
+        self.assertEqual(config.name, "product-info")
+        self.assertEqual(config.transport, "remote")
 
-        agent_config = AgentConfig()
-        apply_remote_config(agent_config, config.model_dump(mode="json"))
-        self.assertEqual(
-            managed_mcp_config_fingerprint(config.product_info),
-            managed_mcp_config_fingerprint(agent_config.product_info),
-        )
-
-    def test_managed_config_rejects_invalid_or_duplicate_header_names(self) -> None:
+    def test_scan_knowledge_base_rejects_invalid_or_duplicate_header_names(self) -> None:
         from fastapi import HTTPException
-
-        from backend.api.agent import _validate_managed_config
+        from backend.api.scan import _knowledge_base_mcp
+        from backend.models import ScanKnowledgeBaseRequest
 
         for headers, error_text in (
             ({"Bad Header": "value"}, "请求头名称无效"),
@@ -682,12 +684,14 @@ class AgentConfigTests(unittest.TestCase):
             ({"Authorization": "Bearer value\r\ninjected: true"}, "不能包含换行"),
         ):
             with self.subTest(headers=headers):
-                config = AgentRemoteConfig()
-                config.product_info.remote.headers = headers
                 with self.assertRaisesRegex(HTTPException, error_text):
-                    _validate_managed_config(config)
+                    _knowledge_base_mcp(ScanKnowledgeBaseRequest(
+                        enabled=True,
+                        url="http://product.test/mcp",
+                        headers=headers,
+                    ))
 
-    def test_legacy_remote_payload_migrates_to_v4_and_disables_default_model(self) -> None:
+    def test_legacy_remote_payload_migrates_to_v5_and_disables_default_model(self) -> None:
         config = AgentRemoteConfig.model_validate({
             "no_proxy": "localhost",
             "opencode_concurrency": 2,
@@ -702,7 +706,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 4)
+        self.assertEqual(config.schema_version, 5)
         self.assertEqual(config.base.no_proxy, "localhost")
         self.assertNotIn("opencode_config", config.model_dump())
         self.assertEqual(config.model_pool.global_concurrency, 2)

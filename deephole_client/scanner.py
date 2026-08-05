@@ -189,8 +189,10 @@ async def _report_process_vulnerabilities(
     code_scan_path: Path,
     product: str,
     validation_environment: str,
+    vulnerability_validation: dict[str, Any] | None = None,
     feedback_entries: list[dict[str, Any]],
     code_graph_mcp: dict[str, Any] | None,
+    knowledge_base_mcp: dict[str, Any] | None = None,
     engine: MiningEngineSelection,
     values: list[Any],
 ) -> list[tuple[Vulnerability, dict[str, Any] | None]]:
@@ -227,6 +229,7 @@ async def _report_process_vulnerabilities(
                     feedback_entries=feedback_entries,
                     processed_offset=int(fp_info.get("processed") or 0),
                     code_graph_mcp=code_graph_mcp,
+                    knowledge_base_mcp=knowledge_base_mcp,
                 )
             except Exception as exc:
                 print(
@@ -235,10 +238,10 @@ async def _report_process_vulnerabilities(
                     flush=True,
                 )
         if (
-            config.vulnerability_validation.enabled
+            isinstance(vulnerability_validation, dict)
+            and bool(vulnerability_validation.get("enabled"))
             and vulnerability.confirmed
             and product
-            and validation_environment
             and response.get("index") is not None
         ):
             from . import server as client_server
@@ -258,9 +261,21 @@ async def _report_process_vulnerabilities(
                     project_path=str(project_path),
                     code_scan_path=str(code_scan_path),
                     product=product,
-                    validation_environment=validation_environment,
+                    validation_method_id=str(
+                        vulnerability_validation.get("method_id") or ""
+                    ),
+                    validation_method_label=str(
+                        vulnerability_validation.get("method_label") or ""
+                    ),
+                    validation_values=dict(
+                        vulnerability_validation.get("values") or {}
+                    ),
+                    validation_policy=dict(
+                        vulnerability_validation.get("policy") or {}
+                    ),
                     report_queued=True,
                     code_graph_mcp=code_graph_mcp,
+                    knowledge_base_mcp=knowledge_base_mcp,
                 )
             except Exception as exc:
                 print(
@@ -303,7 +318,9 @@ async def run_scan(
     scan_mode: str = SCAN_MODE_FULL,
     threat_analysis_enabled: bool = False,
     threat_analysis_method: str = "deephole_threat_analysis",
+    vulnerability_validation: dict[str, Any] | None = None,
     code_graph_mcp: dict[str, Any] | None = None,
+    knowledge_base_mcp: dict[str, Any] | None = None,
     mining_engines: list[dict[str, Any]] | None = None,
 ) -> None:
     """Run the selected directory-discovered mining engines."""
@@ -591,8 +608,9 @@ async def run_scan(
                 # completed stage can be reused for this scan path.
                 is_resume=True,
                 product_mcp=(
-                    config.product_info.name
-                    if config.product_info.enabled
+                    "product-info"
+                    if isinstance(knowledge_base_mcp, dict)
+                    and bool(knowledge_base_mcp.get("enabled"))
                     else None
                 ),
                 output=process_output,
@@ -695,8 +713,10 @@ async def run_scan(
                 code_scan_path=scan_root,
                 product=product,
                 validation_environment=validation_environment,
+                vulnerability_validation=vulnerability_validation,
                 feedback_entries=feedback_entries,
                 code_graph_mcp=code_graph_mcp,
+                knowledge_base_mcp=knowledge_base_mcp,
                 engine=selection,
                 values=normalized,
             )
@@ -733,8 +753,18 @@ async def run_scan(
             "checker_packages": list(checker_packages),
             "product": product,
             "validation_environment": validation_environment,
+            "vulnerability_validation": copy.deepcopy(
+                vulnerability_validation
+            ),
             "feedback_entries": list(feedback_entries),
             "code_graph_mcp": copy.deepcopy(code_graph_mcp),
+            "knowledge_base_mcp": copy.deepcopy(knowledge_base_mcp),
+            "product_mcp": (
+                "product-info"
+                if isinstance(knowledge_base_mcp, dict)
+                and bool(knowledge_base_mcp.get("enabled"))
+                else None
+            ),
             "is_resume": is_resume,
             "retry_candidates": retry_candidates,
             "retry_total_candidates": retry_total_candidates,
@@ -803,6 +833,7 @@ async def run_scan(
             work_dir=scan_dir,
             feedback_entries=feedback_entries,
             code_graph_mcp=code_graph_mcp,
+            knowledge_base_mcp=knowledge_base_mcp,
             output=task_output,
             cancel_event=cancel_event,
         ):

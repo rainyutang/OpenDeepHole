@@ -392,6 +392,17 @@ class PostgresScanStore(SqliteScanStore):
                 "ALTER TABLE scans ADD COLUMN IF NOT EXISTS "
                 "threat_analysis_method_selection_json TEXT NOT NULL DEFAULT '{}'"
             )
+            for statement in (
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS knowledge_base_enabled INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS vulnerability_validation_enabled INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS validation_method_id TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS validation_method_label TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS knowledge_base_mcp_json TEXT",
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS vulnerability_validation_json TEXT",
+                "ALTER TABLE vulnerability_validations ADD COLUMN IF NOT EXISTS validation_method_id TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE vulnerability_validations ADD COLUMN IF NOT EXISTS validation_method_label TEXT NOT NULL DEFAULT ''",
+            ):
+                connection.execute(statement)
             connection.execute(
                 "ALTER TABLE agent_commands ADD COLUMN IF NOT EXISTS "
                 "attempts INTEGER NOT NULL DEFAULT 0"

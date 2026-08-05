@@ -245,7 +245,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 calls.append("candidate_audit")
                 self.assertEqual(kwargs["index_db_path"], index_path)
                 self.assertIn("static_candidate/rules", kwargs["checker_dirs"][0].as_posix())
-                self.assertEqual(kwargs["product_mcp"], "product-knowledge")
+                self.assertEqual(kwargs["product_mcp"], "product-info")
                 processed_key = {
                     "file": "src/a.c",
                     "line": 10,
@@ -310,6 +310,14 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     checker_names=["npd"],
                     scan_id="scan-1",
                     cancel_event=threading.Event(),
+                    knowledge_base_mcp={
+                        "enabled": True,
+                        "name": "product-info",
+                        "transport": "remote",
+                        "timeout_seconds": 300,
+                        "local": {"executable": "", "args": [], "environment": {}},
+                        "remote": {"url": "http://knowledge.test/mcp", "headers": {}},
+                    },
                     mining_engines=[{
                         "engine_id": "static_candidate",
                         "engine_label": "静态规则扫描 + 候选点审计",
@@ -343,6 +351,10 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             "complete",
         )
         self.assertIsNone(task_context.call_args.kwargs["code_graph_mcp"])
+        self.assertEqual(
+            task_context.call_args.kwargs["knowledge_base_mcp"]["name"],
+            "product-info",
+        )
         self.assertTrue(any(
             call.args[1].message
             == "Code graph MCP is not enabled; model tasks will use file tools only"
@@ -1213,8 +1225,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "checker_packages",
                 "product",
                 "validation_environment",
+                "vulnerability_validation",
                 "feedback_entries",
                 "code_graph_mcp",
+                "knowledge_base_mcp",
+                "product_mcp",
                 "is_resume",
                 "retry_candidates",
                 "retry_total_candidates",

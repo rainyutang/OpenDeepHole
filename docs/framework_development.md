@@ -23,7 +23,7 @@ DeepHole 2.0 并不是把所有新能力都注册成同一种插件。开始开�
 | 新增一套独立漏洞挖掘方法，并向平台返回漏洞列表 | 漏洞挖掘引擎 | 是 |
 | 在“静态召回 → 候选点 AI 审计”链路增加一种规则 | `static_candidate` Checker | 是 |
 | 对平台已确认的单个漏洞增加一种去误报方法 | 去误报方法 | 是 |
-| 针对某产品和验证环境实现漏洞复现或验证 | 产品验证器 | 是 |
+| 针对一个或多个产品实现漏洞复现或验证方法 | 产品验证器 | 是 |
 | 增加新的基础设施阶段、其它扫描级产物或全新任务生命周期 | 独立框架过程 | 否，需要显式接入协调器 |
 
 优先使用前五种扩展点。只有新能力无法表示为威胁分析方法、漏洞挖掘引擎、Checker、去误报方法或产品验证器时，
@@ -92,7 +92,7 @@ flowchart TD
 | 候选点审计 | `run_candidate_audit(**kwargs)` | 候选点、规则 Skill、代码索引 | `status`、`vulnerabilities`、`processed_keys` |
 | 威胁审计 | `run_threat_audit(**kwargs)` | 攻击树、高风险模块、扫描上下文 | `status`、`tasks`、`vulnerabilities` |
 | 去误报方法 | `run_fp_review(**kwargs)` | 方法 ID、代码路径、单个漏洞、历史反馈 | 单项 `status`、二元 `verdict`、`reason` 和阶段证据 |
-| 漏洞验证 | `run_vulnerability_validation(**kwargs)` | 产品、环境、漏洞批次、验证器配置 | `status`、`validations`，或验证器目录 `catalog` |
+| 漏洞验证 | `run_vulnerability_validation(**kwargs)` | 产品、方法 ID、漏洞批次、全局策略快照和方法 field 值 | `status`、`validations`，或验证方法目录 `catalog` |
 
 普通框架过程的入口统一为异步 `run_<process>(**kwargs)`。每个过程自行校验允许的 key，
 未知 key 应立即报错；返回值应可 JSON 序列化。威胁分析的外层入口仍由相邻的
@@ -150,9 +150,9 @@ def run_threat_analysis(
 | --- | --- | --- |
 | 身份 | `engine_id`、`engine_label`、`scan_id` | 本次扫描固化的引擎身份和扫描标识 |
 | 目录 | `project_path`、`code_scan_path`、`scan_dir`、`work_dir`、`index_db_path` | 只读源码范围、扫描工作目录、引擎可写目录和代码索引 |
-| 扫描数据 | `checker_names`、`checker_packages`、`product`、`validation_environment`、`feedback_entries` | 本次扫描的规则、产品、环境和历史反馈快照 |
+| 扫描数据 | `checker_names`、`checker_packages`、`product`、`vulnerability_validation`、`feedback_entries` | 本次扫描的规则、产品、漏洞验证配置和历史反馈快照 |
 | 运行状态 | `is_resume`、候选重试参数、威胁审计重试参数 | 续扫和定向重试上下文 |
-| 能力 | `config`、`code_graph_mcp` | Agent 只读配置和本次扫描私有的代码图谱 MCP 配置 |
+| 能力 | `config`、`code_graph_mcp`、`knowledge_base_mcp` | Agent 只读配置，以及本次扫描私有的代码图谱和知识库 MCP 配置 |
 | 回调 | `output`、`cancel_event`、`report_vulnerabilities` | 事件输出、取消检查和流式漏洞上报 |
 
 框架还会向内置引擎传入 `reporter`；第三方引擎不应依赖该平台对象，应优先使用
@@ -457,8 +457,10 @@ deephole_client/vulnerability_validation/product_validators/<method>/
 └── ...                                  # 可选辅助模块和只读资源
 ```
 
-`validator.yaml` 使用 `registrations` 声明一个或多个“产品 + 验证环境”组合，以及需要用户在
-Agent 配置页填写的动态字段。框架按目录自动发现，非法方法会被隔离，不影响其它验证器。
+方法 ID 直接使用目录名。`validator.yaml` 只允许非空 `label`、非空 `description`、非空产品
+列表 `product` 和可选动态参数列表 `field`。动态字段在新建扫描页填写；客户端配置页只维护
+所有验证方法共用的漏洞类型、并发、重试和模型策略。框架按目录自动发现，非法方法会被隔离，
+不影响其它验证器；旧版验证环境和 `registrations` 清单不再加载。
 
 唯一线上入口必须是：
 
@@ -479,7 +481,7 @@ async def validate(**kwargs) -> ValidationResult:
 框架向验证器提供三类数据：
 
 1. 漏洞数据：只保证 `report_markdown` 非空；文件、函数、行号、漏洞类型和调用链都可能缺失。
-2. 用户配置：`validator.yaml` 当前注册项声明的每个字段都会出现在 kwargs；可选字段没有值和
+2. 用户配置：`validator.yaml` 的 `field` 声明的每个字段都会出现在 kwargs；可选字段没有值和
    默认值时为 `None`，必填字段缺失时不会启动验证。
 3. 运行能力：`project_path`、`code_scan_path`、独立 `work_dir`、取消检查、
    `emit_stdout`、`publish_artifact`、`run_command`、模型能力和重试参数。

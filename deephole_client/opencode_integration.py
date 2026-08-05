@@ -525,65 +525,13 @@ def managed_mcp_config_fingerprint(managed) -> str:
 
 
 def build_managed_mcp_runtime_specs(runtime_config=None) -> dict[str, dict]:
-    """Build Agent-wide MCP entries; code graphs are owned by individual scans."""
-    runtime_config = runtime_config or get_config()
-    result: dict[str, dict] = {}
-    for target, managed in (
-        ("product_info", getattr(runtime_config, "product_info", None)),
-    ):
-        normalized = normalized_managed_mcp_config(managed or {})
-        enabled = normalized["enabled"]
-        name = normalized["name"]
-        transport = normalized["transport"]
-        error = ""
-        entry: dict | None = None
-        if enabled and not name:
-            error = "MCP name is empty"
-        elif enabled and transport == "remote":
-            url = normalized["remote"]["url"]
-            if not url:
-                error = "Remote MCP URL is empty"
-            else:
-                entry = {
-                    "type": "remote",
-                    "url": url,
-                    "enabled": True,
-                    "timeout": normalized["timeout_seconds"] * 1000,
-                    # DeepHole 2.0 currently supports static request-header auth.
-                    # Disable OpenCode's interactive OAuth auto-discovery so a bad
-                    # Bearer token is reported as a connection failure instead.
-                    "oauth": False,
-                }
-                if normalized["remote"]["headers"]:
-                    entry["headers"] = dict(normalized["remote"]["headers"])
-        elif enabled and transport == "local":
-            executable = normalized["local"]["executable"]
-            if not executable:
-                error = "Local MCP executable is empty"
-            elif target == "code_graph" and not (
-                shutil.which(executable) or Path(executable).is_file()
-            ):
-                error = f"CodeGraph executable not found: {executable}"
-            else:
-                entry = {
-                    "type": "local",
-                    "command": [executable, *normalized["local"]["args"]],
-                    "enabled": True,
-                    "timeout": normalized["timeout_seconds"] * 1000,
-                }
-                if normalized["local"]["environment"]:
-                    entry["environment"] = dict(normalized["local"]["environment"])
-        elif enabled:
-            error = f"Unsupported MCP transport: {transport}"
-        result[target] = {
-            "target": target,
-            "enabled": enabled,
-            "name": name,
-            "fingerprint": managed_mcp_config_fingerprint(normalized),
-            "config": entry,
-            "error": error,
-        }
-    return result
+    """Return Agent-wide MCP entries.
+
+    Product knowledge and source graphs are scan-owned from v5 onward. An
+    empty result also disconnects a previously hot-loaded v4 product MCP.
+    """
+    del runtime_config
+    return {}
 
 
 def _write_opencode_config(workspace: Path) -> None:

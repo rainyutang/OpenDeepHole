@@ -89,6 +89,7 @@ class OpenCodeExecutionContext:
     task_metadata: dict[str, Any] = field(default_factory=dict)
     feedback_entries: tuple[dict[str, Any], ...] = ()
     code_graph_mcp: dict[str, Any] | None = field(default=None, repr=False)
+    knowledge_base_mcp: dict[str, Any] | None = field(default=None, repr=False)
     on_output: Callable[[str], Any] | None = field(default=None, compare=False, repr=False)
     on_invocation_metadata: Callable[[OutputSource], Any] | None = field(
         default=None,
@@ -132,6 +133,7 @@ def set_opencode_execution_context(
     task_metadata: dict[str, Any] | None = None,
     feedback_entries: Any = None,
     code_graph_mcp: Any = _INHERIT_CONTEXT_VALUE,
+    knowledge_base_mcp: Any = _INHERIT_CONTEXT_VALUE,
     on_output: Callable[[str], Any] | None | object = _INHERIT_CONTEXT_VALUE,
     on_invocation_metadata: Callable[[OutputSource], Any] | None | object = _INHERIT_CONTEXT_VALUE,
     cancel_event: Any = _INHERIT_CONTEXT_VALUE,
@@ -179,6 +181,12 @@ def set_opencode_execution_context(
         next_code_graph_mcp = copy.deepcopy(code_graph_mcp)
     else:
         next_code_graph_mcp = None
+    if knowledge_base_mcp is _INHERIT_CONTEXT_VALUE:
+        next_knowledge_base_mcp = current.knowledge_base_mcp
+    elif isinstance(knowledge_base_mcp, dict):
+        next_knowledge_base_mcp = copy.deepcopy(knowledge_base_mcp)
+    else:
+        next_knowledge_base_mcp = None
     return _execution_context.set(OpenCodeExecutionContext(
         scan_id=next_scan_id,
         project_dir=next_project_dir,
@@ -188,6 +196,7 @@ def set_opencode_execution_context(
         task_metadata=metadata,
         feedback_entries=feedback,
         code_graph_mcp=next_code_graph_mcp,
+        knowledge_base_mcp=next_knowledge_base_mcp,
         on_output=current.on_output if on_output is _INHERIT_CONTEXT_VALUE else on_output,
         on_invocation_metadata=(
             current.on_invocation_metadata
@@ -240,6 +249,7 @@ def _snapshot_execution_context() -> OpenCodeExecutionContext:
         task_metadata=dict(current.task_metadata),
         feedback_entries=tuple(dict(entry) for entry in feedback),
         code_graph_mcp=copy.deepcopy(current.code_graph_mcp),
+        knowledge_base_mcp=copy.deepcopy(current.knowledge_base_mcp),
         on_output=current.on_output,
         on_invocation_metadata=current.on_invocation_metadata,
         cancel_event=current.cancel_event,
@@ -803,6 +813,7 @@ class OpenCodeTaskService:
                                     disabled_mcp_tools=(),
                                     scan_id=context.scan_id,
                                     code_graph_mcp=context.code_graph_mcp,
+                                    knowledge_base_mcp=context.knowledge_base_mcp,
                                     system_prompt=system_prompt,
                                     permissions=(
                                         permissions if output_attempt == 0 else None
@@ -1257,8 +1268,12 @@ def _task_cli_config(context: OpenCodeExecutionContext) -> Any:
 
 def _task_model_policy(context: OpenCodeExecutionContext) -> Any | None:
     """Return the authoritative phase policy for a model-backed task."""
-    config = get_config()
     task_type = str(context.task_metadata.get("task_type") or "").strip()
+    if task_type == "vulnerability_validation":
+        snapshot = context.task_metadata.get("validation_model_policy")
+        if isinstance(snapshot, dict):
+            return snapshot
+    config = get_config()
     if task_type == "vulnerability_mining":
         return getattr(config, "vulnerability_mining", None)
     if task_type == "threat_analysis":
@@ -1267,11 +1282,8 @@ def _task_model_policy(context: OpenCodeExecutionContext) -> Any | None:
     if task_type == "fp_review":
         return getattr(config, "false_positive", None)
     if task_type == "vulnerability_validation":
-        environment = str(context.task_metadata.get("validation_environment") or "").strip()
         validation = getattr(config, "vulnerability_validation", None)
-        environments = _cfg_value(validation, "environments", {}) or {}
-        env_config = environments.get(environment) if isinstance(environments, dict) else None
-        return _cfg_value(env_config, "model_policy") if env_config is not None else None
+        return _cfg_value(validation, "model_policy")
     # Unclassified tasks intentionally retain per-model/task timeout and retry
     # behavior because the Agent configuration page has no policy for them.
     return None

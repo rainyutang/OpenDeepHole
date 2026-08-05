@@ -40,6 +40,7 @@ from backend.models import (
     ScanCandidate,
     ScanStatus,
     ScanSummary,
+    ScanVulnerabilityValidationConfig,
     SkillReport,
     ThreatAuditTask,
     ThreatAnalysisMethodSelection,
@@ -367,6 +368,21 @@ def _scan_code_graph_mcp(value: str | None) -> AgentMcpConfig | None:
         return None
 
 
+def _scan_validation_config(
+    value: str | None,
+) -> ScanVulnerabilityValidationConfig | None:
+    try:
+        data = json.loads(value or "")
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data:
+        return None
+    try:
+        return ScanVulnerabilityValidationConfig.model_validate(data)
+    except Exception:
+        return None
+
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS scans (
     scan_id            TEXT PRIMARY KEY,
@@ -391,9 +407,15 @@ CREATE TABLE IF NOT EXISTS scans (
     workspace_path     TEXT,
     product            TEXT NOT NULL DEFAULT '',
     validation_environment TEXT NOT NULL DEFAULT '',
+    knowledge_base_enabled INTEGER NOT NULL DEFAULT 0,
+    vulnerability_validation_enabled INTEGER NOT NULL DEFAULT 0,
+    validation_method_id TEXT NOT NULL DEFAULT '',
+    validation_method_label TEXT NOT NULL DEFAULT '',
     public_access_token TEXT NOT NULL DEFAULT '',
     opencode_pool      TEXT NOT NULL DEFAULT '{}',
-    code_graph_mcp_json TEXT
+    code_graph_mcp_json TEXT,
+    knowledge_base_mcp_json TEXT,
+    vulnerability_validation_json TEXT
     ,mining_engines_json TEXT NOT NULL DEFAULT '[]'
     ,mining_engine_runs_json TEXT NOT NULL DEFAULT '[]'
 );
@@ -459,6 +481,8 @@ CREATE TABLE IF NOT EXISTS vulnerability_validations (
     running             INTEGER NOT NULL DEFAULT 0,
     product             TEXT NOT NULL DEFAULT '',
     validation_environment TEXT NOT NULL DEFAULT '',
+    validation_method_id TEXT NOT NULL DEFAULT '',
+    validation_method_label TEXT NOT NULL DEFAULT '',
     validator_name      TEXT NOT NULL DEFAULT '',
     validation_success  INTEGER,
     is_problem          INTEGER,
@@ -670,6 +694,14 @@ CREATE TABLE IF NOT EXISTS agents (
 
 CREATE INDEX IF NOT EXISTS idx_agents_user ON agents(user_id, updated_at);
 
+CREATE TABLE IF NOT EXISTS scan_config_memories (
+    user_id       TEXT NOT NULL,
+    agent_key     TEXT NOT NULL,
+    config_json   TEXT NOT NULL DEFAULT '{}',
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY(user_id, agent_key)
+);
+
 CREATE TABLE IF NOT EXISTS agent_opencode_pool_models (
     agent_name      TEXT NOT NULL,
     user_id         TEXT NOT NULL DEFAULT '',
@@ -869,6 +901,30 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN opencode_pool TEXT NOT NULL DEFAULT '{}'")
         if "code_graph_mcp_json" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN code_graph_mcp_json TEXT")
+        if "knowledge_base_enabled" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN knowledge_base_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        if "vulnerability_validation_enabled" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN vulnerability_validation_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        if "validation_method_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN validation_method_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "validation_method_label" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN validation_method_label TEXT NOT NULL DEFAULT ''"
+            )
+        if "knowledge_base_mcp_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN knowledge_base_mcp_json TEXT"
+            )
+        if "vulnerability_validation_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN vulnerability_validation_json TEXT"
+            )
         if "mining_engine_runs_json" not in cols:
             self._conn.execute(
                 "ALTER TABLE scans ADD COLUMN mining_engine_runs_json TEXT NOT NULL DEFAULT '[]'"
@@ -1421,6 +1477,14 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE vulnerability_validations ADD COLUMN validation_environment TEXT NOT NULL DEFAULT ''"
             )
+        if "validation_method_id" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN validation_method_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "validation_method_label" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN validation_method_label TEXT NOT NULL DEFAULT ''"
+            )
         if "validator_name" not in validation_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerability_validations ADD COLUMN validator_name TEXT NOT NULL DEFAULT ''"
@@ -1566,6 +1630,12 @@ class SqliteScanStore(ScanStoreBase):
             validation_environment=(
                 row["validation_environment"] if row["validation_environment"] is not None else ""
             ),
+            knowledge_base_enabled=bool(row["knowledge_base_enabled"]),
+            vulnerability_validation_enabled=bool(
+                row["vulnerability_validation_enabled"]
+            ),
+            validation_method_id=row["validation_method_id"] or "",
+            validation_method_label=row["validation_method_label"] or "",
             scan_items=json.loads(row["scan_items"]),
             mining_engines=_json_model_list(
                 row["mining_engines_json"],
@@ -1640,9 +1710,21 @@ class SqliteScanStore(ScanStoreBase):
             validation_environment=(
                 row["validation_environment"] if row["validation_environment"] is not None else ""
             ),
+            knowledge_base_enabled=bool(row["knowledge_base_enabled"]),
+            vulnerability_validation_enabled=bool(
+                row["vulnerability_validation_enabled"]
+            ),
+            validation_method_id=row["validation_method_id"] or "",
+            validation_method_label=row["validation_method_label"] or "",
             user_id=row["user_id"] if row["user_id"] is not None else "",
             public_access_token=row["public_access_token"] if row["public_access_token"] is not None else "",
             code_graph_mcp=_scan_code_graph_mcp(row["code_graph_mcp_json"]),
+            knowledge_base_mcp=_scan_code_graph_mcp(
+                row["knowledge_base_mcp_json"]
+            ),
+            vulnerability_validation=_scan_validation_config(
+                row["vulnerability_validation_json"]
+            ),
         )
 
     # -- Scan lifecycle --
@@ -1667,10 +1749,14 @@ class SqliteScanStore(ScanStoreBase):
                      threat_analysis_run_json,
                      auto_fp_review, fp_review_method,
                      fp_review_method_selection_json,
-                     product, validation_environment, public_access_token, opencode_pool,
-                     code_graph_mcp_json, mining_engines_json,
+                     product, validation_environment,
+                     knowledge_base_enabled, vulnerability_validation_enabled,
+                     validation_method_id, validation_method_label,
+                     public_access_token, opencode_pool,
+                     code_graph_mcp_json, knowledge_base_mcp_json,
+                     vulnerability_validation_json, mining_engines_json,
                      mining_engine_runs_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     scan_items = excluded.scan_items,
@@ -1702,9 +1788,15 @@ class SqliteScanStore(ScanStoreBase):
                     fp_review_method_selection_json = excluded.fp_review_method_selection_json,
                     product = excluded.product,
                     validation_environment = excluded.validation_environment,
+                    knowledge_base_enabled = excluded.knowledge_base_enabled,
+                    vulnerability_validation_enabled = excluded.vulnerability_validation_enabled,
+                    validation_method_id = excluded.validation_method_id,
+                    validation_method_label = excluded.validation_method_label,
                     public_access_token = excluded.public_access_token,
                     opencode_pool = excluded.opencode_pool,
                     code_graph_mcp_json = excluded.code_graph_mcp_json,
+                    knowledge_base_mcp_json = excluded.knowledge_base_mcp_json,
+                    vulnerability_validation_json = excluded.vulnerability_validation_json,
                     mining_engines_json = excluded.mining_engines_json,
                     mining_engine_runs_json = excluded.mining_engine_runs_json
                 """,
@@ -1758,11 +1850,25 @@ class SqliteScanStore(ScanStoreBase):
                     ),
                     meta.product,
                     meta.validation_environment,
+                    int(meta.knowledge_base_enabled),
+                    int(meta.vulnerability_validation_enabled),
+                    meta.validation_method_id,
+                    meta.validation_method_label,
                     meta.public_access_token,
                     scan.opencode_pool.model_dump_json() if scan.opencode_pool else "{}",
                     (
                         meta.code_graph_mcp.model_dump_json()
                         if meta.code_graph_mcp is not None
+                        else None
+                    ),
+                    (
+                        meta.knowledge_base_mcp.model_dump_json()
+                        if meta.knowledge_base_mcp is not None
+                        else None
+                    ),
+                    (
+                        meta.vulnerability_validation.model_dump_json()
+                        if meta.vulnerability_validation is not None
                         else None
                     ),
                     json.dumps(
@@ -1903,6 +2009,12 @@ class SqliteScanStore(ScanStoreBase):
             validation_environment=(
                 row["validation_environment"] if row["validation_environment"] is not None else ""
             ),
+            knowledge_base_enabled=bool(row["knowledge_base_enabled"]),
+            vulnerability_validation_enabled=bool(
+                row["vulnerability_validation_enabled"]
+            ),
+            validation_method_id=row["validation_method_id"] or "",
+            validation_method_label=row["validation_method_label"] or "",
             status=ScanItemStatus(row["status"]),
             created_at=row["created_at"],
             progress=row["progress"],
@@ -3024,16 +3136,19 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 """\
                 INSERT INTO vulnerability_validations
-                    (scan_id, vuln_index, status, running, product, validation_environment, validator_name,
+                    (scan_id, vuln_index, status, running, product, validation_environment,
+                     validation_method_id, validation_method_label, validator_name,
                      validation_success, is_problem, requires_human_intervention, validation_code,
                      validation_output, intermediate_output, output_sections, final_output, artifacts,
                      started_at, finished_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id, vuln_index) DO UPDATE SET
                     status = excluded.status,
                     running = excluded.running,
                     product = excluded.product,
                     validation_environment = excluded.validation_environment,
+                    validation_method_id = excluded.validation_method_id,
+                    validation_method_label = excluded.validation_method_label,
                     validator_name = excluded.validator_name,
                     validation_success = excluded.validation_success,
                     is_problem = excluded.is_problem,
@@ -3055,6 +3170,8 @@ class SqliteScanStore(ScanStoreBase):
                     1 if validation.running else 0,
                     validation.product,
                     validation.validation_environment,
+                    validation.validation_method_id,
+                    validation.validation_method_label,
                     validation.validator_name,
                     _nullable_bool(validation.validation_success),
                     _nullable_bool(validation.is_problem),
@@ -3117,6 +3234,8 @@ class SqliteScanStore(ScanStoreBase):
                 running=bool(r["running"]),
                 product=r["product"] or "",
                 validation_environment=r["validation_environment"] or "",
+                validation_method_id=r["validation_method_id"] or "",
+                validation_method_label=r["validation_method_label"] or "",
                 validator_name=r["validator_name"] or "",
                 validation_success=_bool_or_none(r["validation_success"]),
                 is_problem=_bool_or_none(r["is_problem"]),
@@ -4574,6 +4693,49 @@ class SqliteScanStore(ScanStoreBase):
         return cur.rowcount > 0
 
     # -- Persistent Agent catalog/config --
+
+    def get_scan_config_memory(
+        self,
+        user_id: str,
+        agent_key: str,
+    ) -> dict | None:
+        row = self._conn.execute(
+            "SELECT config_json FROM scan_config_memories WHERE user_id = ? AND agent_key = ?",
+            (user_id, agent_key),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row["config_json"] or "{}")
+        except Exception:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def upsert_scan_config_memory(
+        self,
+        user_id: str,
+        agent_key: str,
+        config: dict,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """\
+                INSERT INTO scan_config_memories
+                    (user_id, agent_key, config_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, agent_key) DO UPDATE SET
+                    config_json = excluded.config_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    agent_key,
+                    json.dumps(config, ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+            self._conn.commit()
 
     def find_agent_record(self, user_id: str, ip: str, machine_name: str) -> dict | None:
         cur = self._conn.execute(

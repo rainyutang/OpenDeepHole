@@ -30,6 +30,16 @@ def _mcp_config(**overrides) -> dict:
     return config
 
 
+async def _direct_store_call(store, operation, *args, **kwargs):
+    function = getattr(store, operation) if isinstance(operation, str) else operation
+    return function(*args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _use_direct_store_calls(monkeypatch):
+    monkeypatch.setattr(agent_api, "run_store_call", _direct_store_call)
+
+
 def test_local_stdio_probe_initializes_and_lists_tools(tmp_path: Path, monkeypatch) -> None:
     server = Path(__file__).parent / "fixtures" / "mcp_probe_server.py"
     monkeypatch.setattr(
@@ -154,14 +164,22 @@ def test_serve_runtime_status_distinguishes_loaded_pending_and_next_task() -> No
     }
 
 
-def test_agent_probe_result_persists_and_becomes_stale_after_config_change(
+def test_v5_retires_global_product_mcp_configuration(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
-    config = AgentRemoteConfig()
-    config.product_info.enabled = True
-    config.product_info.local.executable = sys.executable
+    config = AgentRemoteConfig.model_validate({
+        "schema_version": 4,
+        "product_info": {
+            "enabled": True,
+            "name": "legacy-product",
+            "transport": "remote",
+            "remote": {"url": "http://legacy-product.test/mcp"},
+        },
+    })
+    assert config.product_info.enabled is False
+    assert "product_info" not in config.model_dump(mode="json")
     store.upsert_agent_record(
         agent_key="stable-agent",
         user_id="user-1",
@@ -173,56 +191,34 @@ def test_agent_probe_result_persists_and_becomes_stale_after_config_change(
         initial_config_json=config.model_dump_json(),
     )
     monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
-    live_agent = AgentInfo(
-        agent_id="session-1",
-        agent_key="stable-agent",
-        name="agent",
-        machine_name="build-host",
-        ip="10.0.0.8",
-        last_seen="2026-07-17T01:00:00+00:00",
-        user_id="user-1",
-    )
-    monkeypatch.setattr(agent_api, "_live_agent_for_key", lambda _key: ("session-1", live_agent))
-
-    async def send_result(_agent_id: str, command: dict) -> bool:
-        agent_api._mcp_probe_waiters[command["request_id"]].set_result({
-            "success": True,
-            "transport": "local",
-            "protocol": "stdio",
-            "tool_names": ["search", "node"],
-            "duration_ms": 12,
-            "runtime_state": "reload_pending",
-            "active_sessions": 1,
-        })
-        return True
-
-    monkeypatch.setattr(agent_api, "send_agent_command", send_result)
+    monkeypatch.setattr(agent_api, "_live_agent_for_key", lambda _key: None)
     user = User(user_id="user-1", username="owner", role="user")
 
-    result = asyncio.run(agent_api.probe_stable_agent_mcp(
-        "stable-agent",
-        "product_info",
-        user,
-    ))
     status = asyncio.run(agent_api.get_stable_agent_mcp_status("stable-agent", user))
-
-    assert result.success is True
-    assert result.tool_names == ["node", "search"]
+    assert status.product_info.enabled is False
     assert status.product_info.stale is False
-    assert status.product_info.last_probe == result
-    persisted = json.loads(store.get_agent_record("stable-agent")["mcp_probe_json"])
-    assert persisted["product_info"]["runtime_state"] == "reload_pending"
-
-    config.product_info.timeout_seconds += 1
-    store.update_agent_config_record("stable-agent", config.model_dump_json())
-    stale_status = asyncio.run(agent_api.get_stable_agent_mcp_status("stable-agent", user))
-    assert stale_status.product_info.stale is True
+    with pytest.raises(HTTPException) as probe_error:
+        asyncio.run(agent_api.probe_stable_agent_mcp(
+            "stable-agent",
+            "product_info",
+            user,
+        ))
+    assert probe_error.value.status_code == 400
+    with pytest.raises(HTTPException) as reload_error:
+        asyncio.run(agent_api.reload_stable_agent_mcp(
+            "stable-agent",
+            "product_info",
+            user,
+        ))
+    assert reload_error.value.status_code == 400
     store.close()
 
 
-def test_scan_code_graph_probe_uses_request_config_without_persisting(
+@pytest.mark.parametrize("target", ["scan_code_graph", "scan_knowledge_base"])
+def test_scan_mcp_probe_normalizes_request_without_persisting(
     tmp_path: Path,
     monkeypatch,
+    target: str,
 ) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
     store.upsert_agent_record(
@@ -250,11 +246,39 @@ def test_scan_code_graph_probe_uses_request_config_without_persisting(
         "_live_agent_for_key",
         lambda _key: ("session-1", live_agent),
     )
-    requested = AgentMcpConfig.model_validate(_mcp_config())
+    requested = AgentMcpConfig.model_validate(
+        _mcp_config(
+            transport=("local" if target == "scan_code_graph" else "remote"),
+            name="caller-controlled",
+            timeout_seconds=7,
+            local={
+                "executable": "unsafe-custom-command",
+                "args": ["--custom"],
+                "environment": {"CUSTOM": "value"},
+            },
+            remote={
+                "url": "http://knowledge.test/mcp",
+                "headers": {"Authorization": "Bearer safe"},
+            },
+        )
+    )
 
     async def send_result(_agent_id: str, command: dict) -> bool:
-        assert command["target"] == "scan_code_graph"
-        assert command["mcp_config"] == requested.model_dump(mode="json")
+        assert command["target"] == target
+        sent_config = command["mcp_config"]
+        assert sent_config["timeout_seconds"] == 300
+        if target == "scan_code_graph":
+            assert sent_config["name"] == "codegraph"
+            assert sent_config["local"]["executable"] == "codegraph"
+            assert sent_config["local"]["args"] == ["serve", "--mcp"]
+            assert "CUSTOM" not in sent_config["local"]["environment"]
+        else:
+            assert sent_config["name"] == "product-info"
+            assert sent_config["transport"] == "remote"
+            assert sent_config["remote"] == {
+                "url": "http://knowledge.test/mcp",
+                "headers": {"Authorization": "Bearer safe"},
+            }
         agent_api._mcp_probe_waiters[command["request_id"]].set_result({
             "success": True,
             "protocol": "stdio",
@@ -265,7 +289,7 @@ def test_scan_code_graph_probe_uses_request_config_without_persisting(
     monkeypatch.setattr(agent_api, "send_agent_command", send_result)
     result = asyncio.run(agent_api.probe_stable_agent_mcp(
         "stable-agent",
-        "scan_code_graph",
+        target,
         User(user_id="user-1", username="owner", role="user"),
         mcp_config=requested,
     ))
@@ -276,13 +300,37 @@ def test_scan_code_graph_probe_uses_request_config_without_persisting(
     store.close()
 
 
+def test_scan_knowledge_probe_rejects_local_transport(tmp_path: Path, monkeypatch) -> None:
+    store = SqliteScanStore(tmp_path / "scan.db")
+    store.upsert_agent_record(
+        agent_key="stable-agent",
+        user_id="user-1",
+        ip="10.0.0.8",
+        machine_name="build-host",
+        display_name="agent",
+        agent_id="session-1",
+        last_seen="2026-07-17T01:00:00+00:00",
+        initial_config_json=AgentRemoteConfig().model_dump_json(),
+    )
+    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
+
+    with pytest.raises(HTTPException, match="仅支持远程") as excinfo:
+        asyncio.run(agent_api.probe_stable_agent_mcp(
+            "stable-agent",
+            "scan_knowledge_base",
+            User(user_id="user-1", username="owner", role="user"),
+            mcp_config=AgentMcpConfig.model_validate(_mcp_config()),
+        ))
+
+    assert excinfo.value.status_code == 422
+    store.close()
+
+
 def test_agent_probe_wait_timeout_cleans_up_waiter(monkeypatch) -> None:
-    config = AgentRemoteConfig()
-    config.product_info.enabled = True
     record = {
         "agent_key": "stable-agent",
         "user_id": "user-1",
-        "config_json": config.model_dump_json(),
+        "config_json": AgentRemoteConfig().model_dump_json(),
     }
 
     class Store:
@@ -314,106 +362,19 @@ def test_agent_probe_wait_timeout_cleans_up_waiter(monkeypatch) -> None:
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(agent_api.probe_stable_agent_mcp(
             "stable-agent",
-            "product_info",
+            "scan_knowledge_base",
             user,
+            mcp_config=AgentMcpConfig.model_validate(
+                _mcp_config(
+                    transport="remote",
+                    timeout_seconds=300,
+                    remote={"url": "http://knowledge.test/mcp", "headers": {}},
+                )
+            ),
         ))
 
     assert excinfo.value.status_code == 504
     assert agent_api._mcp_probe_waiters == {}
-
-
-def test_agent_mcp_status_reports_live_hot_load_state(monkeypatch) -> None:
-    config = AgentRemoteConfig()
-    config.product_info.enabled = True
-    config.product_info.transport = "remote"
-    config.product_info.remote.url = "http://product.test/mcp"
-    record = {
-        "agent_key": "stable-agent",
-        "user_id": "user-1",
-        "config_json": config.model_dump_json(),
-        "mcp_probe_json": "{}",
-    }
-
-    class Store:
-        def get_agent_record(self, _agent_key):
-            return record
-
-    live_agent = AgentInfo(
-        agent_id="session-1",
-        agent_key="stable-agent",
-        name="agent",
-        ip="10.0.0.8",
-        last_seen="2026-07-17T01:00:00+00:00",
-        user_id="user-1",
-    )
-
-    async def send_result(_agent_id: str, command: dict) -> bool:
-        assert command["type"] == "mcp_status"
-        agent_api._mcp_status_waiters[command["request_id"]].set_result({
-            "targets": {
-                "product_info": {
-                    "state": "connected",
-                    "config_fingerprint": agent_api._mcp_config_fingerprint(config.product_info),
-                    "updated_at": "2026-07-19T00:00:00+00:00",
-                    "error": "",
-                    "loaded_directories": 2,
-                    "total_directories": 2,
-                },
-            },
-        })
-        return True
-
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: Store())
-    monkeypatch.setattr(agent_api, "_live_agent_for_key", lambda _key: ("session-1", live_agent))
-    monkeypatch.setattr(agent_api, "send_agent_command", send_result)
-    user = User(user_id="user-1", username="owner", role="user")
-
-    status = asyncio.run(agent_api.get_stable_agent_mcp_status("stable-agent", user))
-
-    assert status.product_info.runtime.state == "connected"
-    assert status.product_info.runtime.loaded_directories == 2
-    assert status.product_info.runtime.total_directories == 2
-    assert agent_api._mcp_status_waiters == {}
-
-
-def test_agent_mcp_reload_sends_target_and_cleans_up_waiter(monkeypatch) -> None:
-    config = AgentRemoteConfig()
-    config.product_info.enabled = True
-    config.product_info.local.executable = sys.executable
-    record = {
-        "agent_key": "stable-agent",
-        "user_id": "user-1",
-        "config_json": config.model_dump_json(),
-    }
-
-    class Store:
-        def get_agent_record(self, _agent_key):
-            return record
-
-    live_agent = AgentInfo(
-        agent_id="session-1",
-        agent_key="stable-agent",
-        name="agent",
-        ip="10.0.0.8",
-        last_seen="2026-07-17T01:00:00+00:00",
-        user_id="user-1",
-    )
-
-    async def send_result(_agent_id: str, command: dict) -> bool:
-        assert command["type"] == "mcp_reload"
-        assert command["target"] == "product_info"
-        agent_api._mcp_reload_waiters[command["request_id"]].set_result({"ok": True})
-        return True
-
-    monkeypatch.setattr(agent_api, "get_scan_store", lambda: Store())
-    monkeypatch.setattr(agent_api, "_live_agent_for_key", lambda _key: ("session-1", live_agent))
-    monkeypatch.setattr(agent_api, "send_agent_command", send_result)
-    user = User(user_id="user-1", username="owner", role="user")
-
-    result = asyncio.run(agent_api.reload_stable_agent_mcp("stable-agent", "product_info", user))
-
-    assert result == {"ok": True}
-    assert agent_api._mcp_reload_waiters == {}
 
 
 def test_agent_mcp_probe_column_is_added_to_legacy_agents_table(tmp_path: Path) -> None:

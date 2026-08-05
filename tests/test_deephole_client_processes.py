@@ -1558,7 +1558,11 @@ def test_fp_review_and_validation_processes_run_per_vulnerability() -> None:
         validator = validators / "demo"
         validator.mkdir(parents=True)
         (validator / "validator.yaml").write_text(
-            "schema_version: 1\nproduct: Demo\nvalidation_environment: lab\n",
+            "label: Demo 验证方法\n"
+            "description: Demo 验证方法\n"
+            "product:\n"
+            "  - Demo\n"
+            "field: []\n",
             encoding="utf-8",
         )
         (validator / "validator.py").write_text(
@@ -1574,10 +1578,11 @@ def test_fp_review_and_validation_processes_run_per_vulnerability() -> None:
             work_dir=root / "validation",
             scan_id="scan-1",
             product="Demo",
-            environment="lab",
+            method_id="demo",
             validation_items=[{"vuln_index": 7, "vulnerability": vulnerability}],
             validators_dir=validators,
-            environment_config={},
+            validation_policy={},
+            method_values={},
             cancel_event=threading.Event(),
         )
         assert validated["status"] == "success"

@@ -137,10 +137,12 @@ class OpenCodeFileWrite:
 @dataclass(frozen=True)
 class _ScanMcpLease:
     directory_key: str
+    state_key: str
     identity: str
     name: str
     fingerprint: str
     connected: bool
+    role: str = "code_graph"
     error: str = ""
 
 
@@ -3150,9 +3152,14 @@ class OpenCodeServeManager:
         directory: Path,
         scan_id: str,
         raw_config: dict[str, Any] | None,
+        *,
+        role: str = "code_graph",
+        source_graph: bool = True,
     ) -> _ScanMcpLease:
         directory = Path(directory).resolve()
         directory_key = self._event_directory_key(directory)
+        normalized_role = str(role or "scan_mcp").strip() or "scan_mcp"
+        state_key = f"{directory_key}\0{normalized_role}"
         spec: dict[str, Any]
         if not str(scan_id or "").strip():
             spec = {
@@ -3189,22 +3196,24 @@ class OpenCodeServeManager:
             fingerprint,
         )
         condition = self._scan_mcp_conditions.setdefault(
-            directory_key,
+            state_key,
             asyncio.Condition(),
         )
         async with condition:
             while True:
-                existing = self._scan_mcp_states.get(directory_key)
+                existing = self._scan_mcp_states.get(state_key)
                 if existing is None:
                     break
                 if str(existing.get("identity") or "") == identity:
                     existing["references"] = int(existing.get("references") or 0) + 1
                     return _ScanMcpLease(
                         directory_key=directory_key,
+                        state_key=state_key,
                         identity=identity,
                         name=str(existing.get("name") or name),
                         fingerprint=fingerprint,
                         connected=bool(existing.get("connected")),
+                        role=normalized_role,
                         error=str(existing.get("error") or ""),
                     )
                 await condition.wait()
@@ -3218,15 +3227,29 @@ class OpenCodeServeManager:
                 "error": str(spec.get("error") or ""),
                 "spec": spec,
                 "directory": directory,
+                "directory_key": directory_key,
+                "role": normalized_role,
+                "source_graph": source_graph,
             }
-            self._scan_mcp_states[directory_key] = state
+            self._scan_mcp_states[state_key] = state
             if raw_config is not None and name:
+                active_names = {
+                    str(item.get("name") or "")
+                    for key, item in self._scan_mcp_states.items()
+                    if key != state_key
+                    and str(item.get("directory_key") or "") == directory_key
+                    and str(item.get("name") or "")
+                }
                 if name in self._enabled_managed_mcp_names():
                     state["error"] = (
                         f"Scan code graph MCP name {name!r} conflicts with "
                         "an enabled global MCP"
                     )
-                else:
+                elif name in active_names:
+                    state["error"] = (
+                        f"Scan MCP name {name!r} conflicts with another active MCP"
+                    )
+                elif source_graph:
                     self._scan_mcp_names.setdefault(directory_key, set()).add(name)
 
             config = spec.get("config")
@@ -3236,23 +3259,28 @@ class OpenCodeServeManager:
                 (timeout_ms / 1000.0) + 5.0 if timeout_ms else 0,
             )
             try:
-                await self._disconnect_source_graph_mcps(client, directory)
+                if source_graph:
+                    await self._disconnect_source_graph_mcps(client, directory)
                 if state["error"]:
                     return _ScanMcpLease(
                         directory_key=directory_key,
+                        state_key=state_key,
                         identity=identity,
                         name=name,
                         fingerprint=fingerprint,
                         connected=False,
+                        role=normalized_role,
                         error=str(state["error"]),
                     )
                 if not name:
                     return _ScanMcpLease(
                         directory_key=directory_key,
+                        state_key=state_key,
                         identity=identity,
                         name="",
                         fingerprint=fingerprint,
                         connected=False,
+                        role=normalized_role,
                     )
                 response = await client.post(
                     "/mcp",
@@ -3271,13 +3299,15 @@ class OpenCodeServeManager:
                 state["connected"] = True
                 return _ScanMcpLease(
                     directory_key=directory_key,
+                    state_key=state_key,
                     identity=identity,
                     name=name,
                     fingerprint=fingerprint,
                     connected=True,
+                    role=normalized_role,
                 )
             except asyncio.CancelledError:
-                self._scan_mcp_states.pop(directory_key, None)
+                self._scan_mcp_states.pop(state_key, None)
                 condition.notify_all()
                 raise
             except Exception as exc:
@@ -3293,7 +3323,7 @@ class OpenCodeServeManager:
                             spec,
                         )
                     except asyncio.CancelledError:
-                        self._scan_mcp_states.pop(directory_key, None)
+                        self._scan_mcp_states.pop(state_key, None)
                         condition.notify_all()
                         raise
                     except Exception as cleanup_exc:
@@ -3313,10 +3343,12 @@ class OpenCodeServeManager:
                 )
                 return _ScanMcpLease(
                     directory_key=directory_key,
+                    state_key=state_key,
                     identity=identity,
                     name=name,
                     fingerprint=fingerprint,
                     connected=False,
+                    role=normalized_role,
                     error=error,
                 )
 
@@ -3327,13 +3359,13 @@ class OpenCodeServeManager:
     ) -> None:
         if lease is None:
             return
-        condition = self._scan_mcp_conditions.get(lease.directory_key)
+        condition = self._scan_mcp_conditions.get(lease.state_key)
         if condition is None:
             return
         spec: dict[str, Any] | None = None
         should_disconnect = False
         async with condition:
-            existing = self._scan_mcp_states.get(lease.directory_key)
+            existing = self._scan_mcp_states.get(lease.state_key)
             if (
                 existing is None
                 or str(existing.get("identity") or "") != lease.identity
@@ -3369,7 +3401,7 @@ class OpenCodeServeManager:
                     self._redact_managed_mcp_error(exc, spec or {}),
                 )
             finally:
-                self._scan_mcp_states.pop(lease.directory_key, None)
+                self._scan_mcp_states.pop(lease.state_key, None)
                 condition.notify_all()
 
     def managed_mcp_runtime_status(self) -> dict[str, dict[str, Any]]:
@@ -3520,6 +3552,7 @@ class OpenCodeServeManager:
         disabled_mcp_tools: list[str] | tuple[str, ...] | None = None,
         scan_id: str = "",
         code_graph_mcp: dict[str, Any] | None = None,
+        knowledge_base_mcp: dict[str, Any] | None = None,
         system_prompt: str = "",
         permissions: list[dict[str, str]] | None = None,
         return_details: bool = False,
@@ -3595,6 +3628,7 @@ class OpenCodeServeManager:
         session_outcome = "failure"
         session_error = ""
         scan_mcp_lease: _ScanMcpLease | None = None
+        knowledge_mcp_lease: _ScanMcpLease | None = None
         selected_source_mcp: str | None = None
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
@@ -3685,6 +3719,29 @@ class OpenCodeServeManager:
                             "session",
                             "CODE_GRAPH_MCP disabled mode=file_tools",
                         )
+                    if (
+                        isinstance(knowledge_base_mcp, dict)
+                        and bool(knowledge_base_mcp.get("enabled"))
+                    ):
+                        knowledge_mcp_lease = await self._acquire_scan_mcp(
+                            client,
+                            directory,
+                            str(scan_id),
+                            knowledge_base_mcp,
+                            role="knowledge_base",
+                            source_graph=False,
+                        )
+                        if knowledge_mcp_lease.connected:
+                            emit(
+                                "session",
+                                f"KNOWLEDGE_BASE_MCP connected name={knowledge_mcp_lease.name}",
+                            )
+                        elif knowledge_mcp_lease.error:
+                            emit(
+                                "session",
+                                "KNOWLEDGE_BASE_MCP unavailable "
+                                f"error={_one_line_preview(knowledge_mcp_lease.error)}",
+                            )
                 if not active_session_id:
                     create_payload: dict[str, Any] = {
                         "title": str(session_title or "").strip() or "DeepHole 2.0 task",
@@ -3799,7 +3856,10 @@ class OpenCodeServeManager:
                     mcp_overrides,
                     selected_source_mcp,
                     source_mcp_names=self._source_graph_mcp_names(directory),
-                    protected_mcp_names=self._enabled_managed_mcp_names(),
+                    protected_mcp_names=(
+                        self._enabled_managed_mcp_names()
+                        | ({knowledge_mcp_lease.name} if knowledge_mcp_lease and knowledge_mcp_lease.connected else set())
+                    ),
                     allow_undiscovered=bool(
                         scan_mcp_lease is not None and scan_mcp_lease.connected
                     ),
@@ -4055,9 +4115,13 @@ class OpenCodeServeManager:
                         )
                 finally:
                     try:
-                        await self._release_scan_mcp(directory, scan_mcp_lease)
+                        if knowledge_mcp_lease is not None:
+                            await self._release_scan_mcp(directory, knowledge_mcp_lease)
                     finally:
-                        await self._release_active_session()
+                        try:
+                            await self._release_scan_mcp(directory, scan_mcp_lease)
+                        finally:
+                            await self._release_active_session()
 
     async def _session_api_request(
         self,

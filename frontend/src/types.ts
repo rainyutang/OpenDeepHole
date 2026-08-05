@@ -174,6 +174,8 @@ export interface VulnerabilityValidation {
   running: boolean;
   product?: string;
   validation_environment?: string;
+  validation_method_id?: string;
+  validation_method_label?: string;
   validator_name?: string;
   validation_success?: boolean | null;
   is_problem?: boolean | null;
@@ -439,13 +441,6 @@ export interface AgentOpenCodePoolStatus extends OpenCodePoolStatus {
   online: boolean;
 }
 
-export interface ValidationTarget {
-  validator_id: string;
-  product: string;
-  validation_environment: string;
-  timeout_seconds?: number | null;
-}
-
 export interface ScanStatus {
   scan_id: string;
   project_id: string;
@@ -459,6 +454,10 @@ export interface ScanStatus {
   fp_review_method_selection?: FpReviewMethodSelection | null;
   product: string;
   validation_environment: string;
+  knowledge_base_enabled: boolean;
+  vulnerability_validation_enabled: boolean;
+  validation_method_id: string;
+  validation_method_label: string;
   scan_items: string[];
   mining_engines?: MiningEngineSelection[];
   mining_engine_runs?: MiningEngineRunStatus[];
@@ -598,6 +597,10 @@ export interface ScanSummary {
   scan_name: string;
   product: string;
   validation_environment: string;
+  knowledge_base_enabled: boolean;
+  vulnerability_validation_enabled: boolean;
+  validation_method_id: string;
+  validation_method_label: string;
   status: ScanItemStatus;
   created_at: string;
   progress: number;
@@ -697,16 +700,15 @@ export interface AgentThreatAnalysisConfig {
   model_policy: AgentModelTaskPolicy;
 }
 
-export interface AgentValidationEnvironmentConfig {
+export interface AgentVulnerabilityValidationConfig {
   supported_vulnerability_types: string[];
   concurrency: number;
   validation_max_retries: number;
   model_policy: AgentModelTaskPolicy;
-  methods: Record<string, Record<string, unknown>>;
 }
 
-export interface AgentVulnerabilityValidationConfig {
-  environments: Record<string, AgentValidationEnvironmentConfig>;
+export interface AgentCheckerSelectionConfig {
+  disabled_checkers: string[];
 }
 
 export interface AgentValidatorField {
@@ -722,18 +724,16 @@ export interface AgentValidatorField {
   placeholder?: string;
 }
 
-export interface AgentValidatorRegistration {
-  registration_key: string;
+export interface AgentValidatorMethod {
   method_id: string;
   method_label: string;
-  product: string;
-  environment: string;
+  description: string;
+  products: string[];
   fields: AgentValidatorField[];
-  legacy?: boolean;
 }
 
 export interface AgentValidatorCatalog {
-  registrations: AgentValidatorRegistration[];
+  methods: AgentValidatorMethod[];
   errors: string[];
   updated_at: string;
 }
@@ -796,18 +796,26 @@ export interface MiningEngineCatalog {
 }
 
 export interface AgentRemoteConfig {
-  schema_version: 4;
+  schema_version: 5;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;
-  product_info: AgentMcpConfig;
   vulnerability_mining: AgentModelTaskPolicy;
   false_positive: AgentModelTaskPolicy;
   vulnerability_validation: AgentVulnerabilityValidationConfig;
+  checker_selection: AgentCheckerSelectionConfig;
 }
 
 export type AgentMcpTarget = "product_info";
-export type AgentMcpProbeTarget = AgentMcpTarget | "scan_code_graph";
+export type AgentMcpProbeTarget = AgentMcpTarget | "scan_code_graph" | "scan_knowledge_base";
+
+export interface ScanConfigMemory {
+  knowledge_base: { url?: string; headers?: Record<string, string> } | null;
+  validation_by_product: Record<string, {
+    last_method_id?: string;
+    values_by_method?: Record<string, Record<string, unknown>>;
+  }>;
+}
 export type AgentMcpRuntimeState = "active" | "reload_pending" | "next_task";
 
 export interface AgentMcpLiveRuntimeStatus {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getValidationTargets, getScansPage, resumeScan, stopScan, deleteScan, updateScanValidationTarget } from "../api/client";
-import type { ScanSummary, ScanItemStatus, User, ValidationTarget } from "../types";
+import { getScansPage, resumeScan, stopScan, deleteScan } from "../api/client";
+import type { ScanSummary, ScanItemStatus, User } from "../types";
 import AnnouncementBoard from "./AnnouncementBoard";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -49,10 +49,6 @@ function productFilterValue(scan: ScanSummary) {
 
 function productFilterLabel(value: string) {
   return value === UNCONFIGURED_PRODUCT_FILTER ? "未配置" : value;
-}
-
-function validationTargetValue(product: string, environment: string) {
-  return product && environment ? JSON.stringify([product, environment]) : "";
 }
 
 function isThreatAnalysisOnlyScan(scan: ScanSummary) {
@@ -214,10 +210,8 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const loadedOlderPagesRef = useRef(false);
-  const [validationTargets, setValidationTargets] = useState<ValidationTarget[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [productSavingId, setProductSavingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [productFilter, setProductFilter] = useState(ALL_FILTER);
   const [projectFilter, setProjectFilter] = useState(ALL_FILTER);
@@ -254,8 +248,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
 
   useEffect(() => {
     fetchScans(true);
-    getValidationTargets().then(setValidationTargets).catch(() => {});
-
     let lastFetch = Date.now();
     const timer = setInterval(() => {
       if (document.visibilityState === "hidden") return;
@@ -336,25 +328,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
       // silently fail
     } finally {
       setActionLoading(null);
-    }
-  };
-
-  const handleValidationTargetChange = async (scanId: string, value: string) => {
-    const [product, validationEnvironment] = value
-      ? (JSON.parse(value) as [string, string])
-      : ["", ""];
-    setProductSavingId(scanId);
-    try {
-      await updateScanValidationTarget(scanId, product, validationEnvironment);
-      setScans((prev) => prev.map((scan) => (
-        scan.scan_id === scanId
-          ? { ...scan, product, validation_environment: validationEnvironment }
-          : scan
-      )));
-    } catch {
-      // silently fail
-    } finally {
-      setProductSavingId(null);
     }
   };
 
@@ -589,7 +562,6 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                   const taskPct = totalTasks > 0 ? Math.min(100, Math.round((completedTasks / totalTasks) * 100)) : 0;
                   const canDelete = !running;
                   const isLoading = actionLoading === scan.scan_id;
-                  const isProductSaving = productSavingId === scan.scan_id;
                   const displayProjectName = projectName(scan);
 
                   return (
@@ -598,22 +570,18 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                       className="border-b border-slate-700/50 hover:bg-slate-800/50 transition-colors"
                     >
                       <td className="px-4 py-3">
-                        <select
-                          value={validationTargetValue(scan.product || "", scan.validation_environment || "")}
-                          onChange={(e) => handleValidationTargetChange(scan.scan_id, e.target.value)}
-                          disabled={isProductSaving}
-                          className="max-w-[9rem] bg-slate-900 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 disabled:opacity-60"
-                        >
-                          <option value="">未配置</option>
-                          {validationTargets.map((target) => (
-                            <option
-                              key={target.validator_id}
-                              value={validationTargetValue(target.product, target.validation_environment)}
-                            >
-                              {target.product} / {target.validation_environment}
-                            </option>
-                          ))}
-                        </select>
+                        <span className="text-sm text-slate-200">{scan.product || "未配置"}</span>
+                        {scan.vulnerability_validation_enabled && (
+                          <span className="mt-1 block max-w-[10rem] truncate text-xs text-blue-300" title={scan.validation_method_label || scan.validation_method_id}>
+                            验证：{scan.validation_method_label || scan.validation_method_id}
+                          </span>
+                        )}
+                        {!scan.vulnerability_validation_enabled && scan.validation_environment && (
+                          <span className="mt-1 block max-w-[10rem] truncate text-xs text-slate-400" title={scan.validation_environment}>
+                            旧验证环境：{scan.validation_environment}
+                          </span>
+                        )}
+                        {scan.knowledge_base_enabled && <span className="mt-1 block text-xs text-emerald-300">已启用知识库</span>}
                       </td>
                       <td className="px-4 py-3 text-sm font-medium text-slate-200 max-w-[14rem] truncate" title={displayProjectName}>
                         {displayProjectName}

@@ -20,7 +20,9 @@ class ScanTask:
     threat_analysis_method: str = "deephole_threat_analysis"
     product: str = ""
     validation_environment: str = ""
+    vulnerability_validation: dict | None = None
     code_graph_mcp: dict | None = None
+    knowledge_base_mcp: dict | None = None
     feedback_entries: list[dict] = field(default_factory=list)
     checker_packages: list[dict] = field(default_factory=list)
     mining_engines: list[dict] | None = None
@@ -49,7 +51,9 @@ class TaskManager:
         threat_analysis_method: str = "deephole_threat_analysis",
         product: str = "",
         validation_environment: str = "",
+        vulnerability_validation: dict | None = None,
         code_graph_mcp: dict | None = None,
+        knowledge_base_mcp: dict | None = None,
         feedback_entries: list[dict] | None = None,
         checker_packages: list[dict] | None = None,
         mining_engines: list[dict] | None = None,
@@ -73,9 +77,19 @@ class TaskManager:
             ),
             product=product,
             validation_environment=validation_environment,
+            vulnerability_validation=(
+                copy.deepcopy(vulnerability_validation)
+                if isinstance(vulnerability_validation, dict)
+                else None
+            ),
             code_graph_mcp=(
                 copy.deepcopy(code_graph_mcp)
                 if isinstance(code_graph_mcp, dict)
+                else None
+            ),
+            knowledge_base_mcp=(
+                copy.deepcopy(knowledge_base_mcp)
+                if isinstance(knowledge_base_mcp, dict)
                 else None
             ),
             feedback_entries=feedback_entries or [],

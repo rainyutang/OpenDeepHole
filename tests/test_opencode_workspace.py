@@ -172,7 +172,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             list(edit).index("~/.opendeephole/scans/**"),
         )
 
-    def test_build_opencode_config_keeps_product_mcp_global_but_not_code_graph(self) -> None:
+    def test_build_opencode_config_keeps_scan_owned_mcps_out_of_global_config(self) -> None:
         fake_config = SimpleNamespace(
             code_graph=SimpleNamespace(
                 enabled=True,
@@ -210,8 +210,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
         self.assertNotIn("codegraph", config["mcp"])
         self.assertNotIn("deephole-code", config["mcp"])
-        self.assertEqual(config["mcp"]["product-info"]["type"], "remote")
-        self.assertIs(config["mcp"]["product-info"]["oauth"], False)
+        self.assertNotIn("product-info", config["mcp"])
 
     def test_codegraph_readiness_survives_restart_and_subdirectories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

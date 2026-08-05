@@ -16,6 +16,11 @@ from backend.models import (
 from backend.scan_metrics import VulnStat
 
 
+async def _direct_store_call(store, operation, *args, **kwargs):
+    function = getattr(store, operation) if isinstance(operation, str) else operation
+    return function(*args, **kwargs)
+
+
 class FakeScanStore:
     def __init__(self, scan: ScanStatus, meta: ScanMeta) -> None:
         self.scan = scan
@@ -158,6 +163,8 @@ class ScanHistorySummaryTests(unittest.TestCase):
 
         with (
             patch("backend.api.scan.get_scan_store", return_value=FakeScanStore(scan, meta)),
+            patch("backend.api.agent.get_scan_store", return_value=FakeScanStore(scan, meta)),
+            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
             patch("backend.api.agent.is_agent_name_online", return_value=True),
         ):
             response = asyncio.run(
@@ -223,6 +230,8 @@ class ScanHistorySummaryTests(unittest.TestCase):
 
         with (
             patch("backend.api.scan.get_scan_store", return_value=FakeScanStore(scan, meta)),
+            patch("backend.api.agent.get_scan_store", return_value=FakeScanStore(scan, meta)),
+            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
             patch("backend.api.agent.is_agent_name_online", return_value=True),
         ):
             response = asyncio.run(

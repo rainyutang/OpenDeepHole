@@ -570,6 +570,19 @@ class ScanStoreBase(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    # -- User + client scoped scan-form memory --
+
+    def get_scan_config_memory(self, user_id: str, agent_key: str) -> dict | None:
+        raise NotImplementedError
+
+    def upsert_scan_config_memory(
+        self,
+        user_id: str,
+        agent_key: str,
+        config: dict,
+    ) -> None:
+        raise NotImplementedError
+
     # -- Cleanup --
 
     @abstractmethod

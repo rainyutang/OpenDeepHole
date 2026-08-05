@@ -516,6 +516,8 @@ class VulnerabilityValidation(BaseModel):
     running: bool = False
     product: str = ""
     validation_environment: str = ""
+    validation_method_id: str = ""
+    validation_method_label: str = ""
     validator_name: str = ""
     validation_success: bool | None = None
     is_problem: bool | None = None
@@ -627,6 +629,10 @@ class ScanStatus(BaseModel):
     fp_review_method_selection: FpReviewMethodSelection | None = None
     product: str = ""
     validation_environment: str = ""
+    knowledge_base_enabled: bool = False
+    vulnerability_validation_enabled: bool = False
+    validation_method_id: str = ""
+    validation_method_label: str = ""
     scan_items: list[str] = []
     mining_engines: list[MiningEngineSelection] = []
     mining_engine_runs: list[MiningEngineRunStatus] = []
@@ -775,6 +781,8 @@ class AgentVulnerabilityValidationUpdate(BaseModel):
     running: bool = False
     product: str = ""
     validation_environment: str = ""
+    validation_method_id: str = ""
+    validation_method_label: str = ""
     validator_name: str = ""
     validation_success: bool | None = None
     is_problem: bool | None = None
@@ -932,13 +940,20 @@ class AgentMcpStatusResponse(BaseModel):
     product_info: AgentMcpTargetStatus = AgentMcpTargetStatus()
 
 
-class AgentValidationEnvironmentConfig(BaseModel):
+class AgentVulnerabilityValidationConfig(BaseModel):
     supported_vulnerability_types: list[str] = ["*"]
     concurrency: int = 1
     validation_max_retries: int = 0
-    model_policy: AgentModelTaskPolicy = AgentModelTaskPolicy()
-    # Values are keyed by the stable validator registration key.
-    methods: dict[str, dict[str, object]] = {}
+    model_policy: AgentModelTaskPolicy = AgentModelTaskPolicy(
+        required_capability="high",
+        timeout_seconds=3600,
+        max_retries=2,
+    )
+
+
+class AgentCheckerSelectionConfig(BaseModel):
+    # Persist exclusions so newly discovered checkers are enabled by default.
+    disabled_checkers: list[str] = []
 
 
 class AgentValidatorField(BaseModel):
@@ -954,19 +969,16 @@ class AgentValidatorField(BaseModel):
     placeholder: str = ""
 
 
-class AgentValidatorRegistration(BaseModel):
-    registration_key: str
+class AgentValidatorMethod(BaseModel):
     method_id: str
     method_label: str = ""
-    product: str
-    environment: str
+    description: str = ""
+    products: list[str] = []
     fields: list[AgentValidatorField] = []
-    timeout_seconds: int | None = None
-    legacy: bool = False
 
 
 class AgentValidatorCatalog(BaseModel):
-    registrations: list[AgentValidatorRegistration] = []
+    methods: list[AgentValidatorMethod] = []
     errors: list[str] = []
     updated_at: str = ""
 
@@ -1006,7 +1018,7 @@ def _upgrade_agent_policy(
 def _upgrade_agent_v2_config(value: dict) -> dict:
     """Migrate managed v2 stage defaults without touching model rows."""
     migrated = copy.deepcopy(value)
-    migrated["schema_version"] = 4
+    migrated["schema_version"] = 5
     base = migrated.get("base")
     if not isinstance(base, dict):
         base = {}
@@ -1024,19 +1036,25 @@ def _upgrade_agent_v2_config(value: dict) -> dict:
         threat.get("model_policy"),
         migrate_threat_retry_default=True,
     )
-    validation = migrated.get("vulnerability_validation")
-    if not isinstance(validation, dict):
-        validation = {}
-        migrated["vulnerability_validation"] = validation
-    environments = validation.get("environments")
-    if not isinstance(environments, dict):
-        environments = {}
-        validation["environments"] = environments
-    for raw_environment in environments.values():
-        if isinstance(raw_environment, dict):
-            raw_environment["model_policy"] = _upgrade_agent_policy(
-                raw_environment.get("model_policy")
-            )
+    # v5 deliberately resets the old per-environment policy because multiple
+    # environments cannot be losslessly collapsed into one shared policy.
+    migrated["vulnerability_validation"] = {}
+    migrated.setdefault("checker_selection", {"disabled_checkers": []})
+    return migrated
+
+
+def _upgrade_agent_v3_or_v4_config(value: dict, *, drop_code_graph: bool) -> dict:
+    """Move v3/v4 to v5 while preserving unrelated task policies."""
+    migrated = copy.deepcopy(value)
+    migrated["schema_version"] = 5
+    migrated.pop("mining_engines", None)
+    migrated.pop("product_info", None)
+    if drop_code_graph:
+        migrated.pop("code_graph", None)
+    # The old value was keyed by environment and cannot be merged safely into
+    # the one universal v5 policy.  Product direction explicitly resets it.
+    migrated["vulnerability_validation"] = {}
+    migrated.setdefault("checker_selection", {"disabled_checkers": []})
     return migrated
 
 
@@ -1069,13 +1087,9 @@ class AgentPatternFilterConfig(BaseModel):
     scope: str = "directory"
 
 
-class AgentVulnerabilityValidationConfig(BaseModel):
-    environments: dict[str, AgentValidationEnvironmentConfig] = {}
-
-
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: int = 4
+    schema_version: int = 5
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
@@ -1094,17 +1108,22 @@ class AgentRemoteConfig(BaseModel):
         ),
         exclude=True,
     )
-    product_info: AgentMcpConfig = AgentMcpConfig(name="product-info")
+    # v4 compatibility input only. Product knowledge is scan-specific in v5.
+    product_info: AgentMcpConfig = Field(
+        default_factory=lambda: AgentMcpConfig(name="product-info"),
+        exclude=True,
+    )
     vulnerability_mining: AgentModelTaskPolicy = AgentModelTaskPolicy()
     false_positive: AgentModelTaskPolicy = AgentModelTaskPolicy(
         required_capability="high",
     )
     vulnerability_validation: AgentVulnerabilityValidationConfig = AgentVulnerabilityValidationConfig()
+    checker_selection: AgentCheckerSelectionConfig = AgentCheckerSelectionConfig()
 
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
-        """Accept older/transient Agent payloads and emit the v4 contract."""
+        """Accept older/transient Agent payloads and emit the v5 contract."""
         if not isinstance(value, dict):
             return value
         if not value:
@@ -1119,15 +1138,19 @@ class AgentRemoteConfig(BaseModel):
             schema_version = 0
         if schema_version >= 5:
             migrated = value
-            migrated["schema_version"] = 4
+            migrated["schema_version"] = 5
             migrated.pop("mining_engines", None)
             return migrated
         if schema_version >= 4:
-            return value
+            return _upgrade_agent_v3_or_v4_config(
+                value,
+                drop_code_graph=False,
+            )
         if schema_version == 3:
-            migrated = value
-            migrated["schema_version"] = 4
-            return migrated
+            return _upgrade_agent_v3_or_v4_config(
+                value,
+                drop_code_graph=True,
+            )
         if schema_version == 2 or "base" in value or "model_pool" in value:
             return _upgrade_agent_v2_config(value)
         legacy = dict(value)
@@ -1201,7 +1224,8 @@ class AgentRemoteConfig(BaseModel):
                 "timeout_seconds": fp_timeout,
                 "max_retries": fp_retries,
             },
-            "vulnerability_validation": {"environments": {}},
+            "vulnerability_validation": {},
+            "checker_selection": {"disabled_checkers": []},
         }
         return _upgrade_agent_v2_config(migrated)
 
@@ -1226,6 +1250,32 @@ class AgentRemoteConfig(BaseModel):
         )
 
 
+class ScanKnowledgeBaseRequest(BaseModel):
+    enabled: bool = False
+    url: str = ""
+    headers: dict[str, str] = {}
+
+
+class ScanVulnerabilityValidationRequest(BaseModel):
+    enabled: bool = False
+    method_id: str = ""
+    values: dict[str, object] = {}
+
+
+class ScanVulnerabilityValidationConfig(BaseModel):
+    enabled: bool = True
+    method_id: str
+    method_label: str = ""
+    description: str = ""
+    values: dict[str, object] = {}
+    policy: AgentVulnerabilityValidationConfig = AgentVulnerabilityValidationConfig()
+
+
+class ScanConfigMemoryResponse(BaseModel):
+    knowledge_base: dict[str, object] | None = None
+    validation_by_product: dict[str, dict[str, object]] = {}
+
+
 class CreateScanRequest(BaseModel):
     """Request to create a new scan via a registered agent."""
     agent_key: str = ""
@@ -1237,8 +1287,15 @@ class CreateScanRequest(BaseModel):
     threat_analysis_enabled: bool | None = None
     threat_analysis_method: str | None = None
     product: str = ""
+    knowledge_base: ScanKnowledgeBaseRequest = Field(
+        default_factory=ScanKnowledgeBaseRequest
+    )
+    vulnerability_validation: ScanVulnerabilityValidationRequest = Field(
+        default_factory=ScanVulnerabilityValidationRequest
+    )
+    # Read-only compatibility input. It cannot enable a new validation run.
     validation_environment: str = ""
-    checkers: list[str]
+    checkers: list[str] | None = None
     mining_engines: list[MiningEngineRequest] | None = None
     feedback_ids: list[str] = []
     code_graph_mcp: AgentMcpConfig | None = None
@@ -1283,11 +1340,25 @@ class ScanMeta(BaseModel):
     fp_review_method_selection: FpReviewMethodSelection | None = None
     product: str = ""
     validation_environment: str = ""
+    knowledge_base_enabled: bool = False
+    vulnerability_validation_enabled: bool = False
+    validation_method_id: str = ""
+    validation_method_label: str = ""
     user_id: str = ""
     public_access_token: str = ""
     # Stored for internal task dispatch only. Public scan responses must never
     # echo connection headers or environment values.
     code_graph_mcp: AgentMcpConfig | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
+    knowledge_base_mcp: AgentMcpConfig | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
+    vulnerability_validation: ScanVulnerabilityValidationConfig | None = Field(
         default=None,
         exclude=True,
         repr=False,
@@ -1303,6 +1374,10 @@ class ScanSummary(BaseModel):
     scan_name: str = ""
     product: str = ""
     validation_environment: str = ""
+    knowledge_base_enabled: bool = False
+    vulnerability_validation_enabled: bool = False
+    validation_method_id: str = ""
+    validation_method_label: str = ""
     status: ScanItemStatus
     created_at: str
     progress: float

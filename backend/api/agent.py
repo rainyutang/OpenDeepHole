@@ -51,7 +51,9 @@ from backend.logger import get_logger
 from backend.models import (
     AgentGitHistory,
     AgentMcpConfig,
+    AgentMcpLocalConfig,
     AgentMcpProbeResult,
+    AgentMcpRemoteConfig,
     AgentMcpRuntimeStatus,
     AgentMcpStatusResponse,
     AgentMcpTargetStatus,
@@ -375,6 +377,77 @@ def _validate_mcp_config(
             )
 
 
+def _normalize_scan_code_graph_mcp(
+    request: AgentMcpConfig | None,
+) -> AgentMcpConfig | None:
+    """Keep scan code-graph input to the UI's mode/remote-only contract."""
+    if request is None or not request.enabled:
+        return None
+    transport = str(request.transport or "").strip()
+    if transport == "local":
+        config = AgentMcpConfig(
+            enabled=True,
+            name="codegraph",
+            transport="local",
+            timeout_seconds=300,
+            local=AgentMcpLocalConfig(
+                executable="codegraph",
+                args=["serve", "--mcp"],
+                environment={
+                    "CODEGRAPH_MCP_TOOLS": (
+                        "explore,node,search,callers,callees,impact,files,status"
+                    ),
+                },
+            ),
+            remote=AgentMcpRemoteConfig(),
+        )
+    else:
+        config = AgentMcpConfig(
+            enabled=True,
+            name="codegraph",
+            transport=transport,
+            timeout_seconds=300,
+            local=AgentMcpLocalConfig(),
+            remote=AgentMcpRemoteConfig(
+                url=str(request.remote.url or "").strip(),
+                headers={
+                    str(key): str(value)
+                    for key, value in request.remote.headers.items()
+                },
+            ),
+        )
+    _validate_mcp_config(config, label="扫描代码图谱", require_enabled=True)
+    return config
+
+
+def _normalize_scan_knowledge_base_mcp(
+    *,
+    enabled: bool,
+    url: str,
+    headers: dict[str, str],
+) -> AgentMcpConfig | None:
+    """Build the fixed remote-only product-knowledge MCP snapshot."""
+    if not enabled:
+        return None
+    config = AgentMcpConfig(
+        enabled=True,
+        name="product-info",
+        transport="remote",
+        timeout_seconds=300,
+        local=AgentMcpLocalConfig(),
+        remote=AgentMcpRemoteConfig(
+            url=str(url or "").strip(),
+            headers={
+                str(key): str(value)
+                for key, value in headers.items()
+                if str(key)
+            },
+        ),
+    )
+    _validate_mcp_config(config, label="扫描知识库", require_enabled=True)
+    return config
+
+
 def _validate_managed_config(
     config: AgentRemoteConfig,
     catalog: AgentValidatorCatalog | None = None,
@@ -439,16 +512,14 @@ def _validate_managed_config(
         "去误报": config.false_positive,
         "威胁分析": config.threat_analysis.model_policy,
     }
-    for environment, env_cfg in config.vulnerability_validation.environments.items():
-        if not str(environment).strip():
-            raise HTTPException(status_code=422, detail="验证环境名称不能为空")
-        if env_cfg.concurrency < 1 or env_cfg.concurrency > 64:
-            raise HTTPException(status_code=422, detail=f"验证环境 {environment} 的并发数必须在 1 到 64 之间")
-        if env_cfg.validation_max_retries < 0:
-            raise HTTPException(status_code=422, detail=f"验证环境 {environment} 的整体验证重试不能小于 0")
-        if not any(str(item).strip() for item in env_cfg.supported_vulnerability_types):
-            raise HTTPException(status_code=422, detail=f"验证环境 {environment} 至少需要一个支持的漏洞类型")
-        policies[f"验证环境 {environment}"] = env_cfg.model_policy
+    validation = config.vulnerability_validation
+    if validation.concurrency < 1 or validation.concurrency > 64:
+        raise HTTPException(status_code=422, detail="漏洞验证同时验证数量必须在 1 到 64 之间")
+    if validation.validation_max_retries < 0:
+        raise HTTPException(status_code=422, detail="漏洞验证整体验证重试不能小于 0")
+    if not any(str(item).strip() for item in validation.supported_vulnerability_types):
+        raise HTTPException(status_code=422, detail="漏洞验证至少需要一个支持的漏洞类型")
+    policies["漏洞验证"] = validation.model_policy
     for label, policy in policies.items():
         if policy.required_capability not in {"low", "high"}:
             raise HTTPException(status_code=422, detail=f"{label}的模型能力无效")
@@ -456,62 +527,8 @@ def _validate_managed_config(
             raise HTTPException(status_code=422, detail=f"{label}的模型超时必须大于 0")
         if policy.max_retries < 0:
             raise HTTPException(status_code=422, detail=f"{label}的模型重试不能小于 0")
-    _validate_mcp_config(config.product_info, label="产品信息")
-    if catalog is not None:
-        registrations = {item.registration_key: item for item in catalog.registrations}
-        for environment, environment_config in config.vulnerability_validation.environments.items():
-            for registration_key, values in environment_config.methods.items():
-                registration = registrations.get(registration_key)
-                if registration is None or registration.environment != environment:
-                    raise HTTPException(status_code=422, detail=f"未知的验证方法配置：{registration_key}")
-                schemas = {field.key: field for field in registration.fields}
-                unknown = sorted(set(values) - set(schemas))
-                if unknown:
-                    raise HTTPException(status_code=422, detail=f"验证方法 {registration.method_label} 包含未知字段：{', '.join(unknown)}")
-                for field in registration.fields:
-                    value = values.get(field.key, field.default)
-                    if field.required and (value is None or value == ""):
-                        raise HTTPException(status_code=422, detail=f"验证方法 {registration.method_label} 缺少必填字段：{field.label}")
-                    if value is None or value == "":
-                        continue
-                    try:
-                        if field.type == "integer":
-                            if isinstance(value, bool):
-                                raise ValueError
-                            parsed_value = int(value)
-                        elif field.type == "number":
-                            if isinstance(value, bool):
-                                raise ValueError
-                            parsed_value = float(value)
-                        elif field.type == "boolean":
-                            if not isinstance(value, bool):
-                                raise ValueError
-                            parsed_value = value
-                        else:
-                            parsed_value = str(value)
-                    except (TypeError, ValueError):
-                        raise HTTPException(
-                            status_code=422,
-                            detail=f"验证方法 {registration.method_label} 的字段 {field.label} 类型无效",
-                        )
-                    if field.type == "select" and field.options and parsed_value not in {
-                        str(option) for option in field.options
-                    }:
-                        raise HTTPException(
-                            status_code=422,
-                            detail=f"验证方法 {registration.method_label} 的字段 {field.label} 选项无效",
-                        )
-                    if field.type in {"integer", "number"}:
-                        if field.min is not None and parsed_value < field.min:
-                            raise HTTPException(
-                                status_code=422,
-                                detail=f"验证方法 {registration.method_label} 的字段 {field.label} 小于最小值",
-                            )
-                        if field.max is not None and parsed_value > field.max:
-                            raise HTTPException(
-                                status_code=422,
-                                detail=f"验证方法 {registration.method_label} 的字段 {field.label} 大于最大值",
-                            )
+    # Dynamic method fields are validated and snapshotted by scan creation.
+    del catalog
 
 
 @dataclass(frozen=True)
@@ -2377,15 +2394,25 @@ async def probe_stable_agent_mcp(
         await run_store_call(store, "get_agent_record", agent_key),
         current_user,
     )
-    transient = target == "scan_code_graph"
+    transient = target in {"scan_code_graph", "scan_knowledge_base"}
     if transient:
         if mcp_config is None:
-            raise HTTPException(status_code=400, detail="缺少扫描代码图谱 MCP 配置")
-        _validate_mcp_config(
-            mcp_config,
-            label="扫描代码图谱",
-            require_enabled=True,
-        )
+            raise HTTPException(status_code=400, detail="缺少扫描级 MCP 配置")
+        if not mcp_config.enabled:
+            raise HTTPException(status_code=400, detail="请先启用该扫描级 MCP 配置")
+        if target == "scan_code_graph":
+            mcp_config = _normalize_scan_code_graph_mcp(mcp_config)
+        else:
+            if mcp_config.transport != "remote":
+                raise HTTPException(
+                    status_code=422,
+                    detail="扫描知识库仅支持远程 MCP",
+                )
+            mcp_config = _normalize_scan_knowledge_base_mcp(
+                enabled=mcp_config.enabled,
+                url=mcp_config.remote.url,
+                headers=mcp_config.remote.headers,
+            )
     else:
         config = _stored_agent_config(record)
         mcp_config = _mcp_target_config(config, target)
@@ -2470,7 +2497,10 @@ async def get_stable_agent_validator_catalog(
     if not product.strip():
         return catalog
     return catalog.model_copy(update={
-        "registrations": [item for item in catalog.registrations if item.product == product.strip()],
+        "methods": [
+            item for item in catalog.methods
+            if product.strip() in item.products
+        ],
     })
 
 
@@ -2480,19 +2510,11 @@ async def get_stable_agent_validation_environments(
     product: str = "",
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    store = get_scan_store()
-    record = _authorize_agent_record(
-        await run_store_call(store, "get_agent_record", agent_key),
-        current_user,
+    del agent_key, product, current_user
+    raise HTTPException(
+        status_code=410,
+        detail="验证环境接口已废弃，请使用 validator-catalog 获取验证方法",
     )
-    catalog = _stored_validator_catalog(record)
-    selected_product = product.strip()
-    environments = sorted({
-        item.environment
-        for item in catalog.registrations
-        if not selected_product or item.product == selected_product
-    })
-    return {"validation_environments": environments}
 
 
 @router.get("/agents")
@@ -3156,6 +3178,8 @@ async def agent_report_vulnerability_validation(
         running=body.running,
         product=body.product,
         validation_environment=body.validation_environment,
+        validation_method_id=body.validation_method_id,
+        validation_method_label=body.validation_method_label,
         validator_name=body.validator_name,
         validation_success=body.validation_success,
         is_problem=body.is_problem,

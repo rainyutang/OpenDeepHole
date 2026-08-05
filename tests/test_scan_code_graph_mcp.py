@@ -121,6 +121,10 @@ def test_task_context_snapshots_scan_mcp_and_nested_context_inherits(tmp_path: P
     work.mkdir()
     nested.mkdir()
     raw = _remote_mcp("http://127.0.0.1:9010/mcp").model_dump(mode="json")
+    knowledge = _remote_mcp(
+        "http://127.0.0.1:9020/mcp",
+        name="product-info",
+    ).model_dump(mode="json")
     output: list[str] = []
 
     with opencode_task_context(
@@ -128,9 +132,11 @@ def test_task_context_snapshots_scan_mcp_and_nested_context_inherits(tmp_path: P
         project_dir=project,
         work_dir=work,
         code_graph_mcp=raw,
+        knowledge_base_mcp=knowledge,
         output=output.append,
     ):
         raw["remote"]["headers"]["Authorization"] = "mutated"
+        knowledge["remote"]["headers"]["Authorization"] = "mutated"
         outer = get_opencode_execution_context()
         with opencode_task_context(project_dir=project, work_dir=nested):
             inner = get_opencode_execution_context()
@@ -143,7 +149,10 @@ def test_task_context_snapshots_scan_mcp_and_nested_context_inherits(tmp_path: P
 
     assert outer.code_graph_mcp is not None
     assert outer.code_graph_mcp["remote"]["headers"]["Authorization"] == "Bearer scan-secret"
+    assert outer.knowledge_base_mcp is not None
+    assert outer.knowledge_base_mcp["remote"]["headers"]["Authorization"] == "Bearer scan-secret"
     assert inner.code_graph_mcp == outer.code_graph_mcp
+    assert inner.knowledge_base_mcp == outer.knowledge_base_mcp
     assert inner.on_output is outer.on_output
     assert muted.on_output is None
 
@@ -152,6 +161,10 @@ def test_agent_scan_task_snapshots_nested_mcp_values(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     raw = _remote_mcp("http://127.0.0.1:9010/mcp").model_dump(mode="json")
+    knowledge = _remote_mcp(
+        "http://127.0.0.1:9020/mcp",
+        name="product-info",
+    ).model_dump(mode="json")
 
     task = TaskManager().create(
         scan_id="scan-a",
@@ -160,14 +173,18 @@ def test_agent_scan_task_snapshots_nested_mcp_values(tmp_path: Path) -> None:
         checkers=["npd"],
         scan_name="scan",
         code_graph_mcp=raw,
+        knowledge_base_mcp=knowledge,
     )
     raw["remote"]["headers"]["Authorization"] = "mutated"
+    knowledge["remote"]["headers"]["Authorization"] = "mutated"
 
     assert task.code_graph_mcp is not None
     assert (
         task.code_graph_mcp["remote"]["headers"]["Authorization"]
         == "Bearer scan-secret"
     )
+    assert task.knowledge_base_mcp is not None
+    assert task.knowledge_base_mcp["remote"]["headers"]["Authorization"] == "Bearer scan-secret"
 
 
 def test_scan_runtime_name_and_tool_overrides_isolate_graphs() -> None:
@@ -420,6 +437,95 @@ def test_failed_scan_mcp_shared_leases_release_without_blocking_next_scan(
         assert manager._scan_mcp_states
         await manager._release_scan_mcp(project, second)
         assert manager._scan_mcp_states == {}
+
+    asyncio.run(run())
+
+
+def test_code_graph_and_knowledge_base_use_independent_scan_leases(
+    tmp_path: Path,
+) -> None:
+    class Response:
+        status_code = 200
+
+        def __init__(self, value) -> None:
+            self.value = value
+
+        def json(self):
+            return self.value
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class Client:
+        def __init__(self) -> None:
+            self.connected: set[str] = set()
+
+        async def get(self, path: str, **_kwargs):
+            assert path == "/mcp"
+            return Response({
+                name: {"status": "connected"}
+                for name in self.connected
+            })
+
+        async def post(self, path: str, **kwargs):
+            if path == "/mcp":
+                name = kwargs["json"]["name"]
+                self.connected.add(name)
+                return Response({name: {"status": "connected"}})
+            name = path.split("/")[-2]
+            self.connected.discard(name)
+            return Response(True)
+
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        client = Client()
+        disconnected: list[str] = []
+
+        async def disconnect(_client, _directory, spec) -> None:
+            disconnected.append(str(spec["name"]))
+
+        manager._disconnect_managed_mcp = disconnect
+        project = tmp_path.resolve()
+        graph_config = _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="codegraph",
+        ).model_dump(mode="json")
+        knowledge_config = _remote_mcp(
+            "http://127.0.0.1:9020/mcp",
+            name="product-info",
+        ).model_dump(mode="json")
+
+        graph = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-a",
+            graph_config,
+        )
+        knowledge = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-a",
+            knowledge_config,
+            role="knowledge_base",
+            source_graph=False,
+        )
+
+        assert graph.connected is True
+        assert knowledge.connected is True
+        assert graph.state_key != knowledge.state_key
+        assert set(manager._scan_mcp_states) == {
+            graph.state_key,
+            knowledge.state_key,
+        }
+        assert manager._source_graph_mcp_names(project) == {"codegraph"}
+
+        await manager._release_scan_mcp(project, knowledge)
+        assert graph.state_key in manager._scan_mcp_states
+        assert knowledge.state_key not in manager._scan_mcp_states
+        await manager._release_scan_mcp(project, graph)
+        assert manager._scan_mcp_states == {}
+        assert disconnected == ["product-info", "codegraph"]
 
     asyncio.run(run())
 

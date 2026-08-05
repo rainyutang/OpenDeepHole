@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, ValidationTarget, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -274,8 +274,9 @@ export async function createScan(body: {
   threat_analysis_enabled?: boolean;
   threat_analysis_method?: string;
   product?: string;
-  validation_environment?: string;
-  checkers: string[];
+  knowledge_base?: { enabled: boolean; url: string; headers: Record<string, string> };
+  vulnerability_validation?: { enabled: boolean; method_id: string; values: Record<string, unknown> };
+  checkers?: string[];
   mining_engines?: MiningEngineRequest[];
   feedback_ids?: string[];
   code_graph_mcp?: AgentMcpConfig | null;
@@ -387,22 +388,6 @@ export async function getScanValidationsPage(
     signal,
   });
   return data;
-}
-
-export async function getValidationTargets(): Promise<ValidationTarget[]> {
-  const { data } = await api.get<{ targets: ValidationTarget[] }>("/api/scan/validation-targets");
-  return data.targets;
-}
-
-export async function updateScanValidationTarget(
-  scanId: string,
-  product: string,
-  validationEnvironment: string,
-): Promise<void> {
-  await api.put(`/api/scan/${scanId}/validation-target`, {
-    product,
-    validation_environment: validationEnvironment,
-  });
 }
 
 export async function stopScan(scanId: string): Promise<void> {
@@ -778,6 +763,24 @@ export async function probeScanCodeGraphMcp(
   return data;
 }
 
+export async function probeScanKnowledgeBaseMcp(
+  agentKey: string,
+  config: AgentMcpConfig,
+): Promise<AgentMcpProbeResult> {
+  const { data } = await api.post<AgentMcpProbeResult>(
+    `/api/agent-configs/${agentKey}/mcp-probe/scan_knowledge_base`,
+    config,
+  );
+  return data;
+}
+
+export async function getScanConfigMemory(agentKey: string): Promise<ScanConfigMemory> {
+  const { data } = await api.get<ScanConfigMemory>(
+    `/api/scan/config-memory/${encodeURIComponent(agentKey)}`,
+  );
+  return data;
+}
+
 export async function reloadAgentMcp(agentKey: string, target: AgentMcpTarget): Promise<void> {
   await api.post(`/api/agent-configs/${agentKey}/mcp-reload/${target}`);
 }
@@ -803,14 +806,6 @@ export async function getThreatAnalysisMethodCatalog(): Promise<ThreatAnalysisMe
 export async function getFpReviewMethodCatalog(): Promise<FpReviewMethodCatalog> {
   const { data } = await api.get<FpReviewMethodCatalog>("/api/fp-review-methods");
   return data;
-}
-
-export async function getAgentValidationEnvironments(agentKey: string, product: string): Promise<string[]> {
-  const { data } = await api.get<{ validation_environments: string[] }>(
-    `/api/agent-configs/${agentKey}/validation-environments`,
-    { params: { product } },
-  );
-  return data.validation_environments;
 }
 
 // --- FP Review ---

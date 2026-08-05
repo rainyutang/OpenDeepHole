@@ -29,7 +29,9 @@ from backend.models import (
     FpReviewJob,
     HistoryPattern,
     MarkRequest,
+    ScanKnowledgeBaseRequest,
     ScanStatus,
+    ScanVulnerabilityValidationRequest,
     UnmarkRequest,
     User,
 )
@@ -52,6 +54,12 @@ class IntegrationScanRequest(BaseModel):
     scan_name: str = ""
     product: str = ""
     validation_environment: str = ""
+    knowledge_base: ScanKnowledgeBaseRequest = Field(
+        default_factory=ScanKnowledgeBaseRequest
+    )
+    vulnerability_validation: ScanVulnerabilityValidationRequest = Field(
+        default_factory=ScanVulnerabilityValidationRequest
+    )
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
     threat_analysis_method: str | None = None
@@ -190,7 +198,7 @@ def _resolve_agent_id(agent_name: str) -> str:
     return matches[0][0]
 
 
-def _public_checker_names() -> list[str]:
+def _public_checker_names(disabled_checkers: list[str] | None = None) -> list[str]:
     registry = refresh_registry()
     names = [
         name for name, entry in registry.items()
@@ -198,7 +206,8 @@ def _public_checker_names() -> list[str]:
     ]
     if not names:
         raise HTTPException(status_code=400, detail="No public enabled checkers available")
-    return names
+    disabled = {name.strip() for name in (disabled_checkers or []) if name.strip()}
+    return [name for name in names if name not in disabled]
 
 
 async def _sync_agent_config(agent_id: str, config: AgentRemoteConfig) -> None:
@@ -292,7 +301,9 @@ async def create_integration_scan(
     current_user: User = Depends(_require_integration_token_async),
 ) -> IntegrationScanResponse:
     agent_id = _resolve_agent_id(body.agent_name)
-    checker_names = _public_checker_names()
+    checker_names = _public_checker_names(
+        body.agent_config.checker_selection.disabled_checkers,
+    )
     code_graph_mcp = body.code_graph_mcp
     if code_graph_mcp is None and body.agent_config.code_graph.enabled:
         # v3 integrations supplied CodeGraph inside the Agent-wide config.
@@ -310,6 +321,8 @@ async def create_integration_scan(
             scan_name=body.scan_name,
             product=body.product,
             validation_environment=body.validation_environment,
+            knowledge_base=body.knowledge_base,
+            vulnerability_validation=body.vulnerability_validation,
             auto_fp_review=body.auto_fp_review,
             fp_review_method=body.fp_review_method,
             threat_analysis_method=body.threat_analysis_method,

@@ -105,9 +105,19 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             ),
             product=msg.get("product", ""),
             validation_environment=msg.get("validation_environment", ""),
+            vulnerability_validation=(
+                msg.get("vulnerability_validation")
+                if isinstance(msg.get("vulnerability_validation"), dict)
+                else None
+            ),
             code_graph_mcp=(
                 msg.get("code_graph_mcp")
                 if isinstance(msg.get("code_graph_mcp"), dict)
+                else None
+            ),
+            knowledge_base_mcp=(
+                msg.get("knowledge_base_mcp")
+                if isinstance(msg.get("knowledge_base_mcp"), dict)
                 else None
             ),
             feedback_entries=msg.get("feedback_entries", []),
@@ -150,9 +160,19 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             ),
             product=msg.get("product"),
             validation_environment=msg.get("validation_environment"),
+            vulnerability_validation=(
+                msg.get("vulnerability_validation")
+                if isinstance(msg.get("vulnerability_validation"), dict)
+                else None
+            ),
             code_graph_mcp=(
                 msg.get("code_graph_mcp")
                 if isinstance(msg.get("code_graph_mcp"), dict)
+                else None
+            ),
+            knowledge_base_mcp=(
+                msg.get("knowledge_base_mcp")
+                if isinstance(msg.get("knowledge_base_mcp"), dict)
                 else None
             ),
             feedback_entries=msg.get("feedback_entries"),
@@ -185,6 +205,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 if isinstance(msg.get("code_graph_mcp"), dict)
                 else None
             ),
+            knowledge_base_mcp=(
+                msg.get("knowledge_base_mcp")
+                if isinstance(msg.get("knowledge_base_mcp"), dict)
+                else None
+            ),
         )
     elif cmd_type == "vulnerability_validation":
         from deephole_client.updater import ensure_runtime_updated
@@ -203,7 +228,8 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                     status="error",
                     running=False,
                     product=msg.get("product", ""),
-                    validation_environment=msg.get("validation_environment", ""),
+                    validation_method_id=msg.get("validation_method_id", ""),
+                    validation_method_label=msg.get("validation_method_label", ""),
                     validation_success=False,
                     requires_human_intervention=True,
                     validation_output=f"Agent runtime update failed: {exc}",
@@ -219,12 +245,28 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             project_path=msg.get("project_path", ""),
             code_scan_path=msg.get("code_scan_path", ""),
             product=msg.get("product", ""),
-            validation_environment=msg.get("validation_environment", ""),
+            validation_method_id=msg.get("validation_method_id", ""),
+            validation_method_label=msg.get("validation_method_label", ""),
+            validation_values=(
+                msg.get("validation_values")
+                if isinstance(msg.get("validation_values"), dict)
+                else {}
+            ),
+            validation_policy=(
+                msg.get("validation_policy")
+                if isinstance(msg.get("validation_policy"), dict)
+                else {}
+            ),
             vulnerability=msg.get("vulnerability") or {},
             report_markdown=msg.get("report_markdown", ""),
             code_graph_mcp=(
                 msg.get("code_graph_mcp")
                 if isinstance(msg.get("code_graph_mcp"), dict)
+                else None
+            ),
+            knowledge_base_mcp=(
+                msg.get("knowledge_base_mcp")
+                if isinstance(msg.get("knowledge_base_mcp"), dict)
                 else None
             ),
         )

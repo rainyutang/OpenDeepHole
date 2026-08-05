@@ -25,6 +25,9 @@ from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
+    AgentMcpConfig,
+    AgentValidatorCatalog,
+    AgentValidatorMethod,
     AgentFpReviewFinish,
     AgentFpReviewProgress,
     AgentFpReviewResult,
@@ -50,12 +53,15 @@ from backend.models import (
     ScanCandidatePage,
     ScanEventPage,
     ScanMeta,
+    ScanConfigMemoryResponse,
+    ScanKnowledgeBaseRequest,
     ScanOverview,
-    ScanValidationTargetList,
     ScanStartResponse,
     ScanStatus,
     ScanSummary,
     ScanSummaryPage,
+    ScanVulnerabilityValidationConfig,
+    ScanVulnerabilityValidationRequest,
     SkillReport,
     ThreatAuditTask,
     ThreatAuditTaskPage,
@@ -379,27 +385,188 @@ def _is_agent_disconnect_error(error_message: str | None) -> bool:
     return error_message == AGENT_DISCONNECT_ERROR
 
 
-def _validate_validation_target(product: str, validation_environment: str) -> tuple[str, str]:
-    normalized_product = str(product or "").strip()
-    normalized_environment = str(validation_environment or "").strip()
-    if not normalized_product and not normalized_environment:
-        return "", ""
-    if not normalized_product or not normalized_environment:
-        raise HTTPException(
-            status_code=400,
-            detail="product and validation_environment must both be set or both be empty",
-        )
-    from backend.validation_catalog import find_validation_target
+def _record_validator_catalog(record: dict | None) -> AgentValidatorCatalog:
+    if not record:
+        return AgentValidatorCatalog()
+    try:
+        raw = json.loads(str(record.get("validator_catalog_json") or "{}"))
+        return AgentValidatorCatalog.model_validate(raw)
+    except Exception as exc:
+        logger.warning("Ignoring invalid validator catalog for scan creation: %s", exc)
+        return AgentValidatorCatalog(errors=[str(exc)])
 
-    if find_validation_target(normalized_product, normalized_environment) is None:
+
+def _validator_method_for_scan(
+    catalog: AgentValidatorCatalog,
+    method_id: str,
+    product: str,
+) -> AgentValidatorMethod | None:
+    normalized_method = str(method_id or "").strip()
+    normalized_product = str(product or "").strip()
+    return next(
+        (
+            method
+            for method in catalog.methods
+            if method.method_id == normalized_method
+            and normalized_product in method.products
+        ),
+        None,
+    )
+
+
+def _validated_method_values(
+    method: AgentValidatorMethod,
+    values: dict[str, object],
+) -> dict[str, object]:
+    schemas = {field.key: field for field in method.fields}
+    unknown = sorted(set(values) - set(schemas))
+    if unknown:
         raise HTTPException(
-            status_code=400,
-            detail=(
-                "Unknown validation target: "
-                f"{normalized_product}/{normalized_environment}"
-            ),
+            status_code=422,
+            detail=f"验证方法 {method.method_label} 包含未知字段：{', '.join(unknown)}",
         )
-    return normalized_product, normalized_environment
+    result: dict[str, object] = {}
+    for field in method.fields:
+        value = values.get(field.key, field.default)
+        if field.required and value in (None, ""):
+            raise HTTPException(
+                status_code=422,
+                detail=f"验证方法 {method.method_label} 缺少必填字段：{field.label}",
+            )
+        if value in (None, ""):
+            result[field.key] = value
+            continue
+        try:
+            if field.type == "integer":
+                if isinstance(value, bool):
+                    raise ValueError
+                parsed: object = int(value)
+            elif field.type == "number":
+                if isinstance(value, bool):
+                    raise ValueError
+                parsed = float(value)
+            elif field.type == "boolean":
+                if not isinstance(value, bool):
+                    raise ValueError
+                parsed = value
+            else:
+                parsed = str(value)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail=f"验证方法 {method.method_label} 的字段 {field.label} 类型无效",
+            )
+        if field.type == "select" and field.options and parsed not in {
+            str(option) for option in field.options
+        }:
+            raise HTTPException(
+                status_code=422,
+                detail=f"验证方法 {method.method_label} 的字段 {field.label} 选项无效",
+            )
+        if field.type in {"integer", "number"}:
+            if field.min is not None and parsed < field.min:  # type: ignore[operator]
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"验证方法 {method.method_label} 的字段 {field.label} 小于最小值",
+                )
+            if field.max is not None and parsed > field.max:  # type: ignore[operator]
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"验证方法 {method.method_label} 的字段 {field.label} 大于最大值",
+                )
+        result[field.key] = parsed
+    return result
+
+
+def _resolve_scan_validation(
+    request: ScanVulnerabilityValidationRequest,
+    *,
+    product: str,
+    catalog: AgentValidatorCatalog,
+    policy,
+) -> ScanVulnerabilityValidationConfig | None:
+    if not request.enabled:
+        return None
+    normalized_product = str(product or "").strip()
+    if not normalized_product:
+        raise HTTPException(status_code=422, detail="启用漏洞验证前必须填写产品")
+    method = _validator_method_for_scan(catalog, request.method_id, normalized_product)
+    if method is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"所选客户端没有适用于产品 {normalized_product} 的验证方法 {request.method_id}",
+        )
+    return ScanVulnerabilityValidationConfig(
+        method_id=method.method_id,
+        method_label=method.method_label,
+        description=method.description,
+        values=_validated_method_values(method, dict(request.values)),
+        policy=policy.model_copy(deep=True),
+    )
+
+
+def _knowledge_base_mcp(
+    request: ScanKnowledgeBaseRequest,
+) -> AgentMcpConfig | None:
+    from backend.api.agent import _normalize_scan_knowledge_base_mcp
+
+    return _normalize_scan_knowledge_base_mcp(
+        enabled=request.enabled,
+        url=request.url,
+        headers=request.headers,
+    )
+
+
+def _scan_code_graph_mcp(
+    request: AgentMcpConfig | None,
+) -> AgentMcpConfig | None:
+    from backend.api.agent import _normalize_scan_code_graph_mcp
+
+    return _normalize_scan_code_graph_mcp(request)
+
+
+async def _remember_scan_configuration(
+    *,
+    user_id: str,
+    agent_key: str,
+    product: str,
+    knowledge_base_mcp: AgentMcpConfig | None,
+    validation: ScanVulnerabilityValidationConfig | None,
+) -> None:
+    store = get_scan_store()
+    current = await run_store_call(
+        store,
+        "get_scan_config_memory",
+        user_id,
+        agent_key,
+    ) or {}
+    memory = dict(current)
+    if knowledge_base_mcp is not None:
+        memory["knowledge_base"] = {
+            "url": knowledge_base_mcp.remote.url,
+            "headers": dict(knowledge_base_mcp.remote.headers),
+        }
+    if validation is not None and product:
+        raw_products = memory.get("validation_by_product")
+        products = dict(raw_products) if isinstance(raw_products, dict) else {}
+        raw_product = products.get(product)
+        product_memory = dict(raw_product) if isinstance(raw_product, dict) else {}
+        raw_methods = product_memory.get("values_by_method")
+        methods = dict(raw_methods) if isinstance(raw_methods, dict) else {}
+        methods[validation.method_id] = dict(validation.values)
+        product_memory.update({
+            "last_method_id": validation.method_id,
+            "values_by_method": methods,
+        })
+        products[product] = product_memory
+        memory["validation_by_product"] = products
+    await run_store_call(
+        store,
+        "upsert_scan_config_memory",
+        user_id,
+        agent_key,
+        memory,
+    )
 
 
 async def _check_scan_owner(scan_id: str, user: User) -> None:
@@ -736,8 +903,6 @@ def _validated_checker_names(checkers: list[str], user: User) -> list[str]:
     """Refresh checker registry and validate requested scan checkers."""
     registry = refresh_registry()
     names = list(dict.fromkeys(checkers))
-    if not names:
-        raise HTTPException(status_code=400, detail="No checkers selected")
 
     unknown = [name for name in names if name not in registry]
     if unknown:
@@ -751,6 +916,24 @@ def _validated_checker_names(checkers: list[str], user: User) -> list[str]:
         raise HTTPException(status_code=403, detail=f"Checker is admin-only: {', '.join(admin_only)}")
 
     return names
+
+
+def _globally_enabled_checker_names(managed_config, user: User) -> list[str]:
+    registry = refresh_registry()
+    disabled = {
+        str(name).strip()
+        for name in managed_config.checker_selection.disabled_checkers
+        if str(name).strip()
+    }
+    return [
+        name
+        for name, checker in registry.items()
+        if name not in disabled
+        and not (
+            checker.visibility == CHECKER_VISIBILITY_ADMIN
+            and user.role != "admin"
+        )
+    ]
 
 
 def _checker_packages_for(names: list[str]) -> list[dict[str, str]]:
@@ -957,16 +1140,18 @@ async def create_agent_scan(
             status_code=400,
             detail="所选客户端尚未配置启用的显式模型，请先在客户端配置页面手动添加模型",
         )
-    code_graph_mcp = None
-    if body.code_graph_mcp is not None and body.code_graph_mcp.enabled:
-        from backend.api.agent import _validate_mcp_config
-
-        _validate_mcp_config(
-            body.code_graph_mcp,
-            label="扫描代码图谱",
-            require_enabled=True,
+    code_graph_mcp = _scan_code_graph_mcp(body.code_graph_mcp)
+    knowledge_base_mcp = _knowledge_base_mcp(body.knowledge_base)
+    if (
+        code_graph_mcp is not None
+        and knowledge_base_mcp is not None
+        and code_graph_mcp.name.strip().casefold()
+        == knowledge_base_mcp.name.strip().casefold()
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="代码图谱 MCP 与知识库 MCP 名称不能相同",
         )
-        code_graph_mcp = body.code_graph_mcp.model_copy(deep=True)
 
     requested_scan_mode = _normalize_scan_mode(body.scan_mode)
     mining_engine_selections = _resolve_scan_mining_engines(
@@ -1003,7 +1188,11 @@ async def create_agent_scan(
     fp_review_method, fp_review_method_selection = _resolve_fp_review_method(
         body.fp_review_method
     )
-    selected_checkers = checker_names if checker_names is not None else body.checkers
+    globally_enabled_checkers = _globally_enabled_checker_names(
+        managed_config,
+        current_user,
+    )
+    requested_checkers = checker_names if checker_names is not None else body.checkers
     static_engine_enabled = any(
         item.enabled and item.engine_id == "static_candidate"
         for item in mining_engine_selections
@@ -1012,7 +1201,22 @@ async def create_agent_scan(
         validated_checker_names = []
         checker_packages = []
     else:
-        validated_checker_names = _validated_checker_names(selected_checkers, current_user)
+        if requested_checkers is None:
+            selected_checkers = globally_enabled_checkers
+        else:
+            requested_valid = _validated_checker_names(
+                requested_checkers,
+                current_user,
+            )
+            enabled_set = set(globally_enabled_checkers)
+            selected_checkers = [
+                name for name in requested_valid if name in enabled_set
+            ]
+        validated_checker_names = (
+            _validated_checker_names(selected_checkers, current_user)
+            if selected_checkers
+            else []
+        )
         checker_packages = _checker_packages_for(validated_checker_names)
     scan_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
@@ -1021,28 +1225,23 @@ async def create_agent_scan(
         raise HTTPException(status_code=400, detail="project_path is required")
     code_scan_path = body.code_scan_path.strip() or project_path
     scan_name = body.scan_name or project_path.split("/")[-1] or scan_id
-    product, validation_environment = _validate_validation_target(
-        body.product,
-        body.validation_environment,
-    )
-    if selected_agent_key and product and validation_environment:
-        import json as _json
-        record = await run_store_call(
-            get_scan_store(),
-            "get_agent_record",
-            selected_agent_key,
+    product = str(body.product or "").strip()
+    if str(body.validation_environment or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="validation_environment 已废弃，请选择验证方法并填写 field 配置",
         )
-        try:
-            registrations = (_json.loads(str(record.get("validator_catalog_json") or "{}")) if record else {}).get("registrations", [])
-        except Exception:
-            registrations = []
-        if not any(
-            str(item.get("product") or "") == product
-            and str(item.get("environment") or "") == validation_environment
-            for item in registrations
-            if isinstance(item, dict)
-        ):
-            raise HTTPException(status_code=400, detail=f"所选 Agent 不支持验证环境：{product}/{validation_environment}")
+    record = await run_store_call(
+        get_scan_store(),
+        "get_agent_record",
+        selected_agent_key,
+    )
+    validation_config = _resolve_scan_validation(
+        body.vulnerability_validation,
+        product=product,
+        catalog=_record_validator_catalog(record),
+        policy=managed_config.vulnerability_validation,
+    )
 
     scan = ScanStatus(
         scan_id=scan_id,
@@ -1060,7 +1259,11 @@ async def create_agent_scan(
         fp_review_method=fp_review_method,
         fp_review_method_selection=fp_review_method_selection,
         product=product,
-        validation_environment=validation_environment,
+        validation_environment="",
+        knowledge_base_enabled=knowledge_base_mcp is not None,
+        vulnerability_validation_enabled=validation_config is not None,
+        validation_method_id=(validation_config.method_id if validation_config else ""),
+        validation_method_label=(validation_config.method_label if validation_config else ""),
         scan_items=validated_checker_names,
         mining_engines=mining_engine_selections,
         mining_engine_runs=[
@@ -1099,10 +1302,16 @@ async def create_agent_scan(
         code_scan_path=code_scan_path,
         scan_name=scan_name,
         product=product,
-        validation_environment=validation_environment,
+        validation_environment="",
+        knowledge_base_enabled=knowledge_base_mcp is not None,
+        vulnerability_validation_enabled=validation_config is not None,
+        validation_method_id=(validation_config.method_id if validation_config else ""),
+        validation_method_label=(validation_config.method_label if validation_config else ""),
         user_id=current_user.user_id,
         public_access_token=public_access_token,
         code_graph_mcp=code_graph_mcp,
+        knowledge_base_mcp=knowledge_base_mcp,
+        vulnerability_validation=validation_config,
     )
 
     store = get_scan_store()
@@ -1133,7 +1342,12 @@ async def create_agent_scan(
         "threat_analysis_method": threat_analysis_method,
         "scan_name": scan_name,
         "product": product,
-        "validation_environment": validation_environment,
+        "validation_environment": "",
+        "vulnerability_validation": (
+            validation_config.model_dump(mode="json")
+            if validation_config is not None
+            else None
+        ),
         "feedback_entries": feedback_entries,
         "checker_packages": checker_packages,
         "mining_engines": [
@@ -1143,6 +1357,11 @@ async def create_agent_scan(
         "code_graph_mcp": (
             code_graph_mcp.model_dump(mode="json")
             if code_graph_mcp is not None
+            else None
+        ),
+        "knowledge_base_mcp": (
+            knowledge_base_mcp.model_dump(mode="json")
+            if knowledge_base_mcp is not None
             else None
         ),
         "agent_runtime_update": await create_agent_task_runtime_update_payload_async(
@@ -1163,6 +1382,14 @@ async def create_agent_scan(
         logger.error("Failed to dispatch scan %s: agent %s not connected", scan_id, agent_id)
         raise HTTPException(status_code=502, detail="Agent not connected")
 
+    await _remember_scan_configuration(
+        user_id=current_user.user_id,
+        agent_key=selected_agent_key,
+        product=product,
+        knowledge_base_mcp=knowledge_base_mcp,
+        validation=validation_config,
+    )
+
     logger.info(
         "Created scan %s for project '%s', dispatched to agent %s (%s)",
         scan_id, scan_name, agent_id, agent.ip,
@@ -1178,6 +1405,35 @@ async def create_scan(
 ) -> ScanStartResponse:
     """Create a new scan and dispatch it to the specified agent daemon."""
     return await create_agent_scan(body, request, current_user)
+
+
+@router.get(
+    "/api/scan/config-memory/{agent_key}",
+    response_model=ScanConfigMemoryResponse,
+)
+async def get_scan_config_memory(
+    agent_key: str,
+    current_user: User = Depends(get_current_user),
+) -> ScanConfigMemoryResponse:
+    from backend.api.agent import _authorize_agent_record
+
+    store = get_scan_store()
+    _authorize_agent_record(
+        await run_store_call(store, "get_agent_record", agent_key),
+        current_user,
+    )
+    raw = await run_store_call(
+        store,
+        "get_scan_config_memory",
+        current_user.user_id,
+        agent_key,
+    ) or {}
+    knowledge = raw.get("knowledge_base")
+    validation = raw.get("validation_by_product")
+    return ScanConfigMemoryResponse(
+        knowledge_base=(dict(knowledge) if isinstance(knowledge, dict) else None),
+        validation_by_product=(dict(validation) if isinstance(validation, dict) else {}),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1314,14 +1570,15 @@ async def list_scans_v2(
     )
 
 
-@router.get("/api/scan/validation-targets", response_model=ScanValidationTargetList)
+@router.get("/api/scan/validation-targets")
 async def list_scan_validation_targets(
     _current_user: User = Depends(get_current_user),
-) -> ScanValidationTargetList:
-    """Return valid product/environment pairs from server validator manifests."""
-    from backend.validation_catalog import get_validation_catalog
-
-    return ScanValidationTargetList(targets=get_validation_catalog())
+) -> dict:
+    """Retire the legacy server-side product/environment catalog."""
+    raise HTTPException(
+        status_code=410,
+        detail="验证环境目录已废弃，请使用所选客户端的验证方法目录",
+    )
 
 
 @router.get("/api/scan/{scan_id}", response_model=ScanStatus)
@@ -1634,26 +1891,13 @@ async def update_scan_validation_target(
     body: UpdateScanValidationTargetRequest,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Update the complete validation target associated with an existing scan."""
+    """Reject legacy product/environment edits; scan configuration is immutable."""
     await _check_scan_owner(scan_id, current_user)
-    product, validation_environment = _validate_validation_target(
-        body.product,
-        body.validation_environment,
+    del body
+    raise HTTPException(
+        status_code=410,
+        detail="历史扫描的产品与验证方法快照只读，请新建扫描后选择验证方法和 field 参数",
     )
-    store = get_scan_store()
-    if await run_store_call(store, "get_scan_meta", scan_id) is None:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    if scan_id in _running_scans:
-        _running_scans[scan_id].product = product
-        _running_scans[scan_id].validation_environment = validation_environment
-    await run_store_call(
-        store,
-        "update_scan_validation_target",
-        scan_id,
-        product,
-        validation_environment,
-    )
-    return {"ok": True}
 
 
 @router.post("/api/scan/{scan_id}/stop")
@@ -1879,6 +2123,11 @@ async def _continue_scan(
         "scan_name": meta.scan_name,
         "product": meta.product,
         "validation_environment": meta.validation_environment,
+        "vulnerability_validation": (
+            meta.vulnerability_validation.model_dump(mode="json")
+            if meta.vulnerability_validation is not None
+            else None
+        ),
         "feedback_entries": feedback_entries,
         "checker_packages": (
             []
@@ -1913,6 +2162,11 @@ async def _continue_scan(
         "code_graph_mcp": (
             meta.code_graph_mcp.model_dump(mode="json")
             if meta.code_graph_mcp is not None
+            else None
+        ),
+        "knowledge_base_mcp": (
+            meta.knowledge_base_mcp.model_dump(mode="json")
+            if meta.knowledge_base_mcp is not None
             else None
         ),
         "agent_runtime_update": runtime_update,
@@ -2278,8 +2532,13 @@ def _append_validation_markdown(lines: list[str], validation: VulnerabilityValid
     lines.append(f"| 状态 | {validation.status} |")
     if validation.product:
         lines.append(f"| 产品 | {validation.product} |")
-    if validation.validation_environment:
-        lines.append(f"| 验证环境 | {validation.validation_environment} |")
+    if validation.validation_method_label or validation.validation_method_id:
+        lines.append(
+            "| 验证方法 | "
+            f"{validation.validation_method_label or validation.validation_method_id} |"
+        )
+    elif validation.validation_environment:
+        lines.append(f"| 旧验证环境 | {validation.validation_environment} |")
     lines.append(f"| 验证成功 | {validation.validation_success} |")
     lines.append(f"| 是否问题 | {validation.is_problem} |")
     lines.append(f"| 人工介入 | {validation.requires_human_intervention} |")
@@ -2588,34 +2847,27 @@ async def _trigger_vulnerability_validation(
     vuln = scan.vulnerabilities[idx]
     if not (vuln.confirmed or vuln.ai_verdict == "confirmed"):
         raise HTTPException(status_code=400, detail="Only AI-confirmed vulnerabilities can be validated")
-    product, validation_environment = _validate_validation_target(
-        meta.product,
-        meta.validation_environment,
-    )
-    if not product:
+    product = str(meta.product or "").strip()
+    validation_config = meta.vulnerability_validation
+    if not product or validation_config is None or not validation_config.enabled:
         raise HTTPException(
             status_code=400,
-            detail="Scan has no configured product validation target",
+            detail="本次扫描未启用漏洞验证，请按新格式新建扫描",
         )
-    if meta.agent_key:
-        from backend.api.agent import get_managed_agent_config_async
-
-        managed_config = await get_managed_agent_config_async(meta.agent_key)
-        env_config = managed_config.vulnerability_validation.environments.get(
-            validation_environment
+    supported = {
+        str(item).strip().casefold()
+        for item in validation_config.policy.supported_vulnerability_types
+    }
+    vulnerability_type = vuln.vuln_type.strip().casefold()
+    if (
+        vulnerability_type
+        and "*" not in supported
+        and vulnerability_type not in supported
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"验证方法 {validation_config.method_label} 不支持漏洞类型 {vuln.vuln_type}",
         )
-        if env_config is not None:
-            supported = {str(item).strip().casefold() for item in env_config.supported_vulnerability_types}
-            vulnerability_type = vuln.vuln_type.strip().casefold()
-            if (
-                vulnerability_type
-                and "*" not in supported
-                and vulnerability_type not in supported
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"验证环境 {validation_environment} 不支持漏洞类型 {vuln.vuln_type}",
-                )
 
     existing = next((item for item in scan.validations if item.vuln_index == idx), None)
     if existing is not None and existing.running:
@@ -2651,7 +2903,8 @@ async def _trigger_vulnerability_validation(
             status="queued",
             running=True,
             product=product,
-            validation_environment=validation_environment,
+            validation_method_id=validation_config.method_id,
+            validation_method_label=validation_config.method_label,
             started_at=now,
             updated_at=now,
         ),
@@ -2667,7 +2920,10 @@ async def _trigger_vulnerability_validation(
         "project_path": meta.project_path,
         "code_scan_path": meta.code_scan_path or meta.project_path,
         "product": product,
-        "validation_environment": validation_environment,
+        "validation_method_id": validation_config.method_id,
+        "validation_method_label": validation_config.method_label,
+        "validation_values": dict(validation_config.values),
+        "validation_policy": validation_config.policy.model_dump(mode="json"),
         "vulnerability": vuln.model_dump(),
         "report_markdown": _vuln_report_markdown(
             idx,
@@ -2678,6 +2934,11 @@ async def _trigger_vulnerability_validation(
         "code_graph_mcp": (
             meta.code_graph_mcp.model_dump(mode="json")
             if meta.code_graph_mcp is not None
+            else None
+        ),
+        "knowledge_base_mcp": (
+            meta.knowledge_base_mcp.model_dump(mode="json")
+            if meta.knowledge_base_mcp is not None
             else None
         ),
         "agent_runtime_update": await create_agent_task_runtime_update_payload_async(
@@ -3237,6 +3498,11 @@ async def _start_fp_review(
             "code_graph_mcp": (
                 meta.code_graph_mcp.model_dump(mode="json")
                 if meta.code_graph_mcp is not None
+                else None
+            ),
+            "knowledge_base_mcp": (
+                meta.knowledge_base_mcp.model_dump(mode="json")
+                if meta.knowledge_base_mcp is not None
                 else None
             ),
             "agent_runtime_update": await create_agent_task_runtime_update_payload_async(

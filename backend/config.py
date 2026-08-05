@@ -141,6 +141,11 @@ class PatternFilterConfig(BaseModel):
 class VulnerabilityValidationConfig(BaseModel):
     enabled: bool = True
     timeout_seconds: int = 7200
+    supported_vulnerability_types: list[str] = ["*"]
+    concurrency: int = 1
+    validation_max_retries: int = 0
+    model_policy: ModelTaskPolicyConfig = ModelTaskPolicyConfig()
+    # Legacy local configuration only; v5 Web scans never consult it.
     environments: dict[str, ValidationEnvironmentConfig] = {}
 
 

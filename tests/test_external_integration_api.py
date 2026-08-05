@@ -110,9 +110,9 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             send = AsyncMock(return_value=True)
             scan_graph = AgentMcpConfig(
                 enabled=True,
-                name="integration-graph",
+                name="codegraph",
                 transport="remote",
-                timeout_seconds=30,
+                timeout_seconds=300,
                 remote=AgentMcpRemoteConfig(
                     url="http://graph.test/mcp",
                     headers={"Authorization": "Bearer per-scan-secret"},
@@ -135,13 +135,6 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                     "backend.api.agent.create_agent_task_runtime_update_payload_async",
                     AsyncMock(return_value=None),
                 ),
-                patch(
-                    "backend.validation_catalog.find_validation_target",
-                    return_value=SimpleNamespace(
-                        product="LTE",
-                        validation_environment="仿真UBBPi板环境",
-                    ),
-                ),
                 patch("backend.api.agent.send_agent_command", send),
             ):
                 result = asyncio.run(
@@ -151,7 +144,6 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                             project_path="/repo/project",
                             scan_name="project",
                             product="LTE",
-                            validation_environment="仿真UBBPi板环境",
                             threat_analysis_method="deephole_threat_analysis",
                             agent_config=AgentRemoteConfig(
                                 model_pool={
@@ -175,7 +167,6 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                             project_path="/repo/file-tools-only",
                             scan_name="file-tools-only",
                             product="LTE",
-                            validation_environment="仿真UBBPi板环境",
                             agent_config=AgentRemoteConfig(
                                 model_pool={
                                     "models": [{
@@ -183,6 +174,9 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                                         "model": "provider/model",
                                         "enabled": True,
                                     }],
+                                },
+                                checker_selection={
+                                    "disabled_checkers": ["public_check"],
                                 },
                             ),
                             code_graph_mcp=AgentMcpConfig(enabled=False),
@@ -197,7 +191,8 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             loaded = store.load_scan(result.scan_id)
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded[1].scan_items, ["public_check"])
-            self.assertEqual(loaded[1].validation_environment, "仿真UBBPi板环境")
+            self.assertEqual(loaded[1].validation_environment, "")
+            self.assertFalse(loaded[1].vulnerability_validation_enabled)
             self.assertEqual(
                 loaded[1].threat_analysis_method,
                 "deephole_threat_analysis",
@@ -209,7 +204,8 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                 [call.args[1]["type"] for call in send.call_args_list],
                 ["config", "task", "config", "task"],
             )
-            self.assertEqual(send.call_args_list[1].args[1]["validation_environment"], "仿真UBBPi板环境")
+            self.assertEqual(send.call_args_list[1].args[1]["validation_environment"], "")
+            self.assertIsNone(send.call_args_list[1].args[1]["vulnerability_validation"])
             self.assertEqual(
                 send.call_args_list[1].args[1]["threat_analysis_method"],
                 "deephole_threat_analysis",
@@ -220,6 +216,8 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             )
             disabled_loaded = store.load_scan(disabled_result.scan_id)
             self.assertIsNotNone(disabled_loaded)
+            self.assertEqual(disabled_result.checkers, [])
+            self.assertEqual(disabled_loaded[1].scan_items, [])
             self.assertIsNone(disabled_loaded[1].code_graph_mcp)
             self.assertIsNone(send.call_args_list[3].args[1]["code_graph_mcp"])
 
@@ -260,6 +258,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             with (
                 patch("backend.api.integration.get_scan_store", return_value=store),
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
             ):
                 user = integration_api._public_user_for_scan("scan-1", "scan-token")
                 result = asyncio.run(
@@ -334,6 +333,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             with (
                 patch("backend.api.integration.get_scan_store", return_value=store),
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
             ):
                 user = integration_api._public_user_for_scan("scan-1", "scan-token")
                 result = asyncio.run(
@@ -394,6 +394,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             with (
                 patch("backend.api.integration.get_scan_store", return_value=store),
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
             ):
                 user = integration_api._public_user_for_scan("scan-1", "scan-token")
                 result = asyncio.run(

@@ -67,7 +67,7 @@ def run_threat_analysis(
 | `code_path` | 必填 | 本次扫描的只读代码目录，传入值为已解析的 `Path` |
 | `output_path` | 必填 | 当前方法的可写产物目录，平台会提前创建 |
 | `is_resume` | `False` | 是否允许方法复用自己在 `output_path` 中保存的阶段产物 |
-| `product_mcp` | `None` | 平台选中的产品信息 MCP 名称；方法不使用时可以忽略 |
+| `product_mcp` | `None` | 本次扫描启用的知识库 MCP 名称；方法不使用时可以忽略 |
 | `attack_modes` | `None` | 预留的攻击模式映射；方法不使用时可以忽略 |
 
 `task_agent_config`、`output`、`cancel_event`、方法 ID 等属于外层平台参数，不会传给原生入口。

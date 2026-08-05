@@ -299,6 +299,7 @@ def opencode_task_context(
     scan_id: str | None = None,
     feedback_entries: list[dict[str, Any]] | None = None,
     code_graph_mcp: dict[str, Any] | None | object = _UNSET,
+    knowledge_base_mcp: dict[str, Any] | None | object = _UNSET,
     config_path: str | PathLike[str] | None = None,
     skill_paths: list[str | PathLike[str]] | None = None,
     task_metadata: dict[str, Any] | None = None,
@@ -324,6 +325,8 @@ def opencode_task_context(
     }
     if code_graph_mcp is not _UNSET:
         context_kwargs["code_graph_mcp"] = code_graph_mcp
+    if knowledge_base_mcp is not _UNSET:
+        context_kwargs["knowledge_base_mcp"] = knowledge_base_mcp
     if output is not _UNSET:
         context_kwargs["on_output"] = output
 

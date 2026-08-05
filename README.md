@@ -27,7 +27,8 @@
 
 ```
 用户在 Web UI 点击「新建扫描」
-  → 选择在线 Agent、填写代码路径（Agent 所在机器的路径）、选择检查项
+  → 选择在线 Agent，填写扫描名称、项目总路径、代码扫描路径和产品
+  → 按需启用知识库、漏洞验证、代码图谱及其它扫描能力
   → 服务器通过 WebSocket 推送任务到 Agent
   → Agent 在本地执行完整扫描流程
   → 进度和结果实时显示在 Web UI
@@ -110,17 +111,19 @@ agent_name: "my-agent"
 owner_token: ""
 ```
 
-下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「客户端配置」** 页面按机器名与 IP 选择客户端。页面只有「基础配置」和「高级配置」两个子页：基础配置包含基础参数与模型配置，高级配置包含威胁分析、产品信息、漏洞挖掘、去误报和漏洞验证。新注册客户端的模型列表固定为空；必须手动添加并启用至少一个明确的 `provider/model` 后才能创建或续建扫描。服务端会持久化配置并推送给在线客户端，已有稳定客户端重连时保留原配置，离线编辑会在重连后生效。
+下载包会自动填入 `server_url` 和 `owner_token`。首次启动并连接后，在 Web UI 的 **「客户端配置」** 页面按机器名与 IP 选择客户端。页面只有「基础配置」和「高级配置」两个子页：基础配置包含基础参数与模型配置，高级配置包含威胁分析、漏洞挖掘、去误报和漏洞验证。漏洞挖掘区统一选择静态分析与候选点审计的 Checker；内置和用户新建 Checker 默认全选，保存后从下一次扫描生效，以后新增的 Checker 也默认启用。漏洞验证区保留所有方法共用的漏洞类型、并发、重试和模型策略。新注册客户端的模型列表固定为空；必须手动添加并启用至少一个明确的 `provider/model` 后才能创建或续建扫描。服务端会持久化配置并推送给在线客户端，已有稳定客户端重连时保留原配置，离线编辑会在重连后生效。
 
 所有登录用户都可以打开 **「结果看板」**。管理员查看全部扫描，普通用户只汇总自己创建的扫描；看板顶部的 Token 总计覆盖当前权限范围内的全部扫描，按 Agent 分组且不受产品筛选影响。单次扫描的模型和任务 Token 明细仍保留在扫描详情中。
 
-**「新建扫描」** 页面会直接读取当前代码仓 `deephole_client/vulnerability_mining/engines/` 中的引擎清单，可为一次扫描选择一个或多个引擎；这个选择与 Agent 无关，不需要等待 Agent 上报引擎。每个已选引擎还可独立配置其结果是否进入去误报，解析后的选择会随扫描固化。
+**「新建扫描」** 页面先集中填写扫描名称、项目总路径、代码扫描路径和产品，再配置本次扫描能力。产品支持自由输入，并根据客户端安装的验证方法提供建议。页面不再选择 Checker；创建时由服务端读取客户端全局 Checker 配置并固化快照，续扫继续使用原快照。漏洞挖掘引擎清单直接来自当前代码仓 `deephole_client/vulnerability_mining/engines/`，可为一次扫描选择一个或多个引擎。
 
-**「新建扫描」** 页面的代码图谱 MCP 是可选项，默认关闭；未启用、未传或传入 `null` 时，模型任务只使用 `read`、`grep`、`glob` 等文件工具，不会启动或回退到内置代码 MCP。启用后可选择本地进程或远端服务，并配置启动参数、环境变量、请求头和 MCP 调用超时。`code_graph_mcp.timeout_seconds` 按秒填写，默认值 `300` 会在运行时转换为 OpenCode MCP 配置中的 `"enabled": true, "timeout": 300000`；该超时同时用于连接、工具发现和单次工具调用。启用的配置会作为扫描私有快照持久化，并在续扫、去误报和漏洞验证中继续使用；不同扫描不会共享代码图谱连接。
+**「新建扫描」** 页面的代码图谱 MCP 是可选项，默认关闭；未启用、未传或传入 `null` 时，模型任务只使用 `read`、`grep`、`glob` 等文件工具，不会启动或回退到内置代码 MCP。启用后只选择本地或远端：本地固定使用当前默认的 `codegraph serve --mcp` 参数，不再允许页面自定义；远端只填写 URL 和请求头。服务端会把名称、超时和本地参数规范化后保存为扫描私有快照，并在续扫、去误报和漏洞验证中继续使用；不同扫描不会共享代码图谱连接。
 
-运行时会严格使用填写的 MCP 名称，不会追加扫描 ID、前缀或哈希。例如名称为 `static-mcp` 且服务提供 `static_read` 时，OpenCode 中的工具名就是 `static-mcp_static_read`；扫描 ID 仅用于内部连接隔离。
+**「启用知识库」** 也是新建扫描的可选项，默认关闭且只支持远程 MCP，只填写 URL 和请求头。启用时，页面会自动带入当前用户在同一稳定客户端上一次成功创建扫描时使用的配置。知识库按扫描快照临时连接，不再属于客户端全局配置，也不会写入 Agent 的全局 OpenCode 配置。
 
-新建扫描页和产品信息配置区都提供手动 **「检测 MCP」**：检测只在 Agent 上执行 MCP `initialize` 和 `list_tools`，不会调用业务工具。扫描代码图谱的检测结果不写入 Agent 全局配置；运行时仍会再次连接，连接或初始化失败时继续扫描并只使用文件工具，不会回退到其它扫描或内置代码图谱。对于本地 `codegraph` CLI，项目 `.codegraph/codegraph.db` 是否就绪仍以扫描任务日志和产物为准。
+新建扫描页的代码图谱和知识库都提供手动 **「检测连接」**：检测只在 Agent 上执行 MCP `initialize` 和 `list_tools`，不会调用业务工具，也不会写入 Agent 全局配置。运行时仍会再次连接；代码图谱连接失败时继续扫描并只使用文件工具，不会回退到其它扫描或内置代码图谱。对于本地 `codegraph` CLI，项目 `.codegraph/codegraph.db` 是否就绪仍以扫描任务日志和产物为准。
+
+**漏洞验证** 默认不启用。勾选后，页面只展示与当前产品兼容的验证方法，并按该方法严格的 `validator.yaml` `field` 定义生成参数表单；方法和参数会按当前用户、稳定客户端、产品和方法记忆。客户端全局验证策略、方法身份和 field 值在创建成功时一起固化，之后修改客户端配置只影响下一次扫描。新格式及扩展约定见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
 
 仓库内置了用于联调的确定性假代码图谱 MCP，可直接运行
 `python tests/fixtures/fake_code_graph_mcp.py --port 9010 --marker scan-a`，并在新建扫描中填写远端 URL `http://127.0.0.1:9010/mcp`。真实 OpenCode Serve 的双图谱连接与隔离回归可用
@@ -175,7 +178,7 @@ WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续�
 1. 点击右上角「新建扫描」
 2. 从下拉列表选择已在线的 Agent
 3. 填写代码路径（Agent 所在机器上的绝对路径，如 `/home/user/myproject`）
-4. 选择要运行的检查项，点击「开始扫描」
+4. 按需启用知识库、漏洞验证、代码图谱和扫描过程，点击「开始扫描」
 5. 扫描进度实时显示在当前页面
 
 ### Agent 启动参数
@@ -262,7 +265,7 @@ visibility: public    # public: 所有用户可见；admin: 仅管理员测试�
 
 ### 在 Web UI 在线创建用户 SKILL
 
-除直接在统一规则目录中开发内置 Checker 外，登录用户也可以在 Web UI 的 **SKILL 市场** 中创建项目级 SKILL。用户创建的规则会保存为 `storage.user_skills_dir/<id>/checker.yaml` 和 `storage.user_skills_dir/<id>/skills/<skill-name>/SKILL.md`，所有用户可在新建扫描页选择使用；服务端在传输时自动拆成静态和审计资源。旧的 `<id>/SKILL.md` 平铺格式不再参与自动发现，需要按新目录结构手动整理。
+除直接在统一规则目录中开发内置 Checker 外，登录用户也可以在 Web UI 的 **SKILL 市场** 中创建项目级 SKILL。用户创建的规则会保存为 `storage.user_skills_dir/<id>/checker.yaml` 和 `storage.user_skills_dir/<id>/skills/<skill-name>/SKILL.md`，并默认加入每个客户端的全局 Checker 选择；服务端在创建扫描时固化选择并把规则拆成静态和审计资源传输。旧的 `<id>/SKILL.md` 平铺格式不再参与自动发现，需要按新目录结构手动整理。
 
 创建流程：
 
@@ -270,7 +273,7 @@ visibility: public    # public: 所有用户可见；admin: 仅管理员测试�
 2. 填写 **标识**、名称、描述、输入和单次运行超时时间
 3. 可选上传 `references/`、`scripts/`、`assets/` 资料
 4. 点击「生成草稿」，检查并编辑生成的 `SKILL.md` 和 `SCENARIOS.md`
-5. 点击「导入 SKILL 市场」，导入后即可在新建扫描页选择
+5. 点击「导入 SKILL 市场」，导入后可在客户端全局 Checker 配置中启用或停用
 
 用户填写的 **标识** 会作为 checker 名称和目录名，不再由系统自动分配 `skill-xx` 编号。标识只能包含字母、数字、下划线，必须以字母或下划线开头，最长 64 个字符，并且不能与现有内置 Checker 或用户 SKILL 重名。
 
@@ -546,7 +549,7 @@ server_url: "http://your-server:8000"
 agent_name: ""
 owner_token: ""
 checkers: []
-schema_version: 4
+schema_version: 5
 base:
   tool: "nga"
   executable: "nga"
@@ -558,14 +561,14 @@ model_pool:
   models: []
 ```
 
-`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v4 字段由 Web **「客户端配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定客户端身份，客户端离线或重连后仍使用同一份服务端配置。新客户端注册时服务端不会采用本地模板上报的模型，模型池保持为空，直到用户在 Web 中明确配置。威胁分析和漏洞挖掘引擎都不属于客户端配置，而是在新建扫描时分别选择；引擎清单直接来自当前代码仓。短暂使用过的 v5 配置会保留其它字段、移除 `mining_engines` 并归一为 v4。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；v3 中的全局代码图谱只作为旧集成请求的扫描级迁移输入，不再写回客户端配置。模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。旧 Web `opencode_config` 字段与运行配置快照会在升级时清理，不再提供编辑或查看入口。
+`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v5 字段由 Web **「客户端配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定客户端身份，客户端离线或重连后仍使用同一份服务端配置。新客户端注册时服务端不会采用本地模板上报的模型，模型池保持为空，直到用户在 Web 中明确配置。威胁分析和漏洞挖掘引擎在新建扫描时选择；Checker 在客户端配置中统一选择并在创建时固化。v4 升级到 v5 时会移除全局产品知识 MCP，并把旧的多验证环境配置重置为新的通用漏洞验证默认策略，不尝试合并；其它阶段策略保持。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；v3 中的全局代码图谱只作为旧集成请求的扫描级迁移输入，不再写回客户端配置。模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。旧 Web `opencode_config` 字段与运行配置快照会在升级时清理，不再提供编辑或查看入口。
 
 新增威胁分析方法只需创建方法目录并实现固定五参数入口，详见 [威胁分析方法扩展](deephole_client/threat_analysis/README.md)。
 新增漏洞挖掘引擎只需创建独立目录并实现固定适配契约，详见 [漏洞挖掘引擎扩展](deephole_client/vulnerability_mining/README.md)。
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“本机发现及显式指定的配置 < DeepHole 2.0 受管字段”合并，不再接受 Web 自定义 JSONC 层。受管字段包括 `$schema`、已启用的全局产品知识 MCP、公共技能路径和运行权限。产品知识 MCP 由客户端配置中的 `product_info` 管理，既写入受管 `opencode.json`，也会通过带目录上下文的 `/mcp` 接口热加载到已经使用过的 OpenCode 工作目录，并跨扫描、跨 Session 保持可用。扫描代码图谱 MCP 使用相同的底层配置格式和 `/mcp` 接口，但只按扫描快照临时连接，任务结束后释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。产品 MCP 的 API Key、Token 等敏感值会以明文保存在服务端数据库、Agent 的 `agent.yaml` 和运行时文件中，应只在可信环境填写。
+OpenCode 最终配置按“本机发现及显式指定的配置 < DeepHole 2.0 受管字段”合并，不再接受 Web 自定义 JSONC 层。全局受管字段只包含 `$schema`、公共技能路径和运行权限；代码图谱与知识库 MCP 都按扫描快照通过带目录上下文的 `/mcp` 接口临时连接，并在任务结束后分别释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。MCP 请求头中的 API Key、Token 等敏感值会保存在服务端扫描快照和创建表单记忆中，应只在可信环境填写。
 
 配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），设置 `OPENCODE_CONFIG_DIR` 并显式清除 `OPENCODE_CONFIG_CONTENT`；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。
 
@@ -576,8 +579,8 @@ OpenCode 调用约定：
 - 文件、SKILL 与 `bash` 的稳定权限统一写入 Serve 实际使用的全局 `opencode.json`。项目目录作为 Session 工作目录保持可读；`~/.opendeephole/opencode_workspace/.opencode` 和最终配置注册的 SKILL 根只读，完整 Agent 的文件编辑工具可写 `~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 与 `skill_create`，其它源码目录保持只读且 `bash` 全面禁用。只有显式传入 `writable_paths` 时，额外动态路径才通过 Session `permission` 创建或 PATCH；省略时不改已有 Session 权限，显式空列表清空覆盖。脱离 Agent 运行时只从 `task-agent.yaml` 的 `serve.opencode_config.skills.paths` 加载 SKILL。
 - `output_schema` 只用于本地 JSON 解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。最终文本 JSON 优先；若模型改用内置文件工具写 JSON，Task Agent 会从当前消息最后写入的合法文件填充 `structured`，但 `text` 仍保留 LLM 最后一次文本输出。确认由本条消息新建的临时文件在解析后自动删除；必须保留的文件或目录可传 `file_write_allowlist`，该白名单只控制清理且不能扩大 `work_dir` 写权限。JSON 仍不合规时默认在原 Session 追加 2 次包含 Schema 的中文纠正，也可通过 `invalid_json_retry_prompt` 提供原样发送的自定义纠正提示词；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
 - OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
-- 只有扫描显式启用的代码图谱 MCP 才会动态连接；空配置、历史 `null` 配置、去误报和漏洞验证均遵循同一文件工具模式，不会启动内置源码 MCP。
-- 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个公共 OpenCode 接口，并继承扫描选择的代码图谱 MCP 或文件工具模式；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
+- 只有扫描显式启用的代码图谱或知识库 MCP 才会动态连接；空配置和历史 `null` 配置不会启动内置源码或知识 MCP。续扫、去误报和漏洞验证继承各自扫描的两类 MCP 快照。
+- 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个公共 OpenCode 接口，并继承扫描选择的代码图谱、知识库或文件工具模式；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
 
 内部 Python 调用统一使用自包含的 `task_agent` 组件。调用方不启动 CLI 或 Serve；首次 `run_opencode_task()` 会惰性创建任务服务和 Serve 管理单例，并在发送任务前完成 Serve 的启动、兼容进程复用或异常恢复：
 

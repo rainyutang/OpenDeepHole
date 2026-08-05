@@ -1,5 +1,5 @@
 # DeepHole 2.0 Agent bootstrap and managed configuration.
-# server_url / agent_name / owner_token are local-only; the remaining v4
+# server_url / agent_name / owner_token are local-only; the remaining v5
 # sections are managed by the Web "客户端配置" page after first connection.
 
 server_url: "http://your-server:8000"
@@ -7,7 +7,7 @@ agent_name: ""
 owner_token: ""
 checkers: []
 
-schema_version: 4
+schema_version: 5
 base:
   tool: "opencode"
   executable: "opencode"
@@ -27,19 +27,6 @@ threat_analysis:
     timeout_seconds: 3600
     max_retries: 2
 
-product_info:
-  enabled: false
-  name: "product-info"
-  transport: "local"
-  timeout_seconds: 300
-  local:
-    executable: "product-info"
-    args: []
-    environment: {}
-  remote:
-    url: ""
-    headers: {}
-
 vulnerability_mining:
   required_capability: "high"
   timeout_seconds: 3600
@@ -51,4 +38,15 @@ false_positive:
   max_retries: 2
 
 vulnerability_validation:
-  environments: {}
+  supported_vulnerability_types:
+    - "*"
+  concurrency: 1
+  validation_max_retries: 0
+  model_policy:
+    required_capability: "high"
+    timeout_seconds: 3600
+    max_retries: 2
+
+checker_selection:
+  # Exclusions are persisted so newly discovered checkers stay enabled.
+  disabled_checkers: []

@@ -27,18 +27,21 @@ def _runtime_sections(config: AgentConfig, scan_dir: Path | None = None) -> dict
         "threat_analysis": dataclasses.asdict(config.threat_analysis),
         "vulnerability_mining": dataclasses.asdict(config.vulnerability_mining),
         "false_positive": dataclasses.asdict(config.false_positive),
-        "product_info": dataclasses.asdict(config.product_info),
         "static_dedup": config.static_dedup,
         "pattern_filter": dataclasses.asdict(config.pattern_filter),
         "no_proxy": config.no_proxy,
         "vulnerability_validation": {
             "enabled": config.vulnerability_validation.enabled,
-            "environments": {
-                name: dataclasses.asdict(value)
-                for name, value in (
-                    config.vulnerability_validation.environments.items()
-                )
-            },
+            "supported_vulnerability_types": list(
+                config.vulnerability_validation.supported_vulnerability_types
+            ),
+            "concurrency": config.vulnerability_validation.concurrency,
+            "validation_max_retries": (
+                config.vulnerability_validation.validation_max_retries
+            ),
+            "model_policy": dataclasses.asdict(
+                config.vulnerability_validation.model_policy
+            ),
         },
     }
     if scan_dir is not None:
@@ -80,7 +83,6 @@ def refresh_platform_runtime_config(config: AgentConfig) -> None:
     current.false_positive = backend_config.ModelTaskPolicyConfig(
         **raw["false_positive"],
     )
-    current.product_info = backend_config.McpConfig(**raw["product_info"])
     current.vulnerability_validation = (
         backend_config.VulnerabilityValidationConfig(
             **raw["vulnerability_validation"],

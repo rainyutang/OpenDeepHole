@@ -1143,6 +1143,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   };
 
   const handleTriggerValidation = async (index: number) => {
+    if (!scan?.vulnerability_validation_enabled) {
+      alert("本次扫描未启用漏洞验证，不能在扫描结束后临时套用新的全局配置");
+      return;
+    }
     setLaunchingValidations((prev) => new Set(prev).add(index));
     try {
       await triggerVulnerabilityValidation(scanId, index);
@@ -1433,7 +1437,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       stoppingValidationIndices={stoppingValidations}
       agentOnline={!!scan.agent_online}
       enableCsvExport
-      onTriggerValidation={handleTriggerValidation}
+      onTriggerValidation={scan.vulnerability_validation_enabled ? handleTriggerValidation : undefined}
       onStopValidation={handleStopValidation}
       onFeedbackCreated={addSelectedFeedbackIds}
       onFeedbackRemoved={removeSelectedFeedbackIds}
@@ -1774,7 +1778,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
               stoppingValidationIndices={stoppingValidations}
               agentOnline={!!scan.agent_online}
               fixedEngineId={activeEngine.engine_id}
-              onTriggerValidation={handleTriggerValidation}
+              onTriggerValidation={scan.vulnerability_validation_enabled ? handleTriggerValidation : undefined}
               onStopValidation={handleStopValidation}
               onFeedbackCreated={addSelectedFeedbackIds}
               onFeedbackRemoved={removeSelectedFeedbackIds}
@@ -2994,10 +2998,18 @@ function ScanOverview({
             <h2 className="mt-1 text-xl font-semibold text-white">{currentStage}</h2>
             <p className="mt-1 text-sm text-slate-400">
               {scan.product || scan.project_id || scan.scan_id}
-              {scan.validation_environment && (
+              {scan.validation_method_label && (
                 <span className="ml-3 border-l border-slate-700 pl-3">
-                  验证环境：<span className="text-slate-300">{scan.validation_environment}</span>
+                  验证方法：<span className="text-slate-300">{scan.validation_method_label}</span>
                 </span>
+              )}
+              {!scan.validation_method_label && scan.validation_environment && (
+                <span className="ml-3 border-l border-slate-700 pl-3">
+                  旧验证环境：<span className="text-slate-300">{scan.validation_environment}</span>
+                </span>
+              )}
+              {scan.knowledge_base_enabled && (
+                <span className="ml-3 border-l border-slate-700 pl-3 text-cyan-300">知识库已启用</span>
               )}
               {scan.agent_name && (
                 <span className="ml-3 border-l border-slate-700 pl-3">
@@ -4714,7 +4726,8 @@ function ValidationDetail({
                 tone={humanInterventionTone(validation.requires_human_intervention)}
               />
               {validation.product && <StatusPill label={`产品：${validation.product}`} tone="slate" />}
-              {validation.validation_environment && <StatusPill label={`环境：${validation.validation_environment}`} tone="slate" />}
+              {validation.validation_method_label && <StatusPill label={`验证方法：${validation.validation_method_label}`} tone="slate" />}
+              {!validation.validation_method_label && validation.validation_environment && <StatusPill label={`旧验证环境：${validation.validation_environment}`} tone="slate" />}
             </div>
             <div className="space-y-3">
               <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">

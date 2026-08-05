@@ -30,6 +30,7 @@ from task_agent.task_service import (
     _permission_path_patterns,
     _runtime_with_permissions,
     _runtime_with_skill_paths,
+    _task_model_policy,
     _writable_path_permissions,
     bind_opencode_execution_context,
 )
@@ -515,6 +516,66 @@ def test_public_interface_assigns_task_type_priority(
         assert result.status == "success"
         spec = service.run_task.await_args.args[0]
         assert spec.priority == expected_priority
+
+    asyncio.run(run())
+
+
+def test_validation_model_task_uses_scan_policy_snapshot(tmp_path: Path) -> None:
+    snapshot = {
+        "required_capability": "low",
+        "timeout_seconds": 17,
+        "max_retries": 3,
+    }
+    assert _task_model_policy(OpenCodeExecutionContext(
+        task_metadata={
+            "task_type": "vulnerability_validation",
+            "validation_model_policy": snapshot,
+        },
+    )) is snapshot
+
+    async def run() -> None:
+        internal = OpenCodeTaskResult(
+            task_id="task-validation-policy",
+            session_id="ses-validation-policy",
+            message_id="msg-validation-policy",
+            status="success",
+            text="ok",
+            model="provider/model",
+        )
+        service = SimpleNamespace(run_task=AsyncMock(return_value=internal))
+        current_config = _config()
+        current_config.vulnerability_validation = SimpleNamespace(
+            model_policy=SimpleNamespace(
+                required_capability="high",
+                timeout_seconds=999,
+                max_retries=9,
+            ),
+        )
+        with (
+            patch(
+                "task_agent.task_service._get_opencode_task_service",
+                return_value=service,
+            ),
+            patch(
+                "task_agent.task_service.get_config",
+                return_value=current_config,
+            ),
+            _task_context(
+                tmp_path,
+                task_metadata={
+                    "validation_model_policy": snapshot,
+                },
+            ),
+        ):
+            await run_opencode_task(
+                task_name="snapshotted validation policy",
+                task_type="vulnerability_validation",
+                prompt="validate",
+                required_capability="high",
+            )
+
+        spec = service.run_task.await_args.args[0]
+        assert spec.timeout_seconds == 17
 
     asyncio.run(run())
 
