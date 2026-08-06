@@ -53,7 +53,7 @@ result = await run_opencode_task(
 | `prompt` | `str` | 必填 | 发送给模型的任务提示词，不能是空字符串或只包含空白。组件会原样发送该字符串，不会因 `output_schema` 自动追加或改写内容。 |
 | `required_capability` | `Literal["low", "high"]` | 必填 | 模型池所需的能力等级，只接受 `low` 或 `high`。 |
 | `output_schema` | `dict[str, Any]` 或 `None` | `None` | 可选的 JSON Schema。传入后，组件会先解析模型最终文本，必要时再检查本次消息由内置文件工具写入的文件，并将匹配值写入 `result.structured`；它不会修改首次 `prompt`。不传时 `result.structured` 为 `None`。 |
-| `invalid_json_retry_count` | `int` | `2` | 首次结果不符合 `output_schema` 时，在同一会话中要求模型修正 JSON 的最大次数，必须大于或等于 `0`。该参数不控制新会话重试次数。 |
+| `invalid_json_retry_count` | `int` | `2` | 首次结果不符合 `output_schema` 时的恢复开关与原 Session 纠正上限，必须大于或等于 `0`。大于 `0` 时先新建一次低能力格式匹配任务，再最多在原 Session 追加该次数的纠正消息；`0` 同时关闭这两层恢复。该参数不控制 fresh Session 重试次数。 |
 | `invalid_json_retry_prompt` | `str` 或 `None` | `None` | JSON 校验失败后的可选纠正提示词。传入非空字符串时，每次纠错都原样重复发送；`None` 使用组件当前包含完整 Schema 的中文默认提示词。 |
 | `file_write_allowlist` | 路径序列或 `None` | `None` | `output_schema` 生效时，需要保留的模型写入文件或目录。相对路径以当前 `work_dir` 为基准，绝对路径也必须位于其中；目录项同时匹配自身及所有后代。它只阻止自动清理，不增加写权限。 |
 | `writable_paths` | 路径序列或 `None` | `None` | 本次 Session 允许内置文件工具修改的额外文件或目录。相对路径以 `project_dir` 为基准，绝对路径可位于项目外；路径会获得 `read`、`external_directory` 和 `edit` 权限，其中 `edit` 同时控制 `write`、`edit` 与 `apply_patch`。不允许通配符或文件系统根目录。 |
@@ -81,7 +81,11 @@ result = await run_opencode_task(
 
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
 
-传入 `output_schema` 后，每条消息仍以最终文本中的合法 JSON 为第一选择。文本不匹配时，组件会按实际成功写入顺序倒序检查当前消息的内置 `write`、`edit`、`apply_patch`/`patch` 文件，最后一个匹配 Schema 的文件作为 `structured`。本次消息确认新建且不在 `file_write_allowlist` 中的文件会在解析后删除，包括执行失败或进入同 Session 纠错时；已有文件即使被模型修改也不会删除或恢复。`writable_paths` 只授予修改权限，不会自动保留文件。未传 Schema 时不跟踪、解析或清理文件；自定义 MCP 的未知文件副作用也不纳入该机制。
+传入 `output_schema` 后，每条消息仍以最终文本中的合法 JSON 为第一选择。文本不匹配时，组件会按实际成功写入顺序倒序检查当前消息的内置 `write`、`edit`、`apply_patch`/`patch` 文件，最后一个匹配 Schema 的文件作为 `structured`。Task Agent 会向受管 `opencode.json` 追加文件写入 Hook，并在消息结束后重新读取本轮新增的完整 assistant 历史，因此即使最终响应只返回文本、文件工具发生在中间 assistant 消息中，也能恢复写入记录。相对写入路径以 `project_dir` 为基准；只读取 `project_dir`、`work_dir` 或显式 `writable_paths` 内的文件。
+
+本次消息确认在 `work_dir` 新建且不在 `file_write_allowlist` 中的文件会在解析后删除，包括执行失败或进入后续恢复时；项目目录和额外 `writable_paths` 中的文件不会被自动删除，已有文件即使被模型修改也不会删除或恢复。`writable_paths` 只授予修改权限，不会自动保留 `work_dir` 文件。未传 Schema 时不跟踪、解析或清理文件；自定义 MCP 的未知文件副作用也不纳入该机制。
+
+若文本和文件仍不符合 Schema，且 `invalid_json_retry_count > 0`，组件先把最后写入的非空文件内容（没有时使用最终文本）交给一个全新、禁用全部工具的格式匹配 Session。该任务以 `required_capability="low"` 调度并优先选择满足要求的最低能力候选，因此允许使用配置为低能力的模型；候选始终来自当前已启用且处于生效时间窗的模型。提示词要求只修复格式、不得增删或改写业务内容；原文缺少必需语义、映射有歧义或与 Schema 完全无关时，必须返回固定非法值 `__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__`，不能强制生成。格式匹配成功时只采用其 `structured`，公开结果继续保留原业务 Session、原文本和原模型。格式匹配失败后，组件才在原业务 Session 最多追加 `invalid_json_retry_count` 次纠正消息；仍失败则进入既有 fresh Session 业务重试。
 
 `task_type` 是文档约定的字符串，而不是导出的枚举。面向业务调用者的稳定类型只有 `vulnerability_mining`、`threat_analysis`、`fp_review` 和 `vulnerability_validation`；未知值会在提交前被拒绝。Agent 自身使用的辅助任务类型属于内部实现，不作为公共调用指导的一部分。
 
@@ -97,9 +101,9 @@ result = await run_opencode_task(
 
 OpenCode 的原生配置放在 `serve.opencode_config` 下，其中 MCP 配置使用 `serve.opencode_config.mcp`。示例文件同时给出了 `type: remote` 的 HTTP MCP 和 `type: local` 的进程 MCP；两项默认关闭，配置好 URL、请求头或启动命令后再将对应的 `enabled` 改为 `true`。MCP 的 `timeout` 单位为毫秒。
 
-独立运行时，组件按 `[<stage>][<session_id>][task|session|tool|skill]` 打印结构化进度并立即刷新。`vulnerability_validation` 的 stage 固定为 `validation`，其它任务使用原始 `task_type`；Session 创建前使用 `pending`。`task` 记录排队、模型选择、Serve 和最终状态，`session` 明确标记当前消息执行的 `START`/`STOP`、Provider 重试、新 Session `RETRY`、同 Session `JSON_RETRY` 及错误；`STOP status=success` 同时表示本次消息结束且执行成功。OpenCode 内部 step 不打印；Tool 和 SKILL 调用分别使用 `tool`、`skill`，每次调用只打印一行。常用内置 Tool 会追加定制摘要：`read` 打印路径及可选 offset/limit，`write` 打印路径和写入字符数，`edit` 打印路径、替换前后字符数及 replace-all 标志，`bash`/`shell` 完整打印经过单行 JSON 转义但不截断、不脱敏的命令及可选工作目录、超时和描述，`grep`/`glob`/`list` 打印各自的模式和目录；当前扫描实际选中的代码图谱 MCP 会打印实际工具名及完整、无截断、无脱敏的单行 `input` JSON，其它未识别的 Tool 与 MCP Tool 仍只打印名称。成功不追加完成行，失败才追加脱敏 `ERROR`。模型 text、reasoning、write/edit 正文及工具返回正文不写入控制台，但最终 text 仍正常返回并参与 JSON 解析。Bash 命令和代码图谱 MCP 输入中的 Token、密码、请求头或其它敏感值会原样进入日志，调用方应避免在这些参数中嵌入不应留存的凭据。一次消息执行结束的 `STOP ... retained=true` 不会删除可续写的 Session。宿主模式继承宿主绑定的输出回调，不会额外重复打印；嵌套 `opencode_task_context(...)` 只有显式传入 `output=None` 才会关闭该回调。
+独立运行时，组件按 `[<stage>][<session_id>][task|session|tool|skill]` 打印结构化进度并立即刷新。`vulnerability_validation` 的 stage 固定为 `validation`，其它任务使用原始 `task_type`；Session 创建前使用 `pending`。`task` 记录排队、模型选择、Serve 和最终状态，`session` 明确标记当前消息执行的 `START`/`STOP`、Provider 重试、新 Session `RETRY`、格式匹配 `JSON_FORMAT_RETRY`/`JSON_FORMAT_RECOVERED`/`JSON_FORMAT_FAILED`、同 Session `JSON_RETRY` 及错误；`STOP status=success` 同时表示本次消息结束且执行成功。OpenCode 内部 step 不打印；Tool 和 SKILL 调用分别使用 `tool`、`skill`，每次调用只打印一行。常用内置 Tool 会追加定制摘要：`read` 打印路径及可选 offset/limit，`write` 打印路径和写入字符数，`edit` 打印路径、替换前后字符数及 replace-all 标志，`bash`/`shell` 完整打印经过单行 JSON 转义但不截断、不脱敏的命令及可选工作目录、超时和描述，`grep`/`glob`/`list` 打印各自的模式和目录；当前扫描实际选中的代码图谱 MCP 会打印实际工具名及完整、无截断、无脱敏的单行 `input` JSON，其它未识别的 Tool 与 MCP Tool 仍只打印名称。成功不追加完成行，失败才追加脱敏 `ERROR`。模型 text、reasoning、write/edit 正文及工具返回正文不写入控制台，但最终 text 仍正常返回并参与 JSON 解析。Bash 命令和代码图谱 MCP 输入中的 Token、密码、请求头或其它敏感值会原样进入日志，调用方应避免在这些参数中嵌入不应留存的凭据。一次消息执行结束的 `STOP ... retained=true` 不会删除可续写的 Session。宿主模式继承宿主绑定的输出回调，不会额外重复打印；嵌套 `opencode_task_context(...)` 只有显式传入 `output=None` 才会关闭该回调。
 
-`serve.timeout` 是一次模型请求的总超时，默认 `3600` 秒。模型 Provider 无法连接时，OpenCode 自身的 `busy`、`retry` 和 `error` 会出现在上述实时输出中；达到总超时后，组件会 abort 当前 Session 请求、回收请求与事件任务，并按 `serve.max_retries` 重新排队到全新 Session，预算耗尽后才返回 `timeout`。fresh Session 重试会记住本次逻辑任务已经尝试过的模型：只要还有满足能力与时间窗的未尝试模型，就排除已经尝试的模型；即使替代模型的并发容量暂满也会等待，而不会立即回到原模型。只有单模型可用或所有合格模型都已尝试后，才允许按当前有效权重回退选择。JSON 纠错仍先在原 Session 和原模型上进行，纠错耗尽后创建 fresh Session 时也遵循相同的换模规则。主动取消仍会立即停止当前请求及后续重试。Serve 子进程不会继承或接受 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式；`serve.environment` 的其它 Provider 环境变量保持不变，代理相关变量仅允许 `NO_PROXY`/`no_proxy` 绕过列表。
+`serve.timeout` 是一次模型请求的总超时，默认 `3600` 秒。模型 Provider 无法连接时，OpenCode 自身的 `busy`、`retry` 和 `error` 会出现在上述实时输出中；达到总超时后，组件会 abort 当前 Session 请求、回收请求与事件任务，并按 `serve.max_retries` 重新排队到全新 Session，预算耗尽后才返回 `timeout`。fresh Session 重试会记住本次逻辑任务已经尝试过的模型：只要还有满足能力与时间窗的未尝试模型，就排除已经尝试的模型；即使替代模型的并发容量暂满也会等待，而不会立即回到原模型。只有单模型可用或所有合格模型都已尝试后，才允许按当前有效权重回退选择。结构化失败先尝试独立低能力格式匹配，再在原业务 Session 纠正；两者都失败后创建 fresh Session 时也遵循相同的换模规则。主动取消仍会立即停止当前请求及后续重试。Serve 子进程不会继承或接受 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式；`serve.environment` 的其它 Provider 环境变量保持不变，代理相关变量仅允许 `NO_PROXY`/`no_proxy` 绕过列表。
 
 同步消息接口若返回 HTTP 成功但正文为空或不是 JSON，组件会按发送前的消息基线从同一 Session 恢复本次新增且已完成的 assistant 消息，并输出不含模型正文的 `RESPONSE_RECOVERED`。无法安全恢复时不会复用旧回复，而是报告仅含状态码、Content-Type、响应字节数和失败类别的协议错误，按健康中性失败换模重试且不降低模型权重；原始响应正文和底层 JSON 解码异常不会进入控制台错误。
 

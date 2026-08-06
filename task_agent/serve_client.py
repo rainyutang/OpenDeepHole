@@ -63,6 +63,97 @@ _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
 _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
 _SERVE_ISOLATED_CONFIG_DIRNAME = ".opendeephole-xdg-config"
+_SERVE_MANAGED_PLUGIN_DIRNAME = ".opendeephole-plugins"
+_FILE_WRITE_PLUGIN_METADATA_KEY = "opendeepholeFileWrites"
+_FILE_WRITE_PLUGIN_SOURCE = r'''import path from "node:path"
+
+const normalizedTool = (value) => String(value || "").trim().toLowerCase().replaceAll("-", "_")
+const pathText = (value) => typeof value === "string" ? value.trim() : ""
+
+export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
+  "tool.execute.after": async (input, output) => {
+    try {
+      const tool = normalizedTool(input?.tool)
+      if (!["write", "edit", "apply_patch", "patch"].includes(tool)) return
+
+      const args = input?.args && typeof input.args === "object" ? input.args : {}
+      const originalMetadata = output?.metadata && typeof output.metadata === "object"
+        ? output.metadata
+        : {}
+      const metadata = { ...originalMetadata }
+      const files = []
+      const addFile = (rawPath, created = false) => {
+        const value = pathText(rawPath)
+        if (!value) return
+        files.push({
+          path: path.isAbsolute(value) ? path.normalize(value) : path.resolve(directory, value),
+          created: Boolean(created),
+        })
+      }
+
+      if (tool === "write" || tool === "edit") {
+        const fileDiff = metadata.filediff && typeof metadata.filediff === "object"
+          ? metadata.filediff
+          : {}
+        const rawPath = pathText(metadata.filepath)
+          || pathText(metadata.filePath)
+          || pathText(fileDiff.file)
+          || pathText(args.filePath)
+          || pathText(args.file_path)
+          || pathText(args.path)
+        const created = tool === "write"
+          ? metadata.exists === false
+          : (args.oldString ?? args.old_string) === ""
+        addFile(rawPath, created)
+      } else {
+        const changes = Array.isArray(metadata.files) ? metadata.files : []
+        for (const item of changes) {
+          if (!item || typeof item !== "object") continue
+          const changeType = String(item.type || "").trim().toLowerCase()
+          if (changeType === "delete") continue
+          const rawPath = changeType === "move"
+            ? pathText(item.movePath) || pathText(item.move_path)
+            : pathText(item.filePath) || pathText(item.file_path) || pathText(item.file)
+          addFile(rawPath, changeType === "add")
+        }
+      }
+
+      if (!files.length) return
+      metadata.opendeepholeFileWrites = {
+        version: 1,
+        sessionID: String(input?.sessionID || ""),
+        callID: String(input?.callID || ""),
+        files,
+      }
+      output.metadata = metadata
+    } catch {
+      // File-write observability must never change the tool call outcome.
+    }
+  },
+})
+'''
+_FILE_WRITE_PLUGIN_HASH = hashlib.sha256(
+    _FILE_WRITE_PLUGIN_SOURCE.encode("utf-8")
+).hexdigest()[:16]
+_FORMATTER_DISABLED_TOOL_IDS = frozenset({
+    "apply_patch",
+    "bash",
+    "codesearch",
+    "edit",
+    "glob",
+    "grep",
+    "list",
+    "patch",
+    "question",
+    "read",
+    "skill",
+    "task",
+    "todoread",
+    "todowrite",
+    "webfetch",
+    "websearch",
+    "write",
+})
 _LEGACY_SCAN_CODE_GRAPH_MCP_PREFIX = "opendeephole-scan-codegraph-"
 _EXPECTED_PASSWORD_WARNING = (
     "Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured."
@@ -329,8 +420,40 @@ def _prepare_serve_startup_cwd(tool: str, startup_cwd: Path | None) -> Path:
     return cwd
 
 
+def _write_private_text(path: Path, content: str) -> None:
+    """Atomically write one private Serve-owned text file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary_path.unlink()
+
+
+def _managed_file_write_plugin_path(cwd: Path) -> Path:
+    plugin_path = (
+        cwd
+        / _SERVE_MANAGED_PLUGIN_DIRNAME
+        / f"opendeephole-file-write-{_FILE_WRITE_PLUGIN_HASH}.mjs"
+    ).resolve()
+    _write_private_text(plugin_path, _FILE_WRITE_PLUGIN_SOURCE)
+    return plugin_path
+
+
 def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
-    """Atomically publish the resolved config used by the next Serve process."""
+    """Atomically publish the resolved config and managed observability plugin."""
     raw = config_content or "{}"
     try:
         data = json.loads(raw)
@@ -338,21 +461,24 @@ def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
         raise ValueError(f"Resolved OpenCode config is invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError("Resolved OpenCode config must be a JSON object")
+    configured_plugins = data.get("plugin")
+    if isinstance(configured_plugins, str):
+        plugins = [configured_plugins]
+    elif isinstance(configured_plugins, list):
+        plugins = [
+            str(value)
+            for value in configured_plugins
+            if isinstance(value, str) and value.strip()
+        ]
+    elif configured_plugins is None:
+        plugins = []
+    else:
+        raise ValueError("Resolved OpenCode config plugin must be a string or list")
+    managed_plugin = _managed_file_write_plugin_path(cwd).as_uri()
+    data["plugin"] = list(dict.fromkeys([*plugins, managed_plugin]))
     normalized = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     config_path = cwd / "opencode.json"
-    fd, temporary_name = tempfile.mkstemp(prefix=".opencode.json.", suffix=".tmp", dir=cwd)
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(normalized)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, config_path)
-        os.chmod(config_path, 0o600)
-    finally:
-        with contextlib.suppress(OSError):
-            temporary_path.unlink()
+    _write_private_text(config_path, normalized)
     return config_path
 
 
@@ -1384,18 +1510,17 @@ def _session_id(data: Any) -> str:
 
 def _config_hash(config_content: str | None) -> str:
     content = (config_content or "").strip()
-    if not content:
-        return ""
     try:
         content = json.dumps(
-            json.loads(content),
+            json.loads(content or "{}"),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
     except Exception:
         pass
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    fingerprint = f"{content}\0file-write-plugin={_FILE_WRITE_PLUGIN_HASH}"
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
 def _normalized_env_overrides(env_overrides: dict[str, str] | None) -> tuple[tuple[str, str], ...]:
@@ -2080,6 +2205,26 @@ def _completed_file_writes(
         if isinstance(value, dict):
             metadata.update(value)
 
+    marker = metadata.get(_FILE_WRITE_PLUGIN_METADATA_KEY)
+    if isinstance(marker, dict) and isinstance(marker.get("files"), list):
+        marker_call_id = str(marker.get("callID") or call_id)
+        marked_writes: list[OpenCodeFileWrite] = []
+        seen_marked_paths: set[str] = set()
+        for item in marker["files"]:
+            if not isinstance(item, dict):
+                continue
+            path = _path_text(item.get("path"))
+            if not path or path in seen_marked_paths:
+                continue
+            seen_marked_paths.add(path)
+            marked_writes.append(OpenCodeFileWrite(
+                call_id=marker_call_id,
+                path=path,
+                created=item.get("created") is True,
+            ))
+        if marked_writes:
+            return marked_writes
+
     if tool_name in {"write", "edit"}:
         file_diff = metadata.get("filediff")
         file_diff = file_diff if isinstance(file_diff, dict) else {}
@@ -2508,6 +2653,30 @@ class _ServeEventState:
             if values:
                 self.reconcile_snapshot(kind, "".join(values))
 
+    def ingest_file_write_snapshot(self, message: object) -> None:
+        """Replay completed file writes without replaying historical text or logs."""
+        if not isinstance(message, dict):
+            return
+        info = message.get("info")
+        if not isinstance(info, dict) or str(info.get("role") or "") != "assistant":
+            return
+        message_id = str(info.get("id") or "")
+        if message_id in self.ignored_file_message_ids:
+            return
+        parts = message.get("parts")
+        if not isinstance(parts, list):
+            return
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            state = part.get("state")
+            if not isinstance(state, dict) or state.get("status") != "completed":
+                continue
+            if message_id and not part.get("messageID"):
+                part = {**part, "messageID": message_id}
+            for value in _completed_file_writes(part, state):
+                self.record_file_write(value, replay=True)
+
     def emit_tool_call(
         self,
         *,
@@ -2858,6 +3027,88 @@ async def _recover_prompt_response(
         now = asyncio.get_running_loop().time()
         if now >= deadline:
             return None, failure_reason
+        await asyncio.sleep(min(0.05, max(0.0, deadline - now)))
+
+
+def _assistant_messages_after_baseline(
+    value: object,
+    *,
+    session_id: str,
+    baseline_message_id: str,
+) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    assistant_messages: list[dict[str, Any]] = []
+    baseline_index: int | None = None
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        info = item.get("info")
+        if not isinstance(info, dict) or str(info.get("role") or "") != "assistant":
+            continue
+        item_session_id = str(info.get("sessionID") or "")
+        if item_session_id and item_session_id != session_id:
+            continue
+        assistant_messages.append(item)
+        if str(info.get("id") or "") == baseline_message_id:
+            baseline_index = len(assistant_messages) - 1
+    if baseline_message_id:
+        if baseline_index is None:
+            return None
+        return assistant_messages[baseline_index + 1:]
+    return assistant_messages
+
+
+async def _replay_current_prompt_file_writes(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    params: dict[str, str],
+    headers: dict[str, str],
+    baseline_message_id: str,
+    response_message_id: str,
+    state: "_ServeEventState",
+) -> None:
+    poll_params = dict(params)
+    poll_params["limit"] = "1000"
+    deadline = (
+        asyncio.get_running_loop().time()
+        + _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS
+    )
+    while True:
+        try:
+            response = await client.get(
+                f"/session/{session_id}/message",
+                params=poll_params,
+                headers=headers,
+            )
+            response.raise_for_status()
+            messages = _assistant_messages_after_baseline(
+                response.json(),
+                session_id=session_id,
+                baseline_message_id=baseline_message_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            messages = None
+        if messages is not None:
+            for message in messages:
+                state.ingest_file_write_snapshot(message)
+            observed_ids = {
+                _response_message_id(message)
+                for message in messages
+            }
+            if not response_message_id or response_message_id in observed_ids:
+                return
+        now = asyncio.get_running_loop().time()
+        if now >= deadline:
+            if messages is None:
+                logger.debug(
+                    "Failed to reconcile OpenCode file writes for session %s",
+                    session_id,
+                )
+            return
         await asyncio.sleep(min(0.05, max(0.0, deadline - now)))
 
 
@@ -3769,6 +4020,7 @@ class OpenCodeServeManager:
         knowledge_base_mcp: dict[str, Any] | None = None,
         system_prompt: str = "",
         permissions: list[dict[str, str]] | None = None,
+        disable_all_tools: bool = False,
         return_details: bool = False,
         show_serve_status: bool = False,
         log_stage: str = "opencode",
@@ -4072,20 +4324,33 @@ class OpenCodeServeManager:
                     on_line=(lambda message: emit("session", message)) if on_line else None,
                     tool=tool,
                 )
-                mcp_overrides = _mcp_tool_overrides(tool_ids, mcp_tools, disabled_mcp_tools)
-                mcp_overrides, source_available = _apply_source_graph_overrides(
-                    tool_ids,
-                    mcp_overrides,
-                    selected_source_mcp,
-                    source_mcp_names=self._source_graph_mcp_names(directory),
-                    protected_mcp_names=(
-                        self._enabled_managed_mcp_names()
-                        | ({knowledge_mcp_lease.name} if knowledge_mcp_lease and knowledge_mcp_lease.connected else set())
-                    ),
-                    allow_undiscovered=bool(
-                        scan_mcp_lease is not None and scan_mcp_lease.connected
-                    ),
-                )
+                if disable_all_tools:
+                    mcp_overrides = {
+                        tool_id: False
+                        for tool_id in sorted(
+                            set(tool_ids) | set(_FORMATTER_DISABLED_TOOL_IDS)
+                        )
+                    }
+                    source_available = False
+                else:
+                    mcp_overrides = _mcp_tool_overrides(
+                        tool_ids,
+                        mcp_tools,
+                        disabled_mcp_tools,
+                    )
+                    mcp_overrides, source_available = _apply_source_graph_overrides(
+                        tool_ids,
+                        mcp_overrides,
+                        selected_source_mcp,
+                        source_mcp_names=self._source_graph_mcp_names(directory),
+                        protected_mcp_names=(
+                            self._enabled_managed_mcp_names()
+                            | ({knowledge_mcp_lease.name} if knowledge_mcp_lease and knowledge_mcp_lease.connected else set())
+                        ),
+                        allow_undiscovered=bool(
+                            scan_mcp_lease is not None and scan_mcp_lease.connected
+                        ),
+                    )
                 if scan_mcp_lease is not None and scan_mcp_lease.connected and not source_available:
                     emit(
                         "session",
@@ -4233,6 +4498,16 @@ class OpenCodeServeManager:
                     result = on_response_model(response_model)
                     if hasattr(result, "__await__"):
                         await result
+                if event_state is not None and on_file_write is not None:
+                    await _replay_current_prompt_file_writes(
+                        client,
+                        session_id=active_session_id,
+                        params=params,
+                        headers=headers,
+                        baseline_message_id=response_baseline_message_id,
+                        response_message_id=_response_message_id(response_data),
+                        state=event_state,
+                    )
                 assistant_error = _assistant_message_error(response_data)
                 if assistant_error is not None:
                     error_name = (

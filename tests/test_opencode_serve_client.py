@@ -22,6 +22,8 @@ from task_agent.serve_client import (
     _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
     _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
     _EventChannelRuntime,
+    _FILE_WRITE_PLUGIN_HASH,
+    _FILE_WRITE_PLUGIN_SOURCE,
     _config_hash,
     _flush_event_state_periodically,
     _handle_serve_event,
@@ -33,6 +35,7 @@ from task_agent.serve_client import (
     _serve_startup_env_debug,
     _serve_startup_shell_debug,
     _token_usage_delta,
+    _write_serve_config_file,
 )
 
 
@@ -51,9 +54,11 @@ def _short_event_drain_for_tests(monkeypatch) -> None:
         lambda cmd, timeout=3.0: "test-version" if "--version" in cmd else "",
     )
     _FakeAsyncClient.message_parts = None
+    _FakeAsyncClient.message_info = None
     _FakeAsyncClient.session_messages = []
     yield
     _FakeAsyncClient.message_parts = None
+    _FakeAsyncClient.message_info = None
     _FakeAsyncClient.session_messages = []
 
 
@@ -555,6 +560,153 @@ def test_run_prompt_tracks_final_response_file_writes_without_output_callback(
             )
         ]
         assert manager._event_states == {}
+
+    asyncio.run(run())
+
+
+def test_run_prompt_replays_intermediate_message_file_writes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        tool_part = {
+            "id": "part-intermediate-write",
+            "type": "tool",
+            "callID": "call-intermediate-write",
+            "tool": "write",
+            "state": {
+                "status": "completed",
+                "input": {
+                    "filePath": "intermediate.json",
+                    "content": '{"answer": 1}',
+                },
+                "metadata": {
+                    "opendeepholeFileWrites": {
+                        "version": 1,
+                        "sessionID": "session-1",
+                        "callID": "call-intermediate-write",
+                        "files": [{
+                            "path": str(project / "intermediate.json"),
+                            "created": True,
+                        }],
+                    },
+                },
+            },
+        }
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["write"]
+        _FakeAsyncClient.message_info = {
+            "id": "message-final",
+            "sessionID": "session-1",
+            "role": "assistant",
+        }
+        _FakeAsyncClient.message_parts = [
+            {"id": "part-final", "type": "text", "text": "written"},
+        ]
+        _FakeAsyncClient.session_messages = [
+            {
+                "info": {
+                    "id": "message-intermediate",
+                    "sessionID": "session-1",
+                    "role": "assistant",
+                },
+                "parts": [tool_part],
+            },
+            {
+                "info": _FakeAsyncClient.message_info,
+                "parts": _FakeAsyncClient.message_parts,
+            },
+        ]
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        writes: list[OpenCodeFileWrite] = []
+
+        details = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="write json",
+            model="provider/model",
+            timeout=30,
+            on_file_write=writes.append,
+            return_details=True,
+        )
+
+        assert isinstance(details, OpenCodePromptResult)
+        assert details.text == "written"
+        assert writes == [
+            OpenCodeFileWrite(
+                call_id="call-intermediate-write",
+                path=str(project / "intermediate.json"),
+                created=True,
+            )
+        ]
+        history_gets = [
+            item
+            for item in _FakeAsyncClient.instances[0].gets
+            if item["path"] == "/session/session-1/message"
+            and item.get("params", {}).get("limit") == "1000"
+        ]
+        assert history_gets
+
+    asyncio.run(run())
+
+
+def test_run_prompt_disable_all_tools_overrides_builtins_and_mcp(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = [
+            "read",
+            "write",
+            "mcp__deephole-code__view_function_code",
+        ]
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+
+        await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            prompt="format only",
+            model="provider/model",
+            timeout=30,
+            disable_all_tools=True,
+        )
+
+        client = _FakeAsyncClient.instances[0]
+        message = next(
+            item for item in client.posts
+            if item["path"] == "/session/session-1/message"
+        )
+        assert message["json"]["tools"]
+        assert all(value is False for value in message["json"]["tools"].values())
+        assert message["json"]["tools"]["bash"] is False
+        assert message["json"]["tools"]["skill"] is False
+        assert (
+            message["json"]["tools"]["mcp__deephole-code__view_function_code"]
+            is False
+        )
 
     asyncio.run(run())
 
@@ -3929,6 +4081,27 @@ def test_owned_listener_pids_only_accept_launcher_process_tree(monkeypatch) -> N
     assert verified is True
 
 
+def test_managed_file_write_plugin_preserves_user_plugins(tmp_path: Path) -> None:
+    workspace = tmp_path / "runtime"
+    workspace.mkdir()
+
+    config_path = _write_serve_config_file(
+        workspace,
+        json.dumps({"plugin": ["user-plugin", "file:///custom/plugin.mjs"]}),
+    )
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["plugin"][:2] == ["user-plugin", "file:///custom/plugin.mjs"]
+    assert len(config["plugin"]) == 3
+    managed_path = (
+        workspace
+        / ".opendeephole-plugins"
+        / f"opendeephole-file-write-{_FILE_WRITE_PLUGIN_HASH}.mjs"
+    ).resolve()
+    assert config["plugin"][2] == managed_path.as_uri()
+    assert managed_path.read_text(encoding="utf-8") == _FILE_WRITE_PLUGIN_SOURCE
+
+
 def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         class FakeProc:
@@ -4037,7 +4210,17 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert Path(envs[0]["XDG_CONFIG_HOME"]).is_dir()
         assert envs[0]["OPENCODE_SERVE_PORT"] == "4096"
         runtime_config_path = startup_cwd / "opencode.json"
-        assert json.loads(runtime_config_path.read_text(encoding="utf-8")) == {"mcp": {}}
+        runtime_config = json.loads(runtime_config_path.read_text(encoding="utf-8"))
+        assert runtime_config["mcp"] == {}
+        assert len(runtime_config["plugin"]) == 1
+        plugin_path = (
+            startup_cwd
+            / ".opendeephole-plugins"
+            / f"opendeephole-file-write-{_FILE_WRITE_PLUGIN_HASH}.mjs"
+        )
+        assert runtime_config["plugin"] == [plugin_path.resolve().as_uri()]
+        assert plugin_path.read_text(encoding="utf-8") == _FILE_WRITE_PLUGIN_SOURCE
+        assert plugin_path.stat().st_mode & 0o777 == 0o600
         assert runtime_config_path.stat().st_mode & 0o777 == 0o600
         for proxy_name in (
             "HTTP_PROXY",
@@ -4083,7 +4266,9 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert f"XDG_CONFIG_HOME={startup_cwd / '.opendeephole-xdg-config'}" in log_text
         assert f"OPENCODE_CONFIG_DIR={startup_cwd}" in log_text
         assert f"config_file_path={runtime_config_path}" in log_text
-        assert 'config_content_redacted={"mcp": {}}' in log_text
+        assert "config_content_redacted=" in log_text
+        assert '"mcp": {}' in log_text
+        assert '"plugin": [' in log_text
         assert "popen_kwargs={'start_new_session': True}" in log_text
 
     asyncio.run(run())

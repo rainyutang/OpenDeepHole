@@ -1253,6 +1253,107 @@ def test_text_json_stays_primary_over_written_json(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_relative_written_path_resolves_from_project_and_is_not_cleaned(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        project_dir = tmp_path / "project"
+        work_dir = tmp_path / "work"
+        project_dir.mkdir()
+        work_dir.mkdir()
+        output_file = project_dir / "result.json"
+
+        async def run_prompt(**kwargs):
+            output_file.write_text('{"answer": 23}', encoding="utf-8")
+            kwargs["on_file_write"](OpenCodeFileWrite(
+                call_id="write-project-relative",
+                path="result.json",
+                created=True,
+            ))
+            callback = kwargs["on_session_id"]("ses-project-relative")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-project-relative",
+                message_id="msg-project-relative",
+                lines=["written"],
+                text="written",
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            project_dir,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="project relative file",
+                prompt="return json",
+                directory=project_dir,
+                output_schema=SCHEMA,
+                output_retry_count=0,
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert result.structured == {"answer": 23}
+        assert output_file.read_text(encoding="utf-8") == '{"answer": 23}'
+
+    asyncio.run(run())
+
+
+def test_written_json_in_explicit_writable_path_is_parsed_and_retained(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        project_dir = tmp_path / "project"
+        work_dir = tmp_path / "work"
+        writable_dir = tmp_path / "external-output"
+        project_dir.mkdir()
+        work_dir.mkdir()
+        writable_dir.mkdir()
+        output_file = writable_dir / "result.json"
+
+        async def run_prompt(**kwargs):
+            output_file.write_text('{"answer": 29}', encoding="utf-8")
+            kwargs["on_file_write"](OpenCodeFileWrite(
+                call_id="write-external",
+                path=str(output_file),
+                created=True,
+            ))
+            callback = kwargs["on_session_id"]("ses-external-file")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-external-file",
+                message_id="msg-external-file",
+                lines=["written"],
+                text="written",
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            project_dir,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="external writable file",
+                prompt="return json",
+                directory=project_dir,
+                output_schema=SCHEMA,
+                output_retry_count=0,
+                writable_paths=(writable_dir,),
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert result.structured == {"answer": 29}
+        assert output_file.read_text(encoding="utf-8") == '{"answer": 29}'
+
+    asyncio.run(run())
+
+
 def test_latest_valid_written_json_wins_and_allowlist_retains_files(
     tmp_path: Path,
 ) -> None:
@@ -1400,7 +1501,7 @@ def test_file_tracking_and_cleanup_are_disabled_without_schema(
     asyncio.run(run())
 
 
-def test_invalid_written_json_is_removed_before_same_session_retry(
+def test_invalid_written_json_is_formatter_source_and_removed_before_formatter(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
@@ -1409,12 +1510,19 @@ def test_invalid_written_json_is_removed_before_same_session_retry(
         invalid_file = work_dir / "invalid.json"
         calls = 0
         permissions: list[list[dict[str, str]] | None] = []
+        prompts: list[str] = []
+        sessions: list[str | None] = []
 
         async def run_prompt(**kwargs):
             nonlocal calls
             calls += 1
             permissions.append(kwargs["permissions"])
-            callback = kwargs["on_session_id"]("ses-file-retry")
+            prompts.append(kwargs["prompt"])
+            sessions.append(kwargs["session_id"])
+            created_session = (
+                "ses-file-retry" if calls == 1 else "ses-file-formatter"
+            )
+            callback = kwargs["on_session_id"](created_session)
             if hasattr(callback, "__await__"):
                 await callback
             if calls == 1:
@@ -1427,9 +1535,11 @@ def test_invalid_written_json_is_removed_before_same_session_retry(
                 text = "written"
             else:
                 assert not invalid_file.exists()
+                assert kwargs["disable_all_tools"] is True
+                assert kwargs["on_file_write"] is None
                 text = '{"answer": 12}'
             return OpenCodePromptResult(
-                session_id="ses-file-retry",
+                session_id=created_session,
                 message_id=f"msg-file-retry-{calls}",
                 lines=[text],
                 text=text,
@@ -1452,12 +1562,16 @@ def test_invalid_written_json_is_removed_before_same_session_retry(
         )
 
         assert result.status == "success"
-        assert result.text == '{"answer": 12}'
+        assert result.session_id == "ses-file-retry"
+        assert result.text == "written"
         assert result.structured == {"answer": 12}
         assert calls == 2
+        assert sessions == [None, None]
+        assert json.dumps('{"answer":"wrong"}', ensure_ascii=False) in prompts[1]
+        assert json.dumps("written", ensure_ascii=False) not in prompts[1]
         assert permissions == [
             _writable_path_permissions((work_dir.resolve(),)),
-            None,
+            [],
         ]
         assert not invalid_file.exists()
 
@@ -1503,18 +1617,25 @@ def test_new_written_file_is_cleaned_when_prompt_fails(tmp_path: Path) -> None:
 def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
-        calls: list[tuple[str, str | None]] = []
+        calls: list[dict] = []
         output: list[str] = []
-        responses = ["not json", '{"answer":"wrong type"}', '{"answer":9}']
+        responses = [
+            "not json",
+            "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__",
+            '{"answer":"wrong type"}',
+            '{"answer":9}',
+        ]
+        created_sessions = ["ses_same", "ses_formatter", "ses_same", "ses_same"]
 
         async def run_prompt(**kwargs):
-            calls.append((kwargs["prompt"], kwargs["session_id"]))
-            callback = kwargs["on_session_id"]("ses_same")
+            index = len(calls)
+            calls.append(kwargs)
+            callback = kwargs["on_session_id"](created_sessions[index])
             if hasattr(callback, "__await__"):
                 await callback
-            text = responses[len(calls) - 1]
+            text = responses[index]
             return OpenCodePromptResult(
-                session_id="ses_same",
+                session_id=created_sessions[index],
                 message_id=f"msg_{len(calls)}",
                 lines=[text],
                 text=text,
@@ -1542,19 +1663,57 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         assert result.status == "success"
         assert result.structured == {"answer": 9}
         assert result.session_id == "ses_same"
-        assert acquire_mock.await_count == 1
-        assert release_mock.await_count == 1
-        assert [session for _prompt, session in calls] == [None, "ses_same", "ses_same"]
+        assert acquire_mock.await_count == 3
+        assert release_mock.await_count == 3
+        assert [call["session_id"] for call in calls] == [
+            None,
+            None,
+            "ses_same",
+            "ses_same",
+        ]
         schema_text = json.dumps(SCHEMA, ensure_ascii=False, indent=2)
-        assert calls[0][0] == "initial prompt"
+        assert calls[0]["prompt"] == "initial prompt"
+        formatter_prompt = calls[1]["prompt"]
+        assert "你是一个只做格式转换的 JSON 修复器" in formatter_prompt
+        assert json.dumps("not json", ensure_ascii=False) in formatter_prompt
+        assert "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__" in formatter_prompt
+        assert calls[1]["disable_all_tools"] is True
+        assert calls[1]["scan_id"] == ""
         assert all(
             "你上一次的回复不是符合目标 JSON Schema 的合法 JSON" in prompt
-            for prompt, _ in calls[1:]
+            for prompt in (calls[2]["prompt"], calls[3]["prompt"])
         )
-        assert all(prompt.endswith(schema_text) for prompt, _ in calls[1:])
-        assert calls[0][0].count(schema_text) == 0
-        assert all(prompt.count(schema_text) == 1 for prompt, _ in calls[1:])
-        assert all("Your previous response" not in prompt for prompt, _ in calls)
+        assert all(
+            prompt.endswith(schema_text)
+            for prompt in (calls[2]["prompt"], calls[3]["prompt"])
+        )
+        assert calls[0]["prompt"].count(schema_text) == 0
+        assert formatter_prompt.count(schema_text) == 1
+        assert all(
+            prompt.count(schema_text) == 1
+            for prompt in (calls[2]["prompt"], calls[3]["prompt"])
+        )
+        formatter_acquire = acquire_mock.await_args_list[1].kwargs
+        assert formatter_acquire["required_capability"] == "low"
+        assert formatter_acquire["strict_capability"] is True
+        assert formatter_acquire["prefer_lowest_capability"] is True
+        assert formatter_acquire["wait_when_unavailable"] is False
+        assert all(
+            "Your previous response" not in call["prompt"]
+            for call in calls
+        )
+        assert (
+            "[opencode][ses_same][session] "
+            "JSON_FORMAT_RETRY reason=invalid_json next_session=new "
+            "required_capability=low"
+            in output
+        )
+        assert any(
+            line.startswith("[opencode][ses_same][session] JSON_FORMAT_FAILED")
+            and "reason=source_unrelated" in line
+            and "fallback=original_session" in line
+            for line in output
+        )
         assert (
             "[opencode][ses_same][session] "
             "JSON_RETRY 1/2 reason=invalid_json next_session=same"
@@ -1577,17 +1736,24 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
 def test_custom_json_correction_prompt_is_repeated_verbatim(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()
-        calls: list[str] = []
-        responses = ["not json", '{"answer":"wrong type"}', '{"answer":9}']
+        calls: list[dict] = []
+        responses = [
+            "not json",
+            "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__",
+            '{"answer":"wrong type"}',
+            '{"answer":9}',
+        ]
 
         async def run_prompt(**kwargs):
-            calls.append(kwargs["prompt"])
-            callback = kwargs["on_session_id"]("ses_custom")
+            index = len(calls)
+            calls.append(kwargs)
+            created_session = "ses_formatter" if index == 1 else "ses_custom"
+            callback = kwargs["on_session_id"](created_session)
             if hasattr(callback, "__await__"):
                 await callback
-            text = responses[len(calls) - 1]
+            text = responses[index]
             return OpenCodePromptResult(
-                session_id="ses_custom",
+                session_id=created_session,
                 message_id=f"msg_{len(calls)}",
                 lines=[text],
                 text=text,
@@ -1620,7 +1786,107 @@ def test_custom_json_correction_prompt_is_repeated_verbatim(tmp_path: Path) -> N
             ))
 
         assert result.status == "success"
-        assert calls == ["original prompt", custom_prompt, custom_prompt]
+        assert [call["prompt"] for call in calls[2:]] == [
+            custom_prompt,
+            custom_prompt,
+        ]
+        assert calls[0]["prompt"] == "original prompt"
+        assert "你是一个只做格式转换的 JSON 修复器" in calls[1]["prompt"]
+        assert [call["session_id"] for call in calls] == [
+            None,
+            None,
+            "ses_custom",
+            "ses_custom",
+        ]
+
+    asyncio.run(run())
+
+
+def test_formatter_request_failure_falls_back_to_original_session(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[dict] = []
+        output: list[str] = []
+
+        async def run_prompt(**kwargs):
+            index = len(calls)
+            calls.append(kwargs)
+            if index == 0:
+                callback = kwargs["on_session_id"]("ses-business")
+                if hasattr(callback, "__await__"):
+                    await callback
+                return OpenCodePromptResult(
+                    session_id="ses-business",
+                    message_id="msg-business",
+                    lines=["not json"],
+                    text="not json",
+                    model="provider/model-low",
+                )
+            if index == 1:
+                callback = kwargs["on_session_id"]("ses-formatter-failed")
+                if hasattr(callback, "__await__"):
+                    await callback
+                await _notify_model_request_failure(kwargs, "failure")
+                raise RuntimeError("formatter transport failed")
+            callback = kwargs["on_session_id"]("ses-business")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-business",
+                message_id="msg-correction",
+                lines=['{"answer": 31}'],
+                text='{"answer": 31}',
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1],
+            patches[2] as release_mock,
+            patches[3],
+            patches[4],
+            patches[5],
+            _task_context(
+                tmp_path,
+                task_metadata={"standalone_console": True},
+                on_output=output.append,
+            ),
+        ):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name="formatter request failure",
+                prompt="initial",
+                directory=tmp_path,
+                output_schema=SCHEMA,
+                output_retry_count=1,
+                attempt=0,
+            ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses-business"
+        assert result.text == '{"answer": 31}'
+        assert result.structured == {"answer": 31}
+        assert [call["session_id"] for call in calls] == [
+            None,
+            None,
+            "ses-business",
+        ]
+        formatter_release = release_mock.await_args_list[1].kwargs
+        assert formatter_release["outcome"] == "failure"
+        assert formatter_release["health_outcome"] == "failure"
+        assert formatter_release["record_completion"] is False
+        assert any(
+            line.startswith("[opencode][ses-business][session] JSON_FORMAT_FAILED")
+            and "reason=RuntimeError" in line
+            and "fallback=original_session" in line
+            for line in output
+        )
 
     asyncio.run(run())
 
@@ -1630,8 +1896,18 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
         service = OpenCodeTaskService()
         calls: list[tuple[str, str | None]] = []
         output: list[str] = []
-        created_sessions = ["ses_first", "ses_first", "ses_final"]
-        texts = ["bad", "still bad", '{"answer":11}']
+        created_sessions = [
+            "ses_first",
+            "ses_formatter",
+            "ses_first",
+            "ses_final",
+        ]
+        texts = [
+            "bad",
+            "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__",
+            "still bad",
+            '{"answer":11}',
+        ]
         sources: list[OutputSource] = []
 
         async def run_prompt(**kwargs):
@@ -1681,21 +1957,38 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
         assert first_session_id == "ses_first"
         assert result.session_id == "ses_final"
         assert result.structured == {"answer": 11}
-        assert [source.attempt for source in sources] == [1, 2]
-        assert acquire_mock.await_count == 2
-        assert [call[1] for call in calls] == [None, "ses_first", None]
-        assert [call[0] for call in calls] == ["initial", "custom retry", "initial"]
+        assert [source.attempt for source in sources] == [1, 1, 2]
+        assert acquire_mock.await_count == 4
+        assert [call[1] for call in calls] == [
+            None,
+            None,
+            "ses_first",
+            None,
+        ]
+        assert calls[0][0] == "initial"
+        assert "你是一个只做格式转换的 JSON 修复器" in calls[1][0]
+        assert calls[2][0] == "custom retry"
+        assert calls[3][0] == "initial"
         first_release = release_mock.await_args_list[0].kwargs
-        final_release = release_mock.await_args_list[1].kwargs
+        formatter_release = release_mock.await_args_list[1].kwargs
+        correction_release = release_mock.await_args_list[2].kwargs
+        final_release = release_mock.await_args_list[3].kwargs
         assert first_release["record_completion"] is False
         assert first_release["outcome"] == "failure"
         assert first_release["health_outcome"] is None
+        assert formatter_release["record_completion"] is False
+        assert formatter_release["outcome"] == "failure"
+        assert formatter_release["health_outcome"] is None
+        assert correction_release["record_completion"] is False
+        assert correction_release["outcome"] == "failure"
+        assert correction_release["health_outcome"] is None
         assert final_release["record_completion"] is True
         assert final_release["outcome"] == "success"
         assert final_release["health_outcome"] == "success"
         identity = {("provider/model-low", False, "opencode", "opencode")}
         assert acquire_mock.await_args_list[0].kwargs["avoid_model_identities"] == set()
-        assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
+        assert acquire_mock.await_args_list[1].kwargs["required_capability"] == "low"
+        assert acquire_mock.await_args_list[3].kwargs["avoid_model_identities"] == identity
         assert (
             "[opencode][ses_first][session] "
             "JSON_RETRY 1/1 reason=invalid_json next_session=same"

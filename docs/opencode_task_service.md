@@ -188,7 +188,7 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 
 嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，`bash` 始终禁用。只有显式传入 `writable_paths` 时，额外动态路径才通过 Session 权限覆盖下发，不进入 Serve 配置哈希。
 
-`workspace_dir` 中生成的 `opencode.json` 包含 `serve.opencode_config` 的实际内容，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该已解析配置，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再合并调用者机器上的环境配置。standalone 只以 YAML 中的 `serve.opencode_config` 为用户配置源；完整 Agent 则在进入 Task Agent 前按受控顺序合并已发现的全局、可执行文件目录、项目和显式配置。用户全局目录及显式配置目录兼容旧版 `config.json`，但自动发现的可执行文件相邻目录和项目目录只接受 `opencode.json` / `opencode.jsonc`；通用 `config.json` 可能属于安装器、启动器或项目自身，不能作为 OpenCode 配置源。
+`workspace_dir` 中生成的 `opencode.json` 包含 `serve.opencode_config` 的实际内容，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Task Agent 还会在该 workspace 的私有目录生成一个受管文件写入 Hook，并在最终配置的 `plugin` 列表末尾追加其文件 URI；调用方已有的插件条目保持原顺序且不会被覆盖，Hook 源码哈希也参与 Serve 配置重载判断。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该已解析配置，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再合并调用者机器上的环境配置。standalone 只以 YAML 中的 `serve.opencode_config` 为用户配置源；完整 Agent 则在进入 Task Agent 前按受控顺序合并已发现的全局、可执行文件目录、项目和显式配置。用户全局目录及显式配置目录兼容旧版 `config.json`，但自动发现的可执行文件相邻目录和项目目录只接受 `opencode.json` / `opencode.jsonc`；通用 `config.json` 可能属于安装器、启动器或项目自身，不能作为 OpenCode 配置源。
 
 ### Serve 参数
 
@@ -300,7 +300,7 @@ Task Agent 的进度行统一使用下面三个头字段：
 ```
 
 - `vulnerability_validation` 映射为 stage `validation`；其它任务直接使用 `task_type`。Session 尚未创建时第二段为 `pending`，创建或续写后改为真实 Session ID。
-- 第三段只会是 `task`、`session`、`tool` 或 `skill`：`task` 覆盖排队、模型 Lease、Serve 准备和任务终态；`session` 覆盖当前消息执行的启动、停止、Provider 重试、新 Session `RETRY`、同 Session `JSON_RETRY`、错误及工具发现；`tool`、`skill` 分别表示一次真实工具调用或 SKILL 读取。OpenCode 内部 step 的 START、STOP 和 FAIL 不打印。
+- 第三段只会是 `task`、`session`、`tool` 或 `skill`：`task` 覆盖排队、模型 Lease、Serve 准备和任务终态；`session` 覆盖当前消息执行的启动、停止、Provider 重试、新 Session `RETRY`、独立格式匹配 `JSON_FORMAT_RETRY` / `JSON_FORMAT_RECOVERED` / `JSON_FORMAT_FAILED`、原 Session `JSON_RETRY`、错误及工具发现；`tool`、`skill` 分别表示一次真实工具调用或 SKILL 读取。OpenCode 内部 step 的 START、STOP 和 FAIL 不打印。
 - 每次消息执行都会打印 `session START` 和 `session STOP`。`STOP status=success retained=true` 同时表示本次消息结束且成功，Session 本身仍保留并可续写；超时和取消分别标记 `status=timeout`、`status=cancelled`。
 - assistant text 和 reasoning 不打印到控制台，仍在内部聚合并作为最终 `text` 返回或用于 JSON 校验。Tool/SKILL 调用每次只打印一行：`read` 打印 `path` 及可选 `offset`/`limit`，`write` 打印 `path`/`content_chars`，`edit` 打印 `path`/`old_chars`/`new_chars` 及可选 `replace_all`，`bash`/`shell` 打印完整 `command` 及可选 `workdir`/`timeout`/`description`，`grep`/`glob`/`list` 打印各自的模式与目录；当前扫描实际选中的代码图谱 MCP 打印实际工具名及完整、无截断、无脱敏的单行 `input` JSON，其它未识别的 Tool 和 MCP Tool 仍只打印名称。Bash 命令与代码图谱 MCP 输入使用 JSON 转义保持单行，其中的 Token、密码、请求头或其它敏感值会原样进入日志。成功不追加完成行，调用失败才在同一类别下追加脱敏 `ERROR`；write/edit 正文、其它未列出的调用参数和工具返回正文仍不打印。嵌套 `opencode_task_context(...)` 省略 `output` 时继承宿主回调，只有显式传入 `output=None` 才关闭输出。
 
@@ -353,11 +353,19 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 只有传入 `output_schema` 时才解析结构化结果。服务不使用 OpenCode 原生 `format=json_schema`，也不再把 Schema 或任何输出要求追加到首次用户 prompt；调用方传入什么字符串，首次消息和任务队列历史就保存并发送什么字符串，`prompt_length` 也按该原文计算。需要模型首次就输出 JSON 时，调用方必须像上文示例一样显式组装最终 prompt。
 
-服务先解析 LLM 的最终文本；文本中的 JSON 合法时始终优先采用。若文本不匹配 Schema，服务会检查当前这条消息中成功完成的内置 `write`、`edit`、`apply_patch`/`patch` 调用，按实际写入顺序从后向前读取文件，最后一个匹配 Schema 的文件成为 `structured`。这不会改变 `OpenCodeResult.text`，它仍是 LLM 最后一次文本输出。自定义 MCP 工具的未知文件副作用不在跟踪范围内。
+服务先解析 LLM 的最终文本；文本中的 JSON 合法时始终优先采用。若文本不匹配 Schema，服务会检查本轮成功完成的内置 `write`、`edit`、`apply_patch`/`patch` 调用，按实际写入顺序从后向前读取文件，最后一个匹配 Schema 的文件成为 `structured`。受管 OpenCode Hook 在 `tool.execute.after` 为写入结果附加标准化路径、Session、调用 ID 和是否新建等标记；消息完成后，Task Agent 还会基于发送前 assistant 基线重新读取本轮完整消息历史，恢复最终 HTTP 响应未包含的中间 assistant 文件写入。事件流、Hook 标记和 OpenCode 原生 Tool 元数据会合并去重；Hook 异常不会改变工具执行结果。这不会改变 `OpenCodeResult.text`，它仍是 LLM 最后一次文本输出。自定义 MCP 工具的未知文件副作用不在跟踪范围内。
 
-每次消息完成后，服务会删除确认由该消息新建、且未被 `file_write_allowlist` 匹配的文件；无论 JSON 来自文本还是文件、消息执行失败，或即将进入同 Session 纠错，都会执行该清理。已存在但被修改的文件不会删除，也不会恢复旧内容。白名单中的相对路径以当前 `work_dir` 为基准；绝对路径必须位于 `work_dir` 内；文件项匹配自身，目录项匹配自身和所有后代。`writable_paths` 只授予修改权限，不会自动保留新文件；`file_write_allowlist` 只控制保留且不会扩大写权限。
+相对写入路径以 OpenCode Session 的 `project_dir` 为基准，只允许读取解析后位于 `project_dir`、`work_dir` 或显式 `writable_paths` 内的文件。每次消息完成后，服务只删除确认由该消息在 `work_dir` 新建、且未被 `file_write_allowlist` 匹配的文件；无论 JSON 来自文本还是文件、消息执行失败，或即将进入后续恢复，都会先取得文件内容快照再执行清理。项目目录和额外 `writable_paths` 中的文件不会被自动删除；已存在但被修改的文件也不会删除或恢复旧内容。白名单中的相对路径以当前 `work_dir` 为基准；绝对路径必须位于 `work_dir` 内；文件项匹配自身，目录项匹配自身和所有后代。`writable_paths` 只授予修改权限，不会自动保留 `work_dir` 新文件；`file_write_allowlist` 只控制保留且不会扩大写权限。
 
-若文本和已写文件都没有符合 Schema 的 JSON，服务会在原 Session 最多追加 `invalid_json_retry_count` 次纠正消息；这些消息复用同一 Session、同一模型 Lease，不重新排队。`invalid_json_retry_prompt=None` 时使用当前包含完整 Schema 的中文默认提示词；传入非空字符串时，每次都原样发送该字符串，不追加 Schema、重试序号或其它内容。空字符串、纯空白和非字符串会在提交任务前报错。未传 `output_schema` 时完全不启用文件跟踪、文件 JSON 回退或自动清理；纠错次数为 `0` 时不会发送纠正消息。
+若文本和已写文件都没有符合 Schema 的 JSON，且 `invalid_json_retry_count > 0`，服务按以下顺序恢复：
+
+1. 释放原业务模型 Lease，新建一个独立格式匹配 Session。输入优先使用本轮最后写入的非空文件原文，没有可读文件时使用业务 Session 最终文本；新 Session 不连接扫描 MCP、权限覆盖为空、所有已发现工具与内置工具均禁用。
+2. 格式匹配以 `required_capability="low"` 严格调度，并优先使用满足要求的最低能力候选，因此配置为低能力的模型可以承担该任务；候选始终只来自已启用且当前时间窗有效的模型，不会使用禁用模型。若没有任何已启用模型，格式匹配失败并回到原 Session。为避免全局并发为 `1` 时死锁，该阶段不会占用原业务 Lease。
+3. 格式匹配提示只允许修复 JSON 语法、围栏、引号、转义、逗号及无歧义且不改变语义的组织/字段映射，禁止新增、删除、推断、补全、概括、翻译或改写业务事实。原文缺少 Schema 必需语义、映射有歧义或与 JSON/Schema 完全无关时，模型必须只返回固定非法值 `__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__`，不得强制套用 Schema。
+4. 格式匹配输出通过 Schema 后，只把该 JSON 作为 `structured`；公开结果仍返回原业务 `session_id`、原 `text`、原 `model` 和原输出来源。格式匹配失败、返回固定非法值或请求异常时，服务重新取得符合原业务能力要求的已启用模型 Lease，并在原业务 Session 最多追加 `invalid_json_retry_count` 次纠正消息。
+5. 原 Session 纠正仍失败后，才按 `serve.max_retries` 重新排队并创建 fresh 业务 Session。格式不合规与固定非法值属于健康中性失败；格式匹配或纠正请求本身发生 Provider/Auth/API 失败或超时时，仍按真实请求结果更新对应模型健康状态。
+
+原 Session 纠正使用 `invalid_json_retry_prompt`：值为 `None` 时使用当前包含完整 Schema 的中文默认提示词；传入非空字符串时，每次都原样发送该字符串，不追加 Schema、重试序号或其它内容。空字符串、纯空白和非字符串会在提交任务前报错。未传 `output_schema` 时完全不启用文件跟踪、文件 JSON 回退或自动清理；`invalid_json_retry_count=0` 时同时关闭独立格式匹配与原 Session 纠正，但既有 fresh Session 重试策略保持不变。
 
 若同 Session 纠正耗尽，内部服务会按对应任务策略的 `max_retries` 释放 Lease、重新排队并创建全新 Session。模型消息超时和其它可重试执行错误也使用同一预算；`max_retries=2` 表示首次 Session 之外最多再创建 2 个 Session，即最多执行 3 次。业务方不再传 `attempt`。
 
