@@ -530,7 +530,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                       onChange={setProjectFilter}
                     />
                   </th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">状态</th>
+                  <th className="min-w-[6.5rem] whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">状态</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">任务进度</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">漏洞数</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">人工确认</th>
@@ -586,13 +586,15 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                       <td className="px-4 py-3 text-sm font-medium text-slate-200 max-w-[14rem] truncate" title={displayProjectName}>
                         {displayProjectName}
                       </td>
-                      <td className="px-4 py-3">
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded border ${st.cls}`}>
-                          {st.label}
+                      <td className="min-w-[6.5rem] whitespace-nowrap px-4 py-3">
+                        <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                          <span className={`inline-flex items-center whitespace-nowrap rounded border px-2 py-0.5 text-xs font-semibold ${st.cls}`}>
+                            {st.label}
+                          </span>
+                          {running && (
+                            <span className="inline-block h-2 w-2 rounded-full bg-blue-400 animate-pulse" />
+                          )}
                         </span>
-                        {running && (
-                          <span className="ml-2 inline-block w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
-                        )}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
