@@ -1942,6 +1942,38 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
             return run if cur.rowcount else None
 
+    def replace_scan_stage_runs(
+        self,
+        scan_id: str,
+        threat_analysis_run: ThreatAnalysisRunStatus | None,
+        mining_engine_runs: list[MiningEngineRunStatus],
+    ) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                """\
+                UPDATE scans
+                SET threat_analysis_run_json = ?, mining_engine_runs_json = ?
+                WHERE scan_id = ?
+                """,
+                (
+                    (
+                        threat_analysis_run.model_dump_json()
+                        if threat_analysis_run is not None
+                        else "{}"
+                    ),
+                    json.dumps(
+                        [
+                            item.model_dump(mode="json")
+                            for item in mining_engine_runs
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    scan_id,
+                ),
+            )
+            self._conn.commit()
+            return bool(cur.rowcount)
+
     def load_scan(self, scan_id: str) -> tuple[ScanStatus, ScanMeta] | None:
         cur = self._conn.execute(
             "SELECT * FROM scans WHERE scan_id = ?", (scan_id,)
@@ -2027,6 +2059,22 @@ class SqliteScanStore(ScanStoreBase):
             user_id=row["user_id"] if row["user_id"] is not None else "",
             username=row["username"] if "username" in row.keys() and row["username"] is not None else "",
             agent_name=row["agent_name"] if row["agent_name"] is not None else "",
+            threat_analysis_run=(
+                ThreatAnalysisRunStatus.model_validate_json(
+                    row["threat_analysis_run_json"]
+                )
+                if row["threat_analysis_run_json"]
+                and row["threat_analysis_run_json"] != "{}"
+                else None
+            ),
+            mining_engines=_json_model_list(
+                row["mining_engines_json"],
+                MiningEngineSelection,
+            ),
+            mining_engine_runs=_json_model_list(
+                row["mining_engine_runs_json"],
+                MiningEngineRunStatus,
+            ),
         )
 
     def list_scans(self) -> list[ScanSummary]:

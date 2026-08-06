@@ -731,6 +731,10 @@ class AgentRuntimePackageTests(unittest.TestCase):
             calls.append("resume")
             self.assertEqual(kwargs["retry_candidates"][0]["file"], "src/a.c")
             self.assertEqual(kwargs["retry_threat_audit_task_ids"], ["threat-timeout"])
+            self.assertEqual(
+                kwargs["retry_mining_engine_ids"],
+                ["threat_audit"],
+            )
             self.assertTrue(kwargs["resume_threat_analysis"])
             self.assertEqual(kwargs["scan_mode"], "threat_analysis_only")
             self.assertEqual(
@@ -749,6 +753,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "retry_total_candidates": 2,
             "retry_processed_offset": 1,
             "resume_threat_analysis": True,
+            "retry_mining_engine_ids": ["threat_audit"],
             "retry_threat_audit_task_ids": ["threat-timeout"],
             "code_graph_mcp": {"enabled": True, "transport": "remote"},
             "agent_runtime_update": {"hash": "new-runtime"},
@@ -770,6 +775,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "retry_total_candidates": 2,
             "retry_processed_offset": 1,
             "resume_threat_analysis": True,
+            "retry_mining_engine_ids": ["threat_audit"],
             "retry_threat_audit_task_ids": ["threat-timeout"],
             "agent_runtime_update": {"hash": "new-runtime"},
         }

@@ -88,6 +88,15 @@ class ScanStoreBase(ABC):
         """Replace the standalone threat-analysis lifecycle state."""
         raise NotImplementedError
 
+    def replace_scan_stage_runs(
+        self,
+        scan_id: str,
+        threat_analysis_run: ThreatAnalysisRunStatus | None,
+        mining_engine_runs: list[MiningEngineRunStatus],
+    ) -> bool:
+        """Atomically replace continuation-visible process lifecycle states."""
+        raise NotImplementedError
+
     @abstractmethod
     def upsert_scan_opencode_token_usage(
         self,

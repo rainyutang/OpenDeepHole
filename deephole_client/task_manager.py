@@ -8,6 +8,14 @@ from pathlib import Path
 from typing import Optional
 
 
+class ScanCancellationEvent(threading.Event):
+    """Cancellation signal carrying local attempt-replacement metadata."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.suppress_terminal_report = False
+
+
 @dataclass
 class ScanTask:
     scan_id: str
@@ -30,8 +38,11 @@ class ScanTask:
     retry_total_candidates: int | None = None
     retry_processed_offset: int = 0
     resume_threat_analysis: bool = False
+    retry_mining_engine_ids: list[str] | None = None
     retry_threat_audit_task_ids: list[str] | None = None
-    cancel_event: threading.Event = field(default_factory=threading.Event)
+    cancel_event: ScanCancellationEvent = field(
+        default_factory=ScanCancellationEvent,
+    )
     asyncio_task: Optional[asyncio.Task] = None
 
 
@@ -61,6 +72,7 @@ class TaskManager:
         retry_total_candidates: int | None = None,
         retry_processed_offset: int = 0,
         resume_threat_analysis: bool = False,
+        retry_mining_engine_ids: list[str] | None = None,
         retry_threat_audit_task_ids: list[str] | None = None,
     ) -> ScanTask:
         task = ScanTask(
@@ -103,6 +115,11 @@ class TaskManager:
             retry_total_candidates=retry_total_candidates,
             retry_processed_offset=retry_processed_offset,
             resume_threat_analysis=resume_threat_analysis,
+            retry_mining_engine_ids=(
+                list(retry_mining_engine_ids)
+                if isinstance(retry_mining_engine_ids, list)
+                else None
+            ),
             retry_threat_audit_task_ids=retry_threat_audit_task_ids,
         )
         self._tasks[scan_id] = task
@@ -118,14 +135,12 @@ class TaskManager:
             return True
         return False
 
-    def resume(self, scan_id: str) -> Optional[ScanTask]:
-        task = self._tasks.get(scan_id)
-        if task:
-            task.cancel_event.clear()
-        return task
-
-    def remove(self, scan_id: str) -> None:
+    def remove(self, scan_id: str, expected: ScanTask | None = None) -> bool:
+        current = self._tasks.get(scan_id)
+        if current is None or (expected is not None and current is not expected):
+            return False
         self._tasks.pop(scan_id, None)
+        return True
 
     def active_snapshots(self) -> list[dict]:
         """Return serializable metadata for scans still running locally."""

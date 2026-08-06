@@ -39,6 +39,25 @@ SCAN_MODE_FULL = "full"
 SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 
 
+def _archive_failed_threat_analysis(output_path: Path) -> Path | None:
+    """Preserve one failed artifact tree before a clean fallback attempt."""
+    output_path = Path(output_path)
+    if not output_path.exists():
+        output_path.mkdir(parents=True, exist_ok=True)
+        return None
+    failed_root = output_path.parent / f"{output_path.name}_failed"
+    failed_root.mkdir(parents=True, exist_ok=True)
+    attempt_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    archive_path = failed_root / attempt_id
+    suffix = 1
+    while archive_path.exists():
+        archive_path = failed_root / f"{attempt_id}-{suffix}"
+        suffix += 1
+    output_path.rename(archive_path)
+    output_path.mkdir(parents=True, exist_ok=False)
+    return archive_path
+
+
 def _resolve_scan_paths(
     project_path: Path,
     code_scan_path: Path | None,
@@ -169,7 +188,10 @@ async def _finish_scan(
     total: int,
     processed: int,
     error: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
+    if bool(getattr(cancel_event, "suppress_terminal_report", False)):
+        return
     await reporter.finish_scan(
         scan_id,
         vulnerabilities,
@@ -314,6 +336,7 @@ async def run_scan(
     retry_total_candidates: int | None = None,
     retry_processed_offset: int = 0,
     resume_threat_analysis: bool = False,
+    retry_mining_engine_ids: list[str] | None = None,
     retry_threat_audit_task_ids: list[str] | None = None,
     scan_mode: str = SCAN_MODE_FULL,
     threat_analysis_enabled: bool = False,
@@ -353,7 +376,35 @@ async def run_scan(
         raw_selections=mining_engines,
         threat_only=threat_only,
     )
-    enabled_selections = [item for item in selections if item.enabled]
+    configured_enabled_selections = [
+        item for item in selections if item.enabled
+    ]
+    if is_resume and retry_mining_engine_ids is not None:
+        retry_engine_ids = {
+            str(engine_id).strip()
+            for engine_id in retry_mining_engine_ids
+            if str(engine_id).strip()
+        }
+        configured_ids = {
+            item.engine_id for item in configured_enabled_selections
+        }
+        unknown_retry_ids = sorted(retry_engine_ids - configured_ids)
+        if unknown_retry_ids:
+            raise ValueError(
+                "Unknown resume mining engine(s): "
+                + ", ".join(unknown_retry_ids)
+            )
+        enabled_selections = [
+            item
+            for item in configured_enabled_selections
+            if item.engine_id in retry_engine_ids
+        ]
+        preserved_completed_engine_count = (
+            len(configured_enabled_selections) - len(enabled_selections)
+        )
+    else:
+        enabled_selections = configured_enabled_selections
+        preserved_completed_engine_count = 0
     index_file_progress = {"current": 0, "total": 0}
 
     async def emit(
@@ -470,6 +521,7 @@ async def run_scan(
             total=0,
             processed=0,
             error="Threat audit requires threat analysis",
+            cancel_event=cancel_event,
         )
         return
     if not enabled_selections and not threat_analysis_selected:
@@ -481,6 +533,7 @@ async def run_scan(
             total=0,
             processed=0,
             error="No scan process or vulnerability-mining engine is enabled",
+            cancel_event=cancel_event,
         )
         return
 
@@ -553,6 +606,7 @@ async def run_scan(
             total=0,
             processed=0,
             error=error or None,
+            cancel_event=cancel_event,
         )
         return
     index_path = Path(str(graph_result["index_db_path"]))
@@ -567,7 +621,7 @@ async def run_scan(
 
     if not any(
         item.engine_id == "static_candidate"
-        for item in enabled_selections
+        for item in configured_enabled_selections
     ):
         await reporter.send_static_progress(scan_id, 0, 0, done=True)
 
@@ -599,14 +653,13 @@ async def run_scan(
         )
         output_path = scan_dir / "threat_analysis"
         result: dict[str, Any] | None = None
-        try:
-            result = await run_threat_analysis(
+
+        async def run_native_attempt(*, resume: bool) -> dict[str, Any]:
+            return await run_threat_analysis(
                 method_id=threat_analysis_method_id,
                 code_path=scan_root,
                 output_path=output_path,
-                # The native process owns its cache and validates whether a
-                # completed stage can be reused for this scan path.
-                is_resume=True,
+                is_resume=resume,
                 product_mcp=(
                     "product-info"
                     if isinstance(knowledge_base_mcp, dict)
@@ -616,6 +669,56 @@ async def run_scan(
                 output=process_output,
                 cancel_event=cancel_event,
             )
+
+        try:
+            result = await run_native_attempt(resume=is_resume)
+            if (
+                is_resume
+                and result.get("result") is not True
+                and not cancel_event.is_set()
+            ):
+                incremental_reason = str(
+                    result.get("reason") or "Threat analysis failed"
+                )
+                try:
+                    archive_path = _archive_failed_threat_analysis(
+                        output_path,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Incremental threat-analysis resume failed: "
+                        f"{incremental_reason}; failed to archive its artifacts: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                print(
+                    _format_process_console_line(
+                        "threat_analysis",
+                        "Incremental resume failed; starting one clean fallback"
+                        + (
+                            f" (archived at {archive_path})"
+                            if archive_path is not None
+                            else ""
+                        ),
+                    ),
+                    flush=True,
+                )
+                clean_result = await run_native_attempt(resume=False)
+                if clean_result.get("result") is not True:
+                    clean_reason = str(
+                        clean_result.get("reason")
+                        or "Threat analysis failed"
+                    )
+                    result = {
+                        **clean_result,
+                        "result": False,
+                        "reason": (
+                            "Incremental threat-analysis resume failed: "
+                            f"{incremental_reason}; clean fallback failed: "
+                            f"{clean_reason}"
+                        ),
+                    }
+                else:
+                    result = clean_result
             if result.get("result") is not True:
                 raise RuntimeError(
                     str(result.get("reason") or "Threat analysis failed")
@@ -681,9 +784,9 @@ async def run_scan(
                 analysis_run.status != "success"
                 or threat_analysis_result is None
             ):
-                run.status = "error"
+                run.status = "skipped"
                 run.error_message = (
-                    "Threat analysis failed: "
+                    "Blocked because threat analysis failed: "
                     + (
                         analysis_run.error_message
                         or analysis_run.status
@@ -839,12 +942,7 @@ async def run_scan(
         ):
             should_run_threat_analysis = (
                 threat_analysis_selected
-                and (
-                    not is_resume
-                    or resume_threat_analysis
-                    or threat_only
-                    or not enabled_selections
-                )
+                and (not is_resume or resume_threat_analysis)
             )
             if should_run_threat_analysis:
                 threat_analysis_task = asyncio.create_task(
@@ -861,7 +959,7 @@ async def run_scan(
                 else None
             )
 
-        successful_runs = 0
+        successful_runs = preserved_completed_engine_count
         failures: list[str] = []
         if (
             threat_analysis_outcome is not None
@@ -888,9 +986,18 @@ async def run_scan(
             total += int(output["total_candidates"])
             processed += int(output["processed_candidates"])
 
+        # A stage-targeted continuation may not run the static engine that
+        # owns the scan-level candidate counters.  Never erase its persisted
+        # totals merely because this attempt only repaired threat analysis or
+        # another independent engine.
+        if is_resume:
+            if retry_total_candidates is not None:
+                total = max(total, max(0, int(retry_total_candidates)))
+            processed = max(processed, max(0, int(retry_processed_offset)))
+
         if cancel_event.is_set():
             status = "cancelled"
-        elif not enabled_selections:
+        elif not configured_enabled_selections:
             status = (
                 "complete"
                 if (
@@ -930,6 +1037,7 @@ async def run_scan(
             total=total,
             processed=processed,
             error=warning,
+            cancel_event=cancel_event,
         )
     except asyncio.CancelledError:
         cancel_event.set()
@@ -945,6 +1053,7 @@ async def run_scan(
             vulnerabilities=audited,
             total=total,
             processed=processed,
+            cancel_event=cancel_event,
         )
         raise
     except Exception as exc:
@@ -963,6 +1072,7 @@ async def run_scan(
             total=total,
             processed=processed,
             error=str(exc),
+            cancel_event=cancel_event,
         )
     finally:
         pool_stop.set()

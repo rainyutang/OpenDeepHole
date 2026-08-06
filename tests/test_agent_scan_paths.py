@@ -13,12 +13,14 @@ from deephole_client.config import AgentConfig
 from deephole_client.scanner import (
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     _event_candidate_index,
+    _finish_scan,
     _format_process_console_line,
     _format_process_event_message,
     _report_process_vulnerabilities,
     _resolve_scan_paths,
     run_scan,
 )
+from deephole_client.task_manager import ScanCancellationEvent
 from backend.models import MiningEngineSelection, Vulnerability
 from deephole_client.vulnerability_mining import runtime as mining_runtime
 from deephole_client.vulnerability_mining.engines.threat_audit import (
@@ -86,6 +88,23 @@ def _threat_vulnerability() -> dict:
 
 
 class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replaced_attempt_suppresses_stale_terminal_report(self) -> None:
+        reporter = _reporter()
+        cancel_event = ScanCancellationEvent()
+        cancel_event.suppress_terminal_report = True
+
+        await _finish_scan(
+            reporter,
+            "scan-replaced",
+            status="cancelled",
+            vulnerabilities=[],
+            total=0,
+            processed=0,
+            cancel_event=cancel_event,
+        )
+
+        reporter.finish_scan.assert_not_awaited()
+
     async def test_reported_fp_check_item_keeps_selected_method(self) -> None:
         reporter = _reporter()
         reporter.report_vulnerability.return_value = {
@@ -575,6 +594,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             analysis.await_args.kwargs["method_id"],
             "custom_threat_analysis",
         )
+        self.assertFalse(analysis.await_args.kwargs["is_resume"])
         mining.assert_not_awaited()
         reporter.push_threat_analysis.assert_awaited_once()
         self.assertEqual(
@@ -646,6 +666,367 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reporter.finish_scan.await_args.args[2], "error")
         self.assertIn(
             "Threat model service unavailable",
+            reporter.finish_scan.await_args.kwargs["error_message"],
+        )
+
+    async def test_threat_analysis_failure_only_blocks_dependent_engine(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        started: list[str] = []
+        manifests = [
+            SimpleNamespace(
+                engine_id="independent",
+                label="Independent engine",
+                fp_review=False,
+            ),
+            SimpleNamespace(
+                engine_id="threat_audit",
+                label="Threat audit",
+                fp_review=False,
+            ),
+        ]
+        loaded = {
+            item.engine_id: SimpleNamespace(manifest=item)
+            for item in manifests
+        }
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: manifests,
+            get=lambda engine_id: loaded.get(engine_id),
+        )
+
+        async def run_engine(engine, **_kwargs):
+            started.append(engine.manifest.engine_id)
+            return {
+                "status": "success",
+                "vulnerabilities": [],
+                "error_message": "",
+                "total_candidates": 0,
+                "processed_candidates": 0,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.run_mining_engine",
+                    side_effect=run_engine,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=AsyncMock(return_value={
+                        "result": False,
+                        "reason": "Threat model service unavailable",
+                    }),
+                ),
+            ):
+                await run_scan(
+                    config=AgentConfig(),
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="independent-engine",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-independent-engine",
+                    cancel_event=threading.Event(),
+                    threat_analysis_enabled=True,
+                    mining_engines=[
+                        {
+                            "engine_id": item.engine_id,
+                            "engine_label": item.label,
+                            "enabled": True,
+                        }
+                        for item in manifests
+                    ],
+                )
+
+        final_runs = {
+            call.args[1]["engine_id"]: call.args[1]
+            for call in reporter.report_mining_engine_run.await_args_list
+        }
+        self.assertEqual(started, ["independent"])
+        self.assertEqual(final_runs["independent"]["status"], "success")
+        self.assertEqual(final_runs["threat_audit"]["status"], "skipped")
+        self.assertIn(
+            "Blocked because threat analysis failed",
+            final_runs["threat_audit"]["error_message"],
+        )
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
+        self.assertIn(
+            "Threat model service unavailable",
+            reporter.finish_scan.await_args.kwargs["error_message"],
+        )
+
+    async def test_threat_analysis_resume_falls_back_once_from_clean_artifacts(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        attempts: list[bool] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+
+            async def run_analysis(**kwargs):
+                attempts.append(bool(kwargs["is_resume"]))
+                output_path = Path(kwargs["output_path"])
+                output_path.mkdir(parents=True, exist_ok=True)
+                if len(attempts) == 1:
+                    (output_path / "poisoned.json").write_text(
+                        '{"cached": true}',
+                        encoding="utf-8",
+                    )
+                    return {
+                        "result": False,
+                        "reason": "cached semantic mismatch",
+                    }
+                return {
+                    "result": True,
+                    "attack_tree_path": str(root / "attack-tree.json"),
+                    "high_risk_modules_path": str(root / "risk.json"),
+                }
+
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=AsyncMock(side_effect=run_analysis),
+                ),
+                patch(
+                    "deephole_client.scanner.collect_json_artifacts",
+                    return_value={"artifacts": {}},
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="analysis-resume",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-analysis-resume",
+                    cancel_event=threading.Event(),
+                    is_resume=True,
+                    retry_total_candidates=7,
+                    retry_processed_offset=5,
+                    resume_threat_analysis=True,
+                    threat_analysis_enabled=True,
+                    mining_engines=[],
+                )
+
+            failed_root = (
+                root
+                / ".opendeephole"
+                / "scans"
+                / "scan-analysis-resume"
+                / "threat_analysis_failed"
+            )
+            archives = list(failed_root.iterdir())
+            self.assertEqual(attempts, [True, False])
+            self.assertEqual(len(archives), 1)
+            self.assertTrue((archives[0] / "poisoned.json").is_file())
+            self.assertEqual(
+                reporter.finish_scan.await_args.args[2],
+                "complete",
+            )
+            self.assertEqual(reporter.finish_scan.await_args.args[3:5], (7, 5))
+
+    async def test_threat_analysis_resume_clean_fallback_is_not_repeated(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        attempts: list[bool] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+
+            async def run_analysis(**kwargs):
+                attempts.append(bool(kwargs["is_resume"]))
+                Path(kwargs["output_path"]).mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                return {
+                    "result": False,
+                    "reason": f"attempt {len(attempts)} failed",
+                }
+
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=AsyncMock(side_effect=run_analysis),
+                ),
+            ):
+                await run_scan(
+                    config=AgentConfig(),
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="analysis-resume-double-failure",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-analysis-resume-double-failure",
+                    cancel_event=threading.Event(),
+                    is_resume=True,
+                    resume_threat_analysis=True,
+                    threat_analysis_enabled=True,
+                    mining_engines=[],
+                )
+
+        self.assertEqual(attempts, [True, False])
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "error")
+        self.assertIn(
+            "Incremental threat-analysis resume failed: attempt 1 failed; "
+            "clean fallback failed: attempt 2 failed",
+            reporter.finish_scan.await_args.kwargs["error_message"],
+        )
+
+    async def test_resume_runs_only_requested_failed_engine(self) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        started: list[str] = []
+        manifests = [
+            SimpleNamespace(engine_id="good", label="Good", fp_review=False),
+            SimpleNamespace(engine_id="bad", label="Bad", fp_review=False),
+        ]
+        loaded = {
+            item.engine_id: SimpleNamespace(manifest=item)
+            for item in manifests
+        }
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: manifests,
+            get=lambda engine_id: loaded.get(engine_id),
+        )
+
+        async def run_engine(engine, **_kwargs):
+            started.append(engine.manifest.engine_id)
+            raise RuntimeError("retry still failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.run_mining_engine",
+                    side_effect=run_engine,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="targeted-resume",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-targeted-resume",
+                    cancel_event=threading.Event(),
+                    is_resume=True,
+                    retry_mining_engine_ids=["bad"],
+                    mining_engines=[
+                        {
+                            "engine_id": "good",
+                            "engine_label": "Good",
+                            "enabled": True,
+                        },
+                        {
+                            "engine_id": "bad",
+                            "engine_label": "Bad",
+                            "enabled": True,
+                        },
+                    ],
+                )
+
+        self.assertEqual(started, ["bad"])
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
+        self.assertIn(
+            "Bad: retry still failed",
             reporter.finish_scan.await_args.kwargs["error_message"],
         )
 

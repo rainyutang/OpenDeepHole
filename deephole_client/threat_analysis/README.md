@@ -113,6 +113,22 @@ return {
 持久展示在扫描详情；取消状态单独记录，不作为普通错误。不要在 `reason` 中返回完整堆栈、
 模型正文、密钥或其它敏感内部信息。
 
+## 续扫与失败恢复
+
+首次扫描调用原生入口时传入 `is_resume=False`；用户续扫失败扫描时，平台只在威胁分析生命周期
+不是 `success`，或依赖它的威胁审计仍有未完成任务时重新启动该过程，并先传入
+`is_resume=True`。方法可以自行验证和复用 `output_path` 中已经完成的阶段产物。
+
+如果这次增量恢复明确返回 `result=False` 且任务没有被取消，外层扫描协调器会把当前
+`threat_analysis` 目录原子移动到同级 `threat_analysis_failed/<UTC-attempt-id>/`，创建新的空
+输出目录，然后只再调用一次原生入口并传入 `is_resume=False`。第二次仍失败时本次续扫立即
+停止威胁分析且不循环重试；扫描整体状态仍按其它独立引擎的结果收敛。取消或外层适配器异常
+也不会触发干净回退。归档只保留在 Agent 本地，便于排查且不会上传原生任务或模型明细。
+
+该恢复策略属于平台协调逻辑，不要求方法感知扫描整体状态，也不修改
+`methods/deephole_threat_analysis/` 内的原生实现。威胁分析失败只会阻塞消费其结果的
+`threat_audit`；其它漏洞挖掘引擎按各自生命周期独立运行和续扫。
+
 ## 从现有 ThreatAnalysis 工程覆盖内置方法
 
 `ThreatAnalysis/src/threat_analysis_harness` 已经包含符合上述约定的 `__init__.py`、

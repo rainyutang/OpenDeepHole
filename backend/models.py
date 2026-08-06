@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 class ScanItemStatus(str, Enum):
@@ -1395,6 +1396,26 @@ class ScanSummary(BaseModel):
     username: str = ""
     agent_name: str = ""
     agent_online: bool = False
+    # Internal lifecycle snapshots used to derive continuation capability for
+    # list responses.  They are loaded with the summary row but never exposed
+    # through the public response model.
+    threat_analysis_run: SkipJsonSchema[
+        ThreatAnalysisRunStatus | None
+    ] = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
+    mining_engines: SkipJsonSchema[list[MiningEngineSelection]] = Field(
+        default_factory=list,
+        exclude=True,
+        repr=False,
+    )
+    mining_engine_runs: SkipJsonSchema[list[MiningEngineRunStatus]] = Field(
+        default_factory=list,
+        exclude=True,
+        repr=False,
+    )
 
 
 class ScanSummaryPage(BaseModel):

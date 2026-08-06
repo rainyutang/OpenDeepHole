@@ -1036,9 +1036,105 @@ def _continuable_task_count(
     scan: ScanStatus,
     processed_keys: set[tuple[str, int, str, str]],
 ) -> int:
-    return len(_continuable_candidates(scan, processed_keys)) + len(
-        _incomplete_threat_audit_tasks(scan)
+    candidate_count = len(_continuable_candidates(scan, processed_keys))
+    threat_task_count = len(_incomplete_threat_audit_tasks(scan))
+    return (
+        candidate_count
+        + threat_task_count
+        + _retryable_stage_count(
+            scan,
+            candidate_count=candidate_count,
+            threat_task_count=threat_task_count,
+        )
     )
+
+
+_COMPLETED_ENGINE_RUN_STATUSES = {"success", "skipped"}
+
+
+def _normalized_run_status(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _threat_analysis_run_needs_retry(
+    scan: ScanStatus | ScanSummary,
+) -> bool:
+    if not scan.threat_analysis_enabled:
+        return False
+    run = scan.threat_analysis_run
+    if run is None:
+        return scan.status in {ScanItemStatus.CANCELLED, ScanItemStatus.ERROR}
+    return _normalized_run_status(run.status) != "success"
+
+
+def _retryable_stage_count(
+    scan: ScanStatus | ScanSummary,
+    *,
+    candidate_count: int,
+    threat_task_count: int,
+) -> int:
+    """Count retryable process-level work not represented by finer tasks."""
+    threat_analysis_retry = _threat_analysis_run_needs_retry(scan)
+    count = 1 if threat_analysis_retry else 0
+    interrupted = scan.status in {ScanItemStatus.CANCELLED, ScanItemStatus.ERROR}
+    runs_by_id = {item.engine_id: item for item in scan.mining_engine_runs}
+    for selection in scan.mining_engines:
+        if not selection.enabled:
+            continue
+        run = runs_by_id.get(selection.engine_id)
+        retryable = (
+            interrupted
+            if run is None
+            else _normalized_run_status(run.status)
+            not in _COMPLETED_ENGINE_RUN_STATUSES
+        )
+        if selection.engine_id == "threat_audit" and threat_analysis_retry:
+            retryable = True
+        if not retryable:
+            continue
+        if selection.engine_id == "static_candidate" and candidate_count:
+            continue
+        if selection.engine_id == "threat_audit" and threat_task_count:
+            continue
+        count += 1
+    return count
+
+
+def _resume_mining_engine_ids(
+    scan: ScanStatus,
+    selections: list[MiningEngineSelection],
+    *,
+    continue_candidates: list[Candidate],
+    incomplete_threat_tasks: list[ThreatAuditTask],
+    full_pipeline_resume: bool,
+    resume_threat_analysis: bool,
+) -> list[str]:
+    """Return enabled engines that have unfinished work for this continuation."""
+    interrupted = scan.status in {ScanItemStatus.CANCELLED, ScanItemStatus.ERROR}
+    runs_by_id = {item.engine_id: item for item in scan.mining_engine_runs}
+    retry_ids: list[str] = []
+    for selection in selections:
+        if not selection.enabled:
+            continue
+        run = runs_by_id.get(selection.engine_id)
+        lifecycle_retry = (
+            interrupted
+            if run is None
+            else _normalized_run_status(run.status)
+            not in _COMPLETED_ENGINE_RUN_STATUSES
+        )
+        has_work = lifecycle_retry
+        if selection.engine_id == "static_candidate":
+            has_work = has_work or full_pipeline_resume or bool(continue_candidates)
+        elif selection.engine_id == "threat_audit":
+            has_work = (
+                has_work
+                or bool(incomplete_threat_tasks)
+                or resume_threat_analysis
+            )
+        if has_work:
+            retry_ids.append(selection.engine_id)
+    return retry_ids
 
 
 def _apply_continue_capability(
@@ -1504,10 +1600,19 @@ async def _enrich_scan_summaries(
             else:
                 s = reconcile_offline_agent_summary_state(s)
             vulnerabilities = vuln_stats.get(s.scan_id, [])
-            continuable_count = (
+            candidate_count = (
                 max(s.total_candidates - s.processed_candidates, 0)
                 + sum(1 for v in vulnerabilities if _is_retryable_vuln(v))
-                + incomplete_threat_counts.get(s.scan_id, 0)
+            )
+            threat_task_count = incomplete_threat_counts.get(s.scan_id, 0)
+            continuable_count = (
+                candidate_count
+                + threat_task_count
+                + _retryable_stage_count(
+                    s,
+                    candidate_count=candidate_count,
+                    threat_task_count=threat_task_count,
+                )
             )
         s.retryable_candidates_count = sum(
             1 for v in vulnerabilities if _is_retryable_vuln(v)
@@ -1686,10 +1791,19 @@ async def get_scan_overview_v2(
         scan.retryable_candidates_count = sum(
             1 for vuln in vulnerabilities if _is_retryable_vuln(vuln)
         )
-        continuable_count = (
+        candidate_count = (
             max(scan.total_candidates - scan.processed_candidates, 0)
             + scan.retryable_candidates_count
-            + incomplete_counts.get(scan_id, 0)
+        )
+        threat_task_count = incomplete_counts.get(scan_id, 0)
+        continuable_count = (
+            candidate_count
+            + threat_task_count
+            + _retryable_stage_count(
+                scan,
+                candidate_count=candidate_count,
+                threat_task_count=threat_task_count,
+            )
         )
 
     fp_result_map = latest_fp_review_result_map(fp_verdicts.get(scan_id, []))
@@ -1970,7 +2084,15 @@ async def _continue_scan(
     processed_keys = await run_store_call(store, "get_processed_keys", scan_id)
     continue_candidates = _continuable_candidates(scan, processed_keys)
     incomplete_threat_tasks = _incomplete_threat_audit_tasks(scan)
-    continue_count = len(continue_candidates) + len(incomplete_threat_tasks)
+    continue_count = (
+        len(continue_candidates)
+        + len(incomplete_threat_tasks)
+        + _retryable_stage_count(
+            scan,
+            candidate_count=len(continue_candidates),
+            threat_task_count=len(incomplete_threat_tasks),
+        )
+    )
     resume_interrupted = scan.status in {ScanItemStatus.CANCELLED, ScanItemStatus.ERROR}
     if not resume_interrupted and continue_count == 0:
         raise HTTPException(status_code=400, detail="当前扫描没有可续扫的任务")
@@ -1986,7 +2108,8 @@ async def _continue_scan(
         for item in meta.mining_engines
     )
     resume_threat_analysis = meta.threat_analysis_enabled and (
-        bool(incomplete_threat_tasks)
+        _threat_analysis_run_needs_retry(scan)
+        or bool(incomplete_threat_tasks)
         or (
             resume_interrupted
             and (
@@ -1998,6 +2121,32 @@ async def _continue_scan(
             )
         )
     )
+    retry_mining_engine_ids = _resume_mining_engine_ids(
+        scan,
+        meta.mining_engines,
+        continue_candidates=continue_candidates,
+        incomplete_threat_tasks=incomplete_threat_tasks,
+        full_pipeline_resume=full_pipeline_resume,
+        resume_threat_analysis=resume_threat_analysis,
+    )
+    if (
+        resume_interrupted
+        and not retry_mining_engine_ids
+        and not resume_threat_analysis
+    ):
+        # A legacy or infrastructure-interrupted row can have a terminal
+        # top-level error even though every persisted stage looks complete.
+        # Preserve the old recoverability contract instead of dispatching an
+        # empty Agent run.
+        retry_mining_engine_ids = [
+            item.engine_id for item in meta.mining_engines if item.enabled
+        ]
+        if not retry_mining_engine_ids and meta.threat_analysis_enabled:
+            resume_threat_analysis = True
+    if threat_audit_enabled and "threat_audit" in retry_mining_engine_ids:
+        # The engine consumes the native result object from the current Agent
+        # process.  Resume the analysis first so it can reuse or reconstruct it.
+        resume_threat_analysis = True
     if meta.threat_analysis_enabled:
         try:
             _resolve_threat_analysis_method(meta.threat_analysis_method)
@@ -2009,7 +2158,10 @@ async def _continue_scan(
                     f"{meta.threat_analysis_method}"
                 ),
             ) from exc
-    if resume_threat_analysis and not scan.threat_audit_tasks:
+    if resume_threat_analysis and (
+        _threat_analysis_run_needs_retry(scan)
+        or not scan.threat_audit_tasks
+    ):
         threat_task_ids: list[str] | None = None
     else:
         threat_task_ids = [task.task_id for task in incomplete_threat_tasks]
@@ -2073,6 +2225,53 @@ async def _continue_scan(
 
     retry_keys = [_candidate_key(candidate) for candidate in continue_candidates]
     removed_processed_keys = [key for key in retry_keys if key in processed_keys]
+
+    previous_threat_analysis_run = (
+        scan.threat_analysis_run.model_copy(deep=True)
+        if scan.threat_analysis_run is not None
+        else None
+    )
+    previous_mining_engine_runs = [
+        item.model_copy(deep=True) for item in scan.mining_engine_runs
+    ]
+    pending_threat_analysis_run = (
+        ThreatAnalysisRunStatus()
+        if resume_threat_analysis
+        else previous_threat_analysis_run
+    )
+    engine_runs_by_id = {
+        item.engine_id: item.model_copy(deep=True)
+        for item in previous_mining_engine_runs
+    }
+    selection_by_id = {
+        item.engine_id: item
+        for item in meta.mining_engines
+        if item.enabled
+    }
+    for engine_id in retry_mining_engine_ids:
+        selection = selection_by_id.get(engine_id)
+        if selection is None:
+            continue
+        engine_runs_by_id[engine_id] = MiningEngineRunStatus(
+            engine_id=engine_id,
+            engine_label=selection.engine_label,
+        )
+    pending_mining_engine_runs = sorted(
+        engine_runs_by_id.values(),
+        key=lambda item: (item.engine_label, item.engine_id),
+    )
+    if resume_threat_analysis or retry_mining_engine_ids:
+        replaced = await run_store_call(
+            store,
+            "replace_scan_stage_runs",
+            scan_id,
+            pending_threat_analysis_run,
+            pending_mining_engine_runs,
+        )
+        if not replaced:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        scan.threat_analysis_run = pending_threat_analysis_run
+        scan.mining_engine_runs = pending_mining_engine_runs
 
     scan.status = ScanItemStatus.PENDING
     scan.error_message = None
@@ -2158,6 +2357,7 @@ async def _continue_scan(
         "retry_total_candidates": total_candidates,
         "retry_processed_offset": processed_offset,
         "resume_threat_analysis": resume_threat_analysis,
+        "retry_mining_engine_ids": retry_mining_engine_ids,
         "retry_threat_audit_task_ids": threat_task_ids,
         "code_graph_mcp": (
             meta.code_graph_mcp.model_dump(mode="json")
@@ -2202,6 +2402,16 @@ async def _continue_scan(
         command = resume_payload
     ok = await send_agent_command(agent_id, command)
     if not ok:
+        if resume_threat_analysis or retry_mining_engine_ids:
+            await run_store_call(
+                store,
+                "replace_scan_stage_runs",
+                scan_id,
+                previous_threat_analysis_run,
+                previous_mining_engine_runs,
+            )
+            scan.threat_analysis_run = previous_threat_analysis_run
+            scan.mining_engine_runs = previous_mining_engine_runs
         await run_store_call(
             store,
             "add_processed_keys_batch",
@@ -2221,11 +2431,13 @@ async def _continue_scan(
         raise HTTPException(status_code=502, detail="Agent not connected")
 
     logger.info(
-        "Continuing scan %s via agent %s: candidates=%s threat_tasks=%d",
+        "Continuing scan %s via agent %s: candidates=%s threat_tasks=%d engines=%s threat_analysis=%s",
         scan_id,
         agent_id,
         "full-pipeline" if candidate_payload is None else len(candidate_payload),
         len(incomplete_threat_tasks),
+        retry_mining_engine_ids,
+        resume_threat_analysis,
     )
     return ScanStartResponse(scan_id=scan_id)
 

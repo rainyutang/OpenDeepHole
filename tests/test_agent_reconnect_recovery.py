@@ -18,6 +18,7 @@ from backend.models import (
     AgentScanFinish,
     Candidate,
     FpReviewStatus,
+    MiningEngineRunStatus,
     MiningEngineSelection,
     OpenCodePoolStatus,
     ScanCandidate,
@@ -26,6 +27,7 @@ from backend.models import (
     ScanMeta,
     ScanStatus,
     ThreatAuditTask,
+    ThreatAnalysisRunStatus,
     User,
     Vulnerability,
 )
@@ -795,6 +797,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
                 patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.scan.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
             ):
                 status = asyncio.run(scan_api.get_scan_status("scan-1", current_user=user))
 
@@ -919,16 +925,21 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
             meta = _meta()
             meta.code_graph_mcp = graph
-            store.save_scan(
-                _scan(
-                    "scan-1",
-                    ScanItemStatus.CANCELLED,
-                    total=10,
-                    processed=4,
-                    error="Agent 断开连接",
-                ),
-                meta,
+            scan = _scan(
+                "scan-1",
+                ScanItemStatus.CANCELLED,
+                total=10,
+                processed=4,
+                error="Agent 断开连接",
             )
+            scan.mining_engines = [
+                MiningEngineSelection(
+                    engine_id="static_candidate",
+                    engine_label="静态规则扫描 + 候选点审计",
+                ),
+            ]
+            meta.mining_engines = scan.mining_engines
+            store.save_scan(scan, meta)
             agent = AgentInfo(
                 agent_id="agent-old",
                 name="agent-1",
@@ -941,8 +952,24 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             send = AsyncMock(return_value=True)
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.scan.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
                 patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
                 patch("backend.api.agent.send_agent_command", new=send),
+                patch(
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "backend.api.agent.get_scan_agent_config_async",
+                    new=AsyncMock(return_value=object()),
+                ),
+                patch(
+                    "backend.api.agent.agent_config_has_explicit_model",
+                    return_value=True,
+                ),
             ):
                 request = SimpleNamespace(base_url="http://testserver/")
                 asyncio.run(scan_api.resume_scan("scan-1", request=request, current_user=user))
@@ -960,7 +987,14 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-1", ScanItemStatus.COMPLETE, total=4, processed=4)
+            scan.mining_engines = [
+                MiningEngineSelection(
+                    engine_id="static_candidate",
+                    engine_label="静态规则扫描 + 候选点审计",
+                ),
+            ]
             meta = _meta()
+            meta.mining_engines = scan.mining_engines
             store.save_scan(scan, meta)
             vulns = [
                 Vulnerability(
@@ -1031,9 +1065,24 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
 
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.scan.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
                 patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
                 patch("backend.api.agent.send_agent_command", new=AsyncMock(side_effect=fake_send)),
-                patch("backend.api.agent.create_agent_runtime_update_payload", return_value=None),
+                patch(
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "backend.api.agent.get_scan_agent_config_async",
+                    new=AsyncMock(return_value=object()),
+                ),
+                patch(
+                    "backend.api.agent.agent_config_has_explicit_model",
+                    return_value=True,
+                ),
             ):
                 request = SimpleNamespace(base_url="http://testserver/")
                 asyncio.run(scan_api.retry_incomplete_scan("scan-1", request=request, current_user=user))
@@ -1045,6 +1094,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(sent["type"], "resume")
             self.assertEqual(sent["retry_total_candidates"], 4)
             self.assertEqual(sent["retry_processed_offset"], 1)
+            self.assertEqual(
+                sent["retry_mining_engine_ids"],
+                ["static_candidate"],
+            )
             self.assertEqual(
                 [(c["file"], c["line"], c["function"]) for c in sent["retry_candidates"]],
                 [("timeout.c", 2, "slow"), ("none.c", 3, "missing"), ("failed.c", 4, "broken")],
@@ -1142,11 +1195,26 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
 
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.scan.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
                 patch.dict("backend.api.agent._registered_agents", {"agent-old": agent}, clear=True),
                 patch("backend.api.agent.send_agent_command", new=AsyncMock(side_effect=fake_send)),
                 patch(
-                    "backend.api.agent.create_agent_runtime_update_payload",
-                    return_value={"hash": "remote-runtime", "archive_sha256": "archive-hash"},
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    new=AsyncMock(return_value={
+                        "hash": "remote-runtime",
+                        "archive_sha256": "archive-hash",
+                    }),
+                ),
+                patch(
+                    "backend.api.agent.get_scan_agent_config_async",
+                    new=AsyncMock(return_value=object()),
+                ),
+                patch(
+                    "backend.api.agent.agent_config_has_explicit_model",
+                    return_value=True,
                 ),
             ):
                 asyncio.run(
@@ -1163,7 +1231,11 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(sent["retry_processed_offset"], 1)
             self.assertTrue(sent["resume_threat_analysis"])
-            self.assertEqual(sent["retry_threat_audit_task_ids"], ["threat-timeout"])
+            self.assertEqual(
+                sent["retry_mining_engine_ids"],
+                ["static_candidate", "threat_audit"],
+            )
+            self.assertIsNone(sent["retry_threat_audit_task_ids"])
             self.assertEqual(
                 sent["agent_runtime_update"],
                 {"hash": "remote-runtime", "archive_sha256": "archive-hash"},
@@ -1237,6 +1309,121 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             )
             self.assertTrue(sent["resume_threat_analysis"])
             self.assertEqual(sent["mining_engines"], [])
+            self.assertEqual(sent["retry_mining_engine_ids"], [])
+
+    def test_complete_scan_can_retry_failed_threat_analysis_without_rerunning_successful_engine(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-threat-retry", ScanItemStatus.COMPLETE)
+            scan.threat_analysis_enabled = True
+            scan.threat_analysis_run = ThreatAnalysisRunStatus(
+                status="error",
+                error_message="cached semantic mismatch",
+            )
+            scan.mining_engines = [
+                MiningEngineSelection(
+                    engine_id="static_candidate",
+                    engine_label="静态规则扫描 + 候选点审计",
+                ),
+                MiningEngineSelection(
+                    engine_id="threat_audit",
+                    engine_label="威胁审计",
+                ),
+            ]
+            scan.mining_engine_runs = [
+                MiningEngineRunStatus(
+                    engine_id="static_candidate",
+                    engine_label="静态规则扫描 + 候选点审计",
+                    status="success",
+                ),
+                MiningEngineRunStatus(
+                    engine_id="threat_audit",
+                    engine_label="威胁审计",
+                    status="skipped",
+                    error_message="Blocked because threat analysis failed",
+                ),
+            ]
+            meta = _meta()
+            meta.threat_analysis_enabled = True
+            meta.mining_engines = scan.mining_engines
+            store.save_scan(scan, meta)
+            agent = AgentInfo(
+                agent_id="agent-old",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            user = User(user_id="user-1", username="alice", role="user")
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.scan.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+            ):
+                status = asyncio.run(
+                    scan_api.get_scan_status(
+                        "scan-threat-retry",
+                        current_user=user,
+                    )
+                )
+            self.assertTrue(status.can_continue)
+            self.assertEqual(status.continuable_task_count, 2)
+
+            sent: dict = {}
+
+            async def fake_send(_agent_id: str, payload: dict) -> bool:
+                sent.update(payload)
+                return True
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.scan.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch.dict(
+                    "backend.api.agent._registered_agents",
+                    {"agent-old": agent},
+                    clear=True,
+                ),
+                patch(
+                    "backend.api.agent.send_agent_command",
+                    new=AsyncMock(side_effect=fake_send),
+                ),
+                patch(
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "backend.api.agent.get_scan_agent_config_async",
+                    new=AsyncMock(return_value=object()),
+                ),
+                patch(
+                    "backend.api.agent.agent_config_has_explicit_model",
+                    return_value=True,
+                ),
+            ):
+                asyncio.run(
+                    scan_api.resume_scan(
+                        "scan-threat-retry",
+                        request=SimpleNamespace(base_url="http://testserver/"),
+                        current_user=user,
+                    )
+                )
+
+            self.assertTrue(sent["resume_threat_analysis"])
+            self.assertEqual(sent["retry_mining_engine_ids"], ["threat_audit"])
+            stored = store.load_scan("scan-threat-retry")[0]
+            self.assertEqual(stored.threat_analysis_run.status, "pending")
+            runs = {item.engine_id: item for item in stored.mining_engine_runs}
+            self.assertEqual(runs["static_candidate"].status, "success")
+            self.assertEqual(runs["threat_audit"].status, "pending")
 
     def test_upsert_incomplete_vulnerability_replaces_existing_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

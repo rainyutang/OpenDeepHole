@@ -137,13 +137,14 @@ async def _run(task, is_resume: bool) -> None:
             retry_total_candidates=task.retry_total_candidates,
             retry_processed_offset=task.retry_processed_offset,
             resume_threat_analysis=task.resume_threat_analysis,
+            retry_mining_engine_ids=task.retry_mining_engine_ids,
             retry_threat_audit_task_ids=task.retry_threat_audit_task_ids,
             code_graph_mcp=task.code_graph_mcp,
             knowledge_base_mcp=task.knowledge_base_mcp,
             mining_engines=task.mining_engines,
         )
     finally:
-        _task_manager.remove(task.scan_id)
+        _task_manager.remove(task.scan_id, task)
 
 
 async def handle_task(
@@ -228,100 +229,128 @@ async def handle_resume(
     retry_total_candidates: Optional[int] = None,
     retry_processed_offset: int = 0,
     resume_threat_analysis: bool = False,
+    retry_mining_engine_ids: Optional[list[str]] = None,
     retry_threat_audit_task_ids: Optional[list[str]] = None,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
         return
 
-    task = _task_manager.resume(scan_id)
-    if task is None:
-        if project_path is None:
-            print(f"Warning: task {scan_id} not found and project_path not provided")
-            return
-        task = _task_manager.create(
-            scan_id=scan_id,
-            project_path=project_path,
-            code_scan_path=code_scan_path,
-            checkers=checkers or [],
-            scan_name=scan_name or "",
-            scan_mode=scan_mode or "full",
-            threat_analysis_enabled=bool(threat_analysis_enabled),
-            threat_analysis_method=(
-                threat_analysis_method or "deephole_threat_analysis"
-            ),
-            product=product or "",
-            validation_environment=validation_environment or "",
-            vulnerability_validation=vulnerability_validation,
-            code_graph_mcp=code_graph_mcp,
-            knowledge_base_mcp=knowledge_base_mcp,
-            feedback_entries=feedback_entries,
-            checker_packages=checker_packages,
-            mining_engines=mining_engines,
-            retry_candidates=retry_candidates,
-            retry_total_candidates=retry_total_candidates,
-            retry_processed_offset=retry_processed_offset,
-            resume_threat_analysis=resume_threat_analysis,
-            retry_threat_audit_task_ids=retry_threat_audit_task_ids,
-        )
+    previous = _task_manager.get(scan_id)
+    if previous is None and project_path is None:
+        print(f"Warning: task {scan_id} not found and project_path not provided")
+        return
+
+    def previous_value(name: str, default: Any) -> Any:
+        return getattr(previous, name, default) if previous is not None else default
+
+    resolved_project_path = project_path or str(previous_value("project_path", ""))
+    if code_scan_path is not None:
+        resolved_code_scan_path = code_scan_path
+    elif project_path is not None:
+        resolved_code_scan_path = project_path
     else:
-        if project_path:
-            task.project_path = Path(project_path)
-        if code_scan_path:
-            task.code_scan_path = Path(code_scan_path)
-        elif project_path:
-            task.code_scan_path = Path(project_path)
-        if checkers is not None:
-            task.checkers = checkers
-        if scan_name is not None:
-            task.scan_name = scan_name
-        if scan_mode is not None:
-            task.scan_mode = scan_mode
-        if threat_analysis_enabled is not None:
-            task.threat_analysis_enabled = bool(threat_analysis_enabled)
-        if threat_analysis_method is not None:
-            task.threat_analysis_method = (
-                str(threat_analysis_method).strip()
-                or "deephole_threat_analysis"
-            )
-        if product is not None:
-            task.product = product
-        if validation_environment is not None:
-            task.validation_environment = validation_environment
-        task.vulnerability_validation = (
-            copy.deepcopy(vulnerability_validation)
-            if isinstance(vulnerability_validation, dict)
-            else None
+        resolved_code_scan_path = str(
+            previous_value("code_scan_path", resolved_project_path)
         )
-        task.code_graph_mcp = (
-            copy.deepcopy(code_graph_mcp)
-            if isinstance(code_graph_mcp, dict)
-            else None
-        )
-        task.knowledge_base_mcp = (
-            copy.deepcopy(knowledge_base_mcp)
-            if isinstance(knowledge_base_mcp, dict)
-            else None
-        )
-        if feedback_entries is not None:
-            task.feedback_entries = feedback_entries
-        if checker_packages is not None:
-            task.checker_packages = checker_packages
-        if mining_engines is not None:
-            task.mining_engines = copy.deepcopy(mining_engines)
-        task.retry_candidates = retry_candidates
-        task.retry_total_candidates = retry_total_candidates
-        task.retry_processed_offset = retry_processed_offset
-        task.resume_threat_analysis = resume_threat_analysis
-        task.retry_threat_audit_task_ids = retry_threat_audit_task_ids
+    resolved_checkers = (
+        checkers
+        if checkers is not None
+        else list(previous_value("checkers", []))
+    )
+    resolved_scan_name = (
+        scan_name
+        if scan_name is not None
+        else str(previous_value("scan_name", ""))
+    )
+    resolved_scan_mode = (
+        scan_mode
+        if scan_mode is not None
+        else str(previous_value("scan_mode", "full"))
+    )
+    resolved_threat_analysis_enabled = (
+        bool(threat_analysis_enabled)
+        if threat_analysis_enabled is not None
+        else bool(previous_value("threat_analysis_enabled", False))
+    )
+    resolved_threat_analysis_method = (
+        (str(threat_analysis_method).strip() or "deephole_threat_analysis")
+        if threat_analysis_method is not None
+        else str(previous_value(
+            "threat_analysis_method",
+            "deephole_threat_analysis",
+        ))
+    )
+    resolved_product = (
+        product
+        if product is not None
+        else str(previous_value("product", ""))
+    )
+    resolved_validation_environment = (
+        validation_environment
+        if validation_environment is not None
+        else str(previous_value("validation_environment", ""))
+    )
+    resolved_feedback_entries = (
+        feedback_entries
+        if feedback_entries is not None
+        else list(previous_value("feedback_entries", []))
+    )
+    resolved_checker_packages = (
+        checker_packages
+        if checker_packages is not None
+        else list(previous_value("checker_packages", []))
+    )
+    resolved_mining_engines = (
+        mining_engines
+        if mining_engines is not None
+        else copy.deepcopy(previous_value("mining_engines", None))
+    )
 
-    if task.asyncio_task and not task.asyncio_task.done():
-        task.asyncio_task.cancel()
+    if (
+        previous is not None
+        and previous.asyncio_task
+        and not previous.asyncio_task.done()
+    ):
+        # Stop cooperatively and wait for synchronous component workers to
+        # observe the old event before creating a task that reuses scan paths.
+        previous.cancel_event.suppress_terminal_report = True
+        previous.cancel_event.set()
         try:
-            await task.asyncio_task
-        except (asyncio.CancelledError, Exception):
+            await asyncio.shield(previous.asyncio_task)
+        except asyncio.CancelledError:
+            if not previous.asyncio_task.done():
+                previous.cancel_event.suppress_terminal_report = False
+                raise
+        except Exception:
             pass
+    if previous is not None:
+        _task_manager.remove(scan_id, previous)
 
+    task = _task_manager.create(
+        scan_id=scan_id,
+        project_path=resolved_project_path,
+        code_scan_path=resolved_code_scan_path,
+        checkers=resolved_checkers,
+        scan_name=resolved_scan_name,
+        scan_mode=resolved_scan_mode,
+        threat_analysis_enabled=resolved_threat_analysis_enabled,
+        threat_analysis_method=resolved_threat_analysis_method,
+        product=resolved_product,
+        validation_environment=resolved_validation_environment,
+        vulnerability_validation=vulnerability_validation,
+        code_graph_mcp=code_graph_mcp,
+        knowledge_base_mcp=knowledge_base_mcp,
+        feedback_entries=resolved_feedback_entries,
+        checker_packages=resolved_checker_packages,
+        mining_engines=resolved_mining_engines,
+        retry_candidates=retry_candidates,
+        retry_total_candidates=retry_total_candidates,
+        retry_processed_offset=retry_processed_offset,
+        resume_threat_analysis=resume_threat_analysis,
+        retry_mining_engine_ids=retry_mining_engine_ids,
+        retry_threat_audit_task_ids=retry_threat_audit_task_ids,
+    )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=True))
     print(f"Resumed task {scan_id}")
 

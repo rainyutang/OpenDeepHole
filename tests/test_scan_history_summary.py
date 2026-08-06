@@ -10,6 +10,7 @@ from backend.models import (
     ScanStatus,
     ScanSummary,
     ThreatAuditTask,
+    ThreatAnalysisRunStatus,
     User,
     Vulnerability,
 )
@@ -77,6 +78,8 @@ class FakeScanStore:
         return ScanSummary(
             scan_id=self.scan.scan_id,
             project_id=self.scan.project_id,
+            scan_mode=self.scan.scan_mode,
+            threat_analysis_enabled=self.scan.threat_analysis_enabled,
             scan_name=self.meta.scan_name,
             product=self.meta.product,
             status=self.scan.status,
@@ -88,6 +91,9 @@ class FakeScanStore:
             scan_items=self.meta.scan_items,
             username="alice",
             agent_name=self.meta.agent_name,
+            threat_analysis_run=self.scan.threat_analysis_run,
+            mining_engines=self.scan.mining_engines,
+            mining_engine_runs=self.scan.mining_engine_runs,
         )
 
 
@@ -242,6 +248,51 @@ class ScanHistorySummaryTests(unittest.TestCase):
 
         self.assertEqual(response[0].retryable_candidates_count, 1)
         self.assertEqual(response[0].continuable_task_count, 2)
+
+    def test_list_scans_allows_retrying_failed_threat_analysis(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project-1",
+            scan_items=[],
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=0,
+            processed_candidates=0,
+            vulnerabilities=[],
+            threat_analysis_enabled=True,
+            threat_analysis_run=ThreatAnalysisRunStatus(
+                status="error",
+                error_message="analysis failed",
+            ),
+        )
+        meta = ScanMeta(
+            scan_items=[],
+            created_at=scan.created_at,
+            scan_name="Project One",
+            agent_name="agent-1",
+            threat_analysis_enabled=True,
+        )
+
+        store = FakeScanStore(scan, meta)
+        with (
+            patch("backend.api.scan.get_scan_store", return_value=store),
+            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+            patch("backend.api.agent.is_agent_name_online", return_value=True),
+        ):
+            response = asyncio.run(
+                list_scans(
+                    current_user=User(
+                        user_id="admin",
+                        username="admin",
+                        role="admin",
+                    )
+                )
+            )
+
+        self.assertTrue(response[0].can_continue)
+        self.assertEqual(response[0].continuable_task_count, 1)
 
 
 if __name__ == "__main__":
