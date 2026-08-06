@@ -4112,21 +4112,35 @@ async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dic
         raise HTTPException(status_code=404, detail="FP review not found")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
+    status = body.status
+    error_message = body.error_message or ""
+    if status == FpReviewStatus.CANCELLED.value:
+        # The stop endpoint persists CANCELLED before asking the Agent to stop,
+        # and that authoritative state returned above. Any other Agent-side
+        # cancellation is an interrupted item/worker, not a user request that
+        # should permanently disable automatic review for this scan.
+        status = FpReviewStatus.ERROR.value
+        if not error_message or error_message == "用户手动停止":
+            error_message = "Agent 去误报任务意外取消"
+        logger.warning(
+            "FP review %s reported an unexpected cancellation; treating it as retryable error",
+            body.review_id,
+        )
     await run_store_call(
         store,
         "update_fp_review_job",
         body.review_id,
-        status=body.status,
+        status=status,
         clear_current_vuln_index=True,
-        error_message=body.error_message or "",
+        error_message=error_message,
     )
     from backend.sse import publish
     publish(scan_id, "fp_review_finish", {
-        "review_id": body.review_id, "status": body.status,
+        "review_id": body.review_id, "status": status,
         "method": job.method,
-        "error_message": body.error_message,
+        "error_message": error_message or None,
     })
-    logger.info("FP review %s finished with status %s", body.review_id, body.status)
+    logger.info("FP review %s finished with status %s", body.review_id, status)
     return {"ok": True}
 
 
