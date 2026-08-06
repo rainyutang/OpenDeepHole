@@ -689,13 +689,15 @@ def _scan_belongs_to_agent(scan_id: str, agent_key: str, agent_id: str) -> bool:
 
 
 async def _agent_has_active_work(agent_key: str, agent_id: str) -> bool:
-    """Check scan and post-scan work before allowing an update restart."""
-    store = get_scan_store()
-    pool = _agent_opencode_pool_latest.get(agent_id)
-    if pool is not None and (pool.global_running > 0 or pool.global_queued > 0):
-        return True
+    """Use durable task lifecycle state to decide whether an update is safe.
+
+    The Agent-wide OpenCode pool is intentionally not consulted here.  Its
+    snapshot is observational and may briefly retain running/queued entries
+    after the user has stopped a task.  Scan, FP-review, and validation rows
+    are the authoritative lifecycle state for manual runtime updates.
+    """
     return await run_store_call(
-        store,
+        get_scan_store(),
         "has_active_work_for_agent",
         agent_key,
         agent_id,

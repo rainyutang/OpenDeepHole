@@ -6,7 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from backend.api import agent as agent_api
-from backend.models import AgentInfo, User
+from backend.models import (
+    AgentInfo,
+    OpenCodePoolModelStats,
+    OpenCodePoolStatus,
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    User,
+)
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -42,6 +50,58 @@ def _connect_agent() -> None:
         runtime_hash="old-runtime",
     )
     agent_api._agent_ws["live-agent"] = object()
+
+
+def _save_agent_scan(
+    store: SqliteScanStore,
+    scan_id: str,
+    status: ScanItemStatus,
+    *,
+    agent_key: str = "stable-agent",
+) -> None:
+    store.save_scan(
+        ScanStatus(
+            scan_id=scan_id,
+            project_id="project-1",
+            status=status,
+            progress=0.0,
+            total_candidates=0,
+            processed_candidates=0,
+            vulnerabilities=[],
+        ),
+        ScanMeta(
+            scan_items=[],
+            created_at="2026-07-29T00:00:00+00:00",
+            agent_id="live-agent",
+            agent_key=agent_key,
+            user_id="user-1",
+        ),
+    )
+
+
+def _stale_pool_status(scan_id: str) -> OpenCodePoolStatus:
+    return OpenCodePoolStatus(
+        global_running=1,
+        global_queued=1,
+        queued_tasks=[
+            {
+                "task_id": "task-queued",
+                "scope_id": scan_id,
+            }
+        ],
+        models=[
+            OpenCodePoolModelStats(
+                id="model-1",
+                running=1,
+                active_tasks=[
+                    {
+                        "task_id": "task-1",
+                        "scope_id": scan_id,
+                    }
+                ],
+            )
+        ],
+    )
 
 
 def _cleanup_agent_globals() -> None:
@@ -106,6 +166,74 @@ def test_manual_runtime_update_waits_while_agent_has_active_work(
             store.get_agent_record("stable-agent")["runtime_update_status"]
             == "pending"
         )
+    finally:
+        _cleanup_agent_globals()
+        store.close()
+
+
+def test_manual_runtime_update_ignores_stale_pool_after_scan_stops(
+    tmp_path: Path,
+) -> None:
+    store, _user = _store_with_agent(tmp_path)
+    _connect_agent()
+    _save_agent_scan(store, "stopped-scan", ScanItemStatus.CANCELLED)
+    agent_api._agent_opencode_pool_latest["live-agent"] = _stale_pool_status(
+        "stopped-scan"
+    )
+    store.set_agent_runtime_update_record(
+        "stable-agent",
+        status="pending",
+        target_hash="new-runtime",
+        server_url="http://server.example",
+        requested_at="2026-07-29T00:00:00+00:00",
+    )
+    send = AsyncMock(return_value=True)
+    payload = {"hash": "new-runtime", "token": "one-time"}
+    try:
+        with (
+            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.api.agent._agent_runtime_hash", return_value="new-runtime"),
+            patch(
+                "backend.api.agent.create_agent_runtime_update_payload",
+                return_value=payload,
+            ),
+            patch("backend.api.agent.send_agent_command", new=send),
+        ):
+            asyncio.run(agent_api._process_agent_runtime_updates())
+
+        send.assert_awaited_once_with(
+            "live-agent",
+            {
+                "type": "task",
+                "runtime_update_only": True,
+                "agent_runtime_update": payload,
+            },
+        )
+        assert (
+            store.get_agent_record("stable-agent")["runtime_update_status"]
+            == "updating"
+        )
+    finally:
+        _cleanup_agent_globals()
+        store.close()
+
+
+def test_manual_runtime_update_still_waits_for_durable_active_scan(
+    tmp_path: Path,
+) -> None:
+    store, _user = _store_with_agent(tmp_path)
+    _connect_agent()
+    _save_agent_scan(
+        store,
+        "active-scan",
+        ScanItemStatus.AUDITING,
+        agent_key="",
+    )
+    try:
+        with patch("backend.api.agent.get_scan_store", return_value=store):
+            assert asyncio.run(
+                agent_api._agent_has_active_work("stable-agent", "live-agent")
+            )
     finally:
         _cleanup_agent_globals()
         store.close()

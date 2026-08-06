@@ -4187,12 +4187,18 @@ class SqliteScanStore(ScanStoreBase):
 
     def has_active_work_for_agent(self, agent_key: str, agent_id: str) -> bool:
         """Return whether an Agent owns scan, FP-review, or validation work."""
-        if agent_key:
+        if agent_key and agent_id:
+            identity_clause = """(
+                s.agent_key = ?
+                OR ((s.agent_key IS NULL OR s.agent_key = '') AND s.agent_id = ?)
+            )"""
+            identity_params = (agent_key, agent_id)
+        elif agent_key:
             identity_clause = "s.agent_key = ?"
-            identity = agent_key
+            identity_params = (agent_key,)
         elif agent_id:
             identity_clause = "s.agent_id = ?"
-            identity = agent_id
+            identity_params = (agent_id,)
         else:
             return False
         row = self._conn.execute(
@@ -4218,7 +4224,7 @@ class SqliteScanStore(ScanStoreBase):
               )
             LIMIT 1
             """,
-            (identity,),
+            identity_params,
         ).fetchone()
         return row is not None
 
