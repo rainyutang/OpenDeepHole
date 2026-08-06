@@ -11,6 +11,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic.json_schema import SkipJsonSchema
 
 
+STATIC_CANDIDATE_ENGINE_ID = "static_candidate"
+STATIC_CANDIDATE_ENGINE_LABEL = "DeepHole基于代码风险点的漏洞挖掘引擎"
+THREAT_AUDIT_ENGINE_ID = "threat_audit"
+THREAT_AUDIT_ENGINE_LABEL = "DeepHole基于攻击威胁的漏洞挖掘引擎"
+BUILTIN_MINING_ENGINE_LABELS = {
+    STATIC_CANDIDATE_ENGINE_ID: STATIC_CANDIDATE_ENGINE_LABEL,
+    THREAT_AUDIT_ENGINE_ID: THREAT_AUDIT_ENGINE_LABEL,
+}
+
+
+def canonical_mining_engine_label(engine_id: str, label: str = "") -> str:
+    """Return the product name for a built-in engine, preserving custom labels."""
+    normalized_id = str(engine_id or "").strip()
+    return BUILTIN_MINING_ENGINE_LABELS.get(
+        normalized_id,
+        str(label or "").strip(),
+    )
+
+
 class ScanItemStatus(str, Enum):
     PENDING = "pending"
     ANALYZING = "analyzing"   # static analysis running
@@ -159,13 +178,21 @@ class Vulnerability(BaseModel):
     audit_index: int | None = None           # Static candidate audit order; DB idx remains the API handle.
     variant_of: str = ""                     # 同类变体排查命中时，来源历史问题模式（根因摘要+出处提交/文件）
     analysis_source: str = "static_candidate"  # "static_candidate" | "threat_audit"
-    engine_id: str = "static_candidate"
-    engine_label: str = "静态规则扫描 + 候选点审计"
+    engine_id: str = STATIC_CANDIDATE_ENGINE_ID
+    engine_label: str = STATIC_CANDIDATE_ENGINE_LABEL
     source_task_id: str = ""
     threat_surface_node_id: str = ""
     threat_method_node_id: str = ""
     threat_code_path: str = ""
     output_source: OutputSource = Field(default_factory=OutputSource)
+
+    @model_validator(mode="after")
+    def _canonicalize_engine_label(self):
+        self.engine_label = canonical_mining_engine_label(
+            self.engine_id,
+            self.engine_label,
+        )
+        return self
 
 
 class MiningEngineRequest(BaseModel):
@@ -181,6 +208,14 @@ class MiningEngineSelection(BaseModel):
     engine_label: str
     enabled: bool = True
 
+    @model_validator(mode="after")
+    def _canonicalize_engine_label(self):
+        self.engine_label = canonical_mining_engine_label(
+            self.engine_id,
+            self.engine_label,
+        )
+        return self
+
 
 class MiningEngineRunStatus(BaseModel):
     """One engine's lifecycle state within a scan."""
@@ -191,6 +226,14 @@ class MiningEngineRunStatus(BaseModel):
     error_message: str = ""
     started_at: str = ""
     finished_at: str = ""
+
+    @model_validator(mode="after")
+    def _canonicalize_engine_label(self):
+        self.engine_label = canonical_mining_engine_label(
+            self.engine_id,
+            self.engine_label,
+        )
+        return self
 
 
 class ThreatAnalysisRunStatus(BaseModel):

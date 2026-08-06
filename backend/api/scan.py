@@ -63,6 +63,7 @@ from backend.models import (
     ScanVulnerabilityValidationConfig,
     ScanVulnerabilityValidationRequest,
     SkillReport,
+    THREAT_AUDIT_ENGINE_LABEL,
     ThreatAuditTask,
     ThreatAuditTaskPage,
     ThreatAnalysisMethodCatalog,
@@ -319,7 +320,7 @@ def _resolve_scan_mining_engines(
         if threat_engine is None:
             raise HTTPException(
                 status_code=400,
-                detail="Threat-audit engine is unavailable",
+                detail=f"{THREAT_AUDIT_ENGINE_LABEL}不可用",
             )
         return [MiningEngineSelection(
             engine_id=threat_engine.engine_id,
@@ -349,7 +350,7 @@ def _resolve_scan_mining_engines(
     ):
         raise HTTPException(
             status_code=400,
-            detail="威胁审计要求本次扫描启用威胁分析",
+            detail=f"{THREAT_AUDIT_ENGINE_LABEL}要求本次扫描启用威胁分析",
         )
     if not selections and not effective_threat_analysis_enabled:
         raise HTTPException(

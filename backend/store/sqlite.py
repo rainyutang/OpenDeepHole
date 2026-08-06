@@ -41,7 +41,9 @@ from backend.models import (
     ScanStatus,
     ScanSummary,
     ScanVulnerabilityValidationConfig,
+    STATIC_CANDIDATE_ENGINE_LABEL,
     SkillReport,
+    THREAT_AUDIT_ENGINE_LABEL,
     ThreatAuditTask,
     ThreatAnalysisMethodSelection,
     ThreatAnalysisRunStatus,
@@ -49,6 +51,7 @@ from backend.models import (
     UserInDB,
     Vulnerability,
     VulnerabilityValidation,
+    canonical_mining_engine_label,
 )
 
 from .base import ScanStoreBase
@@ -112,6 +115,31 @@ def _json_model_list(value: str | None, model_type) -> list:
         except Exception:
             continue
     return result
+
+
+def _canonicalize_mining_engine_json(value: str | None) -> str | None:
+    """Normalize built-in labels in one persisted engine snapshot list."""
+    try:
+        data = json.loads(value or "[]")
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    changed = False
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        engine_id = str(item.get("engine_id") or "").strip()
+        label = canonical_mining_engine_label(
+            engine_id,
+            str(item.get("engine_label") or ""),
+        )
+        if label and item.get("engine_label") != label:
+            item["engine_label"] = label
+            changed = True
+    if not changed:
+        return None
+    return json.dumps(data, ensure_ascii=False)
 
 
 def _fp_review_method_selection(
@@ -272,9 +300,9 @@ def _vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
         or ("threat_audit" if analysis_source == "threat_audit" else "static_candidate"),
         engine_label=(row["engine_label"] if "engine_label" in keys else "")
         or (
-            "威胁审计"
+            THREAT_AUDIT_ENGINE_LABEL
             if analysis_source == "threat_audit"
-            else "静态规则扫描 + 候选点审计"
+            else STATIC_CANDIDATE_ENGINE_LABEL
         ),
         source_task_id=(row["source_task_id"] if "source_task_id" in keys else "") or "",
         threat_surface_node_id=(
@@ -451,7 +479,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     variant_of          TEXT NOT NULL DEFAULT '',
     analysis_source     TEXT NOT NULL DEFAULT 'static_candidate',
     engine_id           TEXT NOT NULL DEFAULT 'static_candidate',
-    engine_label        TEXT NOT NULL DEFAULT '静态规则扫描 + 候选点审计',
+    engine_label        TEXT NOT NULL DEFAULT 'DeepHole基于代码风险点的漏洞挖掘引擎',
     fp_review_eligible  INTEGER NOT NULL DEFAULT 1,
     source_task_id      TEXT NOT NULL DEFAULT '',
     threat_surface_node_id TEXT NOT NULL DEFAULT '',
@@ -827,18 +855,18 @@ class SqliteScanStore(ScanStoreBase):
                 (
                     json.dumps([{
                         "engine_id": "threat_audit",
-                        "engine_label": "威胁审计",
+                        "engine_label": THREAT_AUDIT_ENGINE_LABEL,
                         "enabled": True,
                     }], ensure_ascii=False),
                     json.dumps([
                         {
                             "engine_id": "static_candidate",
-                            "engine_label": "静态规则扫描 + 候选点审计",
+                            "engine_label": STATIC_CANDIDATE_ENGINE_LABEL,
                             "enabled": True,
                         },
                         {
                             "engine_id": "threat_audit",
-                            "engine_label": "威胁审计",
+                            "engine_label": THREAT_AUDIT_ENGINE_LABEL,
                             "enabled": True,
                         },
                     ], ensure_ascii=False),
@@ -929,28 +957,28 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE scans ADD COLUMN mining_engine_runs_json TEXT NOT NULL DEFAULT '[]'"
             )
-        legacy_threat_label = "威胁分析 + 威胁审计"
-        threat_audit_label = "威胁审计"
-        escaped_legacy_threat_label = json.dumps(
-            legacy_threat_label,
-        )[1:-1]
-        escaped_threat_audit_label = json.dumps(
-            threat_audit_label,
-        )[1:-1]
-        for column in ("mining_engines_json", "mining_engine_runs_json"):
+        engine_rows = self._conn.execute(
+            "SELECT scan_id, mining_engines_json, mining_engine_runs_json FROM scans"
+        ).fetchall()
+        for row in engine_rows:
+            selections_json = _canonicalize_mining_engine_json(
+                row["mining_engines_json"],
+            )
+            runs_json = _canonicalize_mining_engine_json(
+                row["mining_engine_runs_json"],
+            )
+            if selections_json is None and runs_json is None:
+                continue
             self._conn.execute(
-                f"""\
+                """\
                 UPDATE scans
-                SET {column} = REPLACE(
-                    REPLACE({column}, ?, ?),
-                    ?, ?
-                )
+                SET mining_engines_json = ?, mining_engine_runs_json = ?
+                WHERE scan_id = ?
                 """,
                 (
-                    legacy_threat_label,
-                    threat_audit_label,
-                    escaped_legacy_threat_label,
-                    escaped_threat_audit_label,
+                    selections_json or row["mining_engines_json"],
+                    runs_json or row["mining_engine_runs_json"],
+                    row["scan_id"],
                 ),
             )
         if "auto_fp_review" not in cols:
@@ -1152,24 +1180,18 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN engine_label TEXT NOT NULL DEFAULT ''"
             )
+        for engine_id, engine_label in (
+            ("static_candidate", STATIC_CANDIDATE_ENGINE_LABEL),
+            ("threat_audit", THREAT_AUDIT_ENGINE_LABEL),
+        ):
             self._conn.execute(
                 """\
                 UPDATE vulnerabilities
-                SET engine_label = CASE
-                    WHEN analysis_source = 'threat_audit'
-                        THEN '威胁审计'
-                    ELSE '静态规则扫描 + 候选点审计'
-                END
-                """
+                SET engine_label = ?
+                WHERE engine_id = ? AND engine_label <> ?
+                """,
+                (engine_label, engine_id, engine_label),
             )
-        self._conn.execute(
-            """\
-            UPDATE vulnerabilities
-            SET engine_label = '威胁审计'
-            WHERE engine_id = 'threat_audit'
-              AND engine_label = '威胁分析 + 威胁审计'
-            """
-        )
         if "fp_review_eligible" not in vuln_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN fp_review_eligible INTEGER NOT NULL DEFAULT 1"

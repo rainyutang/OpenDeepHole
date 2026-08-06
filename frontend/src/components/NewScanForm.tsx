@@ -25,6 +25,11 @@ import ScanCodeGraphMcpEditor, {
   defaultScanCodeGraphMcp,
   validateScanCodeGraphMcp,
 } from "./ScanCodeGraphMcpEditor";
+import {
+  THREAT_AUDIT_ENGINE_ID,
+  THREAT_AUDIT_ENGINE_LABEL,
+  canonicalMiningEngineLabel,
+} from "../miningEngines";
 import { ThemeToggle } from "./ThemeToggle";
 
 interface Props {
@@ -35,7 +40,6 @@ interface Props {
 
 interface MiningEngineFormValue { selected: boolean }
 
-const THREAT_AUDIT_ENGINE_ID = "threat_audit";
 const input = "w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 outline-none transition-colors focus:border-blue-500";
 const emptyMemory: ScanConfigMemory = { knowledge_base: null, validation_by_product: {} };
 
@@ -235,7 +239,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       if (missing) return setError(`请填写验证参数：${missing.label}`);
     }
     if (!enabledEngineCount && !threatAnalysisEnabled) return setError("请至少启用威胁分析或选择一个漏洞挖掘引擎");
-    if (threatAuditEnabled && !threatAnalysisEnabled) return setError("威胁审计要求本次扫描启用威胁分析");
+    if (threatAuditEnabled && !threatAnalysisEnabled) return setError(`${THREAT_AUDIT_ENGINE_LABEL}要求本次扫描启用威胁分析`);
     if (threatAnalysisEnabled && !threatAnalysisMethod) return setError("没有可用的威胁分析方法");
     if (!fpReviewMethod) return setError("没有可用的去误报方法");
     setSubmitting(true);
@@ -276,9 +280,9 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
 
         <ScanCodeGraphMcpEditor value={codeGraphMcp} onChange={(value) => { setCodeGraphMcp(value); setCodeGraphProbe(null); }} online={Boolean(selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo))} probing={probingCodeGraph} probeResult={codeGraphProbe} onProbe={() => void probeCodeGraph()} />
 
-        <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">威胁分析</h2><p className="mt-1 text-xs text-slate-500">可单独运行，也可为威胁审计提供输入。</p></div><Toggle checked={threatAnalysisEnabled} onChange={() => { const next = !threatAnalysisEnabled; setThreatAnalysisEnabled(next); if (!next) setMiningEngines((current) => ({ ...current, [THREAT_AUDIT_ENGINE_ID]: { selected: false } })); }} label="启用威胁分析" /></div>{threatAnalysisEnabled && <div className="mt-4 grid gap-3 md:grid-cols-2">{threatMethods.map((method) => <label key={method.method_id} className={`cursor-pointer rounded-lg border p-3 ${threatAnalysisMethod === method.method_id ? "border-emerald-500 bg-emerald-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={threatAnalysisMethod === method.method_id} onChange={() => setThreatAnalysisMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div>}</Card>
+        <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">威胁分析</h2><p className="mt-1 text-xs text-slate-500">可单独运行，也可为“{THREAT_AUDIT_ENGINE_LABEL}”提供输入。</p></div><Toggle checked={threatAnalysisEnabled} onChange={() => { const next = !threatAnalysisEnabled; setThreatAnalysisEnabled(next); if (!next) setMiningEngines((current) => ({ ...current, [THREAT_AUDIT_ENGINE_ID]: { selected: false } })); }} label="启用威胁分析" /></div>{threatAnalysisEnabled && <div className="mt-4 grid gap-3 md:grid-cols-2">{threatMethods.map((method) => <label key={method.method_id} className={`cursor-pointer rounded-lg border p-3 ${threatAnalysisMethod === method.method_id ? "border-emerald-500 bg-emerald-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={threatAnalysisMethod === method.method_id} onChange={() => setThreatAnalysisMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div>}</Card>
 
-        <Card><h2 className="text-sm font-medium text-slate-200">漏洞挖掘引擎</h2><p className="mt-1 text-xs text-slate-500">选择本次扫描运行的引擎。静态分析与候选点审计的 checker 已由客户端全局配置决定。</p><div className="mt-4 grid gap-3 md:grid-cols-2">{miningEngineCatalog.map((engine) => { const enabled = miningEngines[engine.engine_id]?.selected ?? true; return <label key={engine.engine_id} className={`cursor-pointer rounded-lg border p-4 ${enabled ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="checkbox" checked={enabled} onChange={(event) => { const selected = event.target.checked; setMiningEngines((current) => ({ ...current, [engine.engine_id]: { selected } })); if (engine.engine_id === THREAT_AUDIT_ENGINE_ID && selected) setThreatAnalysisEnabled(true); }} /><span className="text-sm font-medium">{engine.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{engine.description || engine.engine_id}</span></label>; })}</div></Card>
+        <Card><h2 className="text-sm font-medium text-slate-200">漏洞挖掘引擎</h2><p className="mt-1 text-xs text-slate-500">选择本次扫描运行的引擎。静态分析与候选点审计的 checker 已由客户端全局配置决定。</p><div className="mt-4 grid gap-3 md:grid-cols-2">{miningEngineCatalog.map((engine) => { const enabled = miningEngines[engine.engine_id]?.selected ?? true; return <label key={engine.engine_id} className={`cursor-pointer rounded-lg border p-4 ${enabled ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="checkbox" checked={enabled} onChange={(event) => { const selected = event.target.checked; setMiningEngines((current) => ({ ...current, [engine.engine_id]: { selected } })); if (engine.engine_id === THREAT_AUDIT_ENGINE_ID && selected) setThreatAnalysisEnabled(true); }} /><span className="text-sm font-medium">{canonicalMiningEngineLabel(engine.engine_id, engine.label)}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{engine.description || engine.engine_id}</span></label>; })}</div></Card>
 
         <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">自动去误报</h2><p className="mt-1 text-xs text-slate-500">扫描后自动复核已确认问题。</p></div><Toggle checked={autoFpReview} onChange={() => setAutoFpReview((value) => !value)} label="自动去误报" /></div><div className="mt-4 grid gap-3 md:grid-cols-2">{fpMethods.map((method) => <label key={method.method_id} className={`cursor-pointer rounded-lg border p-3 ${fpReviewMethod === method.method_id ? "border-amber-500 bg-amber-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={fpReviewMethod === method.method_id} onChange={() => setFpReviewMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div></Card>
 

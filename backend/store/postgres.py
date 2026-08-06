@@ -19,9 +19,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from backend.models import AgentInfo
+from backend.models import (
+    AgentInfo,
+    STATIC_CANDIDATE_ENGINE_LABEL,
+    THREAT_AUDIT_ENGINE_LABEL,
+)
 
-from .sqlite import SqliteScanStore, _retire_agent_opencode_config
+from .sqlite import (
+    SqliteScanStore,
+    _canonicalize_mining_engine_json,
+    _retire_agent_opencode_config,
+)
 
 
 _QUESTION_MARK = re.compile(r"\?")
@@ -403,6 +411,45 @@ class PostgresScanStore(SqliteScanStore):
                 "ALTER TABLE vulnerability_validations ADD COLUMN IF NOT EXISTS validation_method_label TEXT NOT NULL DEFAULT ''",
             ):
                 connection.execute(statement)
+            for row in connection.execute(
+                "SELECT scan_id, mining_engines_json, mining_engine_runs_json FROM scans"
+            ).fetchall():
+                selections_json = _canonicalize_mining_engine_json(
+                    row["mining_engines_json"],
+                )
+                runs_json = _canonicalize_mining_engine_json(
+                    row["mining_engine_runs_json"],
+                )
+                if selections_json is None and runs_json is None:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE scans
+                    SET mining_engines_json = %s, mining_engine_runs_json = %s
+                    WHERE scan_id = %s
+                    """,
+                    (
+                        selections_json or row["mining_engines_json"],
+                        runs_json or row["mining_engine_runs_json"],
+                        row["scan_id"],
+                    ),
+                )
+            for engine_id, engine_label in (
+                ("static_candidate", STATIC_CANDIDATE_ENGINE_LABEL),
+                ("threat_audit", THREAT_AUDIT_ENGINE_LABEL),
+            ):
+                connection.execute(
+                    """
+                    UPDATE vulnerabilities
+                    SET engine_label = %s
+                    WHERE engine_id = %s AND engine_label <> %s
+                    """,
+                    (engine_label, engine_id, engine_label),
+                )
+            connection.execute(
+                "ALTER TABLE vulnerabilities ALTER COLUMN engine_label SET DEFAULT "
+                "'DeepHole基于代码风险点的漏洞挖掘引擎'"
+            )
             connection.execute(
                 "ALTER TABLE agent_commands ADD COLUMN IF NOT EXISTS "
                 "attempts INTEGER NOT NULL DEFAULT 0"

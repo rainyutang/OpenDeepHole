@@ -76,7 +76,9 @@ from backend.models import (
     OpenCodeTokenUsage,
     ScanEvent,
     ScanItemStatus,
+    STATIC_CANDIDATE_ENGINE_LABEL,
     SkillReport,
+    THREAT_AUDIT_ENGINE_LABEL,
     ThreatAuditTask,
     ThreatAnalysisRunStatus,
     User,
@@ -2815,9 +2817,9 @@ def _stamp_vulnerability_engine(
 
     vuln.engine_id = requested_id
     if requested_id == "threat_audit":
-        vuln.engine_label = "威胁审计"
+        vuln.engine_label = THREAT_AUDIT_ENGINE_LABEL
     elif not str(vuln.engine_label or "").strip():
-        vuln.engine_label = "静态规则扫描 + 候选点审计"
+        vuln.engine_label = STATIC_CANDIDATE_ENGINE_LABEL
     return vuln
 
 
