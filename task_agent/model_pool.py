@@ -427,8 +427,10 @@ def total_model_capacity(
 
 def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOption]:
     raw_models = _cfg_value(cli_config, "models", None) or []
-    configured_tool = str(_cfg_value(cli_config, "tool", "") or "opencode").strip().lower()
-    configured_executable = str(_cfg_value(cli_config, "executable", "") or "").strip()
+    configured_tool = "opencode"
+    configured_executable = str(
+        _cfg_value(cli_config, "executable", "") or "opencode"
+    ).strip()
     options: list[ModelOption] = []
     for index, raw in enumerate(raw_models):
         if raw is None:
@@ -445,10 +447,6 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
         ).strip()
         if not model_id:
             continue
-        tool = str(_cfg_value(raw, "tool", "") or configured_tool).strip().lower()
-        executable = str(
-            _cfg_value(raw, "executable", "") or configured_executable or tool
-        ).strip()
         options.append(
             ModelOption(
                 id=model_id,
@@ -460,8 +458,8 @@ def model_options(cli_config: Any, *, global_concurrency: int) -> list[ModelOpti
                     _cfg_value(raw, "max_concurrency", global_concurrency),
                     global_concurrency,
                 ),
-                tool=tool,
-                executable=executable,
+                tool=configured_tool,
+                executable=configured_executable,
                 timeout=(
                     _safe_int(_cfg_value(raw, "timeout", None), 0, 1)
                     if _cfg_value(raw, "timeout", None) not in (None, "")

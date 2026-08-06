@@ -4,13 +4,14 @@ import os
 import secrets
 import warnings
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "OpenDeepHoleData"
-_AI_CLI_TOOLS = {"nga", "opencode"}
+_LEGACY_AI_CLI_TOOLS = {"nga", "opencode"}
 
 
 class ServerConfig(BaseModel):
@@ -39,16 +40,14 @@ class OpenCodeModelConfig(BaseModel):
     weight: float = 1.0
     max_concurrency: int = 1
     enabled: bool = True
-    tool: str = ""
-    executable: str = ""
     timeout: int | None = None
     max_retries: int | None = None
     time_windows: list[OpenCodeModelTimeWindow] = []
 
 
 class OpenCodeConfig(BaseModel):
-    tool: str = "opencode"
-    executable: str = "opencode"  # CLI executable name or full path
+    tool: Literal["opencode"] = "opencode"
+    executable: str = "opencode"  # OpenCode-compatible executable name or full path
     model: str = "anthropic/claude-sonnet-4-20250514"
     timeout: int = 3600
     max_retries: int = 2  # fresh-Session retries for timeout and retryable failures
@@ -238,18 +237,17 @@ def _normalize_cli_section(section: object) -> None:
     if str(section.pop("invocation_mode", "") or "").strip().lower() == "cli":
         warnings.warn("Legacy OpenCode CLI invocation is no longer supported; using serve", RuntimeWarning)
     tool = str(section.get("tool") or "").strip().lower()
-    if tool in _AI_CLI_TOOLS:
-        section["tool"] = tool
-        return
     executable = str(section.get("executable") or "").strip()
-    inferred = Path(executable).name.lower() if executable else ""
-    if inferred in _AI_CLI_TOOLS:
-        section["tool"] = inferred
-        return
-    if tool:
+    if tool and tool not in _LEGACY_AI_CLI_TOOLS:
         warnings.warn(f"Legacy AI tool {tool!r} is no longer supported; using opencode", RuntimeWarning)
     section["tool"] = "opencode"
-    section["executable"] = "opencode"
+    section["executable"] = executable or ("nga" if tool == "nga" else "opencode")
+    models = section.get("models")
+    if isinstance(models, list):
+        for model in models:
+            if isinstance(model, dict):
+                model.pop("tool", None)
+                model.pop("executable", None)
 
 
 def _resolve_storage_paths(raw: dict, base_dir: Path) -> None:

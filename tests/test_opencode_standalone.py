@@ -28,11 +28,12 @@ from task_agent.standalone import (
 def _config_text(
     project_dir: Path,
     *,
+    schema_version: int = 2,
     port: int = 4096,
     extra: str = "",
 ) -> str:
     return (
-        "schema_version: 1\n"
+        f"schema_version: {schema_version}\n"
         "context:\n"
         f"  project_dir: {project_dir}\n"
         "  work_dir: work\n"
@@ -100,8 +101,79 @@ def test_standalone_config_loads_context_runtime_and_relative_paths(tmp_path: Pa
     assert config.environment["OPENCODE_SERVE_PORT"] == "4317"
     assert config.environment["HTTPS_PROXY"] == "http://proxy.example:8080"
     assert config.opencode_concurrency == 2
+    assert config.opencode.tool == "opencode"
+    assert config.opencode.executable == "opencode"
     assert config.opencode.models[0].model == "provider/model"
     assert config.opencode_config == {"provider": {}}
+
+
+def test_v1_nga_config_migrates_to_global_nga_executable(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, schema_version=1)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["serve"]["tool"] = "nga"
+    raw["serve"].pop("executable")
+    raw["model_pool"]["models"][0]["tool"] = "opencode"
+    raw["model_pool"]["models"][0]["executable"] = "/ignored/model/opencode"
+    config_path.write_text(
+        yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    with pytest.warns(RuntimeWarning) as caught:
+        config = load_standalone_config(config_path)
+
+    messages = [str(warning.message) for warning in caught]
+    assert any("serve.tool='nga'" in message for message in messages)
+    assert any("tool/executable are retired" in message for message in messages)
+    assert config.opencode.tool == "opencode"
+    assert config.opencode.executable == "nga"
+    assert not hasattr(config.opencode.models[0], "tool")
+    assert not hasattr(config.opencode.models[0], "executable")
+
+
+def test_v2_accepts_nga_as_the_global_executable(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["serve"]["executable"] = "nga"
+    config_path.write_text(
+        yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    config = load_standalone_config(config_path)
+
+    assert config.opencode.tool == "opencode"
+    assert config.opencode.executable == "nga"
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value", "message"),
+    [
+        ("serve", "tool", "nga", "serve.tool"),
+        ("model", "tool", "opencode", "Unknown model_pool.models"),
+        ("model", "executable", "nga", "Unknown model_pool.models"),
+    ],
+)
+def test_v2_rejects_legacy_tool_semantics(
+    tmp_path: Path,
+    section: str,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    config_path = _write_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if section == "serve":
+        raw["serve"][field] = value
+    else:
+        raw["model_pool"]["models"][0][field] = value
+    config_path.write_text(
+        yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_standalone_config(config_path)
 
 
 def test_example_config_contains_disabled_remote_and_local_mcp_examples() -> None:
@@ -131,7 +203,7 @@ def test_example_config_contains_disabled_remote_and_local_mcp_examples() -> Non
 @pytest.mark.parametrize(
     ("content", "message"),
     [
-        ("schema_version: 2\n", "schema_version"),
+        ("schema_version: 3\n", "schema_version"),
         (
             "schema_version: 1\ncontext: {}\nserve: {}\nmodel_pool: {}\nunknown: true\n",
             "Unknown top-level fields",

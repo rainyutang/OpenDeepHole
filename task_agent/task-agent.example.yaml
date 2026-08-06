@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 context:
   project_dir: /absolute/path/to/source
@@ -6,7 +6,9 @@ context:
   workspace_dir: /absolute/path/to/opencode-workspace
 
 serve:
+  # Task Agent 的实现固定为 OpenCode；这里只保留 opencode。
   tool: opencode
+  # 实际启动文件，可填写 opencode、nga 或完整路径。
   executable: opencode
   port: 4096
   timeout: 3600

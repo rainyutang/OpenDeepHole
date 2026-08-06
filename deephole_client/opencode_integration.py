@@ -10,7 +10,7 @@ import socket
 import sys
 import threading
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from backend.config import get_config
 from backend.logger import get_logger
@@ -75,7 +75,7 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
     from task_agent import OpenCodeSessionRuntime
     effective = _effective_model_config(cli_config, model_option)
     tool = str(effective["tool"] or "opencode").strip().lower()
-    if tool not in {"opencode", "nga"}:
+    if tool != "opencode":
         raise ValueError(f"Unsupported OpenCode serve tool: {tool}")
     executable = str(effective["executable"] or tool).strip()
     resolved_executable = shutil.which(executable)
@@ -136,8 +136,8 @@ def _effective_model_config(cli_config, model_option) -> dict:
 
     use_default_model = bool(_config_value(model_option, "use_default_model", False))
     return {
-        "tool": choose("tool", "opencode"),
-        "executable": choose("executable", ""),
+        "tool": "opencode",
+        "executable": _config_value(cli_config, "executable", "opencode") or "opencode",
         "model": "" if use_default_model else choose("model", ""),
         "config_paths": _config_value(cli_config, "config_paths", []) or [],
         "proxy_url": str(_config_value(cli_config, "proxy_url", "") or ""),
@@ -267,10 +267,10 @@ def _runtime_config_candidates(
     env: dict[str, str],
 ) -> list[tuple[str, Path]]:
     candidates: list[tuple[str, Path]] = []
-    tool = str(effective.get("tool") or "opencode").strip().lower()
     config_dir_names = ["opencode"]
-    if tool and tool != "opencode":
-        config_dir_names.append(tool)
+    executable_alias = _opencode_executable_alias(effective.get("executable"))
+    if executable_alias == "nga":
+        config_dir_names.append("nga")
     for config_home in _config_home_candidates(env):
         for config_dir_name in config_dir_names:
             config_dir = config_home / config_dir_name
@@ -279,7 +279,7 @@ def _runtime_config_candidates(
                 for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES
             )
 
-    executable = str(effective.get("executable") or tool).strip()
+    executable = str(effective.get("executable") or "opencode").strip()
     if executable:
         resolved_executable = shutil.which(executable) or executable
         executable_parent = Path(resolved_executable).expanduser().parent
@@ -312,6 +312,23 @@ def _runtime_config_candidates(
                 (env_name, path) for path in _expand_config_path(raw_path)
             )
     return candidates
+
+
+def _opencode_executable_alias(value: object) -> str:
+    """Return a known compatibility executable name for config discovery."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    names = {Path(raw).name, PureWindowsPath(raw).name}
+    for name in names:
+        normalized = name.strip().lower()
+        for suffix in (".exe", ".cmd", ".bat"):
+            if normalized.endswith(suffix):
+                normalized = normalized[: -len(suffix)]
+                break
+        if normalized in {"opencode", "nga"}:
+            return normalized
+    return ""
 
 
 def _merge_managed_runtime_config(base: dict, managed: dict) -> dict:

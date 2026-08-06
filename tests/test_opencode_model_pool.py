@@ -1601,15 +1601,21 @@ def test_retry_falls_back_when_all_eligible_models_were_avoided() -> None:
 
 def test_health_survives_non_identity_config_changes_and_resets_on_identity_change() -> None:
     async def run() -> None:
-        cfg = SimpleNamespace(models=[{
-            "id": "primary",
-            "model": "provider/primary",
-            "tool": "opencode",
-            "executable": "/opt/opencode",
-            "weight": 4,
-            "max_concurrency": 1,
-        }])
+        cfg = SimpleNamespace(
+            tool="nga",
+            executable="/opt/opencode",
+            models=[{
+                "id": "primary",
+                "model": "provider/primary",
+                "tool": "nga",
+                "executable": "/ignored/model-specific-nga",
+                "weight": 4,
+                "max_concurrency": 1,
+            }],
+        )
         lease = await acquire_model_lease(cfg, global_concurrency=1)
+        assert lease.option.tool == "opencode"
+        assert lease.option.executable == "/opt/opencode"
         await release_model_lease(
             lease,
             outcome="failure",
@@ -1628,7 +1634,7 @@ def test_health_survives_non_identity_config_changes_and_resets_on_identity_chan
         assert preserved["weight"] == 10
         assert preserved["effective_weight"] == 5
 
-        cfg.models[0]["executable"] = "/opt/opencode-v2"
+        cfg.executable = "/opt/opencode-v2"
         await refresh_configured_model_pool(cfg, global_concurrency=3)
         reset = model_pool_snapshot()["models"][0]
         assert reset["health_penalty_level"] == 0

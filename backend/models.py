@@ -5,9 +5,9 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 
@@ -820,6 +820,8 @@ class AgentInfo(BaseModel):
 
 
 class AgentOpenCodeModelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str = ""
     model: str = ""
     # Read-only compatibility for old agent.yaml files.  It is deliberately
@@ -829,16 +831,14 @@ class AgentOpenCodeModelConfig(BaseModel):
     weight: float = 1.0
     max_concurrency: int = 1
     enabled: bool = True
-    tool: str = ""
-    executable: str = ""
     timeout: int | None = None
     max_retries: int | None = None
     time_windows: list[AgentModelTimeWindow] = []
 
 
 class AgentOpenCodeConfig(BaseModel):
-    tool: str = "nga"
-    executable: str = "nga"
+    tool: Literal["opencode"] = "opencode"
+    executable: str = "opencode"
     model: str = ""
     timeout: int = 3600
     max_retries: int = 2
@@ -850,8 +850,8 @@ class AgentOpenCodeConfig(BaseModel):
 
 
 class AgentBaseConfig(BaseModel):
-    tool: str = "nga"
-    executable: str = "nga"
+    tool: Literal["opencode"] = "opencode"
+    executable: str = "opencode"
     no_proxy: str = "10.0.0.0/8"
     opencode_serve_port: int | None = Field(default=None, ge=1, le=65535)
 
@@ -1059,6 +1059,30 @@ def _upgrade_agent_v3_or_v4_config(value: dict, *, drop_code_graph: bool) -> dic
     return migrated
 
 
+def _upgrade_agent_v6_config(value: dict) -> dict:
+    """Make the OpenCode implementation canonical while preserving its binary."""
+    migrated = copy.deepcopy(value)
+    migrated["schema_version"] = 6
+    base = migrated.get("base")
+    if not isinstance(base, dict):
+        base = {}
+        migrated["base"] = base
+    legacy_tool = str(base.get("tool") or "").strip().lower()
+    executable = str(base.get("executable") or "").strip()
+    if not executable:
+        executable = "nga" if legacy_tool == "nga" else "opencode"
+    base["tool"] = "opencode"
+    base["executable"] = executable
+
+    model_pool = migrated.get("model_pool")
+    if isinstance(model_pool, dict) and isinstance(model_pool.get("models"), list):
+        for model in model_pool["models"]:
+            if isinstance(model, dict):
+                model.pop("tool", None)
+                model.pop("executable", None)
+    return migrated
+
+
 class AgentMemoryApiDiscoveryConfig(BaseModel):
     enabled: bool = True
     batch_size: int = 8
@@ -1090,7 +1114,7 @@ class AgentPatternFilterConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: int = 5
+    schema_version: Literal[6] = 6
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
@@ -1124,7 +1148,7 @@ class AgentRemoteConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
-        """Accept older/transient Agent payloads and emit the v5 contract."""
+        """Accept older/transient Agent payloads and emit the v6 contract."""
         if not isinstance(value, dict):
             return value
         if not value:
@@ -1137,23 +1161,30 @@ class AgentRemoteConfig(BaseModel):
             schema_version = int(value.get("schema_version", 0) or 0)
         except (TypeError, ValueError):
             schema_version = 0
-        if schema_version >= 5:
+        if schema_version >= 6:
             migrated = value
-            migrated["schema_version"] = 5
             migrated.pop("mining_engines", None)
             return migrated
+        if schema_version == 5:
+            migrated = value
+            migrated.pop("mining_engines", None)
+            return _upgrade_agent_v6_config(migrated)
         if schema_version >= 4:
-            return _upgrade_agent_v3_or_v4_config(
-                value,
-                drop_code_graph=False,
+            return _upgrade_agent_v6_config(
+                _upgrade_agent_v3_or_v4_config(
+                    value,
+                    drop_code_graph=False,
+                )
             )
         if schema_version == 3:
-            return _upgrade_agent_v3_or_v4_config(
-                value,
-                drop_code_graph=True,
+            return _upgrade_agent_v6_config(
+                _upgrade_agent_v3_or_v4_config(
+                    value,
+                    drop_code_graph=True,
+                )
             )
         if schema_version == 2 or "base" in value or "model_pool" in value:
-            return _upgrade_agent_v2_config(value)
+            return _upgrade_agent_v6_config(_upgrade_agent_v2_config(value))
         legacy = dict(value)
         opencode = legacy.get("opencode") if isinstance(legacy.get("opencode"), dict) else {}
         fp_cli = legacy.get("fp_review_cli") if isinstance(legacy.get("fp_review_cli"), dict) else {}
@@ -1182,7 +1213,6 @@ class AgentRemoteConfig(BaseModel):
             if not any(
                 isinstance(existing, dict)
                 and str(existing.get("model") or "") == str(migrated.get("model") or "")
-                and str(existing.get("tool") or "") == str(migrated.get("tool") or "")
                 for existing in models
             ):
                 models.append(migrated)
@@ -1228,7 +1258,7 @@ class AgentRemoteConfig(BaseModel):
             "vulnerability_validation": {},
             "checker_selection": {"disabled_checkers": []},
         }
-        return _upgrade_agent_v2_config(migrated)
+        return _upgrade_agent_v6_config(_upgrade_agent_v2_config(migrated))
 
     @property
     def no_proxy(self) -> str:

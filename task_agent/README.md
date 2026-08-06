@@ -1,6 +1,6 @@
 # Task Agent 组件
 
-`task_agent` 是供 DeepHole 2.0 Agent 使用的、自包含任务管理框架。它负责驱动 OpenCode/nga Serve，并管理延迟初始化的 Serve 单例、任务队列、模型租约、会话续接、权限、重试、事件流和 JSON 结果校验；它本身不实现 OpenCode，也不提供或启动单独的 CLI，模型任务仍通过现有的 `opencode serve` 或 `nga serve` 进程运行。
+`task_agent` 是供 DeepHole 2.0 Agent 使用的、自包含任务管理框架。它负责驱动 OpenCode 兼容 Serve，并管理延迟初始化的 Serve 单例、任务队列、模型租约、会话续接、权限、重试、事件流和 JSON 结果校验；工具语义固定为 `opencode`，实际启动文件由全局 executable 配置决定，可使用 `opencode`、`nga` 或完整路径。它本身不实现 OpenCode，也不提供另一套 CLI。
 
 该目录本身就是顶层 Python 包。在源码项目中可以直接把整个 `task_agent/` 放到项目根目录；也可以从其父目录执行 `python -m pip install ./task_agent`，安装后调用代码放在任何目录都继续使用同一个公开包名。
 

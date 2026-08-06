@@ -4040,6 +4040,39 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
     asyncio.run(run())
 
 
+def test_start_locked_resolves_only_configured_nga_when_both_are_available(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        available = {
+            "opencode": "/bin/opencode",
+            "nga": "/opt/nga/bin/nga",
+        }
+        resolved: list[str] = []
+
+        def resolve(name: str) -> str:
+            resolved.append(name)
+            return available[name]
+
+        monkeypatch.setattr("task_agent.serve_client._resolve_executable", resolve)
+        monkeypatch.setattr("task_agent.serve_client._run_command_text", lambda cmd: "nga 1.0")
+        monkeypatch.setattr("task_agent.serve_client._port_is_in_use", lambda port: False)
+        monkeypatch.setattr("task_agent.serve_client._port_bind_error", lambda port: None)
+        manager = OpenCodeServeManager()
+        manager._stop_owned_serve_on_port = AsyncMock()
+        manager._start_once_locked = AsyncMock()
+        key = OpenCodeServeKey(tool="opencode", executable="nga")
+
+        await manager._start_locked(key, startup_cwd=tmp_path)
+
+        assert resolved == ["nga"]
+        assert manager._start_once_locked.await_args.kwargs["executable"] == "/opt/nga/bin/nga"
+        assert manager._start_once_locked.await_args.args[0] == key
+
+    asyncio.run(run())
+
+
 def test_serve_startup_debug_redacts_config_secrets(tmp_path: Path) -> None:
     env = {
         "NODE_TLS_REJECT_UNAUTHORIZED": "0",

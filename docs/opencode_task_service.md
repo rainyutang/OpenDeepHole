@@ -2,7 +2,7 @@
 
 DeepHole 2.0 中所有模型任务统一调用 `task_agent.run_opencode_task()`。业务组件不直接启动 CLI，不访问任务队列，也不自行创建、查询、取消或删除 OpenCode Session。
 
-> 模型任务只使用 OpenCode/nga serve 与 OpenCode Session，没有 LLM API 降级路径。
+> 模型任务只使用 OpenCode 兼容 serve 与 OpenCode Session，没有 LLM API 降级路径。
 
 Agent 启动时只注册一次 DeepHole 2.0 的后端配置、workspace 与 MCP/SKILL 适配，不创建 Serve 进程。首次 `run_opencode_task()` 会惰性创建共享任务服务和 Serve 管理单例；组件在真正发送 prompt 前检查 Serve，按现有规则启动、复用兼容进程或恢复异常进程。没有后端宿主绑定时，公共函数改从组件自己的 YAML 配置自举，仍不存在额外的组件 CLI。
 
@@ -96,7 +96,7 @@ Agent 内部辅助任务继续使用各自既有策略，但不属于公共调�
 格式模板位于 `task_agent/task-agent.example.yaml`。下面的配置包含 Task Agent 自己识别的全部字段；除透传的 `serve.opencode_config` 和由调度器解析的 `time_windows` 项外，顶层、固定分区和模型行都是严格白名单，拼错或加入未知字段会在加载时直接报错：
 
 ```yaml
-schema_version: 1
+schema_version: 2
 
 context:
   # OpenCode Session 的真实源码目录；该目录必须已经存在。
@@ -107,9 +107,9 @@ context:
   workspace_dir: /absolute/path/to/opencode-workspace
 
 serve:
-  # 支持 opencode 或 nga。
+  # Task Agent 的实现固定为 OpenCode；这里只能填写 opencode。
   tool: opencode
-  # 可执行文件名或路径；省略时使用 tool 的值。
+  # 实际启动文件名或路径，可填写 opencode、nga 或完整路径。
   executable: opencode
   port: 4096
   # 单次模型消息从开始执行到完成的默认超时，单位为秒，不包含排队时间。
@@ -160,9 +160,7 @@ model_pool:
       weight: 1
       max_concurrency: 2
       enabled: true
-      # 以下四项均为模型行覆盖；省略时继承 serve 设置。
-      tool: opencode
-      executable: opencode
+      # 以下两项均为模型行覆盖；省略时继承 serve 设置。
       timeout: 3600
       max_retries: 2
       # 使用运行 Task Agent 的机器本地时间；多段时间窗取并集。
@@ -176,7 +174,7 @@ model_pool:
 
 | 参数 | 必填/默认值 | 含义 |
 | --- | --- | --- |
-| `schema_version` | 必填，当前只能为 `1` | standalone YAML 的 Schema 版本；缺失或不是 `1` 会拒绝加载。 |
+| `schema_version` | 必填，当前为 `2` | standalone YAML 的 Schema 版本。v1 会按下述兼容规则迁移；其它版本拒绝加载。 |
 | `context` | 必填 | 固定本次 standalone 组件生命周期使用的目录上下文。 |
 | `serve` | 必填 | Serve 进程、默认执行策略和原生 OpenCode 配置。 |
 | `model_pool` | 必填 | 显式模型列表及全局调度上限。 |
@@ -186,6 +184,8 @@ model_pool:
 
 三个路径都支持 `~`。绝对路径直接使用；相对路径以 `task-agent.yaml` 所在目录为基准，而不是以启动 Python 的当前目录为基准。`project_dir` 必须预先存在；`work_dir` 和 `workspace_dir` 会自动递归创建。standalone 的最终 `workspace_dir/opencode.json` 允许读取项目工作目录、`work_dir`、`workspace_dir/.opencode` 和已注册的 Skill 根；文件编辑工具只能写 `work_dir`，`bash` 始终禁用。
 
+v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未显式填写 `serve.executable` 时继续使用 `nga`；旧模型行里的 `tool` 和 `executable` 会被忽略。v2 只接受 `serve.tool: opencode`，并拒绝模型行工具或可执行文件覆盖，确保所有模型共用 `serve.executable`。
+
 嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，`bash` 始终禁用。只有显式传入 `writable_paths` 时，额外动态路径才通过 Session 权限覆盖下发，不进入 Serve 配置哈希。
 
 `workspace_dir` 中生成的 `opencode.json` 包含 `serve.opencode_config` 的实际内容，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该已解析配置，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再合并调用者机器上的环境配置。standalone 只以 YAML 中的 `serve.opencode_config` 为用户配置源；完整 Agent 则在进入 Task Agent 前按受控顺序合并已发现的全局、可执行文件目录、项目和显式配置。
@@ -194,8 +194,8 @@ model_pool:
 
 | 参数 | 必填/默认值 | 含义 |
 | --- | --- | --- |
-| `serve.tool` | 默认 `opencode` | Serve 实现，只能是 `opencode` 或 `nga`。 |
-| `serve.executable` | 默认等于 `serve.tool` | 启动 Serve 的可执行文件名或路径。 |
+| `serve.tool` | 默认且只能为 `opencode` | 固定的 OpenCode Serve 实现标识，不用于选择磁盘上的文件。 |
+| `serve.executable` | 默认 `opencode` | 实际启动 Serve 的可执行文件名或完整路径；可使用 `opencode`、`nga` 或其它兼容程序。配置哪个就启动哪个，不做名称回退。 |
 | `serve.port` | 默认 `4096`，范围 `1..65535` | 本机 Serve 固定监听端口。该值会成为最终的 `OPENCODE_SERVE_PORT`，覆盖 `serve.environment` 中的同名值；standalone 不会自动改号。 |
 | `serve.timeout` | 默认 `3600`，最小 `1` | 默认单次模型消息执行超时，单位为秒；排队等待模型 Lease 的时间不计入。 |
 | `serve.max_retries` | 默认 `2`，最小 `0` | 首次 Session 之外最多创建多少个全新 Session 进行重试；不等同于同 Session 的 JSON 纠正次数。 |
@@ -240,8 +240,6 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 | `models[].weight` | 默认 `1`，最小 `0.01` | 多个可用且能力合适的模型之间的基础调度权重；运行时健康降级不会改写该配置值。 |
 | `models[].max_concurrency` | 默认 `1`，最小 `1` | 该模型行允许同时持有的 Lease 数量。 |
 | `models[].enabled` | 默认 `true` | 是否将该模型加入可调度模型池。 |
-| `models[].tool` | 默认继承 `serve.tool` | 仅该模型使用的 Serve 实现，只能为空、`opencode` 或 `nga`。 |
-| `models[].executable` | 默认继承 `serve.executable` | 仅该模型使用的可执行文件名或路径。 |
 | `models[].timeout` | 默认继承 `serve.timeout`，最小 `1` | 该模型单次消息执行超时，单位为秒。 |
 | `models[].max_retries` | 默认继承 `serve.max_retries`，最小 `0` | 该模型在超时或其它可重试失败后采用的新 Session 重试次数。 |
 | `models[].time_windows` | 默认 `[]` | 模型允许获得新 Lease 的本地时间窗口；空列表表示全天可用。 |
@@ -267,7 +265,7 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 
 只有已经进入模型消息请求后的 Provider/Auth/API 执行失败或总超时才会增加一级惩罚；即使消息接口返回 HTTP 200，assistant `info.error` 中的这类 Provider 执行错误也按真实请求失败处理。`ContextOverflowError`、`MessageOutputLengthError`、`StructuredOutputError` 和非主动取消产生的 `MessageAbortedError` 会让当前任务换模重试，但不会降权。Serve 启动或配置失败、MCP/回调故障、主动取消、没有可用模型，以及返回内容未通过 JSON Schema 校验，也都不属于模型健康故障。一次最终成功会恢复一级；没有新模型消息请求故障满 10 分钟也会恢复一级。JSON 纠错耗尽后仍会进入 fresh Session 换模重试，但该 JSON 失败本身既不降权也不恢复健康；若纠错消息请求本身超时或发生 Provider/Auth/API 执行失败，仍按真实请求故障处理。
 
-健康状态不会写回配置或跨进程持久化，Agent/Task Agent 进程重启后从零惩罚和基础权重重新开始。运行中只修改基础权重、并发数或时间窗时继续沿用同一实际模型身份的健康状态；模型 ID 对应的真实模型、默认模型标记、工具或可执行文件变化时视为新身份。
+健康状态不会写回配置或跨进程持久化，Agent/Task Agent 进程重启后从零惩罚和基础权重重新开始。运行中只修改基础权重、并发数或时间窗时继续沿用同一实际模型身份的健康状态；模型 ID 对应的真实模型、默认模型标记或全局可执行文件变化时视为新身份。
 
 每个 `time_windows` 项支持以下字段：
 

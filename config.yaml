@@ -19,7 +19,8 @@ server:
   port: 8000
 
 opencode:
-  executable: "opencode"  # opencode 可执行文件名或完整路径，如 "myopencode" 或 "C:/tools/opencode.cmd"
+  tool: "opencode"       # 实现固定为 OpenCode
+  executable: "opencode"  # 全局启动文件名或完整路径，如 "nga" 或 "C:/tools/nga.exe"
   model: ""       # 已废弃兼容字段；模型调度只读取 models
   timeout: 3600  # seconds per model message
   max_retries: 2  # fresh-Session retries for timeout and retryable failures

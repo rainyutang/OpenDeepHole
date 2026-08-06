@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -21,7 +22,8 @@ from .host import (
 
 CONFIG_ENV = "TASK_AGENT_CONFIG"
 DEFAULT_CONFIG_FILENAME = "task-agent.yaml"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+_LEGACY_SCHEMA_VERSION = 1
 _BOOTSTRAP_LOCK = threading.RLock()
 _MISSING = object()
 
@@ -35,8 +37,6 @@ class StandaloneModelConfig:
     weight: float
     max_concurrency: int
     enabled: bool
-    tool: str = ""
-    executable: str = ""
     timeout: int | None = None
     max_retries: int | None = None
     time_windows: tuple[dict[str, Any], ...] = ()
@@ -150,7 +150,11 @@ def _resolve_path(value: Any, *, name: str, base_dir: Path) -> Path:
     return path.resolve()
 
 
-def _load_models(raw_models: Any) -> tuple[StandaloneModelConfig, ...]:
+def _load_models(
+    raw_models: Any,
+    *,
+    schema_version: int,
+) -> tuple[StandaloneModelConfig, ...]:
     if not isinstance(raw_models, list):
         raise ValueError("model_pool.models must be a list")
     models: list[StandaloneModelConfig] = []
@@ -162,12 +166,12 @@ def _load_models(raw_models: Any) -> tuple[StandaloneModelConfig, ...]:
         "weight",
         "max_concurrency",
         "enabled",
-        "tool",
-        "executable",
         "timeout",
         "max_retries",
         "time_windows",
     }
+    if schema_version == _LEGACY_SCHEMA_VERSION:
+        allowed.update({"tool", "executable"})
     for index, value in enumerate(raw_models):
         name = f"model_pool.models[{index}]"
         item = _mapping(value, name)
@@ -187,9 +191,15 @@ def _load_models(raw_models: Any) -> tuple[StandaloneModelConfig, ...]:
             not isinstance(window, Mapping) for window in raw_windows
         ):
             raise ValueError(f"{name}.time_windows must be a list of mappings")
-        model_tool = str(item.get("tool") or "").strip().lower()
-        if model_tool and model_tool not in {"opencode", "nga"}:
-            raise ValueError(f"{name}.tool must be 'opencode' or 'nga'")
+        if schema_version == _LEGACY_SCHEMA_VERSION and (
+            str(item.get("tool") or "").strip()
+            or str(item.get("executable") or "").strip()
+        ):
+            warnings.warn(
+                f"{name}.tool/executable are retired; using serve.executable",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         models.append(
             StandaloneModelConfig(
                 id=model_id,
@@ -213,8 +223,6 @@ def _load_models(raw_models: Any) -> tuple[StandaloneModelConfig, ...]:
                     name=f"{name}.enabled",
                     default=True,
                 ),
-                tool=model_tool,
-                executable=str(item.get("executable") or "").strip(),
                 timeout=_optional_integer(
                     item.get("timeout"),
                     name=f"{name}.timeout",
@@ -248,9 +256,10 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
     raw = _mapping(loaded, "standalone OpenCode config")
     _reject_unknown(raw, {"schema_version", "context", "serve", "model_pool"}, "top-level")
     version = _integer(raw.get("schema_version"), name="schema_version")
-    if version != _SCHEMA_VERSION:
+    if version not in {_LEGACY_SCHEMA_VERSION, _SCHEMA_VERSION}:
         raise ValueError(
-            f"Unsupported standalone OpenCode schema_version {version}; expected {_SCHEMA_VERSION}"
+            "Unsupported standalone OpenCode schema_version "
+            f"{version}; expected {_LEGACY_SCHEMA_VERSION} or {_SCHEMA_VERSION}"
         )
 
     context = _section(raw, "context")
@@ -291,10 +300,22 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         base_dir=base_dir,
     )
 
-    tool = str(serve.get("tool") or "opencode").strip().lower()
-    if tool not in {"opencode", "nga"}:
-        raise ValueError("serve.tool must be 'opencode' or 'nga'")
-    executable = str(serve.get("executable") or tool).strip()
+    legacy_tool = str(serve.get("tool") or "opencode").strip().lower()
+    if version == _SCHEMA_VERSION and legacy_tool != "opencode":
+        raise ValueError("serve.tool must be 'opencode'")
+    if version == _LEGACY_SCHEMA_VERSION and legacy_tool not in {"opencode", "nga"}:
+        raise ValueError("serve.tool must be 'opencode' or legacy 'nga'")
+    if version == _LEGACY_SCHEMA_VERSION and legacy_tool == "nga":
+        warnings.warn(
+            "serve.tool='nga' is deprecated; using tool='opencode' with the nga executable",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    tool = "opencode"
+    executable = str(
+        serve.get("executable")
+        or ("nga" if legacy_tool == "nga" else "opencode")
+    ).strip()
     if not executable:
         raise ValueError("serve.executable is required")
     environment_raw = serve.get("environment") or {}
@@ -320,7 +341,10 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         json.dumps(opencode_config, ensure_ascii=False)
     except (TypeError, ValueError) as exc:
         raise ValueError("serve.opencode_config must be JSON serializable") from exc
-    models = _load_models(model_pool.get("models"))
+    models = _load_models(
+        model_pool.get("models"),
+        schema_version=version,
+    )
     cli_config = StandaloneCLIConfig(
         tool=tool,
         executable=executable,
@@ -376,10 +400,8 @@ def _build_bindings(config: StandaloneOpenCodeConfig) -> OpenCodeHostBindings:
         model_option: Any,
         directory: Path,
     ) -> OpenCodeSessionRuntime:
-        tool = str(getattr(model_option, "tool", "") or cli_config.tool).strip().lower()
-        executable = str(
-            getattr(model_option, "executable", "") or cli_config.executable
-        ).strip()
+        tool = cli_config.tool
+        executable = cli_config.executable
         model = (
             ""
             if bool(getattr(model_option, "use_default_model", False))

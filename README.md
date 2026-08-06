@@ -550,10 +550,11 @@ server_url: "http://your-server:8000"
 agent_name: ""
 owner_token: ""
 checkers: []
-schema_version: 5
+schema_version: 6
 base:
-  tool: "nga"
-  executable: "nga"
+  # 实现固定为 OpenCode；启动文件可填写名称或完整路径。
+  tool: "opencode"
+  executable: "opencode"  # 也可以是 nga、/opt/bin/nga 或 Windows 完整路径
   no_proxy: "10.0.0.0/8"
   # null 时由 Agent 进程自动选择并复用一个空闲端口
   opencode_serve_port: null
@@ -562,24 +563,24 @@ model_pool:
   models: []
 ```
 
-`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v5 字段由 Web **「客户端配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定客户端身份，客户端离线或重连后仍使用同一份服务端配置。新客户端注册时服务端不会采用本地模板上报的模型，模型池保持为空，直到用户在 Web 中明确配置。威胁分析和漏洞挖掘引擎在新建扫描时选择；Checker 在客户端配置中统一选择并在创建时固化。v4 升级到 v5 时会移除全局产品知识 MCP，并把旧的多验证环境配置重置为新的通用漏洞验证默认策略，不尝试合并；其它阶段策略保持。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；v3 中的全局代码图谱只作为旧集成请求的扫描级迁移输入，不再写回客户端配置。模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。旧 Web `opencode_config` 字段与运行配置快照会在升级时清理，不再提供编辑或查看入口。
+`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v6 字段由 Web **「客户端配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定客户端身份，客户端离线或重连后仍使用同一份服务端配置。新客户端注册时服务端不会采用本地模板上报的模型，模型池保持为空，直到用户在 Web 中明确配置。威胁分析和漏洞挖掘引擎在新建扫描时选择；Checker 在客户端配置中统一选择并在创建时固化。v5 升级到 v6 时，`base.tool` 统一迁移为 `opencode`，但保留原 `base.executable`；旧模型行的 `tool`、`executable` 覆盖会被移除，整个客户端只使用基础配置中的可执行文件。v4 升级到 v5 时会移除全局产品知识 MCP，并把旧的多验证环境配置重置为新的通用漏洞验证默认策略，不尝试合并；其它阶段策略保持。v2 及更早配置的阶段能力 `any`/`low` 与旧默认超时 `1200` 会分别一次性迁移为 `high` 和 `3600`；v3 中的全局代码图谱只作为旧集成请求的扫描级迁移输入，不再写回客户端配置。模型行能力标签、显式模型超时及其它自定义超时保持不变，升级后仍可手工配置 `low`。旧 Web `opencode_config` 字段与运行配置快照会在升级时清理，不再提供编辑或查看入口。
 
 新增威胁分析方法只需创建方法目录并实现固定五参数入口，详见 [威胁分析方法扩展](deephole_client/threat_analysis/README.md)。
 新增漏洞挖掘引擎只需创建独立目录并实现固定适配契约，详见 [漏洞挖掘引擎扩展](deephole_client/vulnerability_mining/README.md)。
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“用户全局目录 < 可执行文件相邻目录 < 项目目录 < `opencode.config_paths` < `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` < DeepHole 2.0 受管字段”受控合并，无效 JSON/JSONC 只记录警告并忽略，不再接受 Web 自定义 JSONC 层。全局受管字段只包含 `$schema`、公共技能路径和运行权限；代码图谱与知识库 MCP 都按扫描快照通过带目录上下文的 `/mcp` 接口临时连接，并在任务结束后分别释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。MCP 请求头中的 API Key、Token 等敏感值会保存在服务端扫描快照和创建表单记忆中，应只在可信环境填写。
+OpenCode 最终配置按“用户全局目录 < 可执行文件相邻目录 < 项目目录 < `opencode.config_paths` < `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` < DeepHole 2.0 受管字段”受控合并；当配置的可执行文件 basename 为 `nga` 时，同时兼容发现用户的 `~/.config/nga` 配置目录。无效 JSON/JSONC 只记录警告并忽略，不再接受 Web 自定义 JSONC 层。全局受管字段只包含 `$schema`、公共技能路径和运行权限；代码图谱与知识库 MCP 都按扫描快照通过带目录上下文的 `/mcp` 接口临时连接，并在任务结束后分别释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。MCP 请求头中的 API Key、Token 等敏感值会保存在服务端扫描快照和创建表单记忆中，应只在可信环境填写。
 
 配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），用专用的 `XDG_CONFIG_HOME` 隔离 OpenCode 对用户全局配置的二次发现，把 `OPENCODE_CONFIG_DIR` 指向已解析的配置目录，并显式清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。
 
 OpenCode 调用约定：
 
-- `nga` / `opencode`：整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`，扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。Agent 根据 Web 管理的基础工具和模型行生成 serve 配置。
-- `nga` / `opencode` 只通过 serve API 调用。Agent 优先使用 `base.opencode_serve_port`，未配置时兼容 `OPENCODE_SERVE_PORT`，两者都没有时由操作系统分配一个空闲端口；自动端口在同一 Agent 进程内跨 Serve 重启复用，若启动前已被占用、无监听却无法绑定，或首次只返回泛化的 `Error: Unexpected error`，会有界改选端口再启动；显式端口永不自动改号，并在占用、Windows 排除/保留端口或端点安全软件拒绝时直接报告监听 PID 或绑定错误。两种模式都只会回收已通过归属标记和进程树证明属于本 Agent 的进程，不终止未知监听者。Agent 重启后会重新选择自动端口；配置更新在活动 Session 结束后的安全重启边界生效。standalone `task-agent.yaml` 继续使用显式 `serve.port`（默认 `4096`）。组件只调用 `task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录。调用方不能传原生 permission，只能通过 `writable_paths` 显式增加路径级写权限。
+- 工具语义固定为 `opencode`，整个 Agent 固定使用 `~/.opendeephole/opencode_workspace`。真正启动哪个 OpenCode 兼容程序只由全局 `base.executable` 决定，可填写 `opencode`、`nga` 或完整路径；模型行不再覆盖工具或可执行文件。扫描、复核和验证不再创建各自的配置 workspace，也不再向项目目录镜像运行配置。
+- 所有模型任务只通过 OpenCode 兼容的 serve API 调用，并严格启动配置的 executable，不会因为同时安装了 `opencode` 而回退到它。Agent 优先使用 `base.opencode_serve_port`，未配置时兼容 `OPENCODE_SERVE_PORT`，两者都没有时由操作系统分配一个空闲端口；自动端口在同一 Agent 进程内跨 Serve 重启复用，若启动前已被占用、无监听却无法绑定，或首次只返回泛化的 `Error: Unexpected error`，会有界改选端口再启动；显式端口永不自动改号，并在占用、Windows 排除/保留端口或端点安全软件拒绝时直接报告监听 PID 或绑定错误。两种模式都只会回收已通过归属标记和进程树证明属于本 Agent 的进程，不终止未知监听者。Agent 重启后会重新选择自动端口；配置更新在活动 Session 结束后的安全重启边界生效。standalone `task-agent.yaml` 继续使用显式 `serve.port`（默认 `4096`）。组件只调用 `task_agent.run_opencode_task()`；真实项目目录和 `.opendeephole` 工作目录由执行上下文提供，不回退到当前目录。调用方不能传原生 permission，只能通过 `writable_paths` 显式增加路径级写权限。
 - 文件、SKILL 与 `bash` 的稳定权限统一写入 Serve 实际使用的全局 `opencode.json`。项目目录作为 Session 工作目录保持可读；`~/.opendeephole/opencode_workspace/.opencode` 和最终配置注册的 SKILL 根只读，完整 Agent 的文件编辑工具可写 `~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 与 `skill_create`，其它源码目录保持只读且 `bash` 全面禁用。只有显式传入 `writable_paths` 时，额外动态路径才通过 Session `permission` 创建或 PATCH；省略时不改已有 Session 权限，显式空列表清空覆盖。脱离 Agent 运行时只从 `task-agent.yaml` 的 `serve.opencode_config.skills.paths` 加载 SKILL。
 - `output_schema` 只用于本地 JSON 解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。最终文本 JSON 优先；若模型改用内置文件工具写 JSON，Task Agent 会从当前消息最后写入的合法文件填充 `structured`，但 `text` 仍保留 LLM 最后一次文本输出。确认由本条消息新建的临时文件在解析后自动删除；必须保留的文件或目录可传 `file_write_allowlist`，该白名单只控制清理且不能扩大 `work_dir` 写权限。JSON 仍不合规时默认在原 Session 追加 2 次包含 Schema 的中文纠正，也可通过 `invalid_json_retry_prompt` 提供原样发送的自定义纠正提示词；纠正耗尽或普通执行错误后，内部任务策略决定是否重新排队并创建新 Session。
-- OpenCode/nga serve 会话会保留在真实项目目录下，便于用 `opencode session list` 查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
+- OpenCode 兼容 serve 会话会保留在真实项目目录下，便于用所配置 executable 的 `session list` 命令查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
 - 只有扫描显式启用的代码图谱或知识库 MCP 才会动态连接；空配置和历史 `null` 配置不会启动内置源码或知识 MCP。续扫、去误报和漏洞验证继承各自扫描的两类 MCP 快照。
 - 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个公共 OpenCode 接口，并继承扫描选择的代码图谱、知识库或文件工具模式；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
 
@@ -768,7 +769,7 @@ OpenDeepHole/
 │   ├── api.py                      # run_opencode_task() 公共入口
 │   ├── task_service.py             # 队列、权限、Session、纠错和重试
 │   ├── model_pool.py               # 模型 Lease、并发、能力与健康调度
-│   ├── serve_client.py             # OpenCode/nga Serve 生命周期与事件流
+│   ├── serve_client.py             # OpenCode 兼容 Serve 生命周期与事件流
 │   ├── host.py                     # 嵌入宿主上下文边界
 │   ├── standalone.py               # 独立 YAML 自举与严格校验
 │   ├── token_usage.py              # 模型 Token 用量归集

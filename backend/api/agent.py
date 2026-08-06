@@ -452,8 +452,8 @@ def _validate_managed_config(
     config: AgentRemoteConfig,
     catalog: AgentValidatorCatalog | None = None,
 ) -> None:
-    if config.base.tool not in {"nga", "opencode"}:
-        raise HTTPException(status_code=422, detail="基础配置中的工具只能是 nga 或 opencode")
+    if config.base.tool != "opencode":
+        raise HTTPException(status_code=422, detail="基础配置中的工具只能是 opencode")
     if not config.base.executable.strip():
         raise HTTPException(status_code=422, detail="工具可执行文件不能为空")
     if not 1 <= config.model_pool.global_concurrency <= 64:
@@ -470,8 +470,6 @@ def _validate_managed_config(
             raise HTTPException(status_code=422, detail=f"启用模型 {model_id} 必须填写显式模型名")
         if model.capability not in {"low", "medium", "high"}:
             raise HTTPException(status_code=422, detail=f"模型 {model_id} 的能力配置无效")
-        if model.tool and model.tool not in {"nga", "opencode"}:
-            raise HTTPException(status_code=422, detail=f"模型 {model_id} 的工具覆盖无效")
         if model.weight <= 0:
             raise HTTPException(status_code=422, detail=f"模型 {model_id} 的权重必须大于 0")
         if model.max_concurrency < 1:
@@ -4075,8 +4073,9 @@ Setup
 -----
 1. agent.yaml already contains the server_url and owner_token from the Web UI.
    Start the Agent once, then use the Web "客户端配置" page to configure the
-   tool, explicit model pool, phase policies, MCP servers and validation
-   environments. A scan cannot start without an enabled explicit model.
+   OpenCode-compatible executable, explicit model pool, phase policies, MCP
+   servers and validation environments. A scan cannot start without an enabled
+   explicit model.
 
 2. Install Python 3.10+ if not already installed
 

@@ -661,15 +661,13 @@ export interface AgentOpenCodeModelConfig {
   weight: number;
   max_concurrency: number;
   enabled: boolean;
-  tool?: "nga" | "opencode" | string;
-  executable?: string;
   timeout?: number | null;
   max_retries?: number | null;
   time_windows?: AgentModelTimeWindow[];
 }
 
 export interface AgentBaseConfig {
-  tool: "nga" | "opencode" | string;
+  tool: "opencode";
   executable: string;
   no_proxy: string;
   opencode_serve_port: number | null;
@@ -796,7 +794,7 @@ export interface MiningEngineCatalog {
 }
 
 export interface AgentRemoteConfig {
-  schema_version: 5;
+  schema_version: 6;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;

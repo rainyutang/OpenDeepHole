@@ -9,10 +9,12 @@ from unittest.mock import patch
 from deephole_client import codegraph as codegraph_runtime
 from deephole_client.opencode_integration import (
     _config_home_candidates,
+    _opencode_executable_alias,
     _resolve_serve_port,
     _resolved_serve_port,
     _runtime_config_content,
     _runtime_environment,
+    build_opencode_session_runtime,
     build_opencode_config,
     configure_opencode_component,
     get_global_opencode_workspace,
@@ -251,6 +253,75 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
             self.assertEqual(config, {"permission": {"bash": "deny"}})
 
+    def test_nga_executable_discovers_legacy_nga_config_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            project = root / "project"
+            workspace = root / "workspace"
+            nga_config = home / ".config" / "nga"
+            for path in (project, workspace, nga_config):
+                path.mkdir(parents=True)
+            (nga_config / "opencode.json").write_text(
+                json.dumps({"source": "legacy-nga", "provider": {"nga": {}}}),
+                encoding="utf-8",
+            )
+            managed_opencode_config_path(workspace).write_text("{}", encoding="utf-8")
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=True):
+                config = json.loads(_runtime_config_content(
+                    workspace,
+                    {"tool": "opencode", "executable": "/usr/local/bin/nga"},
+                    project,
+                ))
+
+            self.assertEqual(config["source"], "legacy-nga")
+            self.assertEqual(config["provider"], {"nga": {}})
+
+    def test_session_runtime_uses_global_executable_and_ignores_model_override(
+        self,
+    ) -> None:
+        cli_config = SimpleNamespace(
+            tool="opencode",
+            executable="nga",
+            model="",
+            config_paths=[],
+            no_proxy="",
+            proxy_url="",
+            serve_port=4317,
+        )
+        model = SimpleNamespace(
+            model="provider/model",
+            executable="opencode",
+            tool="nga",
+            use_default_model=False,
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("deephole_client.opencode_integration.shutil.which") as which,
+            patch(
+                "deephole_client.opencode_integration.get_global_opencode_workspace",
+                return_value=Path(tmp),
+            ),
+            patch(
+                "deephole_client.opencode_integration._runtime_config_content",
+                return_value="{}",
+            ),
+        ):
+            which.side_effect = lambda executable: {
+                "opencode": "/usr/bin/opencode",
+                "nga": "/usr/local/bin/nga",
+            }.get(executable)
+            runtime = build_opencode_session_runtime(
+                cli_config,
+                model,
+                Path(tmp),
+            )
+
+        self.assertEqual(runtime.tool, "opencode")
+        self.assertEqual(runtime.executable, "/usr/local/bin/nga")
+        self.assertEqual(runtime.model, "provider/model")
+
     def test_windows_config_home_candidates_include_userprofile_and_appdata(
         self,
     ) -> None:
@@ -262,6 +333,13 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
         self.assertIn(Path(r"C:\Users\demo") / ".config", candidates)
         self.assertIn(Path(r"C:\Users\demo\AppData\Roaming"), candidates)
+
+    def test_executable_alias_handles_posix_and_windows_paths(self) -> None:
+        self.assertEqual(_opencode_executable_alias("nga"), "nga")
+        self.assertEqual(_opencode_executable_alias("/opt/nga/bin/nga"), "nga")
+        self.assertEqual(_opencode_executable_alias(r"C:\Tools\nga.exe"), "nga")
+        self.assertEqual(_opencode_executable_alias(r"C:\Tools\OPENCODE.CMD"), "opencode")
+        self.assertEqual(_opencode_executable_alias("/opt/custom/compatible"), "")
 
     def test_writable_edit_patterns_include_windows_slash_variants(self) -> None:
         path = PureWindowsPath(

@@ -60,6 +60,28 @@ class ConfigPathTests(unittest.TestCase):
 
         self.assertFalse(hasattr(config, "scan"))
 
+    def test_legacy_nga_tool_becomes_global_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "config.yaml"
+            cfg.write_text(
+                "opencode:\n"
+                "  tool: nga\n"
+                "  models:\n"
+                "    - id: primary\n"
+                "      model: provider/model\n"
+                "      tool: opencode\n"
+                "      executable: /ignored/model/opencode\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(str(cfg))
+
+        self.assertEqual(config.opencode.tool, "opencode")
+        self.assertEqual(config.opencode.executable, "nga")
+        model = config.opencode.models[0].model_dump()
+        self.assertNotIn("tool", model)
+        self.assertNotIn("executable", model)
+
 
 if __name__ == "__main__":
     unittest.main()

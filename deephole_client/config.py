@@ -12,11 +12,8 @@ from typing import Optional
 
 import yaml
 
-AI_CLI_TOOLS = ("nga", "opencode")
-_DEFAULT_EXECUTABLES = {
-    "nga": "nga",
-    "opencode": "opencode",
-}
+_CANONICAL_AI_TOOL = "opencode"
+_LEGACY_AI_TOOL_EXECUTABLES = {"nga", "opencode"}
 
 
 @dataclass
@@ -28,8 +25,6 @@ class OpenCodeModelConfig:
     weight: float = 1.0
     max_concurrency: int = 1
     enabled: bool = True
-    tool: str = ""                 # optional per-model override
-    executable: str = ""           # optional per-model override
     timeout: int | None = None
     max_retries: int | None = None
     time_windows: list[dict[str, object]] = field(default_factory=list)
@@ -37,8 +32,8 @@ class OpenCodeModelConfig:
 
 @dataclass
 class OpenCodeConfig:
-    tool: str = "nga"
-    executable: str = "nga"  # CLI executable name or full path
+    tool: str = "opencode"
+    executable: str = "opencode"  # OpenCode-compatible executable name or full path
     model: str = ""
     timeout: int = 3600
     max_retries: int = 2          # fresh-Session retries for timeout and retryable failures
@@ -133,13 +128,13 @@ class VulnerabilityValidationConfig:
     concurrency: int = 1
     validation_max_retries: int = 0
     model_policy: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
-    # Legacy local-config input only. Web-managed v5 scans do not consult it.
+    # Legacy local-config input only. Web-managed v6 scans do not consult it.
     environments: dict[str, ValidationEnvironmentConfig] = field(default_factory=dict)
 
 
 def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
     """Normalize legacy AI-tool config to OpenCode-compatible serve mode."""
-    tool = (config.tool or "").strip().lower()
+    legacy_tool = (config.tool or "").strip().lower()
     executable = (config.executable or "").strip()
     raw_config_paths = getattr(config, "config_paths", []) or []
     if isinstance(raw_config_paths, str):
@@ -161,22 +156,17 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
             raise ValueError("opencode serve_port must be an integer") from exc
         if not 1 <= config.serve_port <= 65535:
             raise ValueError("opencode serve_port must be between 1 and 65535")
-    if tool not in AI_CLI_TOOLS:
-        if tool:
+    if legacy_tool not in _LEGACY_AI_TOOL_EXECUTABLES:
+        if legacy_tool:
             warnings.warn(
-                f"Legacy AI tool {tool!r} is no longer supported; using opencode serve",
+                f"Legacy AI tool {legacy_tool!r} is no longer supported; using opencode serve",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        inferred = Path(executable).name.lower() if executable else ""
-        if inferred in AI_CLI_TOOLS:
-            tool = inferred
-        else:
-            tool = "opencode"
-            executable = ""
-    config.tool = tool
     if not executable:
-        config.executable = _DEFAULT_EXECUTABLES[tool]
+        executable = "nga" if legacy_tool == "nga" else "opencode"
+    config.tool = _CANONICAL_AI_TOOL
+    config.executable = executable
     normalized_models: list[OpenCodeModelConfig] = []
     for index, model_cfg in enumerate(config.models or []):
         if isinstance(model_cfg, dict):
@@ -184,20 +174,6 @@ def normalize_cli_config(config: OpenCodeConfig) -> OpenCodeConfig:
                 k: v for k, v in model_cfg.items()
                 if k in {f.name for f in dataclasses.fields(OpenCodeModelConfig)}
             })
-        model_tool = (model_cfg.tool or "").strip().lower()
-        model_executable = (model_cfg.executable or "").strip()
-        if model_tool and model_tool not in AI_CLI_TOOLS:
-            warnings.warn(
-                f"Legacy per-model AI tool {model_tool!r} is no longer supported; inheriting OpenCode tool",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            model_tool = ""
-            model_executable = ""
-            model_cfg.executable = ""
-        model_cfg.tool = model_tool
-        if model_tool and not model_executable:
-            model_cfg.executable = _DEFAULT_EXECUTABLES[model_tool]
         if not model_cfg.id:
             model_cfg.id = model_cfg.model or ("default" if model_cfg.use_default_model else f"model-{index + 1}")
         model_cfg.use_default_model = _bool_value(model_cfg.use_default_model, False)
@@ -361,19 +337,46 @@ def _upgrade_managed_policy(
     return policy
 
 
+def _upgrade_managed_v6(remote: dict) -> dict:
+    """Canonicalize managed OpenCode configuration without changing its binary."""
+    migrated = copy.deepcopy(remote)
+    migrated["schema_version"] = 6
+    base = migrated.get("base")
+    if not isinstance(base, dict):
+        base = {}
+        migrated["base"] = base
+    legacy_tool = str(base.get("tool") or "").strip().lower()
+    executable = str(base.get("executable") or "").strip()
+    if not executable:
+        executable = "nga" if legacy_tool == "nga" else "opencode"
+    base["tool"] = "opencode"
+    base["executable"] = executable
+
+    model_pool = migrated.get("model_pool")
+    if isinstance(model_pool, dict) and isinstance(model_pool.get("models"), list):
+        for model in model_pool["models"]:
+            if isinstance(model, dict):
+                model.pop("tool", None)
+                model.pop("executable", None)
+    return migrated
+
+
 def _upgrade_managed_remote(remote: dict) -> dict:
-    """Upgrade managed payloads to the Agent v5 contract."""
+    """Upgrade managed payloads to the Agent v6 contract."""
     remote = copy.deepcopy(remote)
     remote.pop("opencode_config", None)
     try:
         schema_version = int(remote.get("schema_version", 0) or 0)
     except (TypeError, ValueError):
         schema_version = 0
-    if schema_version >= 5:
+    if schema_version >= 6:
         migrated = remote
-        migrated["schema_version"] = 5
         migrated.pop("mining_engines", None)
         return migrated
+    if schema_version == 5:
+        migrated = remote
+        migrated.pop("mining_engines", None)
+        return _upgrade_managed_v6(migrated)
     if schema_version >= 4:
         migrated = remote
         migrated["schema_version"] = 5
@@ -381,7 +384,7 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         migrated.pop("product_info", None)
         migrated["vulnerability_validation"] = {}
         migrated.setdefault("checker_selection", {"disabled_checkers": []})
-        return migrated
+        return _upgrade_managed_v6(migrated)
     if schema_version == 3:
         migrated = remote
         migrated["schema_version"] = 5
@@ -390,7 +393,7 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         migrated.pop("product_info", None)
         migrated["vulnerability_validation"] = {}
         migrated.setdefault("checker_selection", {"disabled_checkers": []})
-        return migrated
+        return _upgrade_managed_v6(migrated)
     if not (
         schema_version == 2
         or isinstance(remote.get("base"), dict)
@@ -434,7 +437,7 @@ def _upgrade_managed_remote(remote: dict) -> dict:
     migrated.pop("product_info", None)
     migrated["vulnerability_validation"] = {}
     migrated.setdefault("checker_selection", {"disabled_checkers": []})
-    return migrated
+    return _upgrade_managed_v6(migrated)
 
 
 def _mcp_config(raw: object, default: McpConfig) -> McpConfig:
@@ -568,6 +571,8 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
     section = remote.get("opencode") or {}
     if isinstance(section, dict) and "tool" not in section and "executable" in section:
         config.opencode.tool = ""
+    if isinstance(section, dict) and "tool" in section and "executable" not in section:
+        config.opencode.executable = ""
     for f in dataclasses.fields(config.opencode):
         if f.name in section and section[f.name] is not None:
             setattr(config.opencode, f.name, section[f.name])
@@ -582,10 +587,13 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         if section is None:
             config.fp_review_cli = None
         elif isinstance(section, dict):
-            config.fp_review_cli = normalize_cli_config(OpenCodeConfig(**{
+            values = {
                 k: v for k, v in section.items()
                 if k in {f.name for f in dataclasses.fields(OpenCodeConfig)}
-            }))
+            }
+            if "tool" in values and "executable" not in values:
+                values["executable"] = ""
+            config.fp_review_cli = normalize_cli_config(OpenCodeConfig(**values))
     section = remote.get("memory_api_discovery") or {}
     if isinstance(section, dict):
         for f in dataclasses.fields(config.memory_api_discovery):
@@ -649,7 +657,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
     """Return the server-managed subset of the local Agent config."""
     models: list[dict] = []
     seen_ids: set[str] = set()
-    seen_runtime_models: set[tuple[str, str, str]] = set()
+    seen_runtime_models: set[str] = set()
     sources = [(config.opencode.models, "")]
     if config.fp_review_cli is not None:
         sources.append((config.fp_review_cli.models, "fp-"))
@@ -665,11 +673,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
             if model.use_default_model:
                 item["enabled"] = False
                 item["model"] = ""
-            signature = (
-                str(item.get("model") or ""),
-                str(item.get("tool") or ""),
-                str(item.get("executable") or ""),
-            )
+            signature = str(item.get("model") or "")
             if collision_prefix and signature in seen_runtime_models:
                 continue
             model_id = str(item.get("id") or f"model-{index}")
@@ -685,9 +689,9 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "base": {
-            "tool": config.opencode.tool,
+            "tool": "opencode",
             "executable": config.opencode.executable,
             "no_proxy": config.no_proxy,
             "opencode_serve_port": config.opencode.serve_port,
@@ -783,6 +787,8 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
     }
     if "tool" not in oc_raw and "executable" in oc_raw:
         oc_raw["tool"] = ""
+    if "tool" in oc_raw and "executable" not in oc_raw:
+        oc_raw["executable"] = ""
     fp_raw = raw.get("fp_review_cli", None)
     fp_cfg = None
     if isinstance(fp_raw, dict):
@@ -797,6 +803,8 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
             ]
         if "tool" not in fp_values and "executable" in fp_values:
             fp_values["tool"] = ""
+        if "tool" in fp_values and "executable" not in fp_values:
+            fp_values["executable"] = ""
         fp_cfg = OpenCodeConfig(**fp_values)
 
     cfg = AgentConfig(
@@ -839,7 +847,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v5 remotely-managed fields while preserving local bootstrap fields."""
+    """Persist v6 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return

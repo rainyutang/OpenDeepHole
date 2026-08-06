@@ -70,7 +70,7 @@ def test_v4_migration_resets_only_old_validation_shape() -> None:
         },
     })
 
-    assert config.schema_version == 5
+    assert config.schema_version == 6
     assert config.vulnerability_mining.required_capability == "low"
     assert config.vulnerability_mining.timeout_seconds == 901
     assert config.vulnerability_mining.max_retries == 7
@@ -168,7 +168,7 @@ def test_checker_exclusion_policy_enables_new_checkers_by_default(monkeypatch) -
     }
     monkeypatch.setattr(scan_api, "refresh_registry", lambda: registry)
     config = AgentRemoteConfig(
-        schema_version=5,
+        schema_version=6,
         checker_selection={"disabled_checkers": ["disabled"]},
     )
 

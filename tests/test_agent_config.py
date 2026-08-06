@@ -23,8 +23,8 @@ class AgentConfigTests(unittest.TestCase):
         cfg = AgentConfig()
 
         self.assertEqual(cfg.no_proxy, "10.0.0.0/8")
-        self.assertEqual(cfg.opencode.tool, "nga")
-        self.assertEqual(cfg.opencode.executable, "nga")
+        self.assertEqual(cfg.opencode.tool, "opencode")
+        self.assertEqual(cfg.opencode.executable, "opencode")
         self.assertEqual(cfg.opencode.timeout, 3600)
         self.assertEqual(cfg.opencode.max_retries, 2)
         self.assertIsNone(cfg.opencode.serve_port)
@@ -49,14 +49,14 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 7200)
         self.assertEqual(cfg.opencode_concurrency, 4)
 
-    def test_backend_and_remote_v5_defaults(self) -> None:
+    def test_backend_and_remote_v6_defaults(self) -> None:
         self.assertFalse(BackendGitHistoryConfig().enabled)
-        self.assertEqual(AgentRemoteConfig().schema_version, 5)
+        self.assertEqual(AgentRemoteConfig().schema_version, 6)
         self.assertNotIn("opencode_config", AgentRemoteConfig().model_dump())
         self.assertEqual(AgentRemoteConfig().base.no_proxy, "10.0.0.0/8")
         self.assertIsNone(AgentRemoteConfig().base.opencode_serve_port)
-        self.assertEqual(AgentRemoteConfig().opencode.tool, "nga")
-        self.assertEqual(AgentRemoteConfig().opencode.executable, "nga")
+        self.assertEqual(AgentRemoteConfig().opencode.tool, "opencode")
+        self.assertEqual(AgentRemoteConfig().opencode.executable, "opencode")
         self.assertEqual(AgentRemoteConfig().model_pool.models, [])
         self.assertEqual(AgentRemoteConfig().opencode_concurrency, 4)
         self.assertTrue(AgentRemoteConfig().threat_analysis.enabled)
@@ -68,15 +68,49 @@ class AgentConfigTests(unittest.TestCase):
         self.assertNotIn("product_info", AgentRemoteConfig().model_dump())
         self.assertEqual(AgentRemoteConfig().checker_selection.disabled_checkers, [])
 
-    def test_full_remote_defaults_do_not_switch_agent_to_opencode(self) -> None:
+    def test_v5_nga_config_migrates_tool_without_changing_executable(self) -> None:
+        config = AgentRemoteConfig.model_validate({
+            "schema_version": 5,
+            "base": {"tool": "nga", "executable": "nga"},
+            "model_pool": {
+                "models": [{
+                    "id": "legacy",
+                    "model": "provider/model",
+                    "tool": "opencode",
+                    "executable": "/opt/model-specific-opencode",
+                }],
+            },
+        })
+
+        self.assertEqual(config.schema_version, 6)
+        self.assertEqual(config.base.tool, "opencode")
+        self.assertEqual(config.base.executable, "nga")
+        model = config.model_pool.models[0].model_dump()
+        self.assertNotIn("tool", model)
+        self.assertNotIn("executable", model)
+
         cfg = AgentConfig()
-        cfg.opencode.tool = "nga"
-        cfg.opencode.executable = "nga"
-
-        apply_remote_config(cfg, AgentRemoteConfig().model_dump())
-
-        self.assertEqual(cfg.opencode.tool, "nga")
+        apply_remote_config(cfg, config.model_dump(mode="json"))
+        self.assertEqual(cfg.opencode.tool, "opencode")
         self.assertEqual(cfg.opencode.executable, "nga")
+
+    def test_v6_rejects_noncanonical_tool_and_model_level_overrides(self) -> None:
+        with self.assertRaises(ValueError):
+            AgentRemoteConfig.model_validate({
+                "schema_version": 6,
+                "base": {"tool": "nga", "executable": "nga"},
+            })
+        with self.assertRaises(ValueError):
+            AgentRemoteConfig.model_validate({
+                "schema_version": 6,
+                "model_pool": {
+                    "models": [{
+                        "id": "invalid",
+                        "model": "provider/model",
+                        "executable": "nga",
+                    }],
+                },
+            })
 
     def test_v2_stage_defaults_migrate_once_without_touching_model_rows(self) -> None:
         config = AgentRemoteConfig.model_validate({
@@ -121,7 +155,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 5)
+        self.assertEqual(config.schema_version, 6)
         self.assertEqual(config.vulnerability_mining.required_capability, "high")
         self.assertEqual(config.vulnerability_mining.timeout_seconds, 3600)
         self.assertEqual(config.vulnerability_mining.max_retries, 4)
@@ -183,7 +217,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 5)
+        self.assertEqual(config.schema_version, 6)
         self.assertFalse(config.code_graph.enabled)
         self.assertNotIn("code_graph", config.model_dump(mode="json"))
 
@@ -201,14 +235,14 @@ class AgentConfigTests(unittest.TestCase):
         }
         config = AgentRemoteConfig.model_validate(payload)
 
-        self.assertEqual(config.schema_version, 5)
+        self.assertEqual(config.schema_version, 6)
         self.assertEqual(config.base.opencode_serve_port, 4317)
         self.assertNotIn("mining_engines", config.model_dump())
 
         local = AgentConfig()
         apply_remote_config(local, payload)
         exported = remote_config_dict(local)
-        self.assertEqual(exported["schema_version"], 5)
+        self.assertEqual(exported["schema_version"], 6)
         self.assertEqual(exported["base"]["opencode_serve_port"], 4317)
         self.assertNotIn("mining_engines", exported)
 
@@ -277,7 +311,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.no_proxy, "")
         self.assertEqual(cfg.opencode.max_retries, 0)
         self.assertEqual(cfg.opencode.timeout, 3600)
-        self.assertEqual(cfg.opencode.tool, "nga")
+        self.assertEqual(cfg.opencode.tool, "opencode")
+        self.assertEqual(cfg.opencode.executable, "nga")
         self.assertEqual(cfg.opencode.config_paths, ["/opt/opencode/config.json"])
         self.assertEqual(cfg.opencode.proxy_url, "http://127.0.0.1:3131")
         self.assertEqual(cfg.opencode.no_proxy, "corp.local,127.0.0.1")
@@ -310,11 +345,11 @@ class AgentConfigTests(unittest.TestCase):
 
         remote = remote_config_dict(cfg)
 
-        self.assertEqual(remote["schema_version"], 5)
+        self.assertEqual(remote["schema_version"], 6)
         self.assertNotIn("opencode_config", remote)
         self.assertNotIn("llm_api", remote)
         self.assertEqual(remote["base"], {
-            "tool": "nga",
+            "tool": "opencode",
             "executable": "nga",
             "no_proxy": "10.0.0.0/8",
             "opencode_serve_port": None,
@@ -435,7 +470,7 @@ class AgentConfigTests(unittest.TestCase):
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["server_url"], "http://example.test")
             self.assertEqual(raw["agent_name"], "local-agent")
-            self.assertEqual(raw["schema_version"], 5)
+            self.assertEqual(raw["schema_version"], 6)
             self.assertNotIn("opencode_config", raw)
             self.assertNotIn("llm_api", raw)
             self.assertEqual(raw["base"]["tool"], "opencode")
@@ -503,8 +538,22 @@ class AgentConfigTests(unittest.TestCase):
 
             cfg = load_config(path)
 
-            self.assertEqual(cfg.opencode.tool, "nga")
+            self.assertEqual(cfg.opencode.tool, "opencode")
+            self.assertEqual(cfg.opencode.executable, "nga")
             self.assertEqual(effective_fp_review_cli_config(cfg).model, "audit-model")
+
+    def test_legacy_nga_tool_without_executable_keeps_nga_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "agent.yaml"
+            path.write_text(
+                yaml.dump({"opencode": {"tool": "nga", "model": "audit-model"}}),
+                encoding="utf-8",
+            )
+
+            cfg = load_config(path)
+
+            self.assertEqual(cfg.opencode.tool, "opencode")
+            self.assertEqual(cfg.opencode.executable, "nga")
 
     def test_load_config_defaults_git_history_off_and_allows_explicit_enable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -603,6 +652,8 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(remote["model_pool"]["models"][1]["model"], "deep-model")
         self.assertEqual(remote["model_pool"]["models"][2]["capability"], "high")
         self.assertEqual(remote["model_pool"]["models"][2]["id"], "judge")
+        self.assertNotIn("tool", remote["model_pool"]["models"][0])
+        self.assertNotIn("executable", remote["model_pool"]["models"][0])
 
     def test_legacy_time_window_without_weekdays_defaults_to_every_day(self) -> None:
         config = AgentRemoteConfig.model_validate({
@@ -691,7 +742,7 @@ class AgentConfigTests(unittest.TestCase):
                         headers=headers,
                     ))
 
-    def test_legacy_remote_payload_migrates_to_v5_and_disables_default_model(self) -> None:
+    def test_legacy_remote_payload_migrates_to_v6_and_disables_default_model(self) -> None:
         config = AgentRemoteConfig.model_validate({
             "no_proxy": "localhost",
             "opencode_concurrency": 2,
@@ -706,7 +757,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 5)
+        self.assertEqual(config.schema_version, 6)
         self.assertEqual(config.base.no_proxy, "localhost")
         self.assertNotIn("opencode_config", config.model_dump())
         self.assertEqual(config.model_pool.global_concurrency, 2)

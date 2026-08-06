@@ -1185,8 +1185,7 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         if _config is None:
             raise RuntimeError("Agent config is not initialized")
         tool = str(getattr(_config.opencode, "tool", "") or "opencode").strip().lower() or "opencode"
-        executable = str(getattr(_config.opencode, "executable", "") or tool)
-        if tool not in {"opencode", "nga"}:
+        if tool != "opencode":
             raise RuntimeError(f"{tool} does not support serve model listing")
         runtime = build_opencode_session_runtime(
             _config.opencode,

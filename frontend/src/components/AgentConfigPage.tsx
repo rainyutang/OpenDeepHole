@@ -46,8 +46,8 @@ const policy = (
   required_capability, timeout_seconds: 3600, max_retries,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
-  schema_version: 5,
-  base: { tool: "nga", executable: "nga", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
+  schema_version: 6,
+  base: { tool: "opencode", executable: "opencode", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
   model_pool: { global_concurrency: 4, models: [] },
   threat_analysis: { enabled: true, model_policy: policy("high", 2) },
   vulnerability_mining: policy("high"),
@@ -286,7 +286,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
       ids.add(id);
       added.push({
         id, model, capability: "high", weight: 1,
-        max_concurrency: 1, enabled: true, tool: "", executable: "",
+        max_concurrency: 1, enabled: true,
         timeout: null, max_retries: null, time_windows: [],
       });
     }
@@ -374,8 +374,8 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
             <div>
               <h3 className="mb-4 text-sm font-semibold text-slate-200">基础参数</h3>
               <div className="grid gap-5 md:grid-cols-2">
-                <Field label="工具"><select className={input} value={config.base.tool} onChange={(e) => setCfg({ ...config, base: { ...config.base, tool: e.target.value } })}><option value="nga">nga</option><option value="opencode">opencode</option></select></Field>
-                <Field label="工具可执行文件名或完整路径"><input className={input} value={config.base.executable} onChange={(e) => setCfg({ ...config, base: { ...config.base, executable: e.target.value } })} /></Field>
+                <Field label="工具" hint="实现固定为 OpenCode"><select disabled className={`${input} cursor-not-allowed opacity-70`} value={config.base.tool}><option value="opencode">OpenCode</option></select></Field>
+                <Field label="工具可执行文件名或完整路径" hint="例如 opencode、nga、/opt/bin/nga 或 Windows 完整路径"><input className={input} value={config.base.executable} onChange={(e) => setCfg({ ...config, base: { ...config.base, executable: e.target.value } })} /></Field>
                 <Field label="OpenCode Serve 端口" hint="留空时，本次客户端进程自动选择一个空闲端口"><input className={input} type="number" min={1} max={65535} value={config.base.opencode_serve_port ?? ""} onChange={(e) => setCfg({ ...config, base: { ...config.base, opencode_serve_port: e.target.value === "" ? null : Number(e.target.value) } })} /></Field>
                 <Field label="代理跳过列表" hint="逗号分隔"><textarea className={input} rows={4} value={config.base.no_proxy} onChange={(e) => setCfg({ ...config, base: { ...config.base, no_proxy: e.target.value } })} /></Field>
               </div>
@@ -438,7 +438,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
 function ModelEditor({ config, setCfg, online, onImport, pool }: { config: AgentRemoteConfig; setCfg: (value: AgentRemoteConfig) => void; online: boolean; onImport: () => void; pool: AgentOpenCodePoolStatus | null }) {
   const models = config.model_pool.models;
   const update = (index: number, patch: Partial<AgentOpenCodeModelConfig>) => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.map((item, current) => current === index ? { ...item, ...patch } : item) } });
-  const add = () => setCfg({ ...config, model_pool: { ...config.model_pool, models: [...models, { id: `model-${models.length + 1}`, model: "", capability: "high", weight: 1, max_concurrency: 1, enabled: true, tool: "", executable: "", timeout: null, max_retries: null, time_windows: [] }] } });
+  const add = () => setCfg({ ...config, model_pool: { ...config.model_pool, models: [...models, { id: `model-${models.length + 1}`, model: "", capability: "high", weight: 1, max_concurrency: 1, enabled: true, timeout: null, max_retries: null, time_windows: [] }] } });
   const addWindow = (modelIndex: number) => update(modelIndex, {
     time_windows: [...(models[modelIndex].time_windows || []), { weekdays: [...allWeekdays], start: "09:00", end: "18:00" }],
   });
@@ -470,11 +470,9 @@ function ModelEditor({ config, setCfg, online, onImport, pool }: { config: Agent
         <select className={input} value={model.capability} onChange={(e) => update(index, { capability: e.target.value })}><option value="low">低能力</option><option value="medium">中能力</option><option value="high">高能力</option></select>
         <button onClick={() => setCfg({ ...config, model_pool: { ...config.model_pool, models: models.filter((_, current) => current !== index) } })} className="rounded border border-red-500/30 text-sm text-red-300">删除</button>
       </div>
-      <div className="mt-3 grid gap-3 md:grid-cols-6">
+      <div className="mt-3 grid gap-3 md:grid-cols-4">
         <input className={input} type="number" min={0.1} step={0.1} value={model.weight} title="权重" onChange={(e) => update(index, { weight: Number(e.target.value) })} />
         <input className={input} type="number" min={1} value={model.max_concurrency} title="单模型并发" onChange={(e) => update(index, { max_concurrency: Number(e.target.value) })} />
-        <select className={input} value={model.tool || ""} onChange={(e) => update(index, { tool: e.target.value })}><option value="">继承工具</option><option value="nga">nga</option><option value="opencode">opencode</option></select>
-        <input className={input} value={model.executable || ""} placeholder="可执行文件覆盖" onChange={(e) => update(index, { executable: e.target.value })} />
         <input className={input} type="number" min={1} value={model.timeout ?? ""} placeholder="超时覆盖" onChange={(e) => update(index, { timeout: e.target.value ? Number(e.target.value) : null })} />
         <input className={input} type="number" min={0} value={model.max_retries ?? ""} placeholder="重试覆盖" onChange={(e) => update(index, { max_retries: e.target.value ? Number(e.target.value) : null })} />
       </div>
