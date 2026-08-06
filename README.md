@@ -570,9 +570,9 @@ model_pool:
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“用户全局目录 < 可执行文件相邻目录 < 项目目录 < `opencode.config_paths` < `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` < DeepHole 2.0 受管字段”受控合并；当配置的可执行文件 basename 为 `nga` 时，同时兼容发现用户的 `~/.config/nga` 配置目录。无效 JSON/JSONC 只记录警告并忽略，不再接受 Web 自定义 JSONC 层。全局受管字段只包含 `$schema`、公共技能路径和运行权限；代码图谱与知识库 MCP 都按扫描快照通过带目录上下文的 `/mcp` 接口临时连接，并在任务结束后分别释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。MCP 请求头中的 API Key、Token 等敏感值会保存在服务端扫描快照和创建表单记忆中，应只在可信环境填写。
+OpenCode 最终配置按“用户全局目录 < 可执行文件相邻目录 < 项目目录 < `opencode.config_paths` < `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` < DeepHole 2.0 受管字段”受控合并；当配置的可执行文件 basename 为 `nga` 时，同时兼容发现用户的 `~/.config/nga` 配置目录。用户全局目录和显式指定的配置目录继续兼容旧版 `config.json`；自动发现的可执行文件相邻目录与项目目录只识别明确命名的 `opencode.json` / `opencode.jsonc`，避免把安装器、启动器或项目自身的通用 `config.json`（例如顶层 `env`、`version`）误合并进 OpenCode 配置。无效 JSON/JSONC 只记录警告并忽略，不再接受 Web 自定义 JSONC 层。全局受管字段只包含 `$schema`、公共技能路径和运行权限；代码图谱与知识库 MCP 都按扫描快照通过带目录上下文的 `/mcp` 接口临时连接，并在任务结束后分别释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。MCP 请求头中的 API Key、Token 等敏感值会保存在服务端扫描快照和创建表单记忆中，应只在可信环境填写。
 
-配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），用专用的 `XDG_CONFIG_HOME` 隔离 OpenCode 对用户全局配置的二次发现，把 `OPENCODE_CONFIG_DIR` 指向已解析的配置目录，并显式清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。
+配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），用专用的 `XDG_CONFIG_HOME` 隔离 OpenCode 对用户全局配置的二次发现，把 `OPENCODE_CONFIG_DIR` 指向已解析的配置目录，并显式清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`；存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。创建或更新 Session 返回 HTTP 5xx 时同样会把当前共享 Serve 标记为异常；下一次 Session 重试先等待其它在途任务退出，再安全重启一次并重新生成最终配置，并发重试不会各自重复重启。
 
 OpenCode 调用约定：
 

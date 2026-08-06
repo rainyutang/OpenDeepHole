@@ -159,33 +159,53 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             ):
                 path.mkdir(parents=True, exist_ok=True)
 
+            (home / ".config" / "opencode" / "config.json").write_text(
+                json.dumps({
+                    "provider": {"corp": {"options": {"legacy_global": True}}},
+                }),
+                encoding="utf-8",
+            )
             (home / ".config" / "opencode" / "opencode.json").write_text(
-                json.dumps({"source": "global", "provider": {"corp": {"global": True}}}),
+                json.dumps({
+                    "model": "global/model",
+                    "provider": {"corp": {"options": {"global": True}}},
+                }),
+                encoding="utf-8",
+            )
+            (executable_dir / "config.json").write_text(
+                json.dumps({"env": {"APP_MODE": "portable"}, "version": 2}),
                 encoding="utf-8",
             )
             (executable_dir / ".opencode" / "config.json").write_text(
-                json.dumps({"source": "executable", "provider": {"corp": {"portable": True}}}),
+                json.dumps({"env": {"NESTED_MODE": "portable"}, "version": 3}),
+                encoding="utf-8",
+            )
+            (executable_dir / ".opencode" / "opencode.json").write_text(
+                json.dumps({
+                    "model": "executable/model",
+                    "provider": {"corp": {"options": {"portable": True}}},
+                }),
                 encoding="utf-8",
             )
             (project / "opencode.jsonc").write_text(
-                '{"source": "project", "mcp": {"user": {"enabled": true}}}',
+                '{"model": "project/model", "mcp": {"user": {"enabled": false}}}',
                 encoding="utf-8",
             )
             (project / "config.json").write_text(
-                json.dumps({"unrelated_project_config": True}),
+                json.dumps({"env": {"PROJECT_MODE": "test"}, "version": 3}),
                 encoding="utf-8",
             )
             (configured_dir / "opencode.json").write_text(
-                json.dumps({"source": "configured"}),
+                json.dumps({"model": "configured/model"}),
                 encoding="utf-8",
             )
             env_path = root / "from-env.json"
-            env_path.write_text(json.dumps({"source": "env-path"}), encoding="utf-8")
+            env_path.write_text(json.dumps({"model": "env-path/model"}), encoding="utf-8")
             official_path = root / "official.json"
-            official_path.write_text(json.dumps({"source": "official"}), encoding="utf-8")
+            official_path.write_text(json.dumps({"model": "official/model"}), encoding="utf-8")
             (env_dir / "opencode.json").write_text(
                 json.dumps({
-                    "source": "env-dir",
+                    "model": "env-dir/model",
                     "permission": {"bash": "allow"},
                     "skills": {"paths": ["user-skill"]},
                     "mcp": {"managed": {"enabled": False}},
@@ -216,9 +236,11 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                     _runtime_config_content(workspace, effective, project)
                 )
 
-            self.assertEqual(config["source"], "env-dir")
-            self.assertNotIn("unrelated_project_config", config)
-            self.assertEqual(config["provider"]["corp"], {
+            self.assertEqual(config["model"], "env-dir/model")
+            self.assertNotIn("env", config)
+            self.assertNotIn("version", config)
+            self.assertEqual(config["provider"]["corp"]["options"], {
+                "legacy_global": True,
                 "global": True,
                 "portable": True,
             })
@@ -263,7 +285,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             for path in (project, workspace, nga_config):
                 path.mkdir(parents=True)
             (nga_config / "opencode.json").write_text(
-                json.dumps({"source": "legacy-nga", "provider": {"nga": {}}}),
+                json.dumps({"model": "nga/default", "provider": {"nga": {}}}),
                 encoding="utf-8",
             )
             managed_opencode_config_path(workspace).write_text("{}", encoding="utf-8")
@@ -275,7 +297,7 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                     project,
                 ))
 
-            self.assertEqual(config["source"], "legacy-nga")
+            self.assertEqual(config["model"], "nga/default")
             self.assertEqual(config["provider"], {"nga": {}})
 
     def test_session_runtime_uses_global_executable_and_ignores_model_override(

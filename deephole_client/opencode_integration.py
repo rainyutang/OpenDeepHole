@@ -37,7 +37,7 @@ _GLOBAL_OPENCODE_CONFIG_FILENAMES = (
     "opencode.json",
     "opencode.jsonc",
 )
-_PROJECT_OPENCODE_CONFIG_FILENAMES = (
+_NAMED_OPENCODE_CONFIG_FILENAMES = (
     "opencode.json",
     "opencode.jsonc",
 )
@@ -286,20 +286,20 @@ def _runtime_config_candidates(
         if str(executable_parent) not in {"", "."}:
             candidates.extend(
                 ("executable", executable_parent / filename)
-                for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES
+                for filename in _NAMED_OPENCODE_CONFIG_FILENAMES
             )
             candidates.extend(
                 ("executable", executable_parent / ".opencode" / filename)
-                for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES
+                for filename in _NAMED_OPENCODE_CONFIG_FILENAMES
             )
 
     candidates.extend(
         ("project", project_dir / filename)
-        for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES
+        for filename in _NAMED_OPENCODE_CONFIG_FILENAMES
     )
     candidates.extend(
         ("project", project_dir / ".opencode" / filename)
-        for filename in _PROJECT_OPENCODE_CONFIG_FILENAMES
+        for filename in _NAMED_OPENCODE_CONFIG_FILENAMES
     )
 
     for raw_path in _split_config_path_value(effective.get("config_paths")):

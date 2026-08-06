@@ -188,7 +188,7 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 
 嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，`bash` 始终禁用。只有显式传入 `writable_paths` 时，额外动态路径才通过 Session 权限覆盖下发，不进入 Serve 配置哈希。
 
-`workspace_dir` 中生成的 `opencode.json` 包含 `serve.opencode_config` 的实际内容，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该已解析配置，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再合并调用者机器上的环境配置。standalone 只以 YAML 中的 `serve.opencode_config` 为用户配置源；完整 Agent 则在进入 Task Agent 前按受控顺序合并已发现的全局、可执行文件目录、项目和显式配置。
+`workspace_dir` 中生成的 `opencode.json` 包含 `serve.opencode_config` 的实际内容，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该已解析配置，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再合并调用者机器上的环境配置。standalone 只以 YAML 中的 `serve.opencode_config` 为用户配置源；完整 Agent 则在进入 Task Agent 前按受控顺序合并已发现的全局、可执行文件目录、项目和显式配置。用户全局目录及显式配置目录兼容旧版 `config.json`，但自动发现的可执行文件相邻目录和项目目录只接受 `opencode.json` / `opencode.jsonc`；通用 `config.json` 可能属于安装器、启动器或项目自身，不能作为 OpenCode 配置源。
 
 ### Serve 参数
 
@@ -360,6 +360,8 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 若文本和已写文件都没有符合 Schema 的 JSON，服务会在原 Session 最多追加 `invalid_json_retry_count` 次纠正消息；这些消息复用同一 Session、同一模型 Lease，不重新排队。`invalid_json_retry_prompt=None` 时使用当前包含完整 Schema 的中文默认提示词；传入非空字符串时，每次都原样发送该字符串，不追加 Schema、重试序号或其它内容。空字符串、纯空白和非字符串会在提交任务前报错。未传 `output_schema` 时完全不启用文件跟踪、文件 JSON 回退或自动清理；纠错次数为 `0` 时不会发送纠正消息。
 
 若同 Session 纠正耗尽，内部服务会按对应任务策略的 `max_retries` 释放 Lease、重新排队并创建全新 Session。模型消息超时和其它可重试执行错误也使用同一预算；`max_retries=2` 表示首次 Session 之外最多再创建 2 个 Session，即最多执行 3 次。业务方不再传 `attempt`。
+
+创建新 Session 或更新续写 Session 的权限返回 HTTP 5xx 时，Task Agent 会把共享 Serve 标记为异常，而不让后续重试继续复用同一个进程。发生并发任务时，下一次 Session 获取会等待所有已获取 Session 释放，在空闲边界停止并重启 Serve、重新生成最终 `opencode.json`；等待中的其它重试随后复用这个新进程，因此同一轮异常只触发一次安全重启。HTTP 4xx 仍按请求或配置错误直接上报，不触发 Serve 重启。
 
 OpenCode 同步消息接口若在 HTTP 成功后返回空正文或非 JSON，Task Agent 会查询同一 Session 的消息历史，只接受相对于发送前基线新增且已经完成的 assistant 消息，并将其送回正常的错误、模型、Token、文本和文件写入处理链；恢复成功时控制台输出 `RESPONSE_RECOVERED reason=empty_body|invalid_json source=session_messages`。续写 Session 无法取得发送前基线时不会用历史消息兜底，避免把上一轮结果误认为本轮成功。若没有可确认的新消息，则错误只包含状态码、Content-Type、响应字节数和恢复失败类别，不包含响应正文或模型文本，并作为健康中性失败进入 fresh Session 换模重试，不降低模型权重。
 

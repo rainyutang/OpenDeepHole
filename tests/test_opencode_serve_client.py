@@ -444,6 +444,55 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
+def test_run_prompt_marks_serve_unhealthy_when_session_creation_returns_500(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class SessionCreate500Client(_FakeAsyncClient):
+        async def post(self, path: str, **kwargs):
+            self.posts.append({"path": path, **kwargs})
+            if path == "/session":
+                request = httpx.Request("POST", "http://127.0.0.1:12345/session")
+                response = httpx.Response(500, request=request)
+                return _FakeResponse(
+                    {"error": "internal"},
+                    status_code=500,
+                    error=httpx.HTTPStatusError(
+                        "session creation failed",
+                        request=request,
+                        response=response,
+                    ),
+                )
+            return await super().post(path, **kwargs)
+
+    async def run() -> None:
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            SessionCreate500Client,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        project = tmp_path / "project"
+        project.mkdir()
+
+        with pytest.raises(httpx.HTTPStatusError, match="session creation failed"):
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=project,
+                prompt="hello",
+                model="provider/model",
+                timeout=30,
+            )
+
+        assert manager._restart_required is True
+        assert manager._serve_failure_generation == 1
+
+    asyncio.run(run())
+
+
 def test_run_prompt_tracks_final_response_file_writes_without_output_callback(
     monkeypatch,
     tmp_path: Path,
@@ -5425,6 +5474,43 @@ def test_config_hash_change_reuses_active_serve_process_without_waiting(tmp_path
         manager._start_locked.assert_not_awaited()
         assert manager._port == 12345
         assert live_config.read_text(encoding="utf-8") == '{"active": true}'
+
+    asyncio.run(run())
+
+
+def test_unhealthy_serve_waits_for_concurrent_sessions_then_restarts_once() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        key = OpenCodeServeKey(tool="opencode", executable="opencode")
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = key
+        manager._active_sessions = 1
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+        manager._mark_serve_unhealthy("POST /session", 500)
+
+        first = asyncio.create_task(manager._acquire_session(key))
+        second = asyncio.create_task(manager._acquire_session(key))
+        await asyncio.sleep(0)
+
+        assert first.done() is False
+        assert second.done() is False
+        manager._stop_locked.assert_not_awaited()
+        manager._start_locked.assert_not_awaited()
+
+        await manager._release_active_session()
+        modes = await asyncio.gather(first, second)
+
+        assert modes == ["restarted", "reused"]
+        manager._stop_locked.assert_awaited_once()
+        manager._start_locked.assert_awaited_once_with(key, startup_cwd=None)
+        assert manager._restart_required is False
+        assert manager._active_sessions == 2
 
     asyncio.run(run())
 

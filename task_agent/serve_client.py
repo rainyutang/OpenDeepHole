@@ -2941,6 +2941,8 @@ class OpenCodeServeManager:
         self._event_poll_failure_reported = False
         self._dirty = False
         self._serve_config_generation = 0
+        self._restart_required = False
+        self._serve_failure_generation = 0
         self._model_cache: dict[
             tuple[OpenCodeServeKey, str],
             tuple[OpenCodeModelInfo, ...],
@@ -2988,7 +2990,7 @@ class OpenCodeServeManager:
     def config_runtime_status(self) -> dict[str, int | str]:
         """Return whether the current serve has loaded the latest managed config."""
         running = self._proc is not None and self._proc.poll() is None
-        if running and self._dirty:
+        if running and (self._dirty or self._restart_required):
             state = "reload_pending"
         elif running:
             state = "active"
@@ -2998,6 +3000,28 @@ class OpenCodeServeManager:
             "runtime_state": state,
             "active_sessions": self._active_sessions,
         }
+
+    def _mark_serve_unhealthy(self, operation: str, status_code: int) -> None:
+        """Require the next Session acquisition to replace a broken Serve."""
+        self._restart_required = True
+        self._serve_failure_generation += 1
+        self._invalidate_model_cache()
+        logger.warning(
+            "OpenCode serve request %s returned HTTP %s; "
+            "the next Session attempt will restart the shared Serve",
+            operation,
+            status_code,
+        )
+
+    def _raise_for_session_control_status(
+        self,
+        response: httpx.Response,
+        operation: str,
+    ) -> None:
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code >= 500:
+            self._mark_serve_unhealthy(operation, status_code)
+        response.raise_for_status()
 
     def update_managed_mcp_configs(self, specs: dict[str, dict[str, Any]]) -> None:
         """Install the desired managed MCP set and hot-apply it to live directories."""
@@ -3946,7 +3970,10 @@ class OpenCodeServeManager:
                         headers=headers,
                         json=create_payload,
                     )
-                    created.raise_for_status()
+                    self._raise_for_session_control_status(
+                        created,
+                        "POST /session",
+                    )
                     active_session_id = _session_id(created.json())
                 elif permissions is not None:
                     updated = await client.patch(
@@ -3955,7 +3982,10 @@ class OpenCodeServeManager:
                         headers=headers,
                         json={"permission": permissions},
                     )
-                    updated.raise_for_status()
+                    self._raise_for_session_control_status(
+                        updated,
+                        "PATCH /session/{session_id}",
+                    )
                 if session_mode == "continued":
                     token_baseline, token_baseline_complete = (
                         await _session_tree_token_entries(
@@ -4987,6 +5017,7 @@ class OpenCodeServeManager:
         async with self._lock:
             await self._stop_locked()
         self._dirty = False
+        self._restart_required = False
         self._invalidate_model_cache()
 
     async def _acquire_session(
@@ -5027,7 +5058,11 @@ class OpenCodeServeManager:
             if (
                 self._proc is not None
                 and self._active_sessions > 0
-                and (self._dirty or not compatible_process)
+                and (
+                    self._dirty
+                    or self._restart_required
+                    or not compatible_process
+                )
             ):
                 # Never make a model picker wait for a scan to finish. Query the
                 # current live serve now and keep the reload pending for the next
@@ -5043,7 +5078,11 @@ class OpenCodeServeManager:
                     key.tool,
                     self._active_sessions,
                 )
-            elif compatible_process and not self._dirty:
+            elif (
+                compatible_process
+                and not self._dirty
+                and not self._restart_required
+            ):
                 # Model enumeration reflects the current serve process. Task-local
                 # MCP/SKILL config hash churn must not restart an otherwise
                 # compatible process just to show the picker.
@@ -5229,9 +5268,19 @@ class OpenCodeServeManager:
                 self._port = None
                 self._listener_pids.clear()
                 self._startup_cwd = None
-        if self._proc is not None and self._key == key and not self._dirty:
+        if (
+            self._proc is not None
+            and self._key == key
+            and not self._dirty
+            and not self._restart_required
+        ):
             return "reused"
-        if self._proc is not None and self._same_process_key(self._key, key) and self._active_sessions > 0:
+        if (
+            self._proc is not None
+            and self._same_process_key(self._key, key)
+            and self._active_sessions > 0
+            and not self._restart_required
+        ):
             logger.info(
                 "Reusing active %s serve on 127.0.0.1:%s despite pending config change",
                 key.tool,
@@ -5240,10 +5289,13 @@ class OpenCodeServeManager:
             return "reused"
         reload_generation = self._serve_config_generation
         await self._wait_until_idle_locked()
+        failure_generation = self._serve_failure_generation
         await self._stop_locked()
         await self._start_locked(key, startup_cwd=startup_cwd)
         if self._serve_config_generation == reload_generation:
             self._dirty = False
+        if self._serve_failure_generation == failure_generation:
+            self._restart_required = False
         return "restarted" if had_process else "started"
 
     @staticmethod
