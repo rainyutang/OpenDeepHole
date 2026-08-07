@@ -92,7 +92,7 @@ flowchart TD
 | 过程 | 公开入口 | 主要输入 | 主要返回 |
 | --- | --- | --- | --- |
 | 代码图谱构建 | `run_code_graph_build(**kwargs)` | 项目路径、扫描范围、工作目录 | `status`、`index_db_path`、`cache_hit`、`stats`、`indexer_version` |
-| 威胁分析 | `threat_analysis_runner.run_threat_analysis(**kwargs)` | 代码路径、产物目录、恢复标记 | 原生 `result`、失败 `reason`，以及三类 JSON 产物路径 |
+| 威胁分析 | `threat_analysis_runner.run_threat_analysis(**kwargs)` | 项目总路径、代码扫描路径、产物目录、恢复标记 | 原生 `result`、失败 `reason`，以及三类 JSON 产物路径 |
 | 静态分析 | `run_static_analysis(**kwargs)` | 代码索引、规则目录、Checker 选择 | `status`、`candidates`、`stats` |
 | 候选点审计 | `run_candidate_audit(**kwargs)` | 候选点、规则 Skill、代码索引 | `status`、`vulnerabilities`、`processed_keys` |
 | 威胁审计 | `run_threat_audit(**kwargs)` | 攻击树、高风险模块、扫描上下文 | `status`、`tasks`、`vulnerabilities` |
@@ -138,6 +138,11 @@ def run_threat_analysis(
 含 `attack_trees` 数组的对象、数组。失败结果必须设置 `result=False` 并提供非空 `reason`。
 异常或失败原因会保存到 `ThreatAnalysisRunStatus.error_message`，通过 SSE 和刷新继续显示；
 取消使用独立状态。
+
+平台外层入口额外接收 `project_path`，并继续把本次 `code_path` 扫描目录传给原生五参数入口。
+威胁分析内部的 Task Agent 上下文以 `code_path` 启动 OpenCode Session；其它过程仍继承扫描器
+以 `project_path` 绑定的项目总路径。子目录扫描的最终高风险模块由外层转换为项目根相对
+`代码目录`，转换副本与原生续扫产物分离。
 
 更新内置实现时，可把 `ThreatAnalysis/src/threat_analysis_harness/.` 直接复制到
 `deephole_client/threat_analysis/methods/deephole_threat_analysis/`，保留该目录的平台

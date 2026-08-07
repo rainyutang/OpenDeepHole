@@ -70,7 +70,8 @@ def run_threat_analysis(
 | `product_mcp` | `None` | 本次扫描启用的知识库 MCP 名称；方法不使用时可以忽略 |
 | `attack_modes` | `None` | 预留的攻击模式映射；方法不使用时可以忽略 |
 
-`task_agent_config`、`output`、`cancel_event`、方法 ID 等属于外层平台参数，不会传给原生入口。
+`project_path`、`task_agent_config`、`output`、`cancel_event`、方法 ID 等属于外层平台参数，
+不会传给原生入口。
 需要模型的方法可以像内置实现一样调用 `task_agent.run_opencode_task()`；平台会把当前所选方法
 `skills/` 下所有包含 `SKILL.md` 的 Skill 根仅注册到本方法的任务上下文，不再全局注入其它
 威胁分析方法的 Skill。
@@ -155,7 +156,8 @@ from deephole_client.threat_analysis_runner import run_threat_analysis
 
 result = await run_threat_analysis(
     method_id="deephole_threat_analysis",
-    code_path="/src/project",
+    project_path="/src/project",
+    code_path="/src/project/services/api",
     output_path="/tmp/threat-analysis",
     is_resume=True,
     product_mcp=None,
@@ -167,4 +169,11 @@ result = await run_threat_analysis(
 ```
 
 外层入口是 `async def run_threat_analysis(**kwargs)`，负责选择方法、校验参数和返回契约、绑定
-Task Agent 上下文、转发事件与取消信号；它不会把平台参数混入原生方法签名。
+Task Agent 上下文、转发事件与取消信号；它不会把平台参数混入原生方法签名。`project_path`
+表示项目总路径，省略时默认等于 `code_path`；`code_path` 始终表示本次扫描路径，并且只有威胁
+分析方法内部创建的 OpenCode Session 会把它作为项目目录。扫描器外层上下文和其它业务过程
+仍使用项目总路径。
+
+当 `code_path` 是项目子目录时，原生方法继续在自己的产物中保存扫描路径相对的高风险模块，
+外层另行生成 `output_path/platform/high-risk-modules.json`，把每个 `代码目录` 转换为项目根
+相对路径后提供给平台和威胁审计。原生产物不会被改写，续扫时不会重复添加扫描目录前缀。

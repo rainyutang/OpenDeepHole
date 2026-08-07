@@ -537,6 +537,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             root = Path(tmp)
             project = root / "project"
             project.mkdir()
+            scan_path = project / "services" / "api"
+            scan_path.mkdir(parents=True)
             index_path = root / "index.db"
             index_path.touch()
             analysis = AsyncMock(return_value={
@@ -551,7 +553,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 patch(
                     "deephole_client.scanner.opencode_task_context",
                     return_value=nullcontext(),
-                ),
+                ) as scan_context,
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
                     new=AsyncMock(return_value={
@@ -576,7 +578,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 await run_scan(
                     config=config,
                     project_path=project,
-                    code_scan_path=project,
+                    code_scan_path=scan_path,
                     reporter=reporter,
                     scan_name="analysis-only",
                     product="",
@@ -590,9 +592,22 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         analysis.assert_awaited_once()
+        scan_context.assert_called_once()
+        self.assertEqual(
+            scan_context.call_args.kwargs["project_dir"],
+            project.resolve(),
+        )
         self.assertEqual(
             analysis.await_args.kwargs["method_id"],
             "custom_threat_analysis",
+        )
+        self.assertEqual(
+            analysis.await_args.kwargs["project_path"],
+            project.resolve(),
+        )
+        self.assertEqual(
+            analysis.await_args.kwargs["code_path"],
+            scan_path.resolve(),
         )
         self.assertFalse(analysis.await_args.kwargs["is_resume"])
         mining.assert_not_awaited()

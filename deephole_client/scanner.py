@@ -658,6 +658,7 @@ async def run_scan(
         async def run_native_attempt(*, resume: bool) -> dict[str, Any]:
             return await run_threat_analysis(
                 method_id=threat_analysis_method_id,
+                project_path=project,
                 code_path=scan_root,
                 output_path=output_path,
                 is_resume=resume,

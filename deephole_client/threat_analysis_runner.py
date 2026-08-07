@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
@@ -21,6 +22,7 @@ from .threat_analysis.runtime import (
 PROCESS_NAME = "threat_analysis"
 _ALLOWED_KEYS = {
     "method_id",
+    "project_path",
     "code_path",
     "output_path",
     "is_resume",
@@ -36,6 +38,7 @@ _REQUIRED_RESULT_PATHS = (
     "attack_tree_path",
     "high_risk_modules_path",
 )
+_PLATFORM_HIGH_RISK_MODULES_PATH = Path("platform") / "high-risk-modules.json"
 
 
 async def _emit(output: Any, kind: str, message: str, **data: Any) -> None:
@@ -94,8 +97,136 @@ def _validate_native_result(result: Any) -> dict[str, Any]:
     return result
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _project_relative_module_path(
+    value: Any,
+    *,
+    project_path: Path,
+    code_path: Path,
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError("high-risk module code paths must be non-empty strings")
+    raw = value.strip().replace("\\", "/")
+    path = Path(raw).expanduser()
+    if ".." in path.parts:
+        raise ValueError(f"high-risk module code path cannot contain '..': {value}")
+
+    if path.is_absolute():
+        resolved = path.resolve()
+    else:
+        project_scan_prefix = code_path.relative_to(project_path)
+        prefix_parts = project_scan_prefix.parts
+        already_project_relative = bool(
+            prefix_parts and path.parts[: len(prefix_parts)] == prefix_parts
+        )
+        base = project_path if already_project_relative else code_path
+        resolved = (base / path).resolve()
+
+    if not _path_is_within(resolved, code_path):
+        raise ValueError(
+            "high-risk module code path escapes code_path: "
+            f"{value} (code_path={code_path})"
+        )
+    return resolved.relative_to(project_path).as_posix()
+
+
+def _normalize_module_code_paths(
+    value: Any,
+    *,
+    project_path: Path,
+    code_path: Path,
+) -> str | list[str]:
+    if isinstance(value, str):
+        return _project_relative_module_path(
+            value,
+            project_path=project_path,
+            code_path=code_path,
+        )
+    if isinstance(value, list):
+        return [
+            _project_relative_module_path(
+                item,
+                project_path=project_path,
+                code_path=code_path,
+            )
+            for item in value
+        ]
+    raise TypeError("high-risk module 代码目录 must be a string or string array")
+
+
+def _adapt_high_risk_modules_for_project(
+    result: dict[str, Any],
+    *,
+    project_path: Path,
+    code_path: Path,
+    output_path: Path,
+) -> dict[str, Any]:
+    """Expose project-relative paths without mutating native resume artifacts."""
+    if project_path == code_path:
+        return result
+
+    source_path = Path(result["high_risk_modules_path"]).expanduser().resolve()
+    if not _path_is_within(source_path, output_path):
+        raise ValueError(
+            "high-risk module artifact escapes output_path: "
+            f"{source_path} (output_path={output_path})"
+        )
+    if not source_path.is_file():
+        raise FileNotFoundError(
+            f"high-risk module artifact is not a file: {source_path}"
+        )
+    try:
+        modules = json.loads(source_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"high-risk module artifact is not valid JSON: {source_path}"
+        ) from exc
+    if not isinstance(modules, list):
+        raise TypeError("high-risk module artifact must contain a JSON array")
+
+    normalized_modules: list[dict[str, Any]] = []
+    for index, module in enumerate(modules):
+        if not isinstance(module, dict):
+            raise TypeError(
+                f"high-risk module item {index} must be a JSON object"
+            )
+        if "代码目录" not in module:
+            raise ValueError(
+                f"high-risk module item {index} is missing 代码目录"
+            )
+        normalized = dict(module)
+        normalized["代码目录"] = _normalize_module_code_paths(
+            module["代码目录"],
+            project_path=project_path,
+            code_path=code_path,
+        )
+        normalized_modules.append(normalized)
+
+    platform_path = (output_path / _PLATFORM_HIGH_RISK_MODULES_PATH).resolve()
+    if not _path_is_within(platform_path, output_path):
+        raise ValueError(
+            "platform high-risk module artifact escapes output_path: "
+            f"{platform_path} (output_path={output_path})"
+        )
+    platform_path.parent.mkdir(parents=True, exist_ok=True)
+    platform_path.write_text(
+        json.dumps(normalized_modules, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    adapted = dict(result)
+    adapted["high_risk_modules_path"] = str(platform_path)
+    return adapted
+
+
 async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
-    """Call the untouched native entry point and return its result unchanged."""
+    """Call one native method and adapt its artifacts for platform consumers."""
     unknown = sorted(set(kwargs) - _ALLOWED_KEYS)
     if unknown:
         raise TypeError(
@@ -115,7 +246,13 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
         kwargs.get("method_id") or DEFAULT_THREAT_ANALYSIS_METHOD_ID
     ).strip()
     manifest = resolve_threat_analysis_method(method_id)
-    code_path = _directory(kwargs["code_path"], "code_path")
+    scan_path = _directory(kwargs["code_path"], "code_path")
+    project_path = _directory(
+        kwargs.get("project_path") or scan_path,
+        "project_path",
+    )
+    if not _path_is_within(scan_path, project_path):
+        raise ValueError("code_path must be inside project_path")
     output_path = _directory(
         kwargs["output_path"],
         "output_path",
@@ -158,7 +295,8 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
         "Threat analysis started",
         method_id=manifest.method_id,
         method_label=manifest.label,
-        code_path=str(code_path),
+        project_path=str(project_path),
+        code_path=str(scan_path),
         output_path=str(output_path),
     )
 
@@ -173,8 +311,10 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
             return native_entry(**native_kwargs)
 
     try:
+        # Narrow only method-internal OpenCode sessions. The scanner's outer
+        # context remains bound to the full project for every other process.
         with opencode_task_context(
-            project_dir=code_path,
+            project_dir=scan_path,
             work_dir=output_path,
             config_path=task_agent_config,
             skill_paths=list(manifest.skill_roots()),
@@ -184,7 +324,7 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
         ):
             result = await run_sync_component(
                 invoke_native,
-                code_path=code_path,
+                code_path=scan_path,
                 output_path=output_path,
                 is_resume=bool(kwargs.get("is_resume", False)),
                 product_mcp=kwargs.get("product_mcp"),
@@ -197,6 +337,12 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
 
     result = _validate_native_result(result)
     if result.get("result") is True:
+        result = _adapt_high_risk_modules_for_project(
+            result,
+            project_path=project_path,
+            code_path=scan_path,
+            output_path=output_path,
+        )
         await _emit(
             output,
             "artifact",

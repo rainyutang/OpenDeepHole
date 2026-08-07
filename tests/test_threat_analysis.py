@@ -6,6 +6,7 @@ import tempfile
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -20,7 +21,12 @@ from deephole_client.vulnerability_mining.engines.threat_audit.runner import (
     _tasks,
     _threat_prompt,
 )
-from task_agent import OpenCodeResult, run_opencode_task, run_sync_component
+from task_agent import (
+    OpenCodeResult,
+    opencode_task_context,
+    run_opencode_task,
+    run_sync_component,
+)
 from task_agent.task_service import get_opencode_execution_context
 
 
@@ -198,6 +204,209 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
     } == {"attack-trees", "high-risk-modules", "value-assets"}
     assert events[0]["process"] == "threat_analysis"
     assert events[-1]["kind"] == "artifact"
+
+
+def test_async_facade_scopes_opencode_to_scan_path_and_rebases_module_paths(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    scan_path = project / "services" / "api"
+    output_path = tmp_path / "output"
+    outer_work_path = tmp_path / "outer-work"
+    scan_path.mkdir(parents=True)
+    outer_work_path.mkdir()
+    (scan_path / "src" / "auth").mkdir(parents=True)
+    (scan_path / "absolute.py").touch()
+    raw_modules = [
+        {
+            "模块名称": "认证模块",
+            "代码目录": "src/auth",
+            "面临威胁": "认证绕过",
+        },
+        {
+            "模块名称": "解析模块",
+            "代码目录": [
+                "services/api/src/already-project-relative",
+                str(scan_path / "absolute.py"),
+                r"lib\parser",
+            ],
+            "面临威胁": "恶意输入",
+        },
+    ]
+    captured: dict[str, Any] = {
+        "outer_project_dirs": [],
+        "project_dirs": [],
+        "native_calls": [],
+    }
+
+    async def fake_local(**kwargs):
+        context = get_opencode_execution_context()
+        captured["project_dirs"].append(context.project_dir)
+        return OpenCodeResult(
+            session_id="session-scan-path",
+            status="success",
+            text="[]",
+            structured=[],
+            model="test/model",
+        )
+
+    def native_entry(**kwargs):
+        captured["native_calls"].append(kwargs)
+        asyncio.run(run_opencode_task(
+            task_name="native-scan-scope",
+            task_type="threat_analysis",
+            prompt="inspect scan scope",
+            required_capability="high",
+        ))
+        output_path.mkdir(parents=True, exist_ok=True)
+        value_asset_path = output_path / "value-assets.json"
+        attack_tree_path = output_path / "attack-trees.json"
+        high_risk_modules_path = output_path / "native-high-risk-modules.json"
+        value_asset_path.write_text("[]", encoding="utf-8")
+        attack_tree_path.write_text(
+            '{"attack_trees": []}',
+            encoding="utf-8",
+        )
+        high_risk_modules_path.write_text(
+            json.dumps(raw_modules, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "result": True,
+            "value_asset_path": str(value_asset_path),
+            "attack_tree_path": str(attack_tree_path),
+            "high_risk_modules_path": str(high_risk_modules_path),
+            "native_marker": "preserved",
+        }
+
+    async def scenario() -> tuple[dict, dict]:
+        with opencode_task_context(
+            project_dir=project,
+            work_dir=outer_work_path,
+        ):
+            with (
+                patch(
+                    "deephole_client.threat_analysis_runner._load_implementation",
+                    return_value=SimpleNamespace(
+                        run_threat_analysis=native_entry,
+                    ),
+                ),
+                patch("task_agent.api._run_opencode_task_local", new=fake_local),
+            ):
+                first = await run_threat_analysis(
+                    project_path=project,
+                    code_path=scan_path,
+                    output_path=output_path,
+                )
+                captured["outer_project_dirs"].append(
+                    get_opencode_execution_context().project_dir
+                )
+                second = await run_threat_analysis(
+                    project_path=project,
+                    code_path=scan_path,
+                    output_path=output_path,
+                    is_resume=True,
+                )
+                captured["outer_project_dirs"].append(
+                    get_opencode_execution_context().project_dir
+                )
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    expected_platform_path = (
+        output_path / "platform" / "high-risk-modules.json"
+    ).resolve()
+    expected_modules = [
+        {
+            **raw_modules[0],
+            "代码目录": "services/api/src/auth",
+        },
+        {
+            **raw_modules[1],
+            "代码目录": [
+                "services/api/src/already-project-relative",
+                "services/api/absolute.py",
+                "services/api/lib/parser",
+            ],
+        },
+    ]
+    assert Path(first["high_risk_modules_path"]) == expected_platform_path
+    assert Path(second["high_risk_modules_path"]) == expected_platform_path
+    assert first["native_marker"] == "preserved"
+    artifact_bundle = collect_json_artifacts(first, output_root=output_path)
+    assert artifact_bundle["artifacts"]["high_risk_modules_path"]["content"] == (
+        expected_modules
+    )
+    assert json.loads(expected_platform_path.read_text(encoding="utf-8")) == (
+        expected_modules
+    )
+    assert json.loads(
+        (output_path / "native-high-risk-modules.json").read_text(
+            encoding="utf-8",
+        )
+    ) == raw_modules
+    assert captured["outer_project_dirs"] == [
+        project.resolve(),
+        project.resolve(),
+    ]
+    assert captured["project_dirs"] == [scan_path.resolve(), scan_path.resolve()]
+    assert [call["code_path"] for call in captured["native_calls"]] == [
+        scan_path.resolve(),
+        scan_path.resolve(),
+    ]
+    assert [call["is_resume"] for call in captured["native_calls"]] == [
+        False,
+        True,
+    ]
+
+
+@pytest.mark.parametrize("module_path", ["../outside", 1])
+def test_module_path_normalization_rejects_invalid_values(
+    tmp_path: Path,
+    module_path: Any,
+) -> None:
+    project = (tmp_path / "project").resolve()
+    scan_path = (project / "scan").resolve()
+    scan_path.mkdir(parents=True)
+
+    with pytest.raises((TypeError, ValueError)):
+        threat_analysis_runner._normalize_module_code_paths(
+            module_path,
+            project_path=project,
+            code_path=scan_path,
+        )
+
+
+def test_module_path_normalization_rejects_absolute_path_outside_scan(
+    tmp_path: Path,
+) -> None:
+    project = (tmp_path / "project").resolve()
+    scan_path = (project / "scan").resolve()
+    outside_path = (project / "outside" / "module.py").resolve()
+    scan_path.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="escapes code_path"):
+        threat_analysis_runner._normalize_module_code_paths(
+            str(outside_path),
+            project_path=project,
+            code_path=scan_path,
+        )
+
+
+def test_async_facade_rejects_code_path_outside_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    scan_path = tmp_path / "other"
+    output_path = tmp_path / "output"
+    project.mkdir()
+    scan_path.mkdir()
+
+    with pytest.raises(ValueError, match="code_path must be inside project_path"):
+        asyncio.run(run_threat_analysis(
+            project_path=project,
+            code_path=scan_path,
+            output_path=output_path,
+        ))
 
 
 def test_sync_component_can_call_async_task_agent_on_owner_loop() -> None:
