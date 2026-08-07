@@ -3,11 +3,14 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App";
 import { ThemeProvider } from "./theme/ThemeProvider";
+import RuntimeErrorBoundary from "./components/RuntimeErrorBoundary";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ThemeProvider>
-      <App />
-    </ThemeProvider>
+    <RuntimeErrorBoundary name="application-root" fullscreen>
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
+    </RuntimeErrorBoundary>
   </StrictMode>,
 );

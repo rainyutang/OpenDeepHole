@@ -10,6 +10,7 @@ import RegisterPage from "./components/RegisterPage";
 import UserManagement from "./components/UserManagement";
 import AdminCheckerDashboard from "./components/AdminCheckerDashboard";
 import CheckerCatalogPage from "./components/CheckerCatalogPage";
+import RuntimeErrorBoundary from "./components/RuntimeErrorBoundary";
 import type { User } from "./types";
 
 type Page = "history" | "newScan" | "scanning" | "agent" | "agentConfig" | "users" | "checkerDashboard" | "checkerCatalog";
@@ -19,7 +20,12 @@ function parsePublicScanAccess(): { scanId: string; token: string } | null {
   const hash = window.location.hash || "";
   const match = hash.match(/^#\/public-scan\/([^?]+)(?:\?(.*))?$/);
   if (!match) return null;
-  const scanId = decodeURIComponent(match[1] || "");
+  let scanId = "";
+  try {
+    scanId = decodeURIComponent(match[1] || "");
+  } catch {
+    return null;
+  }
   const params = new URLSearchParams(match[2] || "");
   const token = params.get("token") || "";
   if (!scanId || !token) return null;
@@ -65,13 +71,19 @@ export default function App() {
 
   if (publicAccess) {
     return (
-      <ScanStatusView
-        scanId={publicAccess.scanId}
-        onBack={() => {
-          window.location.hash = "";
-          setPublicAccess(null);
-        }}
-      />
+      <RuntimeErrorBoundary
+        name="public-scan-detail"
+        resetKey={publicAccess.scanId}
+        fullscreen
+      >
+        <ScanStatusView
+          scanId={publicAccess.scanId}
+          onBack={() => {
+            window.location.hash = "";
+            setPublicAccess(null);
+          }}
+        />
+      </RuntimeErrorBoundary>
     );
   }
 
@@ -125,7 +137,9 @@ export default function App() {
         />
       )}
       {page === "scanning" && (
-        <ScanStatusView scanId={scanId} onBack={handleBack} />
+        <RuntimeErrorBoundary name="scan-detail" resetKey={scanId} fullscreen>
+          <ScanStatusView scanId={scanId} onBack={handleBack} />
+        </RuntimeErrorBoundary>
       )}
       {page === "agent" && (
         <AgentDownload onBack={handleBack} />

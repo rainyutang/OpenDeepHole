@@ -220,7 +220,7 @@ function artifactContent(
   key: string,
 ): unknown {
   const artifact = analysis?.artifacts?.[key];
-  return artifact && "content" in artifact ? artifact.content : undefined;
+  return isRecord(artifact) ? artifact.content : undefined;
 }
 
 function artifactArray<T>(
@@ -228,7 +228,7 @@ function artifactArray<T>(
   key: string,
 ): T[] {
   const content = artifactContent(analysis, key);
-  return Array.isArray(content) ? content as T[] : [];
+  return recordItems<T>(content);
 }
 
 function attackTreesFromAnalysis(
@@ -236,12 +236,12 @@ function attackTreesFromAnalysis(
 ): NativeThreatAttackTree[] {
   const content = artifactContent(analysis, "attack_tree_path");
   if (Array.isArray(content)) {
-    return content as NativeThreatAttackTree[];
+    return recordItems<NativeThreatAttackTree>(content);
   }
   if (!isRecord(content) || !Array.isArray(content.attack_trees)) {
     return [];
   }
-  return content.attack_trees as NativeThreatAttackTree[];
+  return recordItems<NativeThreatAttackTree>(content.attack_trees);
 }
 
 function PanelHeading({
@@ -399,7 +399,7 @@ function collectInternalNodes(
   const nodes: NativeThreatTreeNode[] = [];
 
   trees.forEach((tree) => {
-    const treeNodes = Array.isArray(tree.nodes) ? tree.nodes : [];
+    const treeNodes = recordItems<NativeThreatTreeNode>(tree.nodes);
     treeNodes.forEach((node) => {
       if (node.node_type !== "内部节点") {
         return;
@@ -442,8 +442,8 @@ function AttackTreeView({
   tree: NativeThreatAttackTree;
   index: number;
 }) {
-  const nodes = Array.isArray(tree.nodes) ? tree.nodes : [];
-  const edges = Array.isArray(tree.edges) ? tree.edges : [];
+  const nodes = recordItems<NativeThreatTreeNode>(tree.nodes);
+  const edges = recordItems<NativeThreatAttackTree["edges"][number]>(tree.edges);
   const roots = getRootNodes(nodes);
   const inbound = buildInboundIndex(edges);
   const nodesById = buildNodeIndex(nodes);
@@ -593,8 +593,8 @@ function collectLeafPatternGroups(
   nodesById: Map<string, NativeThreatTreeNode>,
 ): LeafPatternGroup[] {
   const groups = new Map<string, MutableLeafPatternGroup>();
-  const nodes = Array.isArray(tree.nodes) ? tree.nodes : [];
-  const attackPaths = Array.isArray(tree.attack_paths) ? tree.attack_paths : [];
+  const nodes = recordItems<NativeThreatTreeNode>(tree.nodes);
+  const attackPaths = recordItems<NativeThreatAttackPath>(tree.attack_paths);
 
   nodes
     .filter((node) => node.node_type === "叶子节点")
@@ -608,9 +608,7 @@ function collectLeafPatternGroups(
     }
 
     const group = ensureLeafPatternGroup(groups, leafNode);
-    const patterns = Array.isArray(path.attack_patterns)
-      ? path.attack_patterns
-      : [];
+    const patterns = Array.isArray(path.attack_patterns) ? path.attack_patterns : [];
     patterns.forEach((pattern) => addPatternTitle(group, pattern));
   });
 
@@ -663,9 +661,9 @@ function findPathLeafNode(
 function leafNodeFromPathMetadata(
   path: NativeThreatAttackPath,
 ): TreeNodeLike | null {
-  const relatedModules = Array.isArray(path.related_high_risk_modules)
-    ? path.related_high_risk_modules
-    : [];
+  const relatedModules = recordItems<NativeThreatAttackPath["related_high_risk_modules"][number]>(
+    path.related_high_risk_modules,
+  );
   const leafModule = relatedModules.find(
     (module) => module.path_role === "外部攻击入口"
       || module.external_exposure === true,
@@ -760,21 +758,26 @@ function displayValue(value: unknown): string {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function recordItems<T>(value: unknown): T[] {
+  return Array.isArray(value) ? value.filter(isRecord) as T[] : [];
 }
 
 function ArtifactPaths({ analysis }: { analysis: ThreatAnalysis }) {
+  const artifacts = isRecord(analysis.artifacts) ? analysis.artifacts : {};
   return (
     <details className="rounded-lg border border-slate-800 bg-slate-900/60">
       <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-slate-300">
         原生产物
       </summary>
       <div className="space-y-2 border-t border-slate-800 p-4">
-        {Object.entries(analysis.artifacts).map(([key, artifact]) => (
-          artifact && (
+        {Object.entries(artifacts).map(([key, artifact]) => (
+          isRecord(artifact) && (
             <div key={key} className="flex flex-wrap gap-2 text-xs">
               <span className="text-slate-500">{key}</span>
-              <code className="break-all text-cyan-200">{artifact.path}</code>
+              <code className="break-all text-cyan-200">{displayValue(artifact.path)}</code>
             </div>
           )
         ))}

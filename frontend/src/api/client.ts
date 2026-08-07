@@ -1,5 +1,15 @@
 import axios from "axios";
 import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
+import {
+  isRecord,
+  normalizeFpReviewJob,
+  normalizeScanCandidate,
+  normalizeScanEvent,
+  normalizeScanStatus,
+  normalizeThreatTask,
+  normalizeValidation,
+  normalizeVulnerability,
+} from "../scanRuntime";
 
 export const api = axios.create({ baseURL: "/" });
 
@@ -289,11 +299,15 @@ export async function createScan(body: {
 
 export async function getScanStatus(scanId: string): Promise<ScanStatus> {
   if (isPublicScan(scanId)) {
-    const { data } = await api.get<ScanStatus>(
+    const { data } = await api.get<unknown>(
       publicScanPath(""),
       { params: publicParams() },
     );
-    return data;
+    const normalized = normalizeScanStatus(data);
+    if (!normalized || normalized.scan_id !== scanId) {
+      throw new Error("扫描状态响应无效");
+    }
+    return normalized;
   }
   const [overview, candidates, vulnerabilities, events, threatTasks, validations] = await Promise.all([
     getScanOverview(scanId),
@@ -304,7 +318,7 @@ export async function getScanStatus(scanId: string): Promise<ScanStatus> {
     getScanValidationsPage(scanId),
   ]);
   const indexedVulnerabilities = vulnerabilities.items.map((item) => item.vulnerability);
-  return {
+  const normalized = normalizeScanStatus({
     ...overview,
     total_candidates: Math.max(
       overview.total_candidates,
@@ -322,12 +336,20 @@ export async function getScanStatus(scanId: string): Promise<ScanStatus> {
       threat_tasks_next_cursor: threatTasks.next_cursor,
       validations_next_cursor: validations.next_cursor,
     },
-  };
+  });
+  if (!normalized || normalized.scan_id !== scanId) {
+    throw new Error("扫描状态响应无效");
+  }
+  return normalized;
 }
 
 export async function getScanOverview(scanId: string): Promise<ScanStatus> {
-  const { data } = await api.get<ScanStatus>(`/api/v2/scans/${scanId}/overview`);
-  return data;
+  const { data } = await api.get<unknown>(`/api/v2/scans/${scanId}/overview`);
+  const normalized = normalizeScanStatus(data);
+  if (!normalized || normalized.scan_id !== scanId) {
+    throw new Error("扫描概览响应无效");
+  }
+  return normalized;
 }
 
 export async function getScanCandidatesPage(
@@ -335,11 +357,16 @@ export async function getScanCandidatesPage(
   after?: number | null,
   signal?: AbortSignal,
 ): Promise<ScanCandidatePage> {
-  const { data } = await api.get<ScanCandidatePage>(`/api/v2/scans/${scanId}/candidates`, {
+  const { data } = await api.get<unknown>(`/api/v2/scans/${scanId}/candidates`, {
     params: after == null ? undefined : { after },
     signal,
   });
-  return data;
+  if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("候选点分页响应无效");
+  return {
+    items: data.items.map((item, index) => normalizeScanCandidate(item, index)),
+    next_cursor: typeof data.next_cursor === "number" ? data.next_cursor : null,
+    has_more: data.has_more === true,
+  };
 }
 
 export async function getScanVulnerabilitiesPage(
@@ -347,11 +374,19 @@ export async function getScanVulnerabilitiesPage(
   after?: number | null,
   signal?: AbortSignal,
 ): Promise<VulnerabilityPage> {
-  const { data } = await api.get<VulnerabilityPage>(`/api/v2/scans/${scanId}/vulnerabilities`, {
+  const { data } = await api.get<unknown>(`/api/v2/scans/${scanId}/vulnerabilities`, {
     params: after == null ? undefined : { after },
     signal,
   });
-  return data;
+  if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("漏洞分页响应无效");
+  return {
+    items: data.items.flatMap((item) => {
+      if (!isRecord(item) || !Number.isInteger(item.index) || Number(item.index) < 0) return [];
+      return [{ index: Number(item.index), vulnerability: normalizeVulnerability(item.vulnerability) }];
+    }),
+    next_cursor: typeof data.next_cursor === "number" ? data.next_cursor : null,
+    has_more: data.has_more === true,
+  };
 }
 
 export async function getScanEventsPage(
@@ -359,11 +394,16 @@ export async function getScanEventsPage(
   before?: number | null,
   signal?: AbortSignal,
 ): Promise<ScanEventPage> {
-  const { data } = await api.get<ScanEventPage>(`/api/v2/scans/${scanId}/events`, {
+  const { data } = await api.get<unknown>(`/api/v2/scans/${scanId}/events`, {
     params: before == null ? undefined : { before },
     signal,
   });
-  return data;
+  if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("日志分页响应无效");
+  return {
+    items: data.items.map(normalizeScanEvent).filter((item): item is NonNullable<typeof item> => item !== null),
+    next_cursor: typeof data.next_cursor === "number" ? data.next_cursor : null,
+    has_more: data.has_more === true,
+  };
 }
 
 export async function getScanThreatTasksPage(
@@ -371,11 +411,16 @@ export async function getScanThreatTasksPage(
   cursor?: string | null,
   signal?: AbortSignal,
 ): Promise<ThreatAuditTaskPage> {
-  const { data } = await api.get<ThreatAuditTaskPage>(`/api/v2/scans/${scanId}/threat-audit-tasks`, {
+  const { data } = await api.get<unknown>(`/api/v2/scans/${scanId}/threat-audit-tasks`, {
     params: cursor ? { cursor } : undefined,
     signal,
   });
-  return data;
+  if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("威胁审计任务分页响应无效");
+  return {
+    items: data.items.map(normalizeThreatTask),
+    next_cursor: typeof data.next_cursor === "string" ? data.next_cursor : null,
+    has_more: data.has_more === true,
+  };
 }
 
 export async function getScanValidationsPage(
@@ -383,11 +428,16 @@ export async function getScanValidationsPage(
   after?: number | null,
   signal?: AbortSignal,
 ): Promise<VulnerabilityValidationPage> {
-  const { data } = await api.get<VulnerabilityValidationPage>(`/api/v2/scans/${scanId}/validations`, {
+  const { data } = await api.get<unknown>(`/api/v2/scans/${scanId}/validations`, {
     params: after == null ? undefined : { after },
     signal,
   });
-  return data;
+  if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("漏洞验证分页响应无效");
+  return {
+    items: data.items.map(normalizeValidation),
+    next_cursor: typeof data.next_cursor === "number" ? data.next_cursor : null,
+    has_more: data.has_more === true,
+  };
 }
 
 export async function stopScan(scanId: string): Promise<void> {
@@ -846,14 +896,18 @@ export async function stopFpReview(scanId: string): Promise<{ ok: boolean; revie
 
 export async function getFpReview(scanId: string): Promise<FpReviewJob> {
   if (isPublicScan(scanId)) {
-    const { data } = await api.get<FpReviewJob>(
+    const { data } = await api.get<unknown>(
       publicScanPath("/fp_review"),
       { params: publicParams() },
     );
-    return data;
+    const normalized = normalizeFpReviewJob(data);
+    if (!normalized || normalized.scan_id !== scanId) throw new Error("去误报状态响应无效");
+    return normalized;
   }
-  const { data } = await api.get<FpReviewJob>(`/api/scan/${scanId}/fp_review`);
-  return data;
+  const { data } = await api.get<unknown>(`/api/scan/${scanId}/fp_review`);
+  const normalized = normalizeFpReviewJob(data);
+  if (!normalized || normalized.scan_id !== scanId) throw new Error("去误报状态响应无效");
+  return normalized;
 }
 
 export async function getScanGitHistory(scanId: string): Promise<HistoryPattern[]> {

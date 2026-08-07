@@ -17,6 +17,8 @@ import {
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 import { ThemeToggle } from "./ThemeToggle";
+import { normalizeOpenCodePool, sameOpenCodePoolSnapshot } from "../scanRuntime";
+import RuntimeErrorBoundary from "./RuntimeErrorBoundary";
 
 const MAX_LOG_LINES = 200;
 const STATIC_CANDIDATE_PAGE_SIZE = 20;
@@ -131,7 +133,7 @@ function isStaticCandidateVulnerability(vuln: Vulnerability): boolean {
 }
 
 function isStaticCandidate(item: Candidate): boolean {
-  return item.vuln_type.toLowerCase() !== "threat_audit"
+  return String(item.vuln_type || "").toLowerCase() !== "threat_audit"
     && String(item.metadata?.source || "").toLowerCase() !== "threat_analysis";
 }
 
@@ -184,6 +186,29 @@ function scanEventKey(item: ScanEvent): string {
     item.message,
     item.candidate_index ?? "",
   ].join("\u0000");
+}
+
+function mergeRecentScanEvents(existing: ScanEvent[], incoming: ScanEvent[]): ScanEvent[] {
+  if (incoming.length === 0) return existing;
+  const keys = new Set(existing.map(scanEventKey));
+  const next = [...existing];
+  for (const event of incoming) {
+    const key = scanEventKey(event);
+    if (keys.has(key)) continue;
+    keys.add(key);
+    next.push(event);
+  }
+  if (next.length === existing.length) return existing;
+  return next.slice(-MAX_LOG_LINES);
+}
+
+function sameShallowValues(left: object | null | undefined, right: object | null | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const keys = new Set([...Object.keys(leftRecord), ...Object.keys(rightRecord)]);
+  return [...keys].every((key) => leftRecord[key] === rightRecord[key]);
 }
 
 function detailResourcesForTab(tab: MainTab, engineId: string): DetailResource[] {
@@ -296,7 +321,7 @@ function mergeDetailPage(previous: ScanStatusType, page: LoadedDetailPage): Scan
     }
     threatTasks.sort((left, right) => (
       String(left.created_at || "").localeCompare(String(right.created_at || ""))
-      || left.task_id.localeCompare(right.task_id)
+      || String(left.task_id || "").localeCompare(String(right.task_id || ""))
     ));
     return {
       ...previous,
@@ -676,18 +701,30 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       const overview = await getScanOverview(scanId);
       setScan((previous) => {
         if (!previous || previous.scan_id !== overview.scan_id) return previous;
+        const totalCandidates = Math.max(
+          previous.total_candidates,
+          overview.total_candidates,
+          overview.detail_counts?.candidates ?? 0,
+        );
+        const detailCounts = overview.detail_counts ?? previous.detail_counts;
+        if (
+          totalCandidates === previous.total_candidates
+          && overview.processed_candidates === previous.processed_candidates
+          && overview.retryable_candidates_count === previous.retryable_candidates_count
+          && overview.continuable_task_count === previous.continuable_task_count
+          && overview.can_continue === previous.can_continue
+          && sameShallowValues(detailCounts, previous.detail_counts)
+        ) {
+          return previous;
+        }
         return {
           ...previous,
-          total_candidates: Math.max(
-            previous.total_candidates,
-            overview.total_candidates,
-            overview.detail_counts?.candidates ?? 0,
-          ),
+          total_candidates: totalCandidates,
           processed_candidates: overview.processed_candidates,
           retryable_candidates_count: overview.retryable_candidates_count,
           continuable_task_count: overview.continuable_task_count,
           can_continue: overview.can_continue,
-          detail_counts: overview.detail_counts ?? previous.detail_counts,
+          detail_counts: detailCounts,
         };
       });
     } catch {
@@ -773,30 +810,47 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // Initial full-state hydration on mount
   useEffect(() => {
+    let cancelled = false;
+    setScan((previous) => previous?.scan_id === scanId ? previous : null);
+    setSelectedFeedbackIds(null);
+    setFpReview(null);
+    setIndexStatus(null);
+    setGitHistory([]);
     getScanStatus(scanId)
       .then((data) => {
+        if (cancelled || data.scan_id !== scanId) return;
         setScan(data);
-        if (selectedFeedbackIds === null && data.feedback_ids) {
-          setSelectedFeedbackIds(new Set(data.feedback_ids));
-        }
+        setSelectedFeedbackIds(new Set(data.feedback_ids ?? []));
       })
       .catch(() => {});
     getFpReview(scanId)
-      .then(setFpReview)
+      .then((job) => {
+        if (!cancelled && job.scan_id === scanId) setFpReview(job);
+      })
       .catch(() => {});
     getAgentIndexStatus(scanId)
-      .then(setIndexStatus)
+      .then((status) => {
+        if (!cancelled) setIndexStatus(status);
+      })
       .catch(() => {});
     getScanGitHistory(scanId)
-      .then(setGitHistory)
+      .then((history) => {
+        if (!cancelled) setGitHistory(Array.isArray(history) ? history : []);
+      })
       .catch(() => {});
     setThreatAnalysisLoading(true);
     getScanThreatAnalysis(scanId)
       .then((analysis) => {
-        setScan((prev) => prev ? { ...prev, threat_analysis: analysis } : prev);
+        if (cancelled) return;
+        setScan((prev) => prev?.scan_id === scanId ? { ...prev, threat_analysis: analysis } : prev);
       })
       .catch(() => {})
-      .finally(() => setThreatAnalysisLoading(false));
+      .finally(() => {
+        if (!cancelled) setThreatAnalysisLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [scanId]);
 
   // SSE event handlers — update state incrementally
@@ -805,15 +859,22 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       setScan((prev) => {
         if (!prev) return prev;
         const patch: Partial<ScanStatusType> = {};
-        if (data.status != null) patch.status = data.status as ScanItemStatus;
-        if (data.progress != null) patch.progress = data.progress;
-        if (data.total_candidates != null) patch.total_candidates = data.total_candidates;
-        if (data.processed_candidates != null) patch.processed_candidates = data.processed_candidates;
-        if (data.static_total_files != null) patch.static_total_files = data.static_total_files;
-        if (data.static_scanned_files != null) patch.static_scanned_files = data.static_scanned_files;
-        if (data.static_analysis_done != null) patch.static_analysis_done = data.static_analysis_done;
-        if (data.opencode_pool !== undefined) patch.opencode_pool = data.opencode_pool;
-        return { ...prev, ...patch };
+        if (data.status != null && data.status !== prev.status) patch.status = data.status as ScanItemStatus;
+        if (data.progress != null && data.progress !== prev.progress) patch.progress = data.progress;
+        if (data.total_candidates != null && data.total_candidates !== prev.total_candidates) patch.total_candidates = data.total_candidates;
+        if (data.processed_candidates != null && data.processed_candidates !== prev.processed_candidates) patch.processed_candidates = data.processed_candidates;
+        if (data.static_total_files != null && data.static_total_files !== prev.static_total_files) patch.static_total_files = data.static_total_files;
+        if (data.static_scanned_files != null && data.static_scanned_files !== prev.static_scanned_files) patch.static_scanned_files = data.static_scanned_files;
+        if (data.static_analysis_done != null && data.static_analysis_done !== prev.static_analysis_done) patch.static_analysis_done = data.static_analysis_done;
+        if (data.opencode_pool === null && prev.opencode_pool != null) {
+          patch.opencode_pool = null;
+        } else if (data.opencode_pool !== undefined && data.opencode_pool !== null) {
+          const pool = normalizeOpenCodePool(data.opencode_pool);
+          if (pool && !sameOpenCodePoolSnapshot(prev.opencode_pool, pool)) {
+            patch.opencode_pool = pool;
+          }
+        }
+        return Object.keys(patch).length > 0 ? { ...prev, ...patch } : prev;
       });
       scheduleOverviewSummaryRefresh();
     },
@@ -922,7 +983,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         } else {
           tasks.push(data.task);
         }
-        tasks.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")) || a.task_id.localeCompare(b.task_id));
+        tasks.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")) || String(a.task_id || "").localeCompare(String(b.task_id || "")));
         return { ...prev, threat_audit_tasks: tasks };
       });
       scheduleOverviewSummaryRefresh();
@@ -933,11 +994,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         mining_engine_runs: data.runs,
       } : prev);
     },
-    onScanEvent: (data) => {
+    onScanEvents: (events) => {
       setScan((prev) => {
         if (!prev) return prev;
-        const events = [...prev.events, data.event].slice(-MAX_LOG_LINES);
-        return { ...prev, events };
+        const merged = mergeRecentScanEvents(prev.events, events);
+        return merged === prev.events ? prev : { ...prev, events: merged };
       });
     },
     onScanFinish: (data) => {
@@ -1675,6 +1736,22 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
       {/* Main content */}
       <div className="flex-1 overflow-auto px-4 py-4 sm:px-6">
+        <RuntimeErrorBoundary
+          name={`scan-panel:${activeTab}`}
+          resetKey={[
+            scanId,
+            activeTab,
+            activeEngineId,
+            scan.status,
+            scan.progress,
+            scan.vulnerabilities.length,
+            scan.validations?.length ?? 0,
+            scan.events.length,
+            scan.events[scan.events.length - 1]?.timestamp ?? "",
+            scan.opencode_pool?.updated_at ?? "",
+          ].join(":")}
+        >
+        <>
         {(activeDetailLoading || activeDetailFailed) && (
           <div
             role="status"
@@ -1826,6 +1903,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           />
         )}
         {activeTab === "issues" && issuesView}
+        </>
+        </RuntimeErrorBoundary>
       </div>
 
       {/* Log floating button */}
@@ -3209,7 +3288,7 @@ function ScanOverview({
               <div className="mt-3 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3">
                 <div className="font-mono text-xs text-blue-100">{target.file}:{target.line}</div>
                 <div className="mt-1 truncate font-mono text-xs text-slate-400">{target.function}</div>
-                <div className="mt-2 text-xs text-slate-300">{target.vuln_type.toUpperCase()}</div>
+                <div className="mt-2 text-xs text-slate-300">{String(target.vuln_type || "未知类型").toUpperCase()}</div>
               </div>
             ) : currentFpReviewTargets.length > 0 ? (
               <div className="mt-3 space-y-2">
@@ -3266,8 +3345,8 @@ function ScanTokenUsagePanel({ usage }: { usage: OpenCodeTokenUsage | null }) {
         <div className="mt-1 font-mono text-sm text-slate-200">{formatTokenCount(value)}</div>
       </div>)}
     </div>
-    {usage.by_model.length > 1 && <div className="mt-3 flex flex-wrap gap-2">
-      {[...usage.by_model].sort((left, right) => right.total_tokens - left.total_tokens).map((item) => (
+    {(usage.by_model ?? []).length > 1 && <div className="mt-3 flex flex-wrap gap-2">
+      {[...(usage.by_model ?? [])].sort((left, right) => right.total_tokens - left.total_tokens).map((item) => (
         <span key={item.model} className="rounded border border-slate-700 bg-slate-950/60 px-2 py-1 font-mono text-[11px] text-slate-400">
           {item.model}: {formatTokenCount(item.total_tokens)}
         </span>

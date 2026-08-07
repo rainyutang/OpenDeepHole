@@ -2,6 +2,7 @@
 
 ## 2026-08-07
 
+- **修复** 扫描详情在各实时过程突发推送或收到异常快照时偶发整页空白：SSE 日志与状态更新改为短窗口合并，接口及事件数据在进入渲染前统一校验和规范化，过期异步响应不再覆盖当前扫描；动态产物异常会被局部隔离并自动恢复，不新增按钮或用户操作
 - **修复** 威胁分析方法内部创建的 OpenCode Session 仅以本次代码扫描路径为项目目录，避免子目录扫描分析项目总路径；其它扫描过程继续以项目总路径启动。子目录扫描产生的高风险模块 `代码目录` 由外层适配为项目根相对路径，原生方法产物保持不变以兼容续扫
 - **修复** standalone Task Agent 与完整 Agent 退出后可能残留 OpenCode Serve 监听进程：清理不再把启动器 PID 退出误判为整棵进程树结束，而是持续检查独立进程组及已确认归属的监听 PID；POSIX `SIGTERM` 超时后自动升级为 `SIGKILL`，Windows 使用 `taskkill /T /F`，强制清理后再次确认。失败时保留归属标记供下次恢复，Linux/macOS Agent 启动脚本同时改为 `exec` 以确保退出信号直达清理逻辑
 - **修复** standalone Task Agent 与完整平台统一使用受控 OpenCode 配置发现和深度合并：自动继承当前用户的全局 Provider/模型、可执行文件相邻、项目及 `OPENCODE_CONFIG*` 显式配置，再由 `task-agent.yaml` 的 `serve.opencode_config` 覆盖；最终生成的 workspace 配置不会回灌，Task Agent 受管权限与文件写入 Hook 仍最后生效
