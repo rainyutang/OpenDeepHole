@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,25 @@ from task_agent.standalone import (
     ensure_opencode_configuration,
     load_standalone_config,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ambient_opencode_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    for name in (
+        CONFIG_ENV,
+        "OPENCODE_CONFIG_PATH",
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_DIR",
+        "APPDATA",
+        "USERPROFILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _config_text(
@@ -105,6 +125,115 @@ def test_standalone_config_loads_context_runtime_and_relative_paths(tmp_path: Pa
     assert config.opencode.executable == "opencode"
     assert config.opencode.models[0].model == "provider/model"
     assert config.opencode_config == {"provider": {}}
+
+
+def test_standalone_config_merges_global_provider_then_inline_override(
+    tmp_path: Path,
+) -> None:
+    global_dir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
+    global_dir.mkdir(parents=True)
+    (global_dir / "config.json").write_text(
+        json.dumps({
+            "provider": {
+                "deepseek": {
+                    "options": {
+                        "baseURL": "https://global.example/v1",
+                        "timeout": 30,
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    (global_dir / "opencode.json").write_text(
+        json.dumps({
+            "provider": {
+                "deepseek": {
+                    "models": {
+                        "deepseek-v4-pro": {"name": "DeepSeek V4 Pro"},
+                    },
+                },
+            },
+            "plugin": ["global-plugin"],
+        }),
+        encoding="utf-8",
+    )
+    config_path = _write_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["serve"]["opencode_config"] = {
+        "provider": {
+            "deepseek": {
+                "options": {"timeout": 60},
+            },
+        },
+        "plugin": ["inline-plugin"],
+    }
+    config_path.write_text(
+        yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    config = load_standalone_config(config_path)
+
+    deepseek = config.opencode_config["provider"]["deepseek"]
+    assert deepseek["models"] == {
+        "deepseek-v4-pro": {"name": "DeepSeek V4 Pro"},
+    }
+    assert deepseek["options"] == {
+        "baseURL": "https://global.example/v1",
+        "timeout": 60,
+    }
+    assert config.opencode_config["plugin"] == ["inline-plugin"]
+
+
+def test_standalone_config_does_not_reimport_generated_workspace_file(
+    tmp_path: Path,
+) -> None:
+    global_dir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
+    global_dir.mkdir(parents=True)
+    (global_dir / "opencode.json").write_text(
+        json.dumps({"provider": {"global-provider": {}}}),
+        encoding="utf-8",
+    )
+    config_path = _write_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    project_dir = Path(raw["context"]["project_dir"])
+    raw["context"]["workspace_dir"] = str(project_dir)
+    raw["serve"]["opencode_config"] = {}
+    config_path.write_text(
+        yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    (project_dir / "opencode.json").write_text(
+        json.dumps({
+            "provider": {"generated-stale-provider": {}},
+            "permission": {"bash": {"*": "deny"}},
+        }),
+        encoding="utf-8",
+    )
+
+    config = load_standalone_config(config_path)
+
+    assert config.opencode_config["provider"] == {"global-provider": {}}
+    assert "permission" not in config.opencode_config
+
+
+def test_standalone_config_warns_and_ignores_invalid_global_jsonc(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    global_dir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
+    global_dir.mkdir(parents=True)
+    invalid_path = global_dir / "opencode.jsonc"
+    invalid_path.write_text("{ broken", encoding="utf-8")
+    config_path = _write_config(tmp_path)
+
+    with caplog.at_level("WARNING", logger="task_agent.standalone"):
+        config = load_standalone_config(config_path)
+
+    assert config.opencode_config == {"provider": {}}
+    assert str(invalid_path) in caplog.text
+    assert "Ignoring invalid OpenCode config" in caplog.text
 
 
 def test_v1_nga_config_migrates_to_global_nga_executable(tmp_path: Path) -> None:
@@ -327,6 +456,23 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
 ) -> None:
     from task_agent import serve_client, task_service
 
+    global_dir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
+    global_dir.mkdir(parents=True)
+    (global_dir / "opencode.json").write_text(
+        json.dumps({
+            "provider": {
+                "provider": {
+                    "models": {"model": {"name": "Standalone Model"}},
+                },
+            },
+            "permission": {
+                "bash": {"*": "allow"},
+                "edit": {"*": "allow"},
+            },
+            "plugin": ["global-plugin"],
+        }),
+        encoding="utf-8",
+    )
     config_path = _write_config(tmp_path, port=4318)
     skill_root = tmp_path / "standalone-skills"
     reference = (
@@ -422,10 +568,16 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
             assert first_call["config_workspace"] == (tmp_path / "workspace").resolve()
             assert first_call["env_overrides"]["OPENCODE_SERVE_PORT"] == "4318"
             runtime_config = json.loads(first_call["config_content"])
+            assert runtime_config["provider"]["provider"]["models"] == {
+                "model": {"name": "Standalone Model"},
+            }
+            assert runtime_config["plugin"] == ["global-plugin"]
             assert runtime_config["skills"]["paths"] == [
                 str(skill_root)
             ]
             permission = runtime_config["permission"]
+            assert permission["bash"] == {"*": "deny"}
+            assert permission["edit"]["*"] == "deny"
             assert permission["read"][str(skill_root.resolve())] == "allow"
             assert (
                 permission["external_directory"][str(skill_root.resolve())]

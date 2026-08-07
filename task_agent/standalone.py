@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import warnings
@@ -12,6 +13,10 @@ from typing import Any, Mapping
 
 import yaml
 
+from .config_discovery import (
+    deep_merge_opencode_config,
+    merge_discovered_opencode_config,
+)
 from .host import (
     OpenCodeHostBindings,
     OpenCodeSessionRuntime,
@@ -19,6 +24,8 @@ from .host import (
     _get_opencode_configuration_state,
 )
 
+
+logger = logging.getLogger(__name__)
 
 CONFIG_ENV = "TASK_AGENT_CONFIG"
 DEFAULT_CONFIG_FILENAME = "task-agent.yaml"
@@ -333,14 +340,38 @@ def load_standalone_config(path: str | os.PathLike[str]) -> StandaloneOpenCodeCo
         maximum=65535,
     )
     environment["OPENCODE_SERVE_PORT"] = str(port)
-    opencode_config = _mapping(
+    inline_opencode_config = _mapping(
         serve.get("opencode_config") or {},
         "serve.opencode_config",
     )
     try:
-        json.dumps(opencode_config, ensure_ascii=False)
+        json.dumps(inline_opencode_config, ensure_ascii=False)
     except (TypeError, ValueError) as exc:
         raise ValueError("serve.opencode_config must be JSON serializable") from exc
+
+    def warn_invalid(path: Path, exc: Exception) -> None:
+        logger.warning("Ignoring invalid OpenCode config %s: %s", path, exc)
+
+    discovered_config, loaded_config = merge_discovered_opencode_config(
+        executable=executable,
+        project_dir=project_dir,
+        env=dict(os.environ),
+        excluded_paths=(workspace_dir / "opencode.json",),
+        on_invalid=warn_invalid,
+    )
+    opencode_config = deep_merge_opencode_config(
+        discovered_config,
+        inline_opencode_config,
+    )
+    logger.info(
+        "Standalone OpenCode config discovery: source=%s project_dir=%s "
+        "loaded=%s inline_top_keys=%s merged_top_keys=%s",
+        source_path,
+        project_dir,
+        loaded_config,
+        sorted(str(key) for key in inline_opencode_config),
+        sorted(str(key) for key in opencode_config),
+    )
     models = _load_models(
         model_pool.get("models"),
         schema_version=version,

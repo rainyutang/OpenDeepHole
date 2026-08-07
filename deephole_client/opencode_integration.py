@@ -10,10 +10,18 @@ import socket
 import sys
 import threading
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 from backend.config import get_config
 from backend.logger import get_logger
+from task_agent.config_discovery import (
+    config_home_candidates,
+    deep_merge_opencode_config,
+    merge_discovered_opencode_config,
+    opencode_executable_alias,
+    read_opencode_config,
+    runtime_config_candidates,
+)
 
 logger = get_logger(__name__)
 
@@ -32,21 +40,6 @@ _LEGACY_MANAGED_THREAT_ANALYSIS_SKILLS = (
     "high-risk-module-merge",
     "attack-tree-by-asset",
 )
-_GLOBAL_OPENCODE_CONFIG_FILENAMES = (
-    "config.json",
-    "opencode.json",
-    "opencode.jsonc",
-)
-_NAMED_OPENCODE_CONFIG_FILENAMES = (
-    "opencode.json",
-    "opencode.jsonc",
-)
-_EXPLICIT_OPENCODE_CONFIG_ENV_NAMES = (
-    "OPENCODE_CONFIG_PATH",
-    "OPENCODE_CONFIG",
-    "OPENCODE_CONFIG_DIR",
-)
-
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
 _auto_serve_port: int | None = None
@@ -179,86 +172,18 @@ def _resolved_serve_port(configured_port: object = None) -> int:
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    merged = json.loads(json.dumps(base))
-    for key, value in override.items():
-        if isinstance(merged.get(key), dict) and isinstance(value, dict):
-            merged[key] = _deep_merge(merged[key], value)
-        else:
-            merged[key] = json.loads(json.dumps(value))
-    return merged
+    return deep_merge_opencode_config(base, override)
 
 
 def _read_runtime_config(path: Path) -> dict:
-    if not path.is_file():
-        return {}
-    from task_agent.config_json import parse_opencode_jsonc
+    def warn_invalid(invalid_path: Path, exc: Exception) -> None:
+        logger.warning("Ignoring invalid OpenCode config %s: %s", invalid_path, exc)
 
-    try:
-        value = parse_opencode_jsonc(
-            path.read_text(encoding="utf-8"),
-            source=str(path),
-        )
-    except Exception as exc:
-        logger.warning("Ignoring invalid OpenCode config %s: %s", path, exc)
-        return {}
-    return value if isinstance(value, dict) else {}
+    return read_opencode_config(path, on_invalid=warn_invalid)
 
 
 def _config_home_candidates(env: dict[str, str]) -> list[Path]:
-    candidates: list[Path] = []
-    xdg_config_home = str(env.get("XDG_CONFIG_HOME") or "").strip()
-    if xdg_config_home:
-        candidates.append(Path(os.path.expandvars(xdg_config_home)).expanduser())
-
-    home = str(env.get("HOME") or "").strip()
-    if not home and sys.platform == "win32":
-        home = str(env.get("USERPROFILE") or "").strip()
-    if home:
-        candidates.append(
-            Path(os.path.expandvars(home)).expanduser() / ".config"
-        )
-    else:
-        candidates.append(Path.home() / ".config")
-
-    if sys.platform == "win32":
-        appdata = str(env.get("APPDATA") or "").strip()
-        if appdata:
-            candidates.append(
-                Path(os.path.expandvars(appdata)).expanduser()
-            )
-
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = os.path.normcase(os.path.abspath(str(candidate)))
-        if key not in seen:
-            seen.add(key)
-            unique.append(candidate)
-    return unique
-
-
-def _split_config_path_value(value: object) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple, set)):
-        return [str(item).strip() for item in value if str(item).strip()]
-    text = str(value).strip()
-    if not text:
-        return []
-    result: list[str] = []
-    for line in text.splitlines():
-        for item in line.split(os.pathsep):
-            item = item.strip()
-            if item:
-                result.append(item)
-    return result
-
-
-def _expand_config_path(raw_path: str) -> list[Path]:
-    path = Path(os.path.expandvars(raw_path)).expanduser()
-    if path.is_dir():
-        return [path / name for name in _GLOBAL_OPENCODE_CONFIG_FILENAMES]
-    return [path]
+    return config_home_candidates(env, platform=sys.platform)
 
 
 def _runtime_config_candidates(
@@ -266,69 +191,18 @@ def _runtime_config_candidates(
     project_dir: Path,
     env: dict[str, str],
 ) -> list[tuple[str, Path]]:
-    candidates: list[tuple[str, Path]] = []
-    config_dir_names = ["opencode"]
-    executable_alias = _opencode_executable_alias(effective.get("executable"))
-    if executable_alias == "nga":
-        config_dir_names.append("nga")
-    for config_home in _config_home_candidates(env):
-        for config_dir_name in config_dir_names:
-            config_dir = config_home / config_dir_name
-            candidates.extend(
-                ("global", config_dir / filename)
-                for filename in _GLOBAL_OPENCODE_CONFIG_FILENAMES
-            )
-
-    executable = str(effective.get("executable") or "opencode").strip()
-    if executable:
-        resolved_executable = shutil.which(executable) or executable
-        executable_parent = Path(resolved_executable).expanduser().parent
-        if str(executable_parent) not in {"", "."}:
-            candidates.extend(
-                ("executable", executable_parent / filename)
-                for filename in _NAMED_OPENCODE_CONFIG_FILENAMES
-            )
-            candidates.extend(
-                ("executable", executable_parent / ".opencode" / filename)
-                for filename in _NAMED_OPENCODE_CONFIG_FILENAMES
-            )
-
-    candidates.extend(
-        ("project", project_dir / filename)
-        for filename in _NAMED_OPENCODE_CONFIG_FILENAMES
+    return runtime_config_candidates(
+        executable=effective.get("executable"),
+        project_dir=project_dir,
+        configured_paths=effective.get("config_paths"),
+        env=env,
+        platform=sys.platform,
     )
-    candidates.extend(
-        ("project", project_dir / ".opencode" / filename)
-        for filename in _NAMED_OPENCODE_CONFIG_FILENAMES
-    )
-
-    for raw_path in _split_config_path_value(effective.get("config_paths")):
-        candidates.extend(
-            ("configured", path) for path in _expand_config_path(raw_path)
-        )
-    for env_name in _EXPLICIT_OPENCODE_CONFIG_ENV_NAMES:
-        for raw_path in _split_config_path_value(env.get(env_name)):
-            candidates.extend(
-                (env_name, path) for path in _expand_config_path(raw_path)
-            )
-    return candidates
 
 
 def _opencode_executable_alias(value: object) -> str:
     """Return a known compatibility executable name for config discovery."""
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    names = {Path(raw).name, PureWindowsPath(raw).name}
-    for name in names:
-        normalized = name.strip().lower()
-        for suffix in (".exe", ".cmd", ".bat"):
-            if normalized.endswith(suffix):
-                normalized = normalized[: -len(suffix)]
-                break
-        if normalized in {"opencode", "nga"}:
-            return normalized
-    return ""
+    return opencode_executable_alias(value)
 
 
 def _merge_managed_runtime_config(base: dict, managed: dict) -> dict:
@@ -356,26 +230,17 @@ def _runtime_config_content(
 ) -> str:
     from task_agent.config_json import dump_opencode_config
 
-    merged: dict = {}
-    loaded: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for source, candidate in _runtime_config_candidates(
-        effective,
-        project_dir,
-        dict(os.environ),
-    ):
-        key = os.path.normcase(os.path.abspath(str(candidate)))
-        if key in seen:
-            continue
-        seen.add(key)
-        config = _read_runtime_config(candidate)
-        if config:
-            merged = _deep_merge(merged, config)
-            loaded.append({
-                "source": source,
-                "path": str(candidate),
-                "keys": sorted(str(item) for item in config),
-            })
+    def warn_invalid(path: Path, exc: Exception) -> None:
+        logger.warning("Ignoring invalid OpenCode config %s: %s", path, exc)
+
+    merged, loaded = merge_discovered_opencode_config(
+        executable=effective.get("executable"),
+        project_dir=project_dir,
+        configured_paths=effective.get("config_paths"),
+        env=dict(os.environ),
+        platform=sys.platform,
+        on_invalid=warn_invalid,
+    )
     managed = _read_runtime_config(managed_opencode_config_path(workspace))
     merged = _merge_managed_runtime_config(merged, managed)
     logger.info(

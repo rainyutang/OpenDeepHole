@@ -18,7 +18,10 @@ serve:
   #   NO_PROXY: 127.0.0.1,localhost
   #   no_proxy: 127.0.0.1,localhost
   environment: {}
-  # OpenCode 的完整配置直接写在这里；MCP 服务名可以自行定义。
+  # standalone 会先合并用户全局、可执行文件相邻、项目和 OPENCODE_CONFIG*
+  # 指定的 OpenCode 配置；这里是优先级更高的 YAML 内覆盖层。
+  # 如果 provider 已在用户全局配置中定义，这里可以保持为空对象。
+  # MCP 服务名可以自行定义。
   # standalone 不会自动安装 Skill；如需使用，请在这里注册实际绝对路径。
   # Task Agent 会在最终 opencode.json 中覆盖文件、SKILL 与 bash 的基础受管权限。
   # 只有 run_opencode_task(writable_paths=...) 的额外动态路径通过 Session API 下发。
