@@ -13,6 +13,7 @@ import secrets
 import shutil
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Literal
@@ -88,6 +89,7 @@ from backend.scan_metrics import (
 )
 from backend.store import get_scan_store
 from backend.store.async_ops import run_store_call
+from backend.vulnerability_identity import vulnerability_report_identity
 from backend.pagination import decode_cursor, encode_cursor
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
 
@@ -2526,15 +2528,19 @@ async def download_report(
         "match_type", "match_reference", "variant_of",
         "description", "ai_analysis",
     ])
-    indexed_vulnerabilities = list(enumerate(scan.vulnerabilities))
+    report_groups = _report_vulnerability_groups(
+        scan.vulnerabilities,
+        fp_map,
+        validation_map,
+    )
     if filtered:
-        indexed_vulnerabilities = [
-            (index, vuln)
-            for index, vuln in indexed_vulnerabilities
+        report_groups = [
+            group
+            for group in report_groups
             if _matches_report_filters(
-                vuln,
-                fp_map.get(index),
-                validation_map.get(index),
+                group.vulnerability,
+                group.fp_result,
+                group.validation,
                 show_all=show_all,
                 severity=severity,
                 vuln_type=vuln_type,
@@ -2543,14 +2549,17 @@ async def download_report(
                 fp_review_state=fp_review_state,
             )
         ]
-        indexed_vulnerabilities.sort(
-            key=lambda item: (
-                item[1].audit_index if item[1].audit_index is not None else item[0],
-                item[0],
+        report_groups.sort(
+            key=lambda group: (
+                group.vulnerability.audit_index
+                if group.vulnerability.audit_index is not None
+                else group.index,
+                group.index,
             )
         )
-    for i, v in indexed_vulnerabilities:
-        fp = fp_map.get(i)
+    for group in report_groups:
+        v = group.vulnerability
+        fp = group.fp_result
         writer.writerow([
             v.engine_id, v.engine_label, v.file, v.line, v.function,
             v.vuln_type, v.severity, v.confirmed,
@@ -2675,6 +2684,84 @@ def _scan_fp_result_map(scan_id: str) -> dict[int, FpReviewResult]:
         return {}
     merged = _merge_latest_fp_review_results(job, scan_id)
     return {r.vuln_index: r for r in merged.results}
+
+
+@dataclass(frozen=True)
+class _ReportVulnerabilityGroup:
+    """One read-only export projection over duplicate persisted results."""
+
+    index: int
+    vulnerability: Vulnerability
+    member_indices: tuple[int, ...]
+    fp_result: FpReviewResult | None
+    validation: VulnerabilityValidation | None
+
+
+def _report_vulnerability_groups(
+    vulnerabilities: list[Vulnerability],
+    fp_map: dict[int, FpReviewResult],
+    validation_map: dict[int, VulnerabilityValidation],
+) -> list[_ReportVulnerabilityGroup]:
+    grouped: dict[
+        tuple[object, ...],
+        list[tuple[int, Vulnerability]],
+    ] = {}
+    for index, vulnerability in enumerate(vulnerabilities):
+        grouped.setdefault(
+            vulnerability_report_identity(vulnerability),
+            [],
+        ).append((index, vulnerability))
+
+    result: list[_ReportVulnerabilityGroup] = []
+    for members in grouped.values():
+        representative_index, representative = members[0]
+        member_indices = tuple(index for index, _vuln in members)
+        fp_candidates = [
+            (index, fp_map[index])
+            for index in member_indices
+            if index in fp_map
+        ]
+        fp_result = (
+            max(
+                fp_candidates,
+                key=lambda item: (
+                    1 if is_effective_fp_review_result(item[1]) else 0,
+                    str(item[1].created_at or ""),
+                    item[0],
+                ),
+            )[1]
+            if fp_candidates
+            else None
+        )
+        validation_candidates = [
+            (index, validation_map[index])
+            for index in member_indices
+            if index in validation_map
+        ]
+        validation = (
+            max(
+                validation_candidates,
+                key=lambda item: (
+                    str(
+                        item[1].updated_at
+                        or item[1].finished_at
+                        or item[1].started_at
+                        or ""
+                    ),
+                    item[0],
+                ),
+            )[1]
+            if validation_candidates
+            else None
+        )
+        result.append(_ReportVulnerabilityGroup(
+            index=representative_index,
+            vulnerability=representative,
+            member_indices=member_indices,
+            fp_result=fp_result,
+            validation=validation,
+        ))
+    return result
 
 
 def _safe_filename_part(text: str) -> str:
@@ -3018,11 +3105,23 @@ async def download_vulnerability_report(
     vuln = scan.vulnerabilities[idx]
     fp_map = await run_store_call(get_scan_store(), _scan_fp_result_map, scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
+    group = next(
+        (
+            item
+            for item in _report_vulnerability_groups(
+                scan.vulnerabilities,
+                fp_map,
+                validation_map,
+            )
+            if idx in item.member_indices
+        ),
+        None,
+    )
     markdown = _vuln_report_markdown(
         idx,
         vuln,
-        fp_map.get(idx),
-        validation_map.get(idx),
+        group.fp_result if group is not None else fp_map.get(idx),
+        group.validation if group is not None else validation_map.get(idx),
         _fp_review_stage_titles(scan_id),
     )
     fname = (
@@ -3276,11 +3375,17 @@ async def download_report_zip(
     store = get_scan_store()
     fp_map = await run_store_call(store, _scan_fp_result_map, scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
-
     confirmed = [
-        (i, v)
-        for i, v in enumerate(scan.vulnerabilities)
-        if v.confirmed or v.ai_verdict == "confirmed"
+        group
+        for group in _report_vulnerability_groups(
+            scan.vulnerabilities,
+            fp_map,
+            validation_map,
+        )
+        if (
+            group.vulnerability.confirmed
+            or group.vulnerability.ai_verdict == "confirmed"
+        )
     ]
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -3288,7 +3393,10 @@ async def download_report_zip(
             zf.writestr("README.md", f"# 扫描 {scan_id}\n\n本次扫描没有 AI 确认为问题的漏洞。\n")
         else:
             index_lines = [f"# 扫描 {scan_id} 漏洞报告索引", "", f"共 {len(confirmed)} 个 AI 确认问题：", ""]
-            for i, v in confirmed:
+            fp_review_stage_titles = _fp_review_stage_titles(scan_id)
+            for group in confirmed:
+                i = group.index
+                v = group.vulnerability
                 export_file = v.file or "unknown"
                 export_line = v.line if v.line > 0 else "unknown"
                 entry = (
@@ -3306,9 +3414,9 @@ async def download_report_zip(
                     _vuln_report_markdown(
                         i,
                         v,
-                        fp_map.get(i),
-                        validation_map.get(i),
-                        _fp_review_stage_titles(scan_id),
+                        group.fp_result,
+                        group.validation,
+                        fp_review_stage_titles,
                     ),
                 )
             zf.writestr("README.md", "\n".join(index_lines) + "\n")

@@ -148,6 +148,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             names = set(zf.namelist())
 
         self.assertIn("deephole_client/main.py", names)
+        self.assertIn("backend/vulnerability_identity.py", names)
         self.assertIn("requirements-agent.txt", names)
         self.assertIn(
             "deephole_client/vulnerability_mining/"

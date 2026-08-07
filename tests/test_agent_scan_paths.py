@@ -1653,6 +1653,103 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error", run_states)
         self.assertEqual(run_states.count("error"), 2)
 
+    async def test_live_report_provenance_does_not_trigger_final_replay(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        manifest = SimpleNamespace(
+            engine_id="good",
+            label="Good engine",
+            fp_review=True,
+        )
+        loaded = SimpleNamespace(manifest=manifest)
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: [manifest],
+            get=lambda engine_id: loaded if engine_id == "good" else None,
+        )
+
+        async def report_vulnerability(_scan_id, vulnerability):
+            vulnerability.output_source.agent_session_id = "agent-session-1"
+            return {"index": 0}
+
+        reporter.report_vulnerability.side_effect = report_vulnerability
+
+        async def run_engine(_engine, **engine_kwargs):
+            await engine_kwargs["report_vulnerabilities"]([_vulnerability()])
+            return {
+                "status": "success",
+                "vulnerabilities": [
+                    Vulnerability.model_validate(_vulnerability()).model_copy(
+                        update={
+                            "engine_id": "good",
+                            "engine_label": "Good engine",
+                            "analysis_source": "good",
+                        },
+                    ),
+                ],
+                "error_message": "",
+                "total_candidates": 1,
+                "processed_candidates": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.run_mining_engine",
+                    side_effect=run_engine,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="live-report-idempotency",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-live-report-idempotency",
+                    cancel_event=threading.Event(),
+                    mining_engines=[{
+                        "engine_id": "good",
+                        "engine_label": "Good engine",
+                        "enabled": True,
+                    }],
+                )
+
+        reporter.report_vulnerability.assert_awaited_once()
+        final_vulnerabilities = reporter.finish_scan.await_args.args[1]
+        self.assertEqual(len(final_vulnerabilities), 1)
+        self.assertEqual(
+            final_vulnerabilities[0].output_source.agent_session_id,
+            "",
+        )
+
     async def test_scan_errors_when_all_enabled_engines_fail(self) -> None:
         reporter = _reporter()
         config = AgentConfig()

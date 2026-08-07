@@ -2,6 +2,8 @@ import asyncio
 import csv
 import io
 import unittest
+import zipfile
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.responses import Response
@@ -78,6 +80,61 @@ class ReportExportTests(unittest.TestCase):
         ):
             return asyncio.run(
                 scan_api.download_report("scan-1", user, **filters)
+            )
+
+    def _download_zip(
+        self,
+        scan: ScanStatus,
+        fp_map: dict[int, FpReviewResult] | None = None,
+    ) -> Response:
+        user = User(user_id="owner", username="owner", role="user")
+        store = SimpleNamespace(get_scan_meta=lambda _scan_id: None)
+        with (
+            patch.object(scan_api, "_check_scan_owner", new=AsyncMock()),
+            patch.object(
+                scan_api,
+                "get_scan_status",
+                new=AsyncMock(return_value=scan),
+            ),
+            patch.object(scan_api, "get_scan_store", return_value=store),
+            patch.object(
+                scan_api,
+                "run_store_call",
+                new=AsyncMock(return_value=fp_map or {}),
+            ),
+            patch.object(scan_api, "_fp_review_stage_titles", return_value=[]),
+        ):
+            return asyncio.run(scan_api.download_report_zip("scan-1", user))
+
+    def _download_single(
+        self,
+        scan: ScanStatus,
+        index: int,
+        fp_map: dict[int, FpReviewResult] | None = None,
+    ) -> Response:
+        user = User(user_id="owner", username="owner", role="user")
+        store = SimpleNamespace(get_scan_meta=lambda _scan_id: None)
+        with (
+            patch.object(scan_api, "_check_scan_owner", new=AsyncMock()),
+            patch.object(
+                scan_api,
+                "get_scan_status",
+                new=AsyncMock(return_value=scan),
+            ),
+            patch.object(scan_api, "get_scan_store", return_value=store),
+            patch.object(
+                scan_api,
+                "run_store_call",
+                new=AsyncMock(return_value=fp_map or {}),
+            ),
+            patch.object(scan_api, "_fp_review_stage_titles", return_value=[]),
+        ):
+            return asyncio.run(
+                scan_api.download_vulnerability_report(
+                    "scan-1",
+                    index,
+                    user,
+                ),
             )
 
     @staticmethod
@@ -232,6 +289,90 @@ class ReportExportTests(unittest.TestCase):
         _, rows = self._rows(self._download(scan, filtered=True))
         self.assertEqual(len(rows), 125)
         self.assertEqual(rows[-1]["function"], "issue-124")
+
+    def test_existing_duplicate_findings_are_deduplicated_only_in_reports(
+        self,
+    ) -> None:
+        first = _vulnerability("duplicate", audit_index=7)
+        first.root_cause = "unchecked pointer"
+        duplicate = first.model_copy(deep=True)
+        duplicate.output_source.agent_id = "agent-enriched"
+        scan = ScanStatus(
+            scan_id="scan-1",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[first, duplicate],
+            validations=[
+                VulnerabilityValidation(
+                    vuln_index=0,
+                    status="verified",
+                    updated_at="2026-07-30T00:00:00+00:00",
+                    validation_output="older validation",
+                ),
+                VulnerabilityValidation(
+                    vuln_index=1,
+                    status="verified",
+                    updated_at="2026-07-31T00:00:00+00:00",
+                    validation_output="newer validation",
+                ),
+            ],
+        )
+        fp_map = {
+            0: _fp_result(0, "uncertain", reason="incomplete conclusion"),
+            1: _fp_result(1, "tp", reason="confirmed by review").model_copy(
+                update={"created_at": "2026-07-31T00:00:00+00:00"},
+            ),
+        }
+
+        _, rows = self._rows(self._download(scan, fp_map))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["fp_verdict"], "tp")
+
+        _, filtered_rows = self._rows(self._download(
+            scan,
+            fp_map,
+            filtered=True,
+            fp_review_state="tp",
+        ))
+        self.assertEqual(len(filtered_rows), 1)
+
+        zip_response = self._download_zip(scan, fp_map)
+        with zipfile.ZipFile(io.BytesIO(zip_response.body)) as archive:
+            names = archive.namelist()
+            report_names = [name for name in names if name != "README.md"]
+            self.assertEqual(len(report_names), 1)
+            self.assertIn(
+                "共 1 个 AI 确认问题",
+                archive.read("README.md").decode("utf-8"),
+            )
+            report_markdown = archive.read(report_names[0]).decode("utf-8")
+            self.assertIn("confirmed by review", report_markdown)
+            self.assertIn("newer validation", report_markdown)
+
+        single_markdown = self._download_single(scan, 0, fp_map).body.decode(
+            "utf-8",
+        )
+        self.assertIn("confirmed by review", single_markdown)
+        self.assertIn("newer validation", single_markdown)
+        self.assertEqual(len(scan.vulnerabilities), 2)
+
+    def test_report_dedup_keeps_distinct_root_cause(self) -> None:
+        first = _vulnerability("same-location", audit_index=3)
+        first.root_cause = "first root cause"
+        second = first.model_copy(update={"root_cause": "second root cause"})
+        scan = ScanStatus(
+            scan_id="scan-1",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[first, second],
+        )
+
+        _, rows = self._rows(self._download(scan))
+        self.assertEqual(len(rows), 2)
 
     def test_public_csv_route_forwards_filters(self) -> None:
         user = User(user_id="owner", username="owner", role="user")

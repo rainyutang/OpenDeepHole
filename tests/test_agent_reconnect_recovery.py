@@ -1729,6 +1729,87 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 [0, 1],
             )
 
+    def test_report_static_finding_replay_reuses_existing_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-static-replay", ScanItemStatus.AUDITING, total=1)
+            scan.auto_fp_review = False
+            meta = _meta()
+            meta.auto_fp_review = False
+            store.save_scan(scan, meta)
+            agent_api._running_scans["scan-static-replay"] = scan
+            finding = Vulnerability(
+                file="static.c",
+                line=12,
+                function="parse",
+                vuln_type="npd",
+                severity="high",
+                description="null dereference",
+                root_cause="unchecked pointer",
+                confirmed=True,
+                ai_verdict="confirmed",
+                audit_index=0,
+            )
+            replay = finding.model_copy(deep=True)
+            replay.output_source.agent_id = "agent-after-enrichment"
+            published: list[tuple[str, str, dict]] = []
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    new=_direct_store_call,
+                ),
+                patch(
+                    "backend.api.scan.run_store_call",
+                    new=_direct_store_call,
+                ),
+                patch(
+                    "backend.sse.publish",
+                    side_effect=lambda scan_id, event_type, data: published.append(
+                        (scan_id, event_type, data),
+                    ),
+                ),
+            ):
+                first_response = asyncio.run(
+                    agent_api.agent_report_vulnerability(
+                        "scan-static-replay",
+                        finding,
+                    ),
+                )
+                agent_api._running_scans.pop("scan-static-replay", None)
+                replay_response = asyncio.run(
+                    agent_api.agent_report_vulnerability(
+                        "scan-static-replay",
+                        replay,
+                    ),
+                )
+                asyncio.run(agent_api.agent_finish_scan(
+                    "scan-static-replay",
+                    AgentScanFinish(
+                        vulnerabilities=[replay, replay.model_copy(deep=True)],
+                        status="complete",
+                        total_candidates=1,
+                        processed_candidates=1,
+                    ),
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+
+            self.assertEqual(first_response["index"], 0)
+            self.assertEqual(replay_response["index"], 0)
+            self.assertEqual(
+                len(store.get_vulnerabilities("scan-static-replay")),
+                1,
+            )
+            vulnerability_events = [
+                data
+                for _scan_id, event_type, data in published
+                if event_type == "scan_vulnerability"
+            ]
+            self.assertEqual(len(vulnerability_events), 1)
+            self.assertEqual(vulnerability_events[0]["index"], 0)
+
     def test_finish_scan_keeps_same_finding_from_different_engines(
         self,
     ) -> None:

@@ -16,6 +16,7 @@ from backend.models import (
     Vulnerability,
 )
 from backend.scan_event_log import is_agent_local_task_output
+from backend.vulnerability_identity import vulnerability_report_identity
 from task_agent import opencode_task_context
 from task_agent.output_format import is_task_output_line
 
@@ -799,7 +800,7 @@ async def run_scan(
         run.status = "running"
         run.started_at = datetime.now(timezone.utc).isoformat()
         await _publish_engine_run(reporter, scan_id, run)
-        reported_vulnerability_counts: dict[str, int] = {}
+        reported_vulnerability_counts: dict[tuple[object, ...], int] = {}
 
         async def report_values(
             values: list[Any],
@@ -826,7 +827,7 @@ async def run_scan(
             for vulnerability, response in reported:
                 if response is None:
                     continue
-                fingerprint = vulnerability.model_dump_json()
+                fingerprint = vulnerability_report_identity(vulnerability)
                 reported_vulnerability_counts[fingerprint] = (
                     reported_vulnerability_counts.get(fingerprint, 0) + 1
                 )
@@ -888,7 +889,7 @@ async def run_scan(
             unreported: list[Vulnerability] = []
             remaining_reported = dict(reported_vulnerability_counts)
             for vulnerability in vulnerabilities:
-                fingerprint = vulnerability.model_dump_json()
+                fingerprint = vulnerability_report_identity(vulnerability)
                 count = remaining_reported.get(fingerprint, 0)
                 if count > 0:
                     remaining_reported[fingerprint] = count - 1

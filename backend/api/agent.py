@@ -34,7 +34,6 @@ import socket
 import time
 import uuid
 import zipfile
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,6 +91,7 @@ from backend.scan_event_log import (
     is_agent_local_task_output,
 )
 from backend.threat_data import parse_threat_analysis_data
+from backend.vulnerability_identity import vulnerability_report_identity
 
 router = APIRouter(prefix="/api/agent")
 public_router = APIRouter()  # Routes not under /api/agent prefix
@@ -2706,69 +2706,17 @@ async def agent_scan_events_v2(
     return {"ok": True, "count": len(events)}
 
 
-def _finish_vulnerability_identity(
-    vuln: Vulnerability,
-) -> tuple:
-    """Return an engine-scoped key for idempotent finish reconciliation."""
-    return (
-        str(vuln.engine_id or "").strip(),
-        vuln.audit_index,
-        str(vuln.source_task_id or "").strip(),
-        str(vuln.threat_surface_node_id or "").strip(),
-        str(vuln.threat_method_node_id or "").strip(),
-        str(vuln.threat_code_path or "").strip(),
-        str(vuln.file or "").strip(),
-        int(vuln.line),
-        str(vuln.function or "").strip(),
-        str(vuln.vuln_type or "").strip().casefold(),
-        bool(vuln.confirmed),
-        str(vuln.ai_verdict or "").strip().casefold(),
-        str(vuln.description or "").strip(),
-        str(vuln.root_cause or "").strip(),
-        str(vuln.trigger_conditions or "").strip(),
-    )
-
-
-def _reported_vulnerability_identity(vuln: Vulnerability) -> str:
-    """Return the immutable evidence identity used for live-report replay."""
-    payload = vuln.model_dump(
-        mode="json",
-        exclude={
-            "user_verdict",
-            "user_verdict_reason",
-            "ticket_submitted",
-            "ticket_id",
-        },
-    )
-    # SQLite exposes an empty legacy chain as the finding function so callers
-    # always have a usable display fallback. Normalize both representations.
-    payload["call_chain"] = payload.get("call_chain") or [payload["function"]]
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _existing_threat_vulnerability(
+def _existing_reported_vulnerability(
     vulnerabilities: list[Vulnerability],
     target: Vulnerability,
 ) -> tuple[int, Vulnerability] | None:
-    """Find an exact threat-audit replay already persisted for this task."""
-    if (
-        str(target.analysis_source or "").strip() != "threat_audit"
-        and str(target.engine_id or "").strip() != "threat_audit"
-    ):
-        return None
-    if not str(target.source_task_id or "").strip():
-        return None
-    target_identity = _reported_vulnerability_identity(target)
+    """Find an already-persisted replay for any mining engine."""
+    target_identity = vulnerability_report_identity(target)
     return next(
         (
             (index, existing)
             for index, existing in enumerate(vulnerabilities)
-            if _reported_vulnerability_identity(existing) == target_identity
+            if vulnerability_report_identity(existing) == target_identity
         ),
         None,
     )
@@ -2934,22 +2882,16 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
         vuln,
         selections=meta.mining_engines if meta is not None else [],
     )
-    is_threat_report = (
-        str(vuln.analysis_source or "").strip() == "threat_audit"
-        or str(vuln.engine_id or "").strip() == "threat_audit"
-    )
     live_scan = _running_scans.get(scan_id)
-    existing_report = None
-    if is_threat_report:
-        existing_vulnerabilities = (
-            live_scan.vulnerabilities
-            if live_scan is not None
-            else await run_store_call(store, "get_vulnerabilities", scan_id)
-        )
-        existing_report = _existing_threat_vulnerability(
-            existing_vulnerabilities,
-            vuln,
-        )
+    existing_vulnerabilities = (
+        live_scan.vulnerabilities
+        if live_scan is not None
+        else await run_store_call(store, "get_vulnerabilities", scan_id)
+    )
+    existing_report = _existing_reported_vulnerability(
+        existing_vulnerabilities,
+        vuln,
+    )
     is_new_report = existing_report is None
     if existing_report is None:
         vuln_index = await run_store_call(
@@ -3401,10 +3343,10 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         "get_vulnerabilities",
         scan_id,
     )
-    existing_identities = Counter(
-        _finish_vulnerability_identity(vuln)
+    existing_identities = {
+        vulnerability_report_identity(vuln)
         for vuln in existing_vulnerabilities
-    )
+    }
     mining_engine_selections = (
         loaded[1].mining_engines
         if loaded is not None
@@ -3417,9 +3359,8 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
             raw_vuln,
             selections=mining_engine_selections,
         )
-        identity = _finish_vulnerability_identity(vuln)
-        if existing_identities[identity] > 0:
-            existing_identities[identity] -= 1
+        identity = vulnerability_report_identity(vuln)
+        if identity in existing_identities:
             continue
         vuln_index = await run_store_call(
             store,
@@ -3427,6 +3368,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
             scan_id,
             vuln,
         )
+        existing_identities.add(identity)
         reconciled_vulnerabilities.append((vuln_index, vuln))
 
     final_vulnerabilities = (
