@@ -22,17 +22,34 @@ async def main():
     marker_path = Path(sys.argv[1])
     grandchild_path = Path(sys.argv[2])
     mode = sys.argv[3]
+    terminate_process_tree = serve_client._terminate_process_tree
+
+    def terminate_quickly(pid, timeout=5.0, **kwargs):
+        return terminate_process_tree(pid, timeout=0.5, **kwargs)
+
+    serve_client._terminate_process_tree = terminate_quickly
+    grandchild_code = (
+        "import os, signal, sys, time; "
+        "from pathlib import Path; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+        "time.sleep(300)"
+    )
     child_code = (
         "import subprocess, sys, time; "
-        "from pathlib import Path; "
         "grandchild = subprocess.Popen("
-        "[sys.executable, '-c', 'import time; time.sleep(300)'], "
+        "[sys.executable, '-c', sys.argv[2], sys.argv[1]], "
         "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
-        "Path(sys.argv[1]).write_text(str(grandchild.pid), encoding='utf-8'); "
         "time.sleep(300)"
     )
     child = subprocess.Popen(
-        [sys.executable, "-c", child_code, str(grandchild_path)],
+        [
+            sys.executable,
+            "-c",
+            child_code,
+            str(grandchild_path),
+            grandchild_code,
+        ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

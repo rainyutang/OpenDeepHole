@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -3905,6 +3906,37 @@ def test_terminate_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
     assert commands == [["taskkill", "/PID", "12345", "/T", "/F"]]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group behavior")
+def test_terminate_process_tree_escalates_after_launcher_exits(monkeypatch) -> None:
+    from task_agent import serve_client
+
+    group_running = {"value": True}
+    sent_signals: list[int] = []
+
+    def fake_killpg(pgid: int, signum: int) -> None:
+        assert pgid == 23456
+        sent_signals.append(signum)
+        if signum == signal.SIGKILL:
+            group_running["value"] = False
+
+    monkeypatch.setattr(
+        serve_client,
+        "_process_group_is_running",
+        lambda pgid: group_running["value"],
+    )
+    monkeypatch.setattr(serve_client.os, "killpg", fake_killpg)
+
+    stopped = serve_client._terminate_process_tree(
+        12345,
+        timeout=0.0,
+        wait=lambda timeout: None,
+        process_group_id=23456,
+    )
+
+    assert stopped is True
+    assert sent_signals == [signal.SIGTERM, signal.SIGKILL]
+
+
 def test_owned_serve_exit_cleanup_is_idempotent(monkeypatch, tmp_path: Path) -> None:
     from task_agent import serve_client
 
@@ -4789,7 +4821,10 @@ def test_start_locked_reclaims_stale_child_listener_after_marker_parent_exits(mo
         monkeypatch.setattr("task_agent.serve_client._resolve_executable", lambda name: "/bin/opencode")
         monkeypatch.setattr("task_agent.serve_client._pid_is_running", lambda pid: False)
         monkeypatch.setattr("task_agent.serve_client._port_is_in_use", lambda port: port_state["in_use"])
-        monkeypatch.setattr("task_agent.serve_client._listener_pids_for_port", lambda port: {22222})
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {22222} if port_state["in_use"] else set(),
+        )
         monkeypatch.setattr("task_agent.serve_client._terminate_process_tree", fake_terminate)
         monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
         monkeypatch.setattr("task_agent.serve_client.subprocess.Popen", lambda *args, **kwargs: FakeProc())
@@ -4867,6 +4902,72 @@ def test_stop_locked_terminates_process_tree_and_removes_marker(monkeypatch, tmp
     asyncio.run(run())
 
 
+def test_stop_locked_retains_marker_when_owned_tree_survives(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        from task_agent import serve_client
+
+        class FakeProc:
+            pid = 33333
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout):
+                raise subprocess.TimeoutExpired("opencode", timeout)
+
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "agent_pid": os.getpid(),
+                "pid": 33333,
+                "port": 4096,
+                "tool": "opencode",
+                "executable": "opencode",
+            }),
+            encoding="utf-8",
+        )
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            lambda *args, **kwargs: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._pid_is_running",
+            lambda pid: pid == 33333,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.asyncio.to_thread",
+            fake_to_thread,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._install_serve_exit_hooks",
+            lambda: None,
+        )
+
+        proc = FakeProc()
+        manager = OpenCodeServeManager()
+        manager._proc = proc
+        serve_client._register_owned_serve_process(proc, marker_path)
+        try:
+            with pytest.raises(RuntimeError, match="did not stop completely"):
+                await manager._stop_locked()
+
+            assert marker_path.exists()
+            assert (os.getpid(), 33333) in serve_client._OWNED_SERVE_PROCESSES
+        finally:
+            serve_client._unregister_owned_serve_process(33333)
+
+    asyncio.run(run())
+
+
 def test_stop_locked_reclaims_listener_when_parent_already_exited(monkeypatch, tmp_path: Path) -> None:
     async def run() -> None:
         class FakeProc:
@@ -4893,12 +4994,18 @@ def test_stop_locked_reclaims_listener_when_parent_already_exited(monkeypatch, t
             return func(*args, **kwargs)
 
         def fake_terminate(pid, *args, **kwargs):
+            if pid == 33333:
+                return True
             terminated.append(pid)
             port_state["in_use"] = False
+            return True
 
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
         monkeypatch.setattr("task_agent.serve_client._port_is_in_use", lambda port: port_state["in_use"])
-        monkeypatch.setattr("task_agent.serve_client._listener_pids_for_port", lambda port: {44444})
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {44444} if port_state["in_use"] else set(),
+        )
         monkeypatch.setattr("task_agent.serve_client._terminate_process_tree", fake_terminate)
         monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
 

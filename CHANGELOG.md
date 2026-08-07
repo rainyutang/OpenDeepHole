@@ -2,6 +2,7 @@
 
 ## 2026-08-07
 
+- **修复** standalone Task Agent 与完整 Agent 退出后可能残留 OpenCode Serve 监听进程：清理不再把启动器 PID 退出误判为整棵进程树结束，而是持续检查独立进程组及已确认归属的监听 PID；POSIX `SIGTERM` 超时后自动升级为 `SIGKILL`，Windows 使用 `taskkill /T /F`，强制清理后再次确认。失败时保留归属标记供下次恢复，Linux/macOS Agent 启动脚本同时改为 `exec` 以确保退出信号直达清理逻辑
 - **修复** standalone Task Agent 与完整平台统一使用受控 OpenCode 配置发现和深度合并：自动继承当前用户的全局 Provider/模型、可执行文件相邻、项目及 `OPENCODE_CONFIG*` 显式配置，再由 `task-agent.yaml` 的 `serve.opencode_config` 覆盖；最终生成的 workspace 配置不会回灌，Task Agent 受管权限与文件写入 Hook 仍最后生效
 - **修复** 漏洞挖掘引擎实时上报成功后不再因 Agent 补充来源信息而被最终结果列表误判为未上报；Agent、服务端实时接口和 v1 完成兜底统一按稳定漏洞证据身份做幂等合并，重复请求复用原 `idx`，不再重复持久化、发布 SSE 或扩大去误报任务范围，v2 轻量完成协议保持不变
 - **修复** 现有扫描的 ZIP、CSV 和单条 Markdown 报告在导出时按同一漏洞证据只读去重，并从重复组中选取最新有效去误报结论和最新验证结果；历史数据库记录、页面列表、统计数量和既有 `idx` 链接均不修改

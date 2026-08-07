@@ -313,6 +313,15 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertNotIn("pacman -S --needed", text)
             self.assertNotIn("INSTALL_MSYS2", text)
 
+    def test_posix_launcher_execs_agent_daemon_for_signal_delivery(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        script_text = (root / "run_agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'exec "$PYTHON_CMD" -m deephole_client.main "$@"',
+            script_text,
+        )
+
     def test_mcp_sse_dependency_requires_multi_loop_safe_version(self) -> None:
         root = Path(__file__).resolve().parent.parent
         requirements = (root / "requirements.txt").read_text(encoding="utf-8")
