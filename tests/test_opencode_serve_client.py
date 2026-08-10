@@ -3906,6 +3906,83 @@ def test_terminate_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
     assert commands == [["taskkill", "/PID", "12345", "/T", "/F"]]
 
 
+def test_reclaim_windows_listener_uses_port_liveness_when_pid_probe_is_false(
+    monkeypatch,
+) -> None:
+    from task_agent import serve_client
+
+    listening = {26364}
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        listening.clear()
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"")
+
+    monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+    monkeypatch.setattr(
+        "task_agent.serve_client._pid_is_running",
+        lambda pid: False,
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._port_is_in_use",
+        lambda port: bool(listening),
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._listener_pids_for_port",
+        lambda port: set(listening),
+    )
+    monkeypatch.setattr("task_agent.serve_client.subprocess.run", fake_run)
+
+    result = serve_client._reclaim_serve_port(
+        6579,
+        reason="test stale Agent-owned serve marker",
+        allowed_pids={26364},
+    )
+
+    assert commands == [["taskkill", "/PID", "26364", "/T", "/F"]]
+    assert result.attempted is True
+    assert result.pids == (26364,)
+    assert result.released is True
+
+
+def test_terminate_windows_listener_falls_back_when_taskkill_fails(
+    monkeypatch,
+    caplog,
+) -> None:
+    from task_agent import serve_client
+
+    listening = {26364}
+    direct_kills: list[tuple[int, int]] = []
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            5,
+            stdout=b"Access is denied",
+        )
+
+    def fake_kill(pid: int, signum: int) -> None:
+        direct_kills.append((pid, signum))
+        listening.discard(pid)
+
+    monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+    monkeypatch.setattr("task_agent.serve_client.subprocess.run", fake_run)
+    monkeypatch.setattr("task_agent.serve_client.os.kill", fake_kill)
+    caplog.set_level("WARNING")
+
+    stopped = serve_client._terminate_process_tree(
+        26364,
+        timeout=0.0,
+        is_running=lambda: 26364 in listening,
+    )
+
+    assert stopped is True
+    assert direct_kills == [(26364, signal.SIGTERM)]
+    assert "taskkill failed" in caplog.text
+    assert "exit_code=5" in caplog.text
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group behavior")
 def test_terminate_process_tree_escalates_after_launcher_exits(monkeypatch) -> None:
     from task_agent import serve_client
@@ -4902,7 +4979,7 @@ def test_stop_locked_terminates_process_tree_and_removes_marker(monkeypatch, tmp
     asyncio.run(run())
 
 
-def test_stop_locked_retains_marker_when_owned_tree_survives(
+def test_stop_locked_retains_state_and_retries_when_owned_tree_survives(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -4935,9 +5012,11 @@ def test_stop_locked_retains_marker_when_owned_tree_survives(
             return func(*args, **kwargs)
 
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        termination_results = [False, True]
+
         monkeypatch.setattr(
             "task_agent.serve_client._terminate_process_tree",
-            lambda *args, **kwargs: False,
+            lambda *args, **kwargs: termination_results.pop(0),
         )
         monkeypatch.setattr(
             "task_agent.serve_client._pid_is_running",
@@ -4955,6 +5034,12 @@ def test_stop_locked_retains_marker_when_owned_tree_survives(
         proc = FakeProc()
         manager = OpenCodeServeManager()
         manager._proc = proc
+        manager._port = 4096
+        manager._key = OpenCodeServeKey(
+            tool="opencode",
+            executable="opencode",
+        )
+        manager._startup_cwd = tmp_path / "runtime"
         serve_client._register_owned_serve_process(proc, marker_path)
         try:
             with pytest.raises(RuntimeError, match="did not stop completely"):
@@ -4962,6 +5047,20 @@ def test_stop_locked_retains_marker_when_owned_tree_survives(
 
             assert marker_path.exists()
             assert (os.getpid(), 33333) in serve_client._OWNED_SERVE_PROCESSES
+            assert manager._proc is proc
+            assert manager._port == 4096
+            assert manager._key is not None
+            assert manager._startup_cwd == tmp_path / "runtime"
+            assert manager._restart_required is True
+
+            await manager._stop_locked()
+
+            assert manager._proc is None
+            assert manager._port is None
+            assert manager._key is None
+            assert manager._startup_cwd is None
+            assert not marker_path.exists()
+            assert (os.getpid(), 33333) not in serve_client._OWNED_SERVE_PROCESSES
         finally:
             serve_client._unregister_owned_serve_process(33333)
 

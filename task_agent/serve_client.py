@@ -974,6 +974,7 @@ def _reclaim_serve_port(
             detail="listener ownership was not proven",
         )
 
+    termination_failed_pids: list[int] = []
     for pid in pids:
         logger.warning(
             "Reclaiming OpenCode serve port 127.0.0.1:%s by terminating listener pid %s (%s)",
@@ -981,13 +982,32 @@ def _reclaim_serve_port(
             pid,
             reason,
         )
-        _terminate_process_tree(pid)
+        stopped = _terminate_process_tree(
+            pid,
+            is_running=(
+                (lambda pid=pid: pid in _listener_pids_for_port(port))
+                if sys.platform == "win32"
+                else None
+            ),
+        )
+        if not stopped:
+            termination_failed_pids.append(pid)
     released = _wait_port_released(port)
+    failure_note = (
+        "; termination failed for listener pid(s)="
+        + ",".join(str(pid) for pid in termination_failed_pids)
+        if termination_failed_pids
+        else ""
+    )
     return _PortReclaimResult(
         attempted=True,
         pids=pids,
         released=released,
-        detail="port released" if released else "port still in use after terminating listener pid(s)",
+        detail=(
+            "port released"
+            if released
+            else "port still in use after terminating listener pid(s)" + failure_note
+        ),
     )
 
 
@@ -1250,13 +1270,19 @@ def _terminate_process_tree(
     wait: Callable[[float], None] | None = None,
     *,
     process_group_id: int | None = None,
+    is_running: Callable[[], bool] | None = None,
 ) -> bool:
     if sys.platform == "win32":
-        return _terminate_windows_process_tree(pid, timeout, wait=wait)
+        return _terminate_windows_process_tree(
+            pid,
+            timeout,
+            wait=wait,
+            is_running=is_running,
+        )
 
     pgid = process_group_id or _owned_process_group_id(pid)
     use_process_group = pgid is not None
-    running = (
+    running = is_running or (
         (lambda: _process_group_is_running(pgid))
         if pgid is not None
         else (lambda: _pid_is_running(pid))
@@ -1301,31 +1327,62 @@ def _terminate_windows_process_tree(
     timeout: float,
     *,
     wait: Callable[[float], None] | None = None,
+    is_running: Callable[[], bool] | None = None,
 ) -> bool:
-    if not _pid_is_running(pid):
+    running = is_running or (lambda: _pid_is_running(pid))
+    if not running():
         return True
+    taskkill_succeeded = False
     try:
-        subprocess.run(
+        completed = subprocess.run(
             ["taskkill", "/PID", str(pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             timeout=timeout,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        returncode = int(getattr(completed, "returncode", 0) or 0)
+        taskkill_succeeded = returncode == 0
+        if not taskkill_succeeded:
+            raw_output = getattr(completed, "stdout", b"") or b""
+            output = (
+                raw_output.decode(errors="replace")
+                if isinstance(raw_output, bytes)
+                else str(raw_output)
+            )
+            logger.warning(
+                "taskkill failed for OpenCode serve pid %s exit_code=%s output=%s",
+                pid,
+                returncode,
+                _one_line_preview(output) or "<empty>",
+            )
+    except FileNotFoundError:
+        logger.warning("taskkill is unavailable while stopping OpenCode serve pid %s", pid)
+    except subprocess.TimeoutExpired:
+        logger.warning("taskkill timed out while stopping OpenCode serve pid %s", pid)
     except Exception as exc:
         logger.warning("Failed to terminate old OpenCode serve process tree pid %s: %s", pid, exc)
-    if _wait_process_exit(pid, timeout, wait=wait):
+    if not running():
+        return True
+    if taskkill_succeeded and _wait_process_exit(
+        pid,
+        timeout,
+        wait=wait,
+        is_running=running,
+    ):
         return True
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        return True
+        return not running()
     except Exception as exc:
         logger.warning("Failed to kill old OpenCode serve process pid %s: %s", pid, exc)
-        return False
-    stopped = _wait_process_exit(pid, timeout, wait=wait)
+    stopped = _wait_process_exit(
+        pid,
+        timeout,
+        wait=wait,
+        is_running=running,
+    )
     if not stopped:
         logger.warning(
             "OpenCode serve process tree pid %s is still running after taskkill /T /F",
@@ -1484,7 +1541,17 @@ def _stop_owned_serve_record(
                 listener_pid,
                 reason,
             )
-            _terminate_process_tree(listener_pid)
+            _terminate_process_tree(
+                listener_pid,
+                is_running=(
+                    (
+                        lambda listener_pid=listener_pid: listener_pid
+                        in _listener_pids_for_port(effective_port)
+                    )
+                    if sys.platform == "win32"
+                    else None
+                ),
+            )
         remaining_listener_pids = _wait_owned_listener_pids_released(
             effective_port,
             known_listener_pids,
@@ -5991,8 +6058,9 @@ class OpenCodeServeManager:
         pid = int(marker.get("pid") or 0)
         known_listener_pids = _marker_listener_pids(marker)
         if not _pid_is_running(pid):
+            reclaim_result: _PortReclaimResult | None = None
             if marker_port > 0 and known_listener_pids and _port_is_in_use(marker_port):
-                await asyncio.to_thread(
+                reclaim_result = await asyncio.to_thread(
                     _reclaim_serve_port,
                     marker_port,
                     reason="stale Agent-owned serve marker",
@@ -6009,6 +6077,11 @@ class OpenCodeServeManager:
                     "Previous Agent-owned OpenCode Serve listener did not stop; "
                     f"pid(s)={','.join(str(item) for item in sorted(remaining_listener_pids))} "
                     f"port={marker_port} ownership marker was retained"
+                    + (
+                        f"; reclaim={reclaim_result.detail}"
+                        if reclaim_result is not None
+                        else ""
+                    )
                 )
             _remove_marker(self._marker_path)
             return
@@ -6021,8 +6094,9 @@ class OpenCodeServeManager:
             marker_port,
         )
         tree_stopped = await asyncio.to_thread(_terminate_process_tree, pid)
+        reclaim_result = None
         if marker_port > 0 and known_listener_pids and _port_is_in_use(marker_port):
-            await asyncio.to_thread(
+            reclaim_result = await asyncio.to_thread(
                 _reclaim_serve_port,
                 marker_port,
                 reason="Agent-owned serve process tree left listener behind",
@@ -6040,6 +6114,11 @@ class OpenCodeServeManager:
                 f"pid={pid} listener_pid(s)="
                 f"{','.join(str(item) for item in sorted(remaining_listener_pids))} "
                 f"port={marker_port} ownership marker was retained"
+                + (
+                    f"; reclaim={reclaim_result.detail}"
+                    if reclaim_result is not None
+                    else ""
+                )
             )
         _remove_marker(self._marker_path)
 
@@ -6203,12 +6282,7 @@ class OpenCodeServeManager:
         port = self._port
         listener_pids = set(self._listener_pids)
         startup_log_path = self._startup_log_path
-        self._proc = None
-        self._port = None
-        self._key = None
-        self._listener_pids.clear()
         self._startup_log_path = None
-        self._startup_cwd = None
         if proc is None:
             _remove_file(startup_log_path)
             return
@@ -6231,17 +6305,23 @@ class OpenCodeServeManager:
                     port=port,
                     listener_pids=listener_pids,
                 )
+        except BaseException:
+            self._restart_required = True
+            raise
         finally:
-            try:
-                if stopped:
-                    _unregister_owned_serve_process(pid)
-            finally:
-                _remove_file(startup_log_path)
+            _remove_file(startup_log_path)
         if not stopped:
+            self._restart_required = True
             raise RuntimeError(
                 "OpenCode Serve process tree did not stop completely; "
                 f"pid={pid} port={port or ''} ownership marker was retained"
             )
+        _unregister_owned_serve_process(pid)
+        self._proc = None
+        self._port = None
+        self._key = None
+        self._listener_pids.clear()
+        self._startup_cwd = None
 
 
 _manager: OpenCodeServeManager | None = None

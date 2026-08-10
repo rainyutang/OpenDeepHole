@@ -97,7 +97,7 @@ result = await run_opencode_task(
 
 未注册宿主时，同一函数会从组件自有的 YAML 文件完成初始化。可以传入 `config_path=...`、设置 `TASK_AGENT_CONFIG`，或将 `task-agent.yaml` 放在当前目录中。请复制 `task-agent.example.yaml` 作为起点。在单例的整个生命周期内，该配置会固定项目、可写工作目录、组件工作区、Serve 进程设置和显式模型池。只有执行 `await shutdown_opencode()` 后才能选择其他配置。
 
-一次 `run_opencode_task()` 返回后不会立即关闭 Serve；只要 Python 宿主进程仍在运行，后续任务就会继续复用这个单例。调用 `await shutdown_opencode()` 会立即终止组件启动的 Serve 进程树。若调用方未显式 shutdown，组件也会在解释器正常退出以及收到 `SIGINT`（Ctrl-C）或 `SIGTERM` 时自动清理，并把信号继续交给宿主原有处理逻辑。POSIX 清理会先向已登记的独立进程组发送 `SIGTERM`，持续检查整个进程组和已确认归属的监听 PID，5 秒后仍未退出则使用 `SIGKILL`；Windows 使用 `taskkill /T /F` 清理进程树。两种平台都会在确认监听进程消失后才删除归属标记。`SIGKILL` 和 `os._exit()` 无法执行 Python 清理；这类异常退出由下次启动时的归属标记恢复逻辑处理。
+一次 `run_opencode_task()` 返回后不会立即关闭 Serve；只要 Python 宿主进程仍在运行，后续任务就会继续复用这个单例。调用 `await shutdown_opencode()` 会立即终止组件启动的 Serve 进程树。若调用方未显式 shutdown，组件也会在解释器正常退出以及收到 `SIGINT`（Ctrl-C）或 `SIGTERM` 时自动清理，并把信号继续交给宿主原有处理逻辑。POSIX 清理会先向已登记的独立进程组发送 `SIGTERM`，持续检查整个进程组和已确认归属的监听 PID，5 秒后仍未退出则使用 `SIGKILL`；Windows 对已确认归属且仍占用目标端口的监听 PID 始终执行 `taskkill /T /F`，必要时使用直接终止兜底，并按该 PID 是否仍在目标端口监听验证结果。两种平台都会在确认监听进程消失后才删除归属标记；清理失败时同时保留管理器内存状态和磁盘标记供下一次重试。`SIGKILL` 和 `os._exit()` 无法执行 Python 清理；这类异常退出由下次启动时的归属标记恢复逻辑处理。
 
 standalone 与完整 Agent 共用受控的 OpenCode 配置发现：依次合并当前用户的全局配置、所选可执行文件相邻配置、项目配置和 `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` 显式配置。随后再合并 `serve.opencode_config`，因此 YAML 是 standalone 的最高优先级用户层；`model_pool.models[].model` 只选择 `provider/model`，对应 Provider 可以直接由用户全局配置提供。自动发现的可执行文件相邻目录和项目目录只读取 `opencode.json` / `opencode.jsonc`，不会误读通用 `config.json`；最终生成的 `workspace_dir/opencode.json` 也不会作为项目配置回灌。
 
