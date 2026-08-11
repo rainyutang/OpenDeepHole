@@ -458,6 +458,11 @@ def _scan_code_graph_mcp(value: str | None) -> AgentMcpConfig | None:
         return None
 
 
+def _scan_mcp_enabled(value: str | None) -> bool:
+    config = _scan_code_graph_mcp(value)
+    return config is not None and config.enabled
+
+
 def _scan_validation_config(
     value: str | None,
 ) -> ScanVulnerabilityValidationConfig | None:
@@ -1732,6 +1737,7 @@ class SqliteScanStore(ScanStoreBase):
             validation_environment=(
                 row["validation_environment"] if row["validation_environment"] is not None else ""
             ),
+            code_graph_mcp_enabled=_scan_mcp_enabled(row["code_graph_mcp_json"]),
             knowledge_base_enabled=bool(row["knowledge_base_enabled"]),
             vulnerability_validation_enabled=bool(
                 row["vulnerability_validation_enabled"]

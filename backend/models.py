@@ -673,6 +673,7 @@ class ScanStatus(BaseModel):
     fp_review_method_selection: FpReviewMethodSelection | None = None
     product: str = ""
     validation_environment: str = ""
+    code_graph_mcp_enabled: bool = False
     knowledge_base_enabled: bool = False
     vulnerability_validation_enabled: bool = False
     validation_method_id: str = ""

@@ -285,6 +285,7 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
     threat_analysis_method: text(value.threat_analysis_method),
     product: text(value.product),
     validation_environment: text(value.validation_environment),
+    code_graph_mcp_enabled: value.code_graph_mcp_enabled === true,
     knowledge_base_enabled: value.knowledge_base_enabled === true,
     vulnerability_validation_enabled: value.vulnerability_validation_enabled === true,
     validation_method_id: text(value.validation_method_id),

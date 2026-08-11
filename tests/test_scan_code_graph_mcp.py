@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from backend.api.scan import get_scan_overview_v2
 from backend.models import (
     AgentMcpConfig,
     AgentMcpLocalConfig,
@@ -12,6 +15,7 @@ from backend.models import (
     ScanItemStatus,
     ScanMeta,
     ScanStatus,
+    User,
 )
 from backend.store.sqlite import SqliteScanStore
 from deephole_client import codegraph as codegraph_runtime
@@ -78,6 +82,107 @@ def test_scan_mcp_snapshot_round_trips_without_public_serialization(tmp_path: Pa
         for row in store._conn.execute("PRAGMA table_info(scans)").fetchall()
     }
     assert "code_graph_mcp_json" in columns
+
+
+def test_scan_mcp_enablement_is_derived_from_private_snapshots(tmp_path: Path) -> None:
+    store = SqliteScanStore(tmp_path / "scan.db")
+    graph = _remote_mcp("http://127.0.0.1:9010/mcp")
+    knowledge = _remote_mcp(
+        "http://127.0.0.1:9020/mcp",
+        name="knowledge-base",
+    )
+    disabled_graph = graph.model_copy(deep=True)
+    disabled_graph.enabled = False
+    cases = [
+        ("both-enabled", graph, knowledge, True, True),
+        ("graph-only", graph, None, True, False),
+        ("knowledge-only", None, knowledge, False, True),
+        ("both-disabled", disabled_graph, None, False, False),
+    ]
+
+    for scan_id, graph_config, knowledge_config, graph_enabled, knowledge_enabled in cases:
+        scan = ScanStatus(
+            scan_id=scan_id,
+            project_id=scan_id,
+            status=ScanItemStatus.COMPLETE,
+            progress=1,
+            total_candidates=0,
+            processed_candidates=0,
+            vulnerabilities=[],
+        )
+        meta = ScanMeta(
+            scan_items=[],
+            created_at="2026-08-11T00:00:00+00:00",
+            scan_name=scan_id,
+            user_id="user-1",
+            knowledge_base_enabled=knowledge_enabled,
+            code_graph_mcp=graph_config,
+            knowledge_base_mcp=knowledge_config,
+        )
+        store.save_scan(scan, meta)
+
+        loaded = store.load_scan(scan_id)
+        assert loaded is not None
+        loaded_scan, loaded_meta = loaded
+        assert loaded_scan.code_graph_mcp_enabled is graph_enabled
+        assert loaded_scan.knowledge_base_enabled is knowledge_enabled
+        assert loaded_meta.code_graph_mcp == graph_config
+        assert loaded_meta.knowledge_base_mcp == knowledge_config
+        public_payload = loaded_scan.model_dump(mode="json")
+        assert "code_graph_mcp" not in public_payload
+        assert "knowledge_base_mcp" not in public_payload
+
+
+def test_scan_overview_exposes_enablement_without_private_mcp_values(tmp_path: Path) -> None:
+    store = SqliteScanStore(tmp_path / "scan.db")
+    graph = _remote_mcp("http://127.0.0.1:9010/mcp")
+    knowledge = _remote_mcp(
+        "http://127.0.0.1:9020/mcp",
+        name="knowledge-base",
+    )
+    scan = ScanStatus(
+        scan_id="scan-overview",
+        project_id="project",
+        status=ScanItemStatus.COMPLETE,
+        progress=1,
+        total_candidates=0,
+        processed_candidates=0,
+        vulnerabilities=[],
+    )
+    meta = ScanMeta(
+        scan_items=[],
+        created_at="2026-08-11T00:00:00+00:00",
+        scan_name="scan-overview",
+        user_id="user-1",
+        knowledge_base_enabled=True,
+        code_graph_mcp=graph,
+        knowledge_base_mcp=knowledge,
+    )
+    store.save_scan(scan, meta)
+
+    async def direct_store_call(store_arg, operation, *args, **kwargs):
+        function = getattr(store_arg, operation) if isinstance(operation, str) else operation
+        return function(*args, **kwargs)
+
+    async def scenario():
+        with (
+            patch("backend.api.scan.get_scan_store", return_value=store),
+            patch("backend.api.scan.run_store_call", side_effect=direct_store_call),
+        ):
+            return await get_scan_overview_v2(
+                "scan-overview",
+                User(user_id="user-1", username="ordinary", role="user"),
+            )
+
+    overview = asyncio.run(scenario())
+    assert overview.code_graph_mcp_enabled is True
+    assert overview.knowledge_base_enabled is True
+    public_payload = overview.model_dump(mode="json")
+    assert "code_graph_mcp" not in public_payload
+    assert "knowledge_base_mcp" not in public_payload
+    public_json = json.dumps(public_payload)
+    assert "scan-secret" not in public_json
+    store.close()
 
 
 def test_scan_mcp_timeout_must_be_positive() -> None:

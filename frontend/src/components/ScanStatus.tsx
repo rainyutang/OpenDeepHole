@@ -2472,12 +2472,45 @@ function ProcessFlowNav({
                   底层能力 · 支撑全部业务阶段
                 </div>
                 <FlowNodeButton node={indexNode} onClick={onNodeClick} wide />
+                <div
+                  className="mt-2 flex flex-wrap items-center justify-center gap-2"
+                  role="list"
+                  aria-label="扫描级 MCP 能力状态"
+                >
+                  <FlowCapabilityStatus label="CodeGraph MCP" enabled={scan.code_graph_mcp_enabled} />
+                  <FlowCapabilityStatus label="知识库" enabled={scan.knowledge_base_enabled} />
+                </div>
               </div>
             </div>
           </div>
         </div>
       </div>
     </nav>
+  );
+}
+
+function FlowCapabilityStatus({
+  label,
+  enabled,
+}: {
+  label: string;
+  enabled: boolean;
+}) {
+  const status = enabled ? "已启用" : "未启用";
+  return (
+    <div
+      role="listitem"
+      aria-label={`${label}：${status}`}
+      title="本次扫描创建时固化的配置状态，不代表实时连接结果"
+      className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium ${
+        enabled
+          ? "border-cyan-400/35 bg-cyan-400/10 text-cyan-100"
+          : "border-slate-700 bg-slate-900/70 text-slate-400"
+      }`}
+    >
+      <span>{label}</span>
+      <span className={enabled ? "text-emerald-300" : "text-slate-500"}>{status}</span>
+    </div>
   );
 }
 
@@ -3103,9 +3136,6 @@ function ScanOverview({
                 <span className="ml-3 border-l border-slate-700 pl-3">
                   旧验证环境：<span className="text-slate-300">{scan.validation_environment}</span>
                 </span>
-              )}
-              {scan.knowledge_base_enabled && (
-                <span className="ml-3 border-l border-slate-700 pl-3 text-cyan-300">知识库已启用</span>
               )}
               {scan.agent_name && (
                 <span className="ml-3 border-l border-slate-700 pl-3">

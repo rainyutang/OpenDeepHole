@@ -1413,6 +1413,7 @@ async def create_agent_scan(
         fp_review_method_selection=fp_review_method_selection,
         product=product,
         validation_environment="",
+        code_graph_mcp_enabled=code_graph_mcp is not None,
         knowledge_base_enabled=knowledge_base_mcp is not None,
         vulnerability_validation_enabled=validation_config is not None,
         validation_method_id=(validation_config.method_id if validation_config else ""),

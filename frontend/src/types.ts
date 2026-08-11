@@ -454,6 +454,7 @@ export interface ScanStatus {
   fp_review_method_selection?: FpReviewMethodSelection | null;
   product: string;
   validation_environment: string;
+  code_graph_mcp_enabled: boolean;
   knowledge_base_enabled: boolean;
   vulnerability_validation_enabled: boolean;
   validation_method_id: string;
