@@ -47,6 +47,7 @@ class ScanIssueMetrics:
     fp_review_issue_count: int = 0
     fp_review_false_positive_count: int = 0
     effective_issue_count: int = 0
+    suspected_issue_count: int = 0
     human_confirmed_count: int = 0
     human_false_positive_count: int = 0
     accuracy_basis_count: int = 0
@@ -97,6 +98,7 @@ def calculate_issue_metrics(
     fp_review_false_positive_count = 0
     human_confirmed_count = 0
     human_false_positive_count = 0
+    suspected_issue_count = 0
     accuracy_basis_count = 0
 
     for index, vuln in enumerate(vulnerabilities):
@@ -118,6 +120,16 @@ def calculate_issue_metrics(
         elif llm_issue:
             accuracy_basis_count += 1
 
+        effective_issue = (
+            llm_issue
+            and not (fp_result is not None and fp_result.verdict == "fp")
+        )
+        if (
+            effective_issue
+            and vuln.user_verdict not in {"confirmed", "false_positive"}
+        ):
+            suspected_issue_count += 1
+
         if vuln.user_verdict == "confirmed":
             human_confirmed_count += 1
         elif vuln.user_verdict == "false_positive":
@@ -131,6 +143,7 @@ def calculate_issue_metrics(
         fp_review_issue_count=fp_review_issue_count,
         fp_review_false_positive_count=fp_review_false_positive_count,
         effective_issue_count=effective_issue_count,
+        suspected_issue_count=suspected_issue_count,
         human_confirmed_count=human_confirmed_count,
         human_false_positive_count=human_false_positive_count,
         accuracy_basis_count=accuracy_basis_count,

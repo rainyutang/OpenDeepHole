@@ -51,10 +51,6 @@ function productFilterLabel(value: string) {
   return value === UNCONFIGURED_PRODUCT_FILTER ? "未配置" : value;
 }
 
-function isThreatAnalysisOnlyScan(scan: ScanSummary) {
-  return scan.scan_mode === "threat_analysis_only";
-}
-
 function uniqueOptions(values: string[]) {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
 }
@@ -242,7 +238,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
 
   // 自适应轮询：有运行中扫描时 5s，全部空闲时降为 30s；页面不可见时暂停，
   // 重新可见时立即刷新一次。
-  const hasRunningScans = scans.some((s) => isRunning(s.status));
+  const hasRunningScans = scans.some((s) => isRunning(s.status) || s.fp_review_running);
   const hasRunningRef = useRef(hasRunningScans);
   hasRunningRef.current = hasRunningScans;
 
@@ -505,7 +501,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
         ) : (
           <div>
             <div className="overflow-x-auto rounded-xl border border-slate-700">
-              <table className="w-full min-w-[78rem] text-sm">
+              <table className="w-full min-w-[62rem] text-sm">
               <thead>
                 <tr className="bg-slate-800 border-b border-slate-700">
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
@@ -522,7 +518,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
                     <HeaderFilter
                       id="project"
-                      label="项目名称"
+                      label="扫描名称"
                       value={projectFilter}
                       options={projectOptions}
                       open={openFilter === "project"}
@@ -531,10 +527,8 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                     />
                   </th>
                   <th className="min-w-[6.5rem] whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">状态</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">任务进度</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">漏洞数</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">人工确认</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">检查项</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">疑似问题</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">确认漏洞</th>
                   {user.role === "admin" && (
                     <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
                       <HeaderFilter
@@ -554,12 +548,12 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
               </thead>
               <tbody>
                 {filteredScans.map((scan) => {
-                  const st = STATUS_STYLES[scan.status];
-                  const running = isRunning(scan.status);
+                  const coreRunning = isRunning(scan.status);
+                  const running = coreRunning || scan.fp_review_running;
+                  const st = scan.status === "complete" && scan.fp_review_running
+                    ? { ...STATUS_STYLES.pending, label: "进行中" }
+                    : STATUS_STYLES[scan.status];
                   const canContinue = !running && !!scan.can_continue;
-                  const totalTasks = scan.total_task_count ?? 0;
-                  const completedTasks = scan.completed_task_count ?? 0;
-                  const taskPct = totalTasks > 0 ? Math.min(100, Math.round((completedTasks / totalTasks) * 100)) : 0;
                   const canDelete = !running;
                   const isLoading = actionLoading === scan.scan_id;
                   const displayProjectName = projectName(scan);
@@ -596,50 +590,11 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                           )}
                         </span>
                       </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <div
-                            className="w-16 h-1.5 bg-slate-700 rounded-full overflow-hidden"
-                            role="progressbar"
-                            aria-label={`${displayProjectName} 任务进度`}
-                            aria-valuemin={0}
-                            aria-valuemax={Math.max(1, totalTasks, completedTasks)}
-                            aria-valuenow={completedTasks}
-                            aria-valuetext={`${completedTasks}/${totalTasks}`}
-                          >
-                            <div
-                              className={`h-full rounded-full transition-all ${running ? "bg-blue-500" : "bg-green-500"}`}
-                              style={{ width: `${taskPct}%` }}
-                            />
-                          </div>
-                          <span className="text-xs text-slate-400">
-                            {completedTasks}/{totalTasks}
-                          </span>
-                        </div>
-                      </td>
                       <td className="px-4 py-3 text-sm text-slate-300">
-                        {scan.vulnerability_count}
+                        {scan.suspected_issue_count}
                       </td>
                       <td className="px-4 py-3 text-sm text-emerald-300">
-                        {scan.human_confirmed_count}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex flex-wrap gap-1">
-                          {isThreatAnalysisOnlyScan(scan) ? (
-                            <span className="text-xs bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded">
-                              仅威胁分析
-                            </span>
-                          ) : (
-                            scan.scan_items.map((item) => (
-                              <span
-                                key={item}
-                                className="text-xs bg-slate-700/50 text-slate-400 px-1.5 py-0.5 rounded"
-                              >
-                                {item}
-                              </span>
-                            ))
-                          )}
-                        </div>
+                        {scan.confirmed_vulnerability_count}
                       </td>
                       {user.role === "admin" && (
                         <td className="px-4 py-3 text-xs text-slate-300">
@@ -693,7 +648,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                 {filteredScans.length === 0 && (
                   <tr>
                     <td
-                      colSpan={user.role === "admin" ? 10 : 9}
+                      colSpan={user.role === "admin" ? 8 : 7}
                       className="px-4 py-8 text-center text-sm text-slate-500"
                     >
                       当前筛选条件下无扫描记录

@@ -89,6 +89,7 @@ from backend.scan_metrics import (
 )
 from backend.store import get_scan_store
 from backend.store.async_ops import run_store_call
+from backend.store.base import DuplicateScanNameError
 from backend.vulnerability_identity import vulnerability_report_identity
 from backend.pagination import decode_cursor, encode_cursor
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
@@ -105,6 +106,14 @@ _scan_owners: dict[str, str] = {}
 
 _FINAL_USER_VERDICTS = {"confirmed", "false_positive"}
 _MARK_VERDICTS = _FINAL_USER_VERDICTS | {"pending_analysis"}
+_FP_REVIEW_ACTIVE_STATUSES = {
+    FpReviewStatus.PENDING.value,
+    FpReviewStatus.RUNNING.value,
+}
+_FP_REVIEW_RETRYABLE_STATUSES = {
+    FpReviewStatus.CANCELLED.value,
+    FpReviewStatus.ERROR.value,
+}
 SCAN_MODE_FULL = "full"
 SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 _SCAN_MODE_ALIASES = {
@@ -128,6 +137,20 @@ def _normalize_scan_mode(value: str | None) -> str:
 
 def _is_threat_analysis_only_mode(value: str | None) -> bool:
     return _normalize_scan_mode(value) == SCAN_MODE_THREAT_ANALYSIS_ONLY
+
+
+def _default_scan_name_base(project_path: str) -> str:
+    normalized = str(project_path or "").strip().rstrip("/\\")
+    if not normalized:
+        return "scan"
+    basename = normalized.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if (
+        not basename
+        or basename in {".", ".."}
+        or (len(basename) == 2 and basename[0].isalpha() and basename[1] == ":")
+    ):
+        return "scan"
+    return basename
 
 
 def _repository_mining_engine_catalog() -> MiningEngineCatalog:
@@ -617,7 +640,7 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
     reviewed: list[dict] = []
     for i, v in enumerate(scan.vulnerabilities):
         if (
-            not v.confirmed
+            not is_llm_issue(v)
             or _has_final_user_verdict(v)
         ):
             continue
@@ -647,6 +670,27 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
         else:
             unresolved.append(item)
     return unresolved + reviewed
+
+
+def _fp_review_resume_state(
+    vulnerabilities,
+    latest_fp_results: dict[int, FpReviewResult],
+    states: list[tuple[str, str]],
+) -> tuple[bool, int]:
+    """Return whether review is active and how many stopped items can resume."""
+    active = any(status in _FP_REVIEW_ACTIVE_STATUSES for _, status in states)
+    if active or not states or states[-1][1] not in _FP_REVIEW_RETRYABLE_STATUSES:
+        return active, 0
+    unresolved = sum(
+        1
+        for index, vulnerability in enumerate(vulnerabilities)
+        if (
+            is_llm_issue(vulnerability)
+            and not _has_final_user_verdict(vulnerability)
+            and index not in latest_fp_results
+        )
+    )
+    return False, unresolved
 
 
 def _ensure_fp_review_job_for_scan(
@@ -697,7 +741,8 @@ def _ensure_fp_review_job_for_scan(
             "cancelled": False,
             "no_unresolved": True,
         }
-    if job is not None and job.status == FpReviewStatus.CANCELLED and not allow_cancelled:
+    cancelled_job = job is not None and job.status == FpReviewStatus.CANCELLED
+    if cancelled_job and not allow_cancelled:
         return {
             "review_id": job.review_id,
             "method": method,
@@ -708,7 +753,7 @@ def _ensure_fp_review_job_for_scan(
             "created": False,
             "cancelled": True,
         }
-    if job is None or (job.status == FpReviewStatus.CANCELLED and allow_cancelled):
+    if job is None or (cancelled_job and allow_cancelled):
         review_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
         store.create_fp_review_job(
@@ -1144,14 +1189,16 @@ def _apply_continue_capability(
     scan: ScanStatus | ScanSummary,
     *,
     continuable_count: int,
+    fp_review_running: bool = False,
 ) -> None:
     running = scan.status in {
         ScanItemStatus.PENDING,
         ScanItemStatus.ANALYZING,
         ScanItemStatus.AUDITING,
     }
+    scan.fp_review_running = fp_review_running
     scan.continuable_task_count = continuable_count
-    scan.can_continue = not running and (
+    scan.can_continue = not running and not fp_review_running and (
         scan.status in {ScanItemStatus.CANCELLED, ScanItemStatus.ERROR}
         or continuable_count > 0
     )
@@ -1323,7 +1370,14 @@ async def create_agent_scan(
     if not project_path:
         raise HTTPException(status_code=400, detail="project_path is required")
     code_scan_path = body.code_scan_path.strip() or project_path
-    scan_name = body.scan_name or project_path.split("/")[-1] or scan_id
+    requested_scan_name = str(body.scan_name or "").strip()
+    generated_name_base = _default_scan_name_base(project_path)
+    generated_name_seed = secrets.randbelow(0x10000)
+    scan_name = (
+        requested_scan_name
+        if requested_scan_name
+        else f"{generated_name_base}_{generated_name_seed:04x}"
+    )
     product = str(body.product or "").strip()
     if str(body.validation_environment or "").strip():
         raise HTTPException(
@@ -1414,7 +1468,28 @@ async def create_agent_scan(
     )
 
     store = get_scan_store()
-    await run_store_call(store, "save_scan", scan, meta)
+    for name_attempt in range(0x10000):
+        if not requested_scan_name:
+            scan_name = (
+                f"{generated_name_base}_"
+                f"{(generated_name_seed + name_attempt) & 0xFFFF:04x}"
+            )
+            scan.project_id = scan_name
+            meta.scan_name = scan_name
+        try:
+            await run_store_call(store, "save_scan", scan, meta)
+            break
+        except DuplicateScanNameError as exc:
+            if requested_scan_name:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"扫描名称「{requested_scan_name}」已存在，请修改后重试",
+                ) from exc
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail=f"无法为项目「{generated_name_base}」生成不重复的扫描名称",
+        )
     _running_scans[scan_id] = scan
     _scan_owners[scan_id] = current_user.user_id
 
@@ -1553,14 +1628,16 @@ async def _enrich_scan_summaries(
     distributed = bool(getattr(store, "distributed", False))
     local_scan_ids = set() if distributed else set(_running_scans)
     stored_ids = [s.scan_id for s in summaries if s.scan_id not in local_scan_ids]
-    vuln_stats, fp_verdicts, incomplete_threat_counts = await asyncio.gather(
+    all_scan_ids = [s.scan_id for s in summaries]
+    vuln_stats, fp_verdicts, incomplete_threat_counts, fp_states = await asyncio.gather(
         run_store_call(store, "get_vuln_stats_by_scans", stored_ids),
         run_store_call(
             store,
             "list_fp_review_verdicts_by_scans",
-            [s.scan_id for s in summaries],
+            all_scan_ids,
         ),
         run_store_call(store, "get_incomplete_threat_audit_counts", stored_ids),
+        run_store_call(store, "list_fp_review_states_by_scans", all_scan_ids),
     )
     live_identities: set[tuple[str, str]] = set()
     if distributed:
@@ -1620,14 +1697,28 @@ async def _enrich_scan_summaries(
         s.retryable_candidates_count = sum(
             1 for v in vulnerabilities if _is_retryable_vuln(v)
         )
-        _apply_continue_capability(s, continuable_count=continuable_count)
-
+        fp_result_map = latest_fp_review_result_map(
+            fp_verdicts.get(s.scan_id, [])
+        )
+        fp_review_running, fp_resume_count = _fp_review_resume_state(
+            vulnerabilities,
+            fp_result_map,
+            fp_states.get(s.scan_id, []),
+        )
+        continuable_count += fp_resume_count
+        _apply_continue_capability(
+            s,
+            continuable_count=continuable_count,
+            fp_review_running=fp_review_running,
+        )
         metrics = calculate_issue_metrics(
             vulnerabilities,
-            latest_fp_review_result_map(fp_verdicts.get(s.scan_id, [])),
+            fp_result_map,
         )
         s.vulnerability_count = metrics.effective_issue_count
         s.human_confirmed_count = metrics.human_confirmed_count
+        s.suspected_issue_count = metrics.suspected_issue_count
+        s.confirmed_vulnerability_count = metrics.human_confirmed_count
     return summaries
 
 
@@ -1725,10 +1816,22 @@ async def get_scan_status(
         scan = reconcile_offline_agent_scan_state(scan_id, scan)
     scan.retryable_candidates_count = _retry_incomplete_count(scan)
     _apply_task_progress(scan)
-    processed_keys = await run_store_call(store, "get_processed_keys", scan_id)
+    processed_keys, fp_verdicts, fp_states = await asyncio.gather(
+        run_store_call(store, "get_processed_keys", scan_id),
+        run_store_call(store, "list_fp_review_verdicts_by_scans", [scan_id]),
+        run_store_call(store, "list_fp_review_states_by_scans", [scan_id]),
+    )
+    fp_review_running, fp_resume_count = _fp_review_resume_state(
+        scan.vulnerabilities,
+        latest_fp_review_result_map(fp_verdicts.get(scan_id, [])),
+        fp_states.get(scan_id, []),
+    )
     _apply_continue_capability(
         scan,
-        continuable_count=_continuable_task_count(scan, processed_keys),
+        continuable_count=(
+            _continuable_task_count(scan, processed_keys) + fp_resume_count
+        ),
+        fp_review_running=fp_review_running,
     )
     _hydrate_threat_analysis_method_selection(scan)
     _hydrate_fp_review_method_selection(scan)
@@ -1771,9 +1874,10 @@ async def get_scan_overview_v2(
             "validations": max(counts["validations"], len(scan.validations)),
             "skill_reports": max(counts["skill_reports"], len(scan.skill_reports)),
         }
-        processed_keys, fp_verdicts = await asyncio.gather(
+        processed_keys, fp_verdicts, fp_states = await asyncio.gather(
             run_store_call(store, "get_processed_keys", scan_id),
             run_store_call(store, "list_fp_review_verdicts_by_scans", [scan_id]),
+            run_store_call(store, "list_fp_review_states_by_scans", [scan_id]),
         )
         scan.retryable_candidates_count = _retry_incomplete_count(scan)
         continuable_count = _continuable_task_count(scan, processed_keys)
@@ -1784,11 +1888,12 @@ async def get_scan_overview_v2(
         }
     else:
         scan = stored_scan
-        vuln_stats, incomplete_counts, validation_states, fp_verdicts = await asyncio.gather(
+        vuln_stats, incomplete_counts, validation_states, fp_verdicts, fp_states = await asyncio.gather(
             run_store_call(store, "get_vuln_stats_by_scans", [scan_id]),
             run_store_call(store, "get_incomplete_threat_audit_counts", [scan_id]),
             run_store_call(store, "get_vulnerability_validation_states", scan_id),
             run_store_call(store, "list_fp_review_verdicts_by_scans", [scan_id]),
+            run_store_call(store, "list_fp_review_states_by_scans", [scan_id]),
         )
         vulnerabilities = vuln_stats.get(scan_id, [])
         scan.retryable_candidates_count = sum(
@@ -1810,6 +1915,12 @@ async def get_scan_overview_v2(
         )
 
     fp_result_map = latest_fp_review_result_map(fp_verdicts.get(scan_id, []))
+    fp_review_running, fp_resume_count = _fp_review_resume_state(
+        vulnerabilities,
+        fp_result_map,
+        fp_states.get(scan_id, []),
+    )
+    continuable_count += fp_resume_count
     issue_metrics = calculate_issue_metrics(vulnerabilities, fp_result_map)
     counts.update({
         "effective_issue_count": issue_metrics.effective_issue_count,
@@ -1837,7 +1948,11 @@ async def get_scan_overview_v2(
     else:
         scan = reconcile_offline_agent_scan_state(scan_id, scan)
     _apply_task_progress(scan)
-    _apply_continue_capability(scan, continuable_count=continuable_count)
+    _apply_continue_capability(
+        scan,
+        continuable_count=continuable_count,
+        fp_review_running=fp_review_running,
+    )
     _hydrate_threat_analysis_method_selection(scan)
     _hydrate_fp_review_method_selection(scan)
     payload = scan.model_dump(mode="python")
@@ -2022,39 +2137,93 @@ async def stop_scan(
     scan_id: str,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Immediately cancel the scan, then best-effort notify the agent."""
+    """Stop the main scan and every active false-positive review task."""
     await _check_scan_owner(scan_id, current_user)
     store = get_scan_store()
-
-    # Resolve agent_id BEFORE popping from memory
-    meta = await run_store_call(store, "get_scan_meta", scan_id)
-    agent_id = await _resolve_scan_agent_id(meta) if meta else ""
-
-    # Immediately mark as CANCELLED in DB and in-memory
-    await run_store_call(
-        store,
-        "update_scan_progress",
-        scan_id,
-        status=ScanItemStatus.CANCELLED,
-        error_message="用户手动停止",
-        clear_current_candidate=True,
+    loaded = await run_store_call(store, "load_scan", scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    stored_scan, meta = loaded
+    live_scan = _running_scans.get(scan_id)
+    core_running = (
+        stored_scan.status
+        in {
+            ScanItemStatus.PENDING,
+            ScanItemStatus.ANALYZING,
+            ScanItemStatus.AUDITING,
+        }
+        or (
+            live_scan is not None
+            and live_scan.status
+            in {
+                ScanItemStatus.PENDING,
+                ScanItemStatus.ANALYZING,
+                ScanItemStatus.AUDITING,
+            }
+        )
     )
-    scan = _running_scans.pop(scan_id, None)
-    if scan is not None:
-        scan.status = ScanItemStatus.CANCELLED
-        scan.error_message = "用户手动停止"
-    _scan_owners.pop(scan_id, None)
+    cancelled_review_ids = await run_store_call(
+        store,
+        "cancel_active_fp_reviews_for_scan",
+        scan_id,
+        "用户手动停止",
+    )
 
-    # Best-effort: send stop command to agent (fire-and-forget)
+    if core_running:
+        await run_store_call(
+            store,
+            "update_scan_progress",
+            scan_id,
+            status=ScanItemStatus.CANCELLED,
+            error_message="用户手动停止",
+            clear_current_candidate=True,
+        )
+        scan = _running_scans.pop(scan_id, None)
+        if scan is not None:
+            scan.status = ScanItemStatus.CANCELLED
+            scan.error_message = "用户手动停止"
+        _scan_owners.pop(scan_id, None)
+
+    agent_id = await _resolve_scan_agent_id(meta)
     if agent_id:
         from backend.api.agent import send_agent_command
-        try:
-            await send_agent_command(agent_id, {"type": "stop", "scan_id": scan_id})
-        except Exception:
-            pass
+        commands: list[dict] = []
+        if core_running:
+            commands.append({"type": "stop", "scan_id": scan_id})
+        commands.extend(
+            {
+                "type": "fp_review_stop",
+                "scan_id": scan_id,
+                "review_id": review_id,
+            }
+            for review_id in cancelled_review_ids
+        )
+        for command in commands:
+            try:
+                await send_agent_command(
+                    agent_id,
+                    command,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify agent %s for scan %s command=%s: %s",
+                    agent_id,
+                    scan_id,
+                    command["type"],
+                    exc,
+                )
 
-    logger.info("Scan %s cancelled immediately by user", scan_id)
-    return {"ok": True}
+    logger.info(
+        "Stopped scan %s by user: main=%s fp_reviews=%s",
+        scan_id,
+        core_running,
+        cancelled_review_ids,
+    )
+    return {
+        "ok": True,
+        "main_scan_stopped": core_running,
+        "fp_review_ids": cancelled_review_ids,
+    }
 
 
 async def _continue_scan(
@@ -2084,7 +2253,18 @@ async def _continue_scan(
     if scan.status in {ScanItemStatus.PENDING, ScanItemStatus.ANALYZING, ScanItemStatus.AUDITING}:
         raise HTTPException(status_code=400, detail="Scan is already running")
 
-    processed_keys = await run_store_call(store, "get_processed_keys", scan_id)
+    processed_keys, fp_verdicts, fp_states = await asyncio.gather(
+        run_store_call(store, "get_processed_keys", scan_id),
+        run_store_call(store, "list_fp_review_verdicts_by_scans", [scan_id]),
+        run_store_call(store, "list_fp_review_states_by_scans", [scan_id]),
+    )
+    fp_review_running, fp_resume_count = _fp_review_resume_state(
+        scan.vulnerabilities,
+        latest_fp_review_result_map(fp_verdicts.get(scan_id, [])),
+        fp_states.get(scan_id, []),
+    )
+    if fp_review_running:
+        raise HTTPException(status_code=400, detail="去误报任务正在运行")
     continue_candidates = _continuable_candidates(scan, processed_keys)
     incomplete_threat_tasks = _incomplete_threat_audit_tasks(scan)
     continue_count = (
@@ -2097,8 +2277,22 @@ async def _continue_scan(
         )
     )
     resume_interrupted = scan.status in {ScanItemStatus.CANCELLED, ScanItemStatus.ERROR}
-    if not resume_interrupted and continue_count == 0:
+    resume_main_scan = resume_interrupted or continue_count > 0
+    if not resume_main_scan and fp_resume_count == 0:
         raise HTTPException(status_code=400, detail="当前扫描没有可续扫的任务")
+    if not resume_main_scan:
+        await _start_fp_review(
+            scan_id,
+            _server_url_from_request(request),
+            raise_on_error=True,
+            require_unresolved=True,
+        )
+        logger.info(
+            "Continuing scan %s with FP-review work only: unresolved=%d",
+            scan_id,
+            fp_resume_count,
+        )
+        return ScanStartResponse(scan_id=scan_id)
 
     # An interrupted scan without a persisted candidate set may have stopped
     # during indexing/static analysis, so let the Agent resume the full pipeline.
@@ -2442,6 +2636,19 @@ async def _continue_scan(
         retry_mining_engine_ids,
         resume_threat_analysis,
     )
+    if fp_resume_count:
+        fp_resume = await _start_fp_review(
+            scan_id,
+            _server_url_from_request(request),
+            raise_on_error=False,
+            require_unresolved=True,
+        )
+        if fp_resume is None:
+            logger.warning(
+                "Main scan %s resumed, but its %d FP-review items remain retryable",
+                scan_id,
+                fp_resume_count,
+            )
     return ScanStartResponse(scan_id=scan_id)
 
 
@@ -2474,6 +2681,19 @@ async def delete_scan(
     if scan_id in _running_scans:
         raise HTTPException(status_code=400, detail="Cannot delete a running scan")
     store = get_scan_store()
+    fp_states = await run_store_call(
+        store,
+        "list_fp_review_states_by_scans",
+        [scan_id],
+    )
+    if any(
+        status in _FP_REVIEW_ACTIVE_STATUSES
+        for _, status in fp_states.get(scan_id, [])
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete a scan with a running FP review",
+        )
 
     # Load scan to get project_id before deletion
     result = await run_store_call(store, "load_scan", scan_id)
@@ -3892,36 +4112,44 @@ async def stop_fp_review(
     job = await run_store_call(store, "get_fp_review_by_scan", scan_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No FP review found for this scan")
-    item_running = job.status in {
-        FpReviewStatus.PENDING,
-        FpReviewStatus.RUNNING,
-    }
-    if not item_running:
-        return {"ok": True, "review_id": job.review_id}
-
     meta = await run_store_call(store, "get_scan_meta", scan_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    await run_store_call(
+    cancelled_review_ids = await run_store_call(
         store,
-        "update_fp_review_job",
-        job.review_id,
-        status=FpReviewStatus.CANCELLED.value,
-        clear_current_vuln_index=True,
-        error_message="用户手动停止",
+        "cancel_active_fp_reviews_for_scan",
+        scan_id,
+        "用户手动停止",
     )
 
     agent_id = await _resolve_scan_agent_id(meta)
     if agent_id is not None:
-        await send_agent_command(agent_id, {
-            "type": "fp_review_stop",
-            "scan_id": scan_id,
-            "review_id": job.review_id,
-        })
+        for review_id in cancelled_review_ids:
+            try:
+                await send_agent_command(agent_id, {
+                    "type": "fp_review_stop",
+                    "scan_id": scan_id,
+                    "review_id": review_id,
+                })
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify agent %s for FP review %s: %s",
+                    agent_id,
+                    review_id,
+                    exc,
+                )
 
-    logger.info("FP review %s for scan %s cancelled by user", job.review_id, scan_id)
-    return {"ok": True, "review_id": job.review_id}
+    logger.info(
+        "FP reviews %s for scan %s cancelled by user",
+        cancelled_review_ids,
+        scan_id,
+    )
+    return {
+        "ok": True,
+        "review_id": job.review_id,
+        "review_ids": cancelled_review_ids,
+    }
 
 
 @router.get("/api/scan/{scan_id}/fp_review", response_model=FpReviewJob)

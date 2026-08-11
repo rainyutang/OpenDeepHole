@@ -479,6 +479,7 @@ export interface ScanStatus {
   retryable_candidates_count: number;
   continuable_task_count: number;
   can_continue: boolean;
+  fp_review_running: boolean;
   total_task_count: number;
   completed_task_count: number;
   opencode_pool?: OpenCodePoolStatus | null;
@@ -608,6 +609,9 @@ export interface ScanSummary {
   processed_candidates: number;
   vulnerability_count: number;
   human_confirmed_count: number;
+  suspected_issue_count: number;
+  confirmed_vulnerability_count: number;
+  fp_review_running: boolean;
   retryable_candidates_count: number;
   continuable_task_count: number;
   can_continue: boolean;

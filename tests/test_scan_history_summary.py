@@ -23,9 +23,16 @@ async def _direct_store_call(store, operation, *args, **kwargs):
 
 
 class FakeScanStore:
-    def __init__(self, scan: ScanStatus, meta: ScanMeta) -> None:
+    def __init__(
+        self,
+        scan: ScanStatus,
+        meta: ScanMeta,
+        *,
+        fp_states: list[tuple[str, str]] | None = None,
+    ) -> None:
         self.scan = scan
         self.meta = meta
+        self.fp_states = fp_states or []
 
     def list_scans(self) -> list[ScanSummary]:
         return [self._summary()]
@@ -67,6 +74,15 @@ class FakeScanStore:
 
     def list_fp_review_verdicts_by_scans(self, scan_ids: list[str]) -> dict[str, list[FpReviewResult]]:
         return {sid: self.list_fp_review_results_by_scan(sid) for sid in scan_ids}
+
+    def list_fp_review_states_by_scans(
+        self,
+        scan_ids: list[str],
+    ) -> dict[str, list[tuple[str, str]]]:
+        return {
+            sid: list(self.fp_states) if sid == self.scan.scan_id else []
+            for sid in scan_ids
+        }
 
     def get_incomplete_threat_audit_counts(self, scan_ids: list[str]) -> dict[str, int]:
         if self.scan.scan_id not in scan_ids:
@@ -187,6 +203,61 @@ class ScanHistorySummaryTests(unittest.TestCase):
         self.assertEqual(response[0].product, "LTE")
         self.assertEqual(response[0].vulnerability_count, 2)
         self.assertEqual(response[0].human_confirmed_count, 2)
+        self.assertEqual(response[0].suspected_issue_count, 0)
+        self.assertEqual(response[0].confirmed_vulnerability_count, 2)
+
+    def test_list_scans_keeps_complete_core_scan_running_while_fp_review_runs(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project-1",
+            scan_items=["npd"],
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[
+                Vulnerability(
+                    file="a.c",
+                    line=1,
+                    function="a",
+                    vuln_type="npd",
+                    severity="high",
+                    description="awaiting review",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            ],
+        )
+        meta = ScanMeta(
+            scan_items=["npd"],
+            created_at=scan.created_at,
+            scan_name="Project One",
+            agent_name="agent-1",
+        )
+        store = FakeScanStore(
+            scan,
+            meta,
+            fp_states=[("review-1", "running")],
+        )
+
+        with (
+            patch("backend.api.scan.get_scan_store", return_value=store),
+            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+            patch("backend.api.agent.is_agent_name_online", return_value=True),
+        ):
+            response = asyncio.run(
+                list_scans(
+                    current_user=User(user_id="admin", username="admin", role="admin")
+                )
+            )
+
+        self.assertEqual(response[0].status, ScanItemStatus.COMPLETE)
+        self.assertTrue(response[0].fp_review_running)
+        self.assertFalse(response[0].can_continue)
+        self.assertEqual(response[0].suspected_issue_count, 1)
 
     def test_list_scans_does_not_count_threat_failures_as_retryable_candidates(self) -> None:
         scan = ScanStatus(

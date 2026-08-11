@@ -698,6 +698,7 @@ class ScanStatus(BaseModel):
     retryable_candidates_count: int = 0
     continuable_task_count: int = 0
     can_continue: bool = False
+    fp_review_running: bool = False
     total_task_count: int = 0
     completed_task_count: int = 0
     opencode_pool: OpenCodePoolStatus | None = None
@@ -1459,6 +1460,9 @@ class ScanSummary(BaseModel):
     processed_candidates: int
     vulnerability_count: int
     human_confirmed_count: int = 0
+    suspected_issue_count: int = 0
+    confirmed_vulnerability_count: int = 0
+    fp_review_running: bool = False
     retryable_candidates_count: int = 0
     continuable_task_count: int = 0
     can_continue: bool = False

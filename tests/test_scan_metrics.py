@@ -76,8 +76,36 @@ class ScanMetricsTests(unittest.TestCase):
 
         self.assertEqual(metrics.human_confirmed_count, 1)
         self.assertEqual(metrics.human_false_positive_count, 1)
+        self.assertEqual(metrics.suspected_issue_count, 1)
         self.assertEqual(metrics.accuracy_basis_count, 3)
         self.assertEqual(metrics.accuracy, 0.3333)
+
+    def test_suspected_count_excludes_effective_fp_review_false_positives(self) -> None:
+        vulnerability = Vulnerability(
+            file="fp.c",
+            line=3,
+            function="fp",
+            vuln_type="npd",
+            severity="high",
+            description="fp",
+            ai_analysis="analysis",
+            confirmed=True,
+            ai_verdict="confirmed",
+        )
+        fp_results = latest_fp_review_result_map([
+            FpReviewResult(
+                vuln_index=0,
+                verdict="fp",
+                severity="low",
+                reason="false positive",
+                created_at="2026-08-05T00:00:00+00:00",
+            ),
+        ])
+
+        metrics = calculate_issue_metrics([vulnerability], fp_results)
+
+        self.assertEqual(metrics.effective_issue_count, 0)
+        self.assertEqual(metrics.suspected_issue_count, 0)
 
     def test_validated_issue_count_excludes_fp_nonissues_and_running_validations(self) -> None:
         vulnerabilities = [

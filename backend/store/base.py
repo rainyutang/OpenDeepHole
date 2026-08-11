@@ -35,6 +35,10 @@ from backend.models import (
 )
 
 
+class DuplicateScanNameError(ValueError):
+    """Raised when a user already owns a scan with the requested name."""
+
+
 class ScanStoreBase(ABC):
     """Scan data storage abstract interface."""
 
@@ -401,6 +405,21 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def mark_fp_reviews_for_scan_error(self, scan_id: str, error_message: str) -> int:
         """Mark pending/running FP review jobs for a scan as error."""
+
+    @abstractmethod
+    def list_fp_review_states_by_scans(
+        self,
+        scan_ids: list[str],
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Return FP-review ``(review_id, status)`` rows grouped by scan."""
+
+    @abstractmethod
+    def cancel_active_fp_reviews_for_scan(
+        self,
+        scan_id: str,
+        error_message: str,
+    ) -> list[str]:
+        """Cancel every pending/running FP review and return its review IDs."""
 
     # -- FP Review jobs --
 

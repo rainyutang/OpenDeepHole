@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -54,12 +55,73 @@ from backend.models import (
     canonical_mining_engine_label,
 )
 
-from .base import ScanStoreBase
+from .base import DuplicateScanNameError, ScanStoreBase
 
 
 # Kept only to satisfy the legacy SQLite column without retaining behavioral
 # meaning in models, APIs, or review routing.
 _LEGACY_FP_REVIEW_ELIGIBLE = 1
+
+
+def _project_path_basename(project_path: str) -> str:
+    """Return the last component for POSIX or Windows-style project paths."""
+    normalized = str(project_path or "").strip().rstrip("/\\")
+    if not normalized:
+        return "scan"
+    basename = normalized.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if (
+        not basename
+        or basename in {".", ".."}
+        or (len(basename) == 2 and basename[0].isalpha() and basename[1] == ":")
+    ):
+        return "scan"
+    return basename
+
+
+def _scan_name_suffix_seed(scan_id: str) -> int:
+    digest = hashlib.sha256(str(scan_id).encode("utf-8")).hexdigest()
+    return int(digest[:4], 16)
+
+
+def _deduplicated_scan_names(rows) -> list[tuple[str, str]]:
+    """Build trimmed, per-user-unique historical scan names in stable order."""
+    used_by_user: dict[str, set[str]] = {}
+    updates: list[tuple[str, str]] = []
+    for row in rows:
+        scan_id = str(row["scan_id"])
+        user_id = str(row["user_id"] or "")
+        raw_name = str(row["scan_name"] or "").strip()
+        used = used_by_user.setdefault(user_id, set())
+        if raw_name and raw_name not in used:
+            scan_name = raw_name
+        else:
+            base = raw_name or _project_path_basename(row["project_path"] or "")
+            seed = _scan_name_suffix_seed(scan_id)
+            scan_name = ""
+            for offset in range(0x10000):
+                candidate = f"{base}_{(seed + offset) & 0xFFFF:04x}"
+                if candidate not in used:
+                    scan_name = candidate
+                    break
+            if not scan_name:
+                # This requires one user to occupy every possible suffix for
+                # the same base. Refuse to create a non-unique migration.
+                raise RuntimeError(
+                    f"Unable to deduplicate scan name for user {user_id!r}: {base!r}"
+                )
+        used.add(scan_name)
+        if scan_name != str(row["scan_name"] or ""):
+            updates.append((scan_name, scan_id))
+    return updates
+
+
+def _is_duplicate_scan_name_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "idx_scans_user_scan_name_unique" in message
+        or "scans.user_id, scans.scan_name" in message
+        or "scans_user_scan_name" in message
+    )
 
 
 def _json_dict(value: str | None) -> dict[str, str]:
@@ -917,6 +979,24 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute("ALTER TABLE scans ADD COLUMN scan_name TEXT DEFAULT ''")
         if "user_id" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN user_id TEXT DEFAULT ''")
+        self._conn.execute("UPDATE scans SET user_id = '' WHERE user_id IS NULL")
+        historical_scan_rows = self._conn.execute(
+            """\
+            SELECT scan_id, user_id, scan_name, project_path
+            FROM scans
+            ORDER BY created_at ASC, scan_id ASC
+            """
+        ).fetchall()
+        scan_name_updates = _deduplicated_scan_names(historical_scan_rows)
+        if scan_name_updates:
+            self._conn.executemany(
+                "UPDATE scans SET scan_name = ? WHERE scan_id = ?",
+                scan_name_updates,
+            )
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scans_user_scan_name_unique "
+            "ON scans(user_id, scan_name)"
+        )
         if "product" not in cols:
             self._conn.execute("ALTER TABLE scans ADD COLUMN product TEXT NOT NULL DEFAULT ''")
         if "validation_environment" not in cols:
@@ -1752,13 +1832,18 @@ class SqliteScanStore(ScanStoreBase):
     # -- Scan lifecycle --
 
     def save_scan(self, scan: ScanStatus, meta: ScanMeta) -> None:
+        meta.scan_name = str(meta.scan_name or "").strip() or (
+            f"{_project_path_basename(meta.project_path)}_"
+            f"{_scan_name_suffix_seed(scan.scan_id):04x}"
+        )
         current_json = (
             scan.current_candidate.model_dump_json()
             if scan.current_candidate
             else None
         )
-        with self._lock:
-            self._conn.execute(
+        try:
+            with self._lock:
+                self._conn.execute(
                 """\
                 INSERT INTO scans
                     (scan_id, project_id, scan_items, status, created_at,
@@ -1909,8 +1994,13 @@ class SqliteScanStore(ScanStoreBase):
                     ),
                 ),
             )
-            self._replace_scan_candidates_locked(scan.scan_id, scan.candidates)
-            self._conn.commit()
+                self._replace_scan_candidates_locked(scan.scan_id, scan.candidates)
+                self._conn.commit()
+        except Exception as exc:
+            self._conn.rollback()
+            if _is_duplicate_scan_name_error(exc):
+                raise DuplicateScanNameError(meta.scan_name) from exc
+            raise
 
     def update_mining_engine_run(
         self,
@@ -4269,6 +4359,69 @@ class SqliteScanStore(ScanStoreBase):
             )
             self._conn.commit()
             return cur.rowcount
+
+    def list_fp_review_states_by_scans(
+        self,
+        scan_ids: list[str],
+    ) -> dict[str, list[tuple[str, str]]]:
+        out: dict[str, list[tuple[str, str]]] = {scan_id: [] for scan_id in scan_ids}
+        if not scan_ids:
+            return out
+        tie_breaker = "created_order" if getattr(self, "distributed", False) else "rowid"
+        with self._lock:
+            for offset in range(0, len(scan_ids), 500):
+                chunk = scan_ids[offset:offset + 500]
+                placeholders = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"""\
+                    SELECT scan_id, review_id, status
+                    FROM fp_review_jobs
+                    WHERE scan_id IN ({placeholders})
+                    ORDER BY created_at ASC, {tie_breaker} ASC
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    out[str(row["scan_id"])].append((
+                        str(row["review_id"]),
+                        str(row["status"]),
+                    ))
+        return out
+
+    def cancel_active_fp_reviews_for_scan(
+        self,
+        scan_id: str,
+        error_message: str,
+    ) -> list[str]:
+        tie_breaker = "created_order" if getattr(self, "distributed", False) else "rowid"
+        with self._lock:
+            rows = self._conn.execute(
+                f"""\
+                SELECT review_id
+                FROM fp_review_jobs
+                WHERE scan_id = ? AND status IN ('pending', 'running')
+                ORDER BY created_at ASC, {tie_breaker} ASC
+                """,
+                (scan_id,),
+            ).fetchall()
+            review_ids = [str(row["review_id"]) for row in rows]
+            if not review_ids:
+                return []
+            placeholders = ",".join("?" * len(review_ids))
+            self._conn.execute(
+                f"""\
+                UPDATE fp_review_jobs
+                SET status = 'cancelled',
+                    current_vuln_index = NULL,
+                    current_vuln_indices = '[]',
+                    error_message = ?
+                WHERE review_id IN ({placeholders})
+                  AND status IN ('pending', 'running')
+                """,
+                (error_message, *review_ids),
+            )
+            self._conn.commit()
+            return review_ids
 
     # -- FP Review jobs --
 

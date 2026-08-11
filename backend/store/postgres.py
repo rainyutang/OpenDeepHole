@@ -28,6 +28,7 @@ from backend.models import (
 from .sqlite import (
     SqliteScanStore,
     _canonicalize_mining_engine_json,
+    _deduplicated_scan_names,
     _retire_agent_opencode_config,
 )
 
@@ -306,6 +307,11 @@ def _sqlite_schema() -> list[str]:
             ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name
             """
         ).fetchall()
+        rows = [
+            row
+            for row in rows
+            if str(row[1]) != "idx_scans_user_scan_name_unique"
+        ]
         # PostgreSQL requires referenced tables to exist when a foreign key is
         # declared.  SQLite's catalog ordering is alphabetical, so create the
         # independent roots before all dependent tables and indexes.
@@ -401,6 +407,9 @@ class PostgresScanStore(SqliteScanStore):
                 "threat_analysis_method_selection_json TEXT NOT NULL DEFAULT '{}'"
             )
             for statement in (
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS user_id TEXT DEFAULT ''",
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS scan_name TEXT DEFAULT ''",
+                "ALTER TABLE scans ADD COLUMN IF NOT EXISTS project_path TEXT DEFAULT ''",
                 "ALTER TABLE scans ADD COLUMN IF NOT EXISTS knowledge_base_enabled INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE scans ADD COLUMN IF NOT EXISTS vulnerability_validation_enabled INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE scans ADD COLUMN IF NOT EXISTS validation_method_id TEXT NOT NULL DEFAULT ''",
@@ -411,6 +420,26 @@ class PostgresScanStore(SqliteScanStore):
                 "ALTER TABLE vulnerability_validations ADD COLUMN IF NOT EXISTS validation_method_label TEXT NOT NULL DEFAULT ''",
             ):
                 connection.execute(statement)
+            connection.execute(
+                "UPDATE scans SET user_id = '' WHERE user_id IS NULL"
+            )
+            historical_scan_rows = connection.execute(
+                """\
+                SELECT scan_id, user_id, scan_name, project_path
+                FROM scans
+                ORDER BY created_at ASC, scan_id ASC
+                """
+            ).fetchall()
+            scan_name_updates = _deduplicated_scan_names(historical_scan_rows)
+            if scan_name_updates:
+                connection.executemany(
+                    "UPDATE scans SET scan_name = %s WHERE scan_id = %s",
+                    scan_name_updates,
+                )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_scans_user_scan_name_unique ON scans(user_id, scan_name)"
+            )
             for row in connection.execute(
                 "SELECT scan_id, mining_engines_json, mining_engine_runs_json FROM scans"
             ).fetchall():

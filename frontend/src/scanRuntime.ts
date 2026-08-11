@@ -330,6 +330,7 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
     retryable_candidates_count: finiteNumber(value.retryable_candidates_count),
     continuable_task_count: finiteNumber(value.continuable_task_count),
     can_continue: value.can_continue === true,
+    fp_review_running: value.fp_review_running === true,
     total_task_count: finiteNumber(value.total_task_count),
     completed_task_count: finiteNumber(value.completed_task_count),
     opencode_pool: normalizeOpenCodePool(value.opencode_pool),
