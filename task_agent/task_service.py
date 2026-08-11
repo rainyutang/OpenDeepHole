@@ -474,17 +474,20 @@ class OpenCodeTaskService:
                 )
             if not output_retry_prompt.strip():
                 raise ValueError("OpenCode output_retry_prompt cannot be empty")
-        file_write_allowlist = tuple(
-            dict.fromkeys(Path(path).resolve() for path in spec.file_write_allowlist)
+        allowlisted_roots = _normalize_writable_path_values(
+            spec.file_write_allowlist,
+            directory,
+            parameter="file_write_allowlist",
         )
-        writable_paths = (
-            None
-            if spec.writable_paths is None
-            else _normalize_writable_path_values(
-                spec.writable_paths,
-                directory,
-            )
+        legacy_writable_roots = _normalize_writable_path_values(
+            spec.writable_paths or (),
+            directory,
+            parameter="writable_paths",
         )
+        configured_write_roots = tuple(dict.fromkeys((
+            *allowlisted_roots,
+            *legacy_writable_roots,
+        )))
         attempt = spec.attempt
         if attempt is not None and int(attempt) < 0:
             raise ValueError("OpenCode attempt cannot be negative")
@@ -498,8 +501,8 @@ class OpenCodeTaskService:
             timeout_seconds=None if timeout is None else int(timeout),
             output_retry_count=output_retry_count,
             output_retry_prompt=output_retry_prompt,
-            file_write_allowlist=file_write_allowlist,
-            writable_paths=writable_paths,
+            file_write_allowlist=configured_write_roots,
+            writable_paths=configured_write_roots,
             attempt=None if attempt is None else int(attempt),
             session_id=str(spec.session_id or "").strip() or None,
         )
@@ -623,6 +626,7 @@ class OpenCodeTaskService:
     async def _run_record(self, record: _TaskRecord) -> None:
         spec = record.spec
         context = record.execution_context
+        write_roots = _effective_file_write_roots(spec, context)
         validation_debug = self._validation_debug_enabled(record)
         combined_cancel = _CombinedCancelEvent(record.cancel_event, context.cancel_event)
         cli_config_source = lambda: _task_cli_config(record.execution_context)
@@ -787,7 +791,7 @@ class OpenCodeTaskService:
                         )
 
                 system_prompt = _task_system_prompt(record)
-                permissions = _writable_path_permissions(spec.writable_paths)
+                permissions = _writable_path_permissions(write_roots)
                 timeout_seconds = (
                     (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
                     or spec.timeout_seconds
@@ -801,6 +805,7 @@ class OpenCodeTaskService:
                         message_writes: dict[
                             tuple[str, str], OpenCodeFileWrite
                         ] = {}
+                        parsed_written_json: _ParsedWrittenFileJson | None = None
 
                         def record_file_write(value: OpenCodeFileWrite) -> None:
                             key = (value.call_id, value.path)
@@ -824,11 +829,7 @@ class OpenCodeTaskService:
                                 on_model_request_failure=record_model_request_failure,
                                 on_response_model=record_model,
                                 on_token_usage=record_token_usage,
-                                on_file_write=(
-                                    record_file_write
-                                    if spec.output_schema is not None
-                                    else None
-                                ),
+                                on_file_write=record_file_write,
                                 cancel_event=combined_cancel,
                                 session_id=session_id or None,
                                 session_title=spec.task_name,
@@ -857,16 +858,17 @@ class OpenCodeTaskService:
                                     message_writes.values(),
                                     project_dir=_required_project_dir(context),
                                     trusted_roots=tuple(dict.fromkeys((
-                                        _required_work_dir(context),
                                         _required_project_dir(context),
-                                        *(spec.writable_paths or ()),
+                                        *write_roots,
                                     ))),
                                 )
                             if spec.output_schema is not None and structured is None:
-                                structured = _parse_written_file_json(
+                                parsed_written_json = _parse_written_file_json(
                                     snapshots,
                                     spec.output_schema,
                                 )
+                                if parsed_written_json is not None:
+                                    structured = parsed_written_json.structured
                             if spec.output_schema is not None and structured is None:
                                 formatter_source_text = next(
                                     (
@@ -884,13 +886,16 @@ class OpenCodeTaskService:
                                 recovery_required = True
                                 raise _StructuredRecoveryRequired()
                         finally:
-                            if spec.output_schema is not None:
-                                _cleanup_written_files(
-                                    message_writes.values(),
-                                    _required_project_dir(context),
-                                    _required_work_dir(context),
-                                    spec.file_write_allowlist,
-                                )
+                            _cleanup_written_files(
+                                message_writes.values(),
+                                _required_project_dir(context),
+                                write_roots,
+                                force_delete_paths=(
+                                    (parsed_written_json.path,)
+                                    if parsed_written_json is not None
+                                    else ()
+                                ),
+                            )
                 finally:
                     if lock_key.startswith("new:"):
                         self._session_locks.pop(lock_key, None)
@@ -1223,10 +1228,10 @@ class OpenCodeTaskService:
         has_fresh_retry = session_attempt < total_session_attempts
         work_dir = _required_work_dir(context)
         project_dir = _required_project_dir(context)
+        write_roots = _effective_file_write_roots(spec, context)
         trusted_roots = tuple(dict.fromkeys((
-            work_dir,
             project_dir,
-            *(spec.writable_paths or ()),
+            *write_roots,
         )))
         accumulated_usage = token_usage
 
@@ -1542,6 +1547,7 @@ class OpenCodeTaskService:
                     category="session",
                 )
                 message_writes: dict[tuple[str, str], OpenCodeFileWrite] = {}
+                parsed_written_json: _ParsedWrittenFileJson | None = None
 
                 def record_file_write(value: OpenCodeFileWrite) -> None:
                     key = (value.call_id, value.path)
@@ -1593,10 +1599,12 @@ class OpenCodeTaskService:
                         trusted_roots=trusted_roots,
                     )
                     if structured is None:
-                        structured = _parse_written_file_json(
+                        parsed_written_json = _parse_written_file_json(
                             snapshots,
                             spec.output_schema or {},
                         )
+                        if parsed_written_json is not None:
+                            structured = parsed_written_json.structured
                     if structured is not None:
                         correction_outcome = "success"
                         await update_model_lease_context(correction_lease, {
@@ -1642,8 +1650,12 @@ class OpenCodeTaskService:
                     _cleanup_written_files(
                         message_writes.values(),
                         project_dir,
-                        work_dir,
-                        spec.file_write_allowlist,
+                        write_roots,
+                        force_delete_paths=(
+                            (parsed_written_json.path,)
+                            if parsed_written_json is not None
+                            else ()
+                        ),
                     )
             correction_error = (
                 "OpenCode exhausted same-session JSON corrections "
@@ -2087,6 +2099,12 @@ def _writable_path_permissions(
         return None
     rules: list[dict[str, str]] = []
     for permission in ("read", "external_directory", "edit"):
+        if permission == "edit":
+            rules.append({
+                "permission": "edit",
+                "pattern": "*",
+                "action": "deny",
+            })
         seen: set[str] = set()
         for root in paths:
             for pattern in _permission_path_patterns(root):
@@ -2187,19 +2205,33 @@ def _path_is_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+def _effective_file_write_roots(
+    spec: OpenCodeTaskSpec,
+    context: OpenCodeExecutionContext,
+) -> tuple[Path, ...]:
+    """Return the per-call writable and retained roots, including work_dir."""
+    return tuple(dict.fromkeys((
+        _required_work_dir(context),
+        *spec.file_write_allowlist,
+        *(spec.writable_paths or ()),
+    )))
+
+
 def _normalize_writable_path_values(
     entries: Iterable[str | Path],
     project_dir: Path,
+    *,
+    parameter: str = "writable_paths",
 ) -> tuple[Path, ...]:
     resolved_project_dir = project_dir.resolve()
     paths: list[Path] = []
     for entry in entries:
         raw = str(entry)
         if not raw.strip():
-            raise ValueError("OpenCode writable_paths entries cannot be empty")
+            raise ValueError(f"OpenCode {parameter} entries cannot be empty")
         if "*" in raw or "?" in raw:
             raise ValueError(
-                "OpenCode writable_paths entries cannot contain wildcard characters"
+                f"OpenCode {parameter} entries cannot contain wildcard characters"
             )
         try:
             path = Path(entry).expanduser()
@@ -2208,36 +2240,11 @@ def _normalize_writable_path_values(
             path = path.resolve()
         except (OSError, RuntimeError) as exc:
             raise ValueError(
-                f"Invalid OpenCode writable_paths entry: {entry!r}"
+                f"Invalid OpenCode {parameter} entry: {entry!r}"
             ) from exc
         if path.parent == path:
             raise ValueError(
-                "OpenCode writable_paths entries cannot resolve to a filesystem root: "
-                f"{entry!r}"
-            )
-        paths.append(path)
-    return tuple(dict.fromkeys(paths))
-
-
-def _normalize_file_write_allowlist_paths(
-    entries: tuple[str, ...],
-    work_dir: Path,
-) -> tuple[Path, ...]:
-    resolved_work_dir = work_dir.resolve()
-    paths: list[Path] = []
-    for entry in entries:
-        try:
-            path = Path(entry).expanduser()
-            if not path.is_absolute():
-                path = resolved_work_dir / path
-            path = path.resolve()
-        except (OSError, RuntimeError) as exc:
-            raise ValueError(
-                f"Invalid OpenCode file_write_allowlist entry: {entry!r}"
-            ) from exc
-        if not _path_is_within(path, resolved_work_dir):
-            raise ValueError(
-                "OpenCode file_write_allowlist entries must resolve within work_dir: "
+                f"OpenCode {parameter} entries cannot resolve to a filesystem root: "
                 f"{entry!r}"
             )
         paths.append(path)
@@ -2247,10 +2254,8 @@ def _normalize_file_write_allowlist_paths(
 def _resolve_written_path(
     raw_path: str,
     project_dir: Path,
-    trusted_roots: Iterable[Path],
 ) -> Path | None:
     resolved_project_dir = project_dir.resolve()
-    resolved_roots = tuple(root.resolve() for root in trusted_roots)
     try:
         path = Path(raw_path).expanduser()
         if not path.is_absolute():
@@ -2258,13 +2263,21 @@ def _resolve_written_path(
         path = path.resolve()
     except (OSError, RuntimeError):
         return None
-    return path if any(_path_is_within(path, root) for root in resolved_roots) else None
+    return path
 
 
 @dataclass(frozen=True)
 class _WrittenFileSnapshot:
     path: Path
     content: str
+    created: bool
+
+
+@dataclass(frozen=True)
+class _ParsedWrittenFileJson:
+    structured: Any
+    path: Path
+    created: bool
 
 
 def _read_written_file_snapshots(
@@ -2275,52 +2288,65 @@ def _read_written_file_snapshots(
 ) -> tuple[_WrittenFileSnapshot, ...]:
     snapshots: list[_WrittenFileSnapshot] = []
     seen: set[Path] = set()
+    resolved_roots = tuple(root.resolve() for root in trusted_roots)
     for write in reversed(tuple(writes)):
-        path = _resolve_written_path(write.path, project_dir, trusted_roots)
-        if path is None or path in seen:
+        path = _resolve_written_path(write.path, project_dir)
+        if (
+            path is None
+            or path in seen
+            or not any(_path_is_within(path, root) for root in resolved_roots)
+        ):
             continue
         seen.add(path)
         try:
             content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             continue
-        snapshots.append(_WrittenFileSnapshot(path=path, content=content))
+        snapshots.append(_WrittenFileSnapshot(
+            path=path,
+            content=content,
+            created=write.created,
+        ))
     return tuple(snapshots)
 
 
 def _parse_written_file_json(
     snapshots: Iterable[_WrittenFileSnapshot],
     schema: dict[str, Any],
-) -> Any:
+) -> _ParsedWrittenFileJson | None:
     for snapshot in snapshots:
         structured = _parse_text_json(snapshot.content, schema)
         if structured is not None:
-            return structured
+            return _ParsedWrittenFileJson(
+                structured=structured,
+                path=snapshot.path,
+                created=snapshot.created,
+            )
     return None
 
 
 def _cleanup_written_files(
     writes: Iterable[OpenCodeFileWrite],
     project_dir: Path,
-    work_dir: Path,
     allowlist: tuple[Path, ...],
+    *,
+    force_delete_paths: Iterable[Path] = (),
 ) -> None:
     cleanup_paths: set[Path] = set()
-    resolved_work_dir = work_dir.resolve()
+    forced = {path.resolve() for path in force_delete_paths}
     for write in writes:
         if not write.created:
             continue
-        path = _resolve_written_path(
-            write.path,
-            project_dir,
-            (resolved_work_dir,),
-        )
+        path = _resolve_written_path(write.path, project_dir)
         if path is None:
             continue
         cleanup_paths.add(path)
 
     for path in cleanup_paths:
-        if any(_path_is_within(path, allowed) for allowed in allowlist):
+        if (
+            path not in forced
+            and any(_path_is_within(path, allowed) for allowed in allowlist)
+        ):
             continue
         try:
             path.unlink()
@@ -2387,19 +2413,20 @@ async def _run_component_task(
     with bind_opencode_execution_context(task_metadata={"task_type": task_type}):
         context = _snapshot_execution_context()
         project_dir = _required_project_dir(context)
-        work_dir = _required_work_dir(context)
-        allowlist = _normalize_file_write_allowlist_paths(
+        allowlisted_roots = _normalize_writable_path_values(
             file_write_allowlist,
-            work_dir,
+            project_dir,
+            parameter="file_write_allowlist",
         )
-        normalized_writable_paths = (
-            None
-            if writable_paths is None
-            else _normalize_writable_path_values(
-                writable_paths,
-                project_dir,
-            )
+        legacy_writable_roots = _normalize_writable_path_values(
+            writable_paths or (),
+            project_dir,
+            parameter="writable_paths",
         )
+        configured_write_roots = tuple(dict.fromkeys((
+            *allowlisted_roots,
+            *legacy_writable_roots,
+        )))
         result = await _get_opencode_task_service().run_task(
             OpenCodeTaskSpec(
                 task_name=task_name,
@@ -2411,8 +2438,8 @@ async def _run_component_task(
                 output_schema=output_schema,
                 output_retry_count=invalid_json_retry_count,
                 output_retry_prompt=invalid_json_retry_prompt,
-                file_write_allowlist=allowlist,
-                writable_paths=normalized_writable_paths,
+                file_write_allowlist=configured_write_roots,
+                writable_paths=configured_write_roots,
                 session_id=session_id,
                 attempt=None,
             )

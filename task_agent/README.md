@@ -55,8 +55,8 @@ result = await run_opencode_task(
 | `output_schema` | `dict[str, Any]` 或 `None` | `None` | 可选的 JSON Schema。传入后，组件会先解析模型最终文本，必要时再检查本次消息由内置文件工具写入的文件，并将匹配值写入 `result.structured`；它不会修改首次 `prompt`。不传时 `result.structured` 为 `None`。 |
 | `invalid_json_retry_count` | `int` | `2` | 首次结果不符合 `output_schema` 时的恢复开关与原 Session 纠正上限，必须大于或等于 `0`。大于 `0` 时先新建一次低能力格式匹配任务，再最多在原 Session 追加该次数的纠正消息；`0` 同时关闭这两层恢复。该参数不控制 fresh Session 重试次数。 |
 | `invalid_json_retry_prompt` | `str` 或 `None` | `None` | JSON 校验失败后的可选纠正提示词。传入非空字符串时，每次纠错都原样重复发送；`None` 使用组件当前包含完整 Schema 的中文默认提示词。 |
-| `file_write_allowlist` | 路径序列或 `None` | `None` | `output_schema` 生效时，需要保留的模型写入文件或目录。相对路径以当前 `work_dir` 为基准，绝对路径也必须位于其中；目录项同时匹配自身及所有后代。它只阻止自动清理，不增加写权限。 |
-| `writable_paths` | 路径序列或 `None` | `None` | 本次 Session 允许内置文件工具修改的额外文件或目录。相对路径以 `project_dir` 为基准，绝对路径可位于项目外；路径会获得 `read`、`external_directory` 和 `edit` 权限，其中 `edit` 同时控制 `write`、`edit` 与 `apply_patch`。不允许通配符或文件系统根目录。 |
+| `file_write_allowlist` | 单个路径、路径序列或 `None` | `None` | 本次 Session 额外允许写入并默认保留的文件或目录。相对路径以 `project_dir` 为基准，绝对路径可位于项目外；路径自身及所有后代会获得 `read`、`external_directory` 和 `edit` 权限。不允许通配符或文件系统根目录。 |
+| `writable_paths` | 单个路径、路径序列或 `None` | `None` | `file_write_allowlist` 的兼容别名；两者同时传入时合并去重，并使用完全相同的写权限和保留语义。 |
 | `session_id` | `str` 或 `None` | `None` | 传入已有 Serve 会话 ID 以续接会话；省略、传入 `None` 或空字符串时创建新会话。同一组件生命周期内，续接会话不能切换项目目录或可写工作目录。 |
 | `config_path` | `str`、`PathLike[str]` 或 `None` | `None` | 独立运行时使用的 YAML 配置文件路径。未传入时依次读取 `TASK_AGENT_CONFIG` 和当前目录下的 `task-agent.yaml`。宿主配置已注册时不能再传入此参数。 |
 | `output` | callable 或 `None` | 使用当前执行上下文 | 可选的本次调用输出覆盖；传 `None` 可关闭 Task Agent 控制台流。 |
@@ -74,16 +74,16 @@ result = await run_opencode_task(
 任务的 Serve 配置，不会修改宿主的持久受管 Skill 注册；Task Agent 会在最终
 `opencode.json` 中从 `skills.paths` 和临时 `skill_paths` 推导显式 `read: allow` 与外部目录规则，使
 `references/`、`assets/`、`scripts/` 等资源可读。standalone 默认仍只允许写 `work_dir`；
-嵌入宿主可通过 `OpenCodeHostBindings.writable_roots` 声明额外稳定可写根。只有调用方显式
-传入 `writable_paths` 时，组件才会在创建或续写 Session 时下发对应路径的窄化
-`permission` 覆盖；`None` 保留已有 Session 权限，显式空列表清除 Session 覆盖并回落到
-全局边界。调用方不能传原生权限规则，`bash` 始终保持禁用。
+嵌入宿主可通过 `OpenCodeHostBindings.writable_roots` 声明额外稳定可写根。每次调用都会把
+`work_dir` 与 `file_write_allowlist`、兼容参数 `writable_paths` 合并为当前 Session 的窄化
+`permission` 覆盖，因此续接 Session 不会继承上一次调用未再次声明的额外路径。调用方不能传
+原生权限规则，`project_dir` 默认只读，`bash` 始终保持禁用。
 
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
 
-传入 `output_schema` 后，每条消息仍以最终文本中的合法 JSON 为第一选择。文本不匹配时，组件会按实际成功写入顺序倒序检查当前消息的内置 `write`、`edit`、`apply_patch`/`patch` 文件，最后一个匹配 Schema 的文件作为 `structured`。Task Agent 会向受管 `opencode.json` 追加文件写入 Hook，并在消息结束后重新读取本轮新增的完整 assistant 历史，因此即使最终响应只返回文本、文件工具发生在中间 assistant 消息中，也能恢复写入记录。相对写入路径以 `project_dir` 为基准；只读取 `project_dir`、`work_dir` 或显式 `writable_paths` 内的文件。
+传入 `output_schema` 后，每条消息仍以最终文本中的合法 JSON 为第一选择。文本不匹配时，组件会按实际成功写入顺序倒序检查当前消息的内置 `write`、`edit`、`apply_patch`/`patch` 文件，最后一个匹配 Schema 的文件作为 `structured`。Task Agent 会向受管 `opencode.json` 追加文件写入 Hook，并在消息结束后重新读取本轮新增的完整 assistant 历史，因此即使最终响应只返回文本、文件工具发生在中间 assistant 消息中，也能恢复写入记录。相对写入路径以 `project_dir` 为基准；只读取 `project_dir`、`work_dir` 或显式白名单路径内的文件。
 
-本次消息确认在 `work_dir` 新建且不在 `file_write_allowlist` 中的文件会在解析后删除，包括执行失败或进入后续恢复时；项目目录和额外 `writable_paths` 中的文件不会被自动删除，已有文件即使被模型修改也不会删除或恢复。`writable_paths` 只授予修改权限，不会自动保留 `work_dir` 文件。未传 Schema 时不跟踪、解析或清理文件；自定义 MCP 的未知文件副作用也不纳入该机制。
+`work_dir` 始终是隐式白名单；显式白名单及其后代也默认保留。本轮由受管文件工具确认新建、但位于有效白名单之外的文件会在任意位置删除，包括执行失败、取消或进入后续恢复时。若某个本轮新建文件被实际采用为符合 `output_schema` 的结构化结果，它会在解析后强制删除，即使位于白名单中；其它合法但未采用的文件仍按普通白名单处理。已有文件即使被修改或被采用为结果也不会删除或恢复。未传 Schema 时不解析文件 JSON，但仍跟踪和清理非白名单新文件；自定义 MCP 的未知文件副作用不纳入该机制。
 
 若文本和文件仍不符合 Schema，且 `invalid_json_retry_count > 0`，组件先把最后写入的非空文件内容（没有时使用最终文本）交给一个全新、禁用全部工具的格式匹配 Session。该任务以 `required_capability="low"` 调度并优先选择满足要求的最低能力候选，因此允许使用配置为低能力的模型；候选始终来自当前已启用且处于生效时间窗的模型。提示词要求只修复格式、不得增删或改写业务内容；原文缺少必需语义、映射有歧义或与 Schema 完全无关时，必须返回固定非法值 `__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__`，不能强制生成。格式匹配成功时只采用其 `structured`，公开结果继续保留原业务 Session、原文本和原模型。格式匹配失败后，组件才在原业务 Session 最多追加 `invalid_json_retry_count` 次纠正消息；仍失败则进入既有 fresh Session 业务重试。
 

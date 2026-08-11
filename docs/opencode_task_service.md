@@ -50,14 +50,14 @@ result = await run_opencode_task(
 | `output_schema` | `dict \| None` | `None` | 最终文本或本次消息所写文件中的 JSON 必须匹配的 JSON Schema；只用于本地解析和校验 |
 | `invalid_json_retry_count` | `int` | `2` | JSON 非法时在原 Session 追加纠正提示的次数 |
 | `invalid_json_retry_prompt` | `str \| None` | `None` | 自定义 JSON 纠正提示词；非空字符串会原样重复发送，`None` 使用内置中文默认值 |
-| `file_write_allowlist` | 路径序列或 `None` | `None` | 需要保留的模型写入文件或目录；仅在传入 `output_schema` 时参与自动清理，不增加写权限 |
-| `writable_paths` | 路径序列或 `None` | `None` | 为本次 Session 额外开放内置文件修改工具的文件或目录；相对路径以 `project_dir` 为基准，绝对路径可位于项目外 |
+| `file_write_allowlist` | 单个路径、路径序列或 `None` | `None` | 为本次 Session 额外开放写权限并默认保留的文件或目录；相对路径以 `project_dir` 为基准，绝对路径可位于项目外 |
+| `writable_paths` | 单个路径、路径序列或 `None` | `None` | `file_write_allowlist` 的兼容别名；两者会合并为同一组可写和保留路径 |
 | `session_id` | `str \| None` | `None` | 为空时创建 Session；非空时续写已有 Session |
 | `config_path` | `str \| PathLike \| None` | `None` | 仅独立模式使用的组件 YAML 路径；后端模式禁止覆盖宿主配置 |
 | `output` | callable 或 `None` | 当前执行上下文 | 覆盖本次任务的流式输出回调；显式 `None` 表示关闭 |
 | `cancel_event` | 提供 `is_set()` 的对象 | 当前执行上下文 | 覆盖本次任务的取消信号 |
 
-不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`writable_paths` 是唯一公开的额外写权限入口；它只生成路径级 `read`、`external_directory` 和 `edit` 放行规则，不能启用 `bash` 或改变其它权限。`file_write_allowlist` 只决定本次新建文件是否在 JSON 检查后保留。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
+不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；两者只生成路径级 `read`、`external_directory` 和 `edit` 放行规则，不能启用 `bash` 或改变其它权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
 
 返回的 `OpenCodeResult.output_source` 是可 JSON 序列化的 dict，用于由客户端协调器原样上报实际模型和 Session 来源。
 
@@ -187,7 +187,7 @@ model_pool:
 
 v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未显式填写 `serve.executable` 时继续使用 `nga`；旧模型行里的 `tool` 和 `executable` 会被忽略。v2 只接受 `serve.tool: opencode`，并拒绝模型行工具或可执行文件覆盖，确保所有模型共用 `serve.executable`。
 
-嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，`bash` 始终禁用。只有显式传入 `writable_paths` 时，额外动态路径才通过 Session 权限覆盖下发，不进入 Serve 配置哈希。
+嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，`bash` 始终禁用。显式传入 `file_write_allowlist` 或兼容参数 `writable_paths` 时，额外动态路径通过 Session 权限覆盖下发，不进入 Serve 配置哈希。
 
 `workspace_dir` 中生成的 `opencode.json` 包含合并后的实际配置，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Task Agent 还会在该 workspace 的私有目录生成一个受管文件写入 Hook，并在最终配置的 `plugin` 列表末尾追加其文件 URI；调用方已有的插件条目保持原顺序且不会被覆盖，Hook 源码哈希也参与 Serve 配置重载判断。
 
@@ -338,7 +338,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 - `project_dir`：真实项目目录，只允许 `read`、`list`、`glob`、`grep`。
 - `work_dir`：当前任务所属的 `.opendeephole` 隔离工作目录，允许文件编辑工具写入。
-- `writable_paths`：调用方显式授权的额外文件或目录；相对路径以 `project_dir` 为基准，绝对路径允许位于项目外，但不接受 `*`、`?` 或文件系统根目录。
+- `file_write_allowlist` / `writable_paths`：调用方显式授权的额外文件或目录；两者合并后同时获得写权限和默认保留语义。相对路径以 `project_dir` 为基准，绝对路径允许位于项目外，但不接受 `*`、`?` 或文件系统根目录。
 - `scan_id`、任务元数据、输出回调和取消事件：由编排层绑定并在异步任务树中自动继承。
 - `config_path`：独立过程可绑定自己的 Task Agent YAML；standalone 会合并全局、可执行文件相邻、项目、环境显式配置与 YAML 中的 `serve.opencode_config.skills.paths`，任务级 `skill_paths` 再追加到最终列表。
 - `skill_paths`：为确实需要临时 Skill 根的过程提供任务级注册；威胁分析只绑定当前所选方法的 Skill 根，不把方法目录写入全局运行配置。
@@ -352,7 +352,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - 拒绝所有 `bash`，避免通过 shell 绕过项目只读和工作目录写边界。
 - 允许加载最终配置注册的 SKILL，以及通用过程通过 `skill_paths` 绑定的临时 SKILL；注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
 
-原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。`writable_paths=None` 时 Task Agent 不在 `POST /session` 或 `PATCH /session/{sessionID}` 中发送权限，因此续接已有 Session 会保留其权限；显式序列会用本次生成的路径规则替换 Session 权限覆盖，显式 `[]` 清空覆盖并回落到全局配置。新 Session 重试会重新应用相同路径，同 Session JSON 纠正不会重复 PATCH。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
+原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。Task Agent 每次都以 `work_dir` 加当前调用显式路径生成 Session 权限；续接已有 Session 时会替换旧覆盖，避免上一次调用的额外写路径残留。新 Session 重试会重新应用相同路径，同 Session JSON 纠正复用当前权限而不重复 PATCH。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
 
 ## JSON 自动纠正和新 Session 重试
 
@@ -360,7 +360,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 服务先解析 LLM 的最终文本；文本中的 JSON 合法时始终优先采用。若文本不匹配 Schema，服务会检查本轮成功完成的内置 `write`、`edit`、`apply_patch`/`patch` 调用，按实际写入顺序从后向前读取文件，最后一个匹配 Schema 的文件成为 `structured`。受管 OpenCode Hook 在 `tool.execute.after` 为写入结果附加标准化路径、Session、调用 ID 和是否新建等标记；消息完成后，Task Agent 还会基于发送前 assistant 基线重新读取本轮完整消息历史，恢复最终 HTTP 响应未包含的中间 assistant 文件写入。事件流、Hook 标记和 OpenCode 原生 Tool 元数据会合并去重；Hook 异常不会改变工具执行结果。这不会改变 `OpenCodeResult.text`，它仍是 LLM 最后一次文本输出。自定义 MCP 工具的未知文件副作用不在跟踪范围内。
 
-相对写入路径以 OpenCode Session 的 `project_dir` 为基准，只允许读取解析后位于 `project_dir`、`work_dir` 或显式 `writable_paths` 内的文件。每次消息完成后，服务只删除确认由该消息在 `work_dir` 新建、且未被 `file_write_allowlist` 匹配的文件；无论 JSON 来自文本还是文件、消息执行失败，或即将进入后续恢复，都会先取得文件内容快照再执行清理。项目目录和额外 `writable_paths` 中的文件不会被自动删除；已存在但被修改的文件也不会删除或恢复旧内容。白名单中的相对路径以当前 `work_dir` 为基准；绝对路径必须位于 `work_dir` 内；文件项匹配自身，目录项匹配自身和所有后代。`writable_paths` 只授予修改权限，不会自动保留 `work_dir` 新文件；`file_write_allowlist` 只控制保留且不会扩大写权限。
+相对写入路径以 OpenCode Session 的 `project_dir` 为基准，只允许从 `project_dir`、`work_dir` 或显式白名单路径读取文件结果。`work_dir` 是隐式白名单，显式路径自身及后代同时可写并默认保留。每次消息结束后，服务会删除本轮确认新建、但位于有效白名单之外的任意位置文件；无论消息成功、失败、取消或即将进入恢复，都会先取得需要的文件快照再清理。若某个本轮新建文件被实际采用为符合 Schema 的 `structured` 来源，则解析后强制删除，即使它位于白名单中；多个合法文件中只有实际采用者使用该例外。已存在但被修改的文件始终不删除或恢复。
 
 若文本和已写文件都没有符合 Schema 的 JSON，且 `invalid_json_retry_count > 0`，服务按以下顺序恢复：
 
@@ -370,7 +370,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 4. 格式匹配输出通过 Schema 后，只把该 JSON 作为 `structured`；公开结果仍返回原业务 `session_id`、原 `text`、原 `model` 和原输出来源。格式匹配失败、返回固定非法值或请求异常时，服务重新取得符合原业务能力要求的已启用模型 Lease，并在原业务 Session 最多追加 `invalid_json_retry_count` 次纠正消息。
 5. 原 Session 纠正仍失败后，才按 `serve.max_retries` 重新排队并创建 fresh 业务 Session。格式不合规与固定非法值属于健康中性失败；格式匹配或纠正请求本身发生 Provider/Auth/API 失败或超时时，仍按真实请求结果更新对应模型健康状态。
 
-原 Session 纠正使用 `invalid_json_retry_prompt`：值为 `None` 时使用当前包含完整 Schema 的中文默认提示词；传入非空字符串时，每次都原样发送该字符串，不追加 Schema、重试序号或其它内容。空字符串、纯空白和非字符串会在提交任务前报错。未传 `output_schema` 时完全不启用文件跟踪、文件 JSON 回退或自动清理；`invalid_json_retry_count=0` 时同时关闭独立格式匹配与原 Session 纠正，但既有 fresh Session 重试策略保持不变。
+原 Session 纠正使用 `invalid_json_retry_prompt`：值为 `None` 时使用当前包含完整 Schema 的中文默认提示词；传入非空字符串时，每次都原样发送该字符串，不追加 Schema、重试序号或其它内容。空字符串、纯空白和非字符串会在提交任务前报错。未传 `output_schema` 时不启用文件 JSON 回退，但仍跟踪并清理非白名单新文件；`invalid_json_retry_count=0` 时同时关闭独立格式匹配与原 Session 纠正，但既有 fresh Session 重试策略保持不变。
 
 若同 Session 纠正耗尽，内部服务会按对应任务策略的 `max_retries` 释放 Lease、重新排队并创建全新 Session。模型消息超时和其它可重试执行错误也使用同一预算；`max_retries=2` 表示首次 Session 之外最多再创建 2 个 Session，即最多执行 3 次。业务方不再传 `attempt`。
 

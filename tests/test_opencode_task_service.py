@@ -14,6 +14,10 @@ import pytest
 
 from backend.models import OutputSource
 from task_agent import OpenCodeResult, run_opencode_task
+from task_agent.api import (
+    _normalize_file_write_allowlist,
+    _normalize_writable_paths,
+)
 from task_agent.model_pool import (
     NO_AVAILABLE_MODEL_MESSAGE,
     ModelLease,
@@ -80,16 +84,29 @@ def test_writable_path_permissions_allow_read_external_access_and_edits(
 
     assert permissions is not None
     expected_patterns = _permission_path_patterns(writable_root)
-    for permission in ("read", "external_directory", "edit"):
+    for permission in ("read", "external_directory"):
         assert [
             rule["pattern"]
             for rule in permissions
             if rule["permission"] == permission
         ] == expected_patterns
-    assert all(rule["action"] == "allow" for rule in permissions)
+    edit_rules = [
+        rule for rule in permissions if rule["permission"] == "edit"
+    ]
+    assert edit_rules[0] == {
+        "permission": "edit",
+        "pattern": "*",
+        "action": "deny",
+    }
+    assert [rule["pattern"] for rule in edit_rules[1:]] == expected_patterns
+    assert all(rule["action"] == "allow" for rule in permissions if rule is not edit_rules[0])
     assert all(rule["permission"] != "bash" for rule in permissions)
     assert _writable_path_permissions(None) is None
-    assert _writable_path_permissions(()) == []
+    assert _writable_path_permissions(()) == [{
+        "permission": "edit",
+        "pattern": "*",
+        "action": "deny",
+    }]
 
 
 def test_dynamic_writable_paths_stay_out_of_serve_config(
@@ -444,13 +461,12 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
         assert spec.output_retry_count == 4
         assert spec.output_retry_prompt == "  custom retry prompt  "
         assert spec.file_write_allowlist == (
-            (tmp_path / "work" / "keep.json").resolve(),
+            (tmp_path / "keep.json").resolve(),
             (tmp_path / "work" / "reports").resolve(),
-        )
-        assert spec.writable_paths == (
             (tmp_path / "generated").resolve(),
             external_dir.resolve(),
         )
+        assert spec.writable_paths == spec.file_write_allowlist
         assert spec.session_id == "ses-existing"
 
         service.run_task.reset_mock()
@@ -781,15 +797,8 @@ def test_public_interface_rejects_invalid_json_retry_prompts() -> None:
 
 def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None:
     async def run() -> None:
-        with pytest.raises(TypeError, match="file_write_allowlist.*sequence"):
-            await run_opencode_task(
-                task_name="scalar allowlist",
-                task_type="vulnerability_mining",
-                prompt="test",
-                required_capability="low",
-                output_schema=SCHEMA,
-                file_write_allowlist="keep.json",  # type: ignore[arg-type]
-            )
+        assert _normalize_file_write_allowlist("keep.json") == ("keep.json",)
+        assert _normalize_file_write_allowlist(Path("reports")) == ("reports",)
         with pytest.raises(TypeError, match="entries.*strings or PathLike"):
             await run_opencode_task(
                 task_name="invalid allowlist entry",
@@ -799,17 +808,22 @@ def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None
                 output_schema=SCHEMA,
                 file_write_allowlist=[123],  # type: ignore[list-item]
             )
-        with (
-            _task_context(tmp_path),
-            pytest.raises(ValueError, match="resolve within work_dir"),
-        ):
+        for value in ("", "generated/*", "generated/file?.json"):
+            with pytest.raises(ValueError, match="file_write_allowlist"):
+                await run_opencode_task(
+                    task_name="unsafe allowlist",
+                    task_type="vulnerability_mining",
+                    prompt="test",
+                    required_capability="low",
+                    file_write_allowlist=value,
+                )
+        with _task_context(tmp_path), pytest.raises(ValueError, match="filesystem root"):
             await run_opencode_task(
-                task_name="outside allowlist",
+                task_name="root allowlist",
                 task_type="vulnerability_mining",
                 prompt="test",
                 required_capability="low",
-                output_schema=SCHEMA,
-                file_write_allowlist=["../outside.json"],
+                file_write_allowlist=Path(tmp_path.anchor),
             )
 
     asyncio.run(run())
@@ -817,14 +831,8 @@ def test_public_interface_validates_file_write_allowlist(tmp_path: Path) -> None
 
 def test_public_interface_validates_writable_paths(tmp_path: Path) -> None:
     async def run() -> None:
-        with pytest.raises(TypeError, match="writable_paths.*sequence"):
-            await run_opencode_task(
-                task_name="scalar writable path",
-                task_type="vulnerability_mining",
-                prompt="test",
-                required_capability="low",
-                writable_paths="generated",  # type: ignore[arg-type]
-            )
+        assert _normalize_writable_paths("generated") == ("generated",)
+        assert _normalize_writable_paths(Path("reports")) == ("reports",)
         with pytest.raises(TypeError, match="entries.*strings or PathLike"):
             await run_opencode_task(
                 task_name="invalid writable path",
@@ -981,7 +989,7 @@ def test_task_service_parses_json_and_uses_global_permissions(tmp_path: Path) ->
         assert "用户理由：边界检查缺失" in captured["system_prompt"]
         assert "CodeGraph project scope" not in captured["system_prompt"]
         assert "Selected scan feedback" not in captured["system_prompt"]
-        assert captured["permissions"] is None
+        assert captured["permissions"] == _writable_path_permissions((scan_dir.resolve(),))
         acquire_kwargs = acquire_mock.await_args.kwargs
         assert acquire_kwargs["stats_scope_id"] == "scan-7"
         assert acquire_kwargs["task_context"]["task_type"] == "vulnerability_mining"
@@ -1139,8 +1147,14 @@ def test_phase_policy_controls_capability_timeout_and_retries(tmp_path: Path) ->
         assert len(calls) == 2
         assert [call["timeout"] for call in calls] == [77, 77]
         assert [call["permissions"] for call in calls] == [
-            _writable_path_permissions((writable_root.resolve(),)),
-            _writable_path_permissions((writable_root.resolve(),)),
+            _writable_path_permissions((
+                (tmp_path / "work").resolve(),
+                writable_root.resolve(),
+            )),
+            _writable_path_permissions((
+                (tmp_path / "work").resolve(),
+                writable_root.resolve(),
+            )),
         ]
         assert acquire_mock.await_count == 2
         assert all(
@@ -1248,12 +1262,12 @@ def test_text_json_stays_primary_over_written_json(tmp_path: Path) -> None:
         assert result.status == "success"
         assert result.text == '{"answer": 7}'
         assert result.structured == {"answer": 7}
-        assert not output_file.exists()
+        assert output_file.read_text(encoding="utf-8") == '{"answer": 99}'
 
     asyncio.run(run())
 
 
-def test_relative_written_path_resolves_from_project_and_is_not_cleaned(
+def test_relative_written_result_path_resolves_from_project_and_is_cleaned(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
@@ -1297,12 +1311,12 @@ def test_relative_written_path_resolves_from_project_and_is_not_cleaned(
 
         assert result.status == "success"
         assert result.structured == {"answer": 23}
-        assert output_file.read_text(encoding="utf-8") == '{"answer": 23}'
+        assert not output_file.exists()
 
     asyncio.run(run())
 
 
-def test_written_json_in_explicit_writable_path_is_parsed_and_retained(
+def test_written_json_in_explicit_allowlist_path_is_parsed_and_removed(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
@@ -1341,7 +1355,7 @@ def test_written_json_in_explicit_writable_path_is_parsed_and_retained(
                 directory=project_dir,
                 output_schema=SCHEMA,
                 output_retry_count=0,
-                writable_paths=(writable_dir,),
+                file_write_allowlist=(writable_dir,),
                 attempt=0,
             ),
             work_dir=work_dir,
@@ -1349,12 +1363,12 @@ def test_written_json_in_explicit_writable_path_is_parsed_and_retained(
 
         assert result.status == "success"
         assert result.structured == {"answer": 29}
-        assert output_file.read_text(encoding="utf-8") == '{"answer": 29}'
+        assert not output_file.exists()
 
     asyncio.run(run())
 
 
-def test_latest_valid_written_json_wins_and_allowlist_retains_files(
+def test_latest_valid_written_json_wins_and_only_selected_file_is_forced_removed(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
@@ -1406,9 +1420,9 @@ def test_latest_valid_written_json_wins_and_allowlist_retains_files(
 
         assert result.status == "success"
         assert result.structured == {"answer": 3}
-        assert not temporary.exists()
+        assert temporary.read_text(encoding="utf-8") == '{"answer": 1}'
         assert retained_file.read_text(encoding="utf-8") == '{"answer": 2}'
-        assert retained_in_dir.read_text(encoding="utf-8") == '{"answer": 3}'
+        assert not retained_in_dir.exists()
 
     asyncio.run(run())
 
@@ -1459,7 +1473,7 @@ def test_preexisting_written_file_is_never_deleted(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_file_tracking_and_cleanup_are_disabled_without_schema(
+def test_file_tracking_is_enabled_without_schema_and_work_dir_is_retained(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
@@ -1468,8 +1482,13 @@ def test_file_tracking_and_cleanup_are_disabled_without_schema(
         output_file = work_dir / "requested.txt"
 
         async def run_prompt(**kwargs):
-            assert kwargs["on_file_write"] is None
+            assert kwargs["on_file_write"] is not None
             output_file.write_text("keep me", encoding="utf-8")
+            kwargs["on_file_write"](OpenCodeFileWrite(
+                call_id="write-no-schema",
+                path=str(output_file),
+                created=True,
+            ))
             callback = kwargs["on_session_id"]("ses-no-schema")
             if hasattr(callback, "__await__"):
                 await callback
@@ -1501,7 +1520,72 @@ def test_file_tracking_and_cleanup_are_disabled_without_schema(
     asyncio.run(run())
 
 
-def test_invalid_written_json_is_formatter_source_and_removed_before_formatter(
+def test_allowlisted_external_directory_retains_descendants_and_cleans_sibling(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        project_dir = tmp_path / "project"
+        work_dir = tmp_path / "work"
+        allowed_dir = tmp_path / "external-output"
+        sibling_dir = tmp_path / "external-output-other"
+        project_dir.mkdir()
+        work_dir.mkdir()
+        allowed_file = allowed_dir / "nested" / "report.md"
+        sibling_file = sibling_dir / "report.md"
+        allowed_file.parent.mkdir(parents=True)
+        sibling_file.parent.mkdir(parents=True)
+        captured_permissions: list[dict[str, str]] | None = None
+
+        async def run_prompt(**kwargs):
+            nonlocal captured_permissions
+            captured_permissions = kwargs["permissions"]
+            for call_id, path in (
+                ("write-allowed", allowed_file),
+                ("write-sibling", sibling_file),
+            ):
+                path.write_text(call_id, encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id=call_id,
+                    path=str(path),
+                    created=True,
+                ))
+            callback = kwargs["on_session_id"]("ses-allowlisted-dir")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses-allowlisted-dir",
+                message_id="msg-allowlisted-dir",
+                lines=["done"],
+                text="done",
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            project_dir,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="allowlisted directory",
+                prompt="write reports",
+                directory=project_dir,
+                file_write_allowlist=(allowed_dir,),
+                output_retry_count=0,
+                attempt=0,
+            ),
+            work_dir=work_dir,
+        )
+
+        assert result.status == "success"
+        assert allowed_file.read_text(encoding="utf-8") == "write-allowed"
+        assert not sibling_file.exists()
+        assert captured_permissions == _writable_path_permissions((
+            work_dir.resolve(),
+            allowed_dir.resolve(),
+        ))
+
+    asyncio.run(run())
+
+
+def test_invalid_written_json_is_formatter_source_and_retained_in_work_dir(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
@@ -1534,7 +1618,7 @@ def test_invalid_written_json_is_formatter_source_and_removed_before_formatter(
                 ))
                 text = "written"
             else:
-                assert not invalid_file.exists()
+                assert invalid_file.read_text(encoding="utf-8") == '{"answer":"wrong"}'
                 assert kwargs["disable_all_tools"] is True
                 assert kwargs["on_file_write"] is None
                 text = '{"answer": 12}'
@@ -1573,7 +1657,7 @@ def test_invalid_written_json_is_formatter_source_and_removed_before_formatter(
             _writable_path_permissions((work_dir.resolve(),)),
             [],
         ]
-        assert not invalid_file.exists()
+        assert invalid_file.read_text(encoding="utf-8") == '{"answer":"wrong"}'
 
     asyncio.run(run())
 
@@ -1582,7 +1666,7 @@ def test_new_written_file_is_cleaned_when_prompt_fails(tmp_path: Path) -> None:
     async def run() -> None:
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        output_file = work_dir / "failed.json"
+        output_file = tmp_path / "failed.json"
 
         async def run_prompt(**kwargs):
             output_file.write_text('{"answer": 5}', encoding="utf-8")
@@ -2284,12 +2368,14 @@ def test_new_session_and_immediate_continuation_are_serialized(tmp_path: Path) -
         active = 0
         max_active = 0
         calls: list[tuple[str, str | None]] = []
+        permissions: list[list[dict[str, str]] | None] = []
 
         async def run_prompt(**kwargs):
             nonlocal active, max_active
             active += 1
             max_active = max(max_active, active)
             calls.append((kwargs["prompt"], kwargs["session_id"]))
+            permissions.append(kwargs["permissions"])
             try:
                 callback = kwargs["on_session_id"]("ses_shared")
                 if hasattr(callback, "__await__"):
@@ -2313,7 +2399,11 @@ def test_new_session_and_immediate_continuation_are_serialized(tmp_path: Path) -
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             with _task_context(tmp_path):
                 first = service.submit_task(OpenCodeTaskSpec(
-                    task_name="first", prompt="first", directory=tmp_path, attempt=0,
+                    task_name="first",
+                    prompt="first",
+                    directory=tmp_path,
+                    file_write_allowlist=(tmp_path / "extra",),
+                    attempt=0,
                 ))
                 session_id = await asyncio.wait_for(first.wait_session_id(), timeout=1)
                 await first_started.wait()
@@ -2332,6 +2422,13 @@ def test_new_session_and_immediate_continuation_are_serialized(tmp_path: Path) -
 
         assert calls == [("first", None), ("second", "ses_shared")]
         assert max_active == 1
+        assert permissions == [
+            _writable_path_permissions((
+                (tmp_path / "work").resolve(),
+                (tmp_path / "extra").resolve(),
+            )),
+            _writable_path_permissions(((tmp_path / "work").resolve(),)),
+        ]
 
     asyncio.run(run())
 

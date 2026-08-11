@@ -28,6 +28,7 @@ _fp_review_tasks: dict[str, asyncio.Task] = {}
 _fp_review_cancel_events: dict[str, threading.Event] = {}
 _fp_review_scan_ids: dict[str, str] = {}
 _fp_review_queues: dict[str, deque["_FpReviewQueueItem"]] = {}
+_fp_review_queue_events: dict[str, asyncio.Event] = {}
 _fp_review_active_items: set[tuple[str, int]] = set()
 _fp_review_running_indices: dict[str, set[int]] = {}
 _validation_tasks: dict[tuple[str, int], asyncio.Future] = {}
@@ -472,6 +473,7 @@ async def enqueue_fp_review(
         processed_offset=max(0, int(processed_offset or 0)),
         planned_task_id="",
     ))
+    _fp_review_queue_events.setdefault(review_id, asyncio.Event()).set()
     worker = _fp_review_tasks.get(review_id)
     if worker is None or worker.done():
         worker = asyncio.create_task(_run_fp_review_worker(review_id))
@@ -491,112 +493,172 @@ async def _run_fp_review_worker(review_id: str) -> None:
     scan_id = _fp_review_scan_ids.get(review_id, "")
     had_work = False
     worker_cancelled = False
+    processed_offset_initialized = False
+    concurrency = 1
+    launch_sequence = 0
+    in_flight: dict[asyncio.Task, tuple[int, _FpReviewQueueItem]] = {}
+
+    async def run_item(
+        item: _FpReviewQueueItem,
+        method_error: str,
+    ) -> dict[str, Any]:
+        vuln_index = int(item.vulnerability["index"])
+        running = _fp_review_running_indices.setdefault(review_id, set())
+        running.add(vuln_index)
+        try:
+            try:
+                await item.reporter.push_fp_progress(
+                    item.scan_id,
+                    review_id,
+                    vuln_index,
+                    None,
+                    sorted(running),
+                )
+            except Exception as exc:
+                print(
+                    f"Warning: failed to report FP review progress for "
+                    f"{review_id} vuln[{vuln_index}]: {exc}"
+                )
+            print(
+                f"[{item.method}] Starting review {review_id} "
+                f"vuln[{vuln_index}] for scan {item.scan_id}"
+            )
+            try:
+                if method_error:
+                    raise RuntimeError(method_error)
+                if item.cancel_event.is_set():
+                    return {
+                        "status": "cancelled",
+                        "error_message": "用户手动停止",
+                    }
+                return await _run_single_fp_review_item(item)
+            except asyncio.CancelledError as exc:
+                current = asyncio.current_task()
+                if item.cancel_event.is_set() or (
+                    current is not None and current.cancelling()
+                ):
+                    raise
+                error_message = str(exc).strip() or (
+                    f"漏洞 {vuln_index} 去误报任务被意外取消"
+                )
+                print(
+                    f"[{item.method}] Review {review_id} "
+                    f"vuln[{vuln_index}] was unexpectedly cancelled: "
+                    f"{error_message}"
+                )
+                return {
+                    "status": "error",
+                    "error_message": error_message,
+                }
+            except Exception as exc:
+                print(
+                    f"[{item.method}] Review {review_id} "
+                    f"vuln[{vuln_index}] failed: {exc}"
+                )
+                return {
+                    "status": "error",
+                    "error_message": str(exc),
+                }
+        finally:
+            running.discard(vuln_index)
+            _fp_review_active_items.discard((review_id, vuln_index))
+
+    async def cancel_in_flight() -> None:
+        tasks = tuple(in_flight)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        in_flight.clear()
+
     try:
         while True:
             queue = _fp_review_queues.get(review_id)
-            if not queue:
+            if not queue and not in_flight:
                 await asyncio.sleep(0)
                 queue = _fp_review_queues.get(review_id)
                 if not queue:
                     break
-            first = queue[0]
-            from deephole_client.fp_review import load_fp_review_methods
+            if queue:
+                first = queue[0]
+                from deephole_client.fp_review import load_fp_review_methods
 
-            method_error = ""
-            try:
-                loaded = load_fp_review_methods().get(first.method)
-            except Exception as exc:
-                loaded = None
-                method_error = (
-                    f"FP review method {first.method!r} failed to load: {exc}"
-                )
-            if loaded is None:
-                method_error = method_error or (
-                    f"FP review method unavailable while queued: {first.method}"
-                )
-                concurrency = 1
-            else:
-                concurrency = loaded.manifest.max_concurrency
-            batch = [
-                queue.popleft()
-                for _ in range(min(concurrency, len(queue)))
-            ]
-            had_work = True
-            last_reporter = batch[-1].reporter
-            scan_id = batch[-1].scan_id
-            if attempts == 0:
-                processed_count = max(
-                    processed_count,
-                    min(item.processed_offset for item in batch),
-                )
-
-            async def run_item(item: _FpReviewQueueItem) -> dict[str, Any]:
-                vuln_index = int(item.vulnerability["index"])
-                running = _fp_review_running_indices.setdefault(review_id, set())
-                running.add(vuln_index)
+                method_error = ""
                 try:
-                    try:
-                        await item.reporter.push_fp_progress(
-                            item.scan_id,
-                            review_id,
-                            vuln_index,
-                            None,
-                            sorted(running),
-                        )
-                    except Exception as exc:
-                        print(
-                            f"Warning: failed to report FP review progress for "
-                            f"{review_id} vuln[{vuln_index}]: {exc}"
-                        )
-                    print(
-                        f"[{item.method}] Starting review {review_id} "
-                        f"vuln[{vuln_index}] for scan {item.scan_id}"
+                    loaded = load_fp_review_methods().get(first.method)
+                except Exception as exc:
+                    loaded = None
+                    method_error = (
+                        f"FP review method {first.method!r} failed to load: {exc}"
                     )
-                    try:
-                        if method_error:
-                            raise RuntimeError(method_error)
-                        if item.cancel_event.is_set():
-                            return {
-                                "status": "cancelled",
-                                "error_message": "用户手动停止",
-                            }
-                        return await _run_single_fp_review_item(item)
-                    except asyncio.CancelledError as exc:
-                        current = asyncio.current_task()
-                        if item.cancel_event.is_set() or (
-                            current is not None and current.cancelling()
-                        ):
-                            raise
-                        error_message = str(exc).strip() or (
-                            f"漏洞 {vuln_index} 去误报任务被意外取消"
-                        )
-                        print(
-                            f"[{item.method}] Review {review_id} "
-                            f"vuln[{vuln_index}] was unexpectedly cancelled: "
-                            f"{error_message}"
-                        )
-                        return {
-                            "status": "error",
-                            "error_message": error_message,
-                        }
-                    except Exception as exc:
-                        print(
-                            f"[{item.method}] Review {review_id} "
-                            f"vuln[{vuln_index}] failed: {exc}"
-                        )
-                        return {
-                            "status": "error",
-                            "error_message": str(exc),
-                        }
-                finally:
-                    running.discard(vuln_index)
-                    _fp_review_active_items.discard((review_id, vuln_index))
+                if loaded is None:
+                    method_error = method_error or (
+                        f"FP review method unavailable while queued: {first.method}"
+                    )
+                    concurrency = 1
+                else:
+                    concurrency = loaded.manifest.max_concurrency
 
-            values = await asyncio.gather(
-                *(run_item(item) for item in batch),
-                return_exceptions=True,
+                launched: list[_FpReviewQueueItem] = []
+                while queue and len(in_flight) < concurrency:
+                    item = queue.popleft()
+                    launched.append(item)
+                    launch_sequence += 1
+                    task = asyncio.create_task(
+                        run_item(item, method_error),
+                        name=(
+                            f"fp-review-{review_id}-"
+                            f"{int(item.vulnerability['index'])}"
+                        ),
+                    )
+                    in_flight[task] = (launch_sequence, item)
+                if launched:
+                    had_work = True
+                    last_reporter = launched[-1].reporter
+                    scan_id = launched[-1].scan_id
+                    if not processed_offset_initialized:
+                        processed_count = max(
+                            processed_count,
+                            min(item.processed_offset for item in launched),
+                        )
+                        processed_offset_initialized = True
+
+            if not in_flight:
+                continue
+
+            queue_wakeup: asyncio.Task | None = None
+            wait_set: set[asyncio.Task] = set(in_flight)
+            if len(in_flight) < concurrency:
+                queue_event = _fp_review_queue_events.setdefault(
+                    review_id,
+                    asyncio.Event(),
+                )
+                queue_event.clear()
+                if _fp_review_queues.get(review_id):
+                    continue
+                queue_wakeup = asyncio.create_task(queue_event.wait())
+                wait_set.add(queue_wakeup)
+            done, _ = await asyncio.wait(
+                wait_set,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            for item, value in zip(batch, values):
+            if queue_wakeup is not None:
+                if queue_wakeup in done:
+                    done.remove(queue_wakeup)
+                else:
+                    queue_wakeup.cancel()
+                    await asyncio.gather(queue_wakeup, return_exceptions=True)
+
+            completed = sorted(
+                (task for task in done if task in in_flight),
+                key=lambda task: in_flight[task][0],
+            )
+            for task in completed:
+                _, item = in_flight.pop(task)
+                try:
+                    value: Any = task.result()
+                except BaseException as exc:
+                    value = exc
                 attempts += 1
                 processed_count += 1
                 vuln_index = int(item.vulnerability["index"])
@@ -647,6 +709,7 @@ async def _run_fp_review_worker(review_id: str) -> None:
                         f"{review_id} vuln[{vuln_index}]: {exc}"
                     )
             if terminal_status == "cancelled":
+                await cancel_in_flight()
                 break
     except asyncio.CancelledError:
         worker_cancelled = True
@@ -657,11 +720,13 @@ async def _run_fp_review_worker(review_id: str) -> None:
         else:
             terminal_status = "error"
             failures.append("去误报工作任务被意外取消")
+        await cancel_in_flight()
         raise
     except Exception as exc:
         terminal_status = "error"
         failures.append(str(exc))
         print(f"FP review worker {review_id} failed: {exc}")
+        await cancel_in_flight()
     finally:
         cancel_event = _fp_review_cancel_events.get(review_id)
         if cancel_event is not None and cancel_event.is_set():
@@ -719,6 +784,7 @@ async def _run_fp_review_worker(review_id: str) -> None:
             )
         elif not queue:
             _fp_review_queues.pop(review_id, None)
+            _fp_review_queue_events.pop(review_id, None)
             _fp_review_cancel_events.pop(review_id, None)
             _fp_review_scan_ids.pop(review_id, None)
 

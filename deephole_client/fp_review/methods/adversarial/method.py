@@ -127,6 +127,9 @@ def _stage_prompt(
         f"{skill}\n\n"
         f"当前阶段：{stage}\n"
         "必须读取当前项目中的真实代码，不得仅依据原报告复述结论。"
+        "前序阶段内容只从输入上下文的 prior_stages 获取。"
+        "不得调用 write、edit、apply_patch、patch 或其它文件写入工具，"
+        "不得创建、修改或删除任何项目文件。"
         "请严格返回约定 JSON；stage_markdown 写出本阶段可独立阅读的分析。\n\n"
         "输入上下文：\n"
         + json.dumps(context, ensure_ascii=False, indent=2)

@@ -26,16 +26,15 @@ compatibility: opencode
 - 疑似漏洞类型
 - 命中文件、函数、行号
 - 疑似 source / sink / 变量名
-- `prove-bug.md` 的文件路径
-- `prove-bug` 给出的结构化阶段摘要
+- `prior_stages.prove_bug` 中的结构化阶段结果与完整 `stage_markdown`
 - 部分上下文代码
 - project_id
 
-你必须先读取提示中给出的 `prove-bug.md` 文件，再主动阅读代码寻找反证。不要直接接受 `prove-bug` 的结论。
+你必须先审查 `prior_stages.prove_bug`，再主动阅读代码寻找反证。不要直接接受 `prove_bug` 的结论，也不得创建或修改项目文件。
 
 ## 阶段 Markdown 输出
 
-你必须将反方论证写入提示中给出的 `prove-fp.md` 路径。该文件会作为最终裁决 Agent 的输入，必须逐条反驳或确认 `prove-bug.md` 中的关键证据，并包含完整代码链、关键代码片段和证据说明。输出风格参考 memleak：读者不重新查看代码也能判断是否是问题。
+你必须在最终 JSON 的 `stage_markdown` 字段中返回反方论证，逐条反驳或确认 `prior_stages.prove_bug` 中的关键证据，并包含完整代码链、关键代码片段和证据说明。输出风格参考 memleak：读者不重新查看代码也能判断是否是问题。
 
 Markdown 至少包含：
 
@@ -182,18 +181,15 @@ for (...; byteNum != 0; byteNum -= contentLen, loop++) {
 
 最终回复输出 JSON，提供：
 
-- `confirmed`：
-  - `false`：已证明非问题
-  - `true`：未能证明非问题，仍保留真实代码问题
-- `severity`：
-  - `low`：非问题
-  - `medium`：真实代码问题存在，但外部触发证据不足
-  - `high`：真实代码问题存在，且外部触发链仍成立
-- `description`：一句话总结反方判定
-- `ai_analysis`：必须包含下面格式
-- `vulnerability_report`：只要 `confirmed=true`，无论 high 还是 medium，都必须填写或修正 Markdown 问题报告
+- `verdict`：已证明非问题为 `false_positive`，问题仍成立为 `true_positive`，证据不足为 `uncertain`
+- `revised_severity`：`low` / `medium` / `high`，无法定级时为空字符串
+- `reason`：一句话总结反方判定
+- `evidence`：关键 `path:line` 及反证数组
+- `stage_markdown`：必须包含下面格式的完整论证
+- `vulnerability_report`：`verdict=true_positive` 时必须填写或修正 Markdown 问题报告
+- `match_type` / `match_reference`：本阶段不适用时返回空字符串
 
-`ai_analysis` 必须按以下格式输出：
+`stage_markdown` 必须按以下格式输出：
 
 ```text
 [PROVE-FP-RESULT]
@@ -269,5 +265,5 @@ Residual Risk:
 - 不允许只因为存在 if 校验就判定误报。
 - 不允许忽略外部入口。
 - 不允许把认证用户输入直接视为可信输入。
-- 如果无法证明不可触发、不可控、已有充分校验或 sink 安全，输出 `confirmed=true`；外部可触发链不足时使用 `severity=medium`。
+- 如果无法证明不可触发、不可控、已有充分校验或 sink 安全，输出 `verdict=true_positive`；外部可触发链不足时使用 `revised_severity=medium`。
 - 不要使用 CVSS 打分。

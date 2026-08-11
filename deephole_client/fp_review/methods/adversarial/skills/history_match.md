@@ -18,21 +18,24 @@ description: 去误报「历史/校验匹配」阶段——判断候选漏洞能
 
 ## 判定原则
 
-- 只要确实满足上述任一类对应关系，就视为**匹配成立**（confirmed=true）——这类问题有历史/同类
+- 只要确实满足上述任一类对应关系，就视为**匹配成立**（verdict=true_positive）——这类问题有历史/同类
   佐证，**直接定级为 high**，无需再做可触发性辩论。
-- 若证据不足、只是表面相似而根因不同、或本站点其实已正确校验，则**匹配不成立**（confirmed=false），
+- 若证据不足、只是表面相似而根因不同、或本站点其实已正确校验，则**匹配不成立**（verdict=uncertain），
   交由后续三阶段对抗辩论判断，**不要勉强匹配**。
 
 ## 输出要求（必须遵守）
 
-1. 在最终 JSON 的 `stage_markdown` 字段返回本阶段完整 Markdown 论证。
-2. 在同一个最终 JSON 中返回结论：
-   - `confirmed`：是否对应上（true/false）。
-   - `match_type`：`history` 或 `validation`（confirmed=true 时必填）。
+最终回复只能返回约定 JSON，不得写入任何文件。字段要求：
+
+   - `verdict`：匹配成立为 `true_positive`，否则为 `uncertain`。
+   - `reason`：结论摘要。
+   - `evidence`：关键 `path:line`、提交或校验证据数组。
+   - `revised_severity`：匹配成立为 `high`，否则为空字符串。
+   - `stage_markdown`：本阶段完整、可独立阅读的 Markdown 论证。
+   - `match_type`：`history` 或 `validation`（匹配成立时必填）。
    - `match_reference`：对应的修复/校验描述——历史模式根因摘要 + 出处提交，或正确校验站点
      `path:line` + 一句话说明。让报告能回溯到对应的历史问题或正面对照。
-   - `description` / `ai_analysis`：结论摘要与详细推理。
-   - `vulnerability_report`：confirmed=true 时提交，含 Summary、Vulnerable Code、Full Call Stack、
+   - `vulnerability_report`：匹配成立时提交，含 Summary、Vulnerable Code、Full Call Stack、
      Root Cause、Why It is Reachable、Impact、Evidence 七个二级标题。
 
 不要调用结果提交类 MCP 工具，不要使用 CVSS 打分。

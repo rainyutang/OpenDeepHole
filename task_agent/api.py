@@ -26,6 +26,8 @@ _SUPPORTED_TASK_TYPES = frozenset({
     "skill_create",
 })
 _UNSET = object()
+_PathValue = str | PathLike[str]
+_PathValues = _PathValue | Sequence[_PathValue]
 _COMPONENT_OWNER_LOOP: ContextVar[asyncio.AbstractEventLoop | None] = ContextVar(
     "task_agent_component_owner_loop",
     default=None,
@@ -52,60 +54,56 @@ class OpenCodeResult:
     token_usage: dict[str, Any] | None = None
 
 
-def _normalize_file_write_allowlist(
-    value: Sequence[str | PathLike[str]] | None,
+def _normalize_path_values(
+    value: _PathValues | None,
+    *,
+    parameter: str,
 ) -> tuple[str, ...]:
     if value is None:
         return ()
-    if isinstance(value, (str, bytes, PathLike)) or not isinstance(value, Sequence):
+    if isinstance(value, bytes):
         raise TypeError(
-            "OpenCode file_write_allowlist must be a sequence of paths or None"
+            f"OpenCode {parameter} must be a path, a sequence of paths, or None"
+        )
+    if isinstance(value, (str, PathLike)):
+        entries = (value,)
+    elif isinstance(value, Sequence):
+        entries = value
+    else:
+        raise TypeError(
+            f"OpenCode {parameter} must be a path, a sequence of paths, or None"
         )
     normalized: list[str] = []
-    for item in value:
+    for item in entries:
         if isinstance(item, bytes) or not isinstance(item, (str, PathLike)):
             raise TypeError(
-                "OpenCode file_write_allowlist entries must be strings or PathLike values"
+                f"OpenCode {parameter} entries must be strings or PathLike values"
             )
         raw = fspath(item)
         if not isinstance(raw, str):
             raise TypeError(
-                "OpenCode file_write_allowlist entries must resolve to string paths"
+                f"OpenCode {parameter} entries must resolve to string paths"
             )
         if not raw.strip():
-            raise ValueError("OpenCode file_write_allowlist entries cannot be empty")
+            raise ValueError(f"OpenCode {parameter} entries cannot be empty")
+        if "*" in raw or "?" in raw:
+            raise ValueError(
+                f"OpenCode {parameter} entries cannot contain wildcard characters"
+            )
         normalized.append(raw)
     return tuple(normalized)
+
+
+def _normalize_file_write_allowlist(
+    value: _PathValues | None,
+) -> tuple[str, ...]:
+    return _normalize_path_values(value, parameter="file_write_allowlist")
 
 
 def _normalize_writable_paths(
-    value: Sequence[str | PathLike[str]] | None,
-) -> tuple[str, ...] | None:
-    if value is None:
-        return None
-    if isinstance(value, (str, bytes, PathLike)) or not isinstance(value, Sequence):
-        raise TypeError(
-            "OpenCode writable_paths must be a sequence of paths or None"
-        )
-    normalized: list[str] = []
-    for item in value:
-        if isinstance(item, bytes) or not isinstance(item, (str, PathLike)):
-            raise TypeError(
-                "OpenCode writable_paths entries must be strings or PathLike values"
-            )
-        raw = fspath(item)
-        if not isinstance(raw, str):
-            raise TypeError(
-                "OpenCode writable_paths entries must resolve to string paths"
-            )
-        if not raw.strip():
-            raise ValueError("OpenCode writable_paths entries cannot be empty")
-        if "*" in raw or "?" in raw:
-            raise ValueError(
-                "OpenCode writable_paths entries cannot contain wildcard characters"
-            )
-        normalized.append(raw)
-    return tuple(normalized)
+    value: _PathValues | None,
+) -> tuple[str, ...]:
+    return _normalize_path_values(value, parameter="writable_paths")
 
 
 async def run_opencode_task(
@@ -117,8 +115,8 @@ async def run_opencode_task(
     output_schema: dict[str, Any] | None = None,
     invalid_json_retry_count: int = 2,
     invalid_json_retry_prompt: str | None = None,
-    file_write_allowlist: Sequence[str | PathLike[str]] | None = None,
-    writable_paths: Sequence[str | PathLike[str]] | None = None,
+    file_write_allowlist: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
+    writable_paths: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -165,8 +163,8 @@ async def _run_opencode_task_local(
     output_schema: dict[str, Any] | None = None,
     invalid_json_retry_count: int = 2,
     invalid_json_retry_prompt: str | None = None,
-    file_write_allowlist: Sequence[str | PathLike[str]] | None = None,
-    writable_paths: Sequence[str | PathLike[str]] | None = None,
+    file_write_allowlist: _PathValues | None = None,
+    writable_paths: _PathValues | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,

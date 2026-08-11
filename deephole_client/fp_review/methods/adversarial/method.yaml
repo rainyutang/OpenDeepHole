@@ -1,7 +1,7 @@
 label: 对抗式复核
 description: 通过历史匹配、正报论证、误报论证和最终裁决逐项复核已确认问题。
 default: true
-max_concurrency: 1
+max_concurrency: 2
 stages:
   - key: history_match
     label: 历史/校验匹配

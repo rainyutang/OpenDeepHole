@@ -74,7 +74,7 @@ class FpReviewMethodDiscoveryTests(unittest.TestCase):
         methods = {item["method_id"]: item for item in catalog["methods"]}
         self.assertEqual(set(methods), {"adversarial", "fp_check"})
         self.assertTrue(methods["adversarial"]["default"])
-        self.assertEqual(methods["adversarial"]["max_concurrency"], 1)
+        self.assertEqual(methods["adversarial"]["max_concurrency"], 2)
         self.assertEqual(methods["fp_check"]["max_concurrency"], 4)
         self.assertIn(
             "gate_review",

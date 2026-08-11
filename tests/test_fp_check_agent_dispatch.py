@@ -16,6 +16,7 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         server._fp_review_cancel_events.clear()
         server._fp_review_scan_ids.clear()
         server._fp_review_queues.clear()
+        server._fp_review_queue_events.clear()
         server._fp_review_active_items.clear()
         server._fp_review_running_indices.clear()
 
@@ -114,6 +115,81 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_finish[2], "complete")
         self.assertEqual(server._fp_review_queues, {})
         self.assertEqual(server._fp_review_active_items, set())
+
+    async def test_incremental_item_fills_free_slot_before_first_finishes(self) -> None:
+        reporter = SimpleNamespace(
+            push_fp_progress=AsyncMock(),
+            finish_fp_review=AsyncMock(),
+        )
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        third_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def run_item(item):
+            vuln_index = int(item.vulnerability["index"])
+            if vuln_index == 0:
+                first_started.set()
+            elif vuln_index == 1:
+                second_started.set()
+            else:
+                third_started.set()
+            if vuln_index < 2:
+                await release.wait()
+            return {"status": "success", "verdict": "true_positive"}
+
+        with patch(
+            "deephole_client.server._run_single_fp_review_item",
+            new=run_item,
+        ):
+            queued = await server.enqueue_fp_review(
+                config=SimpleNamespace(),
+                reporter=reporter,
+                scan_id="scan-1",
+                review_id="review-sliding-window",
+                method="adversarial",
+                project_path="/repo",
+                code_scan_path="/repo/src",
+                vulnerability={"index": 0},
+            )
+            self.assertTrue(queued)
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+
+            queued = await server.enqueue_fp_review(
+                config=SimpleNamespace(),
+                reporter=reporter,
+                scan_id="scan-1",
+                review_id="review-sliding-window",
+                method="adversarial",
+                project_path="/repo",
+                code_scan_path="/repo/src",
+                vulnerability={"index": 1},
+            )
+            self.assertTrue(queued)
+            await asyncio.wait_for(second_started.wait(), timeout=1)
+            self.assertFalse(
+                server._fp_review_tasks["review-sliding-window"].done()
+            )
+
+            queued = await server.enqueue_fp_review(
+                config=SimpleNamespace(),
+                reporter=reporter,
+                scan_id="scan-1",
+                review_id="review-sliding-window",
+                method="adversarial",
+                project_path="/repo",
+                code_scan_path="/repo/src",
+                vulnerability={"index": 2},
+            )
+            self.assertTrue(queued)
+            await asyncio.sleep(0)
+            self.assertFalse(third_started.is_set())
+            release.set()
+            await asyncio.wait_for(third_started.wait(), timeout=1)
+            await server._fp_review_tasks["review-sliding-window"]
+
+        self.assertEqual(reporter.finish_fp_review.await_args.args[2], "complete")
+        self.assertEqual(server._fp_review_queues, {})
 
     async def test_unexpected_item_cancellation_does_not_clear_later_items(self) -> None:
         reporter = SimpleNamespace(

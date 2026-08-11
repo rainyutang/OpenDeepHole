@@ -29,13 +29,12 @@ compatibility: opencode
 - 相关 sink，例如数组访问、指针偏移、memcpy_s、memmove_s、strncpy_s
 - 原始描述和原始 AI 分析
 - project_id
-- 本阶段 Markdown 输出路径
 
 你需要主动阅读代码，补齐上下文。静态分析结果只是候选线索，不是结论。
 
 ## 阶段 Markdown 输出
 
-你必须将正方论证写入提示中给出的 `prove-bug.md` 路径。该文件会作为反方和最终裁决 Agent 的输入，必须包含完整代码链、关键代码片段和证据说明。输出风格参考 memleak：读者不重新查看代码也能判断是否是问题。
+你必须在最终 JSON 的 `stage_markdown` 字段中返回正方论证，包含完整代码链、关键代码片段和证据说明。不得创建或修改项目文件。输出风格参考 memleak：读者不重新查看代码也能判断是否是问题。
 
 Markdown 至少包含：
 
@@ -133,20 +132,19 @@ Markdown 至少包含：
 
 ## 返回结果
 
-无论结论是问题还是非问题，你都必须先把论证写入指定的阶段 Markdown 路径，再在最终回复中输出 JSON 结论；缺少任何一步，本阶段都会被视为失败并重试。
+无论结论是问题还是非问题，最终回复都只能输出约定 JSON；完整论证放入 `stage_markdown`。
 
 最终 JSON 提供：
 
-- `confirmed`：真实代码问题存在为 `true`，否则为 `false`
-- `severity`：
-  - `high`：真实代码问题存在，且证明外部可触发
-  - `medium`：真实代码问题存在，但没有证明完整外部触发链
-  - `low`：非问题
-- `description`：一句话总结判定
-- `ai_analysis`：必须包含下面格式
-- `vulnerability_report`：只要 `confirmed=true`，无论 high 还是 medium，都必须填写 Markdown 问题报告
+- `verdict`：真实问题为 `true_positive`，已证明非问题为 `false_positive`，证据不足为 `uncertain`
+- `revised_severity`：`high` / `medium` / `low`，无法定级时为空字符串
+- `reason`：一句话总结判定
+- `evidence`：关键 `path:line` 及证据数组
+- `stage_markdown`：必须包含下面格式的完整论证
+- `vulnerability_report`：`verdict=true_positive` 时必须填写 Markdown 问题报告
+- `match_type` / `match_reference`：本阶段不适用时返回空字符串
 
-`ai_analysis` 必须按以下格式输出：
+`stage_markdown` 必须按以下格式输出：
 
 ```text
 [PROVE-BUG-RESULT]
@@ -222,5 +220,5 @@ Missing Context:
 - 只有外部入口，不等于关键变量可控。
 - 只有变量可控，不等于校验不足。
 - 只有 memcpy_s，不等于一定安全，也不等于一定有问题。
-- 如果证据不足，输出 `confirmed=false`，`severity=low`，并在 `ai_analysis` 中写 NOT_PROVEN 或 INSUFFICIENT_EVIDENCE。
+- 如果证据不足，输出 `verdict=uncertain`，并在 `stage_markdown` 中写 NOT_PROVEN 或 INSUFFICIENT_EVIDENCE。
 - 不要使用 CVSS 打分。

@@ -63,6 +63,10 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(invoke.await_count, 1)
         self.assertIn("prove_bug", invoke.await_args.kwargs["task_name"])
+        prompt = invoke.await_args.kwargs["prompt"]
+        self.assertIn("不得调用 write、edit、apply_patch、patch", prompt)
+        self.assertNotIn("prove-bug.md", prompt)
+        self.assertIn('"prior_stages": {}', prompt)
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["verdict"], "false_positive")
         self.assertEqual(result["revised_severity"], "low")
