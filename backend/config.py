@@ -124,6 +124,17 @@ class McpConfig(BaseModel):
     remote: McpRemoteConfig = McpRemoteConfig()
 
 
+class KnowledgeBaseConfig(BaseModel):
+    """Server-owned connection and control-tool names for scan knowledge."""
+
+    name: str = Field(default="product-info", max_length=200)
+    url: str = ""
+    headers: dict[str, str] = {}
+    timeout_seconds: int = Field(default=300, gt=0)
+    projects_tool: str = Field(default="", max_length=200)
+    set_project_tool: str = Field(default="", max_length=200)
+
+
 class ValidationEnvironmentConfig(BaseModel):
     supported_vulnerability_types: list[str] = ["*"]
     concurrency: int = 1
@@ -185,6 +196,7 @@ class AppConfig(BaseModel):
     false_positive: ModelTaskPolicyConfig = ModelTaskPolicyConfig()
     code_graph: McpConfig = McpConfig(name="codegraph")
     product_info: McpConfig = McpConfig(name="product-info")
+    knowledge_base: KnowledgeBaseConfig = KnowledgeBaseConfig()
     static_dedup: bool = True
     pattern_filter: PatternFilterConfig = PatternFilterConfig()
     vulnerability_validation: VulnerabilityValidationConfig = VulnerabilityValidationConfig()

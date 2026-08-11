@@ -663,7 +663,7 @@ async def run_scan(
                 output_path=output_path,
                 is_resume=resume,
                 product_mcp=(
-                    "product-info"
+                    str(knowledge_base_mcp.get("name") or "product-info")
                     if isinstance(knowledge_base_mcp, dict)
                     and bool(knowledge_base_mcp.get("enabled"))
                     else None
@@ -865,7 +865,7 @@ async def run_scan(
             "code_graph_mcp": copy.deepcopy(code_graph_mcp),
             "knowledge_base_mcp": copy.deepcopy(knowledge_base_mcp),
             "product_mcp": (
-                "product-info"
+                str(knowledge_base_mcp.get("name") or "product-info")
                 if isinstance(knowledge_base_mcp, dict)
                 and bool(knowledge_base_mcp.get("enabled"))
                 else None

@@ -317,6 +317,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             request_id=str(msg.get("request_id") or ""),
             target=str(msg.get("target") or ""),
             mcp_config=msg.get("mcp_config") if isinstance(msg.get("mcp_config"), dict) else {},
+            projects_tool=str(msg.get("projects_tool") or ""),
         )
     elif cmd_type == "mcp_status":
         return await agent_server.handle_mcp_status(

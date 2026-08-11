@@ -5,6 +5,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -28,6 +29,19 @@ def _mcp_config(**overrides) -> dict:
     }
     config.update(overrides)
     return config
+
+
+def _server_knowledge_config(**overrides):
+    values = {
+        "name": "product-info",
+        "url": "http://server-owned.test/mcp",
+        "headers": {"Authorization": "Bearer server-owned"},
+        "timeout_seconds": 300,
+        "projects_tool": "xxx_projects",
+        "set_project_tool": "xxx_set_project",
+    }
+    values.update(overrides)
+    return SimpleNamespace(knowledge_base=SimpleNamespace(**values))
 
 
 async def _direct_store_call(store, operation, *args, **kwargs):
@@ -127,6 +141,58 @@ def test_remote_probe_redacts_header_secrets(monkeypatch) -> None:
     assert result["success"] is False
     assert secret not in result["error"]
     assert "***" in result["error"]
+
+
+def test_knowledge_probe_calls_projects_tool_and_normalizes_projects(monkeypatch) -> None:
+    inspect = AsyncMock(return_value=(
+        ["xxx_projects", "xxx_set_project", "search_docs"],
+        {
+            "projects": [{
+                "id": "project-1",
+                "name": "5G-gnodeb",
+                "path": "B:/knowledge/5G-gnodeb",
+                "current": True,
+            }],
+            "currentProject": {
+                "id": "project-1",
+                "name": "5G-gnodeb",
+                "path": "B:/knowledge/5G-gnodeb",
+                "current": True,
+            },
+            "sessionProject": None,
+        },
+    ))
+    monkeypatch.setattr(mcp_probe, "_inspect_streamable_http", inspect)
+    monkeypatch.setattr(
+        mcp_probe,
+        "_inspect_sse",
+        AsyncMock(side_effect=AssertionError("SSE fallback must not run")),
+    )
+
+    result = asyncio.run(mcp_probe.probe_mcp_config(
+        "scan_knowledge_base",
+        _mcp_config(
+            transport="remote",
+            remote={"url": "http://knowledge.test/mcp", "headers": {}},
+        ),
+        projects_tool="xxx_projects",
+    ))
+
+    assert result["success"] is True
+    assert result["projects"] == [{
+        "id": "project-1",
+        "name": "5G-gnodeb",
+        "path": "B:/knowledge/5G-gnodeb",
+        "current": True,
+    }]
+    assert result["current_project"] == result["projects"][0]
+    assert result["session_project"] is None
+    inspect.assert_awaited_once_with(
+        "http://knowledge.test/mcp",
+        {},
+        5.0,
+        "xxx_projects",
+    )
 
 
 def test_probe_timeout_uses_global_cap(monkeypatch) -> None:
@@ -232,6 +298,7 @@ def test_scan_mcp_probe_normalizes_request_without_persisting(
         initial_config_json=AgentRemoteConfig().model_dump_json(),
     )
     monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
+    monkeypatch.setattr(agent_api, "get_config", _server_knowledge_config)
     live_agent = AgentInfo(
         agent_id="session-1",
         agent_key="stable-agent",
@@ -276,13 +343,20 @@ def test_scan_mcp_probe_normalizes_request_without_persisting(
             assert sent_config["name"] == "product-info"
             assert sent_config["transport"] == "remote"
             assert sent_config["remote"] == {
-                "url": "http://knowledge.test/mcp",
-                "headers": {"Authorization": "Bearer safe"},
+                "url": "http://server-owned.test/mcp",
+                "headers": {"Authorization": "Bearer server-owned"},
             }
+            assert command["projects_tool"] == "xxx_projects"
+        returned_tools = (
+            ["xxx_projects", "xxx_set_project", "search_docs"]
+            if target == "scan_knowledge_base"
+            else ["fake_graph_lookup"]
+        )
         agent_api._mcp_probe_waiters[command["request_id"]].set_result({
             "success": True,
             "protocol": "stdio",
-            "tool_names": ["fake_graph_lookup"],
+            "tool_names": returned_tools,
+            "projects": [{"id": "project-1", "name": "Project One"}],
         })
         return True
 
@@ -291,16 +365,24 @@ def test_scan_mcp_probe_normalizes_request_without_persisting(
         "stable-agent",
         target,
         User(user_id="user-1", username="owner", role="user"),
-        mcp_config=requested,
+        mcp_config=(requested if target == "scan_code_graph" else None),
     ))
 
     assert result.success is True
-    assert result.tool_names == ["fake_graph_lookup"]
+    assert result.tool_names == (
+        ["search_docs", "xxx_projects", "xxx_set_project"]
+        if target == "scan_knowledge_base"
+        else ["fake_graph_lookup"]
+    )
+    if target == "scan_knowledge_base":
+        assert [(item.id, item.name) for item in result.projects] == [
+            ("project-1", "Project One"),
+        ]
     assert json.loads(store.get_agent_record("stable-agent")["mcp_probe_json"]) == {}
     store.close()
 
 
-def test_scan_knowledge_probe_rejects_local_transport(tmp_path: Path, monkeypatch) -> None:
+def test_scan_knowledge_probe_rejects_missing_server_url(tmp_path: Path, monkeypatch) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
     store.upsert_agent_record(
         agent_key="stable-agent",
@@ -313,8 +395,13 @@ def test_scan_knowledge_probe_rejects_local_transport(tmp_path: Path, monkeypatc
         initial_config_json=AgentRemoteConfig().model_dump_json(),
     )
     monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
+    monkeypatch.setattr(
+        agent_api,
+        "get_config",
+        lambda: _server_knowledge_config(url=""),
+    )
 
-    with pytest.raises(HTTPException, match="仅支持远程") as excinfo:
+    with pytest.raises(HTTPException, match="远端 URL 不能为空") as excinfo:
         asyncio.run(agent_api.probe_stable_agent_mcp(
             "stable-agent",
             "scan_knowledge_base",
@@ -354,6 +441,7 @@ def test_agent_probe_wait_timeout_cleans_up_waiter(monkeypatch) -> None:
         raise asyncio.TimeoutError
 
     monkeypatch.setattr(agent_api, "get_scan_store", lambda: Store())
+    monkeypatch.setattr(agent_api, "get_config", _server_knowledge_config)
     monkeypatch.setattr(agent_api, "_live_agent_for_key", lambda _key: ("session-1", live_agent))
     monkeypatch.setattr(agent_api, "send_agent_command", sent)
     monkeypatch.setattr(agent_api.asyncio, "wait_for", timed_out)

@@ -813,7 +813,7 @@ export type AgentMcpTarget = "product_info";
 export type AgentMcpProbeTarget = AgentMcpTarget | "scan_code_graph" | "scan_knowledge_base";
 
 export interface ScanConfigMemory {
-  knowledge_base: { url?: string; headers?: Record<string, string> } | null;
+  knowledge_base: { project_id?: string; project_name?: string } | null;
   validation_by_product: Record<string, {
     last_method_id?: string;
     values_by_method?: Record<string, Record<string, unknown>>;
@@ -843,6 +843,16 @@ export interface AgentMcpProbeResult {
   error: string;
   runtime_state: AgentMcpRuntimeState;
   active_sessions: number;
+  projects: KnowledgeBaseProject[];
+  current_project: KnowledgeBaseProject | null;
+  session_project: KnowledgeBaseProject | null;
+}
+
+export interface KnowledgeBaseProject {
+  id: string;
+  name: string;
+  path: string;
+  current: boolean;
 }
 
 export interface AgentMcpTargetStatus {

@@ -947,6 +947,20 @@ class AgentMcpConfig(BaseModel):
     )
     local: AgentMcpLocalConfig = AgentMcpLocalConfig()
     remote: AgentMcpRemoteConfig = AgentMcpRemoteConfig()
+    # Scan-private knowledge-base binding metadata. Generic MCP consumers
+    # ignore these fields; they are persisted only inside the private scan
+    # snapshot and consumed by the managed OpenCode plugin path.
+    project_id: str = Field(default="", max_length=200)
+    project_name: str = Field(default="", max_length=500)
+    projects_tool: str = Field(default="", max_length=200)
+    set_project_tool: str = Field(default="", max_length=200)
+
+
+class KnowledgeBaseProject(BaseModel):
+    id: str = Field(max_length=200)
+    name: str = Field(max_length=500)
+    path: str = Field(default="", max_length=4000)
+    current: bool = False
 
 
 class AgentMcpProbeResult(BaseModel):
@@ -962,6 +976,9 @@ class AgentMcpProbeResult(BaseModel):
     error: str = ""
     runtime_state: str = "next_task"
     active_sessions: int = 0
+    projects: list[KnowledgeBaseProject] = []
+    current_project: KnowledgeBaseProject | None = None
+    session_project: KnowledgeBaseProject | None = None
 
 
 class AgentMcpRuntimeStatus(BaseModel):
@@ -1328,8 +1345,8 @@ class AgentRemoteConfig(BaseModel):
 
 class ScanKnowledgeBaseRequest(BaseModel):
     enabled: bool = False
-    url: str = ""
-    headers: dict[str, str] = {}
+    project_id: str = Field(default="", max_length=200)
+    project_name: str = Field(default="", max_length=500)
 
 
 class ScanVulnerabilityValidationRequest(BaseModel):

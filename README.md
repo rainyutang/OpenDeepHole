@@ -120,11 +120,13 @@ owner_token: ""
 
 **「新建扫描」** 页面的代码图谱 MCP 是可选项，默认关闭；未启用、未传或传入 `null` 时，模型任务只使用 `read`、`grep`、`glob` 等文件工具，不会启动或回退到内置代码 MCP。启用后只选择本地或远端：本地固定使用当前默认的 `codegraph serve --mcp` 参数，不再允许页面自定义；远端只填写 URL 和请求头。服务端会把名称、超时和本地参数规范化后保存为扫描私有快照，并在续扫、去误报和漏洞验证中继续使用；不同扫描不会共享代码图谱连接。
 
-**「启用知识库」** 也是新建扫描的可选项，默认关闭且只支持远程 MCP，只填写 URL 和请求头。启用时，页面会自动带入当前用户在同一稳定客户端上一次成功创建扫描时使用的配置。知识库按扫描快照临时连接，不再属于客户端全局配置，也不会写入 Agent 的全局 OpenCode 配置。
+**「启用知识库」** 也是新建扫描的可选项，默认关闭。远程 MCP 的 URL、请求头、超时和两个管理工具名由服务端根目录 `config.yaml` 的 `knowledge_base` 统一维护，用户不再填写连接参数。勾选后点击 **「检测并拉取项目」**，目标 Agent 会连接 MCP 并调用配置的 `projects_tool`；页面解析其 `projects`、`currentProject` 和 `sessionProject` JSON，用户只选择一个项目。创建扫描时固化所选 `project_id` / `project_name` 及服务端连接快照，并按当前用户和稳定客户端记忆上次选择。
+
+知识库运行时仍由 OpenCode 原生 MCP 直接执行查询工具，不引入 MCP 适配器。每个 Session 发送首个业务 prompt 前，Task Agent 会生成不进入会话历史的私有绑定；受管 Plugin 的 `tool.execute.before` 对所有模型可见的知识库查询工具强制覆盖 `project_id`。配置的 `projects_tool` 和 `set_project_tool` 不会暴露给模型，平台运行任务时也不会调用 `set_project_tool`。连接、工具发现或绑定失败时，该 Session 禁用知识库工具后继续任务。
 
 扫描详情顶部流程图的 **「底层能力」** 框会明确显示本次扫描是否启用了 CodeGraph MCP 和知识库。这里展示的是创建扫描时固化的配置快照，不代表 MCP 的实时连接结果；连接失败并回退到文件工具时，已启用状态仍保持不变。
 
-新建扫描页的代码图谱和知识库都提供手动 **「检测连接」**：检测只在 Agent 上执行 MCP `initialize` 和 `list_tools`，不会调用业务工具，也不会写入 Agent 全局配置。运行时仍会再次连接；代码图谱连接失败时继续扫描并只使用文件工具，不会回退到其它扫描或内置代码图谱。对于本地 `codegraph` CLI，项目 `.codegraph/codegraph.db` 是否就绪仍以扫描任务日志和产物为准。
+新建扫描页的代码图谱提供手动 **「检测连接」**，只在 Agent 上执行 MCP `initialize` 和 `list_tools`。知识库的 **「检测并拉取项目」** 还会调用服务端配置的 `projects_tool`，但不会调用 `set_project_tool`，也不会写入 Agent 全局配置。运行时仍会再次连接；代码图谱连接失败时继续扫描并只使用文件工具，知识库连接或项目绑定失败时只禁用知识库工具，两者都不会回退到其它扫描的 MCP。对于本地 `codegraph` CLI，项目 `.codegraph/codegraph.db` 是否就绪仍以扫描任务日志和产物为准。
 
 **漏洞验证** 默认不启用。勾选后，页面只展示与当前产品兼容的验证方法，并按该方法严格的 `validator.yaml` `field` 定义生成参数表单；方法和参数会按当前用户、稳定客户端、产品和方法记忆。客户端全局验证策略、方法身份和 field 值在创建成功时一起固化，之后修改客户端配置只影响下一次扫描。新格式及扩展约定见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
 
@@ -572,7 +574,7 @@ model_pool:
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“用户全局目录 < 可执行文件相邻目录 < 项目目录 < `opencode.config_paths` < `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` < DeepHole 2.0 受管字段”受控合并；standalone 使用相同发现规则，但没有平台专属的 `opencode.config_paths` 层，并在环境显式配置之后合并 `task-agent.yaml` 的 `serve.opencode_config`。当配置的可执行文件 basename 为 `nga` 时，同时兼容发现用户的 `~/.config/nga` 配置目录。用户全局目录和显式指定的配置目录继续兼容旧版 `config.json`；自动发现的可执行文件相邻目录与项目目录只识别明确命名的 `opencode.json` / `opencode.jsonc`，避免把安装器、启动器或项目自身的通用 `config.json`（例如顶层 `env`、`version`）误合并进 OpenCode 配置。无效 JSON/JSONC 只记录警告并忽略，不再接受 Web 自定义 JSONC 层。全局受管字段只包含 `$schema`、公共技能路径和运行权限；代码图谱与知识库 MCP 都按扫描快照通过带目录上下文的 `/mcp` 接口临时连接，并在任务结束后分别释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。MCP 请求头中的 API Key、Token 等敏感值会保存在服务端扫描快照和创建表单记忆中，应只在可信环境填写。
+OpenCode 最终配置按“用户全局目录 < 可执行文件相邻目录 < 项目目录 < `opencode.config_paths` < `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` < DeepHole 2.0 受管字段”受控合并；standalone 使用相同发现规则，但没有平台专属的 `opencode.config_paths` 层，并在环境显式配置之后合并 `task-agent.yaml` 的 `serve.opencode_config`。当配置的可执行文件 basename 为 `nga` 时，同时兼容发现用户的 `~/.config/nga` 配置目录。用户全局目录和显式指定的配置目录继续兼容旧版 `config.json`；自动发现的可执行文件相邻目录与项目目录只识别明确命名的 `opencode.json` / `opencode.jsonc`，避免把安装器、启动器或项目自身的通用 `config.json`（例如顶层 `env`、`version`）误合并进 OpenCode 配置。无效 JSON/JSONC 只记录警告并忽略，不再接受 Web 自定义 JSONC 层。全局受管字段只包含 `$schema`、公共技能路径、运行权限和平台 Hook；代码图谱与知识库 MCP 都按扫描快照通过带目录上下文的 `/mcp` 接口临时连接，并在任务结束后分别释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。知识库 MCP 请求头中的 API Key、Token 等敏感值只由服务端全局配置维护，并随扫描私有快照内部保存，不再进入创建表单或表单记忆。
 
 配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），并在私有目录生成受管文件写入 Hook、追加到已有 `plugin` 列表而不覆盖用户插件；用专用的 `XDG_CONFIG_HOME` 隔离 OpenCode 对用户全局配置的二次发现，把 `OPENCODE_CONFIG_DIR` 指向已解析的配置目录，并显式清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`。存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。创建或更新 Session 返回 HTTP 5xx 时同样会把当前共享 Serve 标记为异常；下一次 Session 重试先等待其它在途任务退出，再安全重启一次并重新生成最终配置，并发重试不会各自重复重启。
 
@@ -583,7 +585,7 @@ OpenCode 调用约定：
 - 文件、SKILL 与 `bash` 的稳定权限统一写入 Serve 实际使用的全局 `opencode.json`。项目目录作为 Session 工作目录保持可读但不可写；`work_dir` 默认可写并自动进入保留白名单，`~/.opendeephole/opencode_workspace/.opencode` 和最终配置注册的 SKILL 根只读，完整 Agent 的文件编辑工具可写 `~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 与 `skill_create`，其它源码目录保持只读且 `bash` 全面禁用。`file_write_allowlist` 和兼容参数 `writable_paths` 会合并为额外可写并默认保留的动态路径，每次调用都替换当前 Session 的路径覆盖，避免续接时残留旧权限。脱离 Agent 运行时会从合并后的全局、项目、环境显式配置及 `task-agent.yaml` 中加载 `skills.paths`，任务级 `skill_paths` 继续追加且只读。
 - `output_schema` 只用于本地 JSON 解析和校验，不发送 OpenCode 原生 `format`，也不修改首次用户 prompt；调用方需要自行把输出要求和 Schema 写入 prompt。最终文本 JSON 优先；若模型改用内置文件工具写 JSON，受管 Hook 与本轮完整消息历史会恢复中间 assistant 的写入记录，Task Agent 再从 `project_dir`、`work_dir` 或显式白名单路径中最后写入的合法文件填充 `structured`，但 `text` 始终保留业务 LLM 的最终文本。所有调用都会清理本轮确认新建且位于有效白名单外的任意位置文件；实际采用为 `structured` 来源的新文件解析后强制删除，即使位于白名单中，已有文件则不删除。JSON 仍不合规时，先以 `required_capability="low"` 从当前已启用模型中优先选择最低能力候选，创建禁用工具的独立格式匹配 Session；提示词禁止改变内容，原文与 Schema 无关或不能无损映射时返回固定非法值。该层失败后才在原业务 Session 追加最多 `invalid_json_retry_count` 次纠正，仍失败再创建 fresh 业务 Session；格式匹配成功也继续对外返回原业务 Session、文本和模型。
 - OpenCode 兼容 serve 会话会保留在真实项目目录下，便于用所配置 executable 的 `session list` 命令查看历史；Agent 只在取消或超时时 abort session，不在正常完成后删除 session。
-- 只有扫描显式启用的代码图谱或知识库 MCP 才会动态连接；空配置和历史 `null` 配置不会启动内置源码或知识 MCP。续扫、去误报和漏洞验证继承各自扫描的两类 MCP 快照。
+- 只有扫描显式启用的代码图谱或知识库 MCP 才会动态连接；空配置和历史 `null` 配置不会启动内置源码或知识 MCP。续扫、去误报和漏洞验证继承各自扫描的两类 MCP 快照；知识库查询的 `project_id` 始终由受管 Plugin 按扫描快照覆盖，两个项目管理工具始终对模型隐藏。
 - 漏洞验证方法在 Agent 主进程中异步执行，直接调用同一个公共 OpenCode 接口，并继承扫描选择的代码图谱、知识库或文件工具模式；验证方法直接执行 `nga`、`opencode`、`hac` 或 `claude` 会被拒绝。
 
 内部 Python 调用统一使用自包含的 `task_agent` 组件。调用方不启动 CLI 或 Serve；首次 `run_opencode_task()` 会惰性创建任务服务和 Serve 管理单例，并在发送任务前完成 Serve 的启动、兼容进程复用或异常恢复：

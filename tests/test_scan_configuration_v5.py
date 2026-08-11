@@ -265,12 +265,27 @@ def test_scan_code_graph_accepts_only_mode_and_remote_connection_values() -> Non
     assert remote.local.executable == ""
 
 
-def test_scan_private_snapshots_and_memory_round_trip(tmp_path: Path) -> None:
+def test_scan_private_snapshots_and_memory_round_trip(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
+    monkeypatch.setattr(
+        agent_api,
+        "get_config",
+        lambda: SimpleNamespace(knowledge_base=SimpleNamespace(
+            name="product-info",
+            url="http://knowledge.test/mcp",
+            headers={"Authorization": "Bearer scan-secret"},
+            timeout_seconds=300,
+            projects_tool="xxx_projects",
+            set_project_tool="xxx_set_project",
+        )),
+    )
     knowledge = scan_api._knowledge_base_mcp(ScanKnowledgeBaseRequest(
         enabled=True,
-        url="http://knowledge.test/mcp",
-        headers={"Authorization": "Bearer scan-secret"},
+        project_id="project-1",
+        project_name="5G-gnodeb",
     ))
     validation = scan_api._resolve_scan_validation(
         ScanVulnerabilityValidationRequest(
@@ -319,8 +334,8 @@ def test_scan_private_snapshots_and_memory_round_trip(tmp_path: Path) -> None:
 
     memory = {
         "knowledge_base": {
-            "url": knowledge.remote.url,
-            "headers": knowledge.remote.headers,
+            "project_id": knowledge.project_id,
+            "project_name": knowledge.project_name,
         },
         "validation_by_product": {
             "LTE": {
@@ -329,7 +344,19 @@ def test_scan_private_snapshots_and_memory_round_trip(tmp_path: Path) -> None:
             },
         },
     }
-    store.upsert_scan_config_memory("user-1", "agent-a", memory)
+    monkeypatch.setattr(scan_api, "get_scan_store", lambda: store)
+
+    async def direct_store_call(target, operation, *args, **kwargs):
+        return getattr(target, operation)(*args, **kwargs)
+
+    monkeypatch.setattr(scan_api, "run_store_call", direct_store_call)
+    asyncio.run(scan_api._remember_scan_configuration(
+        user_id="user-1",
+        agent_key="agent-a",
+        product="LTE",
+        knowledge_base_mcp=knowledge,
+        validation=validation,
+    ))
     assert store.get_scan_config_memory("user-1", "agent-a") == memory
     assert store.get_scan_config_memory("user-2", "agent-a") is None
     assert store.get_scan_config_memory("user-1", "agent-b") is None

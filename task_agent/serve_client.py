@@ -64,6 +64,7 @@ _SERVE_MARKER_OWNER = "opendeephole-agent-serve-v1"
 _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
 _SERVE_ISOLATED_CONFIG_DIRNAME = ".opendeephole-xdg-config"
 _SERVE_MANAGED_PLUGIN_DIRNAME = ".opendeephole-plugins"
+_KNOWLEDGE_BINDING_DIRNAME = "knowledge-bindings"
 _FILE_WRITE_PLUGIN_METADATA_KEY = "opendeepholeFileWrites"
 _FILE_WRITE_PLUGIN_SOURCE = r'''import path from "node:path"
 
@@ -134,6 +135,76 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
 '''
 _FILE_WRITE_PLUGIN_HASH = hashlib.sha256(
     _FILE_WRITE_PLUGIN_SOURCE.encode("utf-8")
+).hexdigest()[:16]
+_KNOWLEDGE_PROJECT_PLUGIN_SOURCE = r'''import crypto from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
+
+const bindingDirectory = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "knowledge-bindings",
+)
+const parents = new Map()
+const bindingPath = (sessionID) => path.join(
+  bindingDirectory,
+  `${crypto.createHash("sha256").update(String(sessionID || "")).digest("hex")}.json`,
+)
+
+const readDirectBinding = async (sessionID) => {
+  try {
+    const value = JSON.parse(await fs.readFile(bindingPath(sessionID), "utf8"))
+    if (!value || value.version !== 1 || typeof value.project_id !== "string") return null
+    if (!value.project_id.trim()) return null
+    return value
+  } catch (error) {
+    if (error?.code === "ENOENT") return null
+    throw error
+  }
+}
+
+const resolveBinding = async (sessionID) => {
+  let current = String(sessionID || "")
+  const visited = new Set()
+  for (let depth = 0; current && depth < 32 && !visited.has(current); depth += 1) {
+    visited.add(current)
+    const binding = await readDirectBinding(current)
+    if (binding) return binding
+    current = String(parents.get(current) || "")
+  }
+  return null
+}
+
+export const OpenDeepHoleKnowledgeProjectHook = async () => ({
+  event: async ({ event }) => {
+    const info = event?.properties?.info || event?.properties?.session || {}
+    const sessionID = String(info?.id || info?.sessionID || "")
+    const parentID = String(info?.parentID || info?.parentId || "")
+    if (sessionID && parentID) {
+      parents.set(sessionID, parentID)
+      if (parents.size > 4096) parents.delete(parents.keys().next().value)
+    }
+    if (event?.type === "session.deleted" && sessionID) parents.delete(sessionID)
+  },
+  "tool.execute.before": async (input, output) => {
+    const binding = await resolveBinding(input?.sessionID)
+    if (!binding) return
+    const tool = String(input?.tool || "")
+    const blocked = Array.isArray(binding.blocked_tool_ids) ? binding.blocked_tool_ids : []
+    if (blocked.includes(tool)) {
+      throw new Error("Knowledge-base project management tools are platform-only")
+    }
+    const allowed = Array.isArray(binding.allowed_tool_ids) ? binding.allowed_tool_ids : []
+    if (!allowed.includes(tool)) return
+    if (!output?.args || typeof output.args !== "object" || Array.isArray(output.args)) {
+      throw new Error("Knowledge-base tool arguments must be an object")
+    }
+    output.args.project_id = binding.project_id
+  },
+})
+'''
+_KNOWLEDGE_PROJECT_PLUGIN_HASH = hashlib.sha256(
+    _KNOWLEDGE_PROJECT_PLUGIN_SOURCE.encode("utf-8")
 ).hexdigest()[:16]
 _FORMATTER_DISABLED_TOOL_IDS = frozenset({
     "apply_patch",
@@ -452,6 +523,60 @@ def _managed_file_write_plugin_path(cwd: Path) -> Path:
     return plugin_path
 
 
+def _managed_knowledge_project_plugin_path(cwd: Path) -> Path:
+    plugin_path = (
+        cwd
+        / _SERVE_MANAGED_PLUGIN_DIRNAME
+        / f"opendeephole-knowledge-project-{_KNOWLEDGE_PROJECT_PLUGIN_HASH}.mjs"
+    ).resolve()
+    _write_private_text(plugin_path, _KNOWLEDGE_PROJECT_PLUGIN_SOURCE)
+    return plugin_path
+
+
+def _knowledge_binding_path(cwd: Path, session_id: str) -> Path:
+    digest = hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()
+    directory = (
+        Path(cwd).resolve()
+        / _SERVE_MANAGED_PLUGIN_DIRNAME
+        / _KNOWLEDGE_BINDING_DIRNAME
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(directory, 0o700)
+    return directory / f"{digest}.json"
+
+
+def _write_knowledge_binding(
+    cwd: Path,
+    *,
+    session_id: str,
+    project_id: str,
+    mcp_name: str,
+    allowed_tool_ids: list[str],
+    blocked_tool_ids: list[str],
+) -> Path:
+    normalized_session_id = str(session_id or "").strip()
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_session_id or not normalized_project_id:
+        raise ValueError("Knowledge-base binding requires session_id and project_id")
+    if not allowed_tool_ids:
+        raise ValueError("Knowledge-base binding has no query tools")
+    binding_path = _knowledge_binding_path(cwd, normalized_session_id)
+    payload = {
+        "version": 1,
+        "session_id": normalized_session_id,
+        "project_id": normalized_project_id,
+        "mcp_name": str(mcp_name or "").strip(),
+        "allowed_tool_ids": list(dict.fromkeys(allowed_tool_ids)),
+        "blocked_tool_ids": list(dict.fromkeys(blocked_tool_ids)),
+    }
+    _write_private_text(
+        binding_path,
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+    )
+    return binding_path
+
+
 def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
     """Atomically publish the resolved config and managed observability plugin."""
     raw = config_content or "{}"
@@ -474,8 +599,11 @@ def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
         plugins = []
     else:
         raise ValueError("Resolved OpenCode config plugin must be a string or list")
-    managed_plugin = _managed_file_write_plugin_path(cwd).as_uri()
-    data["plugin"] = list(dict.fromkeys([*plugins, managed_plugin]))
+    managed_plugins = [
+        _managed_file_write_plugin_path(cwd).as_uri(),
+        _managed_knowledge_project_plugin_path(cwd).as_uri(),
+    ]
+    data["plugin"] = list(dict.fromkeys([*plugins, *managed_plugins]))
     normalized = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     config_path = cwd / "opencode.json"
     _write_private_text(config_path, normalized)
@@ -1764,7 +1892,11 @@ def _config_hash(config_content: str | None) -> str:
         )
     except Exception:
         pass
-    fingerprint = f"{content}\0file-write-plugin={_FILE_WRITE_PLUGIN_HASH}"
+    fingerprint = (
+        f"{content}"
+        f"\0file-write-plugin={_FILE_WRITE_PLUGIN_HASH}"
+        f"\0knowledge-project-plugin={_KNOWLEDGE_PROJECT_PLUGIN_HASH}"
+    )
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
@@ -2102,7 +2234,29 @@ def _tool_belongs_to_mcp(tool_id: object, mcp_name: object) -> bool:
     name = str(mcp_name or "").strip().casefold()
     if not name:
         return False
-    return tool.startswith(f"{name}_") or tool.startswith(f"mcp--{name}--")
+    return (
+        tool.startswith(f"{name}_")
+        or tool.startswith(f"mcp--{name}--")
+        or tool.startswith(f"mcp__{name}__")
+    )
+
+
+def _tool_matches_mcp_tool(
+    tool_id: object,
+    mcp_name: object,
+    raw_tool_name: object,
+) -> bool:
+    if not _tool_belongs_to_mcp(tool_id, mcp_name):
+        return False
+    normalized_id = _normalize_tool_selector(tool_id)
+    normalized_mcp = _normalize_tool_selector(mcp_name)
+    normalized_tool = _normalize_tool_selector(raw_tool_name)
+    if not normalized_mcp or not normalized_tool:
+        return False
+    return normalized_id in {
+        f"{normalized_mcp}{normalized_tool}",
+        f"mcp{normalized_mcp}{normalized_tool}",
+    }
 
 
 def _is_source_graph_tool(
@@ -4037,7 +4191,7 @@ class OpenCodeServeManager:
                         raise
                     except Exception as cleanup_exc:
                         logger.warning(
-                            "Failed to clean up unavailable scan code graph MCP "
+                            "Failed to clean up unavailable scan MCP "
                             "name=%s directory=%s error=%s",
                             name,
                             directory,
@@ -4045,7 +4199,7 @@ class OpenCodeServeManager:
                         )
                 state["error"] = error
                 logger.warning(
-                    "Scan code graph MCP unavailable name=%s directory=%s error=%s",
+                    "Scan MCP unavailable name=%s directory=%s error=%s",
                     name or "disabled",
                     directory,
                     error,
@@ -4059,6 +4213,80 @@ class OpenCodeServeManager:
                     connected=False,
                     role=normalized_role,
                     error=error,
+                )
+
+    async def _disable_scan_mcp_lease(
+        self,
+        client: httpx.AsyncClient,
+        directory: Path,
+        lease: _ScanMcpLease | None,
+        error: object,
+    ) -> None:
+        """Fail one shared scan MCP closed before a model prompt is sent."""
+        if lease is None:
+            return
+        condition = self._scan_mcp_conditions.get(lease.state_key)
+        if condition is None:
+            return
+        spec: dict[str, Any] | None = None
+        async with condition:
+            existing = self._scan_mcp_states.get(lease.state_key)
+            if (
+                existing is None
+                or str(existing.get("identity") or "") != lease.identity
+            ):
+                return
+            spec = existing.get("spec")
+            existing["connected"] = False
+            existing["cleanup_pending"] = True
+            existing["error"] = _one_line_preview(error)
+        if isinstance(spec, dict) and str(spec.get("name") or ""):
+            try:
+                await self._disconnect_managed_mcp(
+                    client,
+                    Path(directory).resolve(),
+                    spec,
+                )
+                async with condition:
+                    existing = self._scan_mcp_states.get(lease.state_key)
+                    if (
+                        existing is not None
+                        and str(existing.get("identity") or "") == lease.identity
+                    ):
+                        existing["cleanup_pending"] = False
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                config = spec.get("config")
+                if isinstance(config, dict):
+                    try:
+                        response = await client.post(
+                            "/mcp",
+                            params=_serve_context_params(directory),
+                            headers=_serve_context_headers(directory),
+                            json={
+                                "name": str(spec.get("name") or ""),
+                                "config": {**config, "enabled": False},
+                            },
+                        )
+                        response.raise_for_status()
+                        async with condition:
+                            existing = self._scan_mcp_states.get(lease.state_key)
+                            if (
+                                existing is not None
+                                and str(existing.get("identity") or "") == lease.identity
+                            ):
+                                existing["cleanup_pending"] = False
+                        return
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                logger.warning(
+                    "Failed to disconnect disabled scan MCP name=%s directory=%s error=%s",
+                    lease.name,
+                    directory,
+                    self._redact_managed_mcp_error(exc, spec),
                 )
 
     async def _release_scan_mcp(
@@ -4085,9 +4313,10 @@ class OpenCodeServeManager:
                 existing["references"] = references
                 return
             spec = existing.get("spec")
-            should_disconnect = bool(existing.get("connected")) and bool(
-                existing.get("name")
-            )
+            should_disconnect = (
+                bool(existing.get("connected"))
+                or bool(existing.get("cleanup_pending"))
+            ) and bool(existing.get("name"))
             try:
                 if should_disconnect and isinstance(spec, dict):
                     async with httpx.AsyncClient(
@@ -4104,7 +4333,7 @@ class OpenCodeServeManager:
                 raise
             except Exception as exc:
                 logger.warning(
-                    "Failed to disconnect scan code graph MCP name=%s directory=%s error=%s",
+                    "Failed to disconnect scan MCP name=%s directory=%s error=%s",
                     str(existing.get("name") or lease.name),
                     directory,
                     self._redact_managed_mcp_error(exc, spec or {}),
@@ -4342,7 +4571,17 @@ class OpenCodeServeManager:
         session_error = ""
         scan_mcp_lease: _ScanMcpLease | None = None
         knowledge_mcp_lease: _ScanMcpLease | None = None
+        knowledge_binding_path: Path | None = None
         selected_source_mcp: str | None = None
+        knowledge_runtime = (
+            knowledge_base_mcp
+            if isinstance(knowledge_base_mcp, dict)
+            and bool(knowledge_base_mcp.get("enabled"))
+            else None
+        )
+        knowledge_mcp_name = str(
+            (knowledge_runtime or {}).get("name") or ""
+        ).strip()
         params = _serve_context_params(directory)
         headers = _serve_context_headers(directory)
         try:
@@ -4432,15 +4671,12 @@ class OpenCodeServeManager:
                             "session",
                             "CODE_GRAPH_MCP disabled mode=file_tools",
                         )
-                    if (
-                        isinstance(knowledge_base_mcp, dict)
-                        and bool(knowledge_base_mcp.get("enabled"))
-                    ):
+                    if knowledge_runtime is not None:
                         knowledge_mcp_lease = await self._acquire_scan_mcp(
                             client,
                             directory,
                             str(scan_id),
-                            knowledge_base_mcp,
+                            knowledge_runtime,
                             role="knowledge_base",
                             source_graph=False,
                         )
@@ -4483,6 +4719,19 @@ class OpenCodeServeManager:
                         updated,
                         "PATCH /session/{session_id}",
                     )
+                binding_workspace = self._startup_cwd or config_workspace
+                if binding_workspace is not None:
+                    try:
+                        _remove_file(_knowledge_binding_path(
+                            binding_workspace,
+                            active_session_id,
+                        ))
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to remove stale knowledge binding for session %s: %s",
+                            active_session_id,
+                            _one_line_preview(exc),
+                        )
                 if session_mode == "continued":
                     token_baseline, token_baseline_complete = (
                         await _session_tree_token_entries(
@@ -4569,6 +4818,31 @@ class OpenCodeServeManager:
                     on_line=(lambda message: emit("session", message)) if on_line else None,
                     tool=tool,
                 )
+                if (
+                    knowledge_mcp_lease is not None
+                    and knowledge_mcp_lease.connected
+                    and knowledge_mcp_name
+                    and not any(
+                        _tool_belongs_to_mcp(tool_id, knowledge_mcp_name)
+                        for tool_id in tool_ids
+                    )
+                ):
+                    # Dynamic MCP registration and tool discovery can settle on
+                    # adjacent event-loop turns. Retry briefly before failing
+                    # this Session's knowledge binding closed.
+                    for _attempt in range(2):
+                        await asyncio.sleep(0.1)
+                        tool_ids = await self._list_tool_ids(
+                            client,
+                            params,
+                            headers,
+                            tool=tool,
+                        )
+                        if any(
+                            _tool_belongs_to_mcp(tool_id, knowledge_mcp_name)
+                            for tool_id in tool_ids
+                        ):
+                            break
                 if disable_all_tools:
                     mcp_overrides = {
                         tool_id: False
@@ -4596,6 +4870,105 @@ class OpenCodeServeManager:
                             scan_mcp_lease is not None and scan_mcp_lease.connected
                         ),
                     )
+                knowledge_tool_ids = [
+                    tool_id
+                    for tool_id in tool_ids
+                    if _tool_belongs_to_mcp(tool_id, knowledge_mcp_name)
+                ]
+                for tool_id in knowledge_tool_ids:
+                    mcp_overrides[tool_id] = False
+                if (
+                    not disable_all_tools
+                    and knowledge_mcp_lease is not None
+                    and knowledge_mcp_lease.connected
+                ):
+                    projects_tool = str(
+                        (knowledge_runtime or {}).get("projects_tool") or ""
+                    ).strip()
+                    set_project_tool = str(
+                        (knowledge_runtime or {}).get("set_project_tool") or ""
+                    ).strip()
+                    projects_tool_ids = [
+                        tool_id
+                        for tool_id in knowledge_tool_ids
+                        if _tool_matches_mcp_tool(
+                            tool_id,
+                            knowledge_mcp_name,
+                            projects_tool,
+                        )
+                    ]
+                    set_project_tool_ids = [
+                        tool_id
+                        for tool_id in knowledge_tool_ids
+                        if _tool_matches_mcp_tool(
+                            tool_id,
+                            knowledge_mcp_name,
+                            set_project_tool,
+                        )
+                    ]
+                    blocked_knowledge_tools = list(dict.fromkeys([
+                        *projects_tool_ids,
+                        *set_project_tool_ids,
+                    ]))
+                    query_knowledge_tools = [
+                        tool_id
+                        for tool_id in knowledge_tool_ids
+                        if tool_id not in blocked_knowledge_tools
+                    ]
+                    binding_error = ""
+                    if not knowledge_tool_ids:
+                        binding_error = "knowledge MCP tools were not discovered"
+                    elif not projects_tool or not set_project_tool:
+                        binding_error = "knowledge control-tool configuration is incomplete"
+                    elif not projects_tool_ids or not set_project_tool_ids:
+                        binding_error = "knowledge control tools were not discovered"
+                    elif not query_knowledge_tools:
+                        binding_error = "knowledge MCP has no model-visible query tools"
+                    else:
+                        try:
+                            if binding_workspace is None:
+                                raise RuntimeError("managed plugin workspace is unavailable")
+                            knowledge_binding_path = _write_knowledge_binding(
+                                binding_workspace,
+                                session_id=active_session_id,
+                                project_id=str(
+                                    (knowledge_runtime or {}).get("project_id") or ""
+                                ),
+                                mcp_name=knowledge_mcp_name,
+                                allowed_tool_ids=query_knowledge_tools,
+                                blocked_tool_ids=blocked_knowledge_tools,
+                            )
+                        except Exception as exc:
+                            binding_error = _one_line_preview(exc)
+                            if binding_workspace is not None:
+                                with contextlib.suppress(Exception):
+                                    _remove_file(_knowledge_binding_path(
+                                        binding_workspace,
+                                        active_session_id,
+                                    ))
+                    if binding_error:
+                        await self._disable_scan_mcp_lease(
+                            client,
+                            directory,
+                            knowledge_mcp_lease,
+                            binding_error,
+                        )
+                        emit(
+                            "session",
+                            "KNOWLEDGE_BASE_MCP disabled fallback=continue_task "
+                            f"error={binding_error}",
+                        )
+                    else:
+                        for tool_id in query_knowledge_tools:
+                            mcp_overrides[tool_id] = True
+                        for tool_id in blocked_knowledge_tools:
+                            mcp_overrides[tool_id] = False
+                        emit(
+                            "session",
+                            "KNOWLEDGE_BASE_MCP project_bound "
+                            f"name={knowledge_mcp_name} "
+                            f"query_tools={len(query_knowledge_tools)}",
+                        )
                 if scan_mcp_lease is not None and scan_mcp_lease.connected and not source_available:
                     emit(
                         "session",
@@ -4857,13 +5230,17 @@ class OpenCodeServeManager:
                         )
                 finally:
                     try:
-                        if knowledge_mcp_lease is not None:
-                            await self._release_scan_mcp(directory, knowledge_mcp_lease)
+                        if knowledge_binding_path is not None:
+                            _remove_file(knowledge_binding_path)
                     finally:
                         try:
-                            await self._release_scan_mcp(directory, scan_mcp_lease)
+                            if knowledge_mcp_lease is not None:
+                                await self._release_scan_mcp(directory, knowledge_mcp_lease)
                         finally:
-                            await self._release_active_session()
+                            try:
+                                await self._release_scan_mcp(directory, scan_mcp_lease)
+                            finally:
+                                await self._release_active_session()
 
     async def _session_api_request(
         self,

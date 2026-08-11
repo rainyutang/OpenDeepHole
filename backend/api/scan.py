@@ -538,8 +538,8 @@ def _knowledge_base_mcp(
 
     return _normalize_scan_knowledge_base_mcp(
         enabled=request.enabled,
-        url=request.url,
-        headers=request.headers,
+        project_id=request.project_id,
+        project_name=request.project_name,
     )
 
 
@@ -569,8 +569,8 @@ async def _remember_scan_configuration(
     memory = dict(current)
     if knowledge_base_mcp is not None:
         memory["knowledge_base"] = {
-            "url": knowledge_base_mcp.remote.url,
-            "headers": dict(knowledge_base_mcp.remote.headers),
+            "project_id": knowledge_base_mcp.project_id,
+            "project_name": knowledge_base_mcp.project_name,
         }
     if validation is not None and product:
         raw_products = memory.get("validation_by_product")

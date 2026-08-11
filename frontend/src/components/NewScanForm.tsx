@@ -12,11 +12,11 @@ import {
 } from "../api/client";
 import type {
   AgentInfo,
-  AgentMcpConfig,
   AgentMcpProbeResult,
   AgentValidatorField,
   AgentValidatorMethod,
   FpReviewMethodCatalogItem,
+  KnowledgeBaseProject,
   MiningEngineCatalogItem,
   ScanConfigMemory,
   ThreatAnalysisMethodCatalogItem,
@@ -45,22 +45,6 @@ const emptyMemory: ScanConfigMemory = { knowledge_base: null, validation_by_prod
 
 function agentAcceptsTasks(agent: AgentInfo) {
   return agent.online && agent.accepting_tasks !== false;
-}
-
-function parseHeaders(text: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    const index = line.indexOf("=");
-    const key = (index < 0 ? line : line.slice(0, index)).trim();
-    if (key) result[key] = index < 0 ? "" : line.slice(index + 1).trim();
-  }
-  return result;
-}
-
-function headersText(headers: Record<string, string>) {
-  return Object.entries(headers).map(([key, value]) => `${key}=${value}`).join("\n");
 }
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: () => void; label: string }) {
@@ -104,8 +88,8 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const [product, setProduct] = useState("");
 
   const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
-  const [knowledgeUrl, setKnowledgeUrl] = useState("");
-  const [knowledgeHeaders, setKnowledgeHeaders] = useState<Record<string, string>>({});
+  const [knowledgeProjects, setKnowledgeProjects] = useState<KnowledgeBaseProject[]>([]);
+  const [knowledgeProjectId, setKnowledgeProjectId] = useState("");
   const [knowledgeProbe, setKnowledgeProbe] = useState<AgentMcpProbeResult | null>(null);
   const [probingKnowledge, setProbingKnowledge] = useState(false);
 
@@ -128,6 +112,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const selectedValidationMethod = compatibleMethods.find((method) => method.method_id === validationMethodId) || null;
   const enabledEngineCount = miningEngineCatalog.filter((engine) => miningEngines[engine.engine_id]?.selected).length;
   const threatAuditEnabled = Boolean(miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected);
+  const selectedKnowledgeProject = knowledgeProjects.find((item) => item.id === knowledgeProjectId) || null;
 
   useEffect(() => {
     Promise.all([getAgents(), getMiningEngineCatalog(), getThreatAnalysisMethodCatalog(), getFpReviewMethodCatalog()]).then(([agentList, engineCatalog, threatCatalog, fpCatalog]) => {
@@ -147,8 +132,8 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
     setCodeGraphProbe(null);
     setKnowledgeProbe(null);
     setKnowledgeEnabled(false);
-    setKnowledgeUrl("");
-    setKnowledgeHeaders({});
+    setKnowledgeProjects([]);
+    setKnowledgeProjectId("");
     setValidationEnabled(false);
     setValidationMethodId("");
     setValidationValues({});
@@ -180,9 +165,10 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const toggleKnowledge = () => {
     const next = !knowledgeEnabled;
     setKnowledgeEnabled(next);
-    if (next) {
-      setKnowledgeUrl(String(memory.knowledge_base?.url || ""));
-      setKnowledgeHeaders(memory.knowledge_base?.headers || {});
+    setKnowledgeProbe(null);
+    if (!next) {
+      setKnowledgeProjects([]);
+      setKnowledgeProjectId("");
     }
   };
 
@@ -207,19 +193,28 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
     finally { setProbingCodeGraph(false); }
   };
 
-  const knowledgeMcp = (): AgentMcpConfig => ({
-    enabled: knowledgeEnabled,
-    name: "product-info",
-    transport: "remote",
-    timeout_seconds: 300,
-    local: { executable: "", args: [], environment: {} },
-    remote: { url: knowledgeUrl.trim(), headers: knowledgeHeaders },
-  });
-
   const probeKnowledge = async () => {
-    if (!selectedAgent || probingKnowledge || !knowledgeEnabled || !knowledgeUrl.trim()) return;
+    if (!selectedAgent || probingKnowledge || !knowledgeEnabled) return;
     setProbingKnowledge(true); setError(null);
-    try { setKnowledgeProbe(await probeScanKnowledgeBaseMcp(selectedAgent, knowledgeMcp())); }
+    setKnowledgeProbe(null);
+    setKnowledgeProjects([]);
+    setKnowledgeProjectId("");
+    try {
+      const result = await probeScanKnowledgeBaseMcp(selectedAgent);
+      setKnowledgeProbe(result);
+      setKnowledgeProjects(result.success ? result.projects : []);
+      if (result.success) {
+        const rememberedId = String(memory.knowledge_base?.project_id || "");
+        const preferred = result.projects.find((item) => item.id === rememberedId)
+          || result.projects.find((item) => item.id === result.session_project?.id)
+          || result.projects.find((item) => item.id === result.current_project?.id)
+          || result.projects.find((item) => item.current)
+          || null;
+        setKnowledgeProjectId(preferred?.id || "");
+      } else {
+        setKnowledgeProjectId("");
+      }
+    }
     catch (probeError: unknown) { setError((probeError as { response?: { data?: { detail?: string } } })?.response?.data?.detail || "知识库连接检测失败"); }
     finally { setProbingKnowledge(false); }
   };
@@ -231,7 +226,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
     if (!projectPath.trim()) return setError("请输入项目总路径");
     const graphError = validateScanCodeGraphMcp(codeGraphMcp);
     if (graphError) return setError(graphError);
-    if (knowledgeEnabled && !knowledgeUrl.trim()) return setError("启用知识库后必须填写远端 URL");
+    if (knowledgeEnabled && !selectedKnowledgeProject) return setError("启用知识库后请先拉取并选择项目");
     if (validationEnabled) {
       if (!product.trim()) return setError("启用漏洞验证前必须填写产品");
       if (!selectedValidationMethod) return setError("当前产品没有可用的验证方法，请检查客户端 validator.yaml");
@@ -251,7 +246,11 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
         code_scan_path: codeScanPath.trim(),
         product: product.trim(),
         scan_mode: "full",
-        knowledge_base: { enabled: knowledgeEnabled, url: knowledgeUrl.trim(), headers: knowledgeHeaders },
+        knowledge_base: {
+          enabled: knowledgeEnabled,
+          project_id: selectedKnowledgeProject?.id || "",
+          project_name: selectedKnowledgeProject?.name || "",
+        },
         vulnerability_validation: { enabled: validationEnabled, method_id: validationMethodId, values: validationValues },
         code_graph_mcp: codeGraphMcp.enabled ? codeGraphMcp : null,
         threat_analysis_enabled: threatAnalysisEnabled,
@@ -274,7 +273,28 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
 
         <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2><p className="mt-1 text-xs text-slate-500">这些信息会作为扫描范围快照保存。</p></div><div className="grid gap-5 md:grid-cols-2"><Field label="扫描名称" hint="同一用户不可重复；留空自动生成“目录名_4位十六进制数”"><input className={input} value={scanName} placeholder="例如 project_audit" onChange={(event) => setScanName(event.target.value)} /></Field><Field label="项目总路径"><input className={input} value={projectPath} placeholder="/path/to/project" onChange={(event) => setProjectPath(event.target.value)} /></Field><Field label="代码扫描路径" hint="可选，留空扫描项目总路径"><input className={input} value={codeScanPath} placeholder="子目录或绝对路径" onChange={(event) => setCodeScanPath(event.target.value)} /></Field><Field label="产品" hint="可输入任意值，也可选择建议"><input className={input} list="scan-product-suggestions" value={product} placeholder="例如 LTE" onChange={(event) => { const next = event.target.value; setProduct(next); if (validationEnabled) { const methods = validatorMethods.filter((method) => method.products.includes(next.trim())); const rememberedId = memory.validation_by_product[next.trim()]?.last_method_id || ""; const method = methods.find((item) => item.method_id === rememberedId) || methods[0]; chooseValidationMethod(method?.method_id || "", next.trim()); } }} /><datalist id="scan-product-suggestions">{productSuggestions.map((item) => <option key={item} value={item} />)}</datalist></Field></div></Card>
 
-        <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">启用知识库</h2><p className="mt-1 text-xs leading-5 text-slate-500">仅支持远程 MCP。默认不启用；启用时会自动带入该用户在此客户端上一次成功创建扫描时使用的配置。</p></div><Toggle checked={knowledgeEnabled} onChange={toggleKnowledge} label="启用知识库" /></div>{knowledgeEnabled && <div className="mt-5 space-y-4"><div className="grid gap-4 md:grid-cols-2"><Field label="远端 URL"><input className={input} value={knowledgeUrl} placeholder="http://10.0.0.8:9000/mcp" onChange={(event) => { setKnowledgeUrl(event.target.value); setKnowledgeProbe(null); }} /></Field><Field label="请求头" hint="每行 NAME=VALUE"><textarea className={input} rows={5} value={headersText(knowledgeHeaders)} onChange={(event) => { setKnowledgeHeaders(parseHeaders(event.target.value)); setKnowledgeProbe(null); }} /></Field></div><div className="flex flex-wrap items-center gap-3"><button type="button" disabled={!selectedAgentReady || !knowledgeUrl.trim() || probingKnowledge} onClick={() => void probeKnowledge()} className="rounded-lg bg-blue-600 px-4 py-2 text-sm disabled:bg-slate-700">{probingKnowledge ? "检测中…" : "检测连接"}</button>{knowledgeProbe && <span className={`text-xs ${knowledgeProbe.success ? "text-emerald-300" : "text-red-300"}`}>{knowledgeProbe.success ? `连接成功，发现 ${knowledgeProbe.tool_count} 个工具` : `连接失败：${knowledgeProbe.error}`}</span>}</div></div>}</Card>
+        <Card>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-medium text-slate-200">启用知识库</h2>
+              <p className="mt-1 text-xs leading-5 text-slate-500">知识库连接由服务端统一配置；本次扫描只需拉取并选择知识库项目。</p>
+            </div>
+            <Toggle checked={knowledgeEnabled} onChange={toggleKnowledge} label="启用知识库" />
+          </div>
+          {knowledgeEnabled && <div className="mt-5 space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" disabled={!selectedAgentReady || probingKnowledge} onClick={() => void probeKnowledge()} className="rounded-lg bg-blue-600 px-4 py-2 text-sm disabled:bg-slate-700">{probingKnowledge ? "检测并拉取中…" : "检测并拉取项目"}</button>
+              {knowledgeProbe && <span className={`text-xs ${knowledgeProbe.success ? "text-emerald-300" : "text-red-300"}`}>{knowledgeProbe.success ? `连接成功，获得 ${knowledgeProbe.projects.length} 个项目` : `连接失败：${knowledgeProbe.error}`}</span>}
+            </div>
+            {knowledgeProbe?.success && knowledgeProjects.length === 0 && <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">知识库没有返回可选项目。</div>}
+            {knowledgeProjects.length > 0 && <Field label="知识库项目">
+              <select className={input} value={knowledgeProjectId} onChange={(event) => setKnowledgeProjectId(event.target.value)}>
+                <option value="">请选择项目</option>
+                {knowledgeProjects.map((item) => <option key={item.id} value={item.id}>{item.name}{item.current ? "（当前）" : ""}{item.path ? ` — ${item.path}` : ""}</option>)}
+              </select>
+            </Field>}
+          </div>}
+        </Card>
 
         <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">漏洞验证</h2><p className="mt-1 text-xs leading-5 text-slate-500">全局并发、重试、漏洞类型和模型策略在客户端配置中维护；这里仅决定本次扫描是否启用、使用哪个方法及其参数。</p></div><Toggle checked={validationEnabled} onChange={toggleValidation} label="启用漏洞验证" /></div>{validatorErrors.length > 0 && <div className="mt-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">{validatorErrors.join("；")}</div>}{validationEnabled && <div className="mt-5 space-y-4">{!product.trim() ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">请先在上方填写产品。</div> : compatibleMethods.length === 0 ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">当前产品没有可用的验证方法。</div> : <><Field label="验证方法"><select className={input} value={validationMethodId} onChange={(event) => chooseValidationMethod(event.target.value)}>{compatibleMethods.map((method) => <option key={method.method_id} value={method.method_id}>{method.method_label}</option>)}</select></Field>{selectedValidationMethod && <><div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3 text-xs text-slate-400">{selectedValidationMethod.description}</div>{selectedValidationMethod.fields.length > 0 ? <div className="grid gap-4 md:grid-cols-2">{selectedValidationMethod.fields.map((field) => <DynamicValidationField key={field.key} schema={field} value={validationValues[field.key]} onChange={(value) => setValidationValues((current) => ({ ...current, [field.key]: value }))} />)}</div> : <p className="text-sm text-slate-500">该验证方法没有额外参数。</p>}</>}</>}</div>}</Card>
 

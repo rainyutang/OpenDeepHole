@@ -1365,12 +1365,21 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         }
 
 
-async def handle_mcp_probe(request_id: str, target: str, mcp_config: dict) -> dict:
+async def handle_mcp_probe(
+    request_id: str,
+    target: str,
+    mcp_config: dict,
+    projects_tool: str = "",
+) -> dict:
     """Probe one saved MCP configuration and report the serve reload state."""
     from deephole_client.mcp_probe import probe_mcp_config
     from task_agent.serve_client import get_serve_manager
 
-    result = await probe_mcp_config(target, mcp_config if isinstance(mcp_config, dict) else {})
+    result = await probe_mcp_config(
+        target,
+        mcp_config if isinstance(mcp_config, dict) else {},
+        projects_tool=str(projects_tool or ""),
+    )
     result.update(get_serve_manager().config_runtime_status())
     result.update({
         "type": "mcp_probe_result",

@@ -284,7 +284,7 @@ export async function createScan(body: {
   threat_analysis_enabled?: boolean;
   threat_analysis_method?: string;
   product?: string;
-  knowledge_base?: { enabled: boolean; url: string; headers: Record<string, string> };
+  knowledge_base?: { enabled: boolean; project_id: string; project_name: string };
   vulnerability_validation?: { enabled: boolean; method_id: string; values: Record<string, unknown> };
   checkers?: string[];
   mining_engines?: MiningEngineRequest[];
@@ -815,11 +815,9 @@ export async function probeScanCodeGraphMcp(
 
 export async function probeScanKnowledgeBaseMcp(
   agentKey: string,
-  config: AgentMcpConfig,
 ): Promise<AgentMcpProbeResult> {
   const { data } = await api.post<AgentMcpProbeResult>(
     `/api/agent-configs/${agentKey}/mcp-probe/scan_knowledge_base`,
-    config,
   );
   return data;
 }

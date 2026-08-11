@@ -25,6 +25,8 @@ from task_agent.serve_client import (
     _EventChannelRuntime,
     _FILE_WRITE_PLUGIN_HASH,
     _FILE_WRITE_PLUGIN_SOURCE,
+    _KNOWLEDGE_PROJECT_PLUGIN_HASH,
+    _KNOWLEDGE_PROJECT_PLUGIN_SOURCE,
     _config_hash,
     _flush_event_state_periodically,
     _handle_serve_event,
@@ -36,6 +38,7 @@ from task_agent.serve_client import (
     _serve_startup_env_debug,
     _serve_startup_shell_debug,
     _token_usage_delta,
+    _tool_matches_mcp_tool,
     _write_serve_config_file,
 )
 
@@ -448,6 +451,239 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
         }
 
     asyncio.run(run())
+
+
+def test_run_prompt_binds_knowledge_project_and_hides_control_tools(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.tool_ids = [
+            "read",
+            "mcp__product-info__xxx_projects",
+            "mcp__product-info__xxx_set_project",
+            "mcp__product-info__search_docs",
+            "mcp__product-info__lookup_symbol",
+        ]
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._remove_file",
+            lambda _path: None,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._release_scan_mcp = AsyncMock()
+        manager._disable_scan_mcp_lease = AsyncMock()
+
+        async def acquire(
+            _client,
+            _directory,
+            _scan_id,
+            _config,
+            *,
+            role="code_graph",
+            source_graph=True,
+        ):
+            del source_graph
+            return _ScanMcpLease(
+                directory_key="directory",
+                state_key=role,
+                identity=role,
+                name="product-info" if role == "knowledge_base" else "",
+                fingerprint=role,
+                connected=role == "knowledge_base",
+                role=role,
+            )
+
+        manager._acquire_scan_mcp = acquire
+        project = tmp_path / "project"
+        runtime = tmp_path / "runtime"
+        project.mkdir()
+        runtime.mkdir()
+        knowledge = {
+            "enabled": True,
+            "name": "product-info",
+            "transport": "remote",
+            "timeout_seconds": 300,
+            "remote": {"url": "http://knowledge.test/mcp", "headers": {}},
+            "project_id": "db3dc782-0c5c-4c99-921b-96805e68e502",
+            "project_name": "5G-gnodeb",
+            "projects_tool": "xxx_projects",
+            "set_project_tool": "xxx_set_project",
+        }
+
+        lines = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            config_workspace=runtime,
+            prompt="business prompt",
+            model="provider/model",
+            timeout=30,
+            scan_id="scan-a",
+            knowledge_base_mcp=knowledge,
+        )
+
+        assert lines == ["done"]
+        client = _FakeAsyncClient.instances[0]
+        messages = [
+            item for item in client.posts
+            if item["path"].endswith("/message")
+        ]
+        assert len(messages) == 1
+        assert messages[0]["json"]["parts"] == [{
+            "type": "text",
+            "text": "business prompt",
+        }]
+        assert "system" not in messages[0]["json"]
+        assert knowledge["project_id"] not in json.dumps(messages[0]["json"])
+        assert messages[0]["json"]["tools"] == {
+            "read": True,
+            "mcp__product-info__xxx_projects": False,
+            "mcp__product-info__xxx_set_project": False,
+            "mcp__product-info__search_docs": True,
+            "mcp__product-info__lookup_symbol": True,
+        }
+        binding_path = (
+            runtime
+            / ".opendeephole-plugins"
+            / "knowledge-bindings"
+            / f"{hashlib.sha256(b'session-1').hexdigest()}.json"
+        )
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        assert binding["project_id"] == knowledge["project_id"]
+        assert binding["allowed_tool_ids"] == [
+            "mcp__product-info__search_docs",
+            "mcp__product-info__lookup_symbol",
+        ]
+        assert binding["blocked_tool_ids"] == [
+            "mcp__product-info__xxx_projects",
+            "mcp__product-info__xxx_set_project",
+        ]
+        manager._disable_scan_mcp_lease.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+def test_run_prompt_disables_knowledge_tools_when_binding_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.tool_ids = [
+            "read",
+            "mcp__product-info__xxx_projects",
+            "mcp__product-info__xxx_set_project",
+            "mcp__product-info__search_docs",
+        ]
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._write_knowledge_binding",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        manager._release_scan_mcp = AsyncMock()
+        manager._disable_scan_mcp_lease = AsyncMock()
+
+        async def acquire(
+            _client,
+            _directory,
+            _scan_id,
+            _config,
+            *,
+            role="code_graph",
+            source_graph=True,
+        ):
+            del source_graph
+            return _ScanMcpLease(
+                directory_key="directory",
+                state_key=role,
+                identity=role,
+                name="product-info" if role == "knowledge_base" else "",
+                fingerprint=role,
+                connected=role == "knowledge_base",
+                role=role,
+            )
+
+        manager._acquire_scan_mcp = acquire
+        project = tmp_path / "project"
+        runtime = tmp_path / "runtime"
+        project.mkdir()
+        runtime.mkdir()
+        lines = await manager.run_prompt(
+            tool="opencode",
+            executable="opencode",
+            directory=project,
+            config_workspace=runtime,
+            prompt="continue anyway",
+            model="provider/model",
+            timeout=30,
+            scan_id="scan-a",
+            knowledge_base_mcp={
+                "enabled": True,
+                "name": "product-info",
+                "transport": "remote",
+                "remote": {"url": "http://knowledge.test/mcp", "headers": {}},
+                "project_id": "project-1",
+                "project_name": "Project One",
+                "projects_tool": "xxx_projects",
+                "set_project_tool": "xxx_set_project",
+            },
+        )
+
+        assert lines == ["done"]
+        message = next(
+            item for item in _FakeAsyncClient.instances[0].posts
+            if item["path"].endswith("/message")
+        )
+        assert message["json"]["tools"]["read"] is True
+        assert all(
+            value is False
+            for key, value in message["json"]["tools"].items()
+            if key.startswith("mcp__product-info__")
+        )
+        manager._disable_scan_mcp_lease.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_knowledge_plugin_overwrites_project_id_without_chat_messages() -> None:
+    assert "output.args.project_id = binding.project_id" in (
+        _KNOWLEDGE_PROJECT_PLUGIN_SOURCE
+    )
+    assert '"tool.execute.before"' in _KNOWLEDGE_PROJECT_PLUGIN_SOURCE
+    assert "chat.message" not in _KNOWLEDGE_PROJECT_PLUGIN_SOURCE
+
+
+@pytest.mark.parametrize(
+    "tool_id",
+    [
+        "product-info_xxx_projects",
+        "mcp__product-info__xxx_projects",
+        "mcp--product-info--xxx_projects",
+    ],
+)
+def test_knowledge_control_tool_matching_supports_opencode_id_formats(
+    tool_id: str,
+) -> None:
+    assert _tool_matches_mcp_tool(
+        tool_id,
+        "product-info",
+        "xxx_projects",
+    )
 
 
 def test_run_prompt_marks_serve_unhealthy_when_session_creation_returns_500(
@@ -4201,7 +4437,7 @@ def test_managed_file_write_plugin_preserves_user_plugins(tmp_path: Path) -> Non
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
     assert config["plugin"][:2] == ["user-plugin", "file:///custom/plugin.mjs"]
-    assert len(config["plugin"]) == 3
+    assert len(config["plugin"]) == 4
     managed_path = (
         workspace
         / ".opendeephole-plugins"
@@ -4209,6 +4445,15 @@ def test_managed_file_write_plugin_preserves_user_plugins(tmp_path: Path) -> Non
     ).resolve()
     assert config["plugin"][2] == managed_path.as_uri()
     assert managed_path.read_text(encoding="utf-8") == _FILE_WRITE_PLUGIN_SOURCE
+    knowledge_plugin_path = (
+        workspace
+        / ".opendeephole-plugins"
+        / f"opendeephole-knowledge-project-{_KNOWLEDGE_PROJECT_PLUGIN_HASH}.mjs"
+    ).resolve()
+    assert config["plugin"][3] == knowledge_plugin_path.as_uri()
+    assert knowledge_plugin_path.read_text(encoding="utf-8") == (
+        _KNOWLEDGE_PROJECT_PLUGIN_SOURCE
+    )
 
 
 def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: Path) -> None:
@@ -4321,15 +4566,27 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         runtime_config_path = startup_cwd / "opencode.json"
         runtime_config = json.loads(runtime_config_path.read_text(encoding="utf-8"))
         assert runtime_config["mcp"] == {}
-        assert len(runtime_config["plugin"]) == 1
+        assert len(runtime_config["plugin"]) == 2
         plugin_path = (
             startup_cwd
             / ".opendeephole-plugins"
             / f"opendeephole-file-write-{_FILE_WRITE_PLUGIN_HASH}.mjs"
         )
-        assert runtime_config["plugin"] == [plugin_path.resolve().as_uri()]
+        knowledge_plugin_path = (
+            startup_cwd
+            / ".opendeephole-plugins"
+            / f"opendeephole-knowledge-project-{_KNOWLEDGE_PROJECT_PLUGIN_HASH}.mjs"
+        )
+        assert runtime_config["plugin"] == [
+            plugin_path.resolve().as_uri(),
+            knowledge_plugin_path.resolve().as_uri(),
+        ]
         assert plugin_path.read_text(encoding="utf-8") == _FILE_WRITE_PLUGIN_SOURCE
         assert plugin_path.stat().st_mode & 0o777 == 0o600
+        assert knowledge_plugin_path.read_text(encoding="utf-8") == (
+            _KNOWLEDGE_PROJECT_PLUGIN_SOURCE
+        )
+        assert knowledge_plugin_path.stat().st_mode & 0o777 == 0o600
         assert runtime_config_path.stat().st_mode & 0o777 == 0o600
         for proxy_name in (
             "HTTP_PROXY",

@@ -43,6 +43,16 @@ git_history:
 threat_analysis:
   enabled: true  # 是否运行威胁分析阶段
 
+# 扫描知识库连接由服务端统一维护，用户创建扫描时只选择项目。
+# projects_tool 用于“检测并拉取项目”；set_project_tool 仅用于从模型工具集中屏蔽，平台不会调用它。
+knowledge_base:
+  name: "product-info"
+  url: ""  # 固定的远程 MCP URL，例如 "http://10.0.0.8:9000/mcp"
+  headers: {}  # 固定请求头，例如 {Authorization: "Bearer ..."}
+  timeout_seconds: 300
+  projects_tool: "xxx_projects"
+  set_project_tool: "xxx_set_project"
+
 storage:
   projects_dir: "../OpenDeepHoleData/projects"
   scans_dir: "../OpenDeepHoleData/scans"

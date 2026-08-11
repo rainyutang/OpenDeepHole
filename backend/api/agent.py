@@ -69,6 +69,7 @@ from backend.models import (
     AgentVulnerabilityValidationUpdate,
     FpReviewStatus,
     HistoryPattern,
+    KnowledgeBaseProject,
     MiningEngineRunStatus,
     MiningEngineSelection,
     OpenCodePoolStatus,
@@ -425,26 +426,50 @@ def _normalize_scan_code_graph_mcp(
 def _normalize_scan_knowledge_base_mcp(
     *,
     enabled: bool,
-    url: str,
-    headers: dict[str, str],
+    project_id: str = "",
+    project_name: str = "",
+    require_project: bool = True,
 ) -> AgentMcpConfig | None:
-    """Build the fixed remote-only product-knowledge MCP snapshot."""
+    """Build a scan-private snapshot from the server-owned knowledge config."""
     if not enabled:
         return None
+    knowledge = get_config().knowledge_base
+    normalized_project_id = str(project_id or "").strip()
+    normalized_project_name = str(project_name or "").strip()
+    if require_project and not normalized_project_id:
+        raise HTTPException(status_code=422, detail="启用知识库后必须选择项目")
+    if require_project and not normalized_project_name:
+        raise HTTPException(status_code=422, detail="知识库项目名称不能为空")
+    projects_tool = str(knowledge.projects_tool or "").strip()
+    set_project_tool = str(knowledge.set_project_tool or "").strip()
+    if not projects_tool or not set_project_tool:
+        raise HTTPException(
+            status_code=422,
+            detail="服务端知识库 projects_tool/set_project_tool 配置不完整",
+        )
+    if projects_tool.casefold() == set_project_tool.casefold():
+        raise HTTPException(
+            status_code=422,
+            detail="服务端知识库 projects_tool 与 set_project_tool 不能相同",
+        )
     config = AgentMcpConfig(
         enabled=True,
-        name="product-info",
+        name=str(knowledge.name or "product-info").strip(),
         transport="remote",
-        timeout_seconds=300,
+        timeout_seconds=knowledge.timeout_seconds,
         local=AgentMcpLocalConfig(),
         remote=AgentMcpRemoteConfig(
-            url=str(url or "").strip(),
+            url=str(knowledge.url or "").strip(),
             headers={
                 str(key): str(value)
-                for key, value in headers.items()
+                for key, value in knowledge.headers.items()
                 if str(key)
             },
         ),
+        project_id=normalized_project_id,
+        project_name=normalized_project_name,
+        projects_tool=projects_tool,
+        set_project_tool=set_project_tool,
     )
     _validate_mcp_config(config, label="扫描知识库", require_enabled=True)
     return config
@@ -2398,22 +2423,16 @@ async def probe_stable_agent_mcp(
     )
     transient = target in {"scan_code_graph", "scan_knowledge_base"}
     if transient:
-        if mcp_config is None:
-            raise HTTPException(status_code=400, detail="缺少扫描级 MCP 配置")
-        if not mcp_config.enabled:
-            raise HTTPException(status_code=400, detail="请先启用该扫描级 MCP 配置")
         if target == "scan_code_graph":
+            if mcp_config is None:
+                raise HTTPException(status_code=400, detail="缺少扫描级 MCP 配置")
+            if not mcp_config.enabled:
+                raise HTTPException(status_code=400, detail="请先启用该扫描级 MCP 配置")
             mcp_config = _normalize_scan_code_graph_mcp(mcp_config)
         else:
-            if mcp_config.transport != "remote":
-                raise HTTPException(
-                    status_code=422,
-                    detail="扫描知识库仅支持远程 MCP",
-                )
             mcp_config = _normalize_scan_knowledge_base_mcp(
-                enabled=mcp_config.enabled,
-                url=mcp_config.remote.url,
-                headers=mcp_config.remote.headers,
+                enabled=True,
+                require_project=False,
             )
     else:
         config = _stored_agent_config(record)
@@ -2433,6 +2452,11 @@ async def probe_stable_agent_mcp(
         "request_id": request_id,
         "target": target,
         "mcp_config": mcp_config.model_dump(mode="json"),
+        "projects_tool": (
+            mcp_config.projects_tool
+            if target == "scan_knowledge_base"
+            else ""
+        ),
     })
     if not sent:
         _mcp_probe_waiters.pop(request_id, None)
@@ -2453,18 +2477,61 @@ async def probe_stable_agent_mcp(
     finally:
         _mcp_probe_waiters.pop(request_id, None)
 
-    tool_names = sorted({
-        str(item)[:200]
+    discovered_tool_names = {
+        str(item).strip()
         for item in (incoming.get("tool_names") or [])
         if str(item).strip()
-    })[:200]
+    }
+    tool_names = sorted(item[:200] for item in discovered_tool_names)[:200]
+    probe_success = bool(incoming.get("success"))
+    probe_error = str(incoming.get("error") or "")[:2000]
+    if target == "scan_knowledge_base" and probe_success:
+        missing_controls = [
+            name
+            for name in (
+                mcp_config.projects_tool,
+                mcp_config.set_project_tool,
+            )
+            if name not in discovered_tool_names
+        ]
+        if missing_controls:
+            probe_success = False
+            probe_error = (
+                "知识库缺少已配置的管理工具："
+                + "、".join(missing_controls)
+            )
     runtime_state = str(incoming.get("runtime_state") or "next_task")
     if runtime_state not in {"active", "reload_pending", "next_task"}:
         runtime_state = "next_task"
+
+    def normalized_project(value: object) -> KnowledgeBaseProject | None:
+        if not isinstance(value, dict):
+            return None
+        project_id = str(value.get("id") or "").strip()
+        project_name = str(value.get("name") or "").strip()
+        if not project_id or not project_name:
+            return None
+        return KnowledgeBaseProject(
+            id=project_id[:200],
+            name=project_name[:500],
+            path=str(value.get("path") or "")[:4000],
+            current=bool(value.get("current")),
+        )
+
+    projects: list[KnowledgeBaseProject] = []
+    seen_project_ids: set[str] = set()
+    for raw_project in incoming.get("projects") or []:
+        project = normalized_project(raw_project)
+        if project is None or project.id in seen_project_ids:
+            continue
+        seen_project_ids.add(project.id)
+        projects.append(project)
+        if len(projects) >= 1000:
+            break
     result = AgentMcpProbeResult(
         target=target,
         config_fingerprint=_mcp_config_fingerprint(mcp_config),
-        success=bool(incoming.get("success")),
+        success=probe_success,
         checked_at=datetime.now(timezone.utc).isoformat(),
         transport=mcp_config.transport,
         protocol=(
@@ -2475,9 +2542,20 @@ async def probe_stable_agent_mcp(
         tool_names=tool_names,
         tool_count=len(tool_names),
         duration_ms=_nonnegative_int(incoming.get("duration_ms")),
-        error=str(incoming.get("error") or "")[:2000],
+        error=probe_error,
         runtime_state=runtime_state,
         active_sessions=_nonnegative_int(incoming.get("active_sessions")),
+        projects=(projects if probe_success else []),
+        current_project=(
+            normalized_project(incoming.get("current_project"))
+            if probe_success
+            else None
+        ),
+        session_project=(
+            normalized_project(incoming.get("session_project"))
+            if probe_success
+            else None
+        ),
     )
     if not transient:
         await _persist_mcp_probe(agent_key, result)

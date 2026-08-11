@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
@@ -16,6 +17,17 @@ from deephole_client.config import (
 )
 from backend.config import GitHistoryConfig as BackendGitHistoryConfig
 from backend.models import AgentRemoteConfig
+
+
+def _server_knowledge_config(headers: dict[str, str] | None = None):
+    return SimpleNamespace(knowledge_base=SimpleNamespace(
+        name="product-info",
+        url="http://product.test/mcp",
+        headers=headers or {},
+        timeout_seconds=300,
+        projects_tool="xxx_projects",
+        set_project_tool="xxx_set_project",
+    ))
 
 
 class AgentConfigTests(unittest.TestCase):
@@ -706,22 +718,31 @@ class AgentConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(HTTPException, error_text):
                     _validate_managed_config(config)
 
-    def test_scan_knowledge_base_accepts_bearer_authorization_header(self) -> None:
+    def test_scan_knowledge_base_uses_server_connection_and_selected_project(self) -> None:
         from backend.api.scan import _knowledge_base_mcp
         from backend.models import ScanKnowledgeBaseRequest
 
-        config = _knowledge_base_mcp(ScanKnowledgeBaseRequest(
-            enabled=True,
-            url="http://product.test/mcp",
-            headers={
-            "Authorization": "Bearer test-secret-123",
-            },
-        ))
+        with patch(
+            "backend.api.agent.get_config",
+            return_value=_server_knowledge_config({
+                "Authorization": "Bearer test-secret-123",
+            }),
+        ):
+            config = _knowledge_base_mcp(ScanKnowledgeBaseRequest(
+                enabled=True,
+                project_id="project-1",
+                project_name="5G-gnodeb",
+            ))
 
         self.assertIsNotNone(config)
         self.assertEqual(config.remote.headers["Authorization"], "Bearer test-secret-123")
+        self.assertEqual(config.remote.url, "http://product.test/mcp")
         self.assertEqual(config.name, "product-info")
         self.assertEqual(config.transport, "remote")
+        self.assertEqual(config.project_id, "project-1")
+        self.assertEqual(config.project_name, "5G-gnodeb")
+        self.assertEqual(config.projects_tool, "xxx_projects")
+        self.assertEqual(config.set_project_tool, "xxx_set_project")
 
     def test_scan_knowledge_base_rejects_invalid_or_duplicate_header_names(self) -> None:
         from fastapi import HTTPException
@@ -736,11 +757,15 @@ class AgentConfigTests(unittest.TestCase):
         ):
             with self.subTest(headers=headers):
                 with self.assertRaisesRegex(HTTPException, error_text):
-                    _knowledge_base_mcp(ScanKnowledgeBaseRequest(
-                        enabled=True,
-                        url="http://product.test/mcp",
-                        headers=headers,
-                    ))
+                    with patch(
+                        "backend.api.agent.get_config",
+                        return_value=_server_knowledge_config(headers),
+                    ):
+                        _knowledge_base_mcp(ScanKnowledgeBaseRequest(
+                            enabled=True,
+                            project_id="project-1",
+                            project_name="Project One",
+                        ))
 
     def test_legacy_remote_payload_migrates_to_v6_and_disables_default_model(self) -> None:
         config = AgentRemoteConfig.model_validate({

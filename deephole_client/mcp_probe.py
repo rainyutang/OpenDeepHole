@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -86,6 +87,112 @@ async def _list_tools(read_stream: Any, write_stream: Any) -> list[str]:
     return sorted({str(tool.name) for tool in result.tools if str(tool.name).strip()})
 
 
+def _call_tool_payload(result: Any) -> dict[str, Any]:
+    content = getattr(result, "content", None) or []
+    raw_messages = [
+        str(getattr(item, "text", "") or "")
+        for item in content
+    ]
+    if bool(
+        getattr(result, "isError", False)
+        or getattr(result, "is_error", False)
+    ):
+        raise RuntimeError(
+            "; ".join(item.strip() for item in raw_messages if item.strip())
+            or "MCP tool returned an error"
+        )
+    structured = getattr(result, "structuredContent", None)
+    if structured is None:
+        structured = getattr(result, "structured_content", None)
+    if isinstance(structured, dict):
+        return structured
+    for item in content:
+        text = getattr(item, "text", None)
+        if not isinstance(text, str) or not text.strip():
+            continue
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    combined = "".join(raw_messages)
+    if combined:
+        try:
+            value = json.loads(combined)
+        except json.JSONDecodeError:
+            value = None
+        if isinstance(value, dict):
+            return value
+    raise ValueError("MCP projects tool did not return a JSON object")
+
+
+async def _list_tools_and_call(
+    read_stream: Any,
+    write_stream: Any,
+    tool_name: str,
+) -> tuple[list[str], dict[str, Any]]:
+    async with ClientSession(read_stream, write_stream) as session:
+        await session.initialize()
+        listed = await session.list_tools()
+        tool_names = sorted({
+            str(tool.name)
+            for tool in listed.tools
+            if str(tool.name).strip()
+        })
+        if tool_name not in tool_names:
+            raise ValueError(f"Configured projects tool was not found: {tool_name}")
+        result = await session.call_tool(tool_name, {})
+    return tool_names, _call_tool_payload(result)
+
+
+def _normalize_project(value: Any, *, label: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object or null")
+    project_id = str(value.get("id") or "").strip()
+    project_name = str(value.get("name") or "").strip()
+    if not project_id or not project_name:
+        raise ValueError(f"{label} must contain non-empty id and name")
+    if len(project_id) > 200 or len(project_name) > 500:
+        raise ValueError(f"{label} id or name is too long")
+    return {
+        "id": project_id,
+        "name": project_name,
+        "path": str(value.get("path") or "")[:4000],
+        "current": bool(value.get("current")),
+    }
+
+
+def _normalize_projects_payload(value: dict[str, Any]) -> dict[str, Any]:
+    raw_projects = value.get("projects")
+    if not isinstance(raw_projects, list):
+        raise ValueError("MCP projects tool response must contain a projects array")
+    if len(raw_projects) > 1000:
+        raise ValueError("MCP projects tool returned more than 1000 projects")
+    projects: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_projects):
+        project = _normalize_project(item, label=f"projects[{index}]")
+        assert project is not None
+        if project["id"] in seen:
+            raise ValueError(f"MCP projects tool returned duplicate project id: {project['id']}")
+        seen.add(project["id"])
+        projects.append(project)
+    return {
+        "projects": projects,
+        "current_project": _normalize_project(
+            value.get("currentProject"),
+            label="currentProject",
+        ),
+        "session_project": _normalize_project(
+            value.get("sessionProject"),
+            label="sessionProject",
+        ),
+    }
+
+
 def _resolve_local_executable(executable: str) -> str:
     resolved = shutil.which(executable)
     if resolved:
@@ -146,6 +253,36 @@ async def _probe_sse(url: str, headers: dict[str, str], timeout: float) -> list[
         return await _list_tools(read_stream, write_stream)
 
 
+async def _inspect_streamable_http(
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    tool_name: str,
+) -> tuple[list[str], dict[str, Any]]:
+    async with streamablehttp_client(
+        url,
+        headers=headers or None,
+        timeout=timeout,
+        sse_read_timeout=timeout,
+    ) as (read_stream, write_stream, _):
+        return await _list_tools_and_call(read_stream, write_stream, tool_name)
+
+
+async def _inspect_sse(
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    tool_name: str,
+) -> tuple[list[str], dict[str, Any]]:
+    async with sse_client(
+        url,
+        headers=headers or None,
+        timeout=timeout,
+        sse_read_timeout=timeout,
+    ) as (read_stream, write_stream):
+        return await _list_tools_and_call(read_stream, write_stream, tool_name)
+
+
 async def _probe_remote(config: dict[str, Any], timeout: float) -> tuple[str, list[str]]:
     remote = config.get("remote")
     if not isinstance(remote, dict):
@@ -176,8 +313,54 @@ async def _probe_remote(config: dict[str, Any], timeout: float) -> tuple[str, li
         ) from exc
 
 
-async def probe_mcp_config(target: str, config: dict[str, Any]) -> dict[str, Any]:
-    """Initialize one configured MCP and list its tools without invoking them."""
+async def _inspect_remote_projects(
+    config: dict[str, Any],
+    timeout: float,
+    tool_name: str,
+) -> tuple[str, list[str], dict[str, Any]]:
+    remote = config.get("remote")
+    if not isinstance(remote, dict):
+        remote = {}
+    url = str(_value(remote, "url", "")).strip()
+    if not url:
+        raise ValueError("MCP remote URL is empty")
+    raw_headers = _value(remote, "headers", {})
+    headers = (
+        {str(key): str(value) for key, value in raw_headers.items()}
+        if isinstance(raw_headers, dict)
+        else {}
+    )
+    try:
+        tool_names, payload = await _inspect_streamable_http(
+            url,
+            headers,
+            timeout,
+            tool_name,
+        )
+        return "streamable_http", tool_names, _normalize_projects_payload(payload)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        streamable_error = _sanitized_error(exc, config)
+    try:
+        tool_names, payload = await _inspect_sse(url, headers, timeout, tool_name)
+        return "sse", tool_names, _normalize_projects_payload(payload)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        sse_error = _sanitized_error(exc, config)
+        raise RuntimeError(
+            f"Streamable HTTP failed: {streamable_error}; SSE failed: {sse_error}"
+        ) from exc
+
+
+async def probe_mcp_config(
+    target: str,
+    config: dict[str, Any],
+    *,
+    projects_tool: str = "",
+) -> dict[str, Any]:
+    """Probe one MCP; optionally invoke its configured project-list tool."""
     timeout = min(
         _MAX_PROBE_SECONDS,
         max(1, int(_value(config, "timeout_seconds", _MAX_PROBE_SECONDS))),
@@ -187,7 +370,24 @@ async def probe_mcp_config(target: str, config: dict[str, Any]) -> dict[str, Any
     try:
         if not bool(_value(config, "enabled", False)):
             raise ValueError("MCP is disabled")
-        if transport == "local":
+        normalized_projects_tool = str(projects_tool or "").strip()
+        project_result: dict[str, Any] = {
+            "projects": [],
+            "current_project": None,
+            "session_project": None,
+        }
+        if normalized_projects_tool:
+            if transport != "remote":
+                raise ValueError("Knowledge-base project discovery requires a remote MCP")
+            protocol, tool_names, project_result = await _run_with_timeout(
+                _inspect_remote_projects(
+                    config,
+                    float(timeout),
+                    normalized_projects_tool,
+                ),
+                float(timeout),
+            )
+        elif transport == "local":
             protocol, tool_names = await _run_with_timeout(_probe_local(config), float(timeout))
         elif transport == "remote":
             protocol, tool_names = await _run_with_timeout(
@@ -204,6 +404,7 @@ async def probe_mcp_config(target: str, config: dict[str, Any]) -> dict[str, Any
             "tool_count": len(tool_names),
             "duration_ms": round((time.monotonic() - started) * 1000),
             "error": "",
+            **project_result,
         }
     except asyncio.TimeoutError:
         error = RuntimeError(f"MCP probe timed out after {timeout} seconds")
@@ -218,4 +419,7 @@ async def probe_mcp_config(target: str, config: dict[str, Any]) -> dict[str, Any
         "tool_count": 0,
         "duration_ms": round((time.monotonic() - started) * 1000),
         "error": _sanitized_error(error, config),
+        "projects": [],
+        "current_project": None,
+        "session_project": None,
     }
