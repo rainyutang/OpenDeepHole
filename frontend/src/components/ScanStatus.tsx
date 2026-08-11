@@ -428,8 +428,9 @@ function threatAuditFlowStatus(
   run: MiningEngineRunStatus | null,
 ): FlowNodeStatus {
   const tasks = scan.threat_audit_tasks ?? [];
-  if (tasks.some((task) => isActiveThreatAuditStatus(task.status))) return "running";
   const runStatus = engineFlowStatus(run);
+  if (scan.status === "cancelled" && runStatus !== "done") return "cancelled";
+  if (tasks.some((task) => isActiveThreatAuditStatus(task.status))) return "running";
   const failed = tasks.filter((task) =>
     ["failed", "failure", "error", "timeout", "no_result"].includes(String(task.status || "").toLowerCase()),
   ).length;
@@ -701,11 +702,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       const overview = await getScanOverview(scanId);
       setScan((previous) => {
         if (!previous || previous.scan_id !== overview.scan_id) return previous;
-        const totalCandidates = Math.max(
-          previous.total_candidates,
-          overview.total_candidates,
-          overview.detail_counts?.candidates ?? 0,
-        );
+        const totalCandidates = overview.total_candidates;
         const detailCounts = overview.detail_counts ?? previous.detail_counts;
         if (
           totalCandidates === previous.total_candidates
@@ -861,8 +858,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         const patch: Partial<ScanStatusType> = {};
         if (data.status != null && data.status !== prev.status) patch.status = data.status as ScanItemStatus;
         if (data.progress != null && data.progress !== prev.progress) patch.progress = data.progress;
-        if (data.total_candidates != null && data.total_candidates !== prev.total_candidates) patch.total_candidates = data.total_candidates;
-        if (data.processed_candidates != null && data.processed_candidates !== prev.processed_candidates) patch.processed_candidates = data.processed_candidates;
+        const nextTotal = data.total_candidates ?? prev.total_candidates;
+        const reportedProcessed = data.processed_candidates ?? prev.processed_candidates;
+        const nextProcessed = nextTotal > 0
+          ? Math.min(Math.max(0, reportedProcessed), nextTotal)
+          : 0;
+        if (nextTotal !== prev.total_candidates) patch.total_candidates = nextTotal;
+        if (nextProcessed !== prev.processed_candidates) patch.processed_candidates = nextProcessed;
         if (data.static_total_files != null && data.static_total_files !== prev.static_total_files) patch.static_total_files = data.static_total_files;
         if (data.static_scanned_files != null && data.static_scanned_files !== prev.static_scanned_files) patch.static_scanned_files = data.static_scanned_files;
         if (data.static_analysis_done != null && data.static_analysis_done !== prev.static_analysis_done) patch.static_analysis_done = data.static_analysis_done;
@@ -879,7 +881,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       scheduleOverviewSummaryRefresh();
     },
     onScanCandidates: (data) => {
-      setScan((prev) => prev ? { ...prev, candidates: data.candidates, total_candidates: data.candidates.length } : prev);
+      setScan((prev) => prev ? {
+        ...prev,
+        candidates: data.candidates,
+        total_candidates: data.candidates.length,
+        processed_candidates: Math.min(prev.processed_candidates, data.candidates.length),
+      } : prev);
       scheduleOverviewSummaryRefresh();
     },
     onScanCandidatesChanged: (data) => {

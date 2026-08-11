@@ -14,6 +14,8 @@ from backend.models import (
     AgentInfo,
     AgentMcpConfig,
     AgentMcpRemoteConfig,
+    AgentProcessedKeyBatch,
+    AgentScanCandidateBatch,
     AgentScanCandidates,
     AgentScanFinish,
     Candidate,
@@ -712,6 +714,198 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.processed_candidates, 2)
             self.assertEqual(stored.progress, 0.5)
+
+    def test_candidate_progress_is_absolute_bounded_and_terminally_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.AUDITING, total=3)
+            scan.static_analysis_done = True
+            scan.mining_engines = [MiningEngineSelection(
+                engine_id="static_candidate",
+                engine_label="静态规则扫描 + 候选点审计",
+            )]
+            scan.mining_engine_runs = [MiningEngineRunStatus(
+                engine_id="static_candidate",
+                engine_label="静态规则扫描 + 候选点审计",
+                status="running",
+            )]
+            scan.candidates = [
+                ScanCandidate(
+                    idx=index,
+                    file="same.c",
+                    line=1,
+                    function="same",
+                    description=f"candidate {index}",
+                    vuln_type="npd",
+                )
+                for index in range(3)
+            ]
+            meta = _meta()
+            meta.mining_engines = scan.mining_engines
+            store.save_scan(scan, meta)
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch("backend.sse.publish"),
+            ):
+                asyncio.run(agent_api.agent_report_processed_v2(
+                    "scan-1",
+                    AgentProcessedKeyBatch.model_validate({
+                        "items": [
+                            {
+                                "file": "same.c",
+                                "line": 1,
+                                "function": "same",
+                                "vuln_type": "npd",
+                            },
+                            {
+                                "file": "same.c",
+                                "line": 1,
+                                "function": "same",
+                                "vuln_type": "npd",
+                            },
+                        ],
+                        "processed_candidates": 3,
+                        "total_candidates": 3,
+                    }),
+                ))
+                running = store.load_scan("scan-1")[0]
+                self.assertEqual(running.total_candidates, 3)
+                self.assertEqual(running.processed_candidates, 2)
+
+                asyncio.run(agent_api.agent_report_processed(
+                    "scan-1",
+                    {
+                        "file": "same.c",
+                        "line": 1,
+                        "function": "same",
+                        "vuln_type": "npd",
+                        "processed_candidates": 1,
+                        "total_candidates": 1,
+                    },
+                ))
+                self.assertEqual(
+                    store.load_scan("scan-1")[0].processed_candidates,
+                    2,
+                )
+
+                asyncio.run(agent_api.agent_report_mining_engine_run(
+                    "scan-1",
+                    MiningEngineRunStatus(
+                        engine_id="static_candidate",
+                        engine_label="静态规则扫描 + 候选点审计",
+                        status="success",
+                    ),
+                ))
+
+            completed = store.load_scan("scan-1")[0]
+            self.assertEqual(completed.total_candidates, 3)
+            self.assertEqual(completed.processed_candidates, 3)
+            self.assertEqual(completed.progress, 1.0)
+
+    def test_finalized_candidate_list_cannot_be_replaced_by_retry_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.CANCELLED, total=3, processed=1)
+            scan.static_analysis_done = True
+            scan.candidates = [
+                ScanCandidate(
+                    idx=index,
+                    file=f"candidate-{index}.c",
+                    line=index + 1,
+                    function=f"candidate_{index}",
+                    description="candidate",
+                    vuln_type="npd",
+                )
+                for index in range(3)
+            ]
+            store.save_scan(scan, _meta())
+            retry_subset = AgentScanCandidates(candidates=[Candidate(
+                file="candidate-2.c",
+                line=3,
+                function="candidate_2",
+                description="retry candidate",
+                vuln_type="npd",
+            )])
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+            ):
+                result = asyncio.run(agent_api.agent_report_scan_candidates(
+                    "scan-1",
+                    retry_subset,
+                ))
+                v2_result = asyncio.run(
+                    agent_api.agent_report_scan_candidates_v2(
+                        "scan-1",
+                        AgentScanCandidateBatch(
+                            offset=0,
+                            candidates=retry_subset.candidates,
+                            reset=True,
+                            final=True,
+                            total=1,
+                        ),
+                    )
+                )
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertTrue(result["preserved"])
+            self.assertTrue(v2_result["preserved"])
+            self.assertEqual(result["count"], 3)
+            self.assertEqual(stored.total_candidates, 3)
+            self.assertEqual(len(stored.candidates), 3)
+
+    def test_overview_repairs_candidate_counter_mismatch_from_persisted_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.COMPLETE, total=1, processed=9)
+            scan.static_analysis_done = True
+            scan.mining_engine_runs = [MiningEngineRunStatus(
+                engine_id="static_candidate",
+                engine_label="静态规则扫描 + 候选点审计",
+                status="success",
+            )]
+            scan.candidates = [
+                ScanCandidate(
+                    idx=index,
+                    file=f"candidate-{index}.c",
+                    line=index + 1,
+                    function=f"candidate_{index}",
+                    description="candidate",
+                    vuln_type="npd",
+                )
+                for index in range(3)
+            ]
+            store.save_scan(scan, _meta())
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.scan.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+            ):
+                overview = asyncio.run(scan_api.get_scan_overview_v2(
+                    "scan-1",
+                    current_user=User(
+                        user_id="user-1",
+                        username="alice",
+                        role="user",
+                    ),
+                ))
+
+            self.assertEqual(overview.total_candidates, 3)
+            self.assertEqual(overview.processed_candidates, 3)
+            self.assertEqual(overview.detail_counts.candidates, 3)
 
     def test_candidate_report_persists_final_static_candidate_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1464,7 +1658,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored[0].failure_reason, "")
             self.assertTrue(stored[0].confirmed)
 
-    def test_cancel_finish_preserves_total_but_accepts_lower_processed_count(self) -> None:
+    def test_cancel_finish_preserves_monotonic_candidate_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
             store.save_scan(_scan("scan-1", ScanItemStatus.AUDITING, total=8, processed=5), _meta())
@@ -1473,6 +1667,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             with (
                 patch("backend.api.agent.get_scan_store", return_value=store),
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
             ):
                 asyncio.run(agent_api.agent_finish_scan(
                     "scan-1",
@@ -1488,7 +1686,55 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             stored = store.load_scan("scan-1")[0]
             self.assertEqual(stored.status, ScanItemStatus.CANCELLED)
             self.assertEqual(stored.total_candidates, 8)
-            self.assertEqual(stored.processed_candidates, 4)
+            self.assertEqual(stored.processed_candidates, 5)
+
+    def test_complete_finish_reconciles_a_missing_static_success_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.AUDITING, total=3, processed=2)
+            scan.static_analysis_done = True
+            scan.mining_engine_runs = [MiningEngineRunStatus(
+                engine_id="static_candidate",
+                engine_label="静态规则扫描 + 候选点审计",
+                status="running",
+            )]
+            scan.candidates = [
+                ScanCandidate(
+                    idx=index,
+                    file=f"candidate-{index}.c",
+                    line=index + 1,
+                    function=f"candidate_{index}",
+                    description="candidate",
+                    vuln_type="npd",
+                )
+                for index in range(3)
+            ]
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = store.load_scan("scan-1")[0]
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+            ):
+                asyncio.run(agent_api.agent_finish_scan(
+                    "scan-1",
+                    AgentScanFinish(
+                        vulnerabilities=[],
+                        status="complete",
+                        total_candidates=3,
+                        processed_candidates=3,
+                    ),
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.COMPLETE)
+            self.assertEqual(stored.total_candidates, 3)
+            self.assertEqual(stored.processed_candidates, 3)
 
     def test_finish_scan_reconciles_missing_threat_findings_without_duplicates(
         self,

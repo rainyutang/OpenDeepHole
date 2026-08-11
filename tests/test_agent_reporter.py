@@ -2,11 +2,11 @@ import asyncio
 import io
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from backend.models import ThreatAnalysisRunStatus
+from backend.models import ThreatAnalysisRunStatus, ThreatAuditTask
 from deephole_client.reporter import Reporter
 
 
@@ -133,6 +133,113 @@ class AgentReporterTests(unittest.TestCase):
             asyncio.run(reporter.send_static_progress("scan-1", 2, 8753))
 
         self.assertEqual(output.getvalue().count("failed to push static analysis progress"), 1)
+
+    def test_threat_audit_upload_warning_contains_task_context(self) -> None:
+        class FakeClient:
+            async def post(self, url, json=None, timeout=None):
+                raise httpx.ReadTimeout("")
+
+        reporter = Reporter("http://server")
+        reporter._client = FakeClient()  # type: ignore[assignment]
+        task = ThreatAuditTask(
+            task_id="threat-task-1",
+            scan_id="scan-1",
+            status="running",
+            surface_node_id="surface-1",
+            method_node_id="method-1",
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            asyncio.run(reporter.push_threat_audit_task("scan-1", task))
+
+        warning = output.getvalue()
+        self.assertIn("scan_id=scan-1", warning)
+        self.assertIn("task_id=threat-task-1", warning)
+        self.assertIn("task_status=running", warning)
+        self.assertIn("error_type=ReadTimeout", warning)
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            asyncio.run(reporter.push_threat_audit_task(
+                "scan-1",
+                task.model_copy(update={"status": "cancelled"}),
+            ))
+        self.assertEqual(output.getvalue(), "")
+
+    def test_processed_batch_carries_absolute_candidate_progress(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.posts: list[dict] = []
+
+            async def post(self, url, json=None, timeout=None):
+                self.posts.append({"url": url, "json": json, "timeout": timeout})
+                return httpx.Response(
+                    200,
+                    request=httpx.Request("POST", url),
+                    json={"ok": True},
+                )
+
+        async def exercise() -> list[dict]:
+            reporter = Reporter("http://server")
+            reporter.set_protocol_version(2)
+            client = FakeClient()
+            reporter._client = client  # type: ignore[assignment]
+            await reporter.report_processed_key(
+                "scan-1",
+                "same.c",
+                1,
+                "same",
+                "npd",
+                completed_candidates=2,
+                total_candidates=10,
+            )
+            await reporter.report_processed_key(
+                "scan-1",
+                "same.c",
+                1,
+                "same",
+                "npd",
+                completed_candidates=3,
+                total_candidates=10,
+            )
+            await reporter._flush_scan_batches("scan-1")
+            return client.posts
+
+        posts = asyncio.run(exercise())
+        processed = next(
+            item for item in posts
+            if item["url"].endswith("/api/agent/v2/scan/scan-1/processed")
+        )
+        self.assertEqual(len(processed["json"]["items"]), 2)
+        self.assertEqual(processed["json"]["processed_candidates"], 3)
+        self.assertEqual(processed["json"]["total_candidates"], 10)
+
+    def test_failed_processed_batch_restores_keys_and_absolute_progress(self) -> None:
+        class FakeClient:
+            async def post(self, url, json=None, timeout=None):
+                raise httpx.ReadTimeout("processed upload timed out")
+
+        reporter = Reporter("http://server")
+        reporter.set_protocol_version(2)
+        reporter._client = FakeClient()  # type: ignore[assignment]
+        reporter._processed_buffers["scan-1"] = [("a.c", 1, "a", "npd")]
+        reporter._processed_progress_buffers["scan-1"] = (7, 12)
+
+        with patch(
+            "deephole_client.reporter.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            asyncio.run(reporter._flush_processed("scan-1"))
+
+        self.assertEqual(
+            reporter._processed_buffers["scan-1"],
+            [("a.c", 1, "a", "npd")],
+        )
+        self.assertEqual(
+            reporter._processed_progress_buffers["scan-1"],
+            (7, 12),
+        )
 
     def test_opencode_pool_status_skips_unchanged_snapshots_between_heartbeats(self) -> None:
         class FakeClient:

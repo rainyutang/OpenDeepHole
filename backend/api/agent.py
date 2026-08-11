@@ -98,6 +98,7 @@ router = APIRouter(prefix="/api/agent")
 public_router = APIRouter()  # Routes not under /api/agent prefix
 logger = get_logger(__name__)
 _HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_STATIC_CANDIDATE_ENGINE_ID = "static_candidate"
 
 # Root of the project (two levels up from this file: backend/api/ → backend/ → project root)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -2851,6 +2852,113 @@ def _stamp_vulnerability_engine(
     return vuln
 
 
+def _static_candidate_run_status(scan) -> str:
+    return next(
+        (
+            str(item.status or "")
+            for item in scan.mining_engine_runs
+            if item.engine_id == _STATIC_CANDIDATE_ENGINE_ID
+        ),
+        "",
+    )
+
+
+def _normalize_candidate_progress(
+    scan,
+    *,
+    candidate_count: int,
+    processed: int,
+    reported_total: int | None = None,
+) -> tuple[int, int]:
+    """Apply the scan-level candidate counter invariants.
+
+    Persisted candidate rows own the denominator once available.  Older scans
+    may only have the legacy counter, so retain it as a fallback when no rows
+    exist.  The final candidate is exposed only after the static engine has
+    published its success lifecycle state.
+    """
+    stored_total = max(0, int(scan.total_candidates or 0))
+    candidate_count = max(0, int(candidate_count or 0))
+    total = (
+        candidate_count
+        if candidate_count > 0
+        else max(stored_total, max(0, int(reported_total or 0)))
+    )
+    completed = max(0, int(processed or 0))
+    run_status = _static_candidate_run_status(scan)
+    if total == 0:
+        return 0, 0
+    if run_status == "success":
+        return total, total
+    if run_status in {"pending", "running"} or (
+        not run_status and scan.status == ScanItemStatus.AUDITING
+    ):
+        return total, min(completed, total - 1)
+    return total, min(completed, total)
+
+
+async def _reconcile_candidate_progress(
+    scan_id: str,
+    *,
+    reported_processed: int | None = None,
+    reported_total: int | None = None,
+    publish_update: bool = True,
+) -> tuple[int, int]:
+    """Persist monotonic, bounded candidate progress and refresh live state."""
+    store = get_scan_store()
+    loaded = await run_store_call(store, "load_scan_overview", scan_id)
+    if loaded is None:
+        return max(0, int(reported_processed or 0)), max(
+            0,
+            int(reported_total or 0),
+        )
+    stored_scan, _meta, counts = loaded
+    live = _running_scans.get(scan_id)
+    scan = live or stored_scan
+    processed_key_count = await run_store_call(
+        store,
+        "count_processed_keys",
+        scan_id,
+    )
+    raw_processed = max(
+        processed_key_count,
+        int(stored_scan.processed_candidates or 0),
+        int(scan.processed_candidates or 0),
+        max(0, int(reported_processed or 0)),
+    )
+    total, processed = _normalize_candidate_progress(
+        scan,
+        candidate_count=counts["candidates"],
+        processed=raw_processed,
+        reported_total=reported_total,
+    )
+    progress = processed / total if total > 0 else scan.progress
+    await run_store_call(
+        store,
+        "update_scan_progress",
+        scan_id,
+        total_candidates=total,
+        processed_candidates=processed,
+        progress=progress,
+    )
+    scan.total_candidates = total
+    scan.processed_candidates = processed
+    scan.progress = progress
+    if publish_update:
+        from backend.sse import publish
+
+        publish(scan_id, "scan_status", {
+            "status": scan.status,
+            "progress": scan.progress,
+            "total_candidates": total,
+            "processed_candidates": processed,
+            "static_total_files": scan.static_total_files,
+            "static_scanned_files": scan.static_scanned_files,
+            "static_analysis_done": scan.static_analysis_done,
+        })
+    return processed, total
+
+
 @router.post("/scan/{scan_id}/mining-engine-run")
 async def agent_report_mining_engine_run(
     scan_id: str,
@@ -2895,12 +3003,36 @@ async def agent_report_mining_engine_run(
     scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         scan.mining_engine_runs = runs
+    if body.engine_id == _STATIC_CANDIDATE_ENGINE_ID:
+        await _reconcile_candidate_progress(
+            scan_id,
+            publish_update=False,
+        )
     from backend.sse import publish
 
     publish(scan_id, "mining_engine_run", {
         "run": body.model_dump(mode="json"),
         "runs": [item.model_dump(mode="json") for item in runs],
     })
+    if body.engine_id == _STATIC_CANDIDATE_ENGINE_ID:
+        current = _running_scans.get(scan_id)
+        if current is None:
+            refreshed = await run_store_call(
+                store,
+                "load_scan_overview",
+                scan_id,
+            )
+            current = refreshed[0] if refreshed is not None else None
+        if current is not None:
+            publish(scan_id, "scan_status", {
+                "status": current.status,
+                "progress": current.progress,
+                "total_candidates": current.total_candidates,
+                "processed_candidates": current.processed_candidates,
+                "static_total_files": current.static_total_files,
+                "static_scanned_files": current.static_scanned_files,
+                "static_analysis_done": current.static_analysis_done,
+            })
     return {"ok": True, "run": body.model_dump(mode="json")}
 
 
@@ -3086,6 +3218,19 @@ async def agent_report_scan_candidates(scan_id: str, body: AgentScanCandidates) 
         )
 
     store = get_scan_store()
+    existing = await run_store_call(store, "load_scan_overview", scan_id)
+    if existing is not None and existing[0].static_analysis_done:
+        preserved_total = max(
+            int(existing[2]["candidates"] or 0),
+            int(existing[0].total_candidates or 0),
+        )
+        logger.info(
+            "Ignored replacement candidate list for finalized scan %s; "
+            "preserving %d candidate(s)",
+            scan_id,
+            preserved_total,
+        )
+        return {"ok": True, "count": preserved_total, "preserved": True}
     candidates = await run_store_call(
         store,
         "replace_scan_candidates",
@@ -3104,6 +3249,11 @@ async def agent_report_scan_candidates(scan_id: str, body: AgentScanCandidates) 
     if scan is not None:
         scan.candidates = candidates
         scan.total_candidates = total
+    processed, total = await _reconcile_candidate_progress(
+        scan_id,
+        reported_total=total,
+        publish_update=False,
+    )
 
     from backend.sse import publish
     publish(scan_id, "scan_candidates", {
@@ -3113,7 +3263,7 @@ async def agent_report_scan_candidates(scan_id: str, body: AgentScanCandidates) 
         "status": scan.status if scan else None,
         "progress": scan.progress if scan else None,
         "total_candidates": total,
-        "processed_candidates": scan.processed_candidates if scan else None,
+        "processed_candidates": processed,
         "static_total_files": scan.static_total_files if scan else None,
         "static_scanned_files": scan.static_scanned_files if scan else None,
         "static_analysis_done": scan.static_analysis_done if scan else None,
@@ -3139,6 +3289,25 @@ async def agent_report_scan_candidates_v2(
             static_candidates.append(candidate)
 
     store = get_scan_store()
+    existing = await run_store_call(store, "load_scan_overview", scan_id)
+    if existing is not None and existing[0].static_analysis_done:
+        preserved_total = max(
+            int(existing[2]["candidates"] or 0),
+            int(existing[0].total_candidates or 0),
+        )
+        logger.info(
+            "Ignored candidate batch for finalized scan %s; preserving %d "
+            "candidate(s)",
+            scan_id,
+            preserved_total,
+        )
+        return {
+            "ok": True,
+            "offset": body.offset,
+            "count": 0,
+            "total": preserved_total,
+            "preserved": True,
+        }
     persisted = await run_store_call(
         store,
         "upsert_scan_candidates_batch",
@@ -3149,7 +3318,11 @@ async def agent_report_scan_candidates_v2(
         final=body.final,
         total=body.total,
     )
-    total = body.total if body.final and body.total is not None else body.offset + len(persisted)
+    total = (
+        body.total
+        if body.total is not None
+        else body.offset + len(persisted)
+    )
     await run_store_call(
         store,
         "update_scan_progress",
@@ -3171,6 +3344,13 @@ async def agent_report_scan_candidates_v2(
             }
         scan.candidates = [by_index[index] for index in sorted(by_index)]
         scan.total_candidates = total
+
+    if body.final:
+        _processed, total = await _reconcile_candidate_progress(
+            scan_id,
+            reported_total=total,
+            publish_update=False,
+        )
 
     from backend.sse import publish
     publish(scan_id, "scan_candidates_changed", {
@@ -3402,17 +3582,33 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
 
     loaded = await run_store_call(store, "load_scan_overview", scan_id)
     existing_scan = loaded[0] if loaded is not None else None
-    final_total = body.total_candidates
-    final_processed = body.processed_candidates
-    if final_status != ScanItemStatus.COMPLETE and existing_scan is not None:
-        if final_total == 0 and existing_scan.total_candidates > 0:
-            final_total = existing_scan.total_candidates
+    if existing_scan is not None:
+        final_total, final_processed = _normalize_candidate_progress(
+            existing_scan,
+            candidate_count=loaded[2]["candidates"],
+            processed=max(
+                int(existing_scan.processed_candidates or 0),
+                int(body.processed_candidates or 0),
+            ),
+            reported_total=body.total_candidates,
+        )
+        # Legacy scans may predate per-engine lifecycle rows, and a transient
+        # lifecycle upload can leave the run marked "running".  A successful
+        # finish that itself reports the full absolute count is terminal proof.
         if (
-            body.total_candidates == 0
-            and body.processed_candidates == 0
-            and existing_scan.processed_candidates > 0
+            final_status == ScanItemStatus.COMPLETE
+            and (
+                not _static_candidate_run_status(existing_scan)
+                or int(body.processed_candidates or 0) >= final_total
+            )
         ):
-            final_processed = existing_scan.processed_candidates
+            final_processed = final_total
+    else:
+        final_total = max(0, int(body.total_candidates or 0))
+        final_processed = min(
+            final_total,
+            max(0, int(body.processed_candidates or 0)),
+        )
 
     from backend.sse import publish
 
@@ -3587,38 +3783,23 @@ async def agent_get_resume_manifest_v2(token: str) -> Response:
 # ---------------------------------------------------------------------------
 
 
-async def _refresh_processed_progress(scan_id: str) -> int:
-    store = get_scan_store()
-    processed = await run_store_call(store, "count_processed_keys", scan_id)
-    live = _running_scans.get(scan_id)
-    if live is not None:
-        total_candidates = live.total_candidates
-        processed = max(processed, live.processed_candidates)
-    else:
-        loaded = await run_store_call(store, "load_scan_overview", scan_id)
-        if loaded is None:
-            return processed
-        overview, _meta, _counts = loaded
-        total_candidates = overview.total_candidates
-        processed = max(processed, overview.processed_candidates)
-    progress = processed / total_candidates if total_candidates > 0 else None
-    await run_store_call(
-        store,
-        "update_scan_progress",
+async def _refresh_processed_progress(
+    scan_id: str,
+    *,
+    reported_processed: int | None = None,
+    reported_total: int | None = None,
+) -> int:
+    processed, _total = await _reconcile_candidate_progress(
         scan_id,
-        processed_candidates=processed,
-        progress=progress,
+        reported_processed=reported_processed,
+        reported_total=reported_total,
     )
-    if live is not None:
-        live.processed_candidates = processed
-        if progress is not None:
-            live.progress = progress
     return processed
 
 
 @router.post("/scan/{scan_id}/processed")
 async def agent_report_processed(scan_id: str, body: dict) -> dict:
-    """Agent reports a successfully processed candidate key after each audit."""
+    """Agent reports a terminal candidate checkpoint after each audit."""
     store = get_scan_store()
     try:
         key = (
@@ -3627,9 +3808,23 @@ async def agent_report_processed(scan_id: str, body: dict) -> dict:
             str(body["function"]),
             str(body["vuln_type"]),
         )
+        reported_processed = (
+            max(0, int(body["processed_candidates"]))
+            if body.get("processed_candidates") is not None
+            else None
+        )
+        reported_total = (
+            max(0, int(body["total_candidates"]))
+            if body.get("total_candidates") is not None
+            else None
+        )
         await run_store_call(store, "add_processed_key", scan_id, key)
-        processed = await _refresh_processed_progress(scan_id)
-    except (KeyError, ValueError) as e:
+        processed = await _refresh_processed_progress(
+            scan_id,
+            reported_processed=reported_processed,
+            reported_total=reported_total,
+        )
+    except (KeyError, TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid processed key: {e}")
     return {"ok": True, "processed": processed}
 
@@ -3649,7 +3844,11 @@ async def agent_report_processed_v2(
         scan_id,
         keys,
     )
-    processed = await _refresh_processed_progress(scan_id)
+    processed = await _refresh_processed_progress(
+        scan_id,
+        reported_processed=body.processed_candidates,
+        reported_total=body.total_candidates,
+    )
     return {"ok": True, "count": len(keys), "processed": processed}
 
 

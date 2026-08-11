@@ -1931,7 +1931,41 @@ async def get_scan_overview_v2(
             validation_states,
         ),
     })
-    scan.total_candidates = max(scan.total_candidates, counts["candidates"])
+    persisted_candidate_count = max(0, int(counts["candidates"] or 0))
+    if scan.static_analysis_done and persisted_candidate_count > 0:
+        scan.total_candidates = persisted_candidate_count
+    else:
+        scan.total_candidates = max(
+            0,
+            int(scan.total_candidates or 0),
+            persisted_candidate_count,
+        )
+    static_run_status = next(
+        (
+            str(item.status or "")
+            for item in scan.mining_engine_runs
+            if item.engine_id == "static_candidate"
+        ),
+        "",
+    )
+    if scan.total_candidates <= 0:
+        scan.processed_candidates = 0
+    elif static_run_status == "success" or (
+        not static_run_status and scan.status == ScanItemStatus.COMPLETE
+    ):
+        scan.processed_candidates = scan.total_candidates
+    elif static_run_status in {"pending", "running"} or (
+        not static_run_status and scan.status == ScanItemStatus.AUDITING
+    ):
+        scan.processed_candidates = min(
+            max(0, int(scan.processed_candidates or 0)),
+            scan.total_candidates - 1,
+        )
+    else:
+        scan.processed_candidates = min(
+            max(0, int(scan.processed_candidates or 0)),
+            scan.total_candidates,
+        )
 
     scan.agent_name = meta.agent_name
     if distributed:
@@ -2356,9 +2390,15 @@ async def _continue_scan(
                     f"{meta.threat_analysis_method}"
                 ),
             ) from exc
-    if resume_threat_analysis and (
-        _threat_analysis_run_needs_retry(scan)
-        or not scan.threat_audit_tasks
+    if (
+        scan.status == ScanItemStatus.CANCELLED
+        and "threat_audit" in retry_mining_engine_ids
+    ) or (
+        resume_threat_analysis
+        and (
+            _threat_analysis_run_needs_retry(scan)
+            or not scan.threat_audit_tasks
+        )
     ):
         threat_task_ids: list[str] | None = None
     else:

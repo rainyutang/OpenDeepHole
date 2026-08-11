@@ -50,6 +50,7 @@ class Reporter:
         self._event_buffers: dict[str, list[ScanEvent]] = {}
         self._event_flush_tasks: dict[str, asyncio.Task] = {}
         self._processed_buffers: dict[str, list[tuple[str, int, str, str]]] = {}
+        self._processed_progress_buffers: dict[str, tuple[int, int]] = {}
         self._processed_flush_tasks: dict[str, asyncio.Task] = {}
         self._undelivered_vulnerabilities: dict[str, list[Vulnerability]] = {}
 
@@ -324,7 +325,26 @@ class Reporter:
             if isinstance(payload, dict):
                 return ThreatAuditTask(**payload)
         except Exception as e:
-            print(f"Warning: failed to upload threat audit task: {e}")
+            # Cancellation uploads are best-effort cleanup after the scan has
+            # already entered a terminal state.  Their failure is expected
+            # during shutdown and must not recreate the post-stop warning
+            # flood this status is intended to prevent.
+            if str(task.status or "").lower() == "cancelled":
+                return None
+            status = ""
+            response_text = ""
+            if isinstance(e, httpx.HTTPStatusError):
+                status = f" status={e.response.status_code}"
+                response_text = (e.response.text or "").strip()
+                if response_text:
+                    response_text = f" response={response_text[:200]!r}"
+            print(
+                "Warning: failed to upload threat audit task "
+                f"scan_id={scan_id} task_id={task.task_id} "
+                f"task_status={task.status} error_type={type(e).__name__}"
+                f"{status} error={e!r}{response_text}",
+                flush=True,
+            )
         return None
 
     async def get_threat_audit_tasks(self, scan_id: str) -> list[ThreatAuditTask]:
@@ -550,9 +570,17 @@ class Reporter:
         )
 
     async def report_processed_key(
-        self, scan_id: str, file: str, line: int, function: str, vuln_type: str
+        self,
+        scan_id: str,
+        file: str,
+        line: int,
+        function: str,
+        vuln_type: str,
+        *,
+        completed_candidates: int | None = None,
+        total_candidates: int | None = None,
     ) -> None:
-        """Report a successfully processed candidate key (fire-and-forget)."""
+        """Report one terminal candidate checkpoint (fire-and-forget)."""
         if self.dry_run:
             return
         if self.protocol_version >= 2:
@@ -560,6 +588,14 @@ class Reporter:
             async with self._batch_lock:
                 buffer = self._processed_buffers.setdefault(scan_id, [])
                 buffer.append((file, line, function, vuln_type))
+                if completed_candidates is not None:
+                    previous_completed, previous_total = (
+                        self._processed_progress_buffers.get(scan_id, (0, 0))
+                    )
+                    self._processed_progress_buffers[scan_id] = (
+                        max(previous_completed, max(0, int(completed_candidates))),
+                        max(previous_total, max(0, int(total_candidates or 0))),
+                    )
                 flush_now = len(buffer) >= AGENT_BATCH_SIZE
                 task = self._processed_flush_tasks.get(scan_id)
                 if task is None or task.done():
@@ -570,9 +606,22 @@ class Reporter:
                 await self._flush_processed(scan_id)
             return
         try:
+            payload = {
+                "file": file,
+                "line": line,
+                "function": function,
+                "vuln_type": vuln_type,
+            }
+            if completed_candidates is not None:
+                payload["processed_candidates"] = max(
+                    0,
+                    int(completed_candidates),
+                )
+            if total_candidates is not None:
+                payload["total_candidates"] = max(0, int(total_candidates))
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/processed",
-                json={"file": file, "line": line, "function": function, "vuln_type": vuln_type},
+                json=payload,
                 timeout=5.0,
             )
         except Exception:
@@ -598,6 +647,10 @@ class Reporter:
     async def _flush_processed(self, scan_id: str) -> None:
         async with self._batch_lock:
             keys = self._processed_buffers.pop(scan_id, [])
+            absolute_progress = self._processed_progress_buffers.pop(
+                scan_id,
+                None,
+            )
         if not keys:
             return
         payload = {
@@ -611,6 +664,9 @@ class Reporter:
                 for file, line, function, vuln_type in keys
             ],
         }
+        if absolute_progress is not None:
+            payload["processed_candidates"] = absolute_progress[0]
+            payload["total_candidates"] = absolute_progress[1]
         for attempt in range(3):
             try:
                 response = await self._client.post(
@@ -626,6 +682,14 @@ class Reporter:
         # Preserve at-least-once delivery within this Agent process.
         async with self._batch_lock:
             self._processed_buffers.setdefault(scan_id, [])[:0] = keys
+            if absolute_progress is not None:
+                current_completed, current_total = (
+                    self._processed_progress_buffers.get(scan_id, (0, 0))
+                )
+                self._processed_progress_buffers[scan_id] = (
+                    max(current_completed, absolute_progress[0]),
+                    max(current_total, absolute_progress[1]),
+                )
 
     async def _flush_scan_batches(self, scan_id: str) -> None:
         event_task = self._event_flush_tasks.pop(scan_id, None)

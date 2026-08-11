@@ -810,6 +810,8 @@ class AgentProcessedKey(BaseModel):
 
 class AgentProcessedKeyBatch(BaseModel):
     items: list[AgentProcessedKey] = Field(default_factory=list, max_length=500)
+    processed_candidates: int | None = Field(default=None, ge=0)
+    total_candidates: int | None = Field(default=None, ge=0)
 
 
 class AgentScanFinishV2(BaseModel):

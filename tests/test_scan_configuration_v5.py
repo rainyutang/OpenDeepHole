@@ -228,6 +228,83 @@ def test_static_candidate_with_all_checkers_disabled_is_a_noop(tmp_path: Path) -
     )
 
 
+def test_static_candidate_targeted_resume_preserves_full_candidate_total(
+    tmp_path: Path,
+) -> None:
+    reporter = SimpleNamespace(
+        report_candidates=AsyncMock(),
+        send_static_progress=AsyncMock(),
+        get_processed_keys=AsyncMock(return_value=set()),
+        replace_skill_reports=AsyncMock(),
+        report_processed_key=AsyncMock(),
+    )
+    config = SimpleNamespace(
+        static_dedup=True,
+        opencode_concurrency=1,
+        pattern_filter=SimpleNamespace(enabled=False, scope="directory"),
+        vulnerability_mining=SimpleNamespace(required_capability="high"),
+    )
+    audit_result = {
+        "status": "success",
+        "vulnerabilities": [],
+        "skill_reports": {},
+        "processed_keys": [{
+            "file": "retry.c",
+            "line": 7,
+            "function": "retry",
+            "vuln_type": "npd",
+        }],
+        "completed_candidates": 4,
+    }
+
+    with patch.object(
+        static_candidate_engine,
+        "run_candidate_audit",
+        new=AsyncMock(return_value=audit_result),
+    ):
+        result = asyncio.run(static_candidate_engine.run(
+            project_path=tmp_path,
+            code_scan_path=tmp_path,
+            scan_dir=tmp_path,
+            work_dir=tmp_path,
+            index_db_path=tmp_path / "unused.db",
+            scan_id="scan-targeted-resume",
+            config=config,
+            reporter=reporter,
+            checker_names=["npd"],
+            checker_packages=[],
+            product="",
+            product_mcp="",
+            feedback_entries=[],
+            is_resume=True,
+            retry_candidates=[{
+                "file": "retry.c",
+                "line": 7,
+                "function": "retry",
+                "description": "retry candidate",
+                "vuln_type": "npd",
+            }],
+            retry_total_candidates=7,
+            retry_processed_offset=3,
+            output=AsyncMock(),
+            cancel_event=SimpleNamespace(is_set=lambda: False),
+            report_vulnerabilities=AsyncMock(),
+        ))
+
+    reporter.report_candidates.assert_not_awaited()
+    reporter.report_processed_key.assert_awaited_once_with(
+        "scan-targeted-resume",
+        "retry.c",
+        7,
+        "retry",
+        "npd",
+        completed_candidates=4,
+        total_candidates=7,
+    )
+    assert result["total_candidates"] == 7
+    assert result["processed_candidates"] == 4
+
+
 def test_scan_code_graph_accepts_only_mode_and_remote_connection_values() -> None:
     local = scan_api._scan_code_graph_mcp(AgentMcpConfig(
         enabled=True,

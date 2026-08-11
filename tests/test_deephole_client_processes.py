@@ -538,12 +538,12 @@ def test_threat_processes_run_with_task_agent_only() -> None:
                 cancel_event=cancelled,
             )
         assert cancelled_audit["status"] == "cancelled"
-        assert cancelled_audit["tasks"][0]["status"] == "cancelled"
+        assert cancelled_audit["tasks"][0]["status"] == "pending"
         assert [
             event["data"]["task"]["status"]
             for event in cancelled_events
             if event["kind"] == "task_status"
-        ] == ["pending", "cancelled"]
+        ] == []
         cancelled_run_task.assert_not_awaited()
 
     with tempfile.TemporaryDirectory() as temp:
@@ -755,6 +755,110 @@ def test_threat_audit_streams_async_task_results_before_batch_finishes() -> None
         asyncio.run(scenario(Path(temp)))
 
 
+def test_threat_audit_cancellation_does_not_start_or_cancel_the_backlog() -> None:
+    async def scenario(root: Path) -> None:
+        project, attack_tree_path, high_risk_modules_path = (
+            _write_threat_audit_inputs(
+                root,
+                attack_patterns=[
+                    {
+                        "pattern_id": f"PATTERN-{index}",
+                        "pattern_name": f"pattern {index}",
+                    }
+                    for index in range(25)
+                ],
+            )
+        )
+        cancel_event = threading.Event()
+        model_calls: list[str] = []
+        events: list[dict] = []
+
+        async def run_task(**kwargs):
+            model_calls.append(kwargs["task_name"])
+            cancel_event.set()
+            await asyncio.sleep(0)
+            return SimpleNamespace(
+                status="cancelled",
+                structured=None,
+                text="cancelled",
+                output_source={},
+            )
+
+        with patch(
+            "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
+            side_effect=run_task,
+        ):
+            audited = await run_threat_audit(
+                project_path=project,
+                work_dir=root / "audit",
+                scan_id="scan-cancel-backlog",
+                attack_tree_path=attack_tree_path,
+                high_risk_modules_path=high_risk_modules_path,
+                concurrency=4,
+                output=events.append,
+                cancel_event=cancel_event,
+            )
+
+        assert audited["status"] == "cancelled"
+        assert len(model_calls) == 1
+        statuses = [
+            event["data"]["task"]["status"]
+            for event in events
+            if event["kind"] == "task_status"
+        ]
+        assert statuses.count("running") == 1
+        assert statuses.count("cancelled") == 1
+        assert sum(task["status"] == "pending" for task in audited["tasks"]) == 24
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_threat_audit_cancellation_stops_task_preparation_immediately() -> None:
+    async def scenario(root: Path) -> None:
+        project, attack_tree_path, high_risk_modules_path = (
+            _write_threat_audit_inputs(
+                root,
+                attack_patterns=[
+                    {
+                        "pattern_id": f"PATTERN-PREP-{index}",
+                        "pattern_name": f"prep pattern {index}",
+                    }
+                    for index in range(20)
+                ],
+            )
+        )
+        cancel_event = threading.Event()
+        events: list[dict] = []
+
+        def collect(event: dict) -> None:
+            events.append(event)
+            if event["kind"] == "task_status":
+                cancel_event.set()
+
+        with patch(
+            "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
+            new=AsyncMock(),
+        ) as run_task:
+            audited = await run_threat_audit(
+                project_path=project,
+                work_dir=root / "audit",
+                scan_id="scan-cancel-preparation",
+                attack_tree_path=attack_tree_path,
+                high_risk_modules_path=high_risk_modules_path,
+                output=collect,
+                cancel_event=cancel_event,
+            )
+
+        assert audited["status"] == "cancelled"
+        assert [event["kind"] for event in events] == ["task_status"]
+        assert all(task["status"] == "pending" for task in audited["tasks"])
+        run_task.assert_not_awaited()
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
 def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
     async def scenario(root: Path) -> None:
         project = root / "project"
@@ -841,11 +945,13 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
             (audit_root / "demo" / "skills").resolve(),
         ]
         assert candidate_results[0]["audit_index"] == 0
+        assert candidate_results[0]["completed_candidates"] == 1
         assert candidate_results[0]["checker_name"] == "demo"
         assert candidate_results[0]["vulnerabilities"][0]["ai_verdict"] == "not_confirmed"
         assert audited["processed_keys"] == [{
             "file": "sample.c", "line": 1, "function": "bad", "vuln_type": "demo",
         }]
+        assert audited["completed_candidates"] == 1
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))
@@ -1369,6 +1475,7 @@ def test_candidate_audit_streams_results_before_the_batch_finishes() -> None:
 
         assert audited["status"] == "success"
         assert [item["audit_index"] for item in candidate_results] == [0, 1]
+        assert [item["completed_candidates"] for item in candidate_results] == [1, 2]
         assert all(
             item["vulnerabilities"][0]["vuln_type"] == "demo"
             for item in candidate_results
@@ -1377,6 +1484,72 @@ def test_candidate_audit_streams_results_before_the_batch_finishes() -> None:
             item["vuln_type"] == "demo"
             for item in audited["vulnerabilities"]
         )
+        assert audited["completed_candidates"] == 2
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_candidate_audit_cancellation_does_not_drain_the_backlog() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        index_path.touch()
+        audit_root = root / "audit-rules"
+        _write_candidate_audit_rule(audit_root)
+        cancel_event = threading.Event()
+        events: list[dict] = []
+        model_calls: list[str] = []
+        candidate_results: list[dict] = []
+
+        async def run_task(**kwargs):
+            model_calls.append(kwargs["task_name"])
+            cancel_event.set()
+            await asyncio.sleep(0)
+            return SimpleNamespace(
+                status="cancelled",
+                structured=None,
+                text="cancelled",
+                output_source={},
+            )
+
+        with patch(
+            "deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.runner.run_opencode_task",
+            side_effect=run_task,
+        ):
+            audited = await run_candidate_audit(
+                project_path=project,
+                work_dir=root / "candidate-audit",
+                scan_id="scan-cancel-backlog",
+                candidates=[
+                    {
+                        "file": f"candidate-{index}.c",
+                        "line": index + 1,
+                        "function": f"candidate_{index}",
+                        "description": "candidate",
+                        "vuln_type": "demo",
+                    }
+                    for index in range(50)
+                ],
+                checker_dirs=[audit_root],
+                index_db_path=index_path,
+                concurrency=4,
+                audit_index_offset=5,
+                output=events.append,
+                on_candidate_result=candidate_results.append,
+                cancel_event=cancel_event,
+            )
+
+        assert audited["status"] == "cancelled"
+        assert len(model_calls) == 1
+        assert candidate_results == []
+        assert audited["processed_keys"] == []
+        assert audited["completed_candidates"] == 5
+        assert sum(
+            event["message"].startswith("Auditing candidate")
+            for event in events
+        ) == 1
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))
@@ -1512,6 +1685,10 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
         assert project_call.kwargs["output_schema"]["type"] == "array"
         assert "裸 JSON List" in project_call.kwargs["prompt"]
         assert len(audited["processed_keys"]) == 5
+        assert [
+            item["completed_candidates"]
+            for item in candidate_results
+        ] == [1, 2, 3, 4, 5]
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))

@@ -1402,6 +1402,79 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     [4, 5],
                 )
 
+    async def test_cancelled_threat_engine_skips_batch_end_task_replay(self) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        cancel_event = threading.Event()
+        report_vulnerabilities = AsyncMock()
+        pending_task = {
+            "task_id": "threat-task-pending",
+            "scan_id": "scan-threat-cancelled",
+            "status": "pending",
+            "surface_node_id": "surface-1",
+            "surface_name": "surface",
+            "method_node_id": "method-1",
+            "method_name": "method",
+        }
+
+        async def run_audit(**_kwargs):
+            cancel_event.set()
+            await _kwargs["output"]({
+                "process": "threat_audit",
+                "kind": "task_status",
+                "message": "cancelled",
+                "data": {
+                    "task": {
+                        **pending_task,
+                        "status": "cancelled",
+                    },
+                },
+            })
+            return {
+                "status": "cancelled",
+                "tasks": [{**pending_task, "status": "cancelled"}],
+                "vulnerabilities": [],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            attack_tree_path = root / "attack-tree.json"
+            high_risk_modules_path = root / "risk.json"
+            attack_tree_path.write_text("{}", encoding="utf-8")
+            high_risk_modules_path.write_text("[]", encoding="utf-8")
+            with patch(
+                "deephole_client.vulnerability_mining.engines."
+                "threat_audit.engine.run_threat_audit",
+                new=AsyncMock(side_effect=run_audit),
+            ):
+                result = await run_threat_audit_engine(
+                    project_path=project,
+                    code_scan_path=project,
+                    work_dir=root / "work",
+                    scan_id="scan-threat-cancelled",
+                    config=config,
+                    reporter=reporter,
+                    output=AsyncMock(),
+                    cancel_event=cancel_event,
+                    retry_threat_audit_task_ids=None,
+                    threat_analysis_result={
+                        "result": True,
+                        "attack_tree_path": str(attack_tree_path),
+                        "high_risk_modules_path": str(high_risk_modules_path),
+                    },
+                    report_vulnerabilities=report_vulnerabilities,
+                )
+
+        self.assertEqual(result["status"], "cancelled")
+        reporter.push_threat_audit_task.assert_awaited_once()
+        self.assertEqual(
+            reporter.push_threat_audit_task.await_args.args[1].status,
+            "cancelled",
+        )
+        report_vulnerabilities.assert_not_awaited()
+
     async def test_custom_scan_graph_is_prepared_and_enters_task_context(
         self,
     ) -> None:
