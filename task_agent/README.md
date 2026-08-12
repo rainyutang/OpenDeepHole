@@ -91,7 +91,11 @@ result = await run_opencode_task(
 
 任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：`vulnerability_validation=90`、`threat_analysis=75`、`fp_review=60`、`vulnerability_mining=50`。同优先级任务按进入队列的先后顺序执行。
 
-漏洞挖掘中的候选点审计、项目级审计和威胁审计都传 `task_type="vulnerability_mining"`。内置调用分别使用 `candidate-audit-*`、`project-audit-*` 和 `threat-audit-*` 任务名前缀，模型看板据此显示具体子任务；自定义名称无法匹配这些前缀时统一显示为“漏洞挖掘”。
+漏洞挖掘中的候选点审计、项目级审计、威胁审计和漏洞根因去重都传
+`task_type="vulnerability_mining"`。内置调用分别使用 `candidate-audit-*`、
+`project-audit-*`、`threat-audit-*` 和 `vulnerability-dedup-*` 任务名前缀，模型看板据此
+显示具体子任务；漏洞去重不会计入候选点审计活动状态，自定义名称无法匹配这些前缀时统一
+显示为“漏洞挖掘”。
 
 嵌入 DeepHole 2.0 时，宿主会在启动期间注册一次 `OpenCodeHostBindings`。注册过程会提供后端配置、共享工作区、解析后的 Serve 进程设置以及可选的 MCP 选择；它不会实例化管理器或启动 Serve。首次调用 `run_opencode_task()` 时，系统会按需创建共享任务服务和 Serve 管理器。在发送提示词之前，该管理器会在 Serve 尚未运行时启动它、复用兼容的进程，或执行既有的重启与恢复逻辑。
 

@@ -6,11 +6,72 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from backend.models import ThreatAnalysisRunStatus, ThreatAuditTask
+from backend.models import ThreatAnalysisRunStatus, ThreatAuditTask, Vulnerability
 from deephole_client.reporter import Reporter
 
 
 class AgentReporterTests(unittest.TestCase):
+    def test_vulnerability_dedup_context_follows_all_pages(self) -> None:
+        vulnerability = Vulnerability(
+            file="src/a.c",
+            line=10,
+            function="parse",
+            vuln_type="npd",
+            severity="high",
+            description="null dereference",
+            vulnerability_report="# report",
+            confirmed=True,
+            ai_verdict="confirmed",
+        )
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.afters: list[int] = []
+
+            async def get(self, url, params=None, timeout=None):
+                del timeout
+                after = int(params["after"])
+                self.afters.append(after)
+                payload = (
+                    {
+                        "items": [{
+                            "index": 0,
+                            "vulnerability": vulnerability.model_dump(
+                                mode="json",
+                            ),
+                        }],
+                        "has_more": True,
+                        "next_cursor": 0,
+                    }
+                    if after == -1
+                    else {
+                        "items": [{
+                            "index": 1,
+                            "vulnerability": vulnerability.model_copy(
+                                update={"line": 20},
+                            ).model_dump(mode="json"),
+                        }],
+                        "has_more": False,
+                        "next_cursor": None,
+                    }
+                )
+                return httpx.Response(
+                    200,
+                    request=httpx.Request("GET", url),
+                    json=payload,
+                )
+
+        reporter = Reporter("http://server")
+        client = FakeClient()
+        reporter._client = client  # type: ignore[assignment]
+
+        result = asyncio.run(
+            reporter.get_vulnerability_dedup_context("scan-1"),
+        )
+
+        self.assertEqual(client.afters, [-1, 0])
+        self.assertEqual([item.line for item in result], [10, 20])
+
     def test_threat_analysis_run_uses_independent_endpoint(self) -> None:
         class FakeClient:
             def __init__(self) -> None:

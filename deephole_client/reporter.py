@@ -366,6 +366,60 @@ class Reporter:
             return []
         return []
 
+    async def get_vulnerability_dedup_context(
+        self,
+        scan_id: str,
+    ) -> list[Vulnerability]:
+        """Fetch all persisted findings used to seed resume-time deduplication."""
+        if self.dry_run:
+            return []
+        vulnerabilities: list[Vulnerability] = []
+        after = -1
+        while True:
+            response = await self._client.get(
+                f"{self.server_url}/api/agent/scan/{scan_id}/vulnerabilities",
+                params={"after": after, "limit": 500},
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError(
+                    "invalid vulnerability deduplication context response",
+                )
+            items = payload.get("items")
+            if not isinstance(items, list):
+                raise RuntimeError(
+                    "vulnerability deduplication context items must be a list",
+                )
+            last_index = after
+            for item in items:
+                if not isinstance(item, dict):
+                    raise RuntimeError(
+                        "invalid vulnerability deduplication context item",
+                    )
+                index = item.get("index")
+                raw_vulnerability = item.get("vulnerability")
+                if not isinstance(index, int) or not isinstance(
+                    raw_vulnerability,
+                    dict,
+                ):
+                    raise RuntimeError(
+                        "invalid vulnerability deduplication context item",
+                    )
+                vulnerabilities.append(
+                    Vulnerability.model_validate(raw_vulnerability),
+                )
+                last_index = max(last_index, index)
+            if not bool(payload.get("has_more")):
+                return vulnerabilities
+            next_cursor = payload.get("next_cursor")
+            if not isinstance(next_cursor, int) or next_cursor <= after:
+                raise RuntimeError(
+                    "vulnerability deduplication context cursor did not advance",
+                )
+            after = max(last_index, next_cursor)
+
     async def send_event(self, scan_id: str, event: ScanEvent) -> None:
         """Push a progress event to the server (best-effort, never raises)."""
         if self.dry_run:

@@ -23,6 +23,9 @@ from deephole_client.scanner import (
 from deephole_client.task_manager import ScanCancellationEvent
 from backend.models import MiningEngineSelection, Vulnerability
 from deephole_client.vulnerability_mining import runtime as mining_runtime
+from deephole_client.vulnerability_mining.dedup import (
+    VulnerabilityDeduplicator,
+)
 from deephole_client.vulnerability_mining.engines.threat_audit import (
     engine as threat_audit_engine_module,
 )
@@ -42,6 +45,7 @@ def _reporter() -> SimpleNamespace:
         get_processed_keys=AsyncMock(return_value=set()),
         replace_skill_reports=AsyncMock(),
         report_vulnerability=AsyncMock(return_value={"index": 0}),
+        get_vulnerability_dedup_context=AsyncMock(return_value=[]),
         report_processed_key=AsyncMock(),
         get_threat_audit_tasks=AsyncMock(return_value=[]),
         push_threat_analysis=AsyncMock(),
@@ -149,6 +153,60 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enqueue.await_args.kwargs["method"], "fp_check")
         self.assertEqual(len(reported), 1)
         self.assertEqual(reported[0][1]["index"], 0)
+
+    async def test_duplicate_is_discarded_before_reporting_and_downstream_work(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        baseline = Vulnerability.model_validate(_vulnerability())
+        deduplicator = VulnerabilityDeduplicator(
+            scan_id="scan-1",
+            project_path="/repo",
+            required_capability="high",
+            existing_vulnerabilities=[baseline],
+        )
+        enqueue_fp = AsyncMock()
+        enqueue_validation = AsyncMock()
+        with (
+            patch(
+                "deephole_client.server.enqueue_fp_review",
+                enqueue_fp,
+            ),
+            patch(
+                "deephole_client.server.enqueue_vulnerability_validation",
+                enqueue_validation,
+            ),
+        ):
+            reported = await _report_process_vulnerabilities(
+                reporter=reporter,
+                config=config,
+                scan_id="scan-1",
+                project_path=Path("/repo"),
+                code_scan_path=Path("/repo"),
+                product="demo",
+                validation_environment="test",
+                vulnerability_validation={"enabled": True},
+                feedback_entries=[],
+                code_graph_mcp=None,
+                engine=MiningEngineSelection(
+                    engine_id="threat_audit",
+                    engine_label="Threat",
+                    enabled=True,
+                ),
+                values=[{
+                    **_vulnerability(),
+                    "file": "/repo/src/a.c",
+                    "engine_id": "threat_audit",
+                }],
+                deduplicator=deduplicator,
+            )
+
+        self.assertEqual(len(reported), 1)
+        self.assertTrue(reported[0][1]["deduplicated"])
+        reporter.report_vulnerability.assert_not_awaited()
+        enqueue_fp.assert_not_awaited()
+        enqueue_validation.assert_not_awaited()
 
     def test_structured_task_output_does_not_repeat_process_prefix(self) -> None:
         line = "[threat_analysis][ses-1][tool] name=read"
@@ -1740,6 +1798,200 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("success", run_states)
         self.assertIn("error", run_states)
         self.assertEqual(run_states.count("error"), 2)
+
+    async def test_cross_engine_exact_duplicates_finish_with_one_finding(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        manifests = [
+            SimpleNamespace(
+                engine_id="engine-a",
+                label="Engine A",
+                fp_review=False,
+            ),
+            SimpleNamespace(
+                engine_id="engine-b",
+                label="Engine B",
+                fp_review=False,
+            ),
+        ]
+        loaded = {
+            item.engine_id: SimpleNamespace(manifest=item)
+            for item in manifests
+        }
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: manifests,
+            get=lambda engine_id: loaded.get(engine_id),
+        )
+
+        async def run_engine(engine, **_kwargs):
+            value = _vulnerability()
+            value["description"] = f"reported by {engine.manifest.engine_id}"
+            value["vulnerability_report"] = (
+                f"# Report from {engine.manifest.engine_id}"
+            )
+            return {
+                "status": "success",
+                "vulnerabilities": [Vulnerability.model_validate(value)],
+                "error_message": "",
+                "total_candidates": 1,
+                "processed_candidates": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            dedup_task = AsyncMock()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.run_mining_engine",
+                    side_effect=run_engine,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.vulnerability_mining.dedup.run_opencode_task",
+                    new=dedup_task,
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="cross-engine-dedup",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-cross-engine",
+                    cancel_event=threading.Event(),
+                    mining_engines=[
+                        {
+                            "engine_id": item.engine_id,
+                            "engine_label": item.label,
+                            "enabled": True,
+                        }
+                        for item in manifests
+                    ],
+                )
+
+        reporter.report_vulnerability.assert_awaited_once()
+        dedup_task.assert_not_awaited()
+        final_vulnerabilities = reporter.finish_scan.await_args.args[1]
+        self.assertEqual(len(final_vulnerabilities), 1)
+        self.assertIn(
+            final_vulnerabilities[0].engine_id,
+            {"engine-a", "engine-b"},
+        )
+
+    async def test_resume_deduplicates_against_persisted_context(self) -> None:
+        reporter = _reporter()
+        reporter.get_vulnerability_dedup_context.return_value = [
+            Vulnerability.model_validate(_vulnerability()),
+        ]
+        config = AgentConfig()
+        manifest = SimpleNamespace(
+            engine_id="engine-a",
+            label="Engine A",
+            fp_review=False,
+        )
+        loaded = SimpleNamespace(manifest=manifest)
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: [manifest],
+            get=lambda engine_id: loaded if engine_id == "engine-a" else None,
+        )
+
+        async def run_engine(_engine, **_kwargs):
+            return {
+                "status": "success",
+                "vulnerabilities": [
+                    Vulnerability.model_validate({
+                        **_vulnerability(),
+                        "file": "./src\\a.c",
+                    }),
+                ],
+                "error_message": "",
+                "total_candidates": 1,
+                "processed_candidates": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.run_mining_engine",
+                    side_effect=run_engine,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="resume-dedup",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-resume-dedup",
+                    cancel_event=threading.Event(),
+                    is_resume=True,
+                    retry_mining_engine_ids=["engine-a"],
+                    mining_engines=[{
+                        "engine_id": "engine-a",
+                        "engine_label": "Engine A",
+                        "enabled": True,
+                    }],
+                )
+
+        reporter.get_vulnerability_dedup_context.assert_awaited_once_with(
+            "scan-resume-dedup",
+        )
+        reporter.report_vulnerability.assert_not_awaited()
+        self.assertEqual(reporter.finish_scan.await_args.args[1], [])
 
     async def test_live_report_provenance_does_not_trigger_final_replay(
         self,

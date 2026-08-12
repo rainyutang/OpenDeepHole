@@ -39,7 +39,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -83,6 +91,8 @@ from backend.models import (
     ThreatAnalysisRunStatus,
     User,
     Vulnerability,
+    VulnerabilityPage,
+    VulnerabilityPageItem,
     VulnerabilityValidation,
 )
 from backend.store import get_scan_store
@@ -3520,6 +3530,36 @@ async def agent_list_threat_audit_tasks(scan_id: str) -> list[ThreatAuditTask]:
     """Return threat-analysis-derived audit tasks for scan resume."""
     store = get_scan_store()
     return await run_store_call(store, "list_threat_audit_tasks", scan_id)
+
+
+@router.get(
+    "/scan/{scan_id}/vulnerabilities",
+    response_model=VulnerabilityPage,
+)
+async def agent_list_vulnerabilities(
+    scan_id: str,
+    limit: int = Query(500, ge=1, le=500),
+    after: int = Query(-1, ge=-1),
+) -> VulnerabilityPage:
+    """Return persisted findings used by Agent resume-time deduplication."""
+    rows = await run_store_call(
+        get_scan_store(),
+        "get_vulnerabilities_page",
+        scan_id,
+        after_index=after,
+        limit=limit + 1,
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = [
+        VulnerabilityPageItem(index=index, vulnerability=vulnerability)
+        for index, vulnerability in rows
+    ]
+    return VulnerabilityPage(
+        items=items,
+        has_more=has_more,
+        next_cursor=items[-1].index if has_more and items else None,
+    )
 
 
 @router.post("/scan/{scan_id}/skill-report")

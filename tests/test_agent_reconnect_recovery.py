@@ -108,6 +108,58 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         agent_api._agent_disconnect_tasks.clear()
         agent_api._scan_index_statuses.clear()
 
+    def test_agent_vulnerability_dedup_context_is_paginated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(
+                _scan("scan-1", ScanItemStatus.AUDITING),
+                _meta(),
+            )
+            for line in (10, 20):
+                store.add_vulnerability(
+                    "scan-1",
+                    Vulnerability(
+                        file="src/a.c",
+                        line=line,
+                        function="parse",
+                        vuln_type="npd",
+                        severity="high",
+                        description="null dereference",
+                        vulnerability_report=f"# report {line}",
+                        confirmed=True,
+                        ai_verdict="confirmed",
+                    ),
+                )
+
+            with (
+                patch(
+                    "backend.api.agent.get_scan_store",
+                    return_value=store,
+                ),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+            ):
+                first = asyncio.run(agent_api.agent_list_vulnerabilities(
+                    "scan-1",
+                    limit=1,
+                    after=-1,
+                ))
+                second = asyncio.run(agent_api.agent_list_vulnerabilities(
+                    "scan-1",
+                    limit=1,
+                    after=first.next_cursor if first.next_cursor is not None else -1,
+                ))
+
+            store.close()
+
+        self.assertTrue(first.has_more)
+        self.assertEqual(first.next_cursor, 0)
+        self.assertEqual(first.items[0].vulnerability.line, 10)
+        self.assertFalse(second.has_more)
+        self.assertEqual(second.items[0].vulnerability.line, 20)
+
     def test_agent_websocket_heartbeat_gets_ack(self) -> None:
         class FakeClient:
             host = "127.0.0.1"

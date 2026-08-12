@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from .vulnerability_mining import (
     load_mining_engines,
     run_mining_engine,
 )
+from .vulnerability_mining.dedup import VulnerabilityDeduplicator
 from .vulnerability_mining.runtime import (
     normalize_mining_engine_vulnerabilities,
 )
@@ -218,6 +220,7 @@ async def _report_process_vulnerabilities(
     knowledge_base_mcp: dict[str, Any] | None = None,
     engine: MiningEngineSelection,
     values: list[Any],
+    deduplicator: VulnerabilityDeduplicator | None = None,
 ) -> list[tuple[Vulnerability, dict[str, Any] | None]]:
     reported: list[tuple[Vulnerability, dict[str, Any] | None]] = []
     for value in values:
@@ -226,6 +229,19 @@ async def _report_process_vulnerabilities(
         vulnerability = Vulnerability.model_validate(value)
         vulnerability.engine_id = engine.engine_id
         vulnerability.engine_label = engine.engine_label
+        if deduplicator is not None:
+            decision = await deduplicator.assess(vulnerability)
+            if not decision.accepted:
+                reported.append((
+                    vulnerability,
+                    {
+                        "ok": True,
+                        "deduplicated": True,
+                        "dedup_method": decision.method,
+                        "reason": decision.reason,
+                    },
+                ))
+                continue
         response = await reporter.report_vulnerability(scan_id, vulnerability)
         reported.append((
             vulnerability,
@@ -635,6 +651,34 @@ async def run_scan(
         asyncio.Task[tuple[MiningEngineRun, dict[str, Any] | None]]
     ] = []
     audited: list[Vulnerability] = []
+    existing_vulnerabilities: list[Vulnerability] = []
+    if is_resume:
+        fetch_dedup_context = getattr(
+            reporter,
+            "get_vulnerability_dedup_context",
+            None,
+        )
+        if fetch_dedup_context is not None:
+            try:
+                existing_vulnerabilities = await fetch_dedup_context(scan_id)
+            except Exception as exc:
+                await process_output({
+                    "process": "vulnerability_dedup",
+                    "kind": "error",
+                    "message": (
+                        "Unable to load persisted vulnerability deduplication "
+                        f"context; continuing without it: {type(exc).__name__}: "
+                        f"{str(exc).strip()}"
+                    ),
+                })
+    deduplicator = VulnerabilityDeduplicator(
+        scan_id=scan_id,
+        project_path=project,
+        required_capability=config.vulnerability_mining.required_capability,
+        existing_vulnerabilities=existing_vulnerabilities,
+        output=process_output,
+        cancel_event=cancel_event,
+    )
     total = 0
     processed = 0
 
@@ -801,7 +845,10 @@ async def run_scan(
         run.status = "running"
         run.started_at = datetime.now(timezone.utc).isoformat()
         await _publish_engine_run(reporter, scan_id, run)
-        reported_vulnerability_counts: dict[tuple[object, ...], int] = {}
+        handled_vulnerability_decisions: dict[
+            tuple[object, ...],
+            deque[bool],
+        ] = {}
 
         async def report_values(
             values: list[Any],
@@ -824,13 +871,18 @@ async def run_scan(
                 knowledge_base_mcp=knowledge_base_mcp,
                 engine=selection,
                 values=normalized,
+                deduplicator=deduplicator,
             )
             for vulnerability, response in reported:
-                if response is None:
-                    continue
                 fingerprint = vulnerability_report_identity(vulnerability)
-                reported_vulnerability_counts[fingerprint] = (
-                    reported_vulnerability_counts.get(fingerprint, 0) + 1
+                handled_vulnerability_decisions.setdefault(
+                    fingerprint,
+                    deque(),
+                ).append(
+                    not (
+                        isinstance(response, dict)
+                        and response.get("deduplicated") is True
+                    ),
                 )
             return reported
 
@@ -887,20 +939,26 @@ async def run_scan(
         try:
             output = await run_mining_engine(loaded, **engine_kwargs)
             vulnerabilities = output["vulnerabilities"]
-            unreported: list[Vulnerability] = []
-            remaining_reported = dict(reported_vulnerability_counts)
+            accepted_vulnerabilities: list[Vulnerability] = []
             for vulnerability in vulnerabilities:
                 fingerprint = vulnerability_report_identity(vulnerability)
-                count = remaining_reported.get(fingerprint, 0)
-                if count > 0:
-                    remaining_reported[fingerprint] = count - 1
-                else:
-                    unreported.append(vulnerability)
-            if unreported:
-                await report_values([
-                    vulnerability.model_dump(mode="json")
-                    for vulnerability in unreported
-                ])
+                decisions = handled_vulnerability_decisions.get(fingerprint)
+                if not decisions:
+                    newly_reported = await report_values([
+                        vulnerability.model_dump(mode="json"),
+                    ])
+                    if not newly_reported:
+                        continue
+                    reported_vulnerability, _response = newly_reported[0]
+                    fingerprint = vulnerability_report_identity(
+                        reported_vulnerability,
+                    )
+                    decisions = handled_vulnerability_decisions.get(fingerprint)
+                if decisions and decisions.popleft():
+                    vulnerability.engine_id = selection.engine_id
+                    vulnerability.engine_label = selection.engine_label
+                    accepted_vulnerabilities.append(vulnerability)
+            output["vulnerabilities"] = accepted_vulnerabilities
             run.status = str(output["status"])
             run.error_message = str(output["error_message"])
             return run, output

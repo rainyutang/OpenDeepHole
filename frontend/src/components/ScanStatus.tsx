@@ -482,8 +482,15 @@ function isThreatAuditPoolTask(task: Record<string, unknown>): boolean {
     && poolTaskName(task).startsWith("threat-audit-");
 }
 
+function isVulnerabilityDedupPoolTask(task: Record<string, unknown>): boolean {
+  return poolTaskType(task) === "vulnerability_mining"
+    && poolTaskName(task).startsWith("vulnerability-dedup-");
+}
+
 function isCandidateAuditPoolTask(task: Record<string, unknown>): boolean {
-  return isVulnerabilityMiningPoolTask(task) && !isThreatAuditPoolTask(task);
+  return isVulnerabilityMiningPoolTask(task)
+    && !isThreatAuditPoolTask(task)
+    && !isVulnerabilityDedupPoolTask(task);
 }
 
 function isThreatPoolTask(task: Record<string, unknown>): boolean {
@@ -3725,6 +3732,7 @@ function scanQueueTaskTypeLabel(task: Record<string, unknown>): string {
   const type = poolTaskType(task);
   const taskName = poolTaskName(task);
   if (type === "vulnerability_mining") {
+    if (taskName.startsWith("vulnerability-dedup-")) return "漏洞去重";
     if (taskName.startsWith("candidate-audit-")) return `${STATIC_CANDIDATE_ENGINE_LABEL} / 候选点审计`;
     if (taskName.startsWith("project-audit-")) return `${STATIC_CANDIDATE_ENGINE_LABEL} / 项目级审计`;
     if (taskName.startsWith("threat-audit-")) return `${THREAT_AUDIT_ENGINE_LABEL} / 威胁审计`;
