@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createAnnouncement,
   deleteAnnouncement,
@@ -19,14 +19,26 @@ function announcementDate(value: string) {
 }
 
 
+function latestPublishedVersion(announcements: Announcement[]) {
+  return announcements.reduce(
+    (latest, announcement) => announcement.updated_at > latest ? announcement.updated_at : latest,
+    "",
+  );
+}
+
+
 export default function AnnouncementBoard({
   user,
   open,
   onClose,
+  refreshKey,
+  onPublishedVersionChange,
 }: {
   user: User;
   open: boolean;
   onClose: () => void;
+  refreshKey: number;
+  onPublishedVersionChange: (version: string) => void;
 }) {
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [managing, setManaging] = useState(false);
@@ -38,14 +50,19 @@ export default function AnnouncementBoard({
   const [published, setPublished] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const publishedRequestId = useRef(0);
 
-  const loadPublished = async () => {
+  const loadPublished = useCallback(async () => {
+    const requestId = ++publishedRequestId.current;
     try {
-      setAnnouncements(await getAnnouncements());
+      const nextAnnouncements = await getAnnouncements();
+      if (requestId !== publishedRequestId.current) return;
+      setAnnouncements(nextAnnouncements);
+      onPublishedVersionChange(latestPublishedVersion(nextAnnouncements));
     } catch {
-      setAnnouncements([]);
+      // Preserve the last successful feed and version on transient failures.
     }
-  };
+  }, [onPublishedVersionChange]);
 
   const loadAdmin = async () => {
     setAdminLoading(true);
@@ -61,7 +78,10 @@ export default function AnnouncementBoard({
 
   useEffect(() => {
     void loadPublished();
-  }, []);
+    return () => {
+      publishedRequestId.current += 1;
+    };
+  }, [loadPublished, refreshKey, user.user_id]);
 
   const resetForm = () => {
     setEditingId("");

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getScansPage, resumeScan, stopScan, deleteScan } from "../api/client";
 import type { ScanSummary, ScanItemStatus, User } from "../types";
 import AnnouncementBoard from "./AnnouncementBoard";
@@ -38,6 +38,39 @@ const NAV_BUTTON_STYLES: Record<NavButtonVariant, string> = {
 
 const ALL_FILTER = "__all__";
 const UNCONFIGURED_PRODUCT_FILTER = "__unconfigured__";
+const ANNOUNCEMENT_LAST_SEEN_STORAGE_PREFIX = "opendeephole.announcements.lastSeen";
+
+function announcementLastSeenStorageKey(userId: string) {
+  return `${ANNOUNCEMENT_LAST_SEEN_STORAGE_PREFIX}.${userId}`;
+}
+
+function normalizeAnnouncementVersion(value: string | null) {
+  if (!value || Number.isNaN(Date.parse(value))) return "";
+  return value;
+}
+
+function readLastSeenAnnouncementVersion(userId: string) {
+  if (typeof window === "undefined") return "";
+  try {
+    return normalizeAnnouncementVersion(
+      window.localStorage.getItem(announcementLastSeenStorageKey(userId)),
+    );
+  } catch {
+    return "";
+  }
+}
+
+function isNewerAnnouncementVersion(candidate: string, baseline: string) {
+  if (!candidate) return false;
+  if (!baseline) return true;
+
+  const candidateTime = Date.parse(candidate);
+  const baselineTime = Date.parse(baseline);
+  if (candidateTime !== baselineTime) return candidateTime > baselineTime;
+
+  // Preserve Python ISO timestamps' sub-millisecond precision.
+  return candidate > baseline;
+}
 
 function projectName(scan: ScanSummary) {
   return scan.scan_name || scan.project_id || scan.scan_id.slice(0, 8);
@@ -175,20 +208,28 @@ function NavButton({
   description,
   onClick,
   variant = "default",
+  unread = false,
 }: {
   label: string;
   description: string;
   onClick: () => void;
   variant?: NavButtonVariant;
+  unread?: boolean;
 }) {
   return (
     <div className="relative group">
       <button
         onClick={onClick}
-        aria-label={`${label}：${description}`}
-        className={`px-3 py-2 text-sm font-medium rounded-lg transition-colors whitespace-nowrap ${NAV_BUTTON_STYLES[variant]}`}
+        aria-label={`${label}：${description}${unread ? "，有未读更新" : ""}`}
+        className={`relative px-3 py-2 text-sm font-medium rounded-lg transition-colors whitespace-nowrap ${NAV_BUTTON_STYLES[variant]}`}
       >
         {label}
+        {unread && (
+          <span
+            aria-hidden="true"
+            className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-red-500"
+          />
+        )}
       </button>
       <div
         role="tooltip"
@@ -214,6 +255,70 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
   const [creatorFilter, setCreatorFilter] = useState(ALL_FILTER);
   const [openFilter, setOpenFilter] = useState<string | null>(null);
   const [announcementOpen, setAnnouncementOpen] = useState(false);
+  const [announcementRefreshKey, setAnnouncementRefreshKey] = useState(0);
+  const [announcementVersion, setAnnouncementVersion] = useState("");
+  const [lastSeenAnnouncementVersion, setLastSeenAnnouncementVersion] = useState(
+    () => readLastSeenAnnouncementVersion(user.user_id),
+  );
+
+  const rememberAnnouncementVersion = useCallback((version: string) => {
+    if (!version) return;
+    setLastSeenAnnouncementVersion((previous) => {
+      const stored = readLastSeenAnnouncementVersion(user.user_id);
+      const baseline = isNewerAnnouncementVersion(stored, previous) ? stored : previous;
+      if (!isNewerAnnouncementVersion(version, baseline)) return baseline;
+      try {
+        window.localStorage.setItem(
+          announcementLastSeenStorageKey(user.user_id),
+          version,
+        );
+      } catch {
+        // Keep the read marker in memory when browser storage is unavailable.
+      }
+      return version;
+    });
+  }, [user.user_id]);
+
+  useEffect(() => {
+    const storageKey = announcementLastSeenStorageKey(user.user_id);
+    setAnnouncementVersion("");
+    setLastSeenAnnouncementVersion(readLastSeenAnnouncementVersion(user.user_id));
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== storageKey) return;
+      const incoming = normalizeAnnouncementVersion(event.newValue);
+      setLastSeenAnnouncementVersion((previous) => (
+        isNewerAnnouncementVersion(incoming, previous) ? incoming : previous
+      ));
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, [user.user_id]);
+
+  useEffect(() => {
+    if (
+      announcementOpen
+      && isNewerAnnouncementVersion(announcementVersion, lastSeenAnnouncementVersion)
+    ) {
+      rememberAnnouncementVersion(announcementVersion);
+    }
+  }, [
+    announcementOpen,
+    announcementVersion,
+    lastSeenAnnouncementVersion,
+    rememberAnnouncementVersion,
+  ]);
+
+  const hasUnreadAnnouncement = isNewerAnnouncementVersion(
+    announcementVersion,
+    lastSeenAnnouncementVersion,
+  );
+
+  const openAnnouncements = () => {
+    rememberAnnouncementVersion(announcementVersion);
+    setAnnouncementOpen(true);
+    setAnnouncementRefreshKey((current) => current + 1);
+  };
 
   const fetchScans = async (initial = false) => {
     try {
@@ -257,6 +362,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
       if (document.visibilityState === "visible") {
         lastFetch = Date.now();
         fetchScans();
+        setAnnouncementRefreshKey((current) => current + 1);
       }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
@@ -464,7 +570,8 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
             <NavButton
               label="公告"
               description="查看最近发布的平台更新公告"
-              onClick={() => setAnnouncementOpen(true)}
+              onClick={openAnnouncements}
+              unread={hasUnreadAnnouncement}
             />
             <ThemeToggle />
             <button
@@ -481,6 +588,8 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
         user={user}
         open={announcementOpen}
         onClose={() => setAnnouncementOpen(false)}
+        refreshKey={announcementRefreshKey}
+        onPublishedVersionChange={setAnnouncementVersion}
       />
 
       {/* Content */}
