@@ -527,7 +527,9 @@ class ThreatAuditTask(BaseModel):
     """One audit task derived from an attack-tree threat-analysis result."""
     task_id: str
     scan_id: str = ""
-    status: str = "pending"  # pending | queued | running | completed | failed | timeout | no_result | cancelled
+    # pending | queued | running | completed | failed | timeout | no_result |
+    # cancelled | superseded
+    status: str = "pending"
     surface_node_id: str = ""
     surface_name: str = ""
     method_node_id: str = ""

@@ -3754,7 +3754,8 @@ class SqliteScanStore(ScanStoreBase):
             f"""\
             SELECT scan_id, COUNT(*) AS task_count
             FROM threat_audit_tasks
-            WHERE scan_id IN ({placeholders}) AND status != 'completed'
+            WHERE scan_id IN ({placeholders})
+              AND status NOT IN ('completed', 'superseded')
             GROUP BY scan_id
             """,
             scan_ids,

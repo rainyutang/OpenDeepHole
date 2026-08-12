@@ -288,7 +288,7 @@ class ScanStoreBase(ABC):
 
     @abstractmethod
     def get_incomplete_threat_audit_counts(self, scan_ids: list[str]) -> dict[str, int]:
-        """Return non-completed threat-audit task counts grouped by scan."""
+        """Return non-terminal threat-audit task counts grouped by scan."""
 
     # -- Events --
 

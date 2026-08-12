@@ -1408,6 +1408,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     method_node_id="method-timeout",
                 ),
             )
+            store.upsert_threat_audit_task(
+                "scan-1",
+                ThreatAuditTask(
+                    task_id="legacy-superseded",
+                    status="superseded",
+                    surface_node_id="surface-legacy",
+                    method_node_id="method-legacy",
+                ),
+            )
             store.add_vulnerability(
                 "scan-1",
                 Vulnerability(

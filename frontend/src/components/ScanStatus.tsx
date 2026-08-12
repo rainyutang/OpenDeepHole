@@ -351,6 +351,14 @@ function isActiveThreatAuditStatus(status: string | null | undefined): boolean {
   return ACTIVE_THREAT_TASK_STATUSES.has(String(status || "").trim().toLowerCase());
 }
 
+function isSupersededThreatAuditStatus(status: string | null | undefined): boolean {
+  return String(status || "").trim().toLowerCase() === "superseded";
+}
+
+function currentThreatAuditTasks(tasks: ThreatAuditTask[]): ThreatAuditTask[] {
+  return tasks.filter((task) => !isSupersededThreatAuditStatus(task.status));
+}
+
 function effectiveMiningEngines(scan: ScanStatusType): MiningEngineSelection[] {
   const selected = (scan.mining_engines ?? [])
     .filter((item) => item.enabled)
@@ -418,7 +426,7 @@ function engineFlowStatus(run: MiningEngineRunStatus | null): FlowNodeStatus {
 }
 
 function terminalThreatTaskStatus(status: string): boolean {
-  return ["completed", "failed", "failure", "error", "timeout", "no_result", "cancelled"].includes(
+  return ["completed", "failed", "failure", "error", "timeout", "no_result", "cancelled", "superseded"].includes(
     String(status || "").trim().toLowerCase(),
   );
 }
@@ -427,7 +435,7 @@ function threatAuditFlowStatus(
   scan: ScanStatusType,
   run: MiningEngineRunStatus | null,
 ): FlowNodeStatus {
-  const tasks = scan.threat_audit_tasks ?? [];
+  const tasks = currentThreatAuditTasks(scan.threat_audit_tasks ?? []);
   const runStatus = engineFlowStatus(run);
   if (scan.status === "cancelled" && runStatus !== "done") return "cancelled";
   if (tasks.some((task) => isActiveThreatAuditStatus(task.status))) return "running";
@@ -2280,7 +2288,9 @@ function ProcessFlowNav({
           : staticRun?.status === "cancelled" || scan.status === "cancelled"
             ? "cancelled"
             : "pending";
-  const threatTasks = scan.threat_audit_tasks ?? [];
+  const allThreatTasks = scan.threat_audit_tasks ?? [];
+  const threatTasks = currentThreatAuditTasks(allThreatTasks);
+  const supersededThreatTasks = allThreatTasks.length - threatTasks.length;
   const completedThreatTasks = threatTasks.filter((task) => task.status === "completed").length;
   const failedThreatTasks = threatTasks.filter((task) =>
     ["failed", "failure", "error", "timeout", "no_result"].includes(String(task.status || "").toLowerCase()),
@@ -2369,6 +2379,8 @@ function ProcessFlowNav({
     const detail = engine.engine_id === THREAT_ENGINE_ID
       ? threatTasks.length > 0
         ? `${activeThreatTasks} 运行 · ${completedThreatTasks}/${threatTasks.length} 完成${failedThreatTasks ? ` · ${failedThreatTasks} 未成功` : ""}`
+        : supersededThreatTasks > 0
+          ? `${supersededThreatTasks} 个历史任务已取代 · 当前没有叶子节点审计任务`
         : scan.threat_analysis
           ? "等待创建审计任务"
           : "等待威胁分析完成"
@@ -2730,6 +2742,8 @@ function ThreatAuditPanel({
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const tasks = scan.threat_audit_tasks ?? [];
+  const currentTasks = useMemo(() => currentThreatAuditTasks(tasks), [tasks]);
+  const supersededTaskCount = tasks.length - currentTasks.length;
   const queueTasks = useMemo(
     () => collectScanQueueTasks(scan.opencode_pool ?? null).filter(
       (item) => isThreatAuditPoolTask(item.task),
@@ -2761,12 +2775,12 @@ function ThreatAuditPanel({
   const selectedRuntime = selected ? runtimeByTaskId.get(selected.task_id) ?? null : null;
   const statusCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    tasks.forEach((task) => {
+    currentTasks.forEach((task) => {
       const status = effectiveThreatAuditTaskStatus(task, runtimeByTaskId.get(task.task_id));
       counts.set(status, (counts.get(status) ?? 0) + 1);
     });
     return counts;
-  }, [tasks, runtimeByTaskId]);
+  }, [currentTasks, runtimeByTaskId]);
   const run = miningEngineRun(scan, THREAT_ENGINE_ID);
   const processStatus = threatAuditFlowStatus(scan, run);
 
@@ -2789,10 +2803,10 @@ function ThreatAuditPanel({
       title={THREAT_AUDIT_ENGINE_LABEL}
       status={flowStatusLabel(processStatus)}
       tone={flowStatusTone(processStatus, "green")}
-      summary="按威胁分析产生的节点与攻击模式拆分任务，并逐项执行模型审计。"
+      summary="按威胁分析产生的叶子节点与攻击模式拆分任务，并逐项执行模型审计。"
     >
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
-        <MiniMetric label="任务总数" value={tasks.length} />
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+        <MiniMetric label="任务总数" value={currentTasks.length} />
         <MiniMetric label="待执行" value={(statusCounts.get("pending") ?? 0) + (statusCounts.get("queued") ?? 0)} tone="amber" />
         <MiniMetric label="运行中" value={statusCounts.get("running") ?? 0} tone="cyan" />
         <MiniMetric label="已完成" value={statusCounts.get("completed") ?? 0} tone="green" />
@@ -2805,6 +2819,7 @@ function ThreatAuditPanel({
           tone="red"
         />
         <MiniMetric label="已取消" value={statusCounts.get("cancelled") ?? 0} />
+        <MiniMetric label="已取代" value={supersededTaskCount} />
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -2854,7 +2869,7 @@ function ThreatAuditPanel({
                                 {task.method_name || "未命名攻击模式"}
                               </div>
                               <div className="mt-1 truncate text-xs text-slate-500">
-                                {task.surface_name || "未命名威胁节点"}
+                                {task.surface_name || "未命名叶子节点"}
                               </div>
                             </div>
                             {status === "running" && (
@@ -2926,9 +2941,11 @@ function effectiveThreatAuditTaskStatus(
   task: ThreatAuditTask,
   runtime: ScanQueueTask | undefined,
 ): string {
+  const persistedStatus = String(task.status || "pending").toLowerCase();
+  if (persistedStatus === "superseded") return persistedStatus;
   if (runtime?.status === "running") return "running";
   if (runtime?.status === "queued" || runtime?.status === "planned") return "queued";
-  return String(task.status || "pending").toLowerCase();
+  return persistedStatus;
 }
 
 function threatAuditStatusLabel(status: string): string {
@@ -2945,6 +2962,7 @@ function threatAuditStatusLabel(status: string): string {
     timeout: "超时",
     no_result: "无结果",
     cancelled: "已取消",
+    superseded: "已取代",
   };
   return labels[status] ?? status;
 }
@@ -2981,7 +2999,7 @@ function ThreatAuditTaskDetail({
       </div>
       <ThreatAuditDetailSection title="审计目标">
         <DetailGrid items={[
-          ["威胁节点", task.surface_name || task.surface_node_id || "—"],
+          ["叶子节点", task.surface_name || task.surface_node_id || "—"],
           ["攻击模式", task.method_name || task.method_node_id || "—"],
           ["攻击目标", task.attack_goal || "—"],
           ["价值资产", task.asset_name || task.asset_id || "—"],
@@ -3242,7 +3260,9 @@ function ScanOverview({
               const run = miningEngineRun(scan, engine.engine_id);
               if (engine.engine_id === THREAT_ENGINE_ID) {
                 const auditStatus = threatAuditFlowStatus(scan, run);
-                const threatTasks = scan.threat_audit_tasks ?? [];
+                const allThreatTasks = scan.threat_audit_tasks ?? [];
+                const threatTasks = currentThreatAuditTasks(allThreatTasks);
+                const supersededCount = allThreatTasks.length - threatTasks.length;
                 const threatCompleted = threatTasks.filter((task) => task.status === "completed").length;
                 return (
                   <Fragment key={engine.engine_id}>
@@ -3250,7 +3270,11 @@ function ScanOverview({
                       label={THREAT_AUDIT_ENGINE_LABEL}
                       status={flowStatusLabel(auditStatus)}
                       tone={flowStatusTone(auditStatus, "green")}
-                      detail={threatTasks.length ? `${threatCompleted}/${threatTasks.length} 任务完成` : "等待威胁审计任务"}
+                      detail={threatTasks.length
+                        ? `${threatCompleted}/${threatTasks.length} 任务完成`
+                        : supersededCount > 0
+                          ? `${supersededCount} 个历史任务已取代`
+                          : "等待威胁审计任务"}
                     />
                     {showGitHistoryStages && (
                       <TaskSummaryRow

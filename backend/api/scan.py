@@ -1043,7 +1043,12 @@ def _retry_incomplete_count(scan: ScanStatus) -> int:
 
 
 def _incomplete_threat_audit_tasks(scan: ScanStatus) -> list[ThreatAuditTask]:
-    return [task for task in scan.threat_audit_tasks if task.status != "completed"]
+    return [
+        task
+        for task in scan.threat_audit_tasks
+        if str(task.status or "").strip().lower()
+        not in {"completed", "superseded"}
+    ]
 
 
 def _continuable_candidates(

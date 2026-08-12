@@ -87,7 +87,10 @@ class FakeScanStore:
     def get_incomplete_threat_audit_counts(self, scan_ids: list[str]) -> dict[str, int]:
         if self.scan.scan_id not in scan_ids:
             return {}
-        count = sum(task.status != "completed" for task in self.scan.threat_audit_tasks)
+        count = sum(
+            task.status not in {"completed", "superseded"}
+            for task in self.scan.threat_audit_tasks
+        )
         return {self.scan.scan_id: count} if count else {}
 
     def _summary(self) -> ScanSummary:
@@ -296,6 +299,7 @@ class ScanHistorySummaryTests(unittest.TestCase):
             ],
             threat_audit_tasks=[
                 ThreatAuditTask(task_id="threat-timeout", status="timeout"),
+                ThreatAuditTask(task_id="legacy-task", status="superseded"),
             ],
         )
         meta = ScanMeta(
