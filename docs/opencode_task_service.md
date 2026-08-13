@@ -291,7 +291,7 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 - 首个独立调用会锁定配置路径，并在同一进程内复用同一个任务服务和 Serve 单例。同一路径可重复传入；若要切换 YAML，必须先执行 `await shutdown_opencode()`。
 - 单个任务返回不会停止 Serve；这是同一 Python 进程内跨阶段、跨任务复用的基础。显式调用 `await shutdown_opencode()` 会终止组件实际启动的 Serve 进程树并清除单例。
 - standalone 的 `serve.port` 是显式固定端口，占用时会报告外部监听 PID，无监听却绑定失败时会提示 Windows 排除/保留端口或端点安全软件，不会换号或终止未证明属于本组件的进程。完整 Agent 在未配置端口时才使用自动模式：最多尝试 3 个端口，并只对一次无明确原因的 `Error: Unexpected error` 早退作恢复性换号。
-- 未显式 shutdown 时，组件会登记自己通过 `Popen` 启动的精确 PID 和独立进程组，在解释器正常退出、`SIGINT`（Ctrl-C）或 `SIGTERM` 时同步清理，再恢复或转交宿主原有信号处理器。启动器 PID 退出不再等同于整棵进程树退出：POSIX 会继续检查进程组和已确认归属的监听 PID，发送 `SIGTERM` 5 秒后仍存活则升级为 `SIGKILL`；Windows 对 ownership marker 已登记且仍占用目标端口的监听 PID 始终执行 `taskkill /T /F`，即使通用 PID 探测给出假阴性也不会跳过，并在需要时使用直接终止兜底。强制清理后按目标端口上的实际监听 PID 再次确认，且不会终止未知进程；只有确认受管进程全部消失才删除归属标记和管理器状态，失败时两者都会保留供下一次重试。
+- 未显式 shutdown 时，组件会登记自己通过 `Popen` 启动的精确 PID 和独立进程组，在解释器正常退出、`SIGINT`（Ctrl-C）或 `SIGTERM` 时同步清理，再恢复或转交宿主原有信号处理器。启动器 PID 退出不再等同于整棵进程树退出：POSIX 会继续检查进程组和已确认归属的监听 PID，发送 `SIGTERM` 5 秒后仍存活则升级为 `SIGKILL`；Windows 对 ownership marker 已登记且仍出现在目标端口监听表中的 PID 始终执行 `taskkill /T /F`，即使通用 PID 探测给出假阴性或 TCP 连接探测暂时失败也不会跳过，并在需要时使用直接终止兜底。强制清理后按 marker PID 是否仍在目标端口监听再次确认，且不会终止未知进程；只有确认受管进程全部消失才删除归属标记和管理器状态，失败时两者都会保留供下一次重试。
 - 启动失败会同时报告固定/自动端口模式、已尝试端口和可执行文件版本，并附上脱敏后的启动日志尾部。`OPENCODE_SERVER_PASSWORD is not set` 是 Agent 仅监听 `127.0.0.1` 时的预期警告，日志会明确说明它不是 Serve 退出原因。
 - `SIGKILL` 和 `os._exit()` 不运行 Python 的信号处理器或 `atexit` 回调，无法保证当场清理；下次启动会继续使用既有归属标记和端口恢复逻辑回收残留 Serve。
 - 若应用已经注册后端宿主绑定，则完全使用宿主配置，不读取独立 YAML；此时再传 `config_path` 会报冲突。

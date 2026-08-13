@@ -402,15 +402,6 @@ def _allocate_loopback_port(excluded: set[int] | None = None) -> int:
     raise RuntimeError("Unable to allocate a distinct loopback port for OpenCode serve")
 
 
-def _wait_port_released(port: int, timeout: float = _SERVE_STOP_TIMEOUT_SECONDS) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not _port_is_in_use(port):
-            return True
-        time.sleep(0.1)
-    return not _port_is_in_use(port)
-
-
 def _run_command_text(cmd: list[str], timeout: float = 3.0) -> str:
     try:
         completed = subprocess.run(
@@ -1083,19 +1074,31 @@ def _reclaim_serve_port(
     reason: str,
     allowed_pids: set[int] | tuple[int, ...] = (),
 ) -> _PortReclaimResult:
-    if not _port_is_in_use(port):
-        return _PortReclaimResult(attempted=False, released=True, detail="port already free")
     allowed = {
         int(pid)
         for pid in allowed_pids
         if int(pid) > 0 and int(pid) != os.getpid()
     }
+    # On Windows a terminating listener can remain in netstat even when a TCP
+    # connect probe already fails. Marker-owned listener identity, not
+    # connectability, is therefore the cleanup and verification boundary.
+    listeners = {
+        int(pid)
+        for pid in _listener_pids_for_port(port)
+        if int(pid) > 0
+    }
     pids = tuple(sorted(
         pid
-        for pid in _listener_pids_for_port(port)
+        for pid in listeners
         if pid in allowed
     ))
     if not pids:
+        if not listeners:
+            return _PortReclaimResult(
+                attempted=False,
+                released=True,
+                detail="owned listener pid(s) already absent",
+            )
         return _PortReclaimResult(
             attempted=False,
             released=False,
@@ -1120,7 +1123,8 @@ def _reclaim_serve_port(
         )
         if not stopped:
             termination_failed_pids.append(pid)
-    released = _wait_port_released(port)
+    remaining_listener_pids = _wait_listener_pids_released(port, set(pids))
+    released = not remaining_listener_pids
     failure_note = (
         "; termination failed for listener pid(s)="
         + ",".join(str(pid) for pid in termination_failed_pids)
@@ -1132,9 +1136,13 @@ def _reclaim_serve_port(
         pids=pids,
         released=released,
         detail=(
-            "port released"
+            "owned listener pid(s) released"
             if released
-            else "port still in use after terminating listener pid(s)" + failure_note
+            else (
+                "owned listener pid(s) still listening after termination="
+                + ",".join(str(pid) for pid in sorted(remaining_listener_pids))
+                + failure_note
+            )
         ),
     )
 
@@ -1605,7 +1613,7 @@ def _marker_for_owned_serve_record(
     return marker if record.pid in marker_pids else None
 
 
-def _wait_owned_listener_pids_released(
+def _wait_listener_pids_released(
     port: int,
     listener_pids: set[int],
     timeout: float = _SERVE_STOP_TIMEOUT_SECONDS,
@@ -1680,7 +1688,7 @@ def _stop_owned_serve_record(
                     else None
                 ),
             )
-        remaining_listener_pids = _wait_owned_listener_pids_released(
+        remaining_listener_pids = _wait_listener_pids_released(
             effective_port,
             known_listener_pids,
         )
@@ -6436,7 +6444,7 @@ class OpenCodeServeManager:
         known_listener_pids = _marker_listener_pids(marker)
         if not _pid_is_running(pid):
             reclaim_result: _PortReclaimResult | None = None
-            if marker_port > 0 and known_listener_pids and _port_is_in_use(marker_port):
+            if marker_port > 0 and known_listener_pids:
                 reclaim_result = await asyncio.to_thread(
                     _reclaim_serve_port,
                     marker_port,
@@ -6472,7 +6480,7 @@ class OpenCodeServeManager:
         )
         tree_stopped = await asyncio.to_thread(_terminate_process_tree, pid)
         reclaim_result = None
-        if marker_port > 0 and known_listener_pids and _port_is_in_use(marker_port):
+        if marker_port > 0 and known_listener_pids:
             reclaim_result = await asyncio.to_thread(
                 _reclaim_serve_port,
                 marker_port,

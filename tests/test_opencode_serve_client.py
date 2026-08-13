@@ -4182,6 +4182,73 @@ def test_reclaim_windows_listener_uses_port_liveness_when_pid_probe_is_false(
     assert result.released is True
 
 
+def test_reclaim_windows_listener_uses_netstat_when_tcp_probe_says_free(
+    monkeypatch,
+) -> None:
+    from task_agent import serve_client
+
+    listening = {15668}
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        listening.clear()
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"")
+
+    monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+    monkeypatch.setattr(
+        "task_agent.serve_client._port_is_in_use",
+        lambda port: False,
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._listener_pids_for_port",
+        lambda port: set(listening),
+    )
+    monkeypatch.setattr("task_agent.serve_client.subprocess.run", fake_run)
+
+    result = serve_client._reclaim_serve_port(
+        26843,
+        reason="test unconnectable stale Agent-owned serve marker",
+        allowed_pids={15668},
+    )
+
+    assert commands == [["taskkill", "/PID", "15668", "/T", "/F"]]
+    assert result.attempted is True
+    assert result.pids == (15668,)
+    assert result.released is True
+
+
+def test_reclaim_unconnectable_listener_does_not_terminate_unowned_pid(
+    monkeypatch,
+) -> None:
+    from task_agent import serve_client
+
+    terminated: list[int] = []
+    monkeypatch.setattr(
+        "task_agent.serve_client._port_is_in_use",
+        lambda port: False,
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._listener_pids_for_port",
+        lambda port: {99999},
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._terminate_process_tree",
+        lambda pid, **kwargs: terminated.append(pid),
+    )
+
+    result = serve_client._reclaim_serve_port(
+        26843,
+        reason="test foreign unconnectable listener",
+        allowed_pids={15668},
+    )
+
+    assert terminated == []
+    assert result.attempted is False
+    assert result.released is False
+    assert result.detail == "listener ownership was not proven"
+
+
 def test_terminate_windows_listener_falls_back_when_taskkill_fails(
     monkeypatch,
     caplog,
@@ -5121,7 +5188,10 @@ def test_start_locked_stops_previous_agent_owned_marker(monkeypatch, tmp_path: P
     asyncio.run(run())
 
 
-def test_start_locked_reclaims_stale_child_listener_after_marker_parent_exits(monkeypatch, tmp_path: Path) -> None:
+def test_start_locked_reclaims_unconnectable_stale_child_listener_after_marker_parent_exits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     async def run() -> None:
         class FakeProc:
             pid = 33333
@@ -5141,7 +5211,7 @@ def test_start_locked_reclaims_stale_child_listener_after_marker_parent_exits(mo
             }),
             encoding="utf-8",
         )
-        port_state = {"in_use": True}
+        listener_state = {"present": True}
         terminated: list[int] = []
 
         async def fake_to_thread(func, *args, **kwargs):
@@ -5149,15 +5219,16 @@ def test_start_locked_reclaims_stale_child_listener_after_marker_parent_exits(mo
 
         def fake_terminate(pid, *args, **kwargs):
             terminated.append(pid)
-            port_state["in_use"] = False
+            listener_state["present"] = False
+            return True
 
         monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
         monkeypatch.setattr("task_agent.serve_client._resolve_executable", lambda name: "/bin/opencode")
         monkeypatch.setattr("task_agent.serve_client._pid_is_running", lambda pid: False)
-        monkeypatch.setattr("task_agent.serve_client._port_is_in_use", lambda port: port_state["in_use"])
+        monkeypatch.setattr("task_agent.serve_client._port_is_in_use", lambda port: False)
         monkeypatch.setattr(
             "task_agent.serve_client._listener_pids_for_port",
-            lambda port: {22222} if port_state["in_use"] else set(),
+            lambda port: {22222} if listener_state["present"] else set(),
         )
         monkeypatch.setattr("task_agent.serve_client._terminate_process_tree", fake_terminate)
         monkeypatch.setattr("task_agent.serve_client.asyncio.to_thread", fake_to_thread)
@@ -5402,6 +5473,75 @@ def test_stop_owned_serve_removes_stale_marker_without_terminating(monkeypatch, 
         await manager._stop_owned_serve_on_port(4096)
 
         assert terminated == []
+        assert not marker_path.exists()
+
+    asyncio.run(run())
+
+
+def test_stop_owned_serve_retries_unconnectable_stale_listener(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "agent_pid": 77777,
+                "pid": 11111,
+                "port": 26843,
+                "tool": "opencode",
+                "executable": "opencode",
+                "listener_pids": [15668],
+            }),
+            encoding="utf-8",
+        )
+        listening = {15668}
+        terminated: list[int] = []
+        termination_results = [False, True]
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        def fake_terminate(pid, *args, **kwargs):
+            terminated.append(pid)
+            stopped = termination_results.pop(0)
+            if stopped:
+                listening.discard(pid)
+            return stopped
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+        monkeypatch.setattr("task_agent.serve_client._pid_is_running", lambda pid: False)
+        monkeypatch.setattr("task_agent.serve_client._port_is_in_use", lambda port: False)
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: set(listening),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._wait_listener_pids_released",
+            lambda port, pids: set(pids) & listening,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            fake_terminate,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.asyncio.to_thread",
+            fake_to_thread,
+        )
+
+        manager = OpenCodeServeManager()
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager._stop_owned_serve_on_port(26843)
+
+        assert "pid(s)=15668" in str(excinfo.value)
+        assert "reclaim=owned listener pid(s) still listening" in str(excinfo.value)
+        assert marker_path.exists()
+
+        await manager._stop_owned_serve_on_port(26843)
+
+        assert terminated == [15668, 15668]
         assert not marker_path.exists()
 
     asyncio.run(run())
