@@ -32,6 +32,8 @@ from task_agent.serve_client import (
     _handle_serve_event,
     _message_token_entries,
     _next_event_reconnect_delay,
+    _opencode_mcp_tool_ids,
+    _opencode_mcp_tool_prefixes,
     _session_tree_token_entries,
     _serve_context_headers,
     _serve_port,
@@ -39,6 +41,7 @@ from task_agent.serve_client import (
     _serve_startup_shell_debug,
     _token_usage_delta,
     _tool_matches_mcp_tool,
+    _write_knowledge_binding,
     _write_serve_config_file,
 )
 
@@ -459,13 +462,7 @@ def test_run_prompt_binds_knowledge_project_and_hides_control_tools(
 ) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
-        _FakeAsyncClient.tool_ids = [
-            "read",
-            "mcp__product-info__xxx_projects",
-            "mcp__product-info__xxx_set_project",
-            "mcp__product-info__search_docs",
-            "mcp__product-info__lookup_symbol",
-        ]
+        _FakeAsyncClient.tool_ids = ["read"]
         monkeypatch.setattr(
             "task_agent.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
@@ -545,11 +542,28 @@ def test_run_prompt_binds_knowledge_project_and_hides_control_tools(
         assert knowledge["project_id"] not in json.dumps(messages[0]["json"])
         assert messages[0]["json"]["tools"] == {
             "read": True,
+            "product-info_*": True,
+            "mcp__product-info__*": True,
+            "mcp--product-info--*": True,
+            "product-info_xxx_projects": False,
             "mcp__product-info__xxx_projects": False,
+            "mcp--product-info--xxx_projects": False,
+            "product-info_xxx_set_project": False,
             "mcp__product-info__xxx_set_project": False,
-            "mcp__product-info__search_docs": True,
-            "mcp__product-info__lookup_symbol": True,
+            "mcp--product-info--xxx_set_project": False,
         }
+        tool_rules = list(messages[0]["json"]["tools"].items())
+        assert max(
+            index for index, (name, _enabled) in enumerate(tool_rules)
+            if name.endswith("*")
+        ) < min(
+            index for index, (name, _enabled) in enumerate(tool_rules)
+            if name.endswith("xxx_projects") or name.endswith("xxx_set_project")
+        )
+        assert [
+            item for item in client.gets
+            if item["path"] == "/experimental/tool/ids"
+        ] == [client.gets[0]]
         binding_path = (
             runtime
             / ".opendeephole-plugins"
@@ -557,14 +571,20 @@ def test_run_prompt_binds_knowledge_project_and_hides_control_tools(
             / f"{hashlib.sha256(b'session-1').hexdigest()}.json"
         )
         binding = json.loads(binding_path.read_text(encoding="utf-8"))
+        assert binding["version"] == 2
         assert binding["project_id"] == knowledge["project_id"]
-        assert binding["allowed_tool_ids"] == [
-            "mcp__product-info__search_docs",
-            "mcp__product-info__lookup_symbol",
+        assert binding["tool_id_prefixes"] == [
+            "product-info_",
+            "mcp__product-info__",
+            "mcp--product-info--",
         ]
         assert binding["blocked_tool_ids"] == [
+            "product-info_xxx_projects",
             "mcp__product-info__xxx_projects",
+            "mcp--product-info--xxx_projects",
+            "product-info_xxx_set_project",
             "mcp__product-info__xxx_set_project",
+            "mcp--product-info--xxx_set_project",
         ]
         manager._disable_scan_mcp_lease.assert_not_awaited()
 
@@ -577,12 +597,7 @@ def test_run_prompt_disables_knowledge_tools_when_binding_fails(
 ) -> None:
     async def run() -> None:
         _FakeAsyncClient.instances = []
-        _FakeAsyncClient.tool_ids = [
-            "read",
-            "mcp__product-info__xxx_projects",
-            "mcp__product-info__xxx_set_project",
-            "mcp__product-info__search_docs",
-        ]
+        _FakeAsyncClient.tool_ids = ["read"]
         monkeypatch.setattr(
             "task_agent.serve_client.httpx.AsyncClient",
             _FakeAsyncClient,
@@ -650,11 +665,12 @@ def test_run_prompt_disables_knowledge_tools_when_binding_fails(
             if item["path"].endswith("/message")
         )
         assert message["json"]["tools"]["read"] is True
-        assert all(
-            value is False
-            for key, value in message["json"]["tools"].items()
-            if key.startswith("mcp__product-info__")
-        )
+        assert message["json"]["tools"] == {
+            "read": True,
+            "product-info_*": False,
+            "mcp__product-info__*": False,
+            "mcp--product-info--*": False,
+        }
         manager._disable_scan_mcp_lease.assert_awaited_once()
 
     asyncio.run(run())
@@ -666,6 +682,92 @@ def test_knowledge_plugin_overwrites_project_id_without_chat_messages() -> None:
     )
     assert '"tool.execute.before"' in _KNOWLEDGE_PROJECT_PLUGIN_SOURCE
     assert "chat.message" not in _KNOWLEDGE_PROJECT_PLUGIN_SOURCE
+
+
+def test_knowledge_plugin_enforces_binding_for_parent_and_child_sessions(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    _write_serve_config_file(runtime, "{}")
+    _write_knowledge_binding(
+        runtime,
+        session_id="parent-session",
+        project_id="selected-project",
+        mcp_name="llm-wiki",
+        blocked_tool_ids=list(_opencode_mcp_tool_ids(
+            "llm-wiki",
+            "llm_wiki_projects",
+        )),
+    )
+    plugin_path = (
+        runtime
+        / ".opendeephole-plugins"
+        / f"opendeephole-knowledge-project-{_KNOWLEDGE_PROJECT_PLUGIN_HASH}.mjs"
+    )
+    script = r'''
+import assert from "node:assert/strict"
+import { pathToFileURL } from "node:url"
+
+const plugin = await import(pathToFileURL(process.argv[1]).href)
+const hooks = await plugin.OpenDeepHoleKnowledgeProjectHook()
+const before = hooks["tool.execute.before"]
+
+const parentArgs = { project_id: "wrong", query: "parent" }
+await before(
+  { sessionID: "parent-session", tool: "llm-wiki_search_docs" },
+  { args: parentArgs },
+)
+assert.equal(parentArgs.project_id, "selected-project")
+
+await hooks.event({
+  event: {
+    type: "session.created",
+    properties: { info: { id: "child-session", parentID: "parent-session" } },
+  },
+})
+const childArgs = { query: "child" }
+await before(
+  { sessionID: "child-session", tool: "llm-wiki_lookup_symbol" },
+  { args: childArgs },
+)
+assert.equal(childArgs.project_id, "selected-project")
+
+const unrelatedArgs = { project_id: "unchanged" }
+await before(
+  { sessionID: "parent-session", tool: "other-mcp_search_docs" },
+  { args: unrelatedArgs },
+)
+assert.equal(unrelatedArgs.project_id, "unchanged")
+
+await assert.rejects(
+  before(
+    { sessionID: "parent-session", tool: "llm-wiki_llm_wiki_projects" },
+    { args: {} },
+  ),
+  /platform-only/,
+)
+'''
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(plugin_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_opencode_mcp_tool_ids_match_official_sanitization_and_legacy_formats() -> None:
+    assert _opencode_mcp_tool_prefixes("llm.wiki") == (
+        "llm_wiki_",
+        "mcp__llm_wiki__",
+        "mcp--llm_wiki--",
+    )
+    assert _opencode_mcp_tool_ids("llm.wiki", "lookup/docs") == (
+        "llm_wiki_lookup_docs",
+        "mcp__llm_wiki__lookup_docs",
+        "mcp--llm_wiki--lookup_docs",
+    )
 
 
 @pytest.mark.parametrize(

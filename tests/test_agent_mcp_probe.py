@@ -382,6 +382,60 @@ def test_scan_mcp_probe_normalizes_request_without_persisting(
     store.close()
 
 
+def test_scan_knowledge_probe_requires_a_model_visible_query_tool(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = SqliteScanStore(tmp_path / "scan.db")
+    store.upsert_agent_record(
+        agent_key="stable-agent",
+        user_id="user-1",
+        ip="10.0.0.8",
+        machine_name="build-host",
+        display_name="agent",
+        agent_id="session-1",
+        last_seen="2026-07-17T01:00:00+00:00",
+        initial_config_json=AgentRemoteConfig().model_dump_json(),
+    )
+    monkeypatch.setattr(agent_api, "get_scan_store", lambda: store)
+    monkeypatch.setattr(agent_api, "get_config", _server_knowledge_config)
+    live_agent = AgentInfo(
+        agent_id="session-1",
+        agent_key="stable-agent",
+        name="agent",
+        machine_name="build-host",
+        ip="10.0.0.8",
+        last_seen="2026-07-17T01:00:00+00:00",
+        user_id="user-1",
+    )
+    monkeypatch.setattr(
+        agent_api,
+        "_live_agent_for_key",
+        lambda _key: ("session-1", live_agent),
+    )
+
+    async def send_result(_agent_id: str, command: dict) -> bool:
+        agent_api._mcp_probe_waiters[command["request_id"]].set_result({
+            "success": True,
+            "protocol": "streamable_http",
+            "tool_names": ["xxx_projects", "xxx_set_project"],
+            "projects": [{"id": "project-1", "name": "Project One"}],
+        })
+        return True
+
+    monkeypatch.setattr(agent_api, "send_agent_command", send_result)
+    result = asyncio.run(agent_api.probe_stable_agent_mcp(
+        "stable-agent",
+        "scan_knowledge_base",
+        User(user_id="user-1", username="owner", role="user"),
+    ))
+
+    assert result.success is False
+    assert result.error == "知识库未提供可供模型使用的查询工具"
+    assert result.tool_names == ["xxx_projects", "xxx_set_project"]
+    store.close()
+
+
 def test_scan_knowledge_probe_rejects_missing_server_url(tmp_path: Path, monkeypatch) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
     store.upsert_agent_record(

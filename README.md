@@ -122,11 +122,11 @@ owner_token: ""
 
 **「启用知识库」** 也是新建扫描的可选项，默认关闭。远程 MCP 的 URL、请求头、超时和两个管理工具名由服务端根目录 `config.yaml` 的 `knowledge_base` 统一维护，用户不再填写连接参数。勾选后点击 **「检测并拉取项目」**，目标 Agent 会连接 MCP 并调用配置的 `projects_tool`；页面解析其 `projects`、`currentProject` 和 `sessionProject` JSON，用户只选择一个项目。创建扫描时固化所选 `project_id` / `project_name` 及服务端连接快照，并按当前用户和稳定客户端记忆上次选择。
 
-知识库运行时仍由 OpenCode 原生 MCP 直接执行查询工具，不引入 MCP 适配器。每个 Session 发送首个业务 prompt 前，Task Agent 会生成不进入会话历史的私有绑定；受管 Plugin 的 `tool.execute.before` 对所有模型可见的知识库查询工具强制覆盖 `project_id`。配置的 `projects_tool` 和 `set_project_tool` 不会暴露给模型，平台运行任务时也不会调用 `set_project_tool`。连接、工具发现或绑定失败时，该 Session 禁用知识库工具后继续任务。
+知识库运行时仍由 OpenCode 原生 MCP 直接执行查询工具，不引入 MCP 适配器。每个 Session 发送首个业务 prompt 前，Task Agent 会按 OpenCode 的 MCP 工具命名规则生成不进入会话历史的私有绑定；受管 Plugin 的 `tool.execute.before` 对该知识库的所有模型可见查询工具强制覆盖 `project_id`。配置的 `projects_tool` 和 `set_project_tool` 会按确定的工具 ID 从模型工具集中隐藏并在 Hook 中二次拒绝，平台运行任务时也不会调用 `set_project_tool`。运行时不依赖仅包含内置与插件工具的 `/experimental/tool/ids` 判断 MCP 工具是否存在；连接或绑定失败时，该 Session 按知识库工具前缀整体禁用后继续任务。
 
 扫描详情顶部流程图的 **「底层能力」** 框会明确显示本次扫描是否启用了 CodeGraph MCP 和知识库。这里展示的是创建扫描时固化的配置快照，不代表 MCP 的实时连接结果；连接失败并回退到文件工具时，已启用状态仍保持不变。
 
-新建扫描页的代码图谱提供手动 **「检测连接」**，只在 Agent 上执行 MCP `initialize` 和 `list_tools`。知识库的 **「检测并拉取项目」** 还会调用服务端配置的 `projects_tool`，但不会调用 `set_project_tool`，也不会写入 Agent 全局配置。运行时仍会再次连接；代码图谱连接失败时继续扫描并只使用文件工具，知识库连接或项目绑定失败时只禁用知识库工具，两者都不会回退到其它扫描的 MCP。对于本地 `codegraph` CLI，项目 `.codegraph/codegraph.db` 是否就绪仍以扫描任务日志和产物为准。
+新建扫描页的代码图谱提供手动 **「检测连接」**，只在 Agent 上执行 MCP `initialize` 和 `list_tools`。知识库的 **「检测并拉取项目」** 还会调用服务端配置的 `projects_tool`，校验 `projects_tool`、`set_project_tool` 和至少一个模型可见查询工具，但不会调用 `set_project_tool`，也不会写入 Agent 全局配置。运行时仍会再次连接；代码图谱连接失败时继续扫描并只使用文件工具，知识库连接或项目绑定失败时只禁用知识库工具，两者都不会回退到其它扫描的 MCP。对于本地 `codegraph` CLI，项目 `.codegraph/codegraph.db` 是否就绪仍以扫描任务日志和产物为准。
 
 **漏洞验证** 默认不启用。勾选后，页面只展示与当前产品兼容的验证方法，并按该方法严格的 `validator.yaml` `field` 定义生成参数表单；方法和参数会按当前用户、稳定客户端、产品和方法记忆。客户端全局验证策略、方法身份和 field 值在创建成功时一起固化，之后修改客户端配置只影响下一次扫描。新格式及扩展约定见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
 

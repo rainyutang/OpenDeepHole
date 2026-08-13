@@ -2511,6 +2511,12 @@ async def probe_stable_agent_mcp(
                 "知识库缺少已配置的管理工具："
                 + "、".join(missing_controls)
             )
+        elif not discovered_tool_names.difference({
+            mcp_config.projects_tool,
+            mcp_config.set_project_tool,
+        }):
+            probe_success = False
+            probe_error = "知识库未提供可供模型使用的查询工具"
     runtime_state = str(incoming.get("runtime_state") or "next_task")
     if runtime_state not in {"active", "reload_pending", "next_task"}:
         runtime_state = "next_task"

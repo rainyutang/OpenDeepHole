@@ -2,6 +2,7 @@
 
 ## 2026-08-13
 
+- **修复** 扫描知识库 MCP 已连接且可快速返回 `tools/list` 时仍被误报 `knowledge MCP tools were not discovered` 并禁用：运行时不再把 OpenCode 1.18.4 仅包含内置/插件工具的 `/experimental/tool/ids` 当作 MCP 工具清单，改为按 OpenCode 确定性命名规则隐藏 `projects_tool` / `set_project_tool`，以知识库工具前缀绑定其余查询工具并强制覆盖 `project_id`；绑定失败时按前缀整体禁用，项目探测同时要求至少存在一个查询工具
 - **修复** “发现的问题”详情不再把引擎完整报告和同一组结构化字段重复展示；页面与单条导出统一只渲染一份中文章节 Markdown 报告，并保留字段内软换行
 - **变更** 候选点与威胁审计的叙述字段 Prompt 按 JSON Schema 字段名逐节约束，章节顺序统一为 `description`、`attack_entry`、`trigger_conditions`、`vulnerable_code`、`root_cause`、`call_chain`、`impact`；`call_chain` 改为 LLM 直接输出的 Markdown 字符串，读取历史数组时自动转换兼容
 - **修复** 威胁审计任务改为按最终 `attack_trees` 数组中的树实例严格隔离；不同树复用相同 `tree_id`、叶子 `node_id` 和攻击模式 ID 时不再被全局聚合为一个任务，每个任务只携带所属树中该叶子到价值资产的唯一完整路径，叶子缺少路径或对应多条路径会明确报告攻击树数据一致性错误，现有 Prompt 与漏洞 JSON 输出契约保持不变

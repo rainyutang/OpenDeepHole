@@ -154,7 +154,7 @@ const bindingPath = (sessionID) => path.join(
 const readDirectBinding = async (sessionID) => {
   try {
     const value = JSON.parse(await fs.readFile(bindingPath(sessionID), "utf8"))
-    if (!value || value.version !== 1 || typeof value.project_id !== "string") return null
+    if (!value || ![1, 2].includes(value.version) || typeof value.project_id !== "string") return null
     if (!value.project_id.trim()) return null
     return value
   } catch (error) {
@@ -195,7 +195,8 @@ export const OpenDeepHoleKnowledgeProjectHook = async () => ({
       throw new Error("Knowledge-base project management tools are platform-only")
     }
     const allowed = Array.isArray(binding.allowed_tool_ids) ? binding.allowed_tool_ids : []
-    if (!allowed.includes(tool)) return
+    const prefixes = Array.isArray(binding.tool_id_prefixes) ? binding.tool_id_prefixes : []
+    if (!allowed.includes(tool) && !prefixes.some((prefix) => tool.startsWith(prefix))) return
     if (!output?.args || typeof output.args !== "object" || Array.isArray(output.args)) {
       throw new Error("Knowledge-base tool arguments must be an object")
     }
@@ -543,22 +544,24 @@ def _write_knowledge_binding(
     session_id: str,
     project_id: str,
     mcp_name: str,
-    allowed_tool_ids: list[str],
     blocked_tool_ids: list[str],
 ) -> Path:
     normalized_session_id = str(session_id or "").strip()
     normalized_project_id = str(project_id or "").strip()
     if not normalized_session_id or not normalized_project_id:
         raise ValueError("Knowledge-base binding requires session_id and project_id")
-    if not allowed_tool_ids:
-        raise ValueError("Knowledge-base binding has no query tools")
+    tool_id_prefixes = list(_opencode_mcp_tool_prefixes(mcp_name))
+    if not tool_id_prefixes:
+        raise ValueError("Knowledge-base binding requires an MCP name")
+    if not blocked_tool_ids:
+        raise ValueError("Knowledge-base binding has no control tools")
     binding_path = _knowledge_binding_path(cwd, normalized_session_id)
     payload = {
-        "version": 1,
+        "version": 2,
         "session_id": normalized_session_id,
         "project_id": normalized_project_id,
         "mcp_name": str(mcp_name or "").strip(),
-        "allowed_tool_ids": list(dict.fromkeys(allowed_tool_ids)),
+        "tool_id_prefixes": tool_id_prefixes,
         "blocked_tool_ids": list(dict.fromkeys(blocked_tool_ids)),
     }
     _write_private_text(
@@ -2237,15 +2240,40 @@ def _scan_mcp_runtime_spec(scan_id: object, raw: object) -> dict[str, Any]:
     }
 
 
+def _sanitize_opencode_mcp_component(value: object) -> str:
+    """Match OpenCode's MCP tool-name sanitizer."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", str(value or "").strip())
+
+
+def _opencode_mcp_tool_prefixes(mcp_name: object) -> tuple[str, ...]:
+    name = _sanitize_opencode_mcp_component(mcp_name)
+    if not name:
+        return ()
+    return (
+        f"{name}_",
+        f"mcp__{name}__",
+        f"mcp--{name}--",
+    )
+
+
+def _opencode_mcp_tool_ids(
+    mcp_name: object,
+    raw_tool_name: object,
+) -> tuple[str, ...]:
+    tool_name = _sanitize_opencode_mcp_component(raw_tool_name)
+    if not tool_name:
+        return ()
+    return tuple(
+        f"{prefix}{tool_name}"
+        for prefix in _opencode_mcp_tool_prefixes(mcp_name)
+    )
+
+
 def _tool_belongs_to_mcp(tool_id: object, mcp_name: object) -> bool:
     tool = str(tool_id or "").strip().casefold()
-    name = str(mcp_name or "").strip().casefold()
-    if not name:
-        return False
-    return (
-        tool.startswith(f"{name}_")
-        or tool.startswith(f"mcp--{name}--")
-        or tool.startswith(f"mcp__{name}__")
+    return any(
+        tool.startswith(prefix.casefold())
+        for prefix in _opencode_mcp_tool_prefixes(mcp_name)
     )
 
 
@@ -2254,6 +2282,12 @@ def _tool_matches_mcp_tool(
     mcp_name: object,
     raw_tool_name: object,
 ) -> bool:
+    tool = str(tool_id or "").strip().casefold()
+    if tool in {
+        candidate.casefold()
+        for candidate in _opencode_mcp_tool_ids(mcp_name, raw_tool_name)
+    }:
+        return True
     if not _tool_belongs_to_mcp(tool_id, mcp_name):
         return False
     normalized_id = _normalize_tool_selector(tool_id)
@@ -4826,31 +4860,6 @@ class OpenCodeServeManager:
                     on_line=(lambda message: emit("session", message)) if on_line else None,
                     tool=tool,
                 )
-                if (
-                    knowledge_mcp_lease is not None
-                    and knowledge_mcp_lease.connected
-                    and knowledge_mcp_name
-                    and not any(
-                        _tool_belongs_to_mcp(tool_id, knowledge_mcp_name)
-                        for tool_id in tool_ids
-                    )
-                ):
-                    # Dynamic MCP registration and tool discovery can settle on
-                    # adjacent event-loop turns. Retry briefly before failing
-                    # this Session's knowledge binding closed.
-                    for _attempt in range(2):
-                        await asyncio.sleep(0.1)
-                        tool_ids = await self._list_tool_ids(
-                            client,
-                            params,
-                            headers,
-                            tool=tool,
-                        )
-                        if any(
-                            _tool_belongs_to_mcp(tool_id, knowledge_mcp_name)
-                            for tool_id in tool_ids
-                        ):
-                            break
                 if disable_all_tools:
                     mcp_overrides = {
                         tool_id: False
@@ -4878,13 +4887,20 @@ class OpenCodeServeManager:
                             scan_mcp_lease is not None and scan_mcp_lease.connected
                         ),
                     )
-                knowledge_tool_ids = [
-                    tool_id
-                    for tool_id in tool_ids
-                    if _tool_belongs_to_mcp(tool_id, knowledge_mcp_name)
+                # OpenCode 1.18.4's experimental tool-ID route only exposes
+                # registry tools; MCP tools are merged later when a Session
+                # resolves its tools. Build the deterministic MCP IDs instead.
+                knowledge_tool_patterns = [
+                    f"{prefix}*"
+                    for prefix in _opencode_mcp_tool_prefixes(knowledge_mcp_name)
                 ]
-                for tool_id in knowledge_tool_ids:
-                    mcp_overrides[tool_id] = False
+                if (
+                    disable_all_tools
+                    and knowledge_mcp_lease is not None
+                    and knowledge_mcp_lease.connected
+                ):
+                    for pattern in knowledge_tool_patterns:
+                        mcp_overrides[pattern] = False
                 if (
                     not disable_all_tools
                     and knowledge_mcp_lease is not None
@@ -4896,42 +4912,21 @@ class OpenCodeServeManager:
                     set_project_tool = str(
                         (knowledge_runtime or {}).get("set_project_tool") or ""
                     ).strip()
-                    projects_tool_ids = [
-                        tool_id
-                        for tool_id in knowledge_tool_ids
-                        if _tool_matches_mcp_tool(
-                            tool_id,
-                            knowledge_mcp_name,
-                            projects_tool,
-                        )
-                    ]
-                    set_project_tool_ids = [
-                        tool_id
-                        for tool_id in knowledge_tool_ids
-                        if _tool_matches_mcp_tool(
-                            tool_id,
-                            knowledge_mcp_name,
-                            set_project_tool,
-                        )
-                    ]
+                    projects_tool_ids = list(_opencode_mcp_tool_ids(
+                        knowledge_mcp_name,
+                        projects_tool,
+                    ))
+                    set_project_tool_ids = list(_opencode_mcp_tool_ids(
+                        knowledge_mcp_name,
+                        set_project_tool,
+                    ))
                     blocked_knowledge_tools = list(dict.fromkeys([
                         *projects_tool_ids,
                         *set_project_tool_ids,
                     ]))
-                    query_knowledge_tools = [
-                        tool_id
-                        for tool_id in knowledge_tool_ids
-                        if tool_id not in blocked_knowledge_tools
-                    ]
                     binding_error = ""
-                    if not knowledge_tool_ids:
-                        binding_error = "knowledge MCP tools were not discovered"
-                    elif not projects_tool or not set_project_tool:
+                    if not projects_tool or not set_project_tool:
                         binding_error = "knowledge control-tool configuration is incomplete"
-                    elif not projects_tool_ids or not set_project_tool_ids:
-                        binding_error = "knowledge control tools were not discovered"
-                    elif not query_knowledge_tools:
-                        binding_error = "knowledge MCP has no model-visible query tools"
                     else:
                         try:
                             if binding_workspace is None:
@@ -4943,7 +4938,6 @@ class OpenCodeServeManager:
                                     (knowledge_runtime or {}).get("project_id") or ""
                                 ),
                                 mcp_name=knowledge_mcp_name,
-                                allowed_tool_ids=query_knowledge_tools,
                                 blocked_tool_ids=blocked_knowledge_tools,
                             )
                         except Exception as exc:
@@ -4955,6 +4949,8 @@ class OpenCodeServeManager:
                                         active_session_id,
                                     ))
                     if binding_error:
+                        for pattern in knowledge_tool_patterns:
+                            mcp_overrides[pattern] = False
                         await self._disable_scan_mcp_lease(
                             client,
                             directory,
@@ -4967,15 +4963,16 @@ class OpenCodeServeManager:
                             f"error={binding_error}",
                         )
                     else:
-                        for tool_id in query_knowledge_tools:
-                            mcp_overrides[tool_id] = True
+                        for pattern in knowledge_tool_patterns:
+                            mcp_overrides[pattern] = True
                         for tool_id in blocked_knowledge_tools:
+                            mcp_overrides.pop(tool_id, None)
                             mcp_overrides[tool_id] = False
                         emit(
                             "session",
                             "KNOWLEDGE_BASE_MCP project_bound "
                             f"name={knowledge_mcp_name} "
-                            f"query_tools={len(query_knowledge_tools)}",
+                            "query_tools=dynamic",
                         )
                 if scan_mcp_lease is not None and scan_mcp_lease.connected and not source_available:
                     emit(
