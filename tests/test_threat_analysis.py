@@ -657,264 +657,171 @@ def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair() -> None:
     assert '"confirmed":' not in prompt
 
 
-def test_threat_audit_temporarily_merges_duplicate_leaf_paths() -> None:
-    nodes = [
-        {
-            "node_id": node_id,
-            "node_type": node_type,
-            "node_name": module_name,
-            "description": f"{module_name}说明",
-            "module_name": None if node_type == "根节点" else module_name,
-            "is_high_risk_module": high_risk,
-            "external_exposure": node_type == "叶子节点",
-            "external_interface_description": None,
-        }
-        for node_id, module_name, node_type, high_risk in [
-            ("NODE-A", "入口A", "叶子节点", True),
-            ("NODE-B", "处理模块B", "内部节点", True),
-            ("NODE-C", "普通内部模块C", "内部节点", False),
-            ("NODE-R", "攻击价值资产：关键服务", "根节点", False),
-        ]
-    ]
-    pattern = {
-        "pattern_id": "PATTERN-SHARED",
-        "pattern_name": "恶意输入",
-        "association_description": "外部输入可到达处理模块",
-    }
-
-    def attack_path(
-        path_id: str,
-        internal_id: str,
-        internal_name: str,
-    ) -> dict:
-        related = [{
-            "module_name": "入口A",
-            "node_id": "NODE-A",
-            "external_exposure": True,
-            "path_role": "外部攻击入口",
-            "association_description": "入口A接收输入",
-        }]
-        if internal_id == "NODE-B":
-            related.append({
-                "module_name": internal_name,
-                "node_id": internal_id,
-                "external_exposure": False,
-                "path_role": "直接资产影响模块",
-                "association_description": "处理不可信数据",
-            })
-        return {
-            "path_id": path_id,
-            "path_name": f"经{internal_name}攻击关键服务",
-            "node_ids": ["NODE-A", internal_id, "NODE-R"],
-            "edge_ids": [],
-            "path_description": f"入口A经{internal_name}到关键服务",
-            "related_high_risk_modules": related,
-            "attack_patterns": [pattern],
-        }
-
-    paths = [
-        attack_path("PATH-B", "NODE-B", "处理模块B"),
-        attack_path("PATH-C", "NODE-C", "普通内部模块C"),
-    ]
-    paths[1]["attack_patterns"].append({
-        "pattern_id": "PATTERN-C",
-        "pattern_name": "路径C专用攻击",
-        "association_description": "仅与路径C关联",
-    })
-    attack_tree_data = {
-        "attack_trees": [{
-            "tree_id": "TREE-1",
-            "value_asset": {
-                "asset_name": "关键服务",
-                "asset_description": "对外提供核心业务",
-            },
-            "nodes": nodes,
-            "edges": [],
-            "attack_paths": paths,
-        }],
-    }
-    high_risk_modules = [
-        {
-            "模块名称": module_name,
-            "代码目录": code_path,
-            "面临威胁": "恶意输入",
-            "是否外部暴露面": "是" if exposed else "否",
-            "判断为高风险模块的原因": f"{module_name}风险",
-        }
-        for module_name, code_path, exposed in [
-            ("入口A", ["src/entry", "src/shared/"], True),
-            ("处理模块B", ["src/b", "src\\shared"], False),
-        ]
-    ]
-
-    tasks = _tasks("scan-1", attack_tree_data, high_risk_modules)
-
-    assert {
-        (task["native_node_id"], task["method_node_id"])
-        for task in tasks
-    } == {
-        ("NODE-A", "PATTERN-SHARED"),
-        ("NODE-A", "PATTERN-C"),
-    }
-    shared = next(
-        task
-        for task in tasks
-        if task["method_node_id"] == "PATTERN-SHARED"
-    )
-    assert [item["path_id"] for item in shared["attack_path_contexts"]] == [
-        "PATH-B",
-        "PATH-C",
-    ]
-    assert [item["path"] for item in shared["code_paths"]] == [
-        "src/entry",
-        "src/shared",
-        "src/b",
-    ]
-    assert shared["legacy_multiple_paths"] is True
-    assert shared["legacy_path_count"] == 2
-    prompt = _threat_prompt(shared)
-    assert "- 攻击路径：\n" in prompt
-    assert (
-        "- 入口A -> 处理模块B -> 攻击价值资产：关键服务" in prompt
-    )
-    assert (
-        "- 入口A -> 普通内部模块C -> 攻击价值资产：关键服务" in prompt
-    )
-    assert "普通内部模块C :" not in prompt
-    assert prompt.count("src/shared") == 1
-
-    reversed_tasks = _tasks(
-        "scan-1",
-        {
-            "attack_trees": [{
-                **attack_tree_data["attack_trees"][0],
-                "attack_paths": list(reversed(paths)),
-            }],
-        },
-        high_risk_modules,
-    )
-    reversed_shared = next(
-        task
-        for task in reversed_tasks
-        if task["method_node_id"] == "PATTERN-SHARED"
-    )
-    assert reversed_shared["task_id"] == shared["task_id"]
-    assert (
-        reversed_shared["attack_path_fingerprint"]
-        == shared["attack_path_fingerprint"]
-    )
-
-
-def test_run_threat_audit_warns_once_for_legacy_duplicate_leaf_paths(
+def test_threat_audit_keeps_duplicate_local_ids_isolated_by_tree(
     tmp_path: Path,
 ) -> None:
-    project = tmp_path / "project"
-    project.mkdir()
-    attack_tree_path = tmp_path / "attack-trees.json"
-    high_risk_modules_path = tmp_path / "high-risk-modules.json"
-    attack_tree_path.write_text(json.dumps({
-        "attack_trees": [{
-            "tree_id": "TREE-LEGACY",
+    def tree(asset_name: str, internal_name: str) -> dict:
+        return {
+            "tree_id": "TREE-SHARED",
             "value_asset": {
-                "asset_name": "关键服务",
-                "asset_description": "核心业务能力",
+                "asset_name": asset_name,
+                "asset_description": f"{asset_name}说明",
             },
             "nodes": [
                 {
-                    "node_id": "LEAF",
+                    "node_id": "NODE-LEAF",
                     "node_type": "叶子节点",
-                    "node_name": "网络入口",
-                    "module_name": "网络入口",
+                    "node_name": "共享入口",
+                    "module_name": "共享入口",
                     "is_high_risk_module": True,
                 },
                 {
-                    "node_id": "INTERNAL-A",
+                    "node_id": "NODE-INTERNAL",
                     "node_type": "内部节点",
-                    "node_name": "处理器A",
-                    "module_name": "处理器A",
-                    "is_high_risk_module": False,
+                    "node_name": internal_name,
+                    "module_name": internal_name,
+                    "is_high_risk_module": True,
                 },
                 {
-                    "node_id": "INTERNAL-B",
-                    "node_type": "内部节点",
-                    "node_name": "处理器B",
-                    "module_name": "处理器B",
-                    "is_high_risk_module": False,
-                },
-                {
-                    "node_id": "ROOT",
+                    "node_id": "NODE-ROOT",
                     "node_type": "根节点",
-                    "node_name": "攻击价值资产：关键服务",
+                    "node_name": f"攻击价值资产：{asset_name}",
                     "module_name": None,
                     "is_high_risk_module": False,
                 },
             ],
-            "attack_paths": [
-                {
-                    "path_id": "PATH-A",
-                    "path_name": "路径A",
-                    "node_ids": ["LEAF", "INTERNAL-A", "ROOT"],
-                    "related_high_risk_modules": [{
-                        "node_id": "LEAF",
-                        "module_name": "网络入口",
-                    }],
-                    "attack_patterns": [{
-                        "pattern_id": "PATTERN-1",
-                        "pattern_name": "恶意输入",
-                    }],
-                },
-                {
-                    "path_id": "PATH-B",
-                    "path_name": "路径B",
-                    "node_ids": ["LEAF", "INTERNAL-B", "ROOT"],
-                    "related_high_risk_modules": [{
-                        "node_id": "LEAF",
-                        "module_name": "网络入口",
-                    }],
-                    "attack_patterns": [{
-                        "pattern_id": "PATTERN-1",
-                        "pattern_name": "恶意输入",
-                    }],
-                },
-            ],
-        }],
-    }), encoding="utf-8")
-    high_risk_modules_path.write_text(json.dumps([{
-        "模块名称": "网络入口",
-        "代码目录": "src/network",
-        "面临威胁": "恶意输入",
-    }]), encoding="utf-8")
-    events: list[dict] = []
+            "attack_paths": [{
+                "path_id": "PATH-SHARED",
+                "path_name": f"攻击{asset_name}",
+                "node_ids": ["NODE-LEAF", "NODE-INTERNAL", "NODE-ROOT"],
+                "related_high_risk_modules": [
+                    {"node_id": "NODE-LEAF", "module_name": "共享入口"},
+                    {"node_id": "NODE-INTERNAL", "module_name": internal_name},
+                ],
+                "attack_patterns": [{
+                    "pattern_id": "PATTERN-SHARED",
+                    "pattern_name": "恶意输入",
+                }],
+            }],
+        }
 
-    with patch(
-        "deephole_client.vulnerability_mining.engines.threat_audit.runner.run_opencode_task",
-        return_value=SimpleNamespace(
-            status="success",
-            structured=[],
-            text="[]",
-            output_source={},
-        ),
-    ):
-        result = asyncio.run(run_threat_audit(
-            project_path=project,
-            work_dir=tmp_path / "audit",
-            scan_id="scan-legacy-paths",
-            attack_tree_path=attack_tree_path,
-            high_risk_modules_path=high_risk_modules_path,
-            output=events.append,
-        ))
-
-    assert len(result["tasks"]) == 1
-    warnings = [
-        event
-        for event in events
-        if event["kind"] == "log" and event["message"].startswith("Warning:")
+    trees = [
+        tree("资产A", "处理模块A"),
+        tree("资产B", "处理模块B"),
     ]
-    assert len(warnings) == 1
-    assert warnings[0]["data"] == {
-        "surface_node_id": "TREE-LEGACY:LEAF",
-        "path_count": 2,
+    high_risk_modules = [
+        {
+            "模块名称": "共享入口",
+            "代码目录": "src/entry",
+            "面临威胁": "恶意输入",
+        },
+        {
+            "模块名称": "处理模块A",
+            "代码目录": "src/a",
+            "面临威胁": "资产A受损",
+        },
+        {
+            "模块名称": "处理模块B",
+            "代码目录": "src/b",
+            "面临威胁": "资产B受损",
+        },
+    ]
+
+    first_tree_task = _tasks(
+        "scan-1",
+        {"attack_trees": [trees[0]]},
+        high_risk_modules,
+    )[0]
+    tasks = _tasks(
+        "scan-1",
+        {"attack_trees": trees},
+        high_risk_modules,
+    )
+
+    assert len(tasks) == 2
+    assert tasks[0]["task_id"] == first_tree_task["task_id"]
+    assert tasks[0]["task_id"] != tasks[1]["task_id"]
+    assert (
+        tasks[0]["attack_path_fingerprint"]
+        != tasks[1]["attack_path_fingerprint"]
+    )
+    assert [task["surface_node_id"] for task in tasks] == [
+        "TREE-SHARED:NODE-LEAF",
+        "TREE-SHARED[tree-2]:NODE-LEAF",
+    ]
+    assert [task["asset_name"] for task in tasks] == ["资产A", "资产B"]
+    assert all(len(task["attack_path_contexts"]) == 1 for task in tasks)
+    assert all(len(task["native_attack_paths"]) == 1 for task in tasks)
+    assert [
+        task["attack_path_contexts"][0]["path_text"] for task in tasks
+    ] == [
+        "共享入口 -> 处理模块A -> 攻击价值资产：资产A",
+        "共享入口 -> 处理模块B -> 攻击价值资产：资产B",
+    ]
+    assert [item["path"] for item in tasks[0]["code_paths"]] == [
+        "src/entry",
+        "src/a",
+    ]
+    assert [item["path"] for item in tasks[1]["code_paths"]] == [
+        "src/entry",
+        "src/b",
+    ]
+    assert "处理模块B" not in _threat_prompt(tasks[0])
+    assert "资产B" not in _threat_prompt(tasks[0])
+    assert "处理模块A" not in _threat_prompt(tasks[1])
+    assert "资产A" not in _threat_prompt(tasks[1])
+
+    store = SqliteScanStore(tmp_path / "scan.db")
+    store.save_scan(*_scan("scan-1"))
+    for task in tasks:
+        store.upsert_threat_audit_task(
+            "scan-1",
+            ThreatAuditTask.model_validate(task),
+        )
+    assert len(store.list_threat_audit_tasks("scan-1")) == 2
+
+
+def test_threat_audit_rejects_multiple_paths_for_one_leaf() -> None:
+    tree = {
+        "tree_id": "TREE-INVALID",
+        "value_asset": {"asset_name": "关键服务"},
+        "nodes": [
+            {"node_id": "LEAF", "node_type": "叶子节点"},
+            {"node_id": "INTERNAL-A", "node_type": "内部节点"},
+            {"node_id": "INTERNAL-B", "node_type": "内部节点"},
+            {"node_id": "ROOT", "node_type": "根节点"},
+        ],
+        "attack_paths": [
+            {
+                "path_id": "PATH-A",
+                "node_ids": ["LEAF", "INTERNAL-A", "ROOT"],
+                "attack_patterns": [],
+            },
+            {
+                "path_id": "PATH-B",
+                "node_ids": ["LEAF", "INTERNAL-B", "ROOT"],
+                "attack_patterns": [],
+            },
+        ],
     }
+
+    with pytest.raises(ValueError, match="exactly one.*found 2"):
+        _tasks("scan-1", {"attack_trees": [tree]}, [])
+
+
+def test_threat_audit_rejects_leaf_without_attack_path() -> None:
+    tree = {
+        "tree_id": "TREE-INVALID",
+        "value_asset": {"asset_name": "关键服务"},
+        "nodes": [
+            {"node_id": "LEAF", "node_type": "叶子节点"},
+            {"node_id": "ROOT", "node_type": "根节点"},
+        ],
+        "attack_paths": [],
+    }
+
+    with pytest.raises(ValueError, match="exactly one.*found 0"):
+        _tasks("scan-1", {"attack_trees": [tree]}, [])
 
 
 def test_legacy_non_leaf_tasks_are_superseded_without_touching_unknowns(
@@ -1016,21 +923,30 @@ def test_threat_audit_task_storage_namespaces_nodes_by_tree(
         return {
             "tree_id": tree_id,
             "value_asset": {"asset_name": asset_name},
-            "nodes": [{
-                "node_id": "NODE-1",
-                "node_type": "叶子节点",
-                "node_name": "共享入口",
-                "description": "接收外部输入",
-                "module_name": "共享入口",
-                "is_high_risk_module": True,
-                "external_exposure": True,
-                "external_interface_description": "网络接口",
-            }],
+            "nodes": [
+                {
+                    "node_id": "NODE-1",
+                    "node_type": "叶子节点",
+                    "node_name": "共享入口",
+                    "description": "接收外部输入",
+                    "module_name": "共享入口",
+                    "is_high_risk_module": True,
+                    "external_exposure": True,
+                    "external_interface_description": "网络接口",
+                },
+                {
+                    "node_id": "ROOT-1",
+                    "node_type": "根节点",
+                    "node_name": f"攻击价值资产：{asset_name}",
+                    "module_name": None,
+                    "is_high_risk_module": False,
+                },
+            ],
             "edges": [],
             "attack_paths": [{
                 "path_id": "PATH-1",
                 "path_name": "共享路径",
-                "node_ids": ["NODE-1"],
+                "node_ids": ["NODE-1", "ROOT-1"],
                 "edge_ids": [],
                 "path_description": "外部输入进入共享入口",
                 "related_high_risk_modules": [{

@@ -124,20 +124,29 @@ def _write_threat_audit_inputs(
         "attack_trees": [{
             "tree_id": "TREE-CALLBACK",
             "value_asset": {"asset_name": "service"},
-            "nodes": [{
-                "node_id": "NODE-CALLBACK",
-                "node_type": "叶子节点",
-                "node_name": "parser",
-                "module_name": "parser",
-                "description": "parses external requests",
-                "is_high_risk_module": True,
-                "external_exposure": True,
-            }],
+            "nodes": [
+                {
+                    "node_id": "NODE-CALLBACK",
+                    "node_type": "叶子节点",
+                    "node_name": "parser",
+                    "module_name": "parser",
+                    "description": "parses external requests",
+                    "is_high_risk_module": True,
+                    "external_exposure": True,
+                },
+                {
+                    "node_id": "ROOT-CALLBACK",
+                    "node_type": "根节点",
+                    "node_name": "攻击价值资产：service",
+                    "module_name": None,
+                    "is_high_risk_module": False,
+                },
+            ],
             "attack_paths": [{
                 "path_id": "PATH-CALLBACK",
                 "path_name": "remote parser path",
                 "path_description": "socket input reaches parser",
-                "node_ids": ["NODE-CALLBACK"],
+                "node_ids": ["NODE-CALLBACK", "ROOT-CALLBACK"],
                 "related_high_risk_modules": [{
                     "module_name": "parser",
                     "node_id": "NODE-CALLBACK",
@@ -379,18 +388,27 @@ def test_threat_processes_run_with_task_agent_only() -> None:
                 "attack_trees": [{
                     "tree_id": "TREE-1",
                     "value_asset": {"asset_name": "service"},
-                    "nodes": [{
-                        "node_id": "NODE-1",
-                        "node_type": "叶子节点",
-                        "node_name": "parser",
-                        "module_name": "parser",
-                        "is_high_risk_module": True,
-                    }],
+                    "nodes": [
+                        {
+                            "node_id": "NODE-1",
+                            "node_type": "叶子节点",
+                            "node_name": "parser",
+                            "module_name": "parser",
+                            "is_high_risk_module": True,
+                        },
+                        {
+                            "node_id": "ROOT-1",
+                            "node_type": "根节点",
+                            "node_name": "攻击价值资产：service",
+                            "module_name": None,
+                            "is_high_risk_module": False,
+                        },
+                    ],
                     "attack_paths": [{
                         "path_id": "AP-1",
                         "path_name": "remote parser path",
                         "path_description": "socket input reaches parser",
-                        "node_ids": ["NODE-1"],
+                        "node_ids": ["NODE-1", "ROOT-1"],
                         "related_high_risk_modules": [{
                             "module_name": "parser",
                             "node_id": "NODE-1",
