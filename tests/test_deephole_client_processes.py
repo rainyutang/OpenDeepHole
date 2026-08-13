@@ -71,10 +71,16 @@ def _audit_item(
             "vuln_type": vuln_type,
             "impact": "机密性：无直接影响；完整性：无直接影响；可用性：进程崩溃",
             "vulnerable_code": f"{file}:{line} {function}\nunsafe();",
-            "call_chain": [
-                {"function": "entry", "file": "src/entry.c", "line": 1},
-                {"function": function, "file": file, "line": line},
-            ],
+            "call_chain": (
+                "- Entry: entry (src/entry.c:1)\n"
+                "- Call Stack:\n"
+                "entry (src/entry.c:1)\n"
+                f"  → {function} ({file}:{line})\n"
+                f"- Vulnerable Frame: {function} ({file}:{line})\n"
+                "- Source To Sink Stack:\n"
+                "input [SOURCE]\n"
+                f"  → {function} ({file}:{line}) [SINK]"
+            ),
             "attack_entry": "外部请求由 entry 处理",
             "root_cause": "缺少必要校验",
             "trigger_conditions": "攻击者提交畸形输入",
@@ -367,8 +373,7 @@ def test_candidate_prompt_uses_existing_related_variables_without_clues() -> Non
     assert prompt == (
         "/oob-audit\n"
         "你是一个白盒审计专家，使用该skill审计文件src/copy.c中28行"
-        "函数copy_payload变量length、destination是否存在oob问题，是否可以触发。\n"
-        "输出的 `call_chain` 必须以外部入口函数为起点。"
+        "函数copy_payload变量length、destination是否存在oob问题，是否可以触发。"
     )
 
 
@@ -474,11 +479,9 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         assert audit["vulnerabilities"][0]["analysis_source"] == "threat_audit"
         assert audit["vulnerabilities"][0]["confirmed"] is True
         assert audit["vulnerabilities"][0]["vuln_type"] == "oob"
-        assert audit["vulnerabilities"][0]["call_chain"][0] == {
-            "function": "entry",
-            "file": "src/entry.c",
-            "line": 1,
-        }
+        assert audit["vulnerabilities"][0]["call_chain"].startswith(
+            "- Entry: entry (src/entry.c:1)\n- Call Stack:"
+        )
         assert "JSON Schema" in run_task.await_args.kwargs["prompt"]
         assert "裸 JSON List" in run_task.await_args.kwargs["prompt"]
         assert run_task.await_args.kwargs["output_schema"]["type"] == "array"
@@ -961,7 +964,8 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         assert "Audit the candidate." not in prompt
         assert "candidate" not in prompt
         assert "使用 `product-info` 提供的工具获取产品知识" in prompt
-        assert "call_chain` 必须以外部入口函数为起点" in prompt
+        assert "## call_chain" in prompt
+        assert "## trigger_conditions" in prompt
         assert "JSON Schema" in prompt
         assert '"vulnerable_code"' in prompt
         assert '"markdown_reports"' not in prompt

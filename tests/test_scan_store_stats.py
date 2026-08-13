@@ -282,50 +282,89 @@ class ScanHistoryPaginationTests(unittest.TestCase):
 
 
 class VulnerabilityStoreTests(unittest.TestCase):
-    def test_structured_call_chain_round_trips_with_legacy_compatibility(
+    def test_markdown_call_chain_round_trips_with_legacy_array_compatibility(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")
             store.save_scan(*_make_scan("scan-chain"))
-            structured = _make_vuln(1).model_copy(update={
-                "call_chain": [
-                    {
-                        "function": "handle_packet",
-                        "file": "src/server.c",
-                        "line": 10,
-                    },
-                    {
-                        "function": "fn1",
-                        "file": "f1.c",
-                        "line": 1,
-                    },
-                ],
+            markdown = (
+                "- Entry: handle_packet (src/server.c:10)\n"
+                "- Call Stack:\n"
+                "handle_packet (src/server.c:10)\n"
+                "  → fn1 (f1.c:1)\n"
+                "- Vulnerable Frame: fn1 (f1.c:1)\n"
+                "- Source To Sink Stack:\n"
+                "packet [SOURCE]\n"
+                "  → fn1 (f1.c:1) [SINK]"
+            )
+            current = Vulnerability(**{
+                **_make_vuln(1).model_dump(mode="json"),
+                "call_chain": markdown,
             })
-            legacy = _make_vuln(2).model_copy(update={
-                "call_chain": ["legacy_entry", "fn2"],
-            })
+            legacy = _make_vuln(2)
 
-            store.add_vulnerability("scan-chain", structured)
+            store.add_vulnerability("scan-chain", current)
             store.add_vulnerability("scan-chain", legacy)
+            store._conn.execute(
+                "UPDATE vulnerabilities SET call_chain = ? WHERE scan_id = ? AND idx = ?",
+                (
+                    json.dumps([
+                        "legacy_entry",
+                        {
+                            "function": "fn2",
+                            "file": "f2.c",
+                            "line": 2,
+                        },
+                    ]),
+                    "scan-chain",
+                    1,
+                ),
+            )
+            store._conn.commit()
 
             stored = store.get_vulnerabilities("scan-chain")
+            self.assertEqual(stored[0].call_chain, markdown)
             self.assertEqual(
-                stored[0].model_dump(mode="json")["call_chain"],
-                [
-                    {
-                        "function": "handle_packet",
-                        "file": "src/server.c",
-                        "line": 10,
-                    },
-                    {
-                        "function": "fn1",
-                        "file": "f1.c",
-                        "line": 1,
-                    },
-                ],
+                stored[1].call_chain,
+                (
+                    "- Entry: legacy_entry\n"
+                    "- Call Stack:\n"
+                    "legacy_entry\n"
+                    "  → fn2 (f2.c:2)\n"
+                    "- Vulnerable Frame: fn2 (f2.c:2)\n"
+                    "- Source To Sink Stack:\n"
+                    "legacy_entry\n"
+                    "  → fn2 (f2.c:2)"
+                ),
             )
-            self.assertEqual(stored[1].call_chain, ["legacy_entry", "fn2"])
+            self.assertEqual(
+                Vulnerability(**{
+                    **_make_vuln(3).model_dump(mode="json"),
+                    "call_chain": [
+                        {
+                            "function": "handle_packet",
+                            "file": "src/server.c",
+                            "line": 10,
+                        },
+                        {
+                            "function": "fn1",
+                            "file": "f1.c",
+                            "line": 1,
+                        },
+                    ],
+                }).call_chain,
+                (
+                    "- Entry: handle_packet (src/server.c:10)\n"
+                    "- Call Stack:\n"
+                    "handle_packet (src/server.c:10)\n"
+                    "  → fn1 (f1.c:1)\n"
+                    "- Vulnerable Frame: fn1 (f1.c:1)\n"
+                    "- Source To Sink Stack:\n"
+                    "handle_packet (src/server.c:10)\n"
+                    "  → fn1 (f1.c:1)"
+                ),
+            )
 
     def test_vulnerability_audit_index_round_trips_and_upsert_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -338,7 +377,12 @@ class VulnerabilityStoreTests(unittest.TestCase):
             store.add_vulnerability("scan-1", timeout)
 
             replacement = _make_vuln(2, audit_index=3).model_copy(update={
-                "call_chain": ["entry_fn", "fn2"],
+                "call_chain": (
+                    "- Entry: entry_fn\n"
+                    "- Call Stack:\nentry_fn\n  → fn2\n"
+                    "- Vulnerable Frame: fn2\n"
+                    "- Source To Sink Stack:\ninput [SOURCE]\n  → fn2 [SINK]"
+                ),
                 "impact": "机密性：无直接影响；完整性：无直接影响；可用性：进程崩溃",
                 "vulnerable_code": "f2.c:2 fn2\nunsafe();",
                 "attack_entry": "外部请求进入 entry_fn",
@@ -352,7 +396,7 @@ class VulnerabilityStoreTests(unittest.TestCase):
             stored = store.get_vulnerabilities("scan-1")
             self.assertEqual([v.audit_index for v in stored], [7, 3])
             self.assertEqual(stored[1].ai_verdict, "confirmed")
-            self.assertEqual(stored[1].call_chain, ["entry_fn", "fn2"])
+            self.assertIn("- Entry: entry_fn", stored[1].call_chain)
             self.assertIn("可用性", stored[1].impact)
             self.assertEqual(stored[1].vulnerable_code, "f2.c:2 fn2\nunsafe();")
             self.assertEqual(stored[1].attack_entry, "外部请求进入 entry_fn")

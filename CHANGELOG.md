@@ -2,6 +2,8 @@
 
 ## 2026-08-13
 
+- **修复** “发现的问题”详情不再把引擎完整报告和同一组结构化字段重复展示；页面与单条导出统一只渲染一份中文章节 Markdown 报告，并保留字段内软换行
+- **变更** 候选点与威胁审计的叙述字段 Prompt 按 JSON Schema 字段名逐节约束，章节顺序统一为 `description`、`attack_entry`、`trigger_conditions`、`vulnerable_code`、`root_cause`、`call_chain`、`impact`；`call_chain` 改为 LLM 直接输出的 Markdown 字符串，读取历史数组时自动转换兼容
 - **修复** 威胁审计任务改为按最终 `attack_trees` 数组中的树实例严格隔离；不同树复用相同 `tree_id`、叶子 `node_id` 和攻击模式 ID 时不再被全局聚合为一个任务，每个任务只携带所属树中该叶子到价值资产的唯一完整路径，叶子缺少路径或对应多条路径会明确报告攻击树数据一致性错误，现有 Prompt 与漏洞 JSON 输出契约保持不变
 - **修复** Windows 下停止并重启 `run_agent.bat` 后，旧 OpenCode Serve PID 仍被 `netstat` 标记为监听、但 TCP 连接探测暂时失败时，归属恢复逻辑会误判端口已释放并跳过 `taskkill`，随后因同一 PID 仍在监听而让威胁分析等模型任务稳定启动失败：回收现在直接以 ownership marker 登记 PID 与目标端口监听表的交集为准，并按该 PID 是否离开监听表验证结果；终止失败仍保留 marker 供重试，未知监听者保持不终止
 

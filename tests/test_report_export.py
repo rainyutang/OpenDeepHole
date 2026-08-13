@@ -374,6 +374,113 @@ class ReportExportTests(unittest.TestCase):
         _, rows = self._rows(self._download(scan))
         self.assertEqual(len(rows), 2)
 
+    def test_single_report_keeps_one_core_markdown_in_chinese_section_order(self) -> None:
+        vulnerability = _vulnerability("markdown")
+        vulnerability.vulnerability_report = """\
+# 漏洞报告
+
+## 漏洞描述
+
+第一行
+第二行
+
+## 攻击入口
+
+入口
+
+## 触发条件
+
+条件
+
+## 漏洞代码
+
+代码
+
+## 漏洞根因
+
+根因
+
+## 漏洞调用链
+
+调用链
+
+## 漏洞影响
+
+影响
+"""
+        scan = ScanStatus(
+            scan_id="scan-1",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[vulnerability],
+        )
+
+        markdown = self._download_single(scan, 0).body.decode("utf-8")
+
+        self.assertEqual(markdown.count("# 漏洞报告"), 1)
+        self.assertEqual(markdown.count("## 漏洞描述"), 1)
+        self.assertNotIn("## 漏洞挖掘引擎报告", markdown)
+        self.assertIn("第一行\n第二行", markdown)
+        headings = [
+            "## 漏洞描述",
+            "## 攻击入口",
+            "## 触发条件",
+            "## 漏洞代码",
+            "## 漏洞根因",
+            "## 漏洞调用链",
+            "## 漏洞影响",
+        ]
+        offsets = [markdown.index(heading) for heading in headings]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertIn("## 平台信息", markdown)
+
+    def test_single_report_builds_one_markdown_report_from_structured_fields(self) -> None:
+        vulnerability = _vulnerability("structured")
+        vulnerability.vulnerability_report = ""
+        vulnerability.attack_entry = "HTTP `POST /parse`"
+        vulnerability.trigger_conditions = "攻击者可提交超长负载。"
+        vulnerability.vulnerable_code = "```c\nunsafe(input); // SINK\n```"
+        vulnerability.root_cause = "`input` 未经过长度校验。"
+        vulnerability.call_chain = (
+            "- Entry: handle_request (src/server.c:8)\n"
+            "- Call Stack:\n"
+            "handle_request (src/server.c:8)\n"
+            "  → structured (src/structured.c:10)\n"
+            "- Vulnerable Frame: structured (src/structured.c:10)\n"
+            "- Source To Sink Stack:\n"
+            "input [SOURCE]\n"
+            "  → unsafe (src/structured.c:10) [SINK]"
+        )
+        vulnerability.impact = "可能影响可用性。"
+        scan = ScanStatus(
+            scan_id="scan-1",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[vulnerability],
+        )
+
+        markdown = self._download_single(scan, 0).body.decode("utf-8")
+
+        headings = [
+            "## 漏洞描述",
+            "## 攻击入口",
+            "## 触发条件",
+            "## 漏洞代码",
+            "## 漏洞根因",
+            "## 漏洞调用链",
+            "## 漏洞影响",
+        ]
+        self.assertEqual([markdown.count(heading) for heading in headings], [1] * 7)
+        self.assertEqual(
+            [markdown.index(heading) for heading in headings],
+            sorted(markdown.index(heading) for heading in headings),
+        )
+        self.assertIn("- Entry: handle_request", markdown)
+
     def test_public_csv_route_forwards_filters(self) -> None:
         user = User(user_id="owner", username="owner", role="user")
         expected = Response(content="ok")

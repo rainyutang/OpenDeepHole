@@ -5609,7 +5609,7 @@ function MarkdownContent({ content }: { content: string }) {
         h1: ({ children }) => <h1 className="mb-4 text-xl font-semibold text-white">{children}</h1>,
         h2: ({ children }) => <h2 className="mt-6 mb-2 text-base font-semibold text-purple-100">{children}</h2>,
         h3: ({ children }) => <h3 className="mt-4 mb-2 text-sm font-semibold text-slate-100">{children}</h3>,
-        p: ({ children }) => <p className="my-2 text-sm leading-7 text-slate-300">{children}</p>,
+        p: ({ children }) => <p className="my-2 whitespace-pre-wrap text-sm leading-7 text-slate-300">{children}</p>,
         ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-5 text-sm leading-relaxed text-slate-300 marker:text-purple-400">{children}</ul>,
         ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-5 text-sm leading-relaxed text-slate-300 marker:text-purple-400">{children}</ol>,
         li: ({ children }) => <li>{children}</li>,

@@ -234,45 +234,6 @@ def _threat_analysis_method_selection(
         return None
 
 
-def _json_call_chain(value: str | None) -> list[dict | str]:
-    try:
-        data = json.loads(value or "[]")
-    except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
-    result: list[dict | str] = []
-    for item in data:
-        if isinstance(item, dict):
-            function = str(item.get("function") or "").strip()
-            file_path = str(item.get("file") or "").strip()
-            try:
-                line = int(item.get("line") or 0)
-            except (TypeError, ValueError):
-                line = 0
-            if function and file_path and line > 0:
-                result.append({
-                    "function": function,
-                    "file": file_path,
-                    "line": line,
-                })
-            continue
-        function = str(item or "").strip()
-        if function:
-            result.append(function)
-    return result
-
-
-def _call_chain_json(values: list[object]) -> str:
-    normalized = [
-        item.model_dump(mode="json")
-        if hasattr(item, "model_dump")
-        else item
-        for item in values
-    ]
-    return json.dumps(normalized, ensure_ascii=False)
-
-
 def _output_source(value: str | None) -> OutputSource:
     try:
         data = json.loads(value or "{}")
@@ -325,11 +286,7 @@ def _vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
         file=row["file"],
         line=row["line"],
         function=row["function"],
-        call_chain=(
-            _json_call_chain(row["call_chain"])
-            if "call_chain" in keys
-            else []
-        ) or [row["function"]],
+        call_chain=(row["call_chain"] if "call_chain" in keys else "") or "",
         vuln_type=row["vuln_type"],
         severity=row["severity"],
         description=row["description"],
@@ -523,7 +480,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     file                TEXT NOT NULL,
     line                INTEGER NOT NULL,
     function            TEXT NOT NULL,
-    call_chain          TEXT NOT NULL DEFAULT '[]',
+    call_chain          TEXT NOT NULL DEFAULT '',
     vuln_type           TEXT NOT NULL,
     severity            TEXT NOT NULL,
     description         TEXT NOT NULL,
@@ -1299,7 +1256,7 @@ class SqliteScanStore(ScanStoreBase):
             )
         if "call_chain" not in vuln_cols:
             self._conn.execute(
-                "ALTER TABLE vulnerabilities ADD COLUMN call_chain TEXT NOT NULL DEFAULT '[]'"
+                "ALTER TABLE vulnerabilities ADD COLUMN call_chain TEXT NOT NULL DEFAULT ''"
             )
         if "vulnerability_report" not in vuln_cols:
             self._conn.execute(
@@ -2963,7 +2920,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.file,
                     vuln.line,
                     vuln.function,
-                    _call_chain_json(vuln.call_chain),
+                    vuln.call_chain,
                     vuln.vuln_type,
                     vuln.severity,
                     vuln.description,
@@ -3072,7 +3029,7 @@ class SqliteScanStore(ScanStoreBase):
                     """,
                     (
                         vuln.audit_index,
-                        _call_chain_json(vuln.call_chain),
+                        vuln.call_chain,
                         vuln.severity,
                         vuln.description,
                         vuln.impact,
@@ -3130,7 +3087,7 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.file,
                     vuln.line,
                     vuln.function,
-                    _call_chain_json(vuln.call_chain),
+                    vuln.call_chain,
                     vuln.vuln_type,
                     vuln.severity,
                     vuln.description,

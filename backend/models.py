@@ -10,6 +10,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from backend.call_chain import normalize_call_chain_markdown
+
 
 STATIC_CANDIDATE_ENGINE_ID = "static_candidate"
 STATIC_CANDIDATE_ENGINE_LABEL = "DeepHole基于代码风险点的漏洞挖掘引擎"
@@ -142,20 +144,12 @@ class OutputSource(BaseModel):
     serve_session_id: str = ""
 
 
-class CallChainEntry(BaseModel):
-    """One function location in an externally reachable vulnerability path."""
-
-    function: str
-    file: str
-    line: int = Field(ge=1)
-
-
 class Vulnerability(BaseModel):
     """A confirmed or assessed vulnerability after AI analysis."""
     file: str
     line: int
     function: str
-    call_chain: list[CallChainEntry | str] = []
+    call_chain: str = ""
     vuln_type: str
     severity: str        # "critical", "high", "medium", "low"
     description: str
@@ -185,6 +179,13 @@ class Vulnerability(BaseModel):
     threat_method_node_id: str = ""
     threat_code_path: str = ""
     output_source: OutputSource = Field(default_factory=OutputSource)
+
+    @field_validator("call_chain", mode="before")
+    @classmethod
+    def _normalize_call_chain(cls, value):
+        if value is not None and not isinstance(value, (str, list, tuple)):
+            raise ValueError("call_chain must be a Markdown string")
+        return normalize_call_chain_markdown(value)
 
     @model_validator(mode="after")
     def _canonicalize_engine_label(self):

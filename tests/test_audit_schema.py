@@ -5,11 +5,13 @@ import json
 import pytest
 
 from deephole_client.vulnerability_mining.engines.static_candidate.candidate_audit.audit_schema import (
+    AUDIT_FIELD_INSTRUCTIONS as CANDIDATE_FIELD_INSTRUCTIONS,
     VULNERABILITY_ITEM_SCHEMA,
     VULNERABILITY_LIST_SCHEMA,
     audit_output_instruction,
 )
 from deephole_client.vulnerability_mining.engines.threat_audit.audit_schema import (
+    AUDIT_FIELD_INSTRUCTIONS as THREAT_FIELD_INSTRUCTIONS,
     THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
     threat_audit_output_instruction,
 )
@@ -25,24 +27,102 @@ def _confirmed_item(function: str = "parse_payload") -> dict:
         "line": 42,
         "description": "解析外部数据时缺少长度校验，可触发越界读取",
         "vuln_type": "越界读取（CWE-125）",
-        "impact": "机密性：可能泄露内存；完整性：无直接影响；可用性：可能崩溃",
-        "vulnerable_code": "src/parser.c:42 parse_payload\nvalue = payload[index];",
-        "call_chain": [
-            {
-                "function": "handle_request",
-                "file": "src/server.c",
-                "line": 12,
-            },
-            {
-                "function": function,
-                "file": "src/parser.c",
-                "line": 35,
-            },
-        ],
         "attack_entry": "网络请求进入 handle_request",
-        "root_cause": "使用外部长度前未验证缓冲区边界",
         "trigger_conditions": "攻击者提交长度字段大于实际负载的报文",
+        "vulnerable_code": "src/parser.c:42 parse_payload\nvalue = payload[index];",
+        "root_cause": "使用外部长度前未验证缓冲区边界",
+        "call_chain": (
+            "- Entry: handle_request (src/server.c:12)\n"
+            "- Call Stack:\n"
+            "handle_request (src/server.c:12)\n"
+            f"  → {function} (src/parser.c:35)\n"
+            f"- Vulnerable Frame: {function} (src/parser.c:35)\n"
+            "- Source To Sink Stack:\n"
+            "request.length [SOURCE]\n"
+            f"  → {function} (src/parser.c:42) [SINK]"
+        ),
+        "impact": "机密性：可能泄露内存；完整性：无直接影响；可用性：可能崩溃",
     }
+
+
+EXPECTED_FIELD_INSTRUCTIONS = """\
+## description
+一句话说明漏洞是什么（漏洞函数、漏洞类型、漏洞场景）、谁可以触发、会造成什么影响。
+
+## attack_entry
+描述这个漏洞的真实攻击入口：
+- 入口类型（HTTP route、RPC method、CLI 参数、文件解析、socket、IPC、插件 hook、后台任务、webhook 等）
+- 谁可以触发该入口，需要什么认证、权限、配置或环境前提
+- 攻击者可控输入从哪里进入，关键字段或参数是什么
+- 进入漏洞路径后的首个处理函数，以及从入口到漏洞函数的高层路径
+
+## trigger_conditions
+说明触发入口、身份前提、数据流和控制流。
+
+## vulnerable_code
+- Function:
+- File:
+- Lines:
+- Snippet:
+- Context:
+
+要求：
+- 必须明确写出漏洞函数名
+- 必须贴出函数漏洞代码片段，同时在代码片段中标注漏洞关键信息，在 `Context` 里补充必要上下文
+
+## root_cause
+详细解释漏洞成因：
+- 攻击者可控输入来自哪里
+- 经过了哪些转换或拼接
+- 哪个校验、编码、授权或隔离假设失效
+- 为什么这会导致真实可利用影响
+
+## call_chain
+- Entry:
+- Call Stack:
+- Vulnerable Frame:
+- Source To Sink Stack:
+
+要求：
+- 必须给出完整调用栈信息，从可触发入口一直写到漏洞函数
+- `Call Stack` 按时间顺序逐层展开，至少覆盖入口、关键中间函数、漏洞函数、sink
+- 如果某一层是条件分支、回调、虚函数分派、模板实例化或异步调度，要写清楚
+
+调用链的形式参考：
+
+CBTP_DhcpMsgProc (cbtp_msg.c:209)
+  → cbtpTopoChangedMsgProc (cbtp_event.c:744)
+    → cbtpGetBbuTopoInfo (cbtp_event.c:849)
+      → fnTomTOPOGetDhcpTopInfo [RRE_GPFN全局函数指针回调，当前唯一注册: TomTOPOGetDhcpTopInfo]
+      → cbtpArray2Str (cbtp_fsm.c:2790) [SINK: ulLength未校验即作为循环上界]
+
+## impact
+说明保密性、完整性、可用性或租户隔离方面的影响。"""
+
+
+def test_audit_field_instructions_match_public_schema_exactly() -> None:
+    assert CANDIDATE_FIELD_INSTRUCTIONS == EXPECTED_FIELD_INSTRUCTIONS
+    assert THREAT_FIELD_INSTRUCTIONS == EXPECTED_FIELD_INSTRUCTIONS
+
+    field_names = [
+        line.removeprefix("## ")
+        for line in EXPECTED_FIELD_INSTRUCTIONS.splitlines()
+        if line.startswith("## ")
+    ]
+    assert field_names == [
+        "description",
+        "attack_entry",
+        "trigger_conditions",
+        "vulnerable_code",
+        "root_cause",
+        "call_chain",
+        "impact",
+    ]
+    assert field_names == [
+        name
+        for name in VULNERABILITY_ITEM_SCHEMA["properties"]
+        if name in field_names
+    ]
 
 
 @pytest.mark.parametrize(
@@ -63,19 +143,16 @@ def _confirmed_item(function: str = "parse_payload") -> dict:
         ),
     ],
 )
-def test_audit_output_instructions_require_direct_exploitability_evidence(
+def test_audit_output_instructions_include_markdown_field_contract(
     instruction: str,
 ) -> None:
-    for expected in (
-        "最小完整真实源码",
-        "外部输入的读取/赋值",
-        "相关 Guard（若存在）",
-        "最终危险操作",
-        "可控输入 -> 数据流/调用链 -> Guard -> 危险操作 -> 可利用性",
-        "攻击者为什么能够触发",
-        "不得只写“构造恶意输入”",
-    ):
-        assert expected in instruction
+    assert EXPECTED_FIELD_INSTRUCTIONS in instruction
+    assert instruction.index("## attack_entry") < instruction.index("## trigger_conditions")
+    assert instruction.index("## trigger_conditions") < instruction.index("## vulnerable_code")
+    assert instruction.index("## call_chain") < instruction.index("JSON Schema")
+    assert '"call_chain":{"type":"string","minLength":1}' in instruction
+    assert "必须使用 Markdown 字符串" in instruction
+    assert "整合为完整 Markdown 漏洞报告" in instruction
 
 
 def test_candidate_output_instruction_requires_effective_guard_evidence() -> None:
@@ -87,15 +164,6 @@ def test_candidate_output_instruction_requires_effective_guard_evidence() -> Non
 
     assert "有效 Guard（校验/边界检查）或不可满足约束所在的函数/位置" in instruction
     assert "攻击者输入为什么无法到达危险状态" in instruction
-    assert "不得判定为已确认漏洞" in instruction
-
-
-def test_threat_output_instruction_omits_effectively_guarded_findings() -> None:
-    instruction = threat_audit_output_instruction(
-        THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
-    )
-
-    assert "若 Guard 能完整阻断所有外部输入路径，不得输出该漏洞" in instruction
 
 
 def test_candidate_schema_accepts_one_false_result() -> None:
@@ -152,18 +220,13 @@ def test_candidate_schema_requires_all_confirmed_fields() -> None:
     "call_chain",
     [
         ["handle_request", "parse_payload"],
-        [{"function": "handle_request", "file": "src/server.c"}],
-        [{"function": "handle_request", "file": "src/server.c", "line": 0}],
-        [{
-            "function": "handle_request",
-            "file": "src/server.c",
-            "line": 12,
-            "extra": "not allowed",
-        }],
+        [],
+        {"function": "handle_request", "file": "src/server.c", "line": 12},
+        "",
     ],
 )
-def test_candidate_schema_rejects_invalid_call_chain_items(
-    call_chain: list,
+def test_candidate_schema_rejects_non_markdown_call_chain(
+    call_chain: object,
 ) -> None:
     value = _confirmed_item()
     value["call_chain"] = call_chain

@@ -25,7 +25,7 @@ VULNERABILITY_RESULTS_SCHEMA: dict[str, Any] = {
 AUDITED_VULNERABILITY_RESULT_SCHEMA: dict[str, Any] = {
     **VULNERABILITY_RESULT_SCHEMA,
     "vuln_type": str,
-    "call_chain": [str],
+    "call_chain": str,
 }
 
 AUDITED_VULNERABILITY_RESULTS_SCHEMA: dict[str, Any] = {
@@ -66,11 +66,7 @@ AUDITED_VULNERABILITY_RESULT_JSON_SCHEMA: dict[str, Any] = {
     "properties": {
         **VULNERABILITY_RESULT_JSON_SCHEMA["properties"],
         "vuln_type": {"type": "string", "minLength": 1},
-        "call_chain": {
-            "type": "array",
-            "minItems": 1,
-            "items": {"type": "string", "minLength": 1},
-        },
+        "call_chain": {"type": "string", "minLength": 1},
     },
     "required": list(AUDITED_VULNERABILITY_RESULT_SCHEMA),
     "additionalProperties": True,
@@ -135,9 +131,9 @@ AUDITED_VULNERABILITY_RESULT_JSON_INSTRUCTION = """\
   "line": 0,
   "function": "真实问题函数名；没有则为空字符串",
   "vuln_type": "真实漏洞类型",
-  "call_chain": ["外部入口函数", "中间函数", "真实问题函数"]
+  "call_chain": "- Entry: 外部入口函数\\n- Call Stack:\\n外部入口函数\\n  → 中间函数\\n    → 真实问题函数\\n- Vulnerable Frame: 真实问题函数\\n- Source To Sink Stack:\\n外部输入\\n  → 真实问题函数"
 }
-`call_chain` 必须按外部可达入口到漏洞函数的顺序填写；第一个函数是验证入口，最后一个函数应为 `function`。
+`call_chain` 必须是 Markdown 字符串，从外部可达入口按顺序写到漏洞函数。
 `severity` 只使用 "high"、"medium"、"low" 或现有任务明确要求的值；`line` 必须是整数。
 """
 
@@ -155,12 +151,12 @@ AUDITED_VULNERABILITY_RESULTS_JSON_INSTRUCTION = """\
       "line": 0,
       "function": "真实问题函数名；没有则为空字符串",
       "vuln_type": "真实漏洞类型",
-      "call_chain": ["外部入口函数", "中间函数", "真实问题函数"]
+      "call_chain": "- Entry: 外部入口函数\\n- Call Stack:\\n外部入口函数\\n  → 中间函数\\n    → 真实问题函数\\n- Vulnerable Frame: 真实问题函数\\n- Source To Sink Stack:\\n外部输入\\n  → 真实问题函数"
     }
   ]
 }
 每个真实问题使用一个 results 元素；没有真实问题时仍输出一个 confirmed=false 的元素。
-每个 `call_chain` 必须按外部可达入口到漏洞函数的顺序填写；第一个函数是验证入口，最后一个函数应为 `function`。
+每个 `call_chain` 必须是 Markdown 字符串，从外部可达入口按顺序写到漏洞函数。
 """
 
 

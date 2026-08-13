@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from backend.checker_sync import build_checker_packages
+from backend.call_chain import call_chain_entry_function
 from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
@@ -658,12 +659,7 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
             "root_cause": v.root_cause,
             "trigger_conditions": v.trigger_conditions,
             "impact": v.impact,
-            "call_chain": [
-                item.model_dump(mode="json")
-                if hasattr(item, "model_dump")
-                else item
-                for item in (v.call_chain or [])
-            ],
+            "call_chain": v.call_chain,
         }
         if i in latest_fp_results:
             reviewed.append(item)
@@ -3161,40 +3157,6 @@ def _append_validation_markdown(lines: list[str], validation: VulnerabilityValid
                     lines.append("")
 
 
-def _normalized_call_chain(value: object) -> list[dict[str, object]]:
-    result: list[dict[str, object]] = []
-    for item in value or []:
-        if hasattr(item, "model_dump"):
-            item = item.model_dump(mode="json")
-        if isinstance(item, dict):
-            function = str(item.get("function") or "").strip()
-            file_path = str(item.get("file") or "").strip()
-            try:
-                line = int(item.get("line") or 0)
-            except (TypeError, ValueError):
-                line = 0
-            if function:
-                result.append({
-                    "function": function,
-                    "file": file_path,
-                    "line": line,
-                })
-            continue
-        function = str(item or "").strip()
-        if function:
-            result.append({"function": function, "file": "", "line": 0})
-    return result
-
-
-def _call_chain_label(item: dict[str, object]) -> str:
-    function = str(item.get("function") or "") or "未知函数"
-    file_path = str(item.get("file") or "")
-    line = int(item.get("line") or 0)
-    if file_path and line > 0:
-        return f"{function} — {file_path}:{line}"
-    return function
-
-
 def _vuln_report_markdown(
     idx,
     vuln,
@@ -3209,107 +3171,38 @@ def _vuln_report_markdown(
         "medium": "一般",
         "low": "提示",
     }
-    severity = str(vuln.severity or "")
-    severity_text = (
-        f"{severity_labels[severity]} ({severity})"
-        if severity in severity_labels
-        else severity or "未知"
+    from deephole_client.vulnerability_mining.engine_report import (
+        build_engine_vulnerability_report,
     )
-    vuln_type = str(vuln.vuln_type or "").strip() or "未知类型"
-    file_path = str(vuln.file or "").strip() or "未知文件"
-    line = int(vuln.line or 0)
-    line_text = str(line) if line > 0 else "未知"
-    function = str(vuln.function or "").strip() or "未知函数"
-    lines: list[str] = []
-    lines.append(
-        f"# 漏洞报告 — {vuln_type} @ {file_path}:{line_text}"
-    )
-    lines.append("")
-    lines.append("| 字段 | 内容 |")
-    lines.append("| --- | --- |")
-    lines.append(f"| 是否是问题 | {'是' if vuln.confirmed else '否'} |")
-    lines.append(
-        f"| 漏洞挖掘引擎 | {vuln.engine_label} ({vuln.engine_id}) |"
-    )
-    lines.append(f"| 严重程度 | {severity_text} |")
-    lines.append(f"| 漏洞文件 | {file_path} |")
-    lines.append(f"| 漏洞函数 | {function} |")
-    lines.append(f"| 漏洞行号 | {line_text} |")
-    lines.append(f"| 漏洞类型 | {vuln_type} |")
-    call_chain = _normalized_call_chain(
-        getattr(vuln, "call_chain", None) or [],
-    )
-    if not call_chain and vuln.function:
-        call_chain = [{
-            "function": vuln.function,
-            "file": vuln.file,
-            "line": int(getattr(vuln, "function_start_line", None) or vuln.line),
-        }]
-    if call_chain:
-        lines.append(
-            f"| 验证入口函数 | {call_chain[0]['function']} |"
-        )
+
+    vulnerability_report = str(getattr(vuln, "vulnerability_report", "") or "").strip()
+    if not vulnerability_report:
+        vulnerability_report = build_engine_vulnerability_report(
+            vuln.model_dump(mode="json")
+        ).strip()
+    lines: list[str] = [vulnerability_report, ""]
+
+    platform_details = [
+        f"- **结果索引**：{idx}",
+        f"- **漏洞挖掘引擎**：{vuln.engine_label} ({vuln.engine_id})",
+    ]
+    validation_entry = call_chain_entry_function(getattr(vuln, "call_chain", ""))
+    if validation_entry:
+        platform_details.append(f"- **验证入口函数**：{validation_entry}")
     if getattr(vuln, "variant_of", ""):
-        lines.append(f"| 同类变体来源 | {vuln.variant_of} |")
+        platform_details.append(f"- **同类变体来源**：{vuln.variant_of}")
     source_text = _format_output_source(getattr(vuln, "output_source", None))
     if source_text:
-        lines.append(f"| AI 输出来源 | {source_text} |")
+        platform_details.append(f"- **AI 输出来源**：{source_text}")
     if vuln.user_verdict:
-        lines.append(f"| 用户判定 | {vuln.user_verdict} |")
-    lines.append("")
-    lines.append("## 漏洞描述")
-    lines.append("")
-    lines.append(vuln.description or "未知")
-    lines.append("")
-    impact = str(getattr(vuln, "impact", "") or "").strip()
-    if impact:
-        lines.append("## 漏洞影响")
-        lines.append("")
-        lines.append(impact)
-        lines.append("")
-    vulnerable_code = str(
-        getattr(vuln, "vulnerable_code", "") or ""
-    ).strip()
-    if vulnerable_code:
-        lines.append("## 漏洞代码")
-        lines.append("")
-        _append_fenced_block(lines, vulnerable_code)
-        lines.append("")
-    if call_chain:
-        lines.append("## 漏洞调用链")
-        lines.append("")
-        for position, item in enumerate(call_chain, start=1):
-            lines.append(f"{position}. `{_call_chain_label(item)}`")
-        lines.append("")
-    for field, title in (
-        ("attack_entry", "攻击入口"),
-        ("root_cause", "漏洞根因"),
-        ("trigger_conditions", "触发条件"),
-    ):
-        content = str(getattr(vuln, field, "") or "").strip()
-        if not content:
-            continue
-        lines.append(f"## {title}")
-        lines.append("")
-        lines.append(content)
-        lines.append("")
-    vulnerability_report = str(getattr(vuln, "vulnerability_report", "") or "").strip()
-    if vulnerability_report:
-        lines.append("## 漏洞挖掘引擎报告")
-        lines.append("")
-        lines.append(vulnerability_report)
-        lines.append("")
+        platform_details.append(f"- **用户判定**：{vuln.user_verdict}")
+    lines.extend(["## 平台信息", "", *platform_details, ""])
+
     if vuln.user_verdict_reason:
         lines.append("## 用户判定理由")
         lines.append("")
         lines.append(vuln.user_verdict_reason)
         lines.append("")
-    if vuln.ai_analysis:
-        lines.append("## 旧版 AI 分析")
-        lines.append("")
-        lines.append(vuln.ai_analysis)
-        lines.append("")
-
     if fp_result is not None:
         lines.append("## 去误报复核")
         lines.append("")

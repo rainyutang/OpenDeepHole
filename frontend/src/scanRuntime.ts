@@ -86,10 +86,17 @@ export function normalizeVulnerability(value: unknown): Vulnerability {
     file: text(raw.file),
     line: finiteNumber(raw.line),
     function: text(raw.function),
+    call_chain: text(raw.call_chain),
     vuln_type: text(raw.vuln_type),
     severity: text(raw.severity),
     description: text(raw.description),
+    impact: text(raw.impact),
+    vulnerable_code: text(raw.vulnerable_code),
+    attack_entry: text(raw.attack_entry),
+    root_cause: text(raw.root_cause),
+    trigger_conditions: text(raw.trigger_conditions),
     ai_analysis: text(raw.ai_analysis),
+    vulnerability_report: text(raw.vulnerability_report),
     confirmed: raw.confirmed === true,
   } as Vulnerability;
 }
