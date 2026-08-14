@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -781,7 +781,102 @@ def test_threat_audit_keeps_duplicate_local_ids_isolated_by_tree(
     assert len(store.list_threat_audit_tasks("scan-1")) == 2
 
 
-def test_threat_audit_rejects_multiple_paths_for_one_leaf() -> None:
+def test_threat_audit_recovers_path_by_skipping_invalid_nodes() -> None:
+    tree = {
+        "tree_id": "AT-001",
+        "value_asset": {"asset_name": "关键服务"},
+        "nodes": [
+            None,
+            {"node_type": "内部节点"},
+            {"node_id": "LEAF", "node_type": "叶子节点"},
+            {"node_id": "LEAF", "node_type": "内部节点"},
+            {"node_id": "PRE", "node_type": "内部节点"},
+            {"node_id": "OTHER-LEAF", "node_type": "叶子节点"},
+            {
+                "node_id": "INTERNAL",
+                "node_type": "内部节点",
+                "module_name": "认证模块",
+                "is_high_risk_module": True,
+            },
+            {"node_id": "BAD-TYPE", "node_type": "外部节点"},
+            {"node_id": "ROOT", "node_type": "根节点"},
+            {"node_id": "AFTER", "node_type": "内部节点"},
+        ],
+        "attack_paths": [{
+            "path_id": "AP-004",
+            "path_name": "异常但可恢复的路径",
+            "node_ids": [
+                "PRE",
+                "",
+                "LEAF",
+                "UNKNOWN",
+                "OTHER-LEAF",
+                "INTERNAL",
+                "INTERNAL",
+                "BAD-TYPE",
+                "ROOT",
+                "AFTER",
+            ],
+            "related_high_risk_modules": [{
+                "node_id": "INTERNAL",
+                "module_name": "认证模块",
+            }],
+            "attack_patterns": [{
+                "pattern_id": "PATTERN-1",
+                "pattern_name": "认证绕过",
+            }],
+        }],
+    }
+    warnings: list[dict[str, Any]] = []
+
+    tasks = _tasks(
+        "scan-1",
+        {"attack_trees": [tree]},
+        [{"模块名称": "认证模块", "代码目录": "src/auth"}],
+        warnings=warnings,
+    )
+
+    assert len(tasks) == 1
+    assert tasks[0]["attack_path_contexts"][0]["node_ids"] == [
+        "LEAF",
+        "INTERNAL",
+        "ROOT",
+    ]
+    assert tasks[0]["code_paths"] == [{
+        "path": "src/auth",
+        "description": "",
+    }]
+    prompt = _threat_prompt(tasks[0])
+    assert "认证模块" in prompt
+    assert "PRE" not in prompt
+    assert "OTHER-LEAF" not in prompt
+    path_warning = next(
+        warning for warning in warnings if warning["path_id"] == "AP-004"
+    )
+    assert path_warning["recovered_node_ids"] == [
+        "LEAF",
+        "INTERNAL",
+        "ROOT",
+    ]
+    assert path_warning["reached_root"] is True
+    assert {
+        item["node_id"] for item in path_warning["skipped_nodes"]
+    } == {
+        "PRE",
+        "node_ids[1]",
+        "UNKNOWN",
+        "OTHER-LEAF",
+        "INTERNAL",
+        "BAD-TYPE",
+        "AFTER",
+    }
+    assert any(
+        warning["reason"] == "ignored invalid node definition(s)"
+        for warning in warnings
+    )
+
+
+def test_threat_audit_selects_best_path_for_duplicate_leaf_pattern() -> None:
     tree = {
         "tree_id": "TREE-INVALID",
         "value_asset": {"asset_name": "关键服务"},
@@ -793,35 +888,212 @@ def test_threat_audit_rejects_multiple_paths_for_one_leaf() -> None:
         ],
         "attack_paths": [
             {
-                "path_id": "PATH-A",
-                "node_ids": ["LEAF", "INTERNAL-A", "ROOT"],
-                "attack_patterns": [],
+                "path_id": "PATH-PARTIAL",
+                "node_ids": ["LEAF", "INTERNAL-A"],
+                "attack_patterns": [{
+                    "pattern_id": "PATTERN-1",
+                    "pattern_name": "恶意输入",
+                }],
             },
             {
-                "path_id": "PATH-B",
+                "path_id": "PATH-COMPLETE",
                 "node_ids": ["LEAF", "INTERNAL-B", "ROOT"],
-                "attack_patterns": [],
+                "attack_patterns": [{
+                    "pattern_id": "PATTERN-1",
+                    "pattern_name": "恶意输入",
+                }],
             },
         ],
     }
+    warnings: list[dict[str, Any]] = []
 
-    with pytest.raises(ValueError, match="exactly one.*found 2"):
-        _tasks("scan-1", {"attack_trees": [tree]}, [])
+    tasks = _tasks(
+        "scan-1",
+        {"attack_trees": [tree]},
+        [],
+        warnings=warnings,
+    )
+
+    assert len(tasks) == 1
+    assert tasks[0]["attack_path_id"] == "PATH-COMPLETE"
+    assert tasks[0]["attack_path_contexts"][0]["node_ids"] == [
+        "LEAF",
+        "INTERNAL-B",
+        "ROOT",
+    ]
+    assert any(
+        "multiple recovered paths map leaf" in warning["reason"]
+        and warning["path_id"] == "PATH-COMPLETE"
+        for warning in warnings
+    )
 
 
-def test_threat_audit_rejects_leaf_without_attack_path() -> None:
-    tree = {
-        "tree_id": "TREE-INVALID",
-        "value_asset": {"asset_name": "关键服务"},
-        "nodes": [
-            {"node_id": "LEAF", "node_type": "叶子节点"},
-            {"node_id": "ROOT", "node_type": "根节点"},
-        ],
-        "attack_paths": [],
+def test_threat_audit_leaf_without_path_is_warning_not_error() -> None:
+    warnings: list[dict[str, Any]] = []
+    tasks = _tasks(
+        "scan-1",
+        {"attack_trees": [{
+            "tree_id": "TREE-INVALID",
+            "value_asset": {"asset_name": "关键服务"},
+            "nodes": [
+                {"node_id": "LEAF", "node_type": "叶子节点"},
+                {"node_id": "ROOT", "node_type": "根节点"},
+            ],
+            "attack_paths": [],
+        }]},
+        [],
+        warnings=warnings,
+    )
+
+    assert tasks == []
+    assert any(
+        warning["reason"] == "leaf node(s) have no recoverable attack path"
+        and warning["skipped_nodes"] == [{
+            "node_id": "LEAF",
+            "reason": "no recoverable attack path",
+        }]
+        for warning in warnings
+    )
+
+
+def test_run_threat_audit_all_unusable_paths_finishes_with_warning(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    attack_tree_path = tmp_path / "attack-trees.json"
+    high_risk_modules_path = tmp_path / "high-risk-modules.json"
+    attack_tree_path.write_text(json.dumps({
+        "attack_trees": [{
+            "tree_id": "AT-EMPTY",
+            "nodes": [
+                {"node_id": "INTERNAL", "node_type": "内部节点"},
+                {"node_id": "ROOT", "node_type": "根节点"},
+            ],
+            "attack_paths": [{
+                "path_id": "AP-NO-LEAF",
+                "node_ids": ["INTERNAL", "ROOT"],
+                "attack_patterns": [{"pattern_id": "PATTERN-1"}],
+            }],
+        }],
+    }), encoding="utf-8")
+    high_risk_modules_path.write_text("[]", encoding="utf-8")
+    events: list[dict[str, Any]] = []
+    run_task = AsyncMock()
+
+    with patch(
+        "deephole_client.vulnerability_mining.engines.threat_audit.runner."
+        "run_opencode_task",
+        new=run_task,
+    ):
+        result = asyncio.run(run_threat_audit(
+            project_path=project,
+            work_dir=tmp_path / "work",
+            scan_id="scan-empty-recovery",
+            attack_tree_path=attack_tree_path,
+            high_risk_modules_path=high_risk_modules_path,
+            output=events.append,
+        ))
+
+    assert result == {
+        "status": "success",
+        "tasks": [],
+        "vulnerabilities": [],
     }
+    run_task.assert_not_awaited()
+    assert any(
+        event["kind"] == "warning"
+        and event["data"]["path_id"] == "AP-NO-LEAF"
+        and event["data"]["skipped_path"] is True
+        for event in events
+    )
 
-    with pytest.raises(ValueError, match="exactly one.*found 0"):
-        _tasks("scan-1", {"attack_trees": [tree]}, [])
+
+def test_run_threat_audit_keeps_partial_and_sibling_paths_running(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    attack_tree_path = tmp_path / "attack-trees.json"
+    high_risk_modules_path = tmp_path / "high-risk-modules.json"
+    attack_tree_path.write_text(json.dumps({
+        "attack_trees": [{
+            "tree_id": "AT-001",
+            "value_asset": {"asset_name": "关键服务"},
+            "nodes": [
+                {"node_id": "LEAF-A", "node_type": "叶子节点"},
+                {"node_id": "LEAF-B", "node_type": "叶子节点"},
+                {"node_id": "INTERNAL-A", "node_type": "内部节点"},
+                {"node_id": "ROOT", "node_type": "根节点"},
+            ],
+            "attack_paths": [
+                {
+                    "path_id": "AP-004",
+                    "node_ids": [
+                        "LEAF-A",
+                        "UNKNOWN",
+                        "LEAF-B",
+                        "INTERNAL-A",
+                    ],
+                    "attack_patterns": [{
+                        "pattern_id": "PATTERN-A",
+                        "pattern_name": "异常路径攻击",
+                    }],
+                },
+                {
+                    "path_id": "AP-005",
+                    "node_ids": ["LEAF-B", "ROOT"],
+                    "attack_patterns": [{
+                        "pattern_id": "PATTERN-B",
+                        "pattern_name": "正常路径攻击",
+                    }],
+                },
+            ],
+        }],
+    }), encoding="utf-8")
+    high_risk_modules_path.write_text("[]", encoding="utf-8")
+    events: list[dict[str, Any]] = []
+    run_task = AsyncMock(return_value=OpenCodeResult(
+        session_id="session-1",
+        status="success",
+        text="[]",
+        structured=[],
+        model="test/model",
+    ))
+
+    with patch(
+        "deephole_client.vulnerability_mining.engines.threat_audit.runner."
+        "run_opencode_task",
+        new=run_task,
+    ):
+        result = asyncio.run(run_threat_audit(
+            project_path=project,
+            work_dir=tmp_path / "work",
+            scan_id="scan-recovery",
+            attack_tree_path=attack_tree_path,
+            high_risk_modules_path=high_risk_modules_path,
+            concurrency=2,
+            output=events.append,
+        ))
+
+    assert result["status"] == "success"
+    assert len(result["tasks"]) == 2
+    assert all(task["status"] == "completed" for task in result["tasks"])
+    assert run_task.await_count == 2
+    warning = next(
+        event
+        for event in events
+        if event["kind"] == "warning"
+        and event["data"]["path_id"] == "AP-004"
+    )
+    assert warning["data"]["recovered_node_ids"] == [
+        "LEAF-A",
+        "INTERNAL-A",
+    ]
+    assert warning["data"]["reached_root"] is False
+    assert "root not reached; auditing the usable partial path" in (
+        warning["message"]
+    )
 
 
 def test_legacy_non_leaf_tasks_are_superseded_without_touching_unknowns(
