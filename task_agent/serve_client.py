@@ -383,13 +383,37 @@ def _port_is_in_use(port: int) -> bool:
 
 
 def _port_bind_error(port: int) -> OSError | None:
-    """Return the loopback bind error even when no listener is connectable."""
+    """Return the exclusive loopback bind error for the Serve endpoint."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_EXCLUSIVEADDRUSE,
+                    1,
+                )
             sock.bind(("127.0.0.1", int(port)))
     except OSError as exc:
         return exc
     return None
+
+
+@dataclass(frozen=True)
+class _ServePortProbe:
+    connectable: bool
+    bind_error: OSError | None
+
+    @property
+    def reusable(self) -> bool:
+        return not self.connectable and self.bind_error is None
+
+
+def _probe_serve_port(port: int) -> _ServePortProbe:
+    """Return whether the endpoint responds and whether Serve can bind it."""
+    return _ServePortProbe(
+        connectable=_port_is_in_use(port),
+        bind_error=_port_bind_error(port),
+    )
 
 
 def _allocate_loopback_port(excluded: set[int] | None = None) -> int:
@@ -1082,9 +1106,9 @@ def _reclaim_serve_port(
         for pid in allowed_pids
         if int(pid) > 0 and int(pid) != os.getpid()
     }
-    # On Windows a terminating listener can remain in netstat even when a TCP
-    # connect probe already fails. Marker-owned listener identity, not
-    # connectability, is therefore the cleanup and verification boundary.
+    # Marker identity limits which listener may be terminated. Actual endpoint
+    # availability is verified separately because Windows can retain a stale
+    # owner-PID row after the socket has already become reusable.
     listeners = {
         int(pid)
         for pid in _listener_pids_for_port(port)
@@ -1108,6 +1132,26 @@ def _reclaim_serve_port(
             detail="listener ownership was not proven",
         )
 
+    # Windows can retain a stale owner-PID row after the process and socket are
+    # already gone. A failed TCP connection plus a successful exclusive bind is
+    # the operational proof that this row cannot block the replacement Serve.
+    if sys.platform == "win32":
+        initial_probe = _probe_serve_port(port)
+        if initial_probe.reusable:
+            logger.warning(
+                "Ignoring stale OpenCode listener-table pid(s)=%s on 127.0.0.1:%s; "
+                "TCP connect failed and exclusive bind succeeded (%s)",
+                ",".join(str(pid) for pid in pids),
+                port,
+                reason,
+            )
+            return _PortReclaimResult(
+                attempted=False,
+                pids=pids,
+                released=True,
+                detail="stale listener-table pid(s) ignored because port is reusable",
+            )
+
     termination_failed_pids: list[int] = []
     for pid in pids:
         logger.warning(
@@ -1119,7 +1163,12 @@ def _reclaim_serve_port(
         stopped = _terminate_process_tree(
             pid,
             is_running=(
-                (lambda pid=pid: pid in _listener_pids_for_port(port))
+                (
+                    lambda pid=pid: (
+                        pid in _listener_pids_for_port(port)
+                        and not _probe_serve_port(port).reusable
+                    )
+                )
                 if sys.platform == "win32"
                 else None
             ),
@@ -1616,6 +1665,25 @@ def _marker_for_owned_serve_record(
     return marker if record.pid in marker_pids else None
 
 
+def _blocking_listener_pids_for_port(
+    port: int,
+    listener_pids: set[int],
+) -> set[int]:
+    """Return recorded listeners that still prevent a replacement Serve bind."""
+    remaining = listener_pids & _listener_pids_for_port(port)
+    if not remaining or sys.platform != "win32":
+        return remaining
+    if not _probe_serve_port(port).reusable:
+        return remaining
+    logger.warning(
+        "Ignoring stale OpenCode listener-table pid(s)=%s on 127.0.0.1:%s; "
+        "TCP connect failed and exclusive bind succeeded",
+        ",".join(str(pid) for pid in sorted(remaining)),
+        port,
+    )
+    return set()
+
+
 def _wait_listener_pids_released(
     port: int,
     listener_pids: set[int],
@@ -1625,7 +1693,7 @@ def _wait_listener_pids_released(
         return set()
     deadline = time.monotonic() + timeout
     while True:
-        remaining = listener_pids & _listener_pids_for_port(port)
+        remaining = _blocking_listener_pids_for_port(port, listener_pids)
         if not remaining or time.monotonic() >= deadline:
             return remaining
         time.sleep(0.1)
@@ -1671,8 +1739,9 @@ def _stop_owned_serve_record(
 
     remaining_listener_pids: set[int] = set()
     if effective_port > 0 and known_listener_pids:
-        remaining_listener_pids = (
-            known_listener_pids & _listener_pids_for_port(effective_port)
+        remaining_listener_pids = _blocking_listener_pids_for_port(
+            effective_port,
+            known_listener_pids,
         )
         for listener_pid in sorted(remaining_listener_pids):
             logger.info(
@@ -1684,8 +1753,13 @@ def _stop_owned_serve_record(
                 listener_pid,
                 is_running=(
                     (
-                        lambda listener_pid=listener_pid: listener_pid
-                        in _listener_pids_for_port(effective_port)
+                        lambda listener_pid=listener_pid: (
+                            listener_pid
+                            in _blocking_listener_pids_for_port(
+                                effective_port,
+                                {listener_pid},
+                            )
+                        )
                     )
                     if sys.platform == "win32"
                     else None
@@ -1860,6 +1934,17 @@ def _owned_serve_process(pid: int | None) -> _OwnedServeProcess | None:
         return _OWNED_SERVE_PROCESSES.get(
             _current_owned_serve_key(normalized_pid)
         )
+
+
+def _current_process_owned_serve_pids() -> tuple[int, ...]:
+    owner_pid = os.getpid()
+    with _OWNED_SERVE_PROCESS_LOCK:
+        pids = [
+            record.pid
+            for record in _OWNED_SERVE_PROCESSES.values()
+            if record.owner_pid == owner_pid
+        ]
+    return tuple(sorted(pids))
 
 
 def _unregister_owned_serve_process(pid: int | None) -> None:
@@ -6238,13 +6323,13 @@ class OpenCodeServeManager:
         generic_retry_used = False
 
         while True:
+            probe = _probe_serve_port(port)
             listeners = (
                 set(_listener_pids_for_port(port))
-                if _port_is_in_use(port)
+                if probe.connectable
                 else set()
             )
-            bind_error = None if listeners else _port_bind_error(port)
-            if listeners or bind_error is not None:
+            if not probe.reusable:
                 attempted_ports.append(port)
                 if (
                     key.serve_port_auto
@@ -6257,7 +6342,7 @@ class OpenCodeServeManager:
                         port,
                         next_port,
                         sorted(listeners),
-                        bind_error or "",
+                        probe.bind_error or "",
                     )
                     port = next_port
                     continue
@@ -6265,7 +6350,7 @@ class OpenCodeServeManager:
                     port,
                     auto_port=key.serve_port_auto,
                     listener_pids=listeners,
-                    bind_error=bind_error,
+                    bind_error=probe.bind_error,
                 ))
                 raise RuntimeError(_serve_startup_context_message(
                     error,
@@ -6330,6 +6415,14 @@ class OpenCodeServeManager:
         config_path: Path,
         attempt: int,
     ) -> None:
+        existing_pids = _current_process_owned_serve_pids()
+        if self._proc is not None or self._port is not None or existing_pids:
+            raise RuntimeError(
+                "Refusing to start a second Agent-owned OpenCode Serve; "
+                f"manager_pid={getattr(self._proc, 'pid', '')} "
+                f"manager_port={self._port or ''} "
+                f"registered_pid(s)={','.join(str(pid) for pid in existing_pids)}"
+            )
         env = {
             name: value
             for name, value in os.environ.items()
@@ -6449,10 +6542,17 @@ class OpenCodeServeManager:
                     allowed_pids=known_listener_pids,
                 )
             remaining_listener_pids = (
-                known_listener_pids
-                & await asyncio.to_thread(_listener_pids_for_port, marker_port)
-                if marker_port > 0 and known_listener_pids
-                else set()
+                set()
+                if reclaim_result is not None and reclaim_result.released
+                else (
+                    await asyncio.to_thread(
+                        _blocking_listener_pids_for_port,
+                        marker_port,
+                        known_listener_pids,
+                    )
+                    if marker_port > 0 and known_listener_pids
+                    else set()
+                )
             )
             if remaining_listener_pids:
                 raise RuntimeError(
@@ -6485,10 +6585,17 @@ class OpenCodeServeManager:
                 allowed_pids=known_listener_pids,
             )
         remaining_listener_pids = (
-            known_listener_pids
-            & await asyncio.to_thread(_listener_pids_for_port, marker_port)
-            if marker_port > 0 and known_listener_pids
-            else set()
+            set()
+            if reclaim_result is not None and reclaim_result.released
+            else (
+                await asyncio.to_thread(
+                    _blocking_listener_pids_for_port,
+                    marker_port,
+                    known_listener_pids,
+                )
+                if marker_port > 0 and known_listener_pids
+                else set()
+            )
         )
         if tree_stopped is False or remaining_listener_pids:
             raise RuntimeError(

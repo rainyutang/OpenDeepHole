@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,7 @@ from task_agent.serve_client import (
     _next_event_reconnect_delay,
     _opencode_mcp_tool_ids,
     _opencode_mcp_tool_prefixes,
+    _port_bind_error,
     _session_tree_token_entries,
     _serve_context_headers,
     _serve_port,
@@ -4216,6 +4218,47 @@ def test_serve_port_accepts_env_override(monkeypatch) -> None:
     assert _serve_port() == 4100
 
 
+def test_windows_port_bind_probe_requests_exclusive_address_use(monkeypatch) -> None:
+    from task_agent import serve_client
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.options: list[tuple[int, int, int]] = []
+            self.bound: tuple[str, int] | None = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def setsockopt(self, level: int, option: int, value: int) -> None:
+            self.options.append((level, option, value))
+
+        def bind(self, address: tuple[str, int]) -> None:
+            self.bound = address
+
+    fake_socket = FakeSocket()
+    monkeypatch.setattr(serve_client.sys, "platform", "win32")
+    monkeypatch.setattr(
+        serve_client.socket,
+        "SO_EXCLUSIVEADDRUSE",
+        0x100,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        serve_client.socket,
+        "socket",
+        lambda *args, **kwargs: fake_socket,
+    )
+
+    assert serve_client.sys.platform == "win32"
+    assert hasattr(serve_client.socket, "SO_EXCLUSIVEADDRUSE")
+    assert _port_bind_error(23678) is None
+    assert fake_socket.options == [(socket.SOL_SOCKET, 0x100, 1)]
+    assert fake_socket.bound == ("127.0.0.1", 23678)
+
+
 def test_pid_is_running_uses_windows_fallback(monkeypatch) -> None:
     from task_agent import serve_client
 
@@ -4284,7 +4327,7 @@ def test_reclaim_windows_listener_uses_port_liveness_when_pid_probe_is_false(
     assert result.released is True
 
 
-def test_reclaim_windows_listener_uses_netstat_when_tcp_probe_says_free(
+def test_reclaim_windows_listener_uses_netstat_when_tcp_probe_fails_but_bind_is_blocked(
     monkeypatch,
 ) -> None:
     from task_agent import serve_client
@@ -4303,6 +4346,10 @@ def test_reclaim_windows_listener_uses_netstat_when_tcp_probe_says_free(
         lambda port: False,
     )
     monkeypatch.setattr(
+        "task_agent.serve_client._port_bind_error",
+        lambda port: OSError(10048, "address already in use"),
+    )
+    monkeypatch.setattr(
         "task_agent.serve_client._listener_pids_for_port",
         lambda port: set(listening),
     )
@@ -4318,6 +4365,46 @@ def test_reclaim_windows_listener_uses_netstat_when_tcp_probe_says_free(
     assert result.attempted is True
     assert result.pids == (15668,)
     assert result.released is True
+
+
+def test_reclaim_windows_ignores_ghost_listener_when_exclusive_bind_succeeds(
+    monkeypatch,
+    caplog,
+) -> None:
+    from task_agent import serve_client
+
+    terminated: list[int] = []
+    monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+    monkeypatch.setattr(
+        "task_agent.serve_client._port_is_in_use",
+        lambda port: False,
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._port_bind_error",
+        lambda port: None,
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._listener_pids_for_port",
+        lambda port: {3980},
+    )
+    monkeypatch.setattr(
+        "task_agent.serve_client._terminate_process_tree",
+        lambda pid, **kwargs: terminated.append(pid),
+    )
+    caplog.set_level("WARNING")
+
+    result = serve_client._reclaim_serve_port(
+        23678,
+        reason="test ghost Agent-owned serve marker",
+        allowed_pids={3980},
+    )
+
+    assert terminated == []
+    assert result.attempted is False
+    assert result.pids == (3980,)
+    assert result.released is True
+    assert "stale listener-table pid(s) ignored" in result.detail
+    assert "exclusive bind succeeded" in caplog.text
 
 
 def test_reclaim_unconnectable_listener_does_not_terminate_unowned_pid(
@@ -5617,6 +5704,14 @@ def test_stop_owned_serve_retries_unconnectable_stale_listener(
         monkeypatch.setattr("task_agent.serve_client._pid_is_running", lambda pid: False)
         monkeypatch.setattr("task_agent.serve_client._port_is_in_use", lambda port: False)
         monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda port: (
+                OSError(10048, "address already in use")
+                if listening
+                else None
+            ),
+        )
+        monkeypatch.setattr(
             "task_agent.serve_client._listener_pids_for_port",
             lambda port: set(listening),
         )
@@ -5645,6 +5740,88 @@ def test_stop_owned_serve_retries_unconnectable_stale_listener(
 
         assert terminated == [15668, 15668]
         assert not marker_path.exists()
+
+    asyncio.run(run())
+
+
+def test_start_locked_clears_bindable_ghost_marker_without_terminating(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "agent_pid": 77777,
+                "pid": 11111,
+                "port": 23678,
+                "tool": "opencode",
+                "executable": "opencode",
+                "listener_pids": [3980],
+            }),
+            encoding="utf-8",
+        )
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+        terminated: list[int] = []
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._run_command_text",
+            lambda cmd: "opencode test",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._pid_is_running",
+            lambda pid: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda port: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda port: None,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {3980} if port == 23678 else set(),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            lambda pid, **kwargs: terminated.append(pid),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.asyncio.to_thread",
+            fake_to_thread,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock()
+        await manager._start_locked(
+            OpenCodeServeKey(
+                tool="opencode",
+                executable="opencode",
+                serve_port_auto=True,
+                config_content="{}",
+                env_overrides=(("OPENCODE_SERVE_PORT", "23678"),),
+            ),
+            startup_cwd=startup_cwd,
+        )
+
+        assert terminated == []
+        assert not marker_path.exists()
+        manager._start_once_locked.assert_awaited_once()
+        assert manager._start_once_locked.await_args.kwargs["port"] == 23678
+        assert manager._auto_port == 23678
 
     asyncio.run(run())
 
@@ -5730,6 +5907,65 @@ def test_start_locked_auto_port_skips_foreign_listener(
         assert manager._start_once_locked.await_count == 1
         assert manager._start_once_locked.await_args.kwargs["port"] == 43123
         assert manager._start_once_locked.await_args.kwargs["attempt"] == 2
+
+    asyncio.run(run())
+
+
+def test_start_locked_auto_port_tries_distinct_candidates_until_free(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+        occupied = {4096, 43123}
+        allocated: list[set[int]] = []
+        candidates = iter((43123, 43124))
+
+        monkeypatch.setenv(
+            "OPENCODE_SERVE_MARKER",
+            str(tmp_path / "missing-marker.json"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda port: port in occupied,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {20000 + port} if port in occupied else set(),
+        )
+
+        def allocate(excluded: set[int]) -> int:
+            allocated.append(set(excluded))
+            return next(candidates)
+
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            allocate,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock()
+        await manager._start_locked(
+            OpenCodeServeKey(
+                tool="opencode",
+                executable="opencode",
+                serve_port_auto=True,
+                config_content="{}",
+                env_overrides=(("OPENCODE_SERVE_PORT", "4096"),),
+            ),
+            startup_cwd=startup_cwd,
+        )
+
+        assert allocated == [{4096}, {4096, 43123}]
+        manager._start_once_locked.assert_awaited_once()
+        assert manager._start_once_locked.await_args.kwargs["port"] == 43124
+        assert manager._start_once_locked.await_args.kwargs["attempt"] == 3
+        assert manager._auto_port == 43124
 
     asyncio.run(run())
 
@@ -5843,6 +6079,137 @@ def test_start_locked_auto_port_stops_after_one_generic_retry(
         assert allocated == [{4096}]
         assert manager._start_once_locked.await_count == 2
         assert "attempted_ports=4096,43125" in str(excinfo.value)
+
+    asyncio.run(run())
+
+
+def test_start_locked_auto_port_does_not_retry_when_cleanup_is_incomplete(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        from task_agent import serve_client
+
+        class FakeProc:
+            pid = 34567
+
+            def poll(self):
+                return None
+
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+        marker_path = tmp_path / "serve-marker.json"
+        startup_log_path = tmp_path / "serve-startup.log"
+        popen_ports: list[int] = []
+
+        def fake_popen(cmd, **kwargs):
+            popen_ports.append(int(cmd[-1]))
+            return FakeProc()
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._run_command_text",
+            lambda cmd: "opencode test",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda port: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda port: None,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._new_serve_startup_log_path",
+            lambda tool, port: startup_log_path,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            pytest.fail,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._install_serve_exit_hooks",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.subprocess.Popen",
+            fake_popen,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._wait_health_locked = AsyncMock(
+            side_effect=RuntimeError("Error: Unexpected error")
+        )
+        manager._stop_locked = AsyncMock(
+            side_effect=RuntimeError(
+                "OpenCode Serve process tree did not stop completely; "
+                "pid=34567 port=4096 ownership marker was retained"
+            )
+        )
+        try:
+            with pytest.raises(RuntimeError) as excinfo:
+                await manager._start_locked(
+                    OpenCodeServeKey(
+                        tool="opencode",
+                        executable="opencode",
+                        serve_port_auto=True,
+                        config_content="{}",
+                        env_overrides=(("OPENCODE_SERVE_PORT", "4096"),),
+                    ),
+                    startup_cwd=startup_cwd,
+                )
+
+            assert popen_ports == [4096]
+            assert "did not stop completely" in str(excinfo.value)
+            assert marker_path.exists()
+            manager._stop_locked.assert_awaited_once()
+        finally:
+            serve_client._unregister_owned_serve_process(34567)
+
+    asyncio.run(run())
+
+
+def test_start_once_refuses_second_serve_registered_by_current_process(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        from task_agent import serve_client
+
+        class FakeProc:
+            pid = 34568
+
+            def poll(self):
+                return None
+
+        marker_path = tmp_path / "existing-marker.json"
+        monkeypatch.setattr(
+            "task_agent.serve_client._install_serve_exit_hooks",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.subprocess.Popen",
+            pytest.fail,
+        )
+        serve_client._register_owned_serve_process(FakeProc(), marker_path)
+        try:
+            manager = OpenCodeServeManager()
+            with pytest.raises(RuntimeError, match="Refusing to start a second"):
+                await manager._start_once_locked(
+                    OpenCodeServeKey(tool="opencode", executable="opencode"),
+                    executable="/bin/opencode",
+                    executable_version="test",
+                    port=43123,
+                    prepared_cwd=tmp_path,
+                    config_path=tmp_path / "opencode.json",
+                    attempt=1,
+                )
+        finally:
+            serve_client._unregister_owned_serve_process(34568)
 
     asyncio.run(run())
 
