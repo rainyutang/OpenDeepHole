@@ -5,6 +5,8 @@
 - **修复** 长时间运行“异常分支内存泄漏”等静态规则时，CPU 密集型 Python 分析与 Agent 共用进程/GIL，可能让 WebSocket 心跳超时并显示 Agent 离线：每批静态分析现改由跨平台 `spawn` 子进程执行，父进程通过专用 Pipe reader 转发原有 checker 事件并独立发送 30 秒活跃进度；外部取消、Task 取消和异常退出会精确回收本批 worker 进程树（Windows `taskkill /T /F`、POSIX 独立进程组），不改变公开参数、事件及结果契约；`memleak` 同时增加等价路径去重和 256 状态上限，超限时保守合并安全事实，避免复杂分支造成指数级耗时与内存增长
 - **新增** Agent 连接服务端前自动检测 Codex CLI；不可用时按顺序关闭 npm strict SSL、配置华为 npm 源、清理缓存并全局安装 `@openai/codex`，完整流程共享 120 秒超时，缺少 npm、命令失败或超时只告警并继续启动，下次重启再重试
 - **新增** 漏洞挖掘引擎 `engine.yaml` 支持可选布尔字段 `requires_codex`；依赖引擎在 Codex 不可用时单独标记失败且不调用适配器，其它引擎继续执行，Codex 可用时通过 `codex_command` 获得跨平台 argv 前缀
+- **新增** Codex CLI 就绪后自动把用户级 OpenCode `opencode.json` / `opencode.jsonc` 中显式声明的全部 provider/model 转为 `$CODEX_HOME` 下独立的 OpenDeepHole 托管 profile：支持 base URL、字面量或环境变量凭据及上下文窗口映射，写入采用稳定名称、原子替换和 0600 权限，成功后只回收过期托管文件，绝不修改用户 `config.toml`、默认模型或非托管 profile；低版本、解析/写入失败和空模型只脱敏告警并回退用户 Codex 默认配置，`requires_codex` 引擎通过不含密钥的 `codex_models` 选择 profile
+- **文档** 漏洞挖掘扩展示例新增完整 `example_codex`：严格选择同步的 `provider/model` 或首项/个人默认回退，以 stdin 传 Prompt，在 `--ephemeral`、只读沙箱和禁止审批条件下无 shell 执行 Codex，并通过工作目录内的输出 Schema 与最终消息文件返回漏洞，同时覆盖错误和取消处理
 - **修复** 威胁审计任务的相关代码路径改为按攻击路径上的模块聚合；同一模块包含多个代码目录时，在任务 `code_paths` 和 Prompt 中只保留一个条目，并使用 `、` 合并规范化且全局去重后的路径，任务拆分、Prompt 其它内容和漏洞 JSON 输出契约保持不变
 
 ## 2026-08-14

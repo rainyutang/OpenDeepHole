@@ -169,6 +169,7 @@ DeepHole 2.0 Agent
   Server  : http://your-server:8000
 
 Codex CLI ready: codex-cli 0.x.y
+Codex model profiles ready: synchronized 4 model(s) from user OpenCode config.
 
   Connected via WebSocket, agent_id: a1b2c3d4...
 ```
@@ -178,6 +179,13 @@ Agent 在连接服务端前检查一次 Codex CLI。若本机没有可调用的 
 `npm cache clean -f` 和 `npm install -g @openai/codex`；源配置、缓存清理、安装及安装后验证
 共享 120 秒总超时。缺少 npm、安装失败或超时只会打印告警并继续连接，未声明依赖 Codex 的
 漏洞挖掘引擎不受影响；失败后到下次重启 Agent 才会再次尝试。
+
+Codex CLI 可用后，Agent 还会读取用户级 OpenCode `opencode.json` / `opencode.jsonc` 中显式
+声明的 `provider.<id>.models`，为每个模型在当前 `$CODEX_HOME`（默认 `~/.codex`）生成一个
+独立的 OpenDeepHole 托管 profile。该过程不会修改 Codex 的 `config.toml` 或默认模型，也不会
+读取项目级、可执行文件旁或显式路径指定的 OpenCode 配置。同步失败、没有可映射模型或 Codex
+版本低于 0.134 时只告警，依赖 Codex 的引擎仍可回退到用户自己的 Codex 默认配置；Agent 不会
+在启动时探测模型服务，协议或凭据错误会在引擎实际调用时报告。
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。Agent 默认允许接收最大 64 MiB 的单条
 WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续扫命令仍超过该限制，可设置正整数
@@ -754,7 +762,7 @@ OpenDeepHole/
 │   │   │       ├── audit_schema.py # 专用结构化输出 Schema
 │   │   │       ├── engine.yaml
 │   │   │       └── engine.py       # 平台引擎适配器
-│   │   ├── examples/               # 可复制的 Skill/外部 CLI 引擎示例
+│   │   ├── examples/               # 可复制的 Skill、外部 CLI 与 Codex 引擎示例
 │   │   ├── runtime.py              # 引擎发现、加载、校验和执行
 │   │   └── engine_report.py        # 引擎结构化结果转漏洞报告
 │   ├── threat_analysis/            # 目录自动发现的威胁分析方法

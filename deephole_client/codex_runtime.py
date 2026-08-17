@@ -7,9 +7,11 @@ import os
 import shutil
 import signal
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
+
+from .codex_profiles import CodexModelProfile, sync_codex_profiles
 
 
 CODEX_INSTALL_TIMEOUT_SECONDS = 120.0
@@ -43,6 +45,9 @@ class CodexRuntimeState:
     executable: str = ""
     version: str = ""
     error: str = ""
+    models: tuple[CodexModelProfile, ...] = ()
+    model_config_warnings: tuple[str, ...] = ()
+    model_config_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -343,6 +348,53 @@ def _print_unavailable(error: str) -> None:
     )
 
 
+def _sync_runtime_models(state: CodexRuntimeState) -> CodexRuntimeState:
+    """Attach secret-free model metadata without making CLI readiness fail."""
+    try:
+        result = sync_codex_profiles(codex_version=state.version)
+    except Exception as exc:
+        result_error = (
+            "unexpected model profile sync failure "
+            f"({type(exc).__name__})"
+        )
+        print(
+            "Warning: Codex model profile sync failed: "
+            f"{result_error}. Codex engines will use the user's default "
+            "Codex configuration; Agent startup will continue.",
+            flush=True,
+        )
+        return replace(state, model_config_error=result_error)
+
+    for warning in result.warnings:
+        print(f"Warning: {warning}", flush=True)
+    if result.error:
+        print(
+            "Warning: Codex model profile sync failed: "
+            f"{result.error}. Codex engines will use the user's default "
+            "Codex configuration; Agent startup will continue.",
+            flush=True,
+        )
+    elif result.models:
+        print(
+            "Codex model profiles ready: synchronized "
+            f"{len(result.models)} model(s) from user OpenCode config.",
+            flush=True,
+        )
+    else:
+        print(
+            "Codex model profiles: no explicit user OpenCode models were "
+            "found; Codex engines will use the user's default Codex "
+            "configuration.",
+            flush=True,
+        )
+    return replace(
+        state,
+        models=result.models,
+        model_config_warnings=result.warnings,
+        model_config_error=result.error,
+    )
+
+
 async def initialize_codex_runtime(
     *,
     timeout_seconds: float = CODEX_INSTALL_TIMEOUT_SECONDS,
@@ -355,10 +407,11 @@ async def initialize_codex_runtime(
     executable = shutil.which("codex")
     if executable:
         try:
-            _runtime_state = await _probe_codex(
+            probed_state = await _probe_codex(
                 executable,
                 timeout=CODEX_PROBE_TIMEOUT_SECONDS,
             )
+            _runtime_state = _sync_runtime_models(probed_state)
             print(
                 f"Codex CLI ready: {_runtime_state.version}",
                 flush=True,
@@ -386,7 +439,7 @@ async def initialize_codex_runtime(
         return _runtime_state
 
     try:
-        _runtime_state = await _install_codex(
+        installed_state = await _install_codex(
             npm,
             timeout_seconds=max(0.0, float(timeout_seconds)),
         )
@@ -401,6 +454,7 @@ async def initialize_codex_runtime(
         _print_unavailable(error)
         return _runtime_state
 
+    _runtime_state = _sync_runtime_models(installed_state)
     print(
         f"Codex CLI installed successfully: {_runtime_state.version}",
         flush=True,
@@ -432,6 +486,7 @@ def _reset_codex_runtime_state_for_tests() -> None:
 
 __all__ = [
     "CODEX_INSTALL_TIMEOUT_SECONDS",
+    "CodexModelProfile",
     "CodexRuntimeState",
     "get_codex_runtime_state",
     "initialize_codex_runtime",

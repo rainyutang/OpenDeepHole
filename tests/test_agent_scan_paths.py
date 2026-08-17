@@ -10,7 +10,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from deephole_client.config import AgentConfig
-from deephole_client.codex_runtime import CodexRuntimeState
+from deephole_client.codex_runtime import (
+    CodexModelProfile,
+    CodexRuntimeState,
+)
 from deephole_client.scanner import (
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     _event_candidate_index,
@@ -1833,6 +1836,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         async def run_engine(engine, **engine_kwargs):
             started.append(engine.manifest.engine_id)
             self.assertNotIn("codex_command", engine_kwargs)
+            self.assertNotIn("codex_models", engine_kwargs)
             return {
                 "status": "success",
                 "vulnerabilities": [],
@@ -1931,9 +1935,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             get=lambda engine_id: loaded if engine_id == "codex" else None,
         )
         received_command: list[str] = []
+        received_models: list[dict] = []
 
         async def run_engine(_engine, **engine_kwargs):
             received_command.extend(engine_kwargs["codex_command"])
+            received_models.extend(engine_kwargs["codex_models"])
             return {
                 "status": "success",
                 "vulnerabilities": [],
@@ -1965,6 +1971,12 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                         available=True,
                         command=("/opt/bin/codex",),
                         executable="/opt/bin/codex",
+                        models=(CodexModelProfile(
+                            id="provider/model",
+                            provider_id="provider",
+                            model_id="model",
+                            profile="opendeephole-provider-model-abcd",
+                        ),),
                     ),
                 ),
                 patch(
@@ -1999,6 +2011,17 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(received_command, ["/opt/bin/codex"])
+        self.assertEqual(received_models, [{
+            "id": "provider/model",
+            "provider_id": "provider",
+            "model_id": "model",
+            "profile": "opendeephole-provider-model-abcd",
+            "command": [
+                "/opt/bin/codex",
+                "--profile",
+                "opendeephole-provider-model-abcd",
+            ],
+        }])
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
     async def test_cross_engine_exact_duplicates_finish_with_one_finding(

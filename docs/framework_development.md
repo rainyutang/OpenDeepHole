@@ -162,7 +162,7 @@ def run_threat_analysis(
 | 目录 | `project_path`、`code_scan_path`、`scan_dir`、`work_dir`、`index_db_path` | 只读源码范围、扫描工作目录、引擎可写目录和代码索引 |
 | 扫描数据 | `checker_names`、`checker_packages`、`product`、`vulnerability_validation`、`feedback_entries` | 本次扫描的规则、产品、漏洞验证配置和历史反馈快照 |
 | 运行状态 | `is_resume`、候选重试参数、威胁审计重试参数 | 续扫和定向重试上下文 |
-| 能力 | `config`、`code_graph_mcp`、`knowledge_base_mcp`、`codex_command` | Agent 只读配置、本次扫描私有 MCP 配置，以及仅向声明依赖 Codex 的引擎提供的安全 argv 前缀 |
+| 能力 | `config`、`code_graph_mcp`、`knowledge_base_mcp`、`codex_command`、`codex_models` | Agent 只读配置、本次扫描私有 MCP 配置，以及仅向声明依赖 Codex 的引擎提供的基础 argv 前缀和无密钥模型 profile 元数据 |
 | 回调 | `output`、`cancel_event`、`report_vulnerabilities` | 事件输出、取消检查和流式漏洞上报 |
 
 框架还会向内置引擎传入 `reporter`；第三方引擎不应依赖该平台对象，应优先使用
@@ -289,8 +289,17 @@ requires_codex: true
   自动开启平台统一的去误报流程。
 - `requires_codex` 可以省略，缺省为 `false`；设为 YAML 布尔值 `true` 时，Agent 启动会提前
   准备 Codex CLI，并在不可用时只阻止该引擎执行。可用时引擎从 `kwargs["codex_command"]`
-  取得可直接追加参数的无 shell argv 前缀。
+  取得可直接追加参数的无 shell argv 前缀，并从 `kwargs["codex_models"]` 取得用户级
+  OpenCode 模型所对应的 profile。每个模型项包含 `id`、`provider_id`、`model_id`、`profile`
+  和已追加 `--profile` 的 `command`，不包含 URL 或凭据；同步失败或没有显式模型时列表为空，
+  引擎仍可用基础命令调用用户的 Codex 默认配置。
 - 未知字段、缺失字段或非法目录只会隔离当前引擎，不影响其它有效引擎发现。
+
+OpenCode 模型同步只读取用户配置目录下的 `opencode.json` / `opencode.jsonc`，不会读取项目、
+可执行文件旁、显式路径或平台模型池配置。生成文件位于 `$CODEX_HOME`，带 OpenDeepHole 托管
+标记且权限仅限当前用户；用户 `config.toml`、默认模型和非托管 profile 始终保持原样。Codex
+低于 0.134、源配置无效或 profile 写入失败都只产生脱敏告警，不会阻止 Agent 或非 Codex 引擎。
+框架不探测模型端点；自定义 provider 的 Responses 协议兼容性在引擎实际调用时确定。
 
 新增目录后不需要修改中央注册表。新建扫描页面直接读取当前代码仓中的有效引擎清单；
 扫描创建后使用已固化的引擎 ID 和名称快照。
@@ -362,6 +371,7 @@ async def run(**kwargs):
 
 - [Skill 引擎示例](../deephole_client/vulnerability_mining/examples/example_skill/engine.py)
 - [外部 CLI 引擎示例](../deephole_client/vulnerability_mining/examples/example_cli/engine.py)
+- [Codex 引擎示例](../deephole_client/vulnerability_mining/examples/example_codex/engine.py)
 
 示例位于 `examples/`，不会自动加载；复制到 `engines/<engine_id>/` 后才会进入生产发现。
 

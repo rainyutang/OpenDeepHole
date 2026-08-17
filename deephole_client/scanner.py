@@ -819,6 +819,7 @@ async def run_scan(
             return run, None
 
         codex_command: list[str] | None = None
+        codex_models: list[dict[str, Any]] | None = None
         if bool(getattr(loaded.manifest, "requires_codex", False)):
             codex_state = get_codex_runtime_state()
             if not codex_state.available or not codex_state.command:
@@ -837,6 +838,10 @@ async def run_scan(
                 await _publish_engine_run(reporter, scan_id, run)
                 return run, None
             codex_command = list(codex_state.command)
+            codex_models = [
+                model.engine_value(codex_state.command)
+                for model in codex_state.models
+            ]
 
         threat_analysis_result: dict[str, Any] | None = None
         if selection.engine_id == "threat_audit":
@@ -959,6 +964,7 @@ async def run_scan(
             )
         if codex_command is not None:
             engine_kwargs["codex_command"] = codex_command
+            engine_kwargs["codex_models"] = codex_models or []
         try:
             output = await run_mining_engine(loaded, **engine_kwargs)
             vulnerabilities = output["vulnerabilities"]

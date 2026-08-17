@@ -11,11 +11,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import deephole_client.main as agent_main
 from deephole_client import codex_runtime
+from deephole_client.codex_profiles import CodexProfileSyncResult
 
 
 class CodexRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         codex_runtime._reset_codex_runtime_state_for_tests()
+        self.profile_sync_patcher = patch.object(
+            codex_runtime,
+            "sync_codex_profiles",
+            return_value=CodexProfileSyncResult(),
+        )
+        self.profile_sync = self.profile_sync_patcher.start()
+        self.addCleanup(self.profile_sync_patcher.stop)
 
     def tearDown(self) -> None:
         codex_runtime._reset_codex_runtime_state_for_tests()
@@ -54,6 +62,9 @@ class CodexRuntimeTests(unittest.TestCase):
             [call.args[0] for call in which.call_args_list],
             ["codex"],
         )
+        self.profile_sync.assert_called_once_with(
+            codex_version="codex-cli 1.2.3",
+        )
 
     def test_missing_npm_is_non_fatal_and_cached_for_this_process(self) -> None:
         with (
@@ -78,6 +89,35 @@ class CodexRuntimeTests(unittest.TestCase):
         runner.assert_not_awaited()
         self.assertTrue(any(
             "Agent startup will continue" in str(call)
+            for call in output.call_args_list
+        ))
+
+    def test_model_sync_failure_keeps_ready_cli_and_default_fallback(
+        self,
+    ) -> None:
+        self.profile_sync.return_value = CodexProfileSyncResult(
+            error="profile directory denied",
+        )
+        ready = codex_runtime.CodexRuntimeState(
+            available=True,
+            command=("/opt/bin/codex",),
+            executable="/opt/bin/codex",
+            version="codex-cli 0.146.1",
+        )
+
+        with patch("builtins.print") as output:
+            state = codex_runtime._sync_runtime_models(ready)
+
+        self.assertTrue(state.available)
+        self.assertEqual(state.command, ("/opt/bin/codex",))
+        self.assertEqual(state.models, ())
+        self.assertEqual(
+            state.model_config_error,
+            "profile directory denied",
+        )
+        self.assertTrue(any(
+            "user's default Codex configuration" in str(call)
+            and "Agent startup will continue" in str(call)
             for call in output.call_args_list
         ))
 
