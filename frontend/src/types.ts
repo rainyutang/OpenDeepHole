@@ -784,6 +784,7 @@ export interface MiningEngineCatalogItem {
   label: string;
   description: string;
   fp_review: boolean;
+  requires_codex: boolean;
 }
 
 export interface MiningEngineCatalog {

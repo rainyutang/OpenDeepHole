@@ -271,6 +271,7 @@ class MiningEngineCatalogItem(BaseModel):
     label: str
     description: str
     fp_review: bool
+    requires_codex: bool = False
 
 
 class MiningEngineCatalog(BaseModel):

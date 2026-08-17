@@ -22,6 +22,7 @@ from task_agent import opencode_task_context
 from task_agent.output_format import is_task_output_line
 
 from .code_graph_build import run_code_graph_build
+from .codex_runtime import get_codex_runtime_state
 from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
 from .process_artifacts import collect_json_artifacts
@@ -817,6 +818,26 @@ async def run_scan(
             await _publish_engine_run(reporter, scan_id, run)
             return run, None
 
+        codex_command: list[str] | None = None
+        if bool(getattr(loaded.manifest, "requires_codex", False)):
+            codex_state = get_codex_runtime_state()
+            if not codex_state.available or not codex_state.command:
+                reason = (
+                    codex_state.error
+                    or "Codex CLI has no executable command on this Agent"
+                )
+                run.status = "error"
+                run.error_message = f"Codex CLI is unavailable: {reason}"
+                run.finished_at = datetime.now(timezone.utc).isoformat()
+                await emit(
+                    "mining_engine",
+                    f"{selection.engine_label} cannot start: "
+                    f"{run.error_message}",
+                )
+                await _publish_engine_run(reporter, scan_id, run)
+                return run, None
+            codex_command = list(codex_state.command)
+
         threat_analysis_result: dict[str, Any] | None = None
         if selection.engine_id == "threat_audit":
             if threat_analysis_task is None:
@@ -936,6 +957,8 @@ async def run_scan(
             engine_kwargs["threat_analysis_result"] = (
                 threat_analysis_result
             )
+        if codex_command is not None:
+            engine_kwargs["codex_command"] = codex_command
         try:
             output = await run_mining_engine(loaded, **engine_kwargs)
             vulnerabilities = output["vulnerabilities"]

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from deephole_client.config import AgentConfig
+from deephole_client.codex_runtime import CodexRuntimeState
 from deephole_client.scanner import (
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     _event_candidate_index,
@@ -1798,6 +1799,207 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("success", run_states)
         self.assertIn("error", run_states)
         self.assertEqual(run_states.count("error"), 2)
+
+    async def test_missing_codex_only_blocks_engines_that_require_it(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        manifests = [
+            SimpleNamespace(
+                engine_id="plain",
+                label="Plain engine",
+                fp_review=False,
+                requires_codex=False,
+            ),
+            SimpleNamespace(
+                engine_id="codex",
+                label="Codex engine",
+                fp_review=False,
+                requires_codex=True,
+            ),
+        ]
+        loaded = {
+            item.engine_id: SimpleNamespace(manifest=item)
+            for item in manifests
+        }
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: manifests,
+            get=lambda engine_id: loaded.get(engine_id),
+        )
+        started: list[str] = []
+
+        async def run_engine(engine, **engine_kwargs):
+            started.append(engine.manifest.engine_id)
+            self.assertNotIn("codex_command", engine_kwargs)
+            return {
+                "status": "success",
+                "vulnerabilities": [],
+                "error_message": "",
+                "total_candidates": 0,
+                "processed_candidates": 0,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.get_codex_runtime_state",
+                    return_value=CodexRuntimeState(
+                        available=False,
+                        error="npm was not found in PATH",
+                    ),
+                ),
+                patch(
+                    "deephole_client.scanner.run_mining_engine",
+                    side_effect=run_engine,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="codex isolation",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-codex-isolation",
+                    cancel_event=threading.Event(),
+                    mining_engines=[{
+                        "engine_id": item.engine_id,
+                        "engine_label": item.label,
+                        "enabled": True,
+                    } for item in manifests],
+                )
+
+        self.assertEqual(started, ["plain"])
+        finish = reporter.finish_scan.await_args
+        self.assertEqual(finish.args[2], "complete")
+        self.assertIn(
+            "Codex engine: Codex CLI is unavailable: "
+            "npm was not found in PATH",
+            finish.kwargs["error_message"],
+        )
+        engine_runs = {
+            call.args[1]["engine_id"]: call.args[1]
+            for call in reporter.report_mining_engine_run.await_args_list
+        }
+        self.assertEqual(engine_runs["plain"]["status"], "success")
+        self.assertEqual(engine_runs["codex"]["status"], "error")
+        self.assertTrue(any(
+            "Codex engine cannot start" in call.args[1].message
+            for call in reporter.send_event.await_args_list
+        ))
+
+    async def test_codex_command_is_passed_to_required_engine(self) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        manifest = SimpleNamespace(
+            engine_id="codex",
+            label="Codex engine",
+            fp_review=False,
+            requires_codex=True,
+        )
+        loaded = SimpleNamespace(manifest=manifest)
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: [manifest],
+            get=lambda engine_id: loaded if engine_id == "codex" else None,
+        )
+        received_command: list[str] = []
+
+        async def run_engine(_engine, **engine_kwargs):
+            received_command.extend(engine_kwargs["codex_command"])
+            return {
+                "status": "success",
+                "vulnerabilities": [],
+                "error_message": "",
+                "total_candidates": 0,
+                "processed_candidates": 0,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.get_codex_runtime_state",
+                    return_value=CodexRuntimeState(
+                        available=True,
+                        command=("/opt/bin/codex",),
+                        executable="/opt/bin/codex",
+                    ),
+                ),
+                patch(
+                    "deephole_client.scanner.run_mining_engine",
+                    side_effect=run_engine,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="codex available",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-codex-available",
+                    cancel_event=threading.Event(),
+                    mining_engines=[{
+                        "engine_id": "codex",
+                        "engine_label": "Codex engine",
+                        "enabled": True,
+                    }],
+                )
+
+        self.assertEqual(received_command, ["/opt/bin/codex"])
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
     async def test_cross_engine_exact_duplicates_finish_with_one_finding(
         self,

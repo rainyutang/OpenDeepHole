@@ -168,8 +168,16 @@ DeepHole 2.0 Agent
   Name    : my-agent
   Server  : http://your-server:8000
 
+Codex CLI ready: codex-cli 0.x.y
+
   Connected via WebSocket, agent_id: a1b2c3d4...
 ```
+
+Agent 在连接服务端前检查一次 Codex CLI。若本机没有可调用的 `codex`，会依次执行
+`npm set strict-ssl false`、设置 `https://mirrors.tools.huawei.com/npm/` 为 registry、
+`npm cache clean -f` 和 `npm install -g @openai/codex`；源配置、缓存清理、安装及安装后验证
+共享 120 秒总超时。缺少 npm、安装失败或超时只会打印告警并继续连接，未声明依赖 Codex 的
+漏洞挖掘引擎不受影响；失败后到下次重启 Agent 才会再次尝试。
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。Agent 默认允许接收最大 64 MiB 的单条
 WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续扫命令仍超过该限制，可设置正整数

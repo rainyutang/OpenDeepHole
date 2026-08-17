@@ -162,7 +162,7 @@ def run_threat_analysis(
 | 目录 | `project_path`、`code_scan_path`、`scan_dir`、`work_dir`、`index_db_path` | 只读源码范围、扫描工作目录、引擎可写目录和代码索引 |
 | 扫描数据 | `checker_names`、`checker_packages`、`product`、`vulnerability_validation`、`feedback_entries` | 本次扫描的规则、产品、漏洞验证配置和历史反馈快照 |
 | 运行状态 | `is_resume`、候选重试参数、威胁审计重试参数 | 续扫和定向重试上下文 |
-| 能力 | `config`、`code_graph_mcp`、`knowledge_base_mcp` | Agent 只读配置，以及本次扫描私有的代码图谱和知识库 MCP 配置 |
+| 能力 | `config`、`code_graph_mcp`、`knowledge_base_mcp`、`codex_command` | Agent 只读配置、本次扫描私有 MCP 配置，以及仅向声明依赖 Codex 的引擎提供的安全 argv 前缀 |
 | 回调 | `output`、`cancel_event`、`report_vulnerabilities` | 事件输出、取消检查和流式漏洞上报 |
 
 框架还会向内置引擎传入 `reporter`；第三方引擎不应依赖该平台对象，应优先使用
@@ -275,17 +275,21 @@ engines/
 目录名就是 `engine_id`，首字符必须是字母或数字，后续只能包含字母、数字、点、下划线和
 连字符，总长度不超过 128 个字符。引擎目录不能是符号链接。
 
-`engine.yaml` 只接受三个必填字段：
+`engine.yaml` 接受三个必填字段和一个可选字段：
 
 ```yaml
 label: 我的漏洞挖掘引擎
 description: 说明输入、检测能力和适用范围。
 fp_review: true
+requires_codex: true
 ```
 
 - `label` 和 `description` 必须是非空字符串。
 - `fp_review` 必须是 YAML 布尔值，只用于界面说明引擎是否自带去误报能力；它不会关闭或
   自动开启平台统一的去误报流程。
+- `requires_codex` 可以省略，缺省为 `false`；设为 YAML 布尔值 `true` 时，Agent 启动会提前
+  准备 Codex CLI，并在不可用时只阻止该引擎执行。可用时引擎从 `kwargs["codex_command"]`
+  取得可直接追加参数的无 shell argv 前缀。
 - 未知字段、缺失字段或非法目录只会隔离当前引擎，不影响其它有效引擎发现。
 
 新增目录后不需要修改中央注册表。新建扫描页面直接读取当前代码仓中的有效引擎清单；

@@ -567,6 +567,13 @@ async def _main() -> None:
     print(f"  Server  : {config.server_url}")
     print()
 
+    # Codex is an optional mining-engine dependency.  Prepare it before the
+    # Agent connects so every task in this process sees one stable result;
+    # failures are reported locally and never prevent the Agent from starting.
+    from deephole_client.codex_runtime import initialize_codex_runtime
+    await initialize_codex_runtime()
+    print()
+
     from deephole_client.reporter import Reporter
     from deephole_client.task_manager import TaskManager
     import deephole_client.server as agent_server
