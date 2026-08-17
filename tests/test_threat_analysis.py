@@ -503,7 +503,9 @@ def test_opaque_artifact_bundle_round_trips_without_schema_conversion() -> None:
         assert scan.threat_analysis == bundle
 
 
-def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair() -> None:
+def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair(
+    tmp_path: Path,
+) -> None:
     attack_tree_data = {
         "attack_trees": [{
             "tree_id": "TREE-1",
@@ -601,7 +603,13 @@ def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair() -> None:
     high_risk_modules = [
         {
             "模块名称": "管理接口",
-            "代码目录": [" ./src/api/ ", "src\\common", "src/shared/"],
+            "代码目录": [
+                " ./src/api/ ",
+                "src\\common",
+                "src/shared/",
+                "src/api",
+                "./src/common/",
+            ],
             "面临威胁": "未授权访问",
             "是否外部暴露面": "是",
             "判断为高风险模块的原因": "处理外部管理请求",
@@ -625,16 +633,30 @@ def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair() -> None:
         ("NODE-1", "PATTERN-2"),
     ]
     assert len({task["task_id"] for task in tasks}) == 2
-    assert [path["path"] for path in tasks[0]["code_paths"]] == [
-        "src/api",
-        "src/common",
-        "src/shared",
-        "src/auth",
+    assert tasks[0]["code_paths"] == [
+        {
+            "path": "src/api、src/common、src/shared",
+            "description": "处理外部管理请求",
+        },
+        {
+            "path": "src/auth",
+            "description": "决定管理权限",
+        },
     ]
-    assert [
-        context["module_name"]
-        for context in tasks[0]["code_path_contexts"]
-    ] == ["管理接口", "管理接口", "管理接口", "认证模块"]
+    assert tasks[0]["code_path_contexts"] == [
+        {
+            "module_name": "管理接口",
+            "path": "src/api、src/common、src/shared",
+            "description": "处理外部管理请求",
+        },
+        {
+            "module_name": "认证模块",
+            "path": "src/auth",
+            "description": "决定管理权限",
+        },
+    ]
+    assert tasks[0]["code_path"] == "src/api、src/common、src/shared"
+    assert tasks[0]["code_path_description"] == "处理外部管理请求"
     assert all(task["attack_path_id"] == "PATH-1" for task in tasks)
     prompt = _threat_prompt(tasks[1])
     assert "- 攻击模式：会话伪造（PATTERN-2）" in prompt
@@ -642,8 +664,13 @@ def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair() -> None:
         "- 攻击路径：管理接口 -> 认证模块 -> 攻击价值资产：管理权限"
         in prompt
     )
-    assert "- 管理接口 : src/api，处理外部管理请求" in prompt
+    assert (
+        "- 管理接口 : src/api、src/common、src/shared，处理外部管理请求"
+        in prompt
+    )
     assert "- 认证模块 : src/auth，决定管理权限" in prompt
+    assert prompt.count("  - 管理接口 : ") == 1
+    assert prompt.count("  - 认证模块 : ") == 1
     assert "- 目标资产：管理权限，系统管理和配置能力" in prompt
     assert "HTTPS 管理接口" not in prompt
     assert "攻击者可接管系统" not in prompt
@@ -655,6 +682,26 @@ def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair() -> None:
     assert "外部输入或对外入口到漏洞触发点" in prompt
     assert tasks[1]["task_id"] not in prompt
     assert '"confirmed":' not in prompt
+
+    store = SqliteScanStore(tmp_path / "scan.db")
+    store.save_scan(*_scan("scan-1"))
+    store.upsert_threat_audit_task(
+        "scan-1",
+        ThreatAuditTask.model_validate(tasks[0]),
+    )
+    stored = store.list_threat_audit_tasks("scan-1")
+    assert len(stored) == 1
+    assert stored[0].code_path == "src/api、src/common、src/shared"
+    assert [item.model_dump() for item in stored[0].code_paths] == [
+        {
+            "path": "src/api、src/common、src/shared",
+            "description": "处理外部管理请求",
+        },
+        {
+            "path": "src/auth",
+            "description": "决定管理权限",
+        },
+    ]
 
 
 def test_threat_audit_keeps_duplicate_local_ids_isolated_by_tree(
