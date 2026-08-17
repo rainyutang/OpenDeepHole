@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import multiprocessing
 import tempfile
 import threading
 import time
@@ -21,6 +22,9 @@ from deephole_client.code_graph_build.cpp_analyzer import CppAnalyzer
 from deephole_client.code_graph_build.runner import _StageProgressGate
 from deephole_client.fp_review import run_fp_review
 from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis import run_static_analysis
+from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis import (
+    runner as static_analysis_runner,
+)
 from deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.base import BaseAnalyzer, Candidate
 from deephole_client.threat_analysis_runner import run_threat_analysis
 from deephole_client.vulnerability_mining.engines.threat_audit import run_threat_audit
@@ -112,6 +116,29 @@ def _write_candidate_audit_rule(
         "description: Audit demo candidates\n"
         "---\n\n"
         "Audit the candidate.",
+        encoding="utf-8",
+    )
+    return checker
+
+
+def _write_static_analysis_checker(
+    root: Path,
+    *,
+    name: str,
+    label: str,
+    analyzer_source: str,
+) -> Path:
+    checker = root / name
+    checker.mkdir(parents=True)
+    (checker / "checker.yaml").write_text(
+        f"name: {name}\n"
+        f"label: {label}\n"
+        "enabled: true\n"
+        "mode: opencode\n",
+        encoding="utf-8",
+    )
+    (checker / "analyzer.py").write_text(
+        analyzer_source,
         encoding="utf-8",
     )
     return checker
@@ -988,48 +1015,56 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
 
 
 def test_static_analysis_keeps_event_loop_responsive_during_blocking_checker() -> None:
-    started = threading.Event()
-    finished = threading.Event()
-    release = threading.Event()
-
-    class BlockingAnalyzer(BaseAnalyzer):
-        vuln_type = "blocking"
-
-        def find_candidates(self, project_path, db=None):
-            started.set()
-            release.wait(timeout=0.5)
-            finished.set()
-            return []
-
     async def scenario(root: Path) -> None:
         project = root / "project"
         project.mkdir()
         index_path = project / "code_index.db"
         database = CodeDatabase(index_path)
         database.close()
-        analyzer = BlockingAnalyzer()
-        checker = SimpleNamespace(
+        checker_root = root / "rules"
+        _write_static_analysis_checker(
+            checker_root,
             name="blocking",
             label="Blocking checker",
-            mode="opencode",
-            analyzer=analyzer,
+            analyzer_source=(
+                "import sys\n"
+                "import time\n"
+                "from ...static_analysis.base import BaseAnalyzer\n"
+                "class Analyzer(BaseAnalyzer):\n"
+                "    vuln_type = 'blocking'\n"
+                "    def find_candidates(self, project_path, db=None):\n"
+                "        sys.setswitchinterval(1.0)\n"
+                "        deadline = time.monotonic() + 0.35\n"
+                "        while time.monotonic() < deadline:\n"
+                "            pass\n"
+                "        return []\n"
+            ),
         )
         stop_ticker = asyncio.Event()
         ticks_while_blocked = 0
         events: list[dict] = []
+        checker_started = asyncio.Event()
+        analysis_task: asyncio.Task | None = None
 
         async def ticker() -> None:
             nonlocal ticks_while_blocked
             while not stop_ticker.is_set():
-                if started.is_set() and not finished.is_set():
+                if (
+                    checker_started.is_set()
+                    and analysis_task is not None
+                    and not analysis_task.done()
+                ):
                     ticks_while_blocked += 1
                 await asyncio.sleep(0.005)
 
+        async def collect(event: dict) -> None:
+            await asyncio.sleep(0)
+            events.append(event)
+            if event["kind"] == "checker_start":
+                checker_started.set()
+
         ticker_task = asyncio.create_task(ticker())
         with patch(
-            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner.discover_checkers",
-            return_value={"blocking": checker},
-        ), patch(
             "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner._PROGRESS_HEARTBEAT_SECONDS",
             0.02,
         ):
@@ -1037,38 +1072,16 @@ def test_static_analysis_keeps_event_loop_responsive_during_blocking_checker() -
                 project_path=project,
                 work_dir=root / "static",
                 index_db_path=index_path,
-                output=events.append,
+                checker_dirs=[checker_root],
+                output=collect,
             ))
-            try:
-                for _ in range(100):
-                    if started.is_set():
-                        break
-                    await asyncio.sleep(0.005)
-                deadline = asyncio.get_running_loop().time() + 0.5
-                while (
-                    ticks_while_blocked < 3
-                    or not any(
-                        event["kind"] == "checker_progress"
-                        and "still running" in event["message"]
-                        for event in events
-                    )
-                ):
-                    if asyncio.get_running_loop().time() >= deadline:
-                        break
-                    await asyncio.sleep(0.005)
-                task_was_still_running = not analysis_task.done()
-                observed_ticks = ticks_while_blocked
-            finally:
-                release.set()
-            result = await asyncio.wait_for(analysis_task, timeout=1)
+            await asyncio.wait_for(checker_started.wait(), timeout=2)
+            result = await asyncio.wait_for(analysis_task, timeout=2)
 
         stop_ticker.set()
         await ticker_task
-        assert started.is_set()
-        assert task_was_still_running
-        assert observed_ticks >= 3
+        assert ticks_while_blocked >= 3
         assert result["status"] == "success"
-        assert analyzer.on_file_progress is None
         assert any(
             event["kind"] == "checker_progress"
             and "still running" in event["message"]
@@ -1148,19 +1161,24 @@ def test_static_analysis_emits_checker_lifecycle_and_candidate_counts() -> None:
         }
         events: list[dict] = []
 
-        async def collect_event(event: dict) -> None:
-            await asyncio.sleep(0)
+        def collect_event(event: dict) -> None:
             events.append(event)
 
         with patch(
             "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner.discover_checkers",
             return_value=registry,
         ):
-            result = await run_static_analysis(
-                project_path=project,
-                work_dir=root / "static",
-                index_db_path=index_path,
-                output=collect_event,
+            result = static_analysis_runner._execute_static_analysis(
+                {
+                    "project_path": str(project),
+                    "index_db_path": str(index_path),
+                    "checker_dirs": [str(root)],
+                    "code_scan_path": str(project),
+                    "checker_names": None,
+                    "deduplicate": True,
+                },
+                collect_event,
+                threading.Event(),
             )
 
         lifecycle = [
@@ -1223,7 +1241,6 @@ def test_static_analysis_emits_checker_lifecycle_and_candidate_counts() -> None:
 
 def test_static_analysis_external_cancellation_resets_file_progress_callback() -> None:
     cancel_event = threading.Event()
-    started = threading.Event()
 
     class CancellableAnalyzer(BaseAnalyzer):
         vuln_type = "cancellable"
@@ -1231,13 +1248,11 @@ def test_static_analysis_external_cancellation_resets_file_progress_callback() -
         def find_candidates(self, project_path, db=None):
             assert self.on_file_progress is not None
             self.on_file_progress(1, 10)
-            started.set()
-            deadline = time.monotonic() + 0.5
-            while not cancel_event.is_set() and time.monotonic() < deadline:
-                time.sleep(0.005)
+            cancel_event.set()
             return []
 
-    async def scenario(root: Path) -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
         project = root / "project"
         project.mkdir()
         index_path = project / "code_index.db"
@@ -1252,27 +1267,22 @@ def test_static_analysis_external_cancellation_resets_file_progress_callback() -
         )
         events: list[dict] = []
 
-        async def cancel_after_start() -> None:
-            for _ in range(100):
-                if started.is_set():
-                    break
-                await asyncio.sleep(0.005)
-            assert started.is_set()
-            cancel_event.set()
-
         with patch(
             "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner.discover_checkers",
             return_value={"cancellable": checker},
         ):
-            cancel_task = asyncio.create_task(cancel_after_start())
-            result = await asyncio.wait_for(run_static_analysis(
-                project_path=project,
-                work_dir=root / "static",
-                index_db_path=index_path,
-                cancel_event=cancel_event,
-                output=events.append,
-            ), timeout=1)
-            await cancel_task
+            result = static_analysis_runner._execute_static_analysis(
+                {
+                    "project_path": str(project),
+                    "index_db_path": str(index_path),
+                    "checker_dirs": [str(root)],
+                    "code_scan_path": str(project),
+                    "checker_names": None,
+                    "deduplicate": True,
+                },
+                events.append,
+                cancel_event,
+            )
 
         assert result["status"] == "cancelled"
         assert result["stats"]["checkers"] == {}
@@ -1297,76 +1307,197 @@ def test_static_analysis_external_cancellation_resets_file_progress_callback() -
         }
         assert analyzer.on_file_progress is None
 
-    with tempfile.TemporaryDirectory() as temp:
-        asyncio.run(scenario(Path(temp)))
 
-
-def test_static_analysis_task_cancellation_stops_bridge_and_cleans_callback() -> None:
-    started = threading.Event()
-    release = threading.Event()
-
-    class BlockingAnalyzer(BaseAnalyzer):
-        vuln_type = "task_cancel"
-
-        def find_candidates(self, project_path, db=None):
-            assert self.on_file_progress is not None
-            self.on_file_progress(1, 10)
-            started.set()
-            release.wait(timeout=1)
-            return []
-
+def test_static_analysis_external_cancellation_forces_spawn_worker_exit() -> None:
     async def scenario(root: Path) -> None:
         project = root / "project"
         project.mkdir()
         index_path = project / "code_index.db"
         database = CodeDatabase(index_path)
         database.close()
-        analyzer = BlockingAnalyzer()
-        checker = SimpleNamespace(
-            name="task_cancel",
-            label="Task cancellation checker",
-            mode="opencode",
-            analyzer=analyzer,
+        checker_root = root / "rules"
+        _write_static_analysis_checker(
+            checker_root,
+            name="forced_cancel",
+            label="Forced cancellation checker",
+            analyzer_source=(
+                "from ...static_analysis.base import BaseAnalyzer\n"
+                "class Analyzer(BaseAnalyzer):\n"
+                "    vuln_type = 'forced_cancel'\n"
+                "    def find_candidates(self, project_path, db=None):\n"
+                "        while True:\n"
+                "            pass\n"
+            ),
         )
+        cancel_event = threading.Event()
+        started = asyncio.Event()
         events: list[dict] = []
 
-        with patch(
-            "deephole_client.vulnerability_mining.engines.static_candidate.static_analysis.runner.discover_checkers",
-            return_value={"task_cancel": checker},
+        def collect(event: dict) -> None:
+            events.append(event)
+            if event["kind"] == "checker_start":
+                started.set()
+
+        with (
+            patch.object(
+                static_analysis_runner,
+                "_WORKER_CANCEL_GRACE_SECONDS",
+                0.05,
+            ),
+            patch.object(
+                static_analysis_runner,
+                "_WORKER_STOP_TIMEOUT_SECONDS",
+                0.2,
+            ),
         ):
             analysis_task = asyncio.create_task(run_static_analysis(
                 project_path=project,
                 work_dir=root / "static",
                 index_db_path=index_path,
-                output=events.append,
+                checker_dirs=[checker_root],
+                cancel_event=cancel_event,
+                output=collect,
             ))
-            try:
-                for _ in range(100):
-                    if started.is_set():
-                        break
-                    await asyncio.sleep(0.005)
-                assert started.is_set()
-                analysis_task.cancel()
-                try:
-                    await asyncio.wait_for(analysis_task, timeout=0.2)
-                except asyncio.CancelledError:
-                    pass
-                else:
-                    raise AssertionError("static analysis task was not cancelled")
-                event_count_after_cancel = len(events)
-            finally:
-                release.set()
+            await asyncio.wait_for(started.wait(), timeout=2)
+            cancel_event.set()
+            result = await asyncio.wait_for(analysis_task, timeout=2)
 
-            for _ in range(100):
-                if analyzer.on_file_progress is None:
-                    break
-                await asyncio.sleep(0.005)
-
-        assert analyzer.on_file_progress is None
-        assert len(events) == event_count_after_cancel
+        assert result == {
+            "status": "cancelled",
+            "candidates": [],
+            "stats": {"total": 0, "checkers": {}},
+        }
+        assert any(event["kind"] == "checker_cancelled" for event in events)
+        assert not [
+            child
+            for child in multiprocessing.active_children()
+            if child.name == "deephole-static-analysis"
+        ]
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))
+
+
+def test_static_analysis_task_cancellation_terminates_spawn_worker() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        database = CodeDatabase(index_path)
+        database.close()
+        checker_root = root / "rules"
+        _write_static_analysis_checker(
+            checker_root,
+            name="task_cancel",
+            label="Task cancellation checker",
+            analyzer_source=(
+                "from ...static_analysis.base import BaseAnalyzer\n"
+                "class Analyzer(BaseAnalyzer):\n"
+                "    vuln_type = 'task_cancel'\n"
+                "    def find_candidates(self, project_path, db=None):\n"
+                "        while True:\n"
+                "            pass\n"
+            ),
+        )
+        events: list[dict] = []
+        started = asyncio.Event()
+
+        def collect(event: dict) -> None:
+            events.append(event)
+            if event["kind"] == "checker_start":
+                started.set()
+
+        with patch.object(
+            static_analysis_runner,
+            "_WORKER_STOP_TIMEOUT_SECONDS",
+            0.2,
+        ):
+            analysis_task = asyncio.create_task(run_static_analysis(
+                project_path=project,
+                work_dir=root / "static",
+                index_db_path=index_path,
+                checker_dirs=[checker_root],
+                output=collect,
+            ))
+            await asyncio.wait_for(started.wait(), timeout=2)
+            analysis_task.cancel()
+            try:
+                await asyncio.wait_for(analysis_task, timeout=2)
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("static analysis task was not cancelled")
+            event_count_after_cancel = len(events)
+
+        await asyncio.sleep(0.05)
+        assert len(events) == event_count_after_cancel
+        assert not [
+            child
+            for child in multiprocessing.active_children()
+            if child.name == "deephole-static-analysis"
+        ]
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_static_analysis_windows_cleanup_targets_exact_worker_tree() -> None:
+    class FakeProcess:
+        pid = 4242
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout=0) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.alive = False
+
+        def kill(self) -> None:
+            self.alive = False
+
+    process = FakeProcess()
+
+    def taskkill(argv, **kwargs):
+        process.alive = False
+        return SimpleNamespace(returncode=0)
+
+    async def run_inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    async def scenario() -> None:
+        with (
+            patch.object(static_analysis_runner.sys, "platform", "win32"),
+            patch.object(
+                static_analysis_runner.asyncio,
+                "to_thread",
+                new=run_inline,
+            ),
+            patch.object(
+                static_analysis_runner.subprocess,
+                "run",
+                side_effect=taskkill,
+            ) as run_taskkill,
+        ):
+            await static_analysis_runner._terminate_worker_process_tree(
+                process,
+                None,
+            )
+
+        assert run_taskkill.call_args.args[0] == [
+            "taskkill",
+            "/PID",
+            "4242",
+            "/T",
+            "/F",
+        ]
+
+    asyncio.run(scenario())
+    assert not process.alive
 
 
 def test_static_analysis_resets_file_progress_callback_after_checker_error() -> None:
@@ -1398,11 +1529,17 @@ def test_static_analysis_resets_file_progress_callback_after_checker_error() -> 
             return_value={"failing": checker},
         ):
             try:
-                await run_static_analysis(
-                    project_path=project,
-                    work_dir=root / "static",
-                    index_db_path=index_path,
-                    output=events.append,
+                static_analysis_runner._execute_static_analysis(
+                    {
+                        "project_path": str(project),
+                        "index_db_path": str(index_path),
+                        "checker_dirs": [str(root)],
+                        "code_scan_path": str(project),
+                        "checker_names": None,
+                        "deduplicate": True,
+                    },
+                    events.append,
+                    threading.Event(),
                 )
             except RuntimeError as exc:
                 assert str(exc) == "checker failed"
@@ -1429,6 +1566,97 @@ def test_static_analysis_resets_file_progress_callback_after_checker_error() -> 
             "checker_label": "Failing checker",
         }
         assert analyzer.on_file_progress is None
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_static_analysis_spawn_surfaces_checker_error() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        database = CodeDatabase(index_path)
+        database.close()
+        checker_root = root / "rules"
+        _write_static_analysis_checker(
+            checker_root,
+            name="failing_spawn",
+            label="Failing spawn checker",
+            analyzer_source=(
+                "from ...static_analysis.base import BaseAnalyzer\n"
+                "class Analyzer(BaseAnalyzer):\n"
+                "    vuln_type = 'failing_spawn'\n"
+                "    def find_candidates(self, project_path, db=None):\n"
+                "        raise RuntimeError('checker failed in child')\n"
+            ),
+        )
+        events: list[dict] = []
+
+        try:
+            await asyncio.wait_for(run_static_analysis(
+                project_path=project,
+                work_dir=root / "static",
+                index_db_path=index_path,
+                checker_dirs=[checker_root],
+                output=events.append,
+            ), timeout=2)
+        except RuntimeError as exc:
+            assert "checker failed in child" in str(exc)
+            assert "Traceback" in str(exc)
+        else:
+            raise AssertionError("failing spawn checker did not raise")
+
+        error_event = next(
+            event for event in events if event["kind"] == "checker_error"
+        )
+        assert error_event["data"]["checker_name"] == "failing_spawn"
+        assert error_event["data"]["error"] == "checker failed in child"
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_static_analysis_spawn_reports_abrupt_worker_exit() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        project.mkdir()
+        index_path = project / "code_index.db"
+        database = CodeDatabase(index_path)
+        database.close()
+        checker_root = root / "rules"
+        _write_static_analysis_checker(
+            checker_root,
+            name="crashing_spawn",
+            label="Crashing spawn checker",
+            analyzer_source=(
+                "import os\n"
+                "from ...static_analysis.base import BaseAnalyzer\n"
+                "class Analyzer(BaseAnalyzer):\n"
+                "    vuln_type = 'crashing_spawn'\n"
+                "    def find_candidates(self, project_path, db=None):\n"
+                "        os._exit(7)\n"
+            ),
+        )
+
+        try:
+            await asyncio.wait_for(run_static_analysis(
+                project_path=project,
+                work_dir=root / "static",
+                index_db_path=index_path,
+                checker_dirs=[checker_root],
+            ), timeout=2)
+        except RuntimeError as exc:
+            assert "stopped without a result" in str(exc)
+            assert "exit code 7" in str(exc)
+        else:
+            raise AssertionError("abrupt worker exit did not raise")
+
+        assert not [
+            child
+            for child in multiprocessing.active_children()
+            if child.name == "deephole-static-analysis"
+        ]
 
     with tempfile.TemporaryDirectory() as temp:
         asyncio.run(scenario(Path(temp)))

@@ -1,7 +1,16 @@
+import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from deephole_client.vulnerability_mining.engines.static_candidate.rules.memleak import (
+    analyzer as memleak_analyzer,
+)
 from deephole_client.vulnerability_mining.engines.static_candidate.rules.memleak.analyzer import (
     Analyzer,
+    MemLeakDetector,
+    PathState,
+    _MAX_PATH_STATES,
     _collect_source_files,
 )
 
@@ -116,3 +125,98 @@ def test_memleak_path_sensitive_cases_use_single_auditable_c_file() -> None:
     assert "bacfile_object_name_set" not in by_function
     assert "ok_switch_case_releases" not in by_function
     assert "ok_state_completion_after_free" not in by_function
+
+
+def test_memleak_path_states_are_deduplicated_and_bounded(caplog) -> None:
+    assert _MAX_PATH_STATES == 256
+    detector = MemLeakDetector(b"")
+    completion_nodes = [
+        SimpleNamespace(type="assignment_expression", start_byte=i, end_byte=i + 1)
+        for i in range(6)
+    ]
+    states = [
+        PathState(
+            freed={"always_freed", f"path_{index}"},
+            transferred={"always_transferred", f"transfer_{index}"},
+            completed_at=[completion_nodes[index % len(completion_nodes)]],
+        )
+        for index in range(10)
+    ]
+    assert detector._compact_path_states([
+        states[0],
+        states[0].copy(),
+    ]) == [states[0]]
+
+    with patch.object(memleak_analyzer, "_MAX_PATH_STATES", 4):
+        with caplog.at_level("WARNING"):
+            compacted = detector._compact_path_states(states + [states[0].copy()])
+            detector._compact_path_states(states)
+
+    assert len(compacted) == 4
+    overflow = compacted[-1]
+    assert overflow.freed == {"always_freed"}
+    assert overflow.transferred == {"always_transferred"}
+    assert {
+        detector._completion_key(node)
+        for node in overflow.completed_at
+    } == {
+        detector._completion_key(node)
+        for node in completion_nodes
+    }
+    assert caplog.messages.count(
+        "memleak path-state limit reached (4); "
+        "conservatively merging overflow states"
+    ) == 1
+
+
+def test_memleak_bounded_state_merge_preserves_error_path_recall() -> None:
+    source = b"""
+void bounded_paths(char *a, char *b, char *c, char *d, int fail) {
+    char *p = malloc(16);
+    if (a) { observe(a); }
+    if (b) { observe(b); }
+    if (c) { observe(c); }
+    if (d) { observe(d); }
+    if (fail) {
+        return;
+    }
+    free(p);
+}
+"""
+
+    with patch.object(memleak_analyzer, "_MAX_PATH_STATES", 4):
+        issues = MemLeakDetector(source).run()
+
+    assert any(
+        issue.kind == "error_path_leak"
+        and issue.func == "bounded_paths"
+        and "p" in issue.leaked
+        for issue in issues
+    )
+
+
+def test_memleak_equivalent_branches_do_not_expand_exponentially() -> None:
+    branches = "\n".join(
+        f"if (flag & {1 << index}) {{ observe(flag); }}"
+        for index in range(16)
+    )
+    source = (
+        "void equivalent_paths(int flag) {\n"
+        "    char *p = malloc(16);\n"
+        f"    {branches}\n"
+        "    if (flag < 0) { return; }\n"
+        "    free(p);\n"
+        "}\n"
+    ).encode()
+
+    started_at = time.monotonic()
+    issues = MemLeakDetector(source).run()
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.5
+    assert any(
+        issue.kind == "error_path_leak"
+        and issue.func == "equivalent_paths"
+        and "p" in issue.leaked
+        for issue in issues
+    )
