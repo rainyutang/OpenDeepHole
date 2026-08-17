@@ -678,8 +678,17 @@ def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair(
     assert "模式关联说明" not in prompt
     assert "模块关联说明" not in prompt
     assert "对外暴露面" not in prompt
-    assert "只作为审计线索，不需要严格遵循" in prompt
-    assert "外部输入或对外入口到漏洞触发点" in prompt
+    assert (
+        "上述攻击路径只作为参考，只输出有真实代码证据的漏洞。必须通过"
+        "真实代码验真从外部输入或对外入口到漏洞触发点的完整可达调用链"
+        "和数据流。如果外部输入不可达、Guard能完整阻断或者证据不足，"
+        "则不要输出。"
+    ) in prompt
+    assert "优先审计上述代码路径" not in prompt
+    assert "只作为审计线索" not in prompt
+    assert "聚焦的攻击链验证" not in prompt
+    assert "代码图谱" not in prompt
+    assert "主链路" not in prompt
     assert tasks[1]["task_id"] not in prompt
     assert '"confirmed":' not in prompt
 
