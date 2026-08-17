@@ -105,6 +105,48 @@ function probeTime(value: string): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
 
+function formatModelPickerError(error: unknown): string {
+  const candidate = error as {
+    message?: unknown;
+    config?: { url?: unknown };
+    response?: {
+      status?: unknown;
+      statusText?: unknown;
+      data?: unknown;
+    };
+  };
+  const response = candidate?.response;
+  const lines = ["从 OpenCode Serve 读取模型失败"];
+  let hasResponseDetail = false;
+  if (response) {
+    const status = typeof response.status === "number" ? response.status : null;
+    const statusText = typeof response.statusText === "string" ? response.statusText.trim() : "";
+    if (status !== null) lines.push(`HTTP 状态：${status}${statusText ? ` ${statusText}` : ""}`);
+    const data = response.data;
+    let detail = "";
+    if (data && typeof data === "object" && "detail" in data) {
+      const value = (data as { detail?: unknown }).detail;
+      detail = typeof value === "string"
+        ? value
+        : (JSON.stringify(value, null, 2) || String(value ?? ""));
+    } else if (typeof data === "string") {
+      detail = data;
+    } else if (data !== undefined && data !== null) {
+      detail = JSON.stringify(data, null, 2) || String(data);
+    }
+    if (detail.trim()) {
+      hasResponseDetail = true;
+      lines.push("", detail.trim());
+    }
+  }
+  const requestUrl = typeof candidate?.config?.url === "string" ? candidate.config.url : "";
+  if (requestUrl) lines.push("", `请求地址：${requestUrl}`);
+  const fallback = typeof candidate?.message === "string" ? candidate.message.trim() : "";
+  if (fallback && (!response || !hasResponseDetail)) lines.push("", fallback);
+  if (lines.length === 1) lines.push("", "未知错误");
+  return lines.join("\n");
+}
+
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return <label className="block"><span className="mb-1.5 block text-xs font-medium text-slate-300">{label}{hint && <span className="ml-1 font-normal text-slate-500">— {hint}</span>}</span>{children}</label>;
 }
@@ -125,7 +167,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [modelPicker, setModelPicker] = useState<{
-    agentId: string;
+    agentKey: string;
     loading: boolean;
     error: string | null;
     message: string | null;
@@ -225,9 +267,9 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
 
   const openModelPicker = async (refresh = false) => {
     if (!selectedAgent?.online) return;
-    const agentId = selectedAgent.agent_id;
+    const targetAgentKey = selectedAgent.agent_key;
     setModelPicker({
-      agentId,
+      agentKey: targetAgentKey,
       loading: true,
       error: null,
       message: null,
@@ -235,9 +277,9 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
       selected: [],
     });
     try {
-      const result = await getAgentOpenCodeModels(agentId, refresh);
+      const result = await getAgentOpenCodeModels(targetAgentKey, refresh);
       if (!result.ok) throw new Error(result.message || "读取模型失败");
-      setModelPicker((current) => current?.agentId === agentId ? {
+      setModelPicker((current) => current?.agentKey === targetAgentKey ? {
         ...current,
         loading: false,
         message: result.message.trim() || null,
@@ -245,10 +287,10 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
         selected: [],
       } : current);
     } catch (error) {
-      setModelPicker((current) => current?.agentId === agentId ? {
+      setModelPicker((current) => current?.agentKey === targetAgentKey ? {
         ...current,
         loading: false,
-        error: error instanceof Error ? error.message : "读取模型失败",
+        error: formatModelPickerError(error),
       } : current);
     }
   };
@@ -410,10 +452,10 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
           <h3 id="model-picker-title" className="text-sm font-semibold text-white">从 serve 导入模型</h3>
           <button type="button" onClick={() => setModelPicker(null)} className="px-2 py-1 text-xs text-slate-300 hover:text-white">关闭</button>
         </div>
-        {modelPicker.message && <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">{modelPicker.message}</div>}
+        {modelPicker.message && <div className="mb-3 whitespace-pre-wrap break-all rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">{modelPicker.message}</div>}
         <div className="max-h-[24rem] overflow-y-auto rounded-md border border-slate-700">
           {modelPicker.loading ? <div className="px-3 py-6 text-center text-sm text-slate-400">读取中…</div>
-            : modelPicker.error ? <div className="px-3 py-6 text-center text-sm text-red-300">{modelPicker.error}</div>
+            : modelPicker.error ? <pre className="whitespace-pre-wrap break-all px-3 py-4 text-left font-mono text-xs leading-5 text-red-300">{modelPicker.error}</pre>
               : modelPicker.models.length === 0 ? <div className="px-3 py-6 text-center text-sm text-slate-400">serve 未返回可用模型</div>
                 : <div className="divide-y divide-slate-700">{modelPicker.models.map((model) => <label key={model.id} className="flex items-center gap-3 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800">
                   <input type="checkbox" checked={modelPicker.selected.includes(model.id)} onChange={() => togglePickedModel(model.id)} className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500" />

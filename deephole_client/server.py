@@ -10,6 +10,7 @@ import json
 import re
 import shutil
 import threading
+import time
 import zipfile
 from collections import deque
 from dataclasses import dataclass
@@ -1314,6 +1315,8 @@ async def handle_feedback_selection_update(scan_id: str, feedback_entries: list[
 
 async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict:
     """Return models visible to the Agent's OpenCode-compatible serve process."""
+    started_at = time.monotonic()
+    stage = "初始化 Agent 配置"
     try:
         from task_agent.serve_client import get_serve_manager
         from deephole_client.opencode_integration import (
@@ -1325,10 +1328,12 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
         tool = str(getattr(_config.opencode, "tool", "") or "opencode").strip().lower() or "opencode"
         if tool != "opencode":
             raise RuntimeError(f"{tool} does not support serve model listing")
+        stage = "解析 OpenCode Serve 运行配置"
         runtime = build_opencode_session_runtime(
             _config.opencode,
             directory=Path.cwd(),
         )
+        stage = "准备 OpenCode Serve 并查询 Provider"
         model_result = await get_serve_manager().list_models(
             tool=runtime.tool,
             executable=runtime.executable,
@@ -1356,11 +1361,20 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             ],
         }
     except Exception as exc:
+        diagnostic = "\n".join((
+            "OpenCode Serve 模型枚举失败",
+            f"阶段：{stage}",
+            f"错误类型：{type(exc).__name__}",
+            f"Agent 端耗时：{max(0.0, time.monotonic() - started_at):.1f} 秒",
+            "",
+            "详细信息：",
+            str(exc).strip() or "未提供具体错误信息。",
+        ))
         return {
             "type": "opencode_models_result",
             "request_id": request_id,
             "ok": False,
-            "message": str(exc),
+            "message": diagnostic,
             "models": [],
         }
 

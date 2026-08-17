@@ -2,6 +2,7 @@
 
 ## 2026-08-17
 
+- **修复** Agent 配置页从 OpenCode Serve 拉取模型时，控制端 60 秒等待短于 Serve 冷启动与 Provider 查询总预算而先返回 504、Agent 重连或多 Worker 请求使用临时会话 ID 又可能继续返回 404：模型读取现改用稳定 `agent_key` 跨 Worker 解析当前连接，RPC 等待扩展为 120 秒并保留旧接口兼容；失败窗口会直接完整展示已脱敏的阶段、耗时、HTTP 状态、Agent/会话、请求编号、Provider 错误和 Serve 启动输出，便于定位端口、可执行文件及配置问题
 - **修复** 长时间运行“异常分支内存泄漏”等静态规则时，CPU 密集型 Python 分析与 Agent 共用进程/GIL，可能让 WebSocket 心跳超时并显示 Agent 离线：每批静态分析现改由跨平台 `spawn` 子进程执行，父进程通过专用 Pipe reader 转发原有 checker 事件并独立发送 30 秒活跃进度；外部取消、Task 取消和异常退出会精确回收本批 worker 进程树（Windows `taskkill /T /F`、POSIX 独立进程组），不改变公开参数、事件及结果契约；`memleak` 同时增加等价路径去重和 256 状态上限，超限时保守合并安全事实，避免复杂分支造成指数级耗时与内存增长
 - **新增** Agent 连接服务端前自动检测 Codex CLI；不可用时按顺序关闭 npm strict SSL、配置华为 npm 源、清理缓存并全局安装 `@openai/codex`，完整流程共享 120 秒超时，缺少 npm、命令失败或超时只告警并继续启动，下次重启再重试
 - **新增** 漏洞挖掘引擎 `engine.yaml` 支持可选布尔字段 `requires_codex`；依赖引擎在 Codex 不可用时单独标记失败且不调用适配器，其它引擎继续执行，Codex 可用时通过 `codex_command` 获得跨平台 argv 前缀

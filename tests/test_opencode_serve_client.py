@@ -2550,6 +2550,43 @@ def test_list_models_caches_success_and_refresh_bypasses_cache() -> None:
     asyncio.run(run())
 
 
+def test_list_models_labels_serve_preparation_failure() -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._acquire_model_listing = AsyncMock(
+            side_effect=RuntimeError("startup output"),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager.list_models(tool="opencode", executable="opencode")
+
+        message = str(excinfo.value)
+        assert "OpenCode Serve 准备失败（启动或复用阶段）" in message
+        assert "startup output" in message
+
+    asyncio.run(run())
+
+
+def test_list_models_labels_provider_query_failure_and_releases_listing() -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._acquire_model_listing = AsyncMock(return_value=False)
+        manager._release_model_listing = AsyncMock()
+        manager._fetch_models = AsyncMock(
+            side_effect=RuntimeError("/provider: 404 Not Found"),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager.list_models(tool="opencode", executable="opencode")
+
+        message = str(excinfo.value)
+        assert "OpenCode Serve 模型接口查询失败" in message
+        assert "/provider: 404 Not Found" in message
+        manager._release_model_listing.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 def test_list_models_coalesces_same_key_concurrent_requests() -> None:
     async def run() -> None:
         fetch_started = asyncio.Event()

@@ -93,7 +93,7 @@ export OPENDEEPHOLE_SERVER_WS_PING_TIMEOUT=120
 
 ## 反向代理
 
-WebSocket 需要较长的读超时；SSE 必须关闭代理缓冲和缓存。例如 Nginx：
+WebSocket 需要较长的读超时；SSE 必须关闭代理缓冲和缓存。首次枚举 OpenCode Serve 模型的应用等待上限为 120 秒，对应普通 HTTP 路由的代理读取超时也必须高于该值，建议统一设为 180 秒。例如 Nginx：
 
 ```nginx
 location /api/agent/ws {
@@ -108,6 +108,12 @@ location ~ ^/api/(public/)?scans?/.*/events$ {
     proxy_pass http://opendeephole;
     proxy_buffering off;
     proxy_cache off;
+    proxy_read_timeout 180s;
+}
+
+# Agent 首次启动 OpenCode Serve 时，模型枚举最多等待 120 秒。
+location ~ ^/api/agent-configs/[^/]+/opencode-models$ {
+    proxy_pass http://opendeephole;
     proxy_read_timeout 180s;
 }
 ```

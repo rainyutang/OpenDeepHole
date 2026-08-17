@@ -5841,14 +5841,27 @@ class OpenCodeServeManager:
                     return OpenCodeModelListResult(models=list(cached))
 
             ensure_started_at = time.monotonic()
-            refresh_deferred = await self._acquire_model_listing(
-                key,
-                startup_cwd=config_workspace,
-            )
+            try:
+                refresh_deferred = await self._acquire_model_listing(
+                    key,
+                    startup_cwd=config_workspace,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "OpenCode Serve 准备失败（启动或复用阶段）：\n"
+                    f"{exc}"
+                ) from exc
             ensure_elapsed = time.monotonic() - ensure_started_at
             request_started_at = time.monotonic()
             try:
-                models = await self._fetch_models(directory)
+                try:
+                    models = await self._fetch_models(directory)
+                except Exception as exc:
+                    raise RuntimeError(
+                        "OpenCode Serve 模型接口查询失败"
+                        "（/provider 或 /config/providers）：\n"
+                        f"{exc}"
+                    ) from exc
             finally:
                 await self._release_model_listing()
             request_elapsed = time.monotonic() - request_started_at

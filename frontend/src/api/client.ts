@@ -776,9 +776,9 @@ export async function getAgentOpenCodePool(agentId: string): Promise<AgentOpenCo
   return data;
 }
 
-export async function getAgentOpenCodeModels(agentId: string, refresh = false): Promise<AgentOpenCodeModelsResult> {
+export async function getAgentOpenCodeModels(agentKey: string, refresh = false): Promise<AgentOpenCodeModelsResult> {
   const { data } = await api.get<AgentOpenCodeModelsResult>(
-    `/api/agent/${agentId}/opencode/models`,
+    `/api/agent-configs/${agentKey}/opencode-models`,
     { params: { refresh } },
   );
   return data;
