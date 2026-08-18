@@ -23,7 +23,7 @@ class ScanTask:
     code_scan_path: Path
     checkers: list[str]
     scan_name: str
-    scan_mode: str = "full"
+    scan_mode: str = "custom"
     threat_analysis_enabled: bool = False
     threat_analysis_method: str = "deephole_threat_analysis"
     product: str = ""
@@ -57,7 +57,7 @@ class TaskManager:
         code_scan_path: str | None,
         checkers: list[str],
         scan_name: str,
-        scan_mode: str = "full",
+        scan_mode: str = "custom",
         threat_analysis_enabled: bool = False,
         threat_analysis_method: str = "deephole_threat_analysis",
         product: str = "",
@@ -81,7 +81,7 @@ class TaskManager:
             code_scan_path=Path(code_scan_path or project_path),
             checkers=checkers,
             scan_name=scan_name,
-            scan_mode=scan_mode or "full",
+            scan_mode=scan_mode or "custom",
             threat_analysis_enabled=bool(threat_analysis_enabled),
             threat_analysis_method=(
                 str(threat_analysis_method or "deephole_threat_analysis").strip()

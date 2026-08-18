@@ -128,7 +128,7 @@ class VulnerabilityValidationConfig:
     concurrency: int = 1
     validation_max_retries: int = 0
     model_policy: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
-    # Legacy local-config input only. Web-managed v6 scans do not consult it.
+    # Legacy local-config input only. Web-managed v7 scans do not consult it.
     environments: dict[str, ValidationEnvironmentConfig] = field(default_factory=dict)
 
 
@@ -361,22 +361,53 @@ def _upgrade_managed_v6(remote: dict) -> dict:
     return migrated
 
 
+def _upgrade_managed_v7(remote: dict) -> dict:
+    """Split managed checker exclusions into scan-mode profiles."""
+    migrated = copy.deepcopy(remote)
+    migrated["schema_version"] = 7
+    selection = migrated.get("checker_selection")
+    defaults: dict[str, list[object]] = {
+        "quick": ["sensitive_clear", "skill_only_project_audit"],
+        "standard": ["skill_only_project_audit"],
+        "custom": [],
+    }
+    if isinstance(selection, dict):
+        if isinstance(selection.get("disabled_checkers"), list):
+            defaults["custom"] = list(selection["disabled_checkers"])
+        for mode in ("quick", "standard", "custom"):
+            profile = selection.get(mode)
+            if isinstance(profile, dict) and isinstance(
+                profile.get("disabled_checkers"),
+                list,
+            ):
+                defaults[mode] = list(profile["disabled_checkers"])
+    migrated["checker_selection"] = {
+        mode: {"disabled_checkers": disabled}
+        for mode, disabled in defaults.items()
+    }
+    return migrated
+
+
 def _upgrade_managed_remote(remote: dict) -> dict:
-    """Upgrade managed payloads to the Agent v6 contract."""
+    """Upgrade managed payloads to the Agent v7 contract."""
     remote = copy.deepcopy(remote)
     remote.pop("opencode_config", None)
     try:
         schema_version = int(remote.get("schema_version", 0) or 0)
     except (TypeError, ValueError):
         schema_version = 0
-    if schema_version >= 6:
+    if schema_version >= 7:
         migrated = remote
         migrated.pop("mining_engines", None)
-        return migrated
+        return _upgrade_managed_v7(migrated)
+    if schema_version == 6:
+        migrated = remote
+        migrated.pop("mining_engines", None)
+        return _upgrade_managed_v7(migrated)
     if schema_version == 5:
         migrated = remote
         migrated.pop("mining_engines", None)
-        return _upgrade_managed_v6(migrated)
+        return _upgrade_managed_v7(_upgrade_managed_v6(migrated))
     if schema_version >= 4:
         migrated = remote
         migrated["schema_version"] = 5
@@ -384,7 +415,7 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         migrated.pop("product_info", None)
         migrated["vulnerability_validation"] = {}
         migrated.setdefault("checker_selection", {"disabled_checkers": []})
-        return _upgrade_managed_v6(migrated)
+        return _upgrade_managed_v7(_upgrade_managed_v6(migrated))
     if schema_version == 3:
         migrated = remote
         migrated["schema_version"] = 5
@@ -393,7 +424,7 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         migrated.pop("product_info", None)
         migrated["vulnerability_validation"] = {}
         migrated.setdefault("checker_selection", {"disabled_checkers": []})
-        return _upgrade_managed_v6(migrated)
+        return _upgrade_managed_v7(_upgrade_managed_v6(migrated))
     if not (
         schema_version == 2
         or isinstance(remote.get("base"), dict)
@@ -437,7 +468,7 @@ def _upgrade_managed_remote(remote: dict) -> dict:
     migrated.pop("product_info", None)
     migrated["vulnerability_validation"] = {}
     migrated.setdefault("checker_selection", {"disabled_checkers": []})
-    return _upgrade_managed_v6(migrated)
+    return _upgrade_managed_v7(_upgrade_managed_v6(migrated))
 
 
 def _mcp_config(raw: object, default: McpConfig) -> McpConfig:
@@ -689,7 +720,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "base": {
             "tool": "opencode",
             "executable": config.opencode.executable,
@@ -718,7 +749,18 @@ def remote_config_dict(config: AgentConfig) -> dict:
                 config.vulnerability_validation.model_policy
             ),
         },
-        "checker_selection": {"disabled_checkers": []},
+        "checker_selection": {
+            "quick": {
+                "disabled_checkers": [
+                    "sensitive_clear",
+                    "skill_only_project_audit",
+                ],
+            },
+            "standard": {
+                "disabled_checkers": ["skill_only_project_audit"],
+            },
+            "custom": {"disabled_checkers": []},
+        },
     }
 
 
@@ -847,7 +889,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v6 remotely-managed fields while preserving local bootstrap fields."""
+    """Persist v7 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return

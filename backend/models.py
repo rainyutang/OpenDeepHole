@@ -1020,9 +1020,19 @@ class AgentVulnerabilityValidationConfig(BaseModel):
     )
 
 
-class AgentCheckerSelectionConfig(BaseModel):
+class AgentModeCheckerSelectionConfig(BaseModel):
     # Persist exclusions so newly discovered checkers are enabled by default.
     disabled_checkers: list[str] = []
+
+
+class AgentCheckerSelectionConfig(BaseModel):
+    quick: AgentModeCheckerSelectionConfig = AgentModeCheckerSelectionConfig(
+        disabled_checkers=["sensitive_clear", "skill_only_project_audit"],
+    )
+    standard: AgentModeCheckerSelectionConfig = AgentModeCheckerSelectionConfig(
+        disabled_checkers=["skill_only_project_audit"],
+    )
+    custom: AgentModeCheckerSelectionConfig = AgentModeCheckerSelectionConfig()
 
 
 class AgentValidatorField(BaseModel):
@@ -1151,6 +1161,33 @@ def _upgrade_agent_v6_config(value: dict) -> dict:
     return migrated
 
 
+def _upgrade_agent_v7_config(value: dict) -> dict:
+    """Split the checker exclusion list into independent scan profiles."""
+    migrated = copy.deepcopy(value)
+    migrated["schema_version"] = 7
+    selection = migrated.get("checker_selection")
+    defaults: dict[str, list[object]] = {
+        "quick": ["sensitive_clear", "skill_only_project_audit"],
+        "standard": ["skill_only_project_audit"],
+        "custom": [],
+    }
+    if isinstance(selection, dict):
+        if isinstance(selection.get("disabled_checkers"), list):
+            defaults["custom"] = list(selection["disabled_checkers"])
+        for mode in ("quick", "standard", "custom"):
+            profile = selection.get(mode)
+            if isinstance(profile, dict) and isinstance(
+                profile.get("disabled_checkers"),
+                list,
+            ):
+                defaults[mode] = list(profile["disabled_checkers"])
+    migrated["checker_selection"] = {
+        mode: {"disabled_checkers": disabled}
+        for mode, disabled in defaults.items()
+    }
+    return migrated
+
+
 class AgentMemoryApiDiscoveryConfig(BaseModel):
     enabled: bool = True
     batch_size: int = 8
@@ -1182,7 +1219,7 @@ class AgentPatternFilterConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: Literal[6] = 6
+    schema_version: Literal[7] = 7
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
@@ -1216,7 +1253,7 @@ class AgentRemoteConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
-        """Accept older/transient Agent payloads and emit the v6 contract."""
+        """Accept older/transient Agent payloads and emit the v7 contract."""
         if not isinstance(value, dict):
             return value
         if not value:
@@ -1229,30 +1266,40 @@ class AgentRemoteConfig(BaseModel):
             schema_version = int(value.get("schema_version", 0) or 0)
         except (TypeError, ValueError):
             schema_version = 0
-        if schema_version >= 6:
+        if schema_version >= 7:
             migrated = value
             migrated.pop("mining_engines", None)
-            return migrated
+            return _upgrade_agent_v7_config(migrated)
+        if schema_version == 6:
+            migrated = value
+            migrated.pop("mining_engines", None)
+            return _upgrade_agent_v7_config(migrated)
         if schema_version == 5:
             migrated = value
             migrated.pop("mining_engines", None)
-            return _upgrade_agent_v6_config(migrated)
+            return _upgrade_agent_v7_config(_upgrade_agent_v6_config(migrated))
         if schema_version >= 4:
-            return _upgrade_agent_v6_config(
-                _upgrade_agent_v3_or_v4_config(
-                    value,
-                    drop_code_graph=False,
+            return _upgrade_agent_v7_config(
+                _upgrade_agent_v6_config(
+                    _upgrade_agent_v3_or_v4_config(
+                        value,
+                        drop_code_graph=False,
+                    )
                 )
             )
         if schema_version == 3:
-            return _upgrade_agent_v6_config(
-                _upgrade_agent_v3_or_v4_config(
-                    value,
-                    drop_code_graph=True,
+            return _upgrade_agent_v7_config(
+                _upgrade_agent_v6_config(
+                    _upgrade_agent_v3_or_v4_config(
+                        value,
+                        drop_code_graph=True,
+                    )
                 )
             )
         if schema_version == 2 or "base" in value or "model_pool" in value:
-            return _upgrade_agent_v6_config(_upgrade_agent_v2_config(value))
+            return _upgrade_agent_v7_config(
+                _upgrade_agent_v6_config(_upgrade_agent_v2_config(value))
+            )
         legacy = dict(value)
         opencode = legacy.get("opencode") if isinstance(legacy.get("opencode"), dict) else {}
         fp_cli = legacy.get("fp_review_cli") if isinstance(legacy.get("fp_review_cli"), dict) else {}
@@ -1326,7 +1373,9 @@ class AgentRemoteConfig(BaseModel):
             "vulnerability_validation": {},
             "checker_selection": {"disabled_checkers": []},
         }
-        return _upgrade_agent_v6_config(_upgrade_agent_v2_config(migrated))
+        return _upgrade_agent_v7_config(
+            _upgrade_agent_v6_config(_upgrade_agent_v2_config(migrated))
+        )
 
     @property
     def no_proxy(self) -> str:
@@ -1382,7 +1431,7 @@ class CreateScanRequest(BaseModel):
     project_path: str
     code_scan_path: str = ""
     scan_name: str = ""
-    scan_mode: str = "full"
+    scan_mode: str = "custom"
     threat_analysis_enabled: bool | None = None
     threat_analysis_method: str | None = None
     product: str = ""

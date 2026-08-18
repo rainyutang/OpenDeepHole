@@ -704,8 +704,14 @@ export interface AgentVulnerabilityValidationConfig {
   model_policy: AgentModelTaskPolicy;
 }
 
-export interface AgentCheckerSelectionConfig {
+export interface AgentModeCheckerSelectionConfig {
   disabled_checkers: string[];
+}
+
+export interface AgentCheckerSelectionConfig {
+  quick: AgentModeCheckerSelectionConfig;
+  standard: AgentModeCheckerSelectionConfig;
+  custom: AgentModeCheckerSelectionConfig;
 }
 
 export interface AgentValidatorField {
@@ -794,7 +800,7 @@ export interface MiningEngineCatalog {
 }
 
 export interface AgentRemoteConfig {
-  schema_version: 6;
+  schema_version: 7;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;

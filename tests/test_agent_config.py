@@ -19,6 +19,18 @@ from backend.config import GitHistoryConfig as BackendGitHistoryConfig
 from backend.models import AgentRemoteConfig
 
 
+DEFAULT_CHECKER_SELECTION = {
+    "quick": {
+        "disabled_checkers": [
+            "sensitive_clear",
+            "skill_only_project_audit",
+        ],
+    },
+    "standard": {"disabled_checkers": ["skill_only_project_audit"]},
+    "custom": {"disabled_checkers": []},
+}
+
+
 def _server_knowledge_config(headers: dict[str, str] | None = None):
     return SimpleNamespace(knowledge_base=SimpleNamespace(
         name="product-info",
@@ -61,9 +73,9 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(cfg.vulnerability_validation.timeout_seconds, 7200)
         self.assertEqual(cfg.opencode_concurrency, 4)
 
-    def test_backend_and_remote_v6_defaults(self) -> None:
+    def test_backend_and_remote_v7_defaults(self) -> None:
         self.assertFalse(BackendGitHistoryConfig().enabled)
-        self.assertEqual(AgentRemoteConfig().schema_version, 6)
+        self.assertEqual(AgentRemoteConfig().schema_version, 7)
         self.assertNotIn("opencode_config", AgentRemoteConfig().model_dump())
         self.assertEqual(AgentRemoteConfig().base.no_proxy, "10.0.0.0/8")
         self.assertIsNone(AgentRemoteConfig().base.opencode_serve_port)
@@ -78,7 +90,10 @@ class AgentConfigTests(unittest.TestCase):
         )
         self.assertNotIn("code_graph", AgentRemoteConfig().model_dump())
         self.assertNotIn("product_info", AgentRemoteConfig().model_dump())
-        self.assertEqual(AgentRemoteConfig().checker_selection.disabled_checkers, [])
+        self.assertEqual(
+            AgentRemoteConfig().checker_selection.model_dump(),
+            DEFAULT_CHECKER_SELECTION,
+        )
 
     def test_v5_nga_config_migrates_tool_without_changing_executable(self) -> None:
         config = AgentRemoteConfig.model_validate({
@@ -94,7 +109,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 6)
+        self.assertEqual(config.schema_version, 7)
         self.assertEqual(config.base.tool, "opencode")
         self.assertEqual(config.base.executable, "nga")
         model = config.model_pool.models[0].model_dump()
@@ -123,6 +138,47 @@ class AgentConfigTests(unittest.TestCase):
                     }],
                 },
             })
+
+    def test_v6_checker_exclusions_migrate_to_custom_profile(self) -> None:
+        config = AgentRemoteConfig.model_validate({
+            "schema_version": 6,
+            "checker_selection": {
+                "disabled_checkers": ["legacy-disabled"],
+            },
+        })
+
+        self.assertEqual(config.schema_version, 7)
+        self.assertEqual(
+            config.checker_selection.quick.disabled_checkers,
+            ["sensitive_clear", "skill_only_project_audit"],
+        )
+        self.assertEqual(
+            config.checker_selection.standard.disabled_checkers,
+            ["skill_only_project_audit"],
+        )
+        self.assertEqual(
+            config.checker_selection.custom.disabled_checkers,
+            ["legacy-disabled"],
+        )
+
+    def test_v7_checker_profiles_are_preserved(self) -> None:
+        config = AgentRemoteConfig.model_validate({
+            "schema_version": 7,
+            "checker_selection": {
+                "quick": {"disabled_checkers": ["quick-off"]},
+                "standard": {"disabled_checkers": ["standard-off"]},
+                "custom": {"disabled_checkers": ["custom-off"]},
+            },
+        })
+
+        self.assertEqual(
+            config.checker_selection.model_dump(),
+            {
+                "quick": {"disabled_checkers": ["quick-off"]},
+                "standard": {"disabled_checkers": ["standard-off"]},
+                "custom": {"disabled_checkers": ["custom-off"]},
+            },
+        )
 
     def test_v2_stage_defaults_migrate_once_without_touching_model_rows(self) -> None:
         config = AgentRemoteConfig.model_validate({
@@ -167,7 +223,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 6)
+        self.assertEqual(config.schema_version, 7)
         self.assertEqual(config.vulnerability_mining.required_capability, "high")
         self.assertEqual(config.vulnerability_mining.timeout_seconds, 3600)
         self.assertEqual(config.vulnerability_mining.max_retries, 4)
@@ -229,7 +285,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 6)
+        self.assertEqual(config.schema_version, 7)
         self.assertFalse(config.code_graph.enabled)
         self.assertNotIn("code_graph", config.model_dump(mode="json"))
 
@@ -247,14 +303,14 @@ class AgentConfigTests(unittest.TestCase):
         }
         config = AgentRemoteConfig.model_validate(payload)
 
-        self.assertEqual(config.schema_version, 6)
+        self.assertEqual(config.schema_version, 7)
         self.assertEqual(config.base.opencode_serve_port, 4317)
         self.assertNotIn("mining_engines", config.model_dump())
 
         local = AgentConfig()
         apply_remote_config(local, payload)
         exported = remote_config_dict(local)
-        self.assertEqual(exported["schema_version"], 6)
+        self.assertEqual(exported["schema_version"], 7)
         self.assertEqual(exported["base"]["opencode_serve_port"], 4317)
         self.assertNotIn("mining_engines", exported)
 
@@ -357,7 +413,7 @@ class AgentConfigTests(unittest.TestCase):
 
         remote = remote_config_dict(cfg)
 
-        self.assertEqual(remote["schema_version"], 6)
+        self.assertEqual(remote["schema_version"], 7)
         self.assertNotIn("opencode_config", remote)
         self.assertNotIn("llm_api", remote)
         self.assertEqual(remote["base"], {
@@ -391,7 +447,7 @@ class AgentConfigTests(unittest.TestCase):
                 "max_retries": 2,
             },
         })
-        self.assertEqual(remote["checker_selection"], {"disabled_checkers": []})
+        self.assertEqual(remote["checker_selection"], DEFAULT_CHECKER_SELECTION)
         self.assertNotIn("code_graph", remote)
         self.assertNotIn("git_history", remote)
         self.assertNotIn("pattern_filter", remote)
@@ -482,7 +538,7 @@ class AgentConfigTests(unittest.TestCase):
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(raw["server_url"], "http://example.test")
             self.assertEqual(raw["agent_name"], "local-agent")
-            self.assertEqual(raw["schema_version"], 6)
+            self.assertEqual(raw["schema_version"], 7)
             self.assertNotIn("opencode_config", raw)
             self.assertNotIn("llm_api", raw)
             self.assertEqual(raw["base"]["tool"], "opencode")
@@ -505,7 +561,7 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raw["false_positive"]["timeout_seconds"], 700)
             self.assertEqual(raw["vulnerability_validation"]["concurrency"], 1)
             self.assertEqual(raw["vulnerability_validation"]["supported_vulnerability_types"], ["*"])
-            self.assertEqual(raw["checker_selection"], {"disabled_checkers": []})
+            self.assertEqual(raw["checker_selection"], DEFAULT_CHECKER_SELECTION)
             for legacy_key in (
                 "no_proxy", "opencode", "opencode_concurrency", "fp_review_cli",
                 "memory_api_discovery", "git_history", "static_dedup", "pattern_filter",
@@ -767,7 +823,7 @@ class AgentConfigTests(unittest.TestCase):
                             project_name="Project One",
                         ))
 
-    def test_legacy_remote_payload_migrates_to_v6_and_disables_default_model(self) -> None:
+    def test_legacy_remote_payload_migrates_to_v7_and_disables_default_model(self) -> None:
         config = AgentRemoteConfig.model_validate({
             "no_proxy": "localhost",
             "opencode_concurrency": 2,
@@ -782,7 +838,7 @@ class AgentConfigTests(unittest.TestCase):
             },
         })
 
-        self.assertEqual(config.schema_version, 6)
+        self.assertEqual(config.schema_version, 7)
         self.assertEqual(config.base.no_proxy, "localhost")
         self.assertNotIn("opencode_config", config.model_dump())
         self.assertEqual(config.model_pool.global_concurrency, 2)

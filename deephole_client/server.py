@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from task_agent.output_format import with_local_timestamp
+from .scan_modes import component_scan_mode
 
 # Module-level globals injected by deephole_client/main.py before connection starts
 _config = None       # AgentConfig
@@ -54,6 +55,7 @@ class _ValidationQueueItem:
     vulnerability: dict
     report_markdown: str
     cancel_event: threading.Event
+    scan_mode: str = "custom"
     code_graph_mcp: dict | None = None
     knowledge_base_mcp: dict | None = None
 
@@ -70,6 +72,7 @@ class _FpReviewQueueItem:
     vulnerability: dict
     feedback_entries: list[dict]
     cancel_event: threading.Event
+    scan_mode: str = "custom"
     code_graph_mcp: dict | None = None
     knowledge_base_mcp: dict | None = None
     processed_offset: int = 0
@@ -155,7 +158,7 @@ async def handle_task(
     code_scan_path: str | None,
     checkers: list[str],
     scan_name: str,
-    scan_mode: str = "full",
+    scan_mode: str = "custom",
     threat_analysis_enabled: bool = False,
     threat_analysis_method: str = "deephole_threat_analysis",
     product: str = "",
@@ -268,7 +271,7 @@ async def handle_resume(
     resolved_scan_mode = (
         scan_mode
         if scan_mode is not None
-        else str(previous_value("scan_mode", "full"))
+        else str(previous_value("scan_mode", "custom"))
     )
     resolved_threat_analysis_enabled = (
         bool(threat_analysis_enabled)
@@ -368,6 +371,7 @@ async def handle_fp_review(
     processed_offset: int = 0,
     code_graph_mcp: dict | None = None,
     knowledge_base_mcp: dict | None = None,
+    scan_mode: str = "custom",
 ) -> None:
     """Handle an 'fp_review' command — queue AI false-positive review items."""
     if _config is None or _reporter is None:
@@ -386,6 +390,7 @@ async def handle_fp_review(
     for offset, vulnerability in enumerate(vulnerabilities):
         await enqueue_fp_review(
             scan_id=scan_id,
+            scan_mode=scan_mode,
             review_id=review_id,
             method=method,
             project_path=project_path,
@@ -405,6 +410,7 @@ async def handle_fp_review(
 async def enqueue_fp_review(
     *,
     scan_id: str,
+    scan_mode: str = "custom",
     review_id: str,
     method: str = "adversarial",
     project_path: str,
@@ -454,6 +460,7 @@ async def enqueue_fp_review(
         config=effective_config,
         reporter=effective_reporter,
         scan_id=scan_id,
+        scan_mode=component_scan_mode(scan_mode),
         review_id=review_id,
         method=method,
         project_path=project_path,
@@ -863,8 +870,10 @@ async def _run_single_fp_review_item(
         knowledge_base_mcp=item.knowledge_base_mcp,
         cancel_event=item.cancel_event,
         skill_paths=list(loaded.manifest.skill_paths) or None,
+        task_metadata={"scan_mode": item.scan_mode},
     ):
         result = await run_fp_review(
+            scan_mode=item.scan_mode,
             method_id=item.method,
             project_path=project,
             code_scan_path=code_scan_path,
@@ -942,10 +951,12 @@ async def handle_vulnerability_validation(
     report_markdown: str,
     code_graph_mcp: dict | None = None,
     knowledge_base_mcp: dict | None = None,
+    scan_mode: str = "custom",
 ) -> None:
     """Handle a validation command using the Agent-wide shared queue."""
     await enqueue_vulnerability_validation(
         scan_id=scan_id,
+        scan_mode=scan_mode,
         vuln_index=vuln_index,
         project_path=project_path,
         code_scan_path=code_scan_path,
@@ -964,6 +975,7 @@ async def handle_vulnerability_validation(
 async def enqueue_vulnerability_validation(
     *,
     scan_id: str,
+    scan_mode: str = "custom",
     vuln_index: int,
     project_path: str,
     code_scan_path: str,
@@ -997,6 +1009,7 @@ async def enqueue_vulnerability_validation(
         config=effective_config,
         reporter=effective_reporter,
         scan_id=scan_id,
+        scan_mode=component_scan_mode(scan_mode),
         vuln_index=vuln_index,
         project_path=project_path,
         code_scan_path=code_scan_path,
@@ -1232,10 +1245,12 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
             knowledge_base_mcp=item.knowledge_base_mcp,
             task_metadata={
                 "validation_model_policy": copy.deepcopy(model_policy),
+                "scan_mode": item.scan_mode,
             },
             cancel_event=item.cancel_event,
         ):
             result = await run_vulnerability_validation(
+                scan_mode=item.scan_mode,
                 project_path=project,
                 code_scan_path=Path(item.code_scan_path).expanduser().resolve(),
                 work_dir=work_root / "validation",

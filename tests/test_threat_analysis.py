@@ -164,6 +164,7 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
             "work_dir": context.work_dir,
             "config_path": context.config_path,
             "skill_paths": context.skill_paths,
+            "task_metadata": context.task_metadata,
         })
         return native_result
 
@@ -178,6 +179,7 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
             return_value=SimpleNamespace(run_threat_analysis=native_entry),
         ):
             return await run_threat_analysis(
+                scan_mode="quick",
                 code_path=project,
                 output_path=output_path,
                 is_resume=True,
@@ -197,6 +199,7 @@ def test_async_facade_calls_sync_native_entry_and_preserves_native_result(
         "product_mcp": "product-info",
         "attack_modes": {"network": True},
     }
+    assert captured["task_metadata"]["scan_mode"] == "quick"
     assert captured["project_dir"] == project.resolve()
     assert captured["work_dir"] == output_path.resolve()
     assert captured["config_path"] == (

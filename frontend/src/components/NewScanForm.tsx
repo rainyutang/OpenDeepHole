@@ -39,6 +39,7 @@ interface Props {
 }
 
 interface MiningEngineFormValue { selected: boolean }
+type ScanMode = "quick" | "standard" | "custom";
 
 const input = "w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 outline-none transition-colors focus:border-blue-500";
 const emptyMemory: ScanConfigMemory = { knowledge_base: null, validation_by_product: {} };
@@ -86,6 +87,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const [projectPath, setProjectPath] = useState("");
   const [codeScanPath, setCodeScanPath] = useState("");
   const [product, setProduct] = useState("");
+  const [scanMode, setScanMode] = useState<ScanMode>("quick");
 
   const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
   const [knowledgeProjects, setKnowledgeProjects] = useState<KnowledgeBaseProject[]>([]);
@@ -233,10 +235,12 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       const missing = selectedValidationMethod.fields.find((field) => field.required && (validationValues[field.key] === "" || validationValues[field.key] == null));
       if (missing) return setError(`请填写验证参数：${missing.label}`);
     }
-    if (!enabledEngineCount && !threatAnalysisEnabled) return setError("请至少启用威胁分析或选择一个漏洞挖掘引擎");
-    if (threatAuditEnabled && !threatAnalysisEnabled) return setError(`${THREAT_AUDIT_ENGINE_LABEL}要求本次扫描启用威胁分析`);
-    if (threatAnalysisEnabled && !threatAnalysisMethod) return setError("没有可用的威胁分析方法");
-    if (!fpReviewMethod) return setError("没有可用的去误报方法");
+    if (scanMode === "custom") {
+      if (!enabledEngineCount && !threatAnalysisEnabled) return setError("请至少启用威胁分析或选择一个漏洞挖掘引擎");
+      if (threatAuditEnabled && !threatAnalysisEnabled) return setError(`${THREAT_AUDIT_ENGINE_LABEL}要求本次扫描启用威胁分析`);
+      if (threatAnalysisEnabled && !threatAnalysisMethod) return setError("没有可用的威胁分析方法");
+      if (!fpReviewMethod) return setError("没有可用的去误报方法");
+    }
     setSubmitting(true);
     try {
       const response = await createScan({
@@ -245,7 +249,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
         project_path: projectPath.trim(),
         code_scan_path: codeScanPath.trim(),
         product: product.trim(),
-        scan_mode: "full",
+        scan_mode: scanMode,
         knowledge_base: {
           enabled: knowledgeEnabled,
           project_id: selectedKnowledgeProject?.id || "",
@@ -253,11 +257,13 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
         },
         vulnerability_validation: { enabled: validationEnabled, method_id: validationMethodId, values: validationValues },
         code_graph_mcp: codeGraphMcp.enabled ? codeGraphMcp : null,
-        threat_analysis_enabled: threatAnalysisEnabled,
-        threat_analysis_method: threatAnalysisMethod,
-        mining_engines: miningEngineCatalog.filter((engine) => miningEngines[engine.engine_id]?.selected).map((engine) => ({ engine_id: engine.engine_id })),
-        auto_fp_review: autoFpReview,
-        fp_review_method: fpReviewMethod,
+        ...(scanMode === "custom" ? {
+          threat_analysis_enabled: threatAnalysisEnabled,
+          threat_analysis_method: threatAnalysisMethod,
+          mining_engines: miningEngineCatalog.filter((engine) => miningEngines[engine.engine_id]?.selected).map((engine) => ({ engine_id: engine.engine_id })),
+          auto_fp_review: autoFpReview,
+          fp_review_method: fpReviewMethod,
+        } : {}),
       });
       onScanStarted(response.scan_id);
     } catch (submitError: unknown) {
@@ -272,6 +278,12 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
         <Card><h2 className="mb-3 text-sm font-medium text-slate-300">选择客户端</h2>{agents.length === 0 ? <p className="text-sm text-slate-500">暂无客户端，请先运行 ./run_agent.sh</p> : <div className="space-y-2">{agents.map((agent) => <label key={agent.agent_key} className={`flex items-center gap-3 rounded-lg border p-3 ${agentAcceptsTasks(agent) ? "cursor-pointer" : "cursor-not-allowed opacity-60"} ${selectedAgent === agent.agent_key ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="sr-only" type="radio" checked={selectedAgent === agent.agent_key} disabled={!agentAcceptsTasks(agent)} onChange={() => setSelectedAgent(agent.agent_key)} /><span className={`h-2 w-2 rounded-full ${agentAcceptsTasks(agent) ? "bg-green-400" : "bg-slate-500"}`} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{agent.machine_name || agent.name}</span><span className="text-xs text-slate-400">{agent.ip}</span></span><span className="text-xs text-slate-400">{agent.online ? agent.accepting_tasks === false ? "更新中" : "在线" : "离线"}</span>{!agent.has_explicit_model && <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">未配置模型</span>}</label>)}</div>}{selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && !selectedAgentInfo.has_explicit_model && <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200"><span>该客户端没有已启用的显式模型。</span><button type="button" onClick={() => onConfigureAgent(selectedAgentInfo.agent_key)} className="rounded border border-amber-400/40 px-3 py-1.5 text-xs">去客户端配置</button></div>}</Card>
 
         <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2><p className="mt-1 text-xs text-slate-500">这些信息会作为扫描范围快照保存。</p></div><div className="grid gap-5 md:grid-cols-2"><Field label="扫描名称" hint="同一用户不可重复；留空自动生成“目录名_4位十六进制数”"><input className={input} value={scanName} placeholder="例如 project_audit" onChange={(event) => setScanName(event.target.value)} /></Field><Field label="项目总路径"><input className={input} value={projectPath} placeholder="/path/to/project" onChange={(event) => setProjectPath(event.target.value)} /></Field><Field label="代码扫描路径" hint="可选，留空扫描项目总路径"><input className={input} value={codeScanPath} placeholder="子目录或绝对路径" onChange={(event) => setCodeScanPath(event.target.value)} /></Field><Field label="产品" hint="可输入任意值，也可选择建议"><input className={input} list="scan-product-suggestions" value={product} placeholder="例如 LTE" onChange={(event) => { const next = event.target.value; setProduct(next); if (validationEnabled) { const methods = validatorMethods.filter((method) => method.products.includes(next.trim())); const rememberedId = memory.validation_by_product[next.trim()]?.last_method_id || ""; const method = methods.find((item) => item.method_id === rememberedId) || methods[0]; chooseValidationMethod(method?.method_id || "", next.trim()); } }} /><datalist id="scan-product-suggestions">{productSuggestions.map((item) => <option key={item} value={item} />)}</datalist></Field></div></Card>
+
+        <Card><div><h2 className="text-sm font-semibold text-slate-200">扫描模式</h2><p className="mt-1 text-xs text-slate-500">快速和标准模式使用固定流程；规则可在客户端高级配置中分别调整。</p></div><div className="mt-4 grid gap-3 md:grid-cols-3">{([
+          { id: "quick", label: "快速模式", description: "两个内置引擎、威胁分析/审计和自动去误报；默认排除敏感信息与测试规则。" },
+          { id: "standard", label: "标准模式", description: "两个内置引擎、威胁分析/审计和自动去误报；默认启用除测试规则外的全部规则。" },
+          { id: "custom", label: "自定义模式", description: "自行选择威胁分析、漏洞挖掘引擎和自动去误报。" },
+        ] as { id: ScanMode; label: string; description: string }[]).map((mode) => <label key={mode.id} className={`cursor-pointer rounded-lg border p-4 ${scanMode === mode.id ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={scanMode === mode.id} onChange={() => setScanMode(mode.id)} /><span className="text-sm font-medium text-slate-100">{mode.label}</span><span className="mt-2 block text-xs leading-5 text-slate-500">{mode.description}</span></label>)}</div></Card>
 
         <Card>
           <div className="flex items-start justify-between gap-3">
@@ -300,11 +312,13 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
 
         <ScanCodeGraphMcpEditor value={codeGraphMcp} onChange={(value) => { setCodeGraphMcp(value); setCodeGraphProbe(null); }} online={Boolean(selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo))} probing={probingCodeGraph} probeResult={codeGraphProbe} onProbe={() => void probeCodeGraph()} />
 
+        {scanMode === "custom" && <>
         <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">威胁分析</h2><p className="mt-1 text-xs text-slate-500">可单独运行，也可为“{THREAT_AUDIT_ENGINE_LABEL}”提供输入。</p></div><Toggle checked={threatAnalysisEnabled} onChange={() => { const next = !threatAnalysisEnabled; setThreatAnalysisEnabled(next); if (!next) setMiningEngines((current) => ({ ...current, [THREAT_AUDIT_ENGINE_ID]: { selected: false } })); }} label="启用威胁分析" /></div>{threatAnalysisEnabled && <div className="mt-4 grid gap-3 md:grid-cols-2">{threatMethods.map((method) => <label key={method.method_id} className={`cursor-pointer rounded-lg border p-3 ${threatAnalysisMethod === method.method_id ? "border-emerald-500 bg-emerald-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={threatAnalysisMethod === method.method_id} onChange={() => setThreatAnalysisMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div>}</Card>
 
         <Card><h2 className="text-sm font-medium text-slate-200">漏洞挖掘引擎</h2><p className="mt-1 text-xs text-slate-500">选择本次扫描运行的引擎。静态分析与候选点审计的 checker 已由客户端全局配置决定。</p><div className="mt-4 grid gap-3 md:grid-cols-2">{miningEngineCatalog.map((engine) => { const enabled = miningEngines[engine.engine_id]?.selected ?? true; return <label key={engine.engine_id} className={`cursor-pointer rounded-lg border p-4 ${enabled ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="checkbox" checked={enabled} onChange={(event) => { const selected = event.target.checked; setMiningEngines((current) => ({ ...current, [engine.engine_id]: { selected } })); if (engine.engine_id === THREAT_AUDIT_ENGINE_ID && selected) setThreatAnalysisEnabled(true); }} /><span className="text-sm font-medium">{canonicalMiningEngineLabel(engine.engine_id, engine.label)}</span>{engine.requires_codex && <span className="ml-2 rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300">需要 Codex</span>}<span className="mt-1 block pl-6 text-xs text-slate-500">{engine.description || engine.engine_id}</span></label>; })}</div></Card>
 
         <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">自动去误报</h2><p className="mt-1 text-xs text-slate-500">扫描后自动复核已确认问题。</p></div><Toggle checked={autoFpReview} onChange={() => setAutoFpReview((value) => !value)} label="自动去误报" /></div><div className="mt-4 grid gap-3 md:grid-cols-2">{fpMethods.map((method) => <label key={method.method_id} className={`cursor-pointer rounded-lg border p-3 ${fpReviewMethod === method.method_id ? "border-amber-500 bg-amber-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={fpReviewMethod === method.method_id} onChange={() => setFpReviewMethod(method.method_id)} /><span className="text-sm">{method.label}</span><span className="mt-1 block pl-6 text-xs text-slate-500">{method.description}</span></label>)}</div></Card>
+        </>}
 
         {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{error}</div>}
         <div className="flex flex-col gap-3 sm:flex-row"><button type="submit" disabled={submitting || !selectedAgentReady} className="flex-1 rounded-lg bg-blue-600 py-2.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">{submitting ? "创建中…" : "开始扫描"}</button><button type="button" onClick={onBack} className="rounded-lg bg-slate-700 px-6 py-2.5 text-sm text-slate-300">取消</button></div>

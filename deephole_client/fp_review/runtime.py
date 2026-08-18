@@ -42,6 +42,7 @@ _COMMON_REQUIRED_KEYS = {
     "vulnerability",
 }
 _COMMON_ALLOWED_KEYS = _COMMON_REQUIRED_KEYS | {
+    "scan_mode",
     "feedback_entries",
     "history",
     "required_capability",

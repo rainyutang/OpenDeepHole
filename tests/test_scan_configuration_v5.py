@@ -28,6 +28,7 @@ from backend.store.sqlite import SqliteScanStore
 from deephole_client.vulnerability_mining.engines.static_candidate import (
     engine as static_candidate_engine,
 )
+from deephole_client.scan_modes import component_scan_mode, normalize_scan_mode
 
 
 def _catalog() -> AgentValidatorCatalog:
@@ -45,6 +46,17 @@ def _catalog() -> AgentValidatorCatalog:
             help="留空时由验证方法自行发现目标",
         )],
     )])
+
+
+def test_scan_mode_normalization_preserves_new_modes_and_maps_legacy_context() -> None:
+    assert normalize_scan_mode("quick") == "quick"
+    assert normalize_scan_mode("standard") == "standard"
+    assert normalize_scan_mode("custom") == "custom"
+    assert normalize_scan_mode("full") == "custom"
+    assert normalize_scan_mode("threat_only") == "threat_analysis_only"
+    assert component_scan_mode("threat_analysis_only") == "custom"
+    with pytest.raises(ValueError, match="Unknown scan mode"):
+        normalize_scan_mode("unexpected")
 
 
 def test_v4_migration_resets_only_old_validation_shape() -> None:
@@ -70,13 +82,20 @@ def test_v4_migration_resets_only_old_validation_shape() -> None:
         },
     })
 
-    assert config.schema_version == 6
+    assert config.schema_version == 7
     assert config.vulnerability_mining.required_capability == "low"
     assert config.vulnerability_mining.timeout_seconds == 901
     assert config.vulnerability_mining.max_retries == 7
     assert config.vulnerability_validation.concurrency == 1
     assert config.vulnerability_validation.supported_vulnerability_types == ["*"]
-    assert config.checker_selection.disabled_checkers == []
+    assert config.checker_selection.quick.disabled_checkers == [
+        "sensitive_clear",
+        "skill_only_project_audit",
+    ]
+    assert config.checker_selection.standard.disabled_checkers == [
+        "skill_only_project_audit",
+    ]
+    assert config.checker_selection.custom.disabled_checkers == []
     assert "product_info" not in config.model_dump(mode="json")
 
 
@@ -180,6 +199,40 @@ def test_checker_exclusion_policy_enables_new_checkers_by_default(monkeypatch) -
         config,
         User(user_id="admin", username="admin", role="admin"),
     ) == ["builtin", "new-user-checker", "admin-only"]
+    assert config.checker_selection.custom.disabled_checkers == ["disabled"]
+
+
+def test_checker_profiles_are_resolved_independently(monkeypatch) -> None:
+    registry = {
+        "normal": SimpleNamespace(visibility="public"),
+        "sensitive_clear": SimpleNamespace(visibility="public"),
+        "skill_only_project_audit": SimpleNamespace(visibility="admin"),
+        "future_rule": SimpleNamespace(visibility="public"),
+    }
+    monkeypatch.setattr(scan_api, "refresh_registry", lambda: registry)
+    config = AgentRemoteConfig()
+    admin = User(user_id="admin", username="admin", role="admin")
+
+    assert scan_api._globally_enabled_checker_names(
+        config,
+        admin,
+        "quick",
+    ) == ["normal", "future_rule"]
+    assert scan_api._globally_enabled_checker_names(
+        config,
+        admin,
+        "standard",
+    ) == ["normal", "sensitive_clear", "future_rule"]
+    assert scan_api._globally_enabled_checker_names(
+        config,
+        admin,
+        "custom",
+    ) == [
+        "normal",
+        "sensitive_clear",
+        "skill_only_project_audit",
+        "future_rule",
+    ]
 
 
 def test_static_candidate_with_all_checkers_disabled_is_a_noop(tmp_path: Path) -> None:

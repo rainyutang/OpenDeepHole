@@ -13,6 +13,7 @@ from task_agent import run_opencode_task
 
 PROCESS_NAME = "fp_review"
 _ALLOWED_KEYS = {
+    "scan_mode",
     "method_id",
     "project_path",
     "code_scan_path",

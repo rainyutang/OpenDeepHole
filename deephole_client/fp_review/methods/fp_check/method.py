@@ -24,6 +24,7 @@ FP_CHECK_STAGE_KEYS = (
 )
 _DEEP_STAGE_KEYS = FP_CHECK_STAGE_KEYS[2:]
 _ALLOWED_KEYS = {
+    "scan_mode",
     "method_id",
     "project_path",
     "code_scan_path",

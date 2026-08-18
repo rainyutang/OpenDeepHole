@@ -95,7 +95,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             code_scan_path=msg.get("code_scan_path"),
             checkers=msg.get("checkers", []),
             scan_name=msg.get("scan_name", ""),
-            scan_mode=msg.get("scan_mode", "full"),
+            scan_mode=msg.get("scan_mode", "custom"),
             threat_analysis_enabled=bool(
                 msg.get("threat_analysis_enabled")
             ),
@@ -215,6 +215,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 if isinstance(msg.get("knowledge_base_mcp"), dict)
                 else None
             ),
+            scan_mode=msg.get("scan_mode", "custom"),
         )
     elif cmd_type == "vulnerability_validation":
         from deephole_client.updater import ensure_runtime_updated
@@ -274,6 +275,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 if isinstance(msg.get("knowledge_base_mcp"), dict)
                 else None
             ),
+            scan_mode=msg.get("scan_mode", "custom"),
         )
     elif cmd_type == "vulnerability_validation_stop":
         await agent_server.handle_vulnerability_validation_stop(

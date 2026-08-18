@@ -21,6 +21,7 @@ from .threat_analysis.runtime import (
 
 PROCESS_NAME = "threat_analysis"
 _ALLOWED_KEYS = {
+    "scan_mode",
     "method_id",
     "project_path",
     "code_path",
@@ -318,7 +319,10 @@ async def run_threat_analysis(**kwargs: Any) -> dict[str, Any]:
             work_dir=output_path,
             config_path=task_agent_config,
             skill_paths=list(manifest.skill_roots()),
-            task_metadata={"standalone_console": True},
+            task_metadata={
+                "standalone_console": True,
+                "scan_mode": str(kwargs.get("scan_mode") or "custom"),
+            },
             output=task_output,
             cancel_event=kwargs.get("cancel_event"),
         ):

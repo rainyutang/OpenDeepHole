@@ -94,6 +94,15 @@ from backend.store.base import DuplicateScanNameError
 from backend.vulnerability_identity import vulnerability_report_identity
 from backend.pagination import decode_cursor, encode_cursor
 from backend.registry import CHECKER_VISIBILITY_ADMIN, refresh_registry
+from deephole_client.scan_modes import (
+    BUILTIN_PROFILE_ENGINE_IDS,
+    SCAN_MODE_CUSTOM,
+    SCAN_MODE_QUICK,
+    SCAN_MODE_STANDARD,
+    SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    component_scan_mode,
+    normalize_scan_mode,
+)
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -115,25 +124,11 @@ _FP_REVIEW_RETRYABLE_STATUSES = {
     FpReviewStatus.CANCELLED.value,
     FpReviewStatus.ERROR.value,
 }
-SCAN_MODE_FULL = "full"
-SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
-_SCAN_MODE_ALIASES = {
-    "": SCAN_MODE_FULL,
-    SCAN_MODE_FULL: SCAN_MODE_FULL,
-    "normal": SCAN_MODE_FULL,
-    "default": SCAN_MODE_FULL,
-    SCAN_MODE_THREAT_ANALYSIS_ONLY: SCAN_MODE_THREAT_ANALYSIS_ONLY,
-    "threat_only": SCAN_MODE_THREAT_ANALYSIS_ONLY,
-    "threat-analysis-only": SCAN_MODE_THREAT_ANALYSIS_ONLY,
-}
-
-
 def _normalize_scan_mode(value: str | None) -> str:
-    mode = str(value or "").strip().lower()
-    normalized = _SCAN_MODE_ALIASES.get(mode)
-    if normalized is None:
-        raise HTTPException(status_code=400, detail=f"Unknown scan mode: {value}")
-    return normalized
+    try:
+        return normalize_scan_mode(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _is_threat_analysis_only_mode(value: str | None) -> bool:
@@ -335,6 +330,37 @@ def _resolve_scan_mining_engines(
             ),
         )
 
+    if scan_mode in {SCAN_MODE_QUICK, SCAN_MODE_STANDARD}:
+        missing = [
+            engine_id
+            for engine_id in BUILTIN_PROFILE_ENGINE_IDS
+            if engine_id not in available
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "扫描模式所需漏洞挖掘引擎不可用: "
+                    + ", ".join(missing)
+                ),
+            )
+        requested_ids = [item.engine_id.strip() for item in requested or []]
+        if requested is not None and set(requested_ids) != set(
+            BUILTIN_PROFILE_ENGINE_IDS
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="快速模式和标准模式固定启用两个内置漏洞挖掘引擎",
+            )
+        return [
+            MiningEngineSelection(
+                engine_id=engine_id,
+                engine_label=available[engine_id].label,
+                enabled=True,
+            )
+            for engine_id in BUILTIN_PROFILE_ENGINE_IDS
+        ]
+
     # Keep old callers that only supplied scan_mode working exactly as before.
     # New callers send threat_analysis_enabled explicitly and may select no
     # mining engine for a real analysis-only scan.
@@ -392,6 +418,8 @@ def _resolve_threat_analysis_enabled(
     scan_mode: str,
     selections: list[MiningEngineSelection],
 ) -> bool:
+    if scan_mode in {SCAN_MODE_QUICK, SCAN_MODE_STANDARD}:
+        return True
     if requested is not None:
         return bool(requested)
     if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
@@ -962,11 +990,19 @@ def _validated_checker_names(checkers: list[str], user: User) -> list[str]:
     return names
 
 
-def _globally_enabled_checker_names(managed_config, user: User) -> list[str]:
+def _globally_enabled_checker_names(
+    managed_config,
+    user: User,
+    scan_mode: str = SCAN_MODE_CUSTOM,
+) -> list[str]:
     registry = refresh_registry()
+    profile = getattr(
+        managed_config.checker_selection,
+        component_scan_mode(scan_mode),
+    )
     disabled = {
         str(name).strip()
-        for name in managed_config.checker_selection.disabled_checkers
+        for name in profile.disabled_checkers
         if str(name).strip()
     }
     return [
@@ -1301,6 +1337,27 @@ async def create_agent_scan(
         )
 
     requested_scan_mode = _normalize_scan_mode(body.scan_mode)
+    fixed_profile = requested_scan_mode in {
+        SCAN_MODE_QUICK,
+        SCAN_MODE_STANDARD,
+    }
+    if fixed_profile and body.threat_analysis_enabled is False:
+        raise HTTPException(
+            status_code=422,
+            detail="快速模式和标准模式固定启用威胁分析",
+        )
+    if fixed_profile and body.auto_fp_review is False:
+        raise HTTPException(
+            status_code=422,
+            detail="快速模式和标准模式固定启用自动去误报",
+        )
+    if fixed_profile and (
+        body.checkers is not None or checker_names is not None
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="快速模式和标准模式的规则由高级配置决定",
+        )
     mining_engine_selections = _resolve_scan_mining_engines(
         scan_overrides=body.mining_engines,
         scan_mode=requested_scan_mode,
@@ -1311,33 +1368,47 @@ async def create_agent_scan(
         scan_mode=requested_scan_mode,
         selections=mining_engine_selections,
     )
-    scan_mode = (
-        SCAN_MODE_THREAT_ANALYSIS_ONLY
-        if (
-            body.threat_analysis_enabled is not None
-            and threat_analysis_enabled
-            and not mining_engine_selections
-        )
-        else (
-            SCAN_MODE_FULL
-            if body.threat_analysis_enabled is not None
-            else requested_scan_mode
-        )
-    )
+    scan_mode = requested_scan_mode
     threat_analysis_method, threat_analysis_method_selection = (
-        _resolve_threat_analysis_method(body.threat_analysis_method)
+        _resolve_threat_analysis_method(
+            None if fixed_profile else body.threat_analysis_method
+        )
     )
+    if (
+        fixed_profile
+        and body.threat_analysis_method is not None
+        and str(body.threat_analysis_method).strip()
+        != threat_analysis_method
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="快速模式和标准模式固定使用默认威胁分析方法",
+        )
     auto_fp_review = (
-        body.auto_fp_review
-        if body.auto_fp_review is not None
-        else get_config().fp_review.auto_on_complete
+        True
+        if fixed_profile
+        else (
+            body.auto_fp_review
+            if body.auto_fp_review is not None
+            else get_config().fp_review.auto_on_complete
+        )
     )
     fp_review_method, fp_review_method_selection = _resolve_fp_review_method(
-        body.fp_review_method
+        None if fixed_profile else body.fp_review_method
     )
+    if (
+        fixed_profile
+        and body.fp_review_method is not None
+        and str(body.fp_review_method).strip() != fp_review_method
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="快速模式和标准模式固定使用默认去误报方法",
+        )
     globally_enabled_checkers = _globally_enabled_checker_names(
         managed_config,
         current_user,
+        scan_mode,
     )
     requested_checkers = checker_names if checker_names is not None else body.checkers
     static_engine_enabled = any(
@@ -3387,6 +3458,7 @@ async def _trigger_vulnerability_validation(
     ok = await send_agent_command(agent_id, {
         "type": "vulnerability_validation",
         "scan_id": scan_id,
+        "scan_mode": component_scan_mode(meta.scan_mode),
         "vuln_index": idx,
         "project_path": meta.project_path,
         "code_scan_path": meta.code_scan_path or meta.project_path,
@@ -3968,6 +4040,7 @@ async def _start_fp_review(
         ok = await send_agent_command(agent_id, {
             "type": "fp_review",
             "scan_id": scan_id,
+            "scan_mode": component_scan_mode(meta.scan_mode),
             "review_id": review_id,
             "method": method,
             "project_path": meta.project_path,

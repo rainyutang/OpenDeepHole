@@ -28,6 +28,7 @@ async def run(**kwargs) -> dict:
 | `code_scan_path` | 是 | path | 本次漏洞扫描的代码目录，与漏洞验证粒度一致 |
 | `work_dir` | 是 | path | 当前漏洞独立工作目录 |
 | `scan_id` | 是 | str | 扫描标识 |
+| `scan_mode` | 否 | str | 扫描模式：`quick`、`standard` 或 `custom` |
 | `review_id` | 是 | str | 本轮去误报标识 |
 | `vuln_index` | 是 | int | 漏洞在扫描结果中的索引 |
 | `vulnerability` | 是 | dict | 单个漏洞对象 |

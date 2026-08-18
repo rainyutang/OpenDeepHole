@@ -19,6 +19,7 @@ from .index_store import IndexStore
 PROCESS_NAME = "code_graph_build"
 _PROGRESS_DECILES = 10
 _ALLOWED_KEYS = {
+    "scan_mode",
     "project_path",
     "work_dir",
     "code_scan_path",

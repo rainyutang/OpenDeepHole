@@ -27,6 +27,12 @@ from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
 from .process_artifacts import collect_json_artifacts
 from .reporter import Reporter
+from .scan_modes import (
+    SCAN_MODE_CUSTOM,
+    SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    component_scan_mode,
+    normalize_scan_mode,
+)
 from .threat_analysis_runner import run_threat_analysis
 from .vulnerability_mining import (
     MiningEngineRun,
@@ -37,10 +43,6 @@ from .vulnerability_mining.dedup import VulnerabilityDeduplicator
 from .vulnerability_mining.runtime import (
     normalize_mining_engine_vulnerabilities,
 )
-
-
-SCAN_MODE_FULL = "full"
-SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 
 
 def _archive_failed_threat_analysis(output_path: Path) -> Path | None:
@@ -211,6 +213,7 @@ async def _report_process_vulnerabilities(
     reporter: Reporter,
     config: AgentConfig,
     scan_id: str,
+    scan_mode: str = "custom",
     project_path: Path,
     code_scan_path: Path,
     product: str,
@@ -261,6 +264,7 @@ async def _report_process_vulnerabilities(
                     config=config,
                     reporter=reporter,
                     scan_id=scan_id,
+                    scan_mode=scan_mode,
                     review_id=str(fp_info["review_id"]),
                     method=str(fp_info.get("method") or "adversarial"),
                     vulnerability=payload,
@@ -291,6 +295,7 @@ async def _report_process_vulnerabilities(
                     config=config,
                     reporter=reporter,
                     scan_id=scan_id,
+                    scan_mode=scan_mode,
                     vuln_index=int(response["index"]),
                     vulnerability=vulnerability.model_dump(mode="json"),
                     report_markdown=str(
@@ -356,7 +361,7 @@ async def run_scan(
     resume_threat_analysis: bool = False,
     retry_mining_engine_ids: list[str] | None = None,
     retry_threat_audit_task_ids: list[str] | None = None,
-    scan_mode: str = SCAN_MODE_FULL,
+    scan_mode: str = SCAN_MODE_CUSTOM,
     threat_analysis_enabled: bool = False,
     threat_analysis_method: str = "deephole_threat_analysis",
     vulnerability_validation: dict[str, Any] | None = None,
@@ -374,14 +379,8 @@ async def run_scan(
     project, scan_root = _resolve_scan_paths(project_path, code_scan_path)
     configure_platform_runtime(config, scan_dir)
 
-    normalized_mode = str(scan_mode or SCAN_MODE_FULL).strip().lower()
-    if normalized_mode in {"threat_only", "threat-analysis-only"}:
-        normalized_mode = SCAN_MODE_THREAT_ANALYSIS_ONLY
-    if normalized_mode not in {
-        SCAN_MODE_FULL,
-        SCAN_MODE_THREAT_ANALYSIS_ONLY,
-    }:
-        raise ValueError(f"Unknown scan mode: {scan_mode}")
+    normalized_mode = normalize_scan_mode(scan_mode)
+    runtime_scan_mode = component_scan_mode(normalized_mode)
     threat_only = normalized_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY
     threat_analysis_selected = bool(
         threat_analysis_enabled or threat_only
@@ -577,6 +576,7 @@ async def run_scan(
 
     try:
         graph_result = await run_code_graph_build(
+            scan_mode=runtime_scan_mode,
             project_path=project,
             code_scan_path=scan_root,
             work_dir=scan_dir / "code_graph_build",
@@ -702,6 +702,7 @@ async def run_scan(
 
         async def run_native_attempt(*, resume: bool) -> dict[str, Any]:
             return await run_threat_analysis(
+                scan_mode=runtime_scan_mode,
                 method_id=threat_analysis_method_id,
                 project_path=project,
                 code_path=scan_root,
@@ -887,6 +888,7 @@ async def run_scan(
                 reporter=reporter,
                 config=config,
                 scan_id=scan_id,
+                scan_mode=runtime_scan_mode,
                 project_path=project,
                 code_scan_path=scan_root,
                 product=product,
@@ -924,6 +926,7 @@ async def run_scan(
         engine_kwargs = {
             "engine_id": selection.engine_id,
             "engine_label": selection.engine_label,
+            "scan_mode": runtime_scan_mode,
             "scan_id": scan_id,
             "project_path": project,
             "code_scan_path": scan_root,
@@ -1028,6 +1031,7 @@ async def run_scan(
             knowledge_base_mcp=knowledge_base_mcp,
             output=task_output,
             cancel_event=cancel_event,
+            task_metadata={"scan_mode": runtime_scan_mode},
         ):
             should_run_threat_analysis = (
                 threat_analysis_selected

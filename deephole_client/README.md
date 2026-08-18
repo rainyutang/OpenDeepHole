@@ -18,6 +18,10 @@
 选择和适配代码位于方法目录外。业务过程不导入 `backend`、`reporter`、`server` 或其它业务
 过程；需要模型时只调用 `task_agent.run_opencode_task()`。
 
+扫描任务调用这些入口时都会提供 `kwargs["scan_mode"]`，值为 `quick`、`standard` 或
+`custom`；历史模式在组件边界映射为 `custom`。威胁分析原生五参数入口保持不变，模式只进入
+外层适配器 kwargs 和 Task Agent 任务元数据。
+
 单独提取普通过程时复制目标过程目录即可；提取静态分析或候选点审计时复制整个
 `vulnerability_mining/engines/static_candidate/`，以同时保留两个过程的公共规则树。需要模型的
 过程还要让通用 `task_agent` 包可导入，并可通过 `task_agent_config` 指向自己的

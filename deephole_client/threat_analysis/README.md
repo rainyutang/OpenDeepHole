@@ -70,7 +70,7 @@ def run_threat_analysis(
 | `product_mcp` | `None` | 本次扫描启用的知识库 MCP 名称；方法不使用时可以忽略 |
 | `attack_modes` | `None` | 预留的攻击模式映射；方法不使用时可以忽略 |
 
-`project_path`、`task_agent_config`、`output`、`cancel_event`、方法 ID 等属于外层平台参数，
+`project_path`、`scan_mode`、`task_agent_config`、`output`、`cancel_event`、方法 ID 等属于外层平台参数，
 不会传给原生入口。
 需要模型的方法可以像内置实现一样调用 `task_agent.run_opencode_task()`；平台会把当前所选方法
 `skills/` 下所有包含 `SKILL.md` 的 Skill 根仅注册到本方法的任务上下文，不再全局注入其它

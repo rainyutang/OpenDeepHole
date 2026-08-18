@@ -1654,9 +1654,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             get=lambda engine_id: loaded.get(engine_id),
         )
         received_keys: set[str] = set()
+        received_scan_modes: set[str] = set()
 
         async def run_engine(engine, **engine_kwargs):
             received_keys.update(engine_kwargs)
+            received_scan_modes.add(engine_kwargs["scan_mode"])
             started.add(engine.manifest.engine_id)
             if len(started) == 2:
                 both_started.set()
@@ -1739,11 +1741,13 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(started, {"good", "bad"})
+        self.assertEqual(received_scan_modes, {"custom"})
         self.assertEqual(
             received_keys,
             {
                 "engine_id",
                 "engine_label",
+                "scan_mode",
                 "scan_id",
                 "project_path",
                 "code_scan_path",

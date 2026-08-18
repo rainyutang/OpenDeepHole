@@ -1,5 +1,5 @@
 # DeepHole 2.0 Agent bootstrap and managed configuration.
-# server_url / agent_name / owner_token are local-only; the remaining v6
+# server_url / agent_name / owner_token are local-only; the remaining v7
 # sections are managed by the Web "客户端配置" page after first connection.
 
 server_url: "http://your-server:8000"
@@ -7,7 +7,7 @@ agent_name: ""
 owner_token: ""
 checkers: []
 
-schema_version: 6
+schema_version: 7
 base:
   # OpenCode is the fixed implementation; executable may be opencode, nga, or a full path.
   tool: "opencode"
@@ -49,5 +49,13 @@ vulnerability_validation:
     max_retries: 2
 
 checker_selection:
-  # Exclusions are persisted so newly discovered checkers stay enabled.
-  disabled_checkers: []
+  # Each mode persists exclusions so newly discovered checkers stay enabled.
+  quick:
+    disabled_checkers:
+      - "sensitive_clear"
+      - "skill_only_project_audit"
+  standard:
+    disabled_checkers:
+      - "skill_only_project_audit"
+  custom:
+    disabled_checkers: []

@@ -27,6 +27,7 @@ interface Props {
 }
 type Section = "basic" | "advanced";
 type AdvancedSection = "threat" | "mining" | "fp" | "validation";
+type CheckerProfileMode = "quick" | "standard" | "custom";
 
 const sections: { id: Section; label: string }[] = [
   { id: "basic", label: "基础配置" },
@@ -46,7 +47,7 @@ const policy = (
   required_capability, timeout_seconds: 3600, max_retries,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
-  schema_version: 6,
+  schema_version: 7,
   base: { tool: "opencode", executable: "opencode", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
   model_pool: { global_concurrency: 4, models: [] },
   threat_analysis: { enabled: true, model_policy: policy("high", 2) },
@@ -58,7 +59,11 @@ const defaultConfig = (): AgentRemoteConfig => ({
     validation_max_retries: 0,
     model_policy: policy("high"),
   },
-  checker_selection: { disabled_checkers: [] },
+  checker_selection: {
+    quick: { disabled_checkers: ["sensitive_clear", "skill_only_project_audit"] },
+    standard: { disabled_checkers: ["skill_only_project_audit"] },
+    custom: { disabled_checkers: [] },
+  },
 });
 
 const input = "w-full rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-white outline-none focus:border-blue-500";
@@ -156,6 +161,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
   const [agentKey, setAgentKey] = useState("");
   const [section, setSection] = useState<Section>("basic");
   const [advancedSection, setAdvancedSection] = useState<AdvancedSection | null>("threat");
+  const [checkerProfileMode, setCheckerProfileMode] = useState<CheckerProfileMode>("quick");
   const [config, setConfig] = useState<AgentRemoteConfig>(defaultConfig);
   const [catalog, setCatalog] = useState<AgentValidatorCatalog>({ methods: [], errors: [], updated_at: "" });
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
@@ -337,11 +343,23 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
     setModelPicker(null);
   };
 
-  const disabledCheckers = new Set(config.checker_selection.disabled_checkers);
+  const disabledCheckers = new Set(
+    config.checker_selection[checkerProfileMode].disabled_checkers,
+  );
   const updateCheckerGroup = (items: CheckerInfo[], enabled: boolean) => {
-    const next = new Set(config.checker_selection.disabled_checkers);
+    const next = new Set(
+      config.checker_selection[checkerProfileMode].disabled_checkers,
+    );
     items.forEach((checker) => enabled ? next.delete(checker.name) : next.add(checker.name));
-    setCfg({ ...config, checker_selection: { disabled_checkers: Array.from(next).sort() } });
+    setCfg({
+      ...config,
+      checker_selection: {
+        ...config.checker_selection,
+        [checkerProfileMode]: {
+          disabled_checkers: Array.from(next).sort(),
+        },
+      },
+    });
   };
   const checkerGroup = (label: string, items: CheckerInfo[]) => <div className="space-y-2">
     <div className="flex items-center justify-between gap-3">
@@ -367,9 +385,14 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
     </div>;
     if (target === "mining") return <div className="space-y-5">
       <PolicyEditor value={config.vulnerability_mining} onChange={(value) => setCfg({ ...config, vulnerability_mining: value })} />
-      <p className="text-sm text-slate-400">这里配置漏洞挖掘阶段的通用模型任务策略；具体运行哪些引擎在创建扫描时选择。</p>
+      <p className="text-sm text-slate-400">这里配置漏洞挖掘阶段的通用模型任务策略；自定义模式可在创建扫描时选择引擎，快速和标准模式固定运行两个内置引擎。</p>
       <div className="space-y-4 border-t border-slate-700 pt-5">
-        <div><h3 className="text-sm font-semibold text-slate-200">静态分析与候选点审计检查项</h3><p className="mt-1 text-xs leading-5 text-slate-500">保存后从下一次扫描开始生效。未出现在禁用列表中的检查项默认启用，因此以后新建的检查项也会自动选中。</p></div>
+        <div><h3 className="text-sm font-semibold text-slate-200">基于代码风险点引擎规则</h3><p className="mt-1 text-xs leading-5 text-slate-500">三个模式分别保存。未出现在禁用列表中的规则默认启用，因此以后新增的可用规则也会自动选中。</p></div>
+        <div className="grid grid-cols-3 gap-2 rounded-lg bg-slate-900/60 p-1">{([
+          { id: "quick", label: "快速模式" },
+          { id: "standard", label: "标准模式" },
+          { id: "custom", label: "自定义模式" },
+        ] as { id: CheckerProfileMode; label: string }[]).map((mode) => <button key={mode.id} type="button" onClick={() => setCheckerProfileMode(mode.id)} className={`rounded-md px-3 py-2 text-sm ${checkerProfileMode === mode.id ? "bg-blue-600 text-white" : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"}`}>{mode.label}</button>)}</div>
         <div className="grid gap-5 lg:grid-cols-2">
           {checkerGroup("系统内置", checkers.filter((checker) => !checker.user_created))}
           {checkerGroup("用户新建", checkers.filter((checker) => checker.user_created))}

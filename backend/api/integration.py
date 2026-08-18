@@ -302,7 +302,7 @@ async def create_integration_scan(
 ) -> IntegrationScanResponse:
     agent_id = _resolve_agent_id(body.agent_name)
     checker_names = _public_checker_names(
-        body.agent_config.checker_selection.disabled_checkers,
+        body.agent_config.checker_selection.custom.disabled_checkers,
     )
     code_graph_mcp = body.code_graph_mcp
     if code_graph_mcp is None and body.agent_config.code_graph.enabled:

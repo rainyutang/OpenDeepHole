@@ -214,6 +214,7 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
                     config=SimpleNamespace(),
                     reporter=reporter,
                     scan_id="scan-1",
+                    scan_mode="quick",
                     review_id="review-unexpected-cancel",
                     method="adversarial",
                     project_path="/repo",
@@ -308,6 +309,7 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
                     config=SimpleNamespace(),
                     reporter=reporter,
                     scan_id="scan-1",
+                    scan_mode="quick",
                     review_id="review-2",
                     method="fp_check",
                     project_path=tmp,
@@ -321,6 +323,7 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
 
         kwargs = run_review.await_args.kwargs
         self.assertEqual(kwargs["method_id"], "fp_check")
+        self.assertEqual(kwargs["scan_mode"], "quick")
         self.assertEqual(kwargs["vuln_index"], 3)
         self.assertEqual(kwargs["vulnerability"]["index"], 3)
         self.assertNotIn("vulnerabilities", kwargs)
@@ -328,6 +331,10 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "success")
         reporter.push_fp_result.assert_awaited_once()
         skill_paths = task_context.call_args.kwargs["skill_paths"]
+        self.assertEqual(
+            task_context.call_args.kwargs["task_metadata"]["scan_mode"],
+            "quick",
+        )
         self.assertTrue(skill_paths)
         self.assertTrue(any(path.name == "skills" for path in skill_paths))
 
