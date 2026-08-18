@@ -2,6 +2,7 @@
 
 ## 2026-08-18
 
+- **修复** Windows Agent 异常退出后，ownership marker 中的旧 PID 已不存在且 TCP 端口已无监听，但旧连接仍让 `SO_EXCLUSIVEADDRUSE` 暂时返回 `10048` 时，清理逻辑会把“端口尚不可复用”误判成“旧 Serve 仍存活”，反复执行失败的 `taskkill` 并阻断全部模型任务：marker 现在记录进程创建标识，恢复时以 Windows 进程快照和创建标识区分真实受管进程、已消失进程与复用 PID；旧进程消失后立即清除 marker，自动模式避开仍在回收的旧端口继续启动，显式固定端口保持不换号并报告绑定错误，身份不明或确实存活的进程仍严格阻止第二个 Serve
 - **修复** Windows Agent 在 npm 位于 `C:\Program Files\nodejs\npm.CMD` 等带空格路径时，把预先拼接的命令行再次交给 `cmd.exe /s /c` 转义，导致首条 `npm set strict-ssl false` 将带反斜杠的引号当作文件名并立即终止 Codex 自动安装：现在优先通过同一 Node 安装中的 `node.exe + node_modules/npm/bin/npm-cli.js` 运行全部 npm 步骤，非标准布局回退为独立 argv 的 `cmd.exe /d /c call`，Codex `.cmd` 的备用调用同步修正；Windows 本地化命令输出增加 OEM/系统编码回退，中文错误不再按 UTF-8 强制解码为乱码，原有 120 秒共享超时和仅禁用 Codex 引擎的失败隔离保持不变
 
 ## 2026-08-17

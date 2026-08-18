@@ -4933,6 +4933,73 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
     asyncio.run(run())
 
 
+def test_write_marker_records_windows_process_creation_times(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from task_agent import serve_client
+
+    class FakeProc:
+        pid = 12345
+
+    marker_path = tmp_path / "serve-marker.json"
+    monkeypatch.setattr(serve_client.sys, "platform", "win32")
+    monkeypatch.setattr(
+        serve_client,
+        "_windows_process_creation_time",
+        lambda pid: pid * 10,
+    )
+
+    serve_client._write_marker(
+        marker_path,
+        proc=FakeProc(),
+        key=OpenCodeServeKey(tool="opencode", executable="opencode"),
+        port=64251,
+        launcher_pid=23456,
+        listener_pids={34567},
+    )
+
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["process_creation_times"] == {
+        str(os.getpid()): os.getpid() * 10,
+        "12345": 123450,
+        "23456": 234560,
+        "34567": 345670,
+    }
+
+
+def test_windows_marker_pid_states_use_creation_tokens(monkeypatch) -> None:
+    from task_agent import serve_client
+
+    marker = {
+        "process_creation_times": {
+            "11111": 100,
+            "22222": 200,
+            "33333": 300,
+        },
+    }
+    monkeypatch.setattr(
+        serve_client,
+        "_windows_process_parent_snapshot",
+        lambda: {11111: 1, 22222: 1},
+    )
+    monkeypatch.setattr(
+        serve_client,
+        "_windows_process_creation_time",
+        lambda pid: {11111: 100, 22222: 201}.get(pid),
+    )
+
+    assert serve_client._windows_marker_pid_states(
+        marker,
+        {11111, 22222, 33333},
+        listener_pids={11111, 22222, 33333},
+    ) == {
+        11111: "owned",
+        22222: "foreign",
+        33333: "absent",
+    }
+
+
 def test_start_locked_resolves_only_configured_nga_when_both_are_available(
     monkeypatch,
     tmp_path: Path,
@@ -5859,6 +5926,347 @@ def test_start_locked_clears_bindable_ghost_marker_without_terminating(
         manager._start_once_locked.assert_awaited_once()
         assert manager._start_once_locked.await_args.kwargs["port"] == 23678
         assert manager._auto_port == 23678
+
+    asyncio.run(run())
+
+
+def test_start_locked_auto_port_skips_absent_process_while_old_port_drains(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "agent_pid": 77777,
+                "pid": 11111,
+                "launcher_pid": 11111,
+                "port": 64251,
+                "tool": "opencode",
+                "executable": "opencode",
+                "listener_pids": [19680],
+            }),
+            encoding="utf-8",
+        )
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+        allocated: list[set[int]] = []
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_parent_snapshot",
+            lambda: {os.getpid(): 1},
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {19680} if port == 64251 else set(),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda _port: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda port: (
+                OSError(10048, "address already in use")
+                if port == 64251
+                else None
+            ),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            pytest.fail,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.asyncio.to_thread",
+            fake_to_thread,
+        )
+
+        def allocate(excluded: set[int]) -> int:
+            allocated.append(set(excluded))
+            return 64252
+
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            allocate,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock()
+        await manager._start_locked(
+            OpenCodeServeKey(
+                tool="opencode",
+                executable="opencode",
+                serve_port_auto=True,
+                config_content="{}",
+                env_overrides=(("OPENCODE_SERVE_PORT", "64251"),),
+            ),
+            startup_cwd=startup_cwd,
+        )
+
+        assert allocated == [{64251}]
+        assert not marker_path.exists()
+        manager._start_once_locked.assert_awaited_once()
+        assert manager._start_once_locked.await_args.kwargs["port"] == 64252
+        assert manager._start_once_locked.await_args.kwargs["attempt"] == 2
+        assert manager._auto_port == 64252
+
+    asyncio.run(run())
+
+
+def test_start_locked_fixed_port_reports_draining_absent_process_port(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "agent_pid": 77777,
+                "pid": 11111,
+                "port": 64251,
+                "tool": "opencode",
+                "executable": "opencode",
+                "listener_pids": [19680],
+            }),
+            encoding="utf-8",
+        )
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_parent_snapshot",
+            lambda: {os.getpid(): 1},
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {19680} if port == 64251 else set(),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda _port: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda port: OSError(10048, "address already in use"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            pytest.fail,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            pytest.fail,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.asyncio.to_thread",
+            fake_to_thread,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock()
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager._start_locked(
+                OpenCodeServeKey(
+                    tool="opencode",
+                    executable="opencode",
+                    config_content="{}",
+                    env_overrides=(("OPENCODE_SERVE_PORT", "64251"),),
+                ),
+                startup_cwd=startup_cwd,
+            )
+
+        assert not marker_path.exists()
+        manager._start_once_locked.assert_not_awaited()
+        message = str(excinfo.value)
+        assert "port_mode=fixed" in message
+        assert "address already in use" in message
+        assert "attempted_ports=64251" in message
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("identity_fields", "current_creation_time"),
+    [
+        ({"process_creation_times": {"19680": 100}}, 200),
+        (
+            {"created_at": 1_000_000_000},
+            (1_000_000_100 + 11_644_473_600) * 10_000_000,
+        ),
+    ],
+)
+def test_start_locked_does_not_terminate_reused_marker_pid(
+    monkeypatch,
+    tmp_path: Path,
+    identity_fields: dict,
+    current_creation_time: int,
+) -> None:
+    async def run() -> None:
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "agent_pid": 77777,
+                "pid": 19680,
+                "launcher_pid": 19680,
+                "port": 64251,
+                "tool": "opencode",
+                "executable": "opencode",
+                "listener_pids": [19680],
+                **identity_fields,
+            }),
+            encoding="utf-8",
+        )
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+        terminated: list[int] = []
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_parent_snapshot",
+            lambda: {os.getpid(): 1, 19680: 1},
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_creation_time",
+            lambda pid: current_creation_time if pid == 19680 else None,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {19680} if port == 64251 else set(),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda port: port == 64251,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda port: (
+                OSError(10048, "address already in use")
+                if port == 64251
+                else None
+            ),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            lambda pid, **kwargs: terminated.append(pid),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            lambda excluded: 64252,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.asyncio.to_thread",
+            fake_to_thread,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock()
+        await manager._start_locked(
+            OpenCodeServeKey(
+                tool="opencode",
+                executable="opencode",
+                serve_port_auto=True,
+                config_content="{}",
+                env_overrides=(("OPENCODE_SERVE_PORT", "64251"),),
+            ),
+            startup_cwd=startup_cwd,
+        )
+
+        assert terminated == []
+        assert not marker_path.exists()
+        assert manager._start_once_locked.await_args.kwargs["port"] == 64252
+
+    asyncio.run(run())
+
+
+def test_stop_owned_serve_retains_marker_when_pid_identity_is_unknown(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "agent_pid": 77777,
+                "pid": 19680,
+                "port": 64251,
+                "tool": "opencode",
+                "executable": "opencode",
+                "listener_pids": [19680],
+                "process_creation_times": {"19680": 100},
+            }),
+            encoding="utf-8",
+        )
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_parent_snapshot",
+            lambda: {os.getpid(): 1, 19680: 1},
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_creation_time",
+            lambda _pid: None,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda _port: {19680},
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda _port: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda _port: OSError(10048, "address already in use"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            pytest.fail,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.asyncio.to_thread",
+            fake_to_thread,
+        )
+
+        manager = OpenCodeServeManager()
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager._stop_owned_serve_on_port(64251)
+
+        assert "pid_states=19680:unknown" in str(excinfo.value)
+        assert marker_path.exists()
 
     asyncio.run(run())
 

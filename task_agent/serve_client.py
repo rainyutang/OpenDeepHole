@@ -916,13 +916,13 @@ def _listener_pids_for_port(port: int) -> set[int]:
     return _posix_listener_pids_for_port(port)
 
 
-def _windows_process_parent_map() -> dict[int, int]:
-    """Return a best-effort Windows PID -> parent PID snapshot."""
+def _windows_process_parent_snapshot() -> dict[int, int] | None:
+    """Return a complete best-effort Windows PID -> parent PID snapshot."""
     try:
         import ctypes
         from ctypes import wintypes
     except Exception:
-        return {}
+        return None
 
     class ProcessEntry32W(ctypes.Structure):
         _fields_ = [
@@ -938,7 +938,10 @@ def _windows_process_parent_map() -> dict[int, int]:
             ("szExeFile", wintypes.WCHAR * 260),
         ]
 
-    kernel32 = ctypes.windll.kernel32
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except Exception:
+        return None
     create_snapshot = kernel32.CreateToolhelp32Snapshot
     create_snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
     create_snapshot.restype = wintypes.HANDLE
@@ -960,13 +963,13 @@ def _windows_process_parent_map() -> dict[int, int]:
         else ctypes.cast(snapshot, ctypes.c_void_p).value
     )
     if not snapshot_value or snapshot_value == invalid_handle:
-        return {}
+        return None
     parents: dict[int, int] = {}
     try:
         entry = ProcessEntry32W()
         entry.dwSize = ctypes.sizeof(ProcessEntry32W)
         if not process_first(snapshot, ctypes.byref(entry)):
-            return {}
+            return None
         while True:
             parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
             if not process_next(snapshot, ctypes.byref(entry)):
@@ -974,6 +977,72 @@ def _windows_process_parent_map() -> dict[int, int]:
     finally:
         close_handle(snapshot)
     return parents
+
+
+def _windows_process_parent_map() -> dict[int, int]:
+    """Return a best-effort Windows PID -> parent PID snapshot."""
+    return _windows_process_parent_snapshot() or {}
+
+
+def _windows_process_creation_time(pid: int) -> int | None:
+    """Return the Windows process creation FILETIME used to detect PID reuse."""
+    if pid <= 0:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FileTime(ctypes.Structure):
+            _fields_ = [
+                ("dwLowDateTime", wintypes.DWORD),
+                ("dwHighDateTime", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        get_process_times = kernel32.GetProcessTimes
+        get_process_times.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+            ctypes.POINTER(FileTime),
+        ]
+        get_process_times.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        process_query_limited_information = 0x1000
+        handle = open_process(
+            process_query_limited_information,
+            False,
+            int(pid),
+        )
+        if not handle:
+            return None
+        try:
+            creation = FileTime()
+            exit_time = FileTime()
+            kernel_time = FileTime()
+            user_time = FileTime()
+            if not get_process_times(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            ):
+                return None
+            return (
+                int(creation.dwHighDateTime) << 32
+            ) | int(creation.dwLowDateTime)
+        finally:
+            close_handle(handle)
+    except Exception:
+        return None
 
 
 def _posix_process_stat(pid: int) -> tuple[str, int, int] | None:
@@ -1092,6 +1161,12 @@ class _PortReclaimResult:
     attempted: bool
     pids: tuple[int, ...] = ()
     released: bool = False
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class _PreviousServeCleanupResult:
+    avoided_ports: tuple[int, ...] = ()
     detail: str = ""
 
 
@@ -1267,6 +1342,22 @@ def _marker_listener_pids(marker: dict[str, Any]) -> set[int]:
     }
 
 
+def _marker_process_creation_times(marker: dict[str, Any]) -> dict[int, int]:
+    raw = marker.get("process_creation_times")
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[int, int] = {}
+    for raw_pid, raw_creation_time in raw.items():
+        try:
+            pid = int(raw_pid)
+            creation_time = int(raw_creation_time)
+        except (TypeError, ValueError):
+            continue
+        if pid > 0 and creation_time > 0:
+            result[pid] = creation_time
+    return result
+
+
 def _write_marker(
     path: Path,
     *,
@@ -1277,6 +1368,22 @@ def _write_marker(
     listener_pids: set[int] | tuple[int, ...] = (),
 ) -> None:
     pid = int(getattr(proc, "pid", 0) or 0)
+    recorded_pids = {
+        int(recorded_pid)
+        for recorded_pid in (
+            os.getpid(),
+            pid,
+            int(launcher_pid or pid),
+            *listener_pids,
+        )
+        if int(recorded_pid) > 0
+    }
+    process_creation_times: dict[str, int] = {}
+    if sys.platform == "win32":
+        for recorded_pid in sorted(recorded_pids):
+            creation_time = _windows_process_creation_time(recorded_pid)
+            if creation_time is not None:
+                process_creation_times[str(recorded_pid)] = creation_time
     data = {
         "owner": _SERVE_MARKER_OWNER,
         "agent_pid": os.getpid(),
@@ -1293,6 +1400,8 @@ def _write_marker(
         "config_hash": key.config_hash,
         "created_at": time.time(),
     }
+    if process_creation_times:
+        data["process_creation_times"] = process_creation_times
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -1790,6 +1899,237 @@ def _stop_owned_serve_record(
             record.marker_path,
         )
     return stopped
+
+
+def _windows_marker_pid_states(
+    marker: dict[str, Any],
+    pids: set[int],
+    *,
+    listener_pids: set[int],
+) -> dict[int, str]:
+    """Classify marker PIDs without confusing a recycled PID with our Serve."""
+    snapshot = _windows_process_parent_snapshot()
+    recorded_creation_times = _marker_process_creation_times(marker)
+    try:
+        marker_created_at = float(marker.get("created_at") or 0)
+    except (TypeError, ValueError):
+        marker_created_at = 0.0
+    states: dict[int, str] = {}
+    for pid in sorted({int(item) for item in pids if int(item) > 0}):
+        if pid == os.getpid():
+            # A previous Serve can never be the current Agent interpreter.
+            states[pid] = "foreign"
+            continue
+        if snapshot is not None and pid not in snapshot:
+            states[pid] = "absent"
+            continue
+
+        recorded_creation_time = recorded_creation_times.get(pid)
+        if recorded_creation_time is not None:
+            current_creation_time = _windows_process_creation_time(pid)
+            if current_creation_time is None:
+                states[pid] = "unknown"
+            elif current_creation_time == recorded_creation_time:
+                states[pid] = "owned"
+            else:
+                states[pid] = "foreign"
+            continue
+
+        if marker_created_at > 0:
+            current_creation_time = _windows_process_creation_time(pid)
+            if current_creation_time is not None:
+                # Windows FILETIME uses 100 ns ticks since 1601-01-01 UTC.
+                process_created_at = (
+                    current_creation_time / 10_000_000
+                ) - 11_644_473_600
+                if process_created_at > marker_created_at + 1.0:
+                    states[pid] = "foreign"
+                    continue
+
+        if snapshot is not None or pid in listener_pids or _pid_is_running(pid):
+            # Legacy markers have no creation token. Preserve their ownership
+            # behavior while all newly written markers get PID-reuse protection.
+            states[pid] = "owned-legacy"
+        else:
+            states[pid] = "absent"
+    return states
+
+
+def _stop_previous_windows_serve_marker(
+    marker: dict[str, Any],
+    marker_path: Path,
+    fallback_port: int,
+) -> _PreviousServeCleanupResult:
+    """Recover one previous Windows Serve marker before starting a replacement."""
+    marker_port = int(marker.get("port") or fallback_port)
+    pid = int(marker.get("pid") or 0)
+    launcher_pid = int(marker.get("launcher_pid") or pid)
+    marker_agent_pid = int(marker.get("agent_pid") or 0)
+    known_listener_pids = _marker_listener_pids(marker)
+
+    def current_state() -> tuple[set[int], dict[int, str]]:
+        current_listeners = (
+            _listener_pids_for_port(marker_port)
+            if marker_port > 0
+            else set()
+        )
+        tracked_pids = {
+            item
+            for item in (
+                marker_agent_pid,
+                pid,
+                launcher_pid,
+                *known_listener_pids,
+            )
+            if item > 0
+        }
+        return current_listeners, _windows_marker_pid_states(
+            marker,
+            tracked_pids,
+            listener_pids=current_listeners,
+        )
+
+    current_listeners, pid_states = current_state()
+    active_states = {"owned", "owned-legacy", "unknown"}
+    if (
+        marker_agent_pid > 0
+        and marker_agent_pid != os.getpid()
+        and pid_states.get(marker_agent_pid) in active_states
+    ):
+        logger.info(
+            "Leaving OpenCode serve marker owned by live Agent pid %s unchanged",
+            marker_agent_pid,
+        )
+        return _PreviousServeCleanupResult()
+
+    serve_pids = {
+        item
+        for item in (pid, launcher_pid, *known_listener_pids)
+        if item > 0
+    }
+
+    def retire_marker(reason: str) -> _PreviousServeCleanupResult:
+        probe = _probe_serve_port(marker_port) if marker_port > 0 else None
+        avoided_ports = (
+            (marker_port,)
+            if probe is not None and not probe.reusable
+            else ()
+        )
+        state_note = ",".join(
+            f"{item}:{pid_states.get(item, 'unknown')}"
+            for item in sorted(serve_pids)
+        )
+        detail = (
+            f"{reason}; tcp_connectable={probe.connectable if probe else False} "
+            f"bind_error={probe.bind_error if probe else ''} "
+            f"pid_states={state_note or 'none'}"
+        )
+        logger.warning(
+            "Retiring stale OpenCode Serve marker port=%s avoided=%s %s",
+            marker_port,
+            bool(avoided_ports),
+            detail,
+        )
+        _remove_marker(marker_path)
+        return _PreviousServeCleanupResult(
+            avoided_ports=avoided_ports,
+            detail=detail,
+        )
+
+    if not serve_pids or all(
+        pid_states.get(item) in {"absent", "foreign"}
+        for item in serve_pids
+    ):
+        return retire_marker("recorded Serve process no longer exists")
+
+    tree_stopped = True
+    primary_pids = {
+        item
+        for item in (pid, launcher_pid)
+        if item > 0 and pid_states.get(item) in {"owned", "owned-legacy"}
+    }
+    for primary_pid in sorted(primary_pids):
+        logger.info(
+            "Stopping previous Agent-owned %s serve pid %s on 127.0.0.1:%s",
+            marker.get("tool") or "opencode",
+            primary_pid,
+            marker_port,
+        )
+        if not _terminate_process_tree(primary_pid):
+            tree_stopped = False
+
+    listener_candidates = known_listener_pids | (
+        {pid, launcher_pid} & current_listeners
+    )
+    allowed_listener_pids = {
+        listener_pid
+        for listener_pid in listener_candidates
+        if pid_states.get(listener_pid) in {"owned", "owned-legacy"}
+    }
+    reclaim_result: _PortReclaimResult | None = None
+    if marker_port > 0 and allowed_listener_pids:
+        reclaim_result = _reclaim_serve_port(
+            marker_port,
+            reason="previous Agent-owned Serve marker",
+            allowed_pids=allowed_listener_pids,
+        )
+
+    current_listeners, pid_states = current_state()
+    if not serve_pids or all(
+        pid_states.get(item) in {"absent", "foreign"}
+        for item in serve_pids
+    ):
+        return retire_marker("recorded Serve process exited during cleanup")
+
+    probe = _probe_serve_port(marker_port) if marker_port > 0 else None
+    active_primary_pids = {
+        item
+        for item in (pid, launcher_pid)
+        if item > 0 and pid_states.get(item) in active_states
+    }
+    remaining_listener_pids = {
+        item
+        for item in serve_pids & current_listeners
+        if pid_states.get(item) in active_states
+    }
+    if (
+        not active_primary_pids
+        and reclaim_result is not None
+        and reclaim_result.released
+        and probe is not None
+        and probe.reusable
+    ):
+        return retire_marker("listener-table row is stale and port is reusable")
+
+    state_note = ",".join(
+        f"{item}:{pid_states.get(item, 'unknown')}"
+        for item in sorted(serve_pids)
+    )
+    reclaim_note = (
+        f"; reclaim={reclaim_result.detail}"
+        if reclaim_result is not None
+        else ""
+    )
+    diagnostics = (
+        f"; tcp_connectable={probe.connectable if probe else False} "
+        f"bind_error={probe.bind_error if probe else ''} "
+        f"pid_states={state_note or 'none'}"
+        f"{reclaim_note}"
+    )
+    if active_primary_pids or not tree_stopped:
+        raise RuntimeError(
+            "Previous Agent-owned OpenCode Serve process tree did not stop; "
+            f"pid={pid} listener_pid(s)="
+            f"{','.join(str(item) for item in sorted(remaining_listener_pids))} "
+            f"port={marker_port} ownership marker was retained"
+            f"{diagnostics}"
+        )
+    raise RuntimeError(
+        "Previous Agent-owned OpenCode Serve listener did not stop; "
+        f"pid(s)={','.join(str(item) for item in sorted(remaining_listener_pids))} "
+        f"port={marker_port} ownership marker was retained"
+        f"{diagnostics}"
+    )
 
 
 def _cleanup_owned_serve_processes(reason: str = "process exit") -> None:
@@ -6329,11 +6669,26 @@ class OpenCodeServeManager:
             if key.serve_port_auto and self._auto_port is not None
             else requested_port
         )
-        await self._stop_owned_serve_on_port(port)
+        cleanup_result = await self._stop_owned_serve_on_port(port)
+        excluded_ports = set(cleanup_result.avoided_ports)
         prepared_cwd = _prepare_serve_startup_cwd(key.tool, startup_cwd)
         config_path = _write_serve_config_file(prepared_cwd, key.config_content)
         attempted_ports: list[int] = []
         generic_retry_used = False
+
+        if key.serve_port_auto and port in excluded_ports:
+            attempted_ports.append(port)
+            next_port = _allocate_loopback_port(
+                set(attempted_ports) | excluded_ports,
+            )
+            logger.warning(
+                "OpenCode auto port 127.0.0.1:%s is still draining after its "
+                "previous Serve exited; retrying on 127.0.0.1:%s cleanup=%s",
+                port,
+                next_port,
+                cleanup_result.detail,
+            )
+            port = next_port
 
         while True:
             probe = _probe_serve_port(port)
@@ -6348,7 +6703,9 @@ class OpenCodeServeManager:
                     key.serve_port_auto
                     and len(attempted_ports) < _SERVE_AUTO_PORT_MAX_ATTEMPTS
                 ):
-                    next_port = _allocate_loopback_port(set(attempted_ports))
+                    next_port = _allocate_loopback_port(
+                        set(attempted_ports) | excluded_ports,
+                    )
                     logger.warning(
                         "OpenCode auto port 127.0.0.1:%s is unavailable; "
                         "retrying on 127.0.0.1:%s listeners=%s bind_error=%s",
@@ -6396,7 +6753,9 @@ class OpenCodeServeManager:
                 if can_retry:
                     if retry_kind == "generic":
                         generic_retry_used = True
-                    next_port = _allocate_loopback_port(set(attempted_ports))
+                    next_port = _allocate_loopback_port(
+                        set(attempted_ports) | excluded_ports,
+                    )
                     logger.warning(
                         "OpenCode serve startup failed on auto port %s (%s); "
                         "retrying on port %s",
@@ -6527,10 +6886,20 @@ class OpenCodeServeManager:
             config_note,
         )
 
-    async def _stop_owned_serve_on_port(self, port: int) -> None:
+    async def _stop_owned_serve_on_port(
+        self,
+        port: int,
+    ) -> _PreviousServeCleanupResult:
         marker = _read_marker(self._marker_path)
         if marker is None or marker.get("owner") != _SERVE_MARKER_OWNER:
-            return
+            return _PreviousServeCleanupResult()
+        if sys.platform == "win32":
+            return await asyncio.to_thread(
+                _stop_previous_windows_serve_marker,
+                marker,
+                self._marker_path,
+                port,
+            )
         marker_agent_pid = int(marker.get("agent_pid") or 0)
         if (
             marker_agent_pid > 0
@@ -6541,7 +6910,7 @@ class OpenCodeServeManager:
                 "Leaving OpenCode serve marker owned by live Agent pid %s unchanged",
                 marker_agent_pid,
             )
-            return
+            return _PreviousServeCleanupResult()
         marker_port = int(marker.get("port") or port)
         pid = int(marker.get("pid") or 0)
         known_listener_pids = _marker_listener_pids(marker)
@@ -6579,9 +6948,9 @@ class OpenCodeServeManager:
                     )
                 )
             _remove_marker(self._marker_path)
-            return
+            return _PreviousServeCleanupResult()
         if not _marker_matches_serve_process(marker):
-            return
+            return _PreviousServeCleanupResult()
         logger.info(
             "Stopping previous Agent-owned %s serve pid %s on 127.0.0.1:%s",
             marker.get("tool") or "opencode",
@@ -6623,6 +6992,7 @@ class OpenCodeServeManager:
                 )
             )
         _remove_marker(self._marker_path)
+        return _PreviousServeCleanupResult()
 
     async def _wait_health_locked(self, startup_log_path: Path | None = None) -> None:
         deadline = time.monotonic() + _SERVE_START_TIMEOUT_SECONDS
