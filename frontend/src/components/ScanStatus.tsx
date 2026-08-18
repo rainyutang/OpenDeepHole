@@ -626,6 +626,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [activeTab, setActiveTab] = useState<MainTab>("overview");
   const [activeEngineId, setActiveEngineId] = useState("");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [exportingZip, setExportingZip] = useState(false);
@@ -692,6 +693,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   useEffect(() => {
     detailAbortControllerRef.current.abort();
     detailAbortControllerRef.current = new AbortController();
+    setSidebarOpen(false);
     detailLoadingRef.current.clear();
     setDetailLoadingResources(new Set());
     setDetailFailedResources(new Set());
@@ -708,6 +710,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       }
     };
   }, [scanId]);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSidebarOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [sidebarOpen]);
 
   const refreshOverviewSummary = useCallback(async () => {
     const current = scanRef.current;
@@ -1511,6 +1522,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     : null;
   const selectedFpReviewStages = selectedFpReviewSelection?.stages ?? [];
   const validationEvents = filterEvents(scan.events, ["validation"]);
+  const flowModel = buildProcessFlowModel({
+    scan,
+    indexProgress,
+    fpReview,
+    activeTab,
+    activeEngineId,
+    threatAnalysisLoading,
+    isDone: !!isDone,
+    isFpReviewing,
+  });
   const activeDetailLoading = requiredDetailResources.some((resource) => detailLoadingResources.has(resource));
   const activeDetailFailed = requiredDetailResources.some((resource) => detailFailedResources.has(resource));
   const issuesView = (
@@ -1547,11 +1568,65 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   );
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 lg:flex">
+      <ScanDetailSidebar
+        mobileOpen={sidebarOpen}
+        scanLabel={scan.product || scan.project_id || scan.scan_id}
+        flow={flowModel}
+        activeTab={activeTab}
+        issueCount={issueCount}
+        verifiedIssueCount={verifiedIssueCount}
+        feedbackCount={feedbackCount}
+        modelRunningCount={scan.opencode_pool?.global_running ?? 0}
+        hasReportModeSkill={hasReportModeSkill}
+        reportCount={scan.skill_reports?.length ?? 0}
+        unseenLogCount={unseenCount}
+        openTool={feedbackOpen
+          ? "feedback"
+          : skillOpen
+            ? "skill"
+            : modelPoolOpen
+              ? "models"
+              : reportsOpen
+                ? "reports"
+                : logOpen
+                  ? "logs"
+                  : null}
+        onClose={() => setSidebarOpen(false)}
+        onHome={() => setActiveTab("overview")}
+        onIssues={() => setActiveTab("issues")}
+        onNodeClick={handleFlowNodeClick}
+        onOpenFeedback={() => setFeedbackOpen(true)}
+        onOpenSkill={() => {
+          setSkillOpen(true);
+          if (!skillType && scan.scan_items.length > 0) {
+            void loadSkill(scan.scan_items[0]);
+          }
+        }}
+        onOpenModels={() => setModelPoolOpen(true)}
+        onOpenReports={() => { void loadSkillReports(); }}
+        onOpenLogs={() => {
+          setLogOpen(true);
+          setLastSeenEvents(logEvents.length);
+        }}
+      />
+
+      <div className="flex min-h-screen min-w-0 flex-1 flex-col">
       {/* Top bar */}
       <div className="bg-slate-800/80 backdrop-blur border-b border-slate-700 px-4 py-4 sm:px-6">
         <div className="mb-3 flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
           <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+              aria-label="打开扫描导航"
+              aria-expanded={sidebarOpen}
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-600 text-slate-300 transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 lg:hidden"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
             <button
               onClick={onBack}
               className="flex items-center gap-1 rounded-md text-sm text-slate-400 transition-colors hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 motion-reduce:transition-none"
@@ -1584,61 +1659,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           </div>
           <div className="flex flex-wrap items-center gap-2 xl:max-w-[72%] xl:justify-end">
             <ThemeToggle />
-            {/* Feedback button with count badge */}
-            <button
-              onClick={() => setFeedbackOpen(true)}
-              className="px-3 py-1.5 text-sm font-medium text-slate-300 border border-slate-600 rounded-lg hover:bg-slate-700 transition-colors flex items-center gap-1.5"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-              </svg>
-              误报屏蔽规则
-              {feedbackCount > 0 && (
-                <span className="bg-blue-500 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[1.25rem] text-center">
-                  {feedbackCount}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => {
-                setSkillOpen(true);
-                if (!skillType && scan.scan_items.length > 0) {
-                  loadSkill(scan.scan_items[0]);
-                }
-              }}
-              className="px-3 py-1.5 text-sm font-medium text-slate-300 border border-slate-600 rounded-lg hover:bg-slate-700 transition-colors flex items-center gap-1.5"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-              </svg>
-              SKILL 预览
-            </button>
-            <button
-              onClick={() => setModelPoolOpen(true)}
-              className="px-3 py-1.5 text-sm font-medium text-cyan-300 border border-cyan-500/40 rounded-lg hover:bg-cyan-500/10 transition-colors flex items-center gap-1.5"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 19V5m0 14h16M8 15V9m4 6V7m4 8v-4" />
-              </svg>
-              模型看板
-              {(scan.opencode_pool?.global_running ?? 0) > 0 && (
-                <span className="text-xs text-cyan-100">{scan.opencode_pool?.global_running}</span>
-              )}
-            </button>
-            {hasReportModeSkill && (
-              <button
-                onClick={loadSkillReports}
-                className="px-3 py-1.5 text-sm font-medium text-purple-300 border border-purple-500/40 rounded-lg hover:bg-purple-500/10 transition-colors flex items-center gap-1.5"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                SKILL 报告
-                {(scan.skill_reports?.length ?? 0) > 0 && (
-                  <span className="text-xs text-purple-200">{scan.skill_reports.length}</span>
-                )}
-              </button>
-            )}
             {(() => {
               const confirmedVulns = scan.vulnerabilities.filter(
                 (v) => (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed))
@@ -1728,21 +1748,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           </div>
         </div>
 
-        <ProcessFlowNav
-          scan={scan}
-          indexProgress={indexProgress}
-          fpReview={fpReview}
-          activeTab={activeTab}
-          activeEngineId={activeEngineId}
-          issueCount={issueCount}
-          verifiedIssueCount={verifiedIssueCount}
-          threatAnalysisLoading={threatAnalysisLoading}
-          isDone={!!isDone}
-          isFpReviewing={isFpReviewing}
-          onNodeClick={handleFlowNodeClick}
-          onHome={() => setActiveTab("overview")}
-          onIssues={() => setActiveTab("issues")}
-        />
+        <ProcessFlowNav flow={flowModel} onNodeClick={handleFlowNodeClick} />
 
         {/* Error */}
         {visibleErrorMessage && (
@@ -1928,22 +1934,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         </>
         </RuntimeErrorBoundary>
       </div>
-
-      {/* Log floating button */}
-      <button
-        onClick={() => { setLogOpen(true); setLastSeenEvents(logEvents.length); }}
-        className="fixed bottom-6 right-6 px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm font-medium rounded-full shadow-lg border border-slate-600 transition-colors z-40 flex items-center gap-2"
-      >
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-        </svg>
-        日志
-        {unseenCount > 0 && (
-          <span className="bg-blue-500 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[1.25rem] text-center">
-            {unseenCount > 99 ? "99+" : unseenCount}
-          </span>
-        )}
-      </button>
+      </div>
 
       {/* Log slide-over panel */}
       {logOpen && (
@@ -2199,35 +2190,41 @@ interface FlowNodeView {
   tone: TaskTone;
 }
 
-function ProcessFlowNav({
+interface MiningFlowEntry {
+  engine: MiningEngineSelection;
+  node: FlowNodeView;
+}
+
+interface ProcessFlowModel {
+  threatAnalysisNode: FlowNodeView;
+  miningEntries: MiningFlowEntry[];
+  staticAnalysisNode: FlowNodeView;
+  validationNode: FlowNodeView;
+  fpReviewNode: FlowNodeView;
+  indexNode: FlowNodeView;
+  codeGraphMcpEnabled: boolean;
+  knowledgeBaseEnabled: boolean;
+}
+
+function buildProcessFlowModel({
   scan,
   indexProgress,
   fpReview,
   activeTab,
   activeEngineId,
-  issueCount,
-  verifiedIssueCount,
   threatAnalysisLoading,
   isDone,
   isFpReviewing,
-  onNodeClick,
-  onHome,
-  onIssues,
 }: {
   scan: ScanStatusType;
   indexProgress: ReturnType<typeof formatIndexProgress>;
   fpReview: FpReviewJob | null;
   activeTab: MainTab;
   activeEngineId: string;
-  issueCount: number;
-  verifiedIssueCount: number;
   threatAnalysisLoading: boolean;
   isDone: boolean;
   isFpReviewing: boolean;
-  onNodeClick: (node: FlowNodeId) => void;
-  onHome: () => void;
-  onIssues: () => void;
-}) {
+}): ProcessFlowModel {
   const engines = effectiveMiningEngines(scan);
   const candidates = scan.candidates ?? [];
   const candidateCount = candidates.length || scan.total_candidates || scan.vulnerabilities.length;
@@ -2288,6 +2285,20 @@ function ProcessFlowNav({
           : staticRun?.status === "cancelled" || scan.status === "cancelled"
             ? "cancelled"
             : "pending";
+  const staticAnalysisNode: FlowNodeView = {
+    id: "static",
+    label: "静态分析",
+    detail: !staticSelected
+      ? "本次扫描未选择代码风险点引擎"
+      : staticRunning
+        ? `${scan.static_scanned_files}/${scan.static_total_files || "?"} 文件`
+        : candidateCount > 0
+          ? `${candidateCount} 个候选点`
+          : "查看候选点生成详情",
+    status: staticNodeStatus,
+    active: activeTab === "static",
+    tone: "cyan",
+  };
   const allThreatTasks = scan.threat_audit_tasks ?? [];
   const threatTasks = currentThreatAuditTasks(allThreatTasks);
   const supersededThreatTasks = allThreatTasks.length - threatTasks.length;
@@ -2401,20 +2412,37 @@ function ProcessFlowNav({
       tone: engine.engine_id === THREAT_ENGINE_ID ? "green" : engine.engine_id === STATIC_ENGINE_ID ? "cyan" : "blue",
     };
   };
+  return {
+    threatAnalysisNode,
+    miningEntries: engines.map((engine) => ({ engine, node: engineNode(engine) })),
+    staticAnalysisNode,
+    validationNode,
+    fpReviewNode,
+    indexNode,
+    codeGraphMcpEnabled: scan.code_graph_mcp_enabled,
+    knowledgeBaseEnabled: scan.knowledge_base_enabled,
+  };
+}
+
+function ProcessFlowNav({
+  flow,
+  onNodeClick,
+}: {
+  flow: ProcessFlowModel;
+  onNodeClick: (node: FlowNodeId) => void;
+}) {
+  const {
+    threatAnalysisNode,
+    miningEntries,
+    validationNode,
+    fpReviewNode,
+    indexNode,
+    codeGraphMcpEnabled,
+    knowledgeBaseEnabled,
+  } = flow;
   return (
     <nav className="border-t border-slate-700/60 pt-3" aria-label="扫描执行流程">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">执行流程</div>
-        <div className="flex flex-wrap items-center gap-2">
-          <FlowUtilityButton active={activeTab === "overview"} onClick={onHome}>
-            首页
-          </FlowUtilityButton>
-          <FlowUtilityButton active={activeTab === "issues"} onClick={onIssues}>
-            发现的问题
-            <span className="ml-1.5 text-xs text-red-300">发现 {issueCount} · 已验证 {verifiedIssueCount}</span>
-          </FlowUtilityButton>
-        </div>
-      </div>
+      <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">执行流程</div>
 
       <div className="relative -mx-1">
         <div
@@ -2447,12 +2475,12 @@ function ProcessFlowNav({
                 className="relative flex-none rounded-xl border border-cyan-500/25 bg-gradient-to-br from-slate-950/80 via-slate-900/60 to-cyan-950/20 px-3 pb-3 pt-9 shadow-sm"
               >
                 <div className="absolute inset-x-3 top-2 text-center text-sm font-semibold text-slate-100">
-                  漏洞挖掘 · {engines.length} 个引擎
+                  漏洞挖掘 · {miningEntries.length} 个引擎
                 </div>
                 <div className="flex w-[26rem] flex-col gap-2">
-                  {engines.length > 0 ? engines.map((engine) => (
+                  {miningEntries.length > 0 ? miningEntries.map(({ engine, node }) => (
                     <div key={engine.engine_id} className="rounded-lg border border-cyan-500/15 bg-cyan-500/5 p-2">
-                      <FlowNodeButton node={engineNode(engine)} onClick={onNodeClick} wide />
+                      <FlowNodeButton node={node} onClick={onNodeClick} wide />
                       {engine.engine_id === STATIC_ENGINE_ID && (
                         <button
                           type="button"
@@ -2503,8 +2531,8 @@ function ProcessFlowNav({
                   role="list"
                   aria-label="扫描级 MCP 能力状态"
                 >
-                  <FlowCapabilityStatus label="CodeGraph MCP" enabled={scan.code_graph_mcp_enabled} />
-                  <FlowCapabilityStatus label="知识库" enabled={scan.knowledge_base_enabled} />
+                  <FlowCapabilityStatus label="CodeGraph MCP" enabled={codeGraphMcpEnabled} />
+                  <FlowCapabilityStatus label="知识库" enabled={knowledgeBaseEnabled} />
                 </div>
               </div>
             </div>
@@ -2540,29 +2568,332 @@ function FlowCapabilityStatus({
   );
 }
 
-function FlowUtilityButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
+type ScanSidebarTool = "feedback" | "skill" | "models" | "reports" | "logs";
+
+interface ScanDetailSidebarProps {
+  mobileOpen: boolean;
+  scanLabel: string;
+  flow: ProcessFlowModel;
+  activeTab: MainTab;
+  issueCount: number;
+  verifiedIssueCount: number;
+  feedbackCount: number;
+  modelRunningCount: number;
+  hasReportModeSkill: boolean;
+  reportCount: number;
+  unseenLogCount: number;
+  openTool: ScanSidebarTool | null;
+  onClose: () => void;
+  onHome: () => void;
+  onIssues: () => void;
+  onNodeClick: (node: FlowNodeId) => void;
+  onOpenFeedback: () => void;
+  onOpenSkill: () => void;
+  onOpenModels: () => void;
+  onOpenReports: () => void;
+  onOpenLogs: () => void;
+}
+
+function ScanDetailSidebar(props: ScanDetailSidebarProps) {
+  const { mobileOpen, ...contentProps } = props;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-current={active ? "page" : undefined}
-      className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900 motion-reduce:transition-none ${
-        active
-          ? "border-blue-500/50 bg-blue-500/15 text-blue-100"
-          : "border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700"
-      }`}
-    >
-      {children}
-    </button>
+    <>
+      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 border-r border-slate-700/80 bg-slate-950/80 backdrop-blur lg:block">
+        <ScanSidebarContent {...contentProps} showClose={false} />
+      </aside>
+      {mobileOpen && (
+        <div className="fixed inset-0 z-[60] lg:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/55"
+            aria-label="关闭扫描导航"
+            onClick={props.onClose}
+          />
+          <aside
+            role="dialog"
+            aria-modal="true"
+            aria-label="扫描导航"
+            className="relative h-full w-72 max-w-[85vw] border-r border-slate-700 bg-slate-950 shadow-2xl"
+          >
+            <ScanSidebarContent {...contentProps} showClose />
+          </aside>
+        </div>
+      )}
+    </>
   );
+}
+
+function ScanSidebarContent({
+  scanLabel,
+  flow,
+  activeTab,
+  issueCount,
+  verifiedIssueCount,
+  feedbackCount,
+  modelRunningCount,
+  hasReportModeSkill,
+  reportCount,
+  unseenLogCount,
+  openTool,
+  onClose,
+  onHome,
+  onIssues,
+  onNodeClick,
+  onOpenFeedback,
+  onOpenSkill,
+  onOpenModels,
+  onOpenReports,
+  onOpenLogs,
+  showClose,
+}: Omit<ScanDetailSidebarProps, "mobileOpen"> & { showClose: boolean }) {
+  const select = (action: () => void) => {
+    action();
+    onClose();
+  };
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-start justify-between gap-3 border-b border-slate-800 px-4 py-4">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-slate-100">扫描导航</div>
+          <div className="mt-1 truncate text-xs text-slate-500" title={scanLabel}>{scanLabel}</div>
+        </div>
+        {showClose && (
+          <button
+            type="button"
+            autoFocus
+            onClick={onClose}
+            aria-label="关闭扫描导航"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+          >
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        )}
+      </div>
+
+      <nav className="min-h-0 flex-1 space-y-5 overflow-y-auto px-3 py-4" aria-label="扫描详情导航">
+        <SidebarSection title="扫描概览">
+          <SidebarNavigationButton
+            label="首页"
+            detail="扫描概览与任务队列"
+            current={activeTab === "overview"}
+            onClick={() => select(onHome)}
+          />
+          <SidebarNavigationButton
+            label="发现的问题"
+            detail={`发现 ${issueCount} · 已验证 ${verifiedIssueCount}`}
+            current={activeTab === "issues"}
+            tone="red"
+            badge={issueCount}
+            onClick={() => select(onIssues)}
+          />
+        </SidebarSection>
+
+        <SidebarSection title="执行流程">
+          <SidebarNavigationButton
+            label={flow.threatAnalysisNode.label}
+            detail={flow.threatAnalysisNode.detail}
+            current={flow.threatAnalysisNode.active}
+            status={flow.threatAnalysisNode.status}
+            tone={flow.threatAnalysisNode.tone}
+            onClick={() => select(() => onNodeClick(flow.threatAnalysisNode.id))}
+          />
+
+          <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-2">
+            <div className="mb-2 flex items-center justify-between gap-2 px-1 text-xs font-semibold text-cyan-100">
+              <span>漏洞挖掘</span>
+              <span className="text-[10px] font-medium text-cyan-300/80">{flow.miningEntries.length} 个引擎</span>
+            </div>
+            {flow.miningEntries.length > 0 ? (
+              <div className="space-y-2">
+                {flow.miningEntries.map(({ engine, node }) => (
+                  <div key={engine.engine_id} className="space-y-1.5">
+                    <SidebarNavigationButton
+                      label={node.label}
+                      detail={node.detail}
+                      current={node.active}
+                      status={node.status}
+                      tone={node.tone}
+                      compact
+                      onClick={() => select(() => onNodeClick(node.id))}
+                    />
+                    {engine.engine_id === STATIC_ENGINE_ID && (
+                      <SidebarNavigationButton
+                        label={flow.staticAnalysisNode.label}
+                        detail={flow.staticAnalysisNode.detail}
+                        current={flow.staticAnalysisNode.active}
+                        status={flow.staticAnalysisNode.status}
+                        tone={flow.staticAnalysisNode.tone}
+                        compact
+                        nested
+                        onClick={() => select(() => onNodeClick(flow.staticAnalysisNode.id))}
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed border-slate-700 px-2 py-3 text-center text-xs text-slate-500">
+                本次扫描未选择漏洞挖掘引擎
+              </div>
+            )}
+          </div>
+
+          <SidebarNavigationButton
+            label={flow.validationNode.label}
+            detail={flow.validationNode.detail}
+            current={flow.validationNode.active}
+            status={flow.validationNode.status}
+            tone={flow.validationNode.tone}
+            onClick={() => select(() => onNodeClick(flow.validationNode.id))}
+          />
+          <SidebarNavigationButton
+            label={flow.fpReviewNode.label}
+            detail={flow.fpReviewNode.detail}
+            current={flow.fpReviewNode.active}
+            status={flow.fpReviewNode.status}
+            tone={flow.fpReviewNode.tone}
+            onClick={() => select(() => onNodeClick(flow.fpReviewNode.id))}
+          />
+          <div className="border-t border-slate-800 pt-2">
+            <SidebarNavigationButton
+              label={flow.indexNode.label}
+              detail={flow.indexNode.detail}
+              current={flow.indexNode.active}
+              status={flow.indexNode.status}
+              tone={flow.indexNode.tone}
+              onClick={() => select(() => onNodeClick(flow.indexNode.id))}
+            />
+          </div>
+        </SidebarSection>
+
+        <SidebarSection title="辅助工具">
+          <SidebarNavigationButton
+            label="SKILL 预览"
+            detail="查看本次扫描使用的 SKILL"
+            expanded={openTool === "skill"}
+            onClick={() => select(onOpenSkill)}
+          />
+          <SidebarNavigationButton
+            label="模型看板"
+            detail="查看 OpenCode 模型池与任务状态"
+            expanded={openTool === "models"}
+            tone="cyan"
+            badge={modelRunningCount}
+            onClick={() => select(onOpenModels)}
+          />
+          <SidebarNavigationButton
+            label="误报屏蔽规则"
+            detail="管理本次扫描使用的反馈规则"
+            expanded={openTool === "feedback"}
+            badge={feedbackCount}
+            onClick={() => select(onOpenFeedback)}
+          />
+          {hasReportModeSkill && (
+            <SidebarNavigationButton
+              label="SKILL 报告"
+              detail="查看报告型 SKILL 的 Markdown 输出"
+              expanded={openTool === "reports"}
+              tone="purple"
+              badge={reportCount}
+              onClick={() => select(onOpenReports)}
+            />
+          )}
+          <SidebarNavigationButton
+            label="日志"
+            detail="查看扫描过程事件"
+            expanded={openTool === "logs"}
+            badge={unseenLogCount}
+            onClick={() => select(onOpenLogs)}
+          />
+        </SidebarSection>
+      </nav>
+    </div>
+  );
+}
+
+function SidebarSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section>
+      <h2 className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">{title}</h2>
+      <div className="space-y-1.5">{children}</div>
+    </section>
+  );
+}
+
+function SidebarNavigationButton({
+  label,
+  detail,
+  current = false,
+  expanded = false,
+  status,
+  tone = "blue",
+  badge = 0,
+  compact = false,
+  nested = false,
+  onClick,
+}: {
+  label: string;
+  detail?: string;
+  current?: boolean;
+  expanded?: boolean;
+  status?: FlowNodeStatus;
+  tone?: TaskTone;
+  badge?: number;
+  compact?: boolean;
+  nested?: boolean;
+  onClick: () => void;
+}) {
+  const active = current || expanded;
+  return (
+    <div className={nested ? "pl-4" : ""}>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-current={current ? "page" : undefined}
+        aria-expanded={expanded || undefined}
+        title={detail ? `${label} · ${detail}` : label}
+        className={`w-full rounded-lg border text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 motion-reduce:transition-none ${compact ? "px-2.5 py-2" : "px-3 py-2.5"} ${
+          active
+            ? `${toneBorder(tone)} ${toneBg(tone)}`
+            : "border-transparent bg-slate-900/35 hover:border-slate-700 hover:bg-slate-800/80"
+        }`}
+      >
+        <span className="flex items-start justify-between gap-2">
+          <span className={`min-w-0 break-words text-sm font-medium ${active ? toneText(tone) : "text-slate-200"}`}>
+            {label}
+          </span>
+          {status ? (
+            <span className="mt-0.5 inline-flex shrink-0 items-center gap-1 text-[10px] text-slate-400">
+              <span className={`h-1.5 w-1.5 rounded-full ${sidebarStatusDotClass(status)}`} aria-hidden="true" />
+              {flowStatusLabel(status)}
+            </span>
+          ) : badge > 0 ? (
+            <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${active ? `${toneBg(tone)} ${toneText(tone)}` : "bg-slate-700 text-slate-200"}`}>
+              {badge > 99 ? "99+" : badge}
+            </span>
+          ) : null}
+        </span>
+        {detail && (
+          <span className={`mt-1 block text-xs leading-4 text-slate-500 ${compact ? "line-clamp-1" : "line-clamp-2"}`}>
+            {detail}
+          </span>
+        )}
+      </button>
+    </div>
+  );
+}
+
+function sidebarStatusDotClass(status: FlowNodeStatus): string {
+  if (status === "running") return "bg-blue-400 animate-pulse motion-reduce:animate-none";
+  if (status === "done") return "bg-emerald-400";
+  if (status === "warning") return "bg-amber-400";
+  if (status === "error") return "bg-red-400";
+  if (status === "cancelled") return "bg-orange-400";
+  if (status === "skipped") return "bg-slate-600";
+  if (status === "unknown") return "bg-slate-500";
+  return "bg-slate-400";
 }
 
 function FlowNodeButton({
