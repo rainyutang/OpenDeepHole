@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -121,6 +122,116 @@ class CodexRuntimeTests(unittest.TestCase):
             for call in output.call_args_list
         ))
 
+    def test_windows_batch_shim_uses_separate_cmd_call_argv(self) -> None:
+        npm = r"C:\Program Files\nodejs\npm.CMD"
+        with (
+            patch.object(codex_runtime, "_is_windows", return_value=True),
+            patch.dict(
+                os.environ,
+                {"COMSPEC": r"C:\Windows\System32\cmd.exe"},
+            ),
+        ):
+            command = codex_runtime._batch_aware_argv((
+                npm,
+                "set",
+                "strict-ssl",
+                "false",
+            ))
+
+        self.assertEqual(command, (
+            r"C:\Windows\System32\cmd.exe",
+            "/d",
+            "/c",
+            "call",
+            npm,
+            "set",
+            "strict-ssl",
+            "false",
+        ))
+        rendered = subprocess.list2cmdline(command)
+        self.assertNotIn("/s", command)
+        self.assertNotIn(r'\"', rendered)
+        self.assertIn(f'"{npm}"', rendered)
+
+    def test_windows_npm_shim_prefers_node_javascript_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "Program Files" / "nodejs"
+            prefix.mkdir(parents=True)
+            npm = prefix / "npm.CMD"
+            npm.touch()
+            node = prefix / "node.exe"
+            node.touch()
+            launcher = (
+                prefix / "node_modules" / "npm" / "bin" / "npm-cli.js"
+            )
+            launcher.parent.mkdir(parents=True)
+            launcher.touch()
+            with (
+                patch.object(
+                    codex_runtime,
+                    "_is_windows",
+                    return_value=True,
+                ),
+                patch.object(
+                    codex_runtime.shutil,
+                    "which",
+                    side_effect=AssertionError("PATH lookup was unexpected"),
+                ),
+            ):
+                command = codex_runtime._npm_command(str(npm))
+
+        self.assertEqual(command, (str(node), str(launcher)))
+
+    def test_windows_npm_shim_falls_back_to_cmd_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            npm = Path(tmp) / "Program Files" / "nodejs" / "npm.CMD"
+            npm.parent.mkdir(parents=True)
+            npm.touch()
+            with (
+                patch.object(
+                    codex_runtime,
+                    "_is_windows",
+                    return_value=True,
+                ),
+                patch.object(
+                    codex_runtime.shutil,
+                    "which",
+                    return_value=None,
+                ),
+                patch.dict(os.environ, {"COMSPEC": "C:/Windows/cmd.exe"}),
+            ):
+                npm_command = codex_runtime._npm_command(str(npm))
+                command = codex_runtime._batch_aware_argv((
+                    *npm_command,
+                    "--version",
+                ))
+
+        self.assertEqual(npm_command, (str(npm),))
+        self.assertEqual(command, (
+            "C:/Windows/cmd.exe",
+            "/d",
+            "/c",
+            "call",
+            str(npm),
+            "--version",
+        ))
+
+    def test_windows_localized_process_output_uses_oem_fallback(self) -> None:
+        message = "不是内部或外部命令，也不是可运行的程序"
+        with (
+            patch.object(codex_runtime, "_is_windows", return_value=True),
+            patch.object(
+                codex_runtime,
+                "_windows_output_encodings",
+                return_value=("gbk",),
+            ),
+        ):
+            decoded = codex_runtime._decode_process_output(
+                message.encode("gbk")
+            )
+
+        self.assertEqual(decoded, message)
+
     def test_install_runs_exact_steps_and_adds_global_bin_to_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             prefix = Path(tmp) / "npm-global"
@@ -197,6 +308,104 @@ class CodexRuntimeTests(unittest.TestCase):
             for call in runner.await_args_list
         ]
         self.assertEqual(timeouts, sorted(timeouts, reverse=True))
+
+    def test_windows_install_runs_all_steps_through_node_launchers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            node_prefix = root / "Program Files" / "nodejs"
+            node_prefix.mkdir(parents=True)
+            npm = node_prefix / "npm.CMD"
+            npm.touch()
+            node = node_prefix / "node.exe"
+            node.touch()
+            npm_launcher = (
+                node_prefix
+                / "node_modules"
+                / "npm"
+                / "bin"
+                / "npm-cli.js"
+            )
+            npm_launcher.parent.mkdir(parents=True)
+            npm_launcher.touch()
+
+            global_prefix = root / "Users" / "agent" / "npm"
+            global_prefix.mkdir(parents=True)
+            codex = global_prefix / "codex.CMD"
+            codex.touch()
+            codex_launcher = (
+                global_prefix
+                / "node_modules"
+                / "@openai"
+                / "codex"
+                / "bin"
+                / "codex.js"
+            )
+            codex_launcher.parent.mkdir(parents=True)
+            codex_launcher.touch()
+            results = [
+                codex_runtime._ProcessResult(0, "", ""),
+                codex_runtime._ProcessResult(0, "", ""),
+                codex_runtime._ProcessResult(0, "", ""),
+                codex_runtime._ProcessResult(0, "installed\n", ""),
+                codex_runtime._ProcessResult(
+                    0,
+                    f"{global_prefix}\n",
+                    "",
+                ),
+                codex_runtime._ProcessResult(
+                    0,
+                    "codex-cli 0.146.1\n",
+                    "",
+                ),
+            ]
+            runner = AsyncMock(side_effect=results)
+
+            def which(name: str):
+                if name == "codex":
+                    return str(codex)
+                if name == "node":
+                    return str(node)
+                return None
+
+            with (
+                patch.object(
+                    codex_runtime,
+                    "_is_windows",
+                    return_value=True,
+                ),
+                patch.object(
+                    codex_runtime.shutil,
+                    "which",
+                    side_effect=which,
+                ),
+                patch.object(codex_runtime, "_run_process", new=runner),
+                patch.dict(os.environ, {"PATH": "C:/Windows/System32"}),
+            ):
+                state = asyncio.run(codex_runtime._install_codex(
+                    str(npm),
+                    timeout_seconds=120,
+                ))
+
+        npm_command = (str(node), str(npm_launcher))
+        self.assertEqual(
+            [call.args[0] for call in runner.await_args_list],
+            [
+                (*npm_command, "set", "strict-ssl", "false"),
+                (
+                    *npm_command,
+                    "config",
+                    "set",
+                    "registry",
+                    "https://mirrors.tools.huawei.com/npm/",
+                ),
+                (*npm_command, "cache", "clean", "-f"),
+                (*npm_command, "install", "-g", "@openai/codex"),
+                (*npm_command, "prefix", "--global"),
+                (str(node), str(codex_launcher), "--version"),
+            ],
+        )
+        self.assertTrue(state.available)
+        self.assertEqual(state.command, (str(node), str(codex_launcher)))
 
     def test_failed_setup_step_stops_install_and_does_not_retry(self) -> None:
         runner = AsyncMock(side_effect=[
@@ -290,7 +499,7 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertFalse(state.available)
         self.assertIn("still not available in PATH", state.error)
 
-    def test_windows_npm_shim_exposes_node_argv_prefix_to_engines(self) -> None:
+    def test_windows_codex_shim_exposes_node_argv_prefix_to_engines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             prefix = Path(tmp)
             shim = prefix / "codex.cmd"
@@ -318,6 +527,34 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertEqual(command, (
             "C:/Program Files/nodejs/node.exe",
             str(launcher),
+        ))
+
+    def test_windows_codex_shim_falls_back_to_cmd_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            shim = Path(tmp) / "Program Files" / "npm" / "codex.cmd"
+            shim.parent.mkdir(parents=True)
+            shim.touch()
+            with (
+                patch.object(
+                    codex_runtime,
+                    "_is_windows",
+                    return_value=True,
+                ),
+                patch.object(
+                    codex_runtime.shutil,
+                    "which",
+                    return_value=None,
+                ),
+                patch.dict(os.environ, {"COMSPEC": "C:/Windows/cmd.exe"}),
+            ):
+                command = codex_runtime._codex_command(str(shim))
+
+        self.assertEqual(command, (
+            "C:/Windows/cmd.exe",
+            "/d",
+            "/c",
+            "call",
+            str(shim),
         ))
 
     def test_agent_prepares_codex_before_connecting(self) -> None:

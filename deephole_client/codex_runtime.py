@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import locale
 import os
 import shutil
 import signal
-import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
@@ -76,15 +76,71 @@ def _batch_aware_argv(argv: Sequence[str]) -> tuple[str, ...]:
         and command
         and Path(command[0]).suffix.lower() in {".bat", ".cmd"}
     ):
-        command_line = subprocess.list2cmdline(list(command))
         return (
             os.environ.get("COMSPEC") or "cmd.exe",
             "/d",
-            "/s",
             "/c",
-            command_line,
+            "call",
+            *command,
         )
     return command
+
+
+def _node_executable(prefix: Path) -> str:
+    """Resolve Node beside an npm shim before falling back to PATH."""
+    sibling = prefix / "node.exe"
+    if sibling.is_file():
+        return str(sibling)
+    return str(shutil.which("node") or "")
+
+
+def _npm_command(executable: str) -> tuple[str, ...]:
+    """Prefer npm's JavaScript launcher over a Windows batch shim."""
+    resolved = Path(executable).expanduser()
+    if not _is_windows() or resolved.suffix.lower() not in {".bat", ".cmd"}:
+        return (str(resolved),)
+
+    launchers = [
+        resolved.parent / "node_modules" / "npm" / "bin" / "npm-cli.js",
+    ]
+    configured_launcher = str(os.environ.get("NPM_CLI_JS") or "").strip()
+    if configured_launcher:
+        launchers.append(Path(configured_launcher).expanduser())
+    node = _node_executable(resolved.parent)
+    if node:
+        for launcher in launchers:
+            if launcher.is_file():
+                return (node, str(launcher))
+    # _run_process applies the cmd.exe /d /c call fallback at launch time.
+    return (str(resolved),)
+
+
+def _windows_output_encodings() -> tuple[str, ...]:
+    return (
+        "oem",
+        "mbcs",
+        locale.getpreferredencoding(False),
+    )
+
+
+def _decode_process_output(value: bytes) -> str:
+    """Decode Node UTF-8 output and localized Windows cmd diagnostics."""
+    if not value:
+        return ""
+    encodings = ["utf-8"]
+    if _is_windows():
+        encodings.extend(_windows_output_encodings())
+    seen: set[str] = set()
+    for encoding in encodings:
+        normalized = str(encoding or "").strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return value.decode(normalized)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return value.decode("utf-8", errors="replace")
 
 
 async def _stop_process(process: asyncio.subprocess.Process) -> None:
@@ -181,8 +237,8 @@ async def _run_process(
         raise
     return _ProcessResult(
         returncode=int(process.returncode or 0),
-        stdout=stdout.decode("utf-8", errors="replace"),
-        stderr=stderr.decode("utf-8", errors="replace"),
+        stdout=_decode_process_output(stdout),
+        stderr=_decode_process_output(stderr),
     )
 
 
@@ -213,16 +269,10 @@ def _codex_command(executable: str) -> tuple[str, ...]:
         / "bin"
         / "codex.js"
     )
-    node = shutil.which("node")
+    node = _node_executable(prefix)
     if node and launcher.is_file():
         return (node, str(launcher))
-    return (
-        os.environ.get("COMSPEC") or "cmd.exe",
-        "/d",
-        "/s",
-        "/c",
-        str(resolved),
-    )
+    return _batch_aware_argv((str(resolved),))
 
 
 async def _probe_codex(
@@ -260,7 +310,7 @@ def _remaining_seconds(deadline: float, stage: str) -> float:
 
 
 async def _run_install_step(
-    npm: str,
+    npm_command: Sequence[str],
     args: Sequence[str],
     *,
     label: str,
@@ -268,7 +318,7 @@ async def _run_install_step(
 ) -> _ProcessResult:
     try:
         result = await _run_process(
-            (npm, *args),
+            (*npm_command, *args),
             timeout=_remaining_seconds(deadline, label),
         )
     except asyncio.TimeoutError as exc:
@@ -302,16 +352,17 @@ async def _install_codex(
     timeout_seconds: float,
 ) -> CodexRuntimeState:
     deadline = asyncio.get_running_loop().time() + timeout_seconds
+    npm_command = _npm_command(npm)
     for label, args in _NPM_INSTALL_STEPS:
         await _run_install_step(
-            npm,
+            npm_command,
             args,
             label=label,
             deadline=deadline,
         )
 
     prefix_result = await _run_install_step(
-        npm,
+        npm_command,
         ("prefix", "--global"),
         label="npm prefix --global",
         deadline=deadline,

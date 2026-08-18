@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-08-18
+
+- **修复** Windows Agent 在 npm 位于 `C:\Program Files\nodejs\npm.CMD` 等带空格路径时，把预先拼接的命令行再次交给 `cmd.exe /s /c` 转义，导致首条 `npm set strict-ssl false` 将带反斜杠的引号当作文件名并立即终止 Codex 自动安装：现在优先通过同一 Node 安装中的 `node.exe + node_modules/npm/bin/npm-cli.js` 运行全部 npm 步骤，非标准布局回退为独立 argv 的 `cmd.exe /d /c call`，Codex `.cmd` 的备用调用同步修正；Windows 本地化命令输出增加 OEM/系统编码回退，中文错误不再按 UTF-8 强制解码为乱码，原有 120 秒共享超时和仅禁用 Codex 引擎的失败隔离保持不变
+
 ## 2026-08-17
 
 - **修复** Agent 配置页从 OpenCode Serve 拉取模型时，控制端 60 秒等待短于 Serve 冷启动与 Provider 查询总预算而先返回 504、Agent 重连或多 Worker 请求使用临时会话 ID 又可能继续返回 404：模型读取现改用稳定 `agent_key` 跨 Worker 解析当前连接，RPC 等待扩展为 120 秒并保留旧接口兼容；失败窗口会直接完整展示已脱敏的阶段、耗时、HTTP 状态、Agent/会话、请求编号、Provider 错误和 Serve 启动输出，便于定位端口、可执行文件及配置问题
