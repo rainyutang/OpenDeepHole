@@ -627,6 +627,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [activeTab, setActiveTab] = useState<MainTab>("overview");
   const [activeEngineId, setActiveEngineId] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [scanInfoOpen, setScanInfoOpen] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [exportingZip, setExportingZip] = useState(false);
@@ -694,6 +695,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     detailAbortControllerRef.current.abort();
     detailAbortControllerRef.current = new AbortController();
     setSidebarOpen(false);
+    setScanInfoOpen(false);
     detailLoadingRef.current.clear();
     setDetailLoadingResources(new Set());
     setDetailFailedResources(new Set());
@@ -1581,21 +1583,24 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         hasReportModeSkill={hasReportModeSkill}
         reportCount={scan.skill_reports?.length ?? 0}
         unseenLogCount={unseenCount}
-        openTool={feedbackOpen
-          ? "feedback"
-          : skillOpen
-            ? "skill"
-            : modelPoolOpen
-              ? "models"
-              : reportsOpen
-                ? "reports"
-                : logOpen
-                  ? "logs"
-                  : null}
+        openTool={scanInfoOpen
+          ? "info"
+          : feedbackOpen
+            ? "feedback"
+            : skillOpen
+              ? "skill"
+              : modelPoolOpen
+                ? "models"
+                : reportsOpen
+                  ? "reports"
+                  : logOpen
+                    ? "logs"
+                    : null}
         onClose={() => setSidebarOpen(false)}
         onHome={() => setActiveTab("overview")}
         onIssues={() => setActiveTab("issues")}
         onNodeClick={handleFlowNodeClick}
+        onOpenScanInfo={() => setScanInfoOpen(true)}
         onOpenFeedback={() => setFeedbackOpen(true)}
         onOpenSkill={() => {
           setSkillOpen(true);
@@ -1935,6 +1940,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         </RuntimeErrorBoundary>
       </div>
       </div>
+
+      {scanInfoOpen && (
+        <ScanInformationPanel
+          scan={scan}
+          onClose={() => setScanInfoOpen(false)}
+        />
+      )}
 
       {/* Log slide-over panel */}
       {logOpen && (
@@ -2568,7 +2580,7 @@ function FlowCapabilityStatus({
   );
 }
 
-type ScanSidebarTool = "feedback" | "skill" | "models" | "reports" | "logs";
+type ScanSidebarTool = "info" | "feedback" | "skill" | "models" | "reports" | "logs";
 
 interface ScanDetailSidebarProps {
   mobileOpen: boolean;
@@ -2587,6 +2599,7 @@ interface ScanDetailSidebarProps {
   onHome: () => void;
   onIssues: () => void;
   onNodeClick: (node: FlowNodeId) => void;
+  onOpenScanInfo: () => void;
   onOpenFeedback: () => void;
   onOpenSkill: () => void;
   onOpenModels: () => void;
@@ -2639,6 +2652,7 @@ function ScanSidebarContent({
   onHome,
   onIssues,
   onNodeClick,
+  onOpenScanInfo,
   onOpenFeedback,
   onOpenSkill,
   onOpenModels,
@@ -2756,19 +2770,16 @@ function ScanSidebarContent({
             tone={flow.fpReviewNode.tone}
             onClick={() => select(() => onNodeClick(flow.fpReviewNode.id))}
           />
-          <div className="border-t border-slate-800 pt-2">
-            <SidebarNavigationButton
-              label={flow.indexNode.label}
-              detail={flow.indexNode.detail}
-              current={flow.indexNode.active}
-              status={flow.indexNode.status}
-              tone={flow.indexNode.tone}
-              onClick={() => select(() => onNodeClick(flow.indexNode.id))}
-            />
-          </div>
         </SidebarSection>
 
-        <SidebarSection title="辅助工具">
+        <SidebarSection title="其它信息">
+          <SidebarNavigationButton
+            label="扫描信息"
+            detail="查看创建扫描时的范围与流程配置"
+            expanded={openTool === "info"}
+            tone="cyan"
+            onClick={() => select(onOpenScanInfo)}
+          />
           <SidebarNavigationButton
             label="SKILL 预览"
             detail="查看本次扫描使用的 SKILL"
@@ -2881,6 +2892,228 @@ function SidebarNavigationButton({
           </span>
         )}
       </button>
+    </div>
+  );
+}
+
+function scanModeLabel(mode?: string): string {
+  if (mode === "quick") return "快速模式";
+  if (mode === "standard") return "标准模式";
+  if (mode === "custom") return "自定义模式";
+  if (mode === "full") return "历史完整模式";
+  if (mode === "threat_analysis_only") return "历史威胁分析模式";
+  return mode?.trim() || "未记录";
+}
+
+function ScanInformationPanel({
+  scan,
+  onClose,
+}: {
+  scan: ScanStatusType;
+  onClose: () => void;
+}) {
+  const engines = effectiveMiningEngines(scan);
+  const staticEngineSelected = engines.some((engine) => engine.engine_id === STATIC_ENGINE_ID);
+  const threatAnalysisSelected = isThreatAnalysisSelected(scan);
+  const autoFpReviewEnabled = scan.auto_fp_review !== false;
+  const validationMethod = scan.validation_method_label
+    || scan.validation_method_id
+    || scan.validation_environment;
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/30" onClick={onClose} />
+      <aside
+        role="dialog"
+        aria-modal="true"
+        aria-label="扫描信息"
+        className="fixed bottom-0 right-0 top-0 z-50 flex w-[42rem] max-w-full flex-col border-l border-slate-700 bg-slate-900 shadow-2xl"
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-slate-700 px-5 py-4">
+          <div>
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-200">扫描信息</h3>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              本页展示创建扫描时固化的基本信息和流程配置，不随当前 Agent 配置变化。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="关闭扫描信息"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+          >
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
+          <ScanInformationSection title="基本信息">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ScanInformationField label="扫描名称" value={scan.project_id || "未记录"} />
+              <ScanInformationField label="扫描 ID" value={scan.scan_id} mono />
+              <ScanInformationField label="创建时间" value={formatDateTime(scan.created_at)} />
+              <ScanInformationField label="Agent" value={scan.agent_name || "未记录"} />
+              <ScanInformationField label="产品" value={scan.product || "未填写"} />
+              <ScanInformationField label="扫描模式" value={scanModeLabel(scan.scan_mode)} />
+            </div>
+          </ScanInformationSection>
+
+          <ScanInformationSection title="扫描范围">
+            <div className="space-y-3">
+              <ScanInformationField label="项目路径" value={scan.project_path || "未记录"} mono wide />
+              <ScanInformationField label="代码扫描路径" value={scan.code_scan_path || scan.project_path || "未记录"} mono wide />
+            </div>
+          </ScanInformationSection>
+
+          <ScanInformationSection title="能力开关">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ScanInformationToggle
+                label="知识库"
+                enabled={scan.knowledge_base_enabled}
+                detail="创建扫描时的数据库能力开关"
+              />
+              <ScanInformationToggle
+                label="CodeGraph MCP"
+                enabled={scan.code_graph_mcp_enabled}
+                detail="创建扫描时的代码图谱工具开关"
+              />
+            </div>
+          </ScanInformationSection>
+
+          <ScanInformationSection title="扫描过程">
+            <div className="space-y-3">
+              <ScanInformationToggle
+                label="威胁分析"
+                enabled={threatAnalysisSelected}
+                detail={threatAnalysisSelected ? `方法：${threatAnalysisMethodLabel(scan)}` : "本次扫描未启用"}
+              />
+
+              <div className="rounded-xl border border-slate-700 bg-slate-950/50 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-medium text-slate-200">漏洞挖掘引擎</div>
+                  <span className="text-xs text-slate-500">{engines.length} 个</span>
+                </div>
+                {engines.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    {engines.map((engine) => (
+                      <div key={engine.engine_id} className="rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2">
+                        <div className="text-sm text-slate-200">{canonicalMiningEngineLabel(engine.engine_id, engine.engine_label)}</div>
+                        <div className="mt-1 break-all font-mono text-[11px] text-slate-500">{engine.engine_id}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-xs text-slate-500">本次扫描未选择漏洞挖掘引擎</p>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-slate-700 bg-slate-950/50 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm font-medium text-slate-200">启用的静态规则</div>
+                  {staticEngineSelected && (
+                    <span className="rounded-full bg-cyan-500/10 px-2 py-1 text-[11px] font-medium text-cyan-300">
+                      {scan.scan_items.length} 条
+                    </span>
+                  )}
+                </div>
+                {!staticEngineSelected ? (
+                  <p className="mt-3 text-xs text-slate-500">未选择基于静态分析的引擎</p>
+                ) : scan.scan_items.length === 0 ? (
+                  <p className="mt-3 text-xs text-slate-500">未启用静态规则</p>
+                ) : (
+                  <div className="mt-3 flex flex-wrap gap-2" aria-label="创建扫描时启用的静态规则">
+                    {scan.scan_items.map((rule, index) => (
+                      <span
+                        key={`${rule}-${index}`}
+                        className="max-w-full break-all rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-2.5 py-1.5 font-mono text-xs text-cyan-100"
+                      >
+                        {rule}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <ScanInformationToggle
+                label="自动去误报"
+                enabled={autoFpReviewEnabled}
+                detail={autoFpReviewEnabled
+                  ? `方法：${fpReviewMethodLabel(scan.fp_review_method, scan.fp_review_method_selection)}`
+                  : "本次扫描未启用"}
+              />
+              <ScanInformationToggle
+                label="漏洞验证"
+                enabled={scan.vulnerability_validation_enabled}
+                detail={scan.vulnerability_validation_enabled
+                  ? `方法：${validationMethod || "未记录"}`
+                  : "本次扫描未启用"}
+              />
+            </div>
+          </ScanInformationSection>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function ScanInformationSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <h4 className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">{title}</h4>
+      {children}
+    </section>
+  );
+}
+
+function ScanInformationField({
+  label,
+  value,
+  mono = false,
+  wide = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  wide?: boolean;
+}) {
+  return (
+    <div className={`rounded-xl border border-slate-700 bg-slate-950/50 p-3 ${wide ? "w-full" : ""}`}>
+      <div className="text-[11px] font-medium text-slate-500">{label}</div>
+      <div className={`mt-1.5 break-all text-sm leading-6 text-slate-200 ${mono ? "font-mono text-xs" : ""}`} title={value}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function ScanInformationToggle({
+  label,
+  enabled,
+  detail,
+}: {
+  label: string;
+  enabled: boolean;
+  detail: string;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-700 bg-slate-950/50 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm font-medium text-slate-200">{label}</span>
+        <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${
+          enabled ? "bg-emerald-500/10 text-emerald-300" : "bg-slate-800 text-slate-500"
+        }`}>
+          {enabled ? "已启用" : "未启用"}
+        </span>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-slate-500">{detail}</p>
     </div>
   );
 }

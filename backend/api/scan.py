@@ -1471,6 +1471,8 @@ async def create_agent_scan(
     scan = ScanStatus(
         scan_id=scan_id,
         project_id=scan_name,
+        project_path=project_path,
+        code_scan_path=code_scan_path,
         scan_mode=scan_mode,
         threat_analysis_enabled=threat_analysis_enabled,
         threat_analysis_method=threat_analysis_method,

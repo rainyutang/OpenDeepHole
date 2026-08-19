@@ -251,6 +251,8 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                 created_at=scan.created_at,
                 user_id="owner",
                 public_access_token="scan-token",
+                project_path="/repo/project",
+                code_scan_path="/repo/project/src",
             )
             store.save_scan(scan, meta)
             store.add_vulnerability("scan-1", vuln)
@@ -261,6 +263,12 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                 patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
             ):
                 user = integration_api._public_user_for_scan("scan-1", "scan-token")
+                public_scan = asyncio.run(
+                    integration_api.get_public_scan_status(
+                        "scan-1",
+                        current_user=user,
+                    )
+                )
                 result = asyncio.run(
                     integration_api.mark_public_vulnerability(
                         "scan-1",
@@ -273,6 +281,8 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                     integration_api._public_user_for_scan("scan-1", "bad-token")
 
             self.assertTrue(result["feedback_id"])
+            self.assertEqual(public_scan.project_path, "/repo/project")
+            self.assertEqual(public_scan.code_scan_path, "/repo/project/src")
             self.assertEqual(ctx.exception.status_code, 403)
             updated = store.get_vulnerabilities("scan-1")[0]
             self.assertEqual(updated.user_verdict, "confirmed")

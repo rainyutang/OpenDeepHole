@@ -153,6 +153,8 @@ def test_scan_overview_exposes_enablement_without_private_mcp_values(tmp_path: P
         scan_items=[],
         created_at="2026-08-11T00:00:00+00:00",
         scan_name="scan-overview",
+        project_path="/repo/project",
+        code_scan_path="/repo/project/src",
         user_id="user-1",
         knowledge_base_enabled=True,
         code_graph_mcp=graph,
@@ -177,7 +179,11 @@ def test_scan_overview_exposes_enablement_without_private_mcp_values(tmp_path: P
     overview = asyncio.run(scenario())
     assert overview.code_graph_mcp_enabled is True
     assert overview.knowledge_base_enabled is True
+    assert overview.project_path == "/repo/project"
+    assert overview.code_scan_path == "/repo/project/src"
     public_payload = overview.model_dump(mode="json")
+    assert public_payload["project_path"] == "/repo/project"
+    assert public_payload["code_scan_path"] == "/repo/project/src"
     assert "code_graph_mcp" not in public_payload
     assert "knowledge_base_mcp" not in public_payload
     public_json = json.dumps(public_payload)

@@ -1659,6 +1659,12 @@ class SqliteScanStore(ScanStoreBase):
         return ScanStatus(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
+            project_path=row["project_path"] if row["project_path"] is not None else "",
+            code_scan_path=(
+                row["code_scan_path"]
+                if row["code_scan_path"] is not None
+                else ""
+            ),
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
             threat_analysis_method=(

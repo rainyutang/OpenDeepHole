@@ -667,6 +667,8 @@ class AgentOpenCodePoolStatus(OpenCodePoolStatus):
 class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
+    project_path: str = ""
+    code_scan_path: str = ""
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
     threat_analysis_method: str = "deephole_threat_analysis"
