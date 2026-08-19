@@ -266,6 +266,60 @@ class ScanHistorySummaryTests(unittest.TestCase):
         self.assertFalse(response[0].can_continue)
         self.assertEqual(response[0].suspected_issue_count, 1)
 
+    def test_list_scans_v2_counts_unreviewed_fp_work_without_prior_job(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project-1",
+            scan_items=["npd"],
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[
+                Vulnerability(
+                    file="a.c",
+                    line=1,
+                    function="a",
+                    vuln_type="npd",
+                    severity="high",
+                    description="awaiting review",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            ],
+        )
+        meta = ScanMeta(
+            scan_items=["npd"],
+            created_at=scan.created_at,
+            scan_name="Project One",
+            agent_name="agent-1",
+        )
+        store = FakeScanStore(scan, meta)
+
+        with (
+            patch("backend.api.scan.get_scan_store", return_value=store),
+            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+            patch("backend.api.agent.is_agent_name_online", return_value=True),
+        ):
+            page = asyncio.run(
+                list_scans_v2(
+                    limit=50,
+                    cursor=None,
+                    current_user=User(
+                        user_id="admin",
+                        username="admin",
+                        role="admin",
+                    ),
+                )
+            )
+
+        self.assertFalse(page.items[0].fp_review_running)
+        self.assertTrue(page.items[0].can_continue)
+        self.assertEqual(page.items[0].continuable_task_count, 1)
+
     def test_list_scans_does_not_count_threat_failures_as_retryable_candidates(self) -> None:
         scan = ScanStatus(
             scan_id="scan-1",

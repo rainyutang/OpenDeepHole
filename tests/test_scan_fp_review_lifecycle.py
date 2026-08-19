@@ -204,6 +204,116 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
                 [1],
             )
 
+    def test_resume_complete_scan_dispatches_partial_complete_fp_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(_scan(ScanItemStatus.COMPLETE), _meta())
+            store.add_vulnerability("scan-1", _vulnerability(0))
+            store.add_vulnerability("scan-1", _vulnerability(1))
+            store.create_fp_review_job(
+                "review", "scan-1", 2, "2026-08-11T00:01:00+00:00"
+            )
+            store.add_fp_review_result(
+                "review",
+                FpReviewResult(
+                    vuln_index=0,
+                    verdict="tp",
+                    severity="high",
+                    reason="confirmed",
+                    created_at="2026-08-11T00:01:30+00:00",
+                ),
+            )
+            store.update_fp_review_job("review", status="complete", processed=2)
+            send = AsyncMock(return_value=True)
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    new=AsyncMock(return_value="agent-live"),
+                ),
+                patch(
+                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch("backend.api.agent.send_agent_command", new=send),
+            ):
+                response = asyncio.run(
+                    scan_api.resume_scan(
+                        "scan-1",
+                        request=SimpleNamespace(base_url="http://testserver/"),
+                        current_user=User(
+                            user_id="user-1",
+                            username="alice",
+                            role="user",
+                        ),
+                    )
+                )
+
+            self.assertEqual(response.scan_id, "scan-1")
+            self.assertEqual(store.get_fp_review_job("review").status, FpReviewStatus.RUNNING)
+            send.assert_awaited_once()
+            payload = send.await_args.args[1]
+            self.assertEqual(payload["type"], "fp_review")
+            self.assertEqual(
+                [item["index"] for item in payload["vulnerabilities"]],
+                [1],
+            )
+
+    def test_resume_complete_scan_starts_fp_work_without_prior_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(_scan(ScanItemStatus.COMPLETE), _meta())
+            store.add_vulnerability("scan-1", _vulnerability(0))
+            store.add_vulnerability("scan-1", _vulnerability(1))
+            send = AsyncMock(return_value=True)
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    new=AsyncMock(return_value="agent-live"),
+                ),
+                patch(
+                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch("backend.api.agent.send_agent_command", new=send),
+            ):
+                response = asyncio.run(
+                    scan_api.resume_scan(
+                        "scan-1",
+                        request=SimpleNamespace(base_url="http://testserver/"),
+                        current_user=User(
+                            user_id="user-1",
+                            username="alice",
+                            role="user",
+                        ),
+                    )
+                )
+
+            self.assertEqual(response.scan_id, "scan-1")
+            latest = store.get_fp_review_by_scan("scan-1")
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest.status, FpReviewStatus.RUNNING)
+            send.assert_awaited_once()
+            payload = send.await_args.args[1]
+            self.assertEqual(payload["type"], "fp_review")
+            self.assertEqual(
+                [item["index"] for item in payload["vulnerabilities"]],
+                [0, 1],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

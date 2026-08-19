@@ -57,6 +57,7 @@ class FpReviewOrderTests(unittest.TestCase):
                     return_value=[],
                 ),
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
             ):
                 result = asyncio.run(
                     scan_api.get_fp_review_skill(
@@ -383,6 +384,100 @@ class FpReviewOrderTests(unittest.TestCase):
         self.assertNotIn(0, latest)
         self.assertIn(1, latest)
 
+    def test_manual_review_dispatches_unresolved_then_all_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            now = datetime.now(timezone.utc).isoformat()
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_items=["npd"],
+                created_at=now,
+                status=ScanItemStatus.COMPLETE,
+                progress=1.0,
+                total_candidates=2,
+                processed_candidates=2,
+                vulnerabilities=[
+                    Vulnerability(
+                        file="reviewed.c",
+                        line=10,
+                        function="reviewed",
+                        vuln_type="npd",
+                        severity="high",
+                        description="already reviewed",
+                        ai_analysis="analysis",
+                        confirmed=True,
+                        ai_verdict="confirmed",
+                    ),
+                    Vulnerability(
+                        file="pending.c",
+                        line=20,
+                        function="pending",
+                        vuln_type="npd",
+                        severity="high",
+                        description="awaiting review",
+                        ai_analysis="analysis",
+                        confirmed=True,
+                        ai_verdict="confirmed",
+                    ),
+                ],
+            )
+            store.save_scan(
+                scan,
+                ScanMeta(scan_items=["npd"], created_at=now, user_id="owner"),
+            )
+            store.create_fp_review_job("review", "scan-1", 2, now)
+            store.add_fp_review_result(
+                "review",
+                FpReviewResult(
+                    vuln_index=0,
+                    verdict="tp",
+                    severity="high",
+                    reason="first result",
+                    created_at=now,
+                ),
+            )
+            store.update_fp_review_job("review", status="complete", processed=1)
+
+            with patch("backend.api.scan.get_scan_store", return_value=store):
+                partial = _ensure_fp_review_job_for_scan(
+                    "scan-1",
+                    scan,
+                    allow_cancelled=True,
+                    publish_started=False,
+                )
+
+            self.assertEqual(
+                [item["index"] for item in partial["confirmed"]],
+                [1],
+            )
+            self.assertEqual(partial["processed"], 1)
+
+            store.add_fp_review_result(
+                "review",
+                FpReviewResult(
+                    vuln_index=1,
+                    verdict="fp",
+                    severity="low",
+                    reason="second result",
+                    created_at=now,
+                ),
+            )
+            store.update_fp_review_job("review", status="complete", processed=2)
+            with patch("backend.api.scan.get_scan_store", return_value=store):
+                rerun = _ensure_fp_review_job_for_scan(
+                    "scan-1",
+                    scan,
+                    allow_cancelled=True,
+                    publish_started=False,
+                )
+
+            self.assertEqual(
+                [item["index"] for item in rerun["confirmed"]],
+                [0, 1],
+            )
+            self.assertEqual(rerun["processed"], 0)
+
     def test_trigger_fp_review_dispatches_runtime_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")
@@ -435,10 +530,11 @@ class FpReviewOrderTests(unittest.TestCase):
 
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
                 patch("backend.api.agent.send_agent_command", send),
                 patch(
-                    "backend.api.agent.create_agent_runtime_update_payload",
-                    return_value={"hash": "runtime-hash"},
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    new=AsyncMock(return_value={"hash": "runtime-hash"}),
                 ) as runtime_update,
             ):
                 result = asyncio.run(
@@ -453,7 +549,7 @@ class FpReviewOrderTests(unittest.TestCase):
             self.assertEqual(result["status"], "running")
             self.assertEqual(result["total"], 1)
             self.assertEqual(result["processed"], 0)
-            runtime_update.assert_called_once_with("http://server.example")
+            runtime_update.assert_awaited_once_with("http://server.example", "")
             command = send.await_args.args[1]
             self.assertEqual(command["type"], "fp_review")
             self.assertEqual(command["agent_runtime_update"], {"hash": "runtime-hash"})
@@ -711,6 +807,7 @@ class FpReviewOrderTests(unittest.TestCase):
 
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
                 patch("backend.api.scan._push_feedback_selection_update", push),
             ):
                 result = asyncio.run(
@@ -784,7 +881,10 @@ class FpReviewOrderTests(unittest.TestCase):
                     )
                 )
 
-            with patch("backend.api.scan.get_scan_store", return_value=store):
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+            ):
                 result = asyncio.run(
                     scan_api.batch_unmark_vulnerabilities(
                         "scan-1",

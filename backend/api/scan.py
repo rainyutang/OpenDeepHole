@@ -120,10 +120,8 @@ _FP_REVIEW_ACTIVE_STATUSES = {
     FpReviewStatus.PENDING.value,
     FpReviewStatus.RUNNING.value,
 }
-_FP_REVIEW_RETRYABLE_STATUSES = {
-    FpReviewStatus.CANCELLED.value,
-    FpReviewStatus.ERROR.value,
-}
+
+
 def _normalize_scan_mode(value: str | None) -> str:
     try:
         return normalize_scan_mode(value)
@@ -702,10 +700,10 @@ def _fp_review_resume_state(
     latest_fp_results: dict[int, FpReviewResult],
     states: list[tuple[str, str]],
 ) -> tuple[bool, int]:
-    """Return whether review is active and how many stopped items can resume."""
+    """Return whether review is active and how many unresolved items can resume."""
     active = any(status in _FP_REVIEW_ACTIVE_STATUSES for _, status in states)
-    if active or not states or states[-1][1] not in _FP_REVIEW_RETRYABLE_STATUSES:
-        return active, 0
+    if active:
+        return True, 0
     unresolved = sum(
         1
         for index, vulnerability in enumerate(vulnerabilities)
@@ -3965,9 +3963,11 @@ async def _start_fp_review(
     raise_on_error: bool = True,
     require_unresolved: bool = False,
 ) -> dict | None:
-    """Start an AI false-positive review for all confirmed vulnerabilities in a scan.
+    """Start an AI false-positive review for eligible vulnerabilities in a scan.
 
-    Shared by the manual trigger endpoint and the auto-trigger on scan completion.
+    Manual triggers review unresolved findings first and rerun all findings only
+    after every eligible finding has an effective result. Automatic and resume
+    callers can require unresolved work so they never start a full rerun.
     When ``raise_on_error`` is False, failures are logged and ``None`` is returned
     instead of raising — used by the auto-trigger path so a failed/blocked review
     never breaks scan-finish handling.
@@ -4125,7 +4125,7 @@ async def trigger_fp_review(
     request: Request,
     current_user: User = Depends(get_current_user),
 ) -> dict:
-    """Trigger AI false-positive review for all confirmed vulnerabilities in a scan."""
+    """Review unresolved findings, or rerun all after every finding is resolved."""
     await _check_scan_owner(scan_id, current_user)
     return await _start_fp_review(scan_id, _server_url_from_request(request), raise_on_error=True)
 

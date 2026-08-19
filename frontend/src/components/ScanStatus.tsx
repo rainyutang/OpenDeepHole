@@ -677,6 +677,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // FP review state
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
+  const [fpReviewHydrated, setFpReviewHydrated] = useState(false);
   const [fpReviewLoading, setFpReviewLoading] = useState(false);
   const [fpReviewStopping, setFpReviewStopping] = useState(false);
   const [launchingValidations, setLaunchingValidations] = useState<Set<number>>(new Set());
@@ -885,6 +886,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     setScan((previous) => previous?.scan_id === scanId ? previous : null);
     setSelectedFeedbackIds(null);
     setFpReview(null);
+    setFpReviewHydrated(false);
     setIndexStatus(null);
     setGitHistory([]);
     getScanStatus(scanId)
@@ -898,7 +900,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       .then((job) => {
         if (!cancelled && job.scan_id === scanId) setFpReview(job);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setFpReviewHydrated(true);
+      });
     getAgentIndexStatus(scanId)
       .then((status) => {
         if (!cancelled) setIndexStatus(status);
@@ -1760,60 +1765,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           </div>
           <div className="flex flex-wrap items-center gap-2 xl:max-w-[72%] xl:justify-end">
             <ThemeToggle />
-            {(() => {
-              const confirmedVulns = scan.vulnerabilities.filter(
-                (v) => (v.ai_verdict === "confirmed" || (!v.ai_verdict && v.confirmed))
-                  && !hasFinalUserVerdict(v)
-              ).length;
-              const canTrigger = confirmedVulns > 0;
-              const isReviewing = fpReview?.status === "running" || fpReview?.status === "pending";
-              if (!canTrigger) return null;
-              return (
-                <>
-                  <button
-                    onClick={handleFpReview}
-                    disabled={!canTrigger || fpReviewLoading || !!isReviewing}
-                    className="px-3 py-1.5 text-sm font-medium text-amber-400 border border-amber-500/50 rounded-lg hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-                    title={!canTrigger ? "需要存在 LLM 正报才可使用" : "使用 AI 对已确认漏洞逐条进行误报复核"}
-                  >
-                    {isReviewing ? (
-                      <>
-                        <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
-                        复核中 {fpReview!.processed}/{fpReview!.total}
-                      </>
-                    ) : fpReviewLoading ? (
-                      <>
-                        <div className="w-3 h-3 border border-amber-500/30 border-t-amber-400 rounded-full animate-spin" />
-                        启动中...
-                      </>
-                    ) : (
-                      <>
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                        AI去误报
-                        {fpReview?.status === "complete" && (
-                          <span className="text-xs text-green-400 ml-0.5">✓</span>
-                        )}
-                        {fpReview?.status === "cancelled" && (
-                          <span className="text-xs text-amber-300 ml-0.5">已停止</span>
-                        )}
-                      </>
-                    )}
-                  </button>
-                  {isReviewing && (
-                    <button
-                      onClick={handleStopFpReview}
-                      disabled={fpReviewStopping}
-                      className="px-3 py-1.5 text-sm font-medium text-red-400 border border-red-500/50 rounded-lg hover:bg-red-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                      title="停止当前AI去误报复核"
-                    >
-                      {fpReviewStopping ? "停止中..." : "停止复核"}
-                    </button>
-                  )}
-                </>
-              );
-            })()}
             {isDone && (
               <>
                 {scan.can_continue && (
@@ -2063,6 +2014,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         {activeTab === "fp_review" && (
           <FpReviewPanel
             vulnerabilities={scan.vulnerabilities}
+            reviewDataLoaded={
+              fpReviewHydrated
+              && (
+                !scan.detail_pages
+                || (
+                  scan.detail_pages.vulnerabilities_next_cursor == null
+                  && !detailLoadingResources.has("vulnerabilities")
+                )
+              )
+            }
             fpReview={fpReview}
             methodLabel={fpReviewMethodLabel(selectedFpReviewMethod, selectedFpReviewSelection)}
             methodDescription={selectedFpReviewSelection?.description ?? "按漏洞粒度逐条执行去误报复核。"}
@@ -5102,6 +5063,7 @@ function AuditTaskPanel({
 
 function FpReviewPanel({
   vulnerabilities,
+  reviewDataLoaded,
   fpReview,
   methodLabel,
   methodDescription,
@@ -5114,6 +5076,7 @@ function FpReviewPanel({
   onStop,
 }: {
   vulnerabilities: Vulnerability[];
+  reviewDataLoaded: boolean;
   fpReview: FpReviewJob | null;
   methodLabel: string;
   methodDescription: string;
@@ -5129,7 +5092,11 @@ function FpReviewPanel({
   const confirmed = useMemo(
     () => vulnerabilities
       .map((vuln, index) => ({ vuln, index }))
-      .filter(({ vuln }) => isAiConfirmed(vuln)),
+      .filter(({ vuln }) => (
+        !vuln.provisional
+        && isAiConfirmed(vuln)
+        && !hasFinalUserVerdict(vuln)
+      )),
     [vulnerabilities],
   );
   const resultByIndex = useMemo(
@@ -5160,30 +5127,40 @@ function FpReviewPanel({
   const waitingCount = items.filter(
     (item) => !isEffectiveFpReviewResult(item.result) && !item.running,
   ).length;
-  const tpCount = items.filter((item) => item.result?.verdict === "tp").length;
-  const fpCount = items.filter((item) => item.result?.verdict === "fp").length;
+  const allReviewed = reviewDataLoaded
+    && items.length > 0
+    && items.every((item) => isEffectiveFpReviewResult(item.result));
+  const tpCount = items.filter(
+    (item) => isEffectiveFpReviewResult(item.result) && item.result.verdict === "tp",
+  ).length;
+  const fpCount = items.filter(
+    (item) => isEffectiveFpReviewResult(item.result) && item.result.verdict === "fp",
+  ).length;
   const status = isFpReviewing
     ? "复核中"
-    : fpReview?.status === "complete"
-      ? "已完成"
+    : !reviewDataLoaded
+      ? "加载中"
       : fpReview?.status === "error"
         ? "异常"
         : fpReview?.status === "cancelled"
           ? "已停止"
-          : confirmed.length > 0
-            ? "等待"
-            : "无目标";
+          : allReviewed
+            ? "已完成"
+            : confirmed.length > 0
+              ? "等待"
+              : "无目标";
   const tone: TaskTone = isFpReviewing
     ? "amber"
-    : fpReview?.status === "complete"
-      ? "green"
-      : fpReview?.status === "error"
-        ? "red"
-        : fpReview?.status === "cancelled"
-          ? "amber"
+    : fpReview?.status === "error"
+      ? "red"
+      : fpReview?.status === "cancelled"
+        ? "amber"
+        : allReviewed
+          ? "green"
           : "slate";
   const selected = selectedIndex === null ? null : items.find((item) => item.index === selectedIndex) ?? null;
   const canTrigger = confirmed.length > 0
+    && reviewDataLoaded
     && !isFpReviewing
     && !loading;
 
@@ -5217,9 +5194,22 @@ function FpReviewPanel({
             type="button"
             onClick={onTrigger}
             disabled={!canTrigger}
+            title={!reviewDataLoaded
+              ? "正在加载复核状态与完整漏洞列表"
+              : allReviewed
+                ? "全部问题均已形成有效结论，点击后重新复核全部问题"
+                : `仅复核 ${waitingCount} 个尚未形成有效结论的问题`}
             className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {loading ? "启动中..." : `启动${methodLabel}`}
+            {loading
+              ? "启动中..."
+              : isFpReviewing
+                ? "复核中..."
+                : !reviewDataLoaded
+                  ? "加载中..."
+                  : allReviewed
+                    ? "重新复核"
+                    : "启动复核"}
           </button>
         )}
         {isFpReviewing && (
@@ -5402,19 +5392,20 @@ function FpReviewDetail({
 
 function fpReviewSortRank(result: FpReviewJob["results"][number] | undefined, running: boolean): number {
   if (running) return 0;
-  if (!result) return 1;
+  if (!isEffectiveFpReviewResult(result)) return 1;
   return 2;
 }
 
 function fpReviewItemLabel(result: FpReviewJob["results"][number] | undefined, running: boolean): string {
   if (running) return "复核中";
   if (!result) return "等待复核";
+  if (!isEffectiveFpReviewResult(result)) return "未完成";
   return result.verdict === "fp" ? "误报" : result.verdict === "tp" ? "正报" : "未完成";
 }
 
 function fpReviewItemTone(result: FpReviewJob["results"][number] | undefined, running: boolean): TaskTone {
   if (running) return "amber";
-  if (!result) return "slate";
+  if (!isEffectiveFpReviewResult(result)) return "slate";
   return result.verdict === "fp" ? "green" : result.verdict === "tp" ? "red" : "slate";
 }
 
