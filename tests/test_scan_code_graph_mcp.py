@@ -49,6 +49,91 @@ def _remote_mcp(
     )
 
 
+class _McpResponse:
+    status_code = 200
+
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def json(self):
+        return self.value
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _RecoveringMcpClient:
+    def __init__(
+        self,
+        *,
+        add_outcomes: list[object],
+        connect_outcomes: list[object] | None = None,
+    ) -> None:
+        self.add_outcomes = list(add_outcomes)
+        self.connect_outcomes = list(connect_outcomes or [])
+        self.name = ""
+        self.state = "missing"
+        self.error = ""
+        self.add_calls = 0
+        self.connect_calls = 0
+        self.disconnect_calls = 0
+        self.connect_started: asyncio.Event | None = None
+        self.connect_continue: asyncio.Event | None = None
+
+    def _status(self) -> dict:
+        if not self.name or self.state == "missing":
+            return {}
+        value = {"status": self.state}
+        if self.error:
+            value["error"] = self.error
+        return {self.name: value}
+
+    def _apply(self, outcome: object) -> None:
+        error: BaseException | None = None
+        if isinstance(outcome, tuple):
+            state, error = outcome
+        else:
+            state = outcome
+        self.state = str(state)
+        self.error = "offline" if self.state == "failed" else ""
+        if error is not None:
+            raise error
+
+    async def get(self, path: str, **_kwargs):
+        assert path == "/mcp"
+        return _McpResponse(self._status())
+
+    async def post(self, path: str, **kwargs):
+        if path == "/mcp":
+            self.add_calls += 1
+            self.name = str(kwargs["json"]["name"])
+            outcome = (
+                self.add_outcomes.pop(0)
+                if self.add_outcomes
+                else self.state
+            )
+            self._apply(outcome)
+            return _McpResponse(self._status())
+        if path.endswith("/connect"):
+            self.connect_calls += 1
+            if self.connect_started is not None:
+                self.connect_started.set()
+            if self.connect_continue is not None:
+                await self.connect_continue.wait()
+            outcome = (
+                self.connect_outcomes.pop(0)
+                if self.connect_outcomes
+                else self.state
+            )
+            self._apply(outcome)
+            return _McpResponse(True)
+        assert path.endswith("/disconnect")
+        self.disconnect_calls += 1
+        self.state = "disabled"
+        self.error = ""
+        return _McpResponse(True)
+
+
 def test_scan_mcp_snapshot_round_trips_without_public_serialization(tmp_path: Path) -> None:
     store = SqliteScanStore(tmp_path / "scan.db")
     config = _remote_mcp(
@@ -546,6 +631,327 @@ def test_failed_scan_mcp_shared_leases_release_without_blocking_next_scan(
 
         await manager._release_scan_mcp(project, first)
         assert manager._scan_mcp_states
+        await manager._release_scan_mcp(project, second)
+        assert manager._scan_mcp_states == {}
+
+    asyncio.run(run())
+
+
+def test_connected_scan_mcp_reconnects_after_live_connection_failure(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        client = _RecoveringMcpClient(
+            add_outcomes=["connected"],
+            connect_outcomes=["connected"],
+        )
+        disconnected: list[str] = []
+
+        async def disconnect(_client, _directory, spec) -> None:
+            disconnected.append(str(spec["name"]))
+
+        manager._disconnect_managed_mcp = disconnect
+        project = tmp_path.resolve()
+        config = _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="codegraph",
+        ).model_dump(mode="json")
+
+        first = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-reconnect",
+            config,
+        )
+        assert first.connected is True
+
+        # Model tool execution can close an MCP after the lease was cached as
+        # connected. The next task must consult OpenCode and recover it.
+        client.state = "failed"
+        client.error = "Connection closed"
+        second = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-reconnect",
+            config,
+        )
+
+        assert second.connected is True
+        assert second.error == ""
+        assert client.add_calls == 1
+        assert client.connect_calls == 1
+        assert manager._scan_mcp_states[first.state_key]["references"] == 2
+
+        await manager._release_scan_mcp(project, first)
+        assert manager._scan_mcp_states
+        await manager._release_scan_mcp(project, second)
+        assert manager._scan_mcp_states == {}
+        assert disconnected == ["codegraph"]
+
+    asyncio.run(run())
+
+
+def test_failed_scan_mcp_recovers_before_existing_lease_is_released(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def run() -> None:
+        monkeypatch.setattr(
+            "task_agent.serve_client._SCAN_MCP_CONNECT_RETRY_DELAY_SECONDS",
+            0.0,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        client = _RecoveringMcpClient(
+            add_outcomes=["failed"],
+            connect_outcomes=["failed", "connected"],
+        )
+
+        async def disconnect(_client, _directory, _spec) -> None:
+            return None
+
+        manager._disconnect_managed_mcp = disconnect
+        project = tmp_path.resolve()
+        config = _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="codegraph",
+        ).model_dump(mode="json")
+
+        first = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-sticky-failure",
+            config,
+        )
+        assert first.connected is False
+        assert client.connect_calls == 1
+
+        state = manager._scan_mcp_states[first.state_key]
+        state["next_retry_at"] = 0.0
+        second = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-sticky-failure",
+            config,
+        )
+
+        assert second.connected is True
+        assert second.error == ""
+        assert client.connect_calls == 2
+        assert state["references"] == 2
+        assert state["connected"] is True
+
+        await manager._release_scan_mcp(project, first)
+        await manager._release_scan_mcp(project, second)
+        assert manager._scan_mcp_states == {}
+
+    asyncio.run(run())
+
+
+def test_concurrent_scan_mcp_recovery_uses_one_reconnect(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        client = _RecoveringMcpClient(
+            add_outcomes=["connected"],
+            connect_outcomes=["connected"],
+        )
+        client.connect_started = asyncio.Event()
+        client.connect_continue = asyncio.Event()
+
+        async def disconnect(_client, _directory, _spec) -> None:
+            return None
+
+        manager._disconnect_managed_mcp = disconnect
+        project = tmp_path.resolve()
+        config = _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="codegraph",
+        ).model_dump(mode="json")
+        first = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-concurrent-recovery",
+            config,
+        )
+        client.state = "failed"
+        client.error = "Connection closed"
+
+        pending = [
+            asyncio.create_task(manager._acquire_scan_mcp(
+                client,
+                project,
+                "scan-concurrent-recovery",
+                config,
+            ))
+            for _ in range(2)
+        ]
+        await asyncio.wait_for(client.connect_started.wait(), timeout=1)
+        assert not any(task.done() for task in pending)
+        client.connect_continue.set()
+        recovered = await asyncio.gather(*pending)
+
+        assert all(lease.connected for lease in recovered)
+        assert client.connect_calls == 1
+        assert manager._scan_mcp_states[first.state_key]["references"] == 3
+
+        await manager._release_scan_mcp(project, first)
+        for lease in recovered:
+            await manager._release_scan_mcp(project, lease)
+        assert manager._scan_mcp_states == {}
+
+    asyncio.run(run())
+
+
+def test_scan_mcp_lost_add_response_reconciles_connected_status(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        client = _RecoveringMcpClient(
+            add_outcomes=[(
+                "connected",
+                RuntimeError("add response was lost"),
+            )],
+        )
+
+        async def disconnect(_client, _directory, _spec) -> None:
+            return None
+
+        manager._disconnect_managed_mcp = disconnect
+        project = tmp_path.resolve()
+        config = _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="codegraph",
+        ).model_dump(mode="json")
+
+        lease = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-response-lost",
+            config,
+        )
+
+        assert lease.connected is True
+        assert lease.error == ""
+        assert client.add_calls == 1
+        assert client.connect_calls == 0
+        await manager._release_scan_mcp(project, lease)
+
+    asyncio.run(run())
+
+
+def test_failed_scan_mcp_recovery_is_cooled_down_between_tasks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def run() -> None:
+        monkeypatch.setattr(
+            "task_agent.serve_client._SCAN_MCP_CONNECT_RETRY_DELAY_SECONDS",
+            0.0,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        client = _RecoveringMcpClient(
+            add_outcomes=["failed"],
+            connect_outcomes=["failed", "failed"],
+        )
+        project = tmp_path.resolve()
+        config = _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="codegraph",
+        ).model_dump(mode="json")
+
+        leases = [await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-offline",
+            config,
+        )]
+        assert leases[0].connected is False
+        assert client.connect_calls == 1
+
+        leases.append(await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-offline",
+            config,
+        ))
+        assert client.connect_calls == 1
+
+        state = manager._scan_mcp_states[leases[0].state_key]
+        state["next_retry_at"] = 0.0
+        leases.append(await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-offline",
+            config,
+        ))
+        assert client.connect_calls == 2
+
+        leases.append(await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-offline",
+            config,
+        ))
+        assert client.connect_calls == 2
+        assert all(not lease.connected for lease in leases)
+
+        for lease in leases:
+            await manager._release_scan_mcp(project, lease)
+        assert manager._scan_mcp_states == {}
+
+    asyncio.run(run())
+
+
+def test_intentionally_disabled_scan_mcp_lease_is_not_reconnected(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        client = _RecoveringMcpClient(add_outcomes=["connected"])
+        project = tmp_path.resolve()
+        config = _remote_mcp(
+            "http://127.0.0.1:9010/mcp",
+            name="product-info",
+        ).model_dump(mode="json")
+        first = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-disabled-lease",
+            config,
+            role="knowledge_base",
+            source_graph=False,
+        )
+        assert first.connected is True
+
+        await manager._disable_scan_mcp_lease(
+            client,
+            project,
+            first,
+            "project binding failed",
+        )
+        second = await manager._acquire_scan_mcp(
+            client,
+            project,
+            "scan-disabled-lease",
+            config,
+            role="knowledge_base",
+            source_graph=False,
+        )
+
+        assert second.connected is False
+        assert second.error == "project binding failed"
+        assert client.connect_calls == 0
+        assert client.disconnect_calls == 1
+        await manager._release_scan_mcp(project, first)
         await manager._release_scan_mcp(project, second)
         assert manager._scan_mcp_states == {}
 

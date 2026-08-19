@@ -126,7 +126,7 @@ owner_token: ""
 
 扫描详情顶部流程图的 **「底层能力」** 框会明确显示本次扫描是否启用了 CodeGraph MCP 和知识库。这里展示的是创建扫描时固化的配置快照，不代表 MCP 的实时连接结果；连接失败并回退到文件工具时，已启用状态仍保持不变。
 
-新建扫描页的代码图谱提供手动 **「检测连接」**，只在 Agent 上执行 MCP `initialize` 和 `list_tools`。知识库的 **「检测并拉取项目」** 还会调用服务端配置的 `projects_tool`，校验 `projects_tool`、`set_project_tool` 和至少一个模型可见查询工具，但不会调用 `set_project_tool`，也不会写入 Agent 全局配置。运行时仍会再次连接；代码图谱连接失败时继续扫描并只使用文件工具，知识库连接或项目绑定失败时只禁用知识库工具，两者都不会回退到其它扫描的 MCP。对于本地 `codegraph` CLI，项目 `.codegraph/codegraph.db` 是否就绪仍以扫描任务日志和产物为准。
+新建扫描页的代码图谱提供手动 **「检测连接」**，只在 Agent 上执行 MCP `initialize` 和 `list_tools`。知识库的 **「检测并拉取项目」** 还会调用服务端配置的 `projects_tool`，校验 `projects_tool`、`set_project_tool` 和至少一个模型可见查询工具，但不会调用 `set_project_tool`，也不会写入 Agent 全局配置。运行时仍会再次连接；代码图谱连接失败时继续扫描并只使用文件工具，知识库连接或项目绑定失败时只禁用知识库工具，两者都不会回退到其它扫描的 MCP。同一扫描的后续任务在复用代码图谱前会核对 OpenCode 实时状态，首次瞬时失败或运行中掉线时受控重连；一次恢复失败只让当前任务回退到文件工具，不会永久禁用后续任务。对于本地 `codegraph` CLI，项目 `.codegraph/codegraph.db` 是否就绪仍以扫描任务日志和产物为准。
 
 **漏洞验证** 默认不启用。勾选后，页面只展示与当前产品兼容的验证方法，并按该方法严格的 `validator.yaml` `field` 定义生成参数表单；方法和参数会按当前用户、稳定客户端、产品和方法记忆。客户端全局验证策略、方法身份和 field 值在创建成功时一起固化，之后修改客户端配置只影响下一次扫描。新格式及扩展约定见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
 

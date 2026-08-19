@@ -131,6 +131,21 @@ async def _exercise_scan_binding(
             and name == "static-mcp"
         ]
 
+        disconnected = await client.post(
+            "/mcp/static-mcp/disconnect",
+            params=params,
+            headers=headers,
+        )
+        disconnected.raise_for_status()
+        recovered_a = await manager._acquire_scan_mcp(
+            client,
+            project_dir,
+            "scan-a",
+            configs[0],
+        )
+        assert recovered_a.connected is True
+        await manager._release_scan_mcp(project_dir, recovered_a)
+
         pending_b = asyncio.create_task(
             manager._acquire_scan_mcp(
                 client,

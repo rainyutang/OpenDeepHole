@@ -57,6 +57,9 @@ _SERVE_EVENT_DRAIN_TIMEOUT_SECONDS = 1.0
 _SERVE_EVENT_PREVIEW_LIMIT = 500
 _SERVE_STARTUP_LOG_TAIL_LIMIT = 4000
 _SERVE_AUTO_PORT_MAX_ATTEMPTS = 3
+_SCAN_MCP_INITIAL_CONNECT_ATTEMPTS = 2
+_SCAN_MCP_CONNECT_RETRY_DELAY_SECONDS = 0.5
+_SCAN_MCP_RECOVERY_COOLDOWN_SECONDS = 1.0
 _DEFAULT_SERVE_PORT = 4096
 _SERVE_PORT_ENV = "OPENCODE_SERVE_PORT"
 _SERVE_MARKER_ENV = "OPENCODE_SERVE_MARKER"
@@ -4476,6 +4479,163 @@ class OpenCodeServeManager:
             )
             disconnected.raise_for_status()
 
+    async def _scan_mcp_live_status(
+        self,
+        client: httpx.AsyncClient,
+        directory: Path,
+        name: str,
+    ) -> tuple[str, str, bool]:
+        """Return one directory-scoped MCP's live state and registration status."""
+        response = await client.get(
+            "/mcp",
+            params=_serve_context_params(directory),
+            headers=_serve_context_headers(directory),
+        )
+        response.raise_for_status()
+        statuses = self._mcp_status_map(response.json())
+        if name not in statuses:
+            return "missing", "OpenCode returned no MCP status", False
+        state, error = self._mcp_native_status(statuses.get(name))
+        return state, error, True
+
+    @staticmethod
+    def _scan_mcp_exception_is_retryable(exc: BaseException) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = int(exc.response.status_code)
+            return status >= 500 or status in {408, 409, 425, 429}
+        return True
+
+    async def _connect_scan_mcp_once(
+        self,
+        client: httpx.AsyncClient,
+        directory: Path,
+        spec: dict[str, Any],
+        *,
+        registered: bool,
+        request_timeout: float,
+    ) -> tuple[str, str, bool]:
+        name = str(spec.get("name") or "")
+        config = spec.get("config")
+        if registered:
+            response = await client.post(
+                f"/mcp/{quote(name, safe='')}/connect",
+                params=_serve_context_params(directory),
+                headers=_serve_context_headers(directory),
+                timeout=request_timeout,
+            )
+            if response.status_code != 404:
+                response.raise_for_status()
+                return await self._scan_mcp_live_status(
+                    client,
+                    directory,
+                    name,
+                )
+
+        response = await client.post(
+            "/mcp",
+            params=_serve_context_params(directory),
+            headers=_serve_context_headers(directory),
+            json={"name": name, "config": config},
+            timeout=request_timeout,
+        )
+        response.raise_for_status()
+        statuses = self._mcp_status_map(response.json())
+        if name not in statuses:
+            return await self._scan_mcp_live_status(
+                client,
+                directory,
+                name,
+            )
+        state, error = self._mcp_native_status(statuses.get(name))
+        return state, error, True
+
+    async def _recover_scan_mcp_connection(
+        self,
+        client: httpx.AsyncClient,
+        directory: Path,
+        spec: dict[str, Any],
+        *,
+        registered: bool,
+        request_timeout: float,
+        max_attempts: int,
+    ) -> tuple[bool, str, bool, bool, bool]:
+        """Connect or reconnect a scan MCP and reconcile ambiguous responses."""
+        name = str(spec.get("name") or "")
+        last_error = ""
+        retryable = True
+        cleanup_pending = False
+        attempts = max(1, int(max_attempts))
+        for attempt in range(1, attempts + 1):
+            try:
+                native_state, native_error, registered = (
+                    await self._connect_scan_mcp_once(
+                        client,
+                        directory,
+                        spec,
+                        registered=registered,
+                        request_timeout=request_timeout,
+                    )
+                )
+                cleanup_pending = False
+                if native_state == "connected":
+                    return True, "", True, False, True
+                last_error = native_error or (
+                    f"OpenCode reported MCP state {native_state}"
+                )
+                retryable = native_state not in {
+                    "needs_auth",
+                    "needs_client_registration",
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = self._redact_managed_mcp_error(exc, spec)
+                retryable = self._scan_mcp_exception_is_retryable(exc)
+                cleanup_pending = True
+                try:
+                    native_state, native_error, registered = (
+                        await self._scan_mcp_live_status(
+                            client,
+                            directory,
+                            name,
+                        )
+                    )
+                    cleanup_pending = False
+                    if native_state == "connected":
+                        return True, "", True, False, True
+                    if native_error:
+                        last_error = native_error
+                    elif native_state != "missing":
+                        last_error = f"OpenCode reported MCP state {native_state}"
+                    if native_state in {
+                        "needs_auth",
+                        "needs_client_registration",
+                    }:
+                        retryable = False
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # The add/connect response may have been lost after OpenCode
+                    # accepted it. Retain cleanup_pending so the final release
+                    # still removes a possibly-live client.
+                    pass
+
+            if not retryable or attempt >= attempts:
+                break
+            logger.warning(
+                "Scan MCP connection attempt failed "
+                "name=%s directory=%s attempt=%s/%s retry_in=%.1fs error=%s",
+                name,
+                directory,
+                attempt,
+                attempts,
+                _SCAN_MCP_CONNECT_RETRY_DELAY_SECONDS,
+                last_error,
+            )
+            await asyncio.sleep(_SCAN_MCP_CONNECT_RETRY_DELAY_SECONDS)
+
+        return False, last_error, retryable, cleanup_pending, registered
+
     async def _acquire_scan_mcp(
         self,
         client: httpx.AsyncClient,
@@ -4525,27 +4685,174 @@ class OpenCodeServeManager:
             name,
             fingerprint,
         )
+        config = spec.get("config")
+        timeout_ms = int(config.get("timeout") or 0) if isinstance(config, dict) else 0
+        request_timeout = max(
+            _SERVE_REQUEST_TIMEOUT_SECONDS,
+            (timeout_ms / 1000.0) + 5.0 if timeout_ms else 0,
+        )
         condition = self._scan_mcp_conditions.setdefault(
             state_key,
             asyncio.Condition(),
         )
+
+        def lease_from_state(state: dict[str, Any]) -> _ScanMcpLease:
+            return _ScanMcpLease(
+                directory_key=directory_key,
+                state_key=state_key,
+                identity=identity,
+                name=str(state.get("name") or name),
+                fingerprint=fingerprint,
+                connected=bool(state.get("connected")),
+                role=normalized_role,
+                error=str(state.get("error") or ""),
+            )
+
+        def retain(state: dict[str, Any]) -> _ScanMcpLease:
+            state["references"] = int(state.get("references") or 0) + 1
+            return lease_from_state(state)
+
         async with condition:
             while True:
                 existing = self._scan_mcp_states.get(state_key)
                 if existing is None:
                     break
                 if str(existing.get("identity") or "") == identity:
-                    existing["references"] = int(existing.get("references") or 0) + 1
-                    return _ScanMcpLease(
-                        directory_key=directory_key,
-                        state_key=state_key,
-                        identity=identity,
-                        name=str(existing.get("name") or name),
-                        fingerprint=fingerprint,
-                        connected=bool(existing.get("connected")),
-                        role=normalized_role,
-                        error=str(existing.get("error") or ""),
+                    if (
+                        not name
+                        or not isinstance(config, dict)
+                        or existing.get("retryable") is False
+                    ):
+                        return retain(existing)
+
+                    was_connected = bool(existing.get("connected"))
+                    registered = bool(existing.get("registered"))
+                    try:
+                        live_state, live_error, registered = (
+                            await self._scan_mcp_live_status(
+                                client,
+                                directory,
+                                name,
+                            )
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if was_connected:
+                            logger.warning(
+                                "Failed to verify connected scan MCP; "
+                                "using cached state name=%s directory=%s error=%s",
+                                name,
+                                directory,
+                                self._redact_managed_mcp_error(exc, spec),
+                            )
+                            return retain(existing)
+                        live_state = "unknown"
+                        live_error = str(existing.get("error") or "") or (
+                            self._redact_managed_mcp_error(exc, spec)
+                        )
+                    else:
+                        existing["registered"] = registered
+                        existing["cleanup_pending"] = False
+                        if live_state == "connected":
+                            existing.update({
+                                "connected": True,
+                                "error": "",
+                                "retryable": True,
+                                "next_retry_at": 0.0,
+                            })
+                            if not was_connected:
+                                logger.info(
+                                    "Scan MCP recovered from live status "
+                                    "name=%s directory=%s",
+                                    name,
+                                    directory,
+                                )
+                            return retain(existing)
+                        if live_state in {
+                            "needs_auth",
+                            "needs_client_registration",
+                        }:
+                            existing.update({
+                                "connected": False,
+                                "error": live_error or (
+                                    f"OpenCode reported MCP state {live_state}"
+                                ),
+                                "retryable": False,
+                            })
+                            return retain(existing)
+
+                    existing.update({
+                        "connected": False,
+                        "error": live_error or (
+                            f"OpenCode reported MCP state {live_state}"
+                        ),
+                        "registered": registered,
+                    })
+                    if time.monotonic() < float(
+                        existing.get("next_retry_at") or 0.0
+                    ):
+                        return retain(existing)
+
+                    logger.warning(
+                        "Scan MCP connection lost; reconnecting "
+                        "name=%s directory=%s previous_state=%s error=%s",
+                        name,
+                        directory,
+                        live_state,
+                        existing["error"],
                     )
+                    try:
+                        (
+                            connected,
+                            error,
+                            retryable,
+                            cleanup_pending,
+                            registered,
+                        ) = await self._recover_scan_mcp_connection(
+                            client,
+                            directory,
+                            spec,
+                            registered=registered,
+                            request_timeout=request_timeout,
+                            max_attempts=1,
+                        )
+                    except asyncio.CancelledError:
+                        existing.update({
+                            "connected": False,
+                            "retryable": True,
+                            "next_retry_at": 0.0,
+                        })
+                        raise
+                    existing.update({
+                        "connected": connected,
+                        "error": error,
+                        "retryable": retryable,
+                        "cleanup_pending": cleanup_pending,
+                        "registered": registered,
+                        "next_retry_at": (
+                            0.0
+                            if connected or not retryable
+                            else time.monotonic()
+                            + _SCAN_MCP_RECOVERY_COOLDOWN_SECONDS
+                        ),
+                    })
+                    if connected:
+                        logger.info(
+                            "Scan MCP reconnected name=%s directory=%s",
+                            name,
+                            directory,
+                        )
+                    else:
+                        logger.warning(
+                            "Scan MCP reconnect unavailable "
+                            "name=%s directory=%s retryable=%s error=%s",
+                            name,
+                            directory,
+                            retryable,
+                            error,
+                        )
+                    return retain(existing)
                 await condition.wait()
 
             state: dict[str, Any] = {
@@ -4560,6 +4867,10 @@ class OpenCodeServeManager:
                 "directory_key": directory_key,
                 "role": normalized_role,
                 "source_graph": source_graph,
+                "retryable": not bool(spec.get("error")),
+                "next_retry_at": 0.0,
+                "registered": False,
+                "cleanup_pending": False,
             }
             self._scan_mcp_states[state_key] = state
             if raw_config is not None and name:
@@ -4575,112 +4886,105 @@ class OpenCodeServeManager:
                         f"Scan code graph MCP name {name!r} conflicts with "
                         "an enabled global MCP"
                     )
+                    state["retryable"] = False
                 elif name in active_names:
                     state["error"] = (
                         f"Scan MCP name {name!r} conflicts with another active MCP"
                     )
+                    state["retryable"] = False
                 elif source_graph:
                     self._scan_mcp_names.setdefault(directory_key, set()).add(name)
 
-            config = spec.get("config")
-            timeout_ms = int(config.get("timeout") or 0) if isinstance(config, dict) else 0
-            request_timeout = max(
-                _SERVE_REQUEST_TIMEOUT_SECONDS,
-                (timeout_ms / 1000.0) + 5.0 if timeout_ms else 0,
-            )
             try:
                 if source_graph:
-                    await self._disconnect_source_graph_mcps(client, directory)
+                    try:
+                        await self._disconnect_source_graph_mcps(client, directory)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to inspect stale source MCPs before scan MCP "
+                            "connect; retrying name=%s directory=%s error=%s",
+                            name or "disabled",
+                            directory,
+                            self._redact_managed_mcp_error(exc, spec),
+                        )
+                        await asyncio.sleep(
+                            _SCAN_MCP_CONNECT_RETRY_DELAY_SECONDS
+                        )
+                        await self._disconnect_source_graph_mcps(
+                            client,
+                            directory,
+                        )
                 if state["error"]:
-                    return _ScanMcpLease(
-                        directory_key=directory_key,
-                        state_key=state_key,
-                        identity=identity,
-                        name=name,
-                        fingerprint=fingerprint,
-                        connected=False,
-                        role=normalized_role,
-                        error=str(state["error"]),
-                    )
+                    return lease_from_state(state)
                 if not name:
-                    return _ScanMcpLease(
-                        directory_key=directory_key,
-                        state_key=state_key,
-                        identity=identity,
-                        name="",
-                        fingerprint=fingerprint,
-                        connected=False,
-                        role=normalized_role,
-                    )
-                response = await client.post(
-                    "/mcp",
-                    params=_serve_context_params(directory),
-                    headers=_serve_context_headers(directory),
-                    json={"name": name, "config": config},
-                    timeout=request_timeout,
+                    state["retryable"] = False
+                    return lease_from_state(state)
+                (
+                    connected,
+                    error,
+                    retryable,
+                    cleanup_pending,
+                    registered,
+                ) = await self._recover_scan_mcp_connection(
+                    client,
+                    directory,
+                    spec,
+                    registered=False,
+                    request_timeout=request_timeout,
+                    max_attempts=_SCAN_MCP_INITIAL_CONNECT_ATTEMPTS,
                 )
-                response.raise_for_status()
-                statuses = self._mcp_status_map(response.json())
-                native_state, error = self._mcp_native_status(statuses.get(name))
-                if native_state != "connected":
-                    raise RuntimeError(
-                        error or f"OpenCode reported MCP state {native_state}"
+                state.update({
+                    "connected": connected,
+                    "error": error,
+                    "retryable": retryable,
+                    "cleanup_pending": cleanup_pending,
+                    "registered": registered,
+                    "next_retry_at": (
+                        0.0
+                        if connected or not retryable
+                        else time.monotonic()
+                        + _SCAN_MCP_RECOVERY_COOLDOWN_SECONDS
+                    ),
+                })
+                if not connected:
+                    logger.warning(
+                        "Scan MCP unavailable "
+                        "name=%s directory=%s retryable=%s error=%s",
+                        name,
+                        directory,
+                        retryable,
+                        error,
                     )
-                state["connected"] = True
-                return _ScanMcpLease(
-                    directory_key=directory_key,
-                    state_key=state_key,
-                    identity=identity,
-                    name=name,
-                    fingerprint=fingerprint,
-                    connected=True,
-                    role=normalized_role,
-                )
+                return lease_from_state(state)
             except asyncio.CancelledError:
                 self._scan_mcp_states.pop(state_key, None)
                 condition.notify_all()
                 raise
             except Exception as exc:
                 error = self._redact_managed_mcp_error(exc, spec)
-                if name:
-                    try:
-                        # A timed-out/failed add may still have connected inside
-                        # OpenCode. Explicitly disconnect it before allowing the
-                        # model task to continue in file-only mode.
-                        await self._disconnect_managed_mcp(
-                            client,
-                            directory,
-                            spec,
-                        )
-                    except asyncio.CancelledError:
-                        self._scan_mcp_states.pop(state_key, None)
-                        condition.notify_all()
-                        raise
-                    except Exception as cleanup_exc:
-                        logger.warning(
-                            "Failed to clean up unavailable scan MCP "
-                            "name=%s directory=%s error=%s",
-                            name,
-                            directory,
-                            self._redact_managed_mcp_error(cleanup_exc, spec),
-                        )
-                state["error"] = error
+                retryable = self._scan_mcp_exception_is_retryable(exc)
+                state.update({
+                    "connected": False,
+                    "error": error,
+                    "retryable": retryable,
+                    "next_retry_at": (
+                        0.0
+                        if not retryable
+                        else time.monotonic()
+                        + _SCAN_MCP_RECOVERY_COOLDOWN_SECONDS
+                    ),
+                })
                 logger.warning(
-                    "Scan MCP unavailable name=%s directory=%s error=%s",
+                    "Scan MCP unavailable before connection "
+                    "name=%s directory=%s retryable=%s error=%s",
                     name or "disabled",
                     directory,
+                    retryable,
                     error,
                 )
-                return _ScanMcpLease(
-                    directory_key=directory_key,
-                    state_key=state_key,
-                    identity=identity,
-                    name=name,
-                    fingerprint=fingerprint,
-                    connected=False,
-                    role=normalized_role,
-                    error=error,
-                )
+                return lease_from_state(state)
 
     async def _disable_scan_mcp_lease(
         self,
@@ -4707,6 +5011,8 @@ class OpenCodeServeManager:
             existing["connected"] = False
             existing["cleanup_pending"] = True
             existing["error"] = _one_line_preview(error)
+            existing["retryable"] = False
+            existing["next_retry_at"] = 0.0
         if isinstance(spec, dict) and str(spec.get("name") or ""):
             try:
                 await self._disconnect_managed_mcp(
