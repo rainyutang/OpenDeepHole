@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from backend.api.scan import list_scans
+from backend.api.scan import list_scans, list_scans_v2
 from backend.models import (
     FpReviewResult,
     ScanItemStatus,
@@ -40,6 +40,9 @@ class FakeScanStore:
     def list_scans_by_user(self, user_id: str) -> list[ScanSummary]:
         return [self._summary()]
 
+    def list_scans_page(self, **_kwargs) -> list[ScanSummary]:
+        return [self._summary()]
+
     def load_scan(self, scan_id: str) -> tuple[ScanStatus, ScanMeta] | None:
         if scan_id != self.scan.scan_id:
             return None
@@ -55,6 +58,7 @@ class FakeScanStore:
                     confirmed=v.confirmed,
                     user_verdict=v.user_verdict,
                     analysis_source=v.analysis_source,
+                    provisional=v.provisional,
                 )
                 for v in self.scan.vulnerabilities
             ]
@@ -323,6 +327,56 @@ class ScanHistorySummaryTests(unittest.TestCase):
 
         self.assertEqual(response[0].retryable_candidates_count, 1)
         self.assertEqual(response[0].continuable_task_count, 2)
+
+    def test_list_scans_v2_does_not_count_provisional_failures_as_retryable_candidates(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project-1",
+            scan_items=["npd"],
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[
+                Vulnerability(
+                    file="streamed.c",
+                    line=7,
+                    function="streamed_timeout",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="provisional timeout",
+                    ai_analysis="timeout",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                    provisional=True,
+                ),
+            ],
+        )
+        meta = ScanMeta(
+            scan_items=["npd"],
+            created_at=scan.created_at,
+            scan_name="Project One",
+            agent_name="agent-1",
+        )
+
+        with (
+            patch("backend.api.scan.get_scan_store", return_value=FakeScanStore(scan, meta)),
+            patch("backend.api.agent.get_scan_store", return_value=FakeScanStore(scan, meta)),
+            patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+            patch("backend.api.agent.is_agent_name_online", return_value=True),
+        ):
+            page = asyncio.run(
+                list_scans_v2(
+                    limit=50,
+                    cursor=None,
+                    current_user=User(user_id="admin", username="admin", role="admin")
+                )
+            )
+
+        self.assertEqual(page.items[0].retryable_candidates_count, 0)
+        self.assertEqual(page.items[0].continuable_task_count, 0)
+        self.assertFalse(page.items[0].can_continue)
 
     def test_list_scans_allows_retrying_failed_threat_analysis(self) -> None:
         scan = ScanStatus(

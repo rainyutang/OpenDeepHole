@@ -597,6 +597,24 @@ class VulnStatsStoreTests(unittest.TestCase):
             self.assertEqual(len(stats), 601)
             self.assertEqual(len(stats["scan-1"]), 1)
 
+    def test_batch_stats_preserve_provisional_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(*_make_scan("scan-1"))
+            store.add_vulnerability("scan-1", _make_vuln(1))
+            store.add_provisional_vulnerability(
+                "scan-1",
+                "batch-1",
+                _make_vuln(2, ai_verdict="timeout"),
+            )
+
+            stats = store.get_vuln_stats_by_scans(["scan-1"])
+
+            self.assertEqual(
+                [stat.provisional for stat in stats["scan-1"]],
+                [False, True],
+            )
+
 
 class FpReviewVerdictsStoreTests(unittest.TestCase):
     def test_verdicts_grouped_and_ordered_like_full_query(self) -> None:

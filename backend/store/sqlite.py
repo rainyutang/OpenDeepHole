@@ -3757,7 +3757,8 @@ class SqliteScanStore(ScanStoreBase):
                 placeholders = ",".join("?" * len(chunk))
                 cur = self._conn.execute(
                     f"""\
-                    SELECT scan_id, vuln_type, ai_verdict, confirmed, user_verdict, analysis_source
+                    SELECT scan_id, vuln_type, ai_verdict, confirmed, user_verdict,
+                           analysis_source, provisional
                     FROM vulnerabilities
                     WHERE scan_id IN ({placeholders})
                     ORDER BY scan_id, idx
@@ -3772,6 +3773,7 @@ class SqliteScanStore(ScanStoreBase):
                             confirmed=bool(r["confirmed"]),
                             user_verdict=r["user_verdict"],
                             analysis_source=r["analysis_source"] or "static_candidate",
+                            provisional=bool(r["provisional"]),
                         )
                     )
         return out

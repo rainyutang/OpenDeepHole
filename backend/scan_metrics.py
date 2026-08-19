@@ -38,6 +38,7 @@ class VulnStat:
     confirmed: bool
     user_verdict: str | None
     analysis_source: str = "static_candidate"
+    provisional: bool = False
 
 
 @dataclass(frozen=True)
