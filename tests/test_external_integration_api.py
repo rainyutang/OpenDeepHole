@@ -233,6 +233,7 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                 severity="high",
                 description="desc",
                 ai_analysis="analysis",
+                vulnerability_report="# Public vulnerability report",
                 confirmed=True,
             )
             scan = ScanStatus(
@@ -269,6 +270,14 @@ class ExternalIntegrationApiTests(unittest.TestCase):
                         current_user=user,
                     )
                 )
+                public_vulnerabilities = asyncio.run(
+                    integration_api.get_public_scan_vulnerabilities(
+                        "scan-1",
+                        limit=100,
+                        after=-1,
+                        current_user=user,
+                    )
+                )
                 result = asyncio.run(
                     integration_api.mark_public_vulnerability(
                         "scan-1",
@@ -283,6 +292,11 @@ class ExternalIntegrationApiTests(unittest.TestCase):
             self.assertTrue(result["feedback_id"])
             self.assertEqual(public_scan.project_path, "/repo/project")
             self.assertEqual(public_scan.code_scan_path, "/repo/project/src")
+            self.assertEqual(len(public_vulnerabilities.items), 1)
+            self.assertEqual(
+                public_vulnerabilities.items[0].vulnerability.vulnerability_report,
+                "# Public vulnerability report",
+            )
             self.assertEqual(ctx.exception.status_code, 403)
             updated = store.get_vulnerabilities("scan-1")[0]
             self.assertEqual(updated.user_verdict, "confirmed")

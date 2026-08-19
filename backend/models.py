@@ -178,6 +178,7 @@ class Vulnerability(BaseModel):
     threat_surface_node_id: str = ""
     threat_method_node_id: str = ""
     threat_code_path: str = ""
+    provisional: bool = False                 # Platform-owned live result awaiting run() reconciliation
     output_source: OutputSource = Field(default_factory=OutputSource)
 
     @field_validator("call_chain", mode="before")
@@ -787,6 +788,13 @@ class AgentScanFinish(BaseModel):
     total_candidates: int
     processed_candidates: int
     error_message: str | None = None
+    replace_report_batch_ids: list[str] = Field(default_factory=list)
+
+
+class AgentVulnerabilityReconcile(BaseModel):
+    """Replace provisional report batches with one authoritative result list."""
+    report_batch_ids: list[str] = Field(default_factory=list)
+    vulnerabilities: list[Vulnerability] = Field(default_factory=list)
 
 
 class AgentScanCandidates(BaseModel):

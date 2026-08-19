@@ -98,6 +98,7 @@ export function normalizeVulnerability(value: unknown): Vulnerability {
     ai_analysis: text(raw.ai_analysis),
     vulnerability_report: text(raw.vulnerability_report),
     confirmed: raw.confirmed === true,
+    provisional: raw.provisional === true,
   } as Vulnerability;
 }
 

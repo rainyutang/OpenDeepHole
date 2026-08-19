@@ -144,6 +144,69 @@ def test_reporter_falls_back_to_v1_finish_after_live_result_failure() -> None:
     assert len(finish["json"]["vulnerabilities"]) == 1
 
 
+def test_reporter_reconciles_provisional_batch_before_lightweight_finish() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.posts: list[dict] = []
+
+        async def post(self, url, json=None, params=None, timeout=None):
+            self.posts.append({
+                "url": url,
+                "json": json,
+                "params": params,
+                "timeout": timeout,
+            })
+            payload = {"ok": True, "items": []}
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json=payload,
+            )
+
+    async def exercise() -> list[dict]:
+        reporter = Reporter("http://server")
+        reporter.set_protocol_version(2)
+        fake = FakeClient()
+        reporter._client = fake  # type: ignore[assignment]
+        callback = _vulnerability().model_copy(update={
+            "vulnerability_report": "# Callback",
+        })
+        final = callback.model_copy(update={
+            "file": "src/final.c",
+            "vulnerability_report": "# Final",
+        })
+        await reporter.report_vulnerability(
+            "scan-1",
+            callback,
+            provisional=True,
+            report_batch_id="batch-1",
+        )
+        reconciled = await reporter.reconcile_vulnerabilities(
+            "scan-1",
+            ["batch-1"],
+            [final],
+        )
+        assert reconciled == {"ok": True, "items": []}
+        await reporter.finish_scan("scan-1", [final], "complete", 1, 1)
+        return fake.posts
+
+    posts = asyncio.run(exercise())
+    live = next(item for item in posts if item["url"].endswith("/vulnerability"))
+    assert live["params"] == {
+        "provisional": "true",
+        "report_batch_id": "batch-1",
+    }
+    assert live["json"]["provisional"] is True
+    reconcile = next(
+        item for item in posts
+        if item["url"].endswith("/vulnerabilities/reconcile")
+    )
+    assert reconcile["json"]["report_batch_ids"] == ["batch-1"]
+    assert reconcile["json"]["vulnerabilities"][0]["vulnerability_report"] == "# Final"
+    assert reconcile["json"]["vulnerabilities"][0]["provisional"] is False
+    assert any(item["url"].endswith("/v2/scan/scan-1/finish") for item in posts)
+
+
 def test_distributed_sse_writer_persists_one_bounded_batch() -> None:
     class FakeStore:
         distributed = True

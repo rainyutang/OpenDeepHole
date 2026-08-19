@@ -212,6 +212,56 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         enqueue_fp.assert_not_awaited()
         enqueue_validation.assert_not_awaited()
 
+    async def test_provisional_report_defers_fp_review_and_validation(self) -> None:
+        reporter = _reporter()
+        reporter.report_vulnerability.return_value = {
+            "index": 3,
+            "fp_review": {
+                "review_id": "review-1",
+                "method": "adversarial",
+                "vuln_index": 3,
+                "queued": True,
+                "processed": 0,
+            },
+        }
+        enqueue_fp = AsyncMock()
+        enqueue_validation = AsyncMock()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("deephole_client.server.enqueue_fp_review", enqueue_fp),
+            patch(
+                "deephole_client.server.enqueue_vulnerability_validation",
+                enqueue_validation,
+            ),
+        ):
+            project = Path(tmp)
+            await _report_process_vulnerabilities(
+                reporter=reporter,
+                config=AgentConfig(),
+                scan_id="scan-provisional",
+                project_path=project,
+                code_scan_path=project,
+                product="product",
+                validation_environment="",
+                vulnerability_validation={"enabled": True},
+                feedback_entries=[],
+                code_graph_mcp=None,
+                engine=MiningEngineSelection(
+                    engine_id="static_candidate",
+                    engine_label="Static",
+                    enabled=True,
+                ),
+                values=[_vulnerability()],
+                provisional=True,
+                report_batch_id="batch-1",
+            )
+
+        enqueue_fp.assert_not_awaited()
+        enqueue_validation.assert_not_awaited()
+        self.assertTrue(
+            reporter.report_vulnerability.await_args.args[1].provisional,
+        )
+
     def test_structured_task_output_does_not_repeat_process_prefix(self) -> None:
         line = "[threat_analysis][ses-1][tool] name=read"
 
@@ -2318,6 +2368,135 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             final_vulnerabilities[0].output_source.agent_session_id,
             "",
         )
+
+    async def test_engine_callback_results_follow_final_return_precedence(self) -> None:
+        config = AgentConfig()
+        manifest = SimpleNamespace(
+            engine_id="custom-engine",
+            label="Custom engine",
+            fp_review=False,
+        )
+        loaded = SimpleNamespace(manifest=manifest)
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: [manifest],
+            get=lambda engine_id: loaded if engine_id == manifest.engine_id else None,
+        )
+
+        def finding(name: str, line: int) -> dict:
+            return {
+                **_vulnerability(),
+                "file": f"src/{name}.c",
+                "line": line,
+                "function": f"handle_{name}",
+                "description": name,
+                "vulnerability_report": f"# {name}",
+            }
+
+        async def run_case(
+            *,
+            result_status: str,
+            final_values: list[dict],
+            scan_id: str,
+        ) -> tuple[SimpleNamespace, list[Vulnerability]]:
+            reporter = _reporter()
+
+            async def run_engine(_engine, **engine_kwargs):
+                await engine_kwargs["report_vulnerabilities"]([
+                    finding("callback", 10),
+                ])
+                return {
+                    "status": result_status,
+                    "vulnerabilities": [
+                        Vulnerability.model_validate(value)
+                        for value in final_values
+                    ],
+                    "error_message": "partial failure" if result_status == "error" else "",
+                    "total_candidates": 1,
+                    "processed_candidates": 1,
+                }
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                project = root / "project"
+                project.mkdir()
+                index_path = root / "index.db"
+                index_path.touch()
+                with (
+                    patch("deephole_client.scanner.Path.home", return_value=root),
+                    patch("deephole_client.scanner.configure_platform_runtime"),
+                    patch(
+                        "deephole_client.scanner.opencode_task_context",
+                        return_value=nullcontext(),
+                    ),
+                    patch(
+                        "deephole_client.scanner.load_mining_engines",
+                        return_value=registry,
+                    ),
+                    patch(
+                        "deephole_client.scanner.run_mining_engine",
+                        side_effect=run_engine,
+                    ),
+                    patch(
+                        "deephole_client.scanner.run_code_graph_build",
+                        new=AsyncMock(return_value={
+                            "status": "success",
+                            "index_db_path": str(index_path),
+                            "stats": {"files": 0},
+                        }),
+                    ),
+                ):
+                    await run_scan(
+                        config=config,
+                        project_path=project,
+                        code_scan_path=project,
+                        reporter=reporter,
+                        scan_name=scan_id,
+                        product="",
+                        validation_environment="",
+                        checker_names=[],
+                        scan_id=scan_id,
+                        cancel_event=threading.Event(),
+                        mining_engines=[{
+                            "engine_id": manifest.engine_id,
+                            "engine_label": manifest.label,
+                            "enabled": True,
+                        }],
+                    )
+            return reporter, reporter.finish_scan.await_args.args[1]
+
+        success_reporter, success_values = await run_case(
+            result_status="success",
+            final_values=[finding("final", 20)],
+            scan_id="scan-authoritative-final",
+        )
+        self.assertEqual(
+            [value.vulnerability_report for value in success_values],
+            ["# final"],
+        )
+        self.assertEqual(success_reporter.finish_scan.await_args.args[2], "complete")
+
+        empty_reporter, empty_values = await run_case(
+            result_status="success",
+            final_values=[],
+            scan_id="scan-success-empty",
+        )
+        self.assertEqual(
+            [value.vulnerability_report for value in empty_values],
+            ["# callback"],
+        )
+        self.assertEqual(empty_reporter.finish_scan.await_args.args[2], "complete")
+
+        error_reporter, error_values = await run_case(
+            result_status="error",
+            final_values=[finding("partial", 30)],
+            scan_id="scan-error-partial",
+        )
+        self.assertEqual(
+            [value.vulnerability_report for value in error_values],
+            ["# callback", "# partial"],
+        )
+        self.assertEqual(error_reporter.finish_scan.await_args.args[2], "error")
 
     async def test_scan_errors_when_all_enabled_engines_fail(self) -> None:
         reporter = _reporter()

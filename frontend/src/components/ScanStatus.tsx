@@ -654,6 +654,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const scanRef = useRef<ScanStatusType | null>(null);
   const detailLoadingRef = useRef<Set<DetailResource>>(new Set());
   const detailAbortControllerRef = useRef(new AbortController());
+  const vulnerabilityListGenerationRef = useRef(0);
   const summaryRefreshTimerRef = useRef<number | null>(null);
   const summaryRefreshInFlightRef = useRef(false);
 
@@ -708,6 +709,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   useEffect(() => {
     detailAbortControllerRef.current.abort();
     detailAbortControllerRef.current = new AbortController();
+    vulnerabilityListGenerationRef.current += 1;
     setSidebarOpen(false);
     setScanInfoOpen(false);
     setExportMenuOpen(false);
@@ -819,9 +821,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       return next;
     });
     const signal = detailAbortControllerRef.current.signal;
+    const vulnerabilityGeneration = resource === "vulnerabilities"
+      ? vulnerabilityListGenerationRef.current
+      : null;
+    const isCurrentGeneration = () => (
+      vulnerabilityGeneration == null
+      || vulnerabilityGeneration === vulnerabilityListGenerationRef.current
+    );
     let failed = false;
     try {
-      while (cursor != null && !signal.aborted) {
+      while (cursor != null && !signal.aborted && isCurrentGeneration()) {
         let page: LoadedDetailPage | null = null;
         let lastError: unknown = null;
         for (let attempt = 0; attempt < 4 && !signal.aborted; attempt += 1) {
@@ -836,7 +845,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             }
           }
         }
-        if (signal.aborted) return;
+        if (signal.aborted || !isCurrentGeneration()) return;
         if (!page) throw lastError ?? new Error("详情分页加载失败");
         if (page.nextCursor != null && page.nextCursor === cursor) {
           throw new Error(`详情游标未前进: ${resource}`);
@@ -845,21 +854,23 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         cursor = page.nextCursor;
       }
     } catch (error) {
-      if (!signal.aborted) {
+      if (!signal.aborted && isCurrentGeneration()) {
         failed = true;
         console.warn(`自动加载扫描详情失败 (${resource})`, error);
         setDetailFailedResources((previous) => new Set(previous).add(resource));
       }
     } finally {
-      detailLoadingRef.current.delete(resource);
-      setDetailLoadingResources(new Set(detailLoadingRef.current));
-      if (!failed) {
-        setDetailFailedResources((previous) => {
-          if (!previous.has(resource)) return previous;
-          const next = new Set(previous);
-          next.delete(resource);
-          return next;
-        });
+      if (isCurrentGeneration()) {
+        detailLoadingRef.current.delete(resource);
+        setDetailLoadingResources(new Set(detailLoadingRef.current));
+        if (!failed) {
+          setDetailFailedResources((previous) => {
+            if (!previous.has(resource)) return previous;
+            const next = new Set(previous);
+            next.delete(resource);
+            return next;
+          });
+        }
       }
     }
   }, [scanId]);
@@ -1005,6 +1016,55 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         return { ...prev, vulnerabilities: vulns };
       });
       scheduleOverviewSummaryRefresh();
+    },
+    onScanVulnerabilitiesChanged: (data) => {
+      const generation = vulnerabilityListGenerationRef.current + 1;
+      vulnerabilityListGenerationRef.current = generation;
+      detailLoadingRef.current.delete("vulnerabilities");
+      setDetailLoadingResources(new Set(detailLoadingRef.current));
+      setDetailFailedResources((previous) => {
+        if (!previous.has("vulnerabilities")) return previous;
+        const next = new Set(previous);
+        next.delete("vulnerabilities");
+        return next;
+      });
+      const signal = detailAbortControllerRef.current.signal;
+      getScanVulnerabilitiesPage(scanId, null, signal)
+        .then((page) => {
+          if (
+            signal.aborted
+            || generation !== vulnerabilityListGenerationRef.current
+          ) return;
+          const vulnerabilities: Vulnerability[] = [];
+          for (const item of page.items) {
+            vulnerabilities[item.index] = item.vulnerability;
+          }
+          setScan((prev) => prev ? {
+            ...prev,
+            vulnerabilities,
+            detail_counts: prev.detail_counts ? {
+              ...prev.detail_counts,
+              vulnerabilities: data.count,
+            } : prev.detail_counts,
+            detail_pages: {
+              candidates_next_cursor: prev.detail_pages?.candidates_next_cursor ?? null,
+              vulnerabilities_next_cursor: page.next_cursor,
+              events_next_cursor: prev.detail_pages?.events_next_cursor ?? null,
+              threat_tasks_next_cursor: prev.detail_pages?.threat_tasks_next_cursor ?? null,
+              validations_next_cursor: prev.detail_pages?.validations_next_cursor ?? null,
+            },
+          } : prev);
+        })
+        .catch((error) => {
+          if (
+            !signal.aborted
+            && generation === vulnerabilityListGenerationRef.current
+          ) {
+            console.warn("刷新权威漏洞列表失败", error);
+            setDetailFailedResources((previous) => new Set(previous).add("vulnerabilities"));
+          }
+        });
+      scheduleOverviewSummaryRefresh(0);
     },
     onVulnerabilityValidation: (data) => {
       setLaunchingValidations((prev) => {

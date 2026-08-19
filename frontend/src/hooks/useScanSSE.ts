@@ -49,6 +49,10 @@ interface ScanVulnerabilityEvent {
   vulnerability: Vulnerability;
 }
 
+interface ScanVulnerabilitiesChangedEvent {
+  count: number;
+}
+
 interface ScanCandidatesEvent {
   candidates: ScanCandidate[];
 }
@@ -144,6 +148,7 @@ export interface ScanSSEHandlers {
   onScanCandidates?: (data: ScanCandidatesEvent) => void;
   onScanCandidatesChanged?: (data: ScanCandidatesChangedEvent) => void;
   onScanVulnerability?: (data: ScanVulnerabilityEvent) => void;
+  onScanVulnerabilitiesChanged?: (data: ScanVulnerabilitiesChangedEvent) => void;
   onScanEvent?: (data: ScanEventPayload) => void;
   onScanEvents?: (events: ScanEvent[]) => void;
   onScanFinish?: (data: ScanFinishEvent) => void;
@@ -296,6 +301,8 @@ function isValidPayload(eventType: string, value: unknown): value is Record<stri
         && typeof value.final === "boolean";
     case "scan_vulnerability":
       return Number.isInteger(value.index) && Number(value.index) >= 0 && isVulnerability(value.vulnerability);
+    case "scan_vulnerabilities_changed":
+      return Number.isInteger(value.count) && Number(value.count) >= 0;
     case "scan_event":
       return normalizeScanEvent(value.event) !== null;
     case "scan_finish":
@@ -481,6 +488,9 @@ export function useScanSSE(
       index: d.index,
       vulnerability: normalizeVulnerability(d.vulnerability),
     }));
+    handle<ScanVulnerabilitiesChangedEvent>("scan_vulnerabilities_changed", (d) => (
+      handlersRef.current.onScanVulnerabilitiesChanged?.(d)
+    ));
     handle<ScanEventPayload>("scan_event", (d) => {
       const event = normalizeScanEvent(d.event);
       if (event) queueScanEvent(event);

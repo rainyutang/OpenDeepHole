@@ -404,6 +404,71 @@ class VulnerabilityStoreTests(unittest.TestCase):
             self.assertEqual(stored[1].trigger_conditions, "提交畸形输入")
             self.assertEqual(stored[1].vulnerability_report, "# Vulnerability\n\nStored report.")
 
+    def test_provisional_report_batch_is_strictly_replaced_by_final_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(*_make_scan("scan-reconcile"))
+            store.add_vulnerability("scan-reconcile", _make_vuln(1))
+
+            def report_only(markdown: str) -> Vulnerability:
+                return Vulnerability(
+                    file="",
+                    line=0,
+                    function="",
+                    vuln_type="",
+                    severity="high",
+                    description="",
+                    vulnerability_report=markdown,
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                )
+
+            first_index = store.add_provisional_vulnerability(
+                "scan-reconcile",
+                "batch-1",
+                report_only("# Callback A"),
+            )
+            second_index = store.add_provisional_vulnerability(
+                "scan-reconcile",
+                "batch-1",
+                report_only("# Callback B"),
+            )
+            self.assertEqual((first_index, second_index), (1, 2))
+            self.assertEqual(
+                store.add_provisional_vulnerability(
+                    "scan-reconcile",
+                    "batch-1",
+                    report_only("# Callback A"),
+                ),
+                first_index,
+            )
+            self.assertFalse(store._conn.in_transaction)
+            self.assertTrue(all(
+                vulnerability.provisional
+                for vulnerability in store.get_vulnerabilities("scan-reconcile")[1:]
+            ))
+
+            reconciled = store.reconcile_provisional_vulnerabilities(
+                "scan-reconcile",
+                ["batch-1"],
+                [report_only("# Final authoritative report")],
+            )
+            stored = store.get_vulnerabilities("scan-reconcile")
+            self.assertEqual([item.vulnerability_report for item in stored], [
+                "",
+                "# Final authoritative report",
+            ])
+            self.assertFalse(stored[1].provisional)
+            self.assertEqual(reconciled[0][0], 1)
+
+            replay = store.reconcile_provisional_vulnerabilities(
+                "scan-reconcile",
+                ["batch-1"],
+                [report_only("# Final authoritative report")],
+            )
+            self.assertEqual(replay[0][0], 1)
+            self.assertEqual(len(store.get_vulnerabilities("scan-reconcile")), 2)
+
     def test_agent_identity_config_catalog_and_scan_key_persist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")

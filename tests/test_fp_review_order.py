@@ -6,10 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
+
 from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.store.sqlite import SqliteScanStore
-from backend.api.scan import _ensure_fp_review_job_for_scan, _ordered_fp_review_candidates, _retry_incomplete_candidates
+from backend.api.scan import (
+    _ensure_fp_review_job_for_scan,
+    _fp_review_resume_state,
+    _ordered_fp_review_candidates,
+    _retry_incomplete_candidates,
+)
 from backend.models import (
     AgentFpReviewFinish,
     AgentInfo,
@@ -182,6 +189,124 @@ class FpReviewOrderTests(unittest.TestCase):
             [item["index"] for item in ordered],
             [0, 1],
         )
+
+    def test_provisional_findings_are_read_only_for_scan_actions(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project",
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.AUDITING,
+            progress=0.5,
+            total_candidates=3,
+            processed_candidates=1,
+            vulnerabilities=[
+                Vulnerability(
+                    file="streamed.c",
+                    line=1,
+                    function="streamed",
+                    vuln_type="npd",
+                    severity="high",
+                    description="streamed",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                    provisional=True,
+                ),
+                Vulnerability(
+                    file="timeout.c",
+                    line=2,
+                    function="timeout",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="timeout",
+                    confirmed=False,
+                    ai_verdict="timeout",
+                    provisional=True,
+                ),
+                Vulnerability(
+                    file="final.c",
+                    line=3,
+                    function="final",
+                    vuln_type="npd",
+                    severity="high",
+                    description="final",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            ],
+        )
+
+        self.assertEqual(
+            [item["index"] for item in _ordered_fp_review_candidates(scan, {})],
+            [2],
+        )
+        self.assertEqual(_retry_incomplete_candidates(scan), [])
+        self.assertEqual(
+            _fp_review_resume_state(
+                scan.vulnerabilities,
+                {},
+                [("review-1", FpReviewStatus.ERROR.value)],
+            ),
+            (False, 1),
+        )
+
+    def test_provisional_finding_rejects_feedback_and_validation_mutations(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            project_id="project",
+            created_at="2026-01-01T00:00:00+00:00",
+            status=ScanItemStatus.AUDITING,
+            progress=0.5,
+            total_candidates=1,
+            processed_candidates=1,
+            vulnerabilities=[
+                Vulnerability(
+                    file="streamed.c",
+                    line=1,
+                    function="streamed",
+                    vuln_type="npd",
+                    severity="high",
+                    description="streamed",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                    provisional=True,
+                ),
+            ],
+        )
+
+        with self.assertRaises(HTTPException) as marked:
+            asyncio.run(scan_api._mark_single(
+                scan.scan_id,
+                scan,
+                object(),
+                0,
+                "confirmed",
+                "verified",
+            ))
+        self.assertEqual(marked.exception.status_code, 409)
+
+        with self.assertRaises(HTTPException) as unmarked:
+            asyncio.run(scan_api._unmark_single(
+                scan.scan_id,
+                scan,
+                object(),
+                0,
+            ))
+        self.assertEqual(unmarked.exception.status_code, 409)
+
+        with (
+            patch("backend.api.scan.get_scan_store", return_value=object()),
+            patch(
+                "backend.api.scan.run_store_call",
+                new=AsyncMock(return_value=(scan, SimpleNamespace())),
+            ),
+        ):
+            with self.assertRaises(HTTPException) as validation:
+                asyncio.run(scan_api._trigger_vulnerability_validation(
+                    scan.scan_id,
+                    0,
+                    "http://testserver/",
+                ))
+        self.assertEqual(validation.exception.status_code, 409)
 
     def test_pending_analysis_does_not_block_incomplete_retry(self) -> None:
         scan = ScanStatus(

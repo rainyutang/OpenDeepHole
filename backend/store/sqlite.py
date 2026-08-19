@@ -54,6 +54,7 @@ from backend.models import (
     VulnerabilityValidation,
     canonical_mining_engine_label,
 )
+from backend.vulnerability_identity import vulnerability_report_identity
 
 from .base import DuplicateScanNameError, ScanStoreBase
 
@@ -333,6 +334,9 @@ def _vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
         threat_code_path=(
             row["threat_code_path"] if "threat_code_path" in keys else ""
         ) or "",
+        provisional=bool(
+            row["provisional"] if "provisional" in keys else 0
+        ),
         output_source=_output_source(row["output_source"] if "output_source" in keys else "{}"),
     )
 
@@ -509,6 +513,8 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     threat_surface_node_id TEXT NOT NULL DEFAULT '',
     threat_method_node_id TEXT NOT NULL DEFAULT '',
     threat_code_path    TEXT NOT NULL DEFAULT '',
+    provisional        INTEGER NOT NULL DEFAULT 0,
+    report_batch_id    TEXT NOT NULL DEFAULT '',
     output_source       TEXT NOT NULL DEFAULT '{}',
     UNIQUE(scan_id, idx)
 );
@@ -1262,6 +1268,18 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN vulnerability_report TEXT NOT NULL DEFAULT ''"
             )
+        if "provisional" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0"
+            )
+        if "report_batch_id" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN report_batch_id TEXT NOT NULL DEFAULT ''"
+            )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vulnerabilities_report_batch "
+            "ON vulnerabilities(scan_id, report_batch_id)"
+        )
         for column in (
             "impact",
             "vulnerable_code",
@@ -2897,6 +2915,140 @@ class SqliteScanStore(ScanStoreBase):
         )
         return cur.fetchone()[0]
 
+    def _insert_vulnerability_locked(
+        self,
+        scan_id: str,
+        index: int,
+        vuln: Vulnerability,
+        *,
+        provisional: bool = False,
+        report_batch_id: str = "",
+    ) -> None:
+        columns = (
+            "scan_id, idx, audit_index, file, line, function, call_chain, "
+            "vuln_type, severity, description, impact, vulnerable_code, "
+            "attack_entry, root_cause, trigger_conditions, ai_analysis, "
+            "vulnerability_report, confirmed, ai_verdict, failure_reason, "
+            "user_verdict, user_verdict_reason, ticket_submitted, ticket_id, "
+            "function_source, function_start_line, variant_of, "
+            "analysis_source, engine_id, engine_label, fp_review_eligible, "
+            "source_task_id, threat_surface_node_id, threat_method_node_id, "
+            "threat_code_path, provisional, report_batch_id, output_source"
+        )
+        values = (
+            scan_id,
+            index,
+            vuln.audit_index,
+            vuln.file,
+            vuln.line,
+            vuln.function,
+            vuln.call_chain,
+            vuln.vuln_type,
+            vuln.severity,
+            vuln.description,
+            vuln.impact,
+            vuln.vulnerable_code,
+            vuln.attack_entry,
+            vuln.root_cause,
+            vuln.trigger_conditions,
+            vuln.ai_analysis,
+            vuln.vulnerability_report,
+            1 if vuln.confirmed else 0,
+            vuln.ai_verdict,
+            vuln.failure_reason,
+            vuln.user_verdict,
+            vuln.user_verdict_reason,
+            1 if vuln.ticket_submitted else 0,
+            vuln.ticket_id if vuln.ticket_submitted else "",
+            vuln.function_source,
+            vuln.function_start_line,
+            vuln.variant_of,
+            vuln.analysis_source,
+            vuln.engine_id,
+            vuln.engine_label,
+            _LEGACY_FP_REVIEW_ELIGIBLE,
+            vuln.source_task_id,
+            vuln.threat_surface_node_id,
+            vuln.threat_method_node_id,
+            vuln.threat_code_path,
+            1 if provisional else 0,
+            report_batch_id,
+            vuln.output_source.model_dump_json(),
+        )
+        placeholders = ", ".join("?" for _ in values)
+        self._conn.execute(
+            f"INSERT INTO vulnerabilities ({columns}) VALUES ({placeholders})",
+            values,
+        )
+
+    def _overwrite_vulnerability_locked(
+        self,
+        scan_id: str,
+        index: int,
+        vuln: Vulnerability,
+        *,
+        provisional: bool = False,
+        report_batch_id: str = "",
+    ) -> None:
+        assignments = (
+            "audit_index = ?, file = ?, line = ?, function = ?, "
+            "call_chain = ?, vuln_type = ?, severity = ?, description = ?, "
+            "impact = ?, vulnerable_code = ?, attack_entry = ?, "
+            "root_cause = ?, trigger_conditions = ?, ai_analysis = ?, "
+            "vulnerability_report = ?, confirmed = ?, ai_verdict = ?, "
+            "failure_reason = ?, user_verdict = ?, user_verdict_reason = ?, "
+            "ticket_submitted = ?, ticket_id = ?, function_source = ?, "
+            "function_start_line = ?, variant_of = ?, analysis_source = ?, "
+            "engine_id = ?, engine_label = ?, fp_review_eligible = ?, "
+            "source_task_id = ?, threat_surface_node_id = ?, "
+            "threat_method_node_id = ?, threat_code_path = ?, provisional = ?, "
+            "report_batch_id = ?, output_source = ?"
+        )
+        self._conn.execute(
+            f"UPDATE vulnerabilities SET {assignments} "
+            "WHERE scan_id = ? AND idx = ?",
+            (
+                vuln.audit_index,
+                vuln.file,
+                vuln.line,
+                vuln.function,
+                vuln.call_chain,
+                vuln.vuln_type,
+                vuln.severity,
+                vuln.description,
+                vuln.impact,
+                vuln.vulnerable_code,
+                vuln.attack_entry,
+                vuln.root_cause,
+                vuln.trigger_conditions,
+                vuln.ai_analysis,
+                vuln.vulnerability_report,
+                1 if vuln.confirmed else 0,
+                vuln.ai_verdict,
+                vuln.failure_reason,
+                vuln.user_verdict,
+                vuln.user_verdict_reason,
+                1 if vuln.ticket_submitted else 0,
+                vuln.ticket_id if vuln.ticket_submitted else "",
+                vuln.function_source,
+                vuln.function_start_line,
+                vuln.variant_of,
+                vuln.analysis_source,
+                vuln.engine_id,
+                vuln.engine_label,
+                _LEGACY_FP_REVIEW_ELIGIBLE,
+                vuln.source_task_id,
+                vuln.threat_surface_node_id,
+                vuln.threat_method_node_id,
+                vuln.threat_code_path,
+                1 if provisional else 0,
+                report_batch_id,
+                vuln.output_source.model_dump_json(),
+                scan_id,
+                index,
+            ),
+        )
+
     def add_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
         with self._lock:
             cur = self._conn.execute(
@@ -2905,58 +3057,10 @@ class SqliteScanStore(ScanStoreBase):
             )
             next_idx = cur.fetchone()[0] + 1
 
-            self._conn.execute(
-                """\
-                INSERT INTO vulnerabilities
-                    (scan_id, idx, audit_index, file, line, function, call_chain, vuln_type,
-                     severity, description, impact, vulnerable_code, attack_entry,
-                     root_cause, trigger_conditions, ai_analysis, vulnerability_report, confirmed,
-                     ai_verdict, failure_reason, user_verdict, user_verdict_reason,
-                     ticket_submitted, ticket_id,
-                     function_source, function_start_line, variant_of,
-                     analysis_source, engine_id, engine_label,
-                     fp_review_eligible, source_task_id, threat_surface_node_id,
-                     threat_method_node_id, threat_code_path, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    scan_id,
-                    next_idx,
-                    vuln.audit_index,
-                    vuln.file,
-                    vuln.line,
-                    vuln.function,
-                    vuln.call_chain,
-                    vuln.vuln_type,
-                    vuln.severity,
-                    vuln.description,
-                    vuln.impact,
-                    vuln.vulnerable_code,
-                    vuln.attack_entry,
-                    vuln.root_cause,
-                    vuln.trigger_conditions,
-                    vuln.ai_analysis,
-                    vuln.vulnerability_report,
-                    1 if vuln.confirmed else 0,
-                    vuln.ai_verdict,
-                    vuln.failure_reason,
-                    vuln.user_verdict,
-                    vuln.user_verdict_reason,
-                    1 if vuln.ticket_submitted else 0,
-                    vuln.ticket_id if vuln.ticket_submitted else "",
-                    vuln.function_source,
-                    vuln.function_start_line,
-                    vuln.variant_of,
-                    vuln.analysis_source,
-                    vuln.engine_id,
-                    vuln.engine_label,
-                    _LEGACY_FP_REVIEW_ELIGIBLE,
-                    vuln.source_task_id,
-                    vuln.threat_surface_node_id,
-                    vuln.threat_method_node_id,
-                    vuln.threat_code_path,
-                    vuln.output_source.model_dump_json(),
-                ),
+            self._insert_vulnerability_locked(
+                scan_id,
+                next_idx,
+                vuln,
             )
             self._conn.commit()
             return next_idx
@@ -3127,6 +3231,247 @@ class SqliteScanStore(ScanStoreBase):
             )
             self._conn.commit()
             return next_idx
+
+    def add_provisional_vulnerability(
+        self,
+        scan_id: str,
+        report_batch_id: str,
+        vuln: Vulnerability,
+    ) -> int:
+        """Append one live result, treating retries within a batch as replays."""
+        normalized_batch_id = str(report_batch_id or "").strip()
+        if not normalized_batch_id:
+            raise ValueError("report_batch_id is required for provisional results")
+
+        stored = vuln.model_copy(deep=True, update={"provisional": True})
+        identity = vulnerability_report_identity(stored)
+        with self._lock:
+            try:
+                # Besides being a no-op logically, this serializes per-scan
+                # result writers across PostgreSQL workers before allocating
+                # an index.
+                self._conn.execute(
+                    "UPDATE scans SET scan_id = scan_id WHERE scan_id = ?",
+                    (scan_id,),
+                )
+                rows = self._conn.execute(
+                    """\
+                    SELECT *
+                    FROM vulnerabilities
+                    WHERE scan_id = ?
+                      AND provisional = 1
+                      AND report_batch_id = ?
+                    ORDER BY idx
+                    """,
+                    (scan_id, normalized_batch_id),
+                ).fetchall()
+                for row in rows:
+                    if (
+                        vulnerability_report_identity(
+                            _vulnerability_from_row(row)
+                        )
+                        == identity
+                    ):
+                        self._conn.commit()
+                        return int(row["idx"])
+
+                row = self._conn.execute(
+                    "SELECT COALESCE(MAX(idx), -1) "
+                    "FROM vulnerabilities WHERE scan_id = ?",
+                    (scan_id,),
+                ).fetchone()
+                next_idx = int(row[0]) + 1
+                self._insert_vulnerability_locked(
+                    scan_id,
+                    next_idx,
+                    stored,
+                    provisional=True,
+                    report_batch_id=normalized_batch_id,
+                )
+                self._conn.commit()
+                return next_idx
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def reconcile_provisional_vulnerabilities(
+        self,
+        scan_id: str,
+        report_batch_ids: list[str],
+        vulnerabilities: list[Vulnerability],
+    ) -> list[tuple[int, Vulnerability]]:
+        """Atomically replace selected live batches with authoritative results."""
+        normalized_batch_ids = list(
+            dict.fromkeys(
+                batch_id
+                for value in report_batch_ids
+                if (batch_id := str(value or "").strip())
+            )
+        )
+        if not normalized_batch_ids:
+            raise ValueError("report_batch_ids are required for reconciliation")
+        desired = [
+            vuln.model_copy(deep=True, update={"provisional": False})
+            for vuln in vulnerabilities
+        ]
+
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "UPDATE scans SET scan_id = scan_id WHERE scan_id = ?",
+                    (scan_id,),
+                )
+                rows = self._conn.execute(
+                    "SELECT * FROM vulnerabilities WHERE scan_id = ? ORDER BY idx",
+                    (scan_id,),
+                ).fetchall()
+                target_batches = set(normalized_batch_ids)
+                targeted_rows = [
+                    row
+                    for row in rows
+                    if bool(row["provisional"])
+                    and str(row["report_batch_id"] or "") in target_batches
+                ]
+                affected_task_ids = {
+                    str(row["source_task_id"] or "").strip()
+                    for row in targeted_rows
+                    if str(row["source_task_id"] or "").strip()
+                }
+                affected_task_ids.update(
+                    str(vuln.source_task_id or "").strip()
+                    for vuln in desired
+                    if str(vuln.source_task_id or "").strip()
+                )
+
+                if normalized_batch_ids:
+                    placeholders = ", ".join("?" for _ in normalized_batch_ids)
+                    self._conn.execute(
+                        f"""\
+                        DELETE FROM vulnerabilities
+                        WHERE scan_id = ?
+                          AND provisional = 1
+                          AND report_batch_id IN ({placeholders})
+                        """,
+                        (scan_id, *normalized_batch_ids),
+                    )
+
+                remaining_rows = [
+                    row
+                    for row in rows
+                    if not (
+                        bool(row["provisional"])
+                        and str(row["report_batch_id"] or "") in target_batches
+                    )
+                ]
+                remaining_by_identity: dict[
+                    tuple[object, ...], tuple[int, Vulnerability]
+                ] = {}
+                for row in remaining_rows:
+                    stored = _vulnerability_from_row(row)
+                    if not stored.provisional:
+                        remaining_by_identity.setdefault(
+                            vulnerability_report_identity(stored),
+                            (int(row["idx"]), stored),
+                        )
+
+                used_indexes = {int(row["idx"]) for row in remaining_rows}
+                next_idx = max(used_indexes, default=-1) + 1
+                reconciled: list[tuple[int, Vulnerability]] = []
+                reconciled_identities: set[tuple[object, ...]] = set()
+                for vuln in desired:
+                    identity = vulnerability_report_identity(vuln)
+                    if identity in reconciled_identities:
+                        continue
+                    reconciled_identities.add(identity)
+
+                    existing = remaining_by_identity.get(identity)
+                    if existing is not None:
+                        reconciled.append(existing)
+                        continue
+
+                    replacement_row = next(
+                        (
+                            row
+                            for row in remaining_rows
+                            if int(row["idx"]) not in {
+                                index for index, _stored in reconciled
+                            }
+                            and not bool(row["provisional"])
+                            and str(row["file"] or "") == vuln.file
+                            and int(row["line"] or 0) == int(vuln.line or 0)
+                            and str(row["function"] or "") == vuln.function
+                            and str(row["vuln_type"] or "") == vuln.vuln_type
+                            and str(row["engine_id"] or "") == vuln.engine_id
+                            and not str(row["user_verdict"] or "").strip()
+                            and str(row["ai_verdict"] or "")
+                            in {"timeout", "no_result", "failed"}
+                        ),
+                        None,
+                    )
+                    if replacement_row is not None:
+                        index = int(replacement_row["idx"])
+                        self._overwrite_vulnerability_locked(scan_id, index, vuln)
+                    else:
+                        while next_idx in used_indexes:
+                            next_idx += 1
+                        index = next_idx
+                        used_indexes.add(index)
+                        next_idx += 1
+                        self._insert_vulnerability_locked(scan_id, index, vuln)
+                    remaining_by_identity[identity] = (index, vuln)
+                    reconciled.append((index, vuln))
+
+                if affected_task_ids:
+                    task_indexes: dict[str, list[int]] = {
+                        task_id: [] for task_id in affected_task_ids
+                    }
+                    current_rows = self._conn.execute(
+                        """\
+                        SELECT idx, source_task_id
+                        FROM vulnerabilities
+                        WHERE scan_id = ? AND provisional = 0
+                        ORDER BY idx
+                        """,
+                        (scan_id,),
+                    ).fetchall()
+                    for row in current_rows:
+                        task_id = str(row["source_task_id"] or "").strip()
+                        if task_id in task_indexes:
+                            task_indexes[task_id].append(int(row["idx"]))
+                    for task_id, indexes in task_indexes.items():
+                        self._conn.execute(
+                            """\
+                            UPDATE threat_audit_tasks
+                            SET result_vuln_indexes = ?
+                            WHERE scan_id = ? AND task_id = ?
+                            """,
+                            (json.dumps(indexes, ensure_ascii=False), scan_id, task_id),
+                        )
+
+                self._conn.commit()
+                return reconciled
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def promote_provisional_vulnerabilities(self, scan_id: str) -> int:
+        """Keep live results when a scan terminates before explicit reconciliation."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE scans SET scan_id = scan_id WHERE scan_id = ?",
+                (scan_id,),
+            )
+            cursor = self._conn.execute(
+                """\
+                UPDATE vulnerabilities
+                SET provisional = 0, report_batch_id = ''
+                WHERE scan_id = ? AND provisional = 1
+                """,
+                (scan_id,),
+            )
+            promoted = cursor.rowcount
+            self._conn.commit()
+            return promoted
 
     def update_vulnerability(
         self,

@@ -669,7 +669,8 @@ def _ordered_fp_review_candidates(scan: ScanStatus, latest_fp_results: dict[int,
     reviewed: list[dict] = []
     for i, v in enumerate(scan.vulnerabilities):
         if (
-            not is_llm_issue(v)
+            v.provisional
+            or not is_llm_issue(v)
             or _has_final_user_verdict(v)
         ):
             continue
@@ -709,7 +710,8 @@ def _fp_review_resume_state(
         1
         for index, vulnerability in enumerate(vulnerabilities)
         if (
-            is_llm_issue(vulnerability)
+            not vulnerability.provisional
+            and is_llm_issue(vulnerability)
             and not _has_final_user_verdict(vulnerability)
             and index not in latest_fp_results
         )
@@ -1033,7 +1035,8 @@ def _candidate_key(candidate: Candidate) -> tuple[str, int, str, str]:
 
 def _is_retryable_vuln(vuln) -> bool:
     return (
-        _is_static_candidate_vulnerability(vuln)
+        not vuln.provisional
+        and _is_static_candidate_vulnerability(vuln)
         and not _has_final_user_verdict(vuln)
         and (vuln.ai_verdict or "") in _RETRYABLE_AI_VERDICTS
     )
@@ -3389,6 +3392,11 @@ async def _trigger_vulnerability_validation(
     if idx < 0 or idx >= len(scan.vulnerabilities):
         raise HTTPException(status_code=404, detail="Vulnerability index out of range")
     vuln = scan.vulnerabilities[idx]
+    if vuln.provisional:
+        raise HTTPException(
+            status_code=409,
+            detail="漏洞仍在等待引擎最终结果对账，暂不能执行验证",
+        )
     if not (vuln.confirmed or vuln.ai_verdict == "confirmed"):
         raise HTTPException(status_code=400, detail="Only AI-confirmed vulnerabilities can be validated")
     product = str(meta.product or "").strip()
@@ -3678,6 +3686,11 @@ async def _mark_single(
         raise HTTPException(status_code=400, detail=f"Invalid vulnerability index: {index}")
 
     vuln = scan.vulnerabilities[index]
+    if vuln.provisional:
+        raise HTTPException(
+            status_code=409,
+            detail="漏洞仍在等待引擎最终结果对账，暂不能标记",
+        )
     normalized_ticket_id = ticket_id.strip() if ticket_submitted else ""
 
     removed_feedback_ids: list[str] = []
@@ -3799,6 +3812,12 @@ async def _unmark_single(
     """Clear a vulnerability's manual verdict and delete its same-source feedback."""
     if index < 0 or index >= len(scan.vulnerabilities):
         raise HTTPException(status_code=400, detail=f"Invalid vulnerability index: {index}")
+
+    if scan.vulnerabilities[index].provisional:
+        raise HTTPException(
+            status_code=409,
+            detail="漏洞仍在等待引擎最终结果对账，暂不能取消标记",
+        )
 
     if scan_id in _running_scans:
         live = _running_scans[scan_id]

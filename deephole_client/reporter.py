@@ -159,19 +159,38 @@ class Reporter:
         except Exception as e:
             print(f"Warning: failed to upload static candidates: {e}")
 
-    async def report_vulnerability(self, scan_id: str, vuln: Vulnerability) -> dict | None:
+    async def report_vulnerability(
+        self,
+        scan_id: str,
+        vuln: Vulnerability,
+        *,
+        provisional: bool = False,
+        report_batch_id: str = "",
+    ) -> dict | None:
         """Push a single vulnerability result immediately after it is audited."""
+        vuln.provisional = bool(provisional)
         if self.dry_run:
             marker = "[VULN]" if vuln.confirmed else "[  FP]"
             print(f"  {marker} {vuln.vuln_type.upper()} {vuln.file}:{vuln.line} ({vuln.function})")
             return None
         vuln.output_source = self._with_agent_source(vuln.output_source)
         try:
-            resp = await self._client.post(
-                f"{self.server_url}/api/agent/scan/{scan_id}/vulnerability",
-                json=vuln.model_dump(),
-                timeout=10.0,
-            )
+            if provisional:
+                resp = await self._client.post(
+                    f"{self.server_url}/api/agent/scan/{scan_id}/vulnerability",
+                    json=vuln.model_dump(),
+                    params={
+                        "provisional": "true",
+                        "report_batch_id": report_batch_id,
+                    },
+                    timeout=10.0,
+                )
+            else:
+                resp = await self._client.post(
+                    f"{self.server_url}/api/agent/scan/{scan_id}/vulnerability",
+                    json=vuln.model_dump(),
+                    timeout=10.0,
+                )
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -182,6 +201,44 @@ class Reporter:
                     )
             print(f"Warning: failed to upload vulnerability result: {e}")
             return None
+
+    async def reconcile_vulnerabilities(
+        self,
+        scan_id: str,
+        report_batch_ids: list[str],
+        vulnerabilities: list[Vulnerability],
+    ) -> dict | None:
+        """Replace provisional engine reports with their authoritative list."""
+        if self.dry_run:
+            return None
+        for vuln in vulnerabilities:
+            vuln.provisional = False
+            vuln.output_source = self._with_agent_source(vuln.output_source)
+        payload = {
+            "report_batch_ids": report_batch_ids,
+            "vulnerabilities": [vuln.model_dump() for vuln in vulnerabilities],
+        }
+        for attempt in range(3):
+            try:
+                response = await self._client.post(
+                    f"{self.server_url}/api/agent/scan/{scan_id}/vulnerabilities/reconcile",
+                    json=payload,
+                    timeout=60.0,
+                )
+                response.raise_for_status()
+                result = response.json()
+                async with self._batch_lock:
+                    self._undelivered_vulnerabilities.pop(scan_id, None)
+                return result if isinstance(result, dict) else None
+            except Exception as exc:
+                if attempt < 2:
+                    await asyncio.sleep(2**attempt)
+                    continue
+                print(
+                    "Warning: failed to reconcile vulnerability results after "
+                    f"3 attempts: {exc}"
+                )
+        return None
 
     async def report_mining_engine_run(
         self,
@@ -407,9 +464,9 @@ class Reporter:
                     raise RuntimeError(
                         "invalid vulnerability deduplication context item",
                     )
-                vulnerabilities.append(
-                    Vulnerability.model_validate(raw_vulnerability),
-                )
+                vulnerability = Vulnerability.model_validate(raw_vulnerability)
+                if not vulnerability.provisional:
+                    vulnerabilities.append(vulnerability)
                 last_index = max(last_index, index)
             if not bool(payload.get("has_more")):
                 return vulnerabilities
@@ -489,6 +546,7 @@ class Reporter:
         total_candidates: int,
         processed_candidates: int,
         error_message: Optional[str] = None,
+        replace_report_batch_ids: list[str] | None = None,
     ) -> None:
         """Push final scan results. Retries up to 3 times on failure."""
         if self.dry_run:
@@ -507,14 +565,20 @@ class Reporter:
             "total_candidates": total_candidates,
             "processed_candidates": processed_candidates,
             "error_message": error_message,
+            "replace_report_batch_ids": list(replace_report_batch_ids or []),
         }
         await self._flush_scan_batches(scan_id)
         async with self._batch_lock:
             has_undelivered_vulnerabilities = bool(
                 self._undelivered_vulnerabilities.get(scan_id)
             )
-        if self.protocol_version >= 2 and not has_undelivered_vulnerabilities:
+        if (
+            self.protocol_version >= 2
+            and not has_undelivered_vulnerabilities
+            and not replace_report_batch_ids
+        ):
             payload.pop("vulnerabilities", None)
+            payload.pop("replace_report_batch_ids", None)
             finish_path = f"/api/agent/v2/scan/{scan_id}/finish"
         else:
             finish_path = f"/api/agent/scan/{scan_id}/finish"

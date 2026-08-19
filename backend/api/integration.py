@@ -34,6 +34,7 @@ from backend.models import (
     ScanVulnerabilityValidationRequest,
     UnmarkRequest,
     User,
+    VulnerabilityPage,
 )
 from backend.registry import CHECKER_VISIBILITY_PUBLIC, refresh_registry
 from backend.scan_metrics import calculate_issue_metrics
@@ -378,6 +379,25 @@ async def get_public_scan_status(
     current_user: User = Depends(_public_user_dependency),
 ) -> ScanStatus:
     return await scan_api.get_scan_status(scan_id, current_user)
+
+
+@router.get(
+    "/api/public/scans/{scan_id}/vulnerabilities",
+    response_model=VulnerabilityPage,
+)
+async def get_public_scan_vulnerabilities(
+    scan_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    after: int = Query(-1, ge=-1),
+    current_user: User = Depends(_public_user_dependency),
+) -> VulnerabilityPage:
+    """Return the authoritative vulnerability page for a public scan."""
+    return await scan_api.get_scan_vulnerabilities_v2(
+        scan_id,
+        limit,
+        after,
+        current_user,
+    )
 
 
 @router.post("/api/public/scans/{scan_id}/stop")

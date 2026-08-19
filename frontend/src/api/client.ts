@@ -374,10 +374,19 @@ export async function getScanVulnerabilitiesPage(
   after?: number | null,
   signal?: AbortSignal,
 ): Promise<VulnerabilityPage> {
-  const { data } = await api.get<unknown>(`/api/v2/scans/${scanId}/vulnerabilities`, {
-    params: after == null ? undefined : { after },
-    signal,
-  });
+  const publicScan = isPublicScan(scanId);
+  const { data } = await api.get<unknown>(
+    publicScan
+      ? publicScanPath("/vulnerabilities")
+      : `/api/v2/scans/${scanId}/vulnerabilities`,
+    {
+      params: {
+        ...(publicScan ? publicParams() : {}),
+        ...(after == null ? {} : { after }),
+      },
+      signal,
+    },
+  );
   if (!isRecord(data) || !Array.isArray(data.items)) throw new Error("漏洞分页响应无效");
   return {
     items: data.items.flatMap((item) => {

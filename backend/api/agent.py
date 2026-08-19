@@ -74,6 +74,7 @@ from backend.models import (
     AgentScanEventBatch,
     AgentScanFinish,
     AgentScanFinishV2,
+    AgentVulnerabilityReconcile,
     AgentVulnerabilityValidationUpdate,
     FpReviewStatus,
     HistoryPattern,
@@ -3271,7 +3272,12 @@ async def agent_report_threat_analysis_run(
 
 
 @router.post("/scan/{scan_id}/vulnerability")
-async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
+async def agent_report_vulnerability(
+    scan_id: str,
+    vuln: Vulnerability,
+    provisional: bool = False,
+    report_batch_id: str = "",
+) -> dict:
     """Agent pushes a single vulnerability result immediately after auditing it."""
     store = get_scan_store()
     meta = await run_store_call(store, "get_scan_meta", scan_id)
@@ -3280,7 +3286,48 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
         vuln,
         selections=meta.mining_engines if meta is not None else [],
     )
+    vuln.provisional = bool(provisional)
     live_scan = _running_scans.get(scan_id)
+    if provisional:
+        normalized_batch_id = str(report_batch_id or "").strip()
+        if not normalized_batch_id:
+            raise HTTPException(
+                status_code=422,
+                detail="临时漏洞上报必须包含 report_batch_id",
+            )
+        vuln_index = await run_store_call(
+            store,
+            "add_provisional_vulnerability",
+            scan_id,
+            normalized_batch_id,
+            vuln,
+        )
+        scan = live_scan or await _ensure_running_scan(scan_id)
+        if scan is not None:
+            if vuln_index < len(scan.vulnerabilities):
+                scan.vulnerabilities[vuln_index] = vuln
+            elif vuln_index == len(scan.vulnerabilities):
+                scan.vulnerabilities.append(vuln)
+            else:
+                scan.vulnerabilities = await run_store_call(
+                    store,
+                    "get_vulnerabilities",
+                    scan_id,
+                )
+
+        from backend.sse import publish
+
+        publish(scan_id, "scan_vulnerability", {
+            "index": vuln_index,
+            "vulnerability": vuln.model_dump(),
+        })
+        return {
+            "ok": True,
+            "index": vuln_index,
+            "provisional": True,
+            "report_markdown": vuln.vulnerability_report,
+        }
+
     existing_vulnerabilities = (
         live_scan.vulnerabilities
         if live_scan is not None
@@ -3383,6 +3430,83 @@ async def agent_report_vulnerability(scan_id: str, vuln: Vulnerability) -> dict:
     if fp_review_info is not None:
         response["fp_review"] = fp_review_info
     return response
+
+
+@router.post("/scan/{scan_id}/vulnerabilities/reconcile")
+async def agent_reconcile_vulnerabilities(
+    scan_id: str,
+    body: AgentVulnerabilityReconcile,
+) -> dict:
+    """Replace live engine batches with the authoritative post-run result list."""
+    if not any(str(value or "").strip() for value in body.report_batch_ids):
+        raise HTTPException(
+            status_code=422,
+            detail="最终漏洞列表对账必须包含 report_batch_ids",
+        )
+    store = get_scan_store()
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    stamped = []
+    for raw_vuln in body.vulnerabilities:
+        vuln = _stamp_vulnerability_engine(
+            scan_id,
+            raw_vuln,
+            selections=meta.mining_engines if meta is not None else [],
+        )
+        vuln.provisional = False
+        stamped.append(vuln)
+
+    reconciled = await run_store_call(
+        store,
+        "reconcile_provisional_vulnerabilities",
+        scan_id,
+        body.report_batch_ids,
+        stamped,
+    )
+    final_vulnerabilities = await run_store_call(
+        store,
+        "get_vulnerabilities",
+        scan_id,
+    )
+    scan = _running_scans.get(scan_id)
+    if scan is not None:
+        scan.vulnerabilities = final_vulnerabilities
+
+    from backend.api.scan import (
+        _fp_review_stage_titles,
+        _scan_fp_result_map,
+        _vuln_report_markdown,
+    )
+    from backend.sse import publish
+
+    fp_map = _scan_fp_result_map(scan_id)
+    stage_titles = _fp_review_stage_titles(scan_id)
+    items = []
+    for vuln_index, vuln in reconciled:
+        try:
+            report_markdown = _vuln_report_markdown(
+                vuln_index,
+                vuln,
+                fp_map.get(vuln_index),
+                fp_review_stage_titles=stage_titles,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to render reconciled vulnerability report scan=%s idx=%s: %s",
+                scan_id,
+                vuln_index,
+                exc,
+            )
+            report_markdown = vuln.vulnerability_report
+        items.append({
+            "index": vuln_index,
+            "vulnerability": vuln.model_dump(mode="json"),
+            "report_markdown": report_markdown,
+        })
+
+    publish(scan_id, "scan_vulnerabilities_changed", {
+        "count": len(final_vulnerabilities),
+    })
+    return {"ok": True, "items": items, "count": len(final_vulnerabilities)}
 
 
 @router.post("/scan/{scan_id}/candidates")
@@ -3830,44 +3954,86 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
 
     from backend.sse import publish
 
-    existing_vulnerabilities = await run_store_call(
-        store,
-        "get_vulnerabilities",
-        scan_id,
-    )
-    existing_identities = {
-        vulnerability_report_identity(vuln)
-        for vuln in existing_vulnerabilities
-    }
     mining_engine_selections = (
         loaded[1].mining_engines
         if loaded is not None
         else []
     )
+    replacement_batch_ids = list(dict.fromkeys(
+        batch_id
+        for value in body.replace_report_batch_ids
+        if (batch_id := str(value or "").strip())
+    ))
+    if body.replace_report_batch_ids and not replacement_batch_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="replace_report_batch_ids 不能只包含空值",
+        )
     reconciled_vulnerabilities: list[tuple[int, Vulnerability]] = []
-    for raw_vuln in body.vulnerabilities:
-        vuln = _stamp_vulnerability_engine(
-            scan_id,
-            raw_vuln,
-            selections=mining_engine_selections,
-        )
-        identity = vulnerability_report_identity(vuln)
-        if identity in existing_identities:
-            continue
-        vuln_index = await run_store_call(
+    refresh_vulnerabilities = False
+    if replacement_batch_ids:
+        authoritative_vulnerabilities = []
+        for raw_vuln in body.vulnerabilities:
+            vuln = _stamp_vulnerability_engine(
+                scan_id,
+                raw_vuln,
+                selections=mining_engine_selections,
+            )
+            vuln.provisional = False
+            authoritative_vulnerabilities.append(vuln)
+        reconciled_vulnerabilities = await run_store_call(
             store,
-            "upsert_incomplete_vulnerability",
+            "reconcile_provisional_vulnerabilities",
             scan_id,
-            vuln,
+            replacement_batch_ids,
+            authoritative_vulnerabilities,
         )
-        existing_identities.add(identity)
-        reconciled_vulnerabilities.append((vuln_index, vuln))
+        refresh_vulnerabilities = True
+        final_vulnerabilities = await run_store_call(
+            store,
+            "get_vulnerabilities",
+            scan_id,
+        )
+    else:
+        promoted = await run_store_call(
+            store,
+            "promote_provisional_vulnerabilities",
+            scan_id,
+        )
+        refresh_vulnerabilities = promoted > 0
+        existing_vulnerabilities = await run_store_call(
+            store,
+            "get_vulnerabilities",
+            scan_id,
+        )
+        existing_identities = {
+            vulnerability_report_identity(vuln)
+            for vuln in existing_vulnerabilities
+        }
+        for raw_vuln in body.vulnerabilities:
+            vuln = _stamp_vulnerability_engine(
+                scan_id,
+                raw_vuln,
+                selections=mining_engine_selections,
+            )
+            vuln.provisional = False
+            identity = vulnerability_report_identity(vuln)
+            if identity in existing_identities:
+                continue
+            vuln_index = await run_store_call(
+                store,
+                "upsert_incomplete_vulnerability",
+                scan_id,
+                vuln,
+            )
+            existing_identities.add(identity)
+            reconciled_vulnerabilities.append((vuln_index, vuln))
 
-    final_vulnerabilities = (
-        await run_store_call(store, "get_vulnerabilities", scan_id)
-        if reconciled_vulnerabilities
-        else existing_vulnerabilities
-    )
+        final_vulnerabilities = (
+            await run_store_call(store, "get_vulnerabilities", scan_id)
+            if reconciled_vulnerabilities
+            else existing_vulnerabilities
+        )
 
     await run_store_call(
         store,
@@ -3909,6 +4075,10 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         publish(scan_id, "scan_vulnerability", {
             "index": vuln_index,
             "vulnerability": vuln.model_dump(),
+        })
+    if refresh_vulnerabilities:
+        publish(scan_id, "scan_vulnerabilities_changed", {
+            "count": len(final_vulnerabilities),
         })
     publish(scan_id, "scan_status", {
         "status": final_status,

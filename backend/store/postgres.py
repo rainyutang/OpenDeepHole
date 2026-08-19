@@ -392,7 +392,10 @@ class PostgresScanStore(SqliteScanStore):
                 "SELECT pg_advisory_xact_lock(%s)",
                 (_SCHEMA_BOOTSTRAP_LOCK_KEY,),
             )
+            deferred_report_batch_index = "idx_vulnerabilities_report_batch"
             for statement in _sqlite_schema():
+                if deferred_report_batch_index in statement:
+                    continue
                 connection.execute(statement)
             for statement in filter(str.strip, _COORDINATION_SCHEMA.split(";")):
                 connection.execute(statement)
@@ -418,8 +421,14 @@ class PostgresScanStore(SqliteScanStore):
                 "ALTER TABLE scans ADD COLUMN IF NOT EXISTS vulnerability_validation_json TEXT",
                 "ALTER TABLE vulnerability_validations ADD COLUMN IF NOT EXISTS validation_method_id TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE vulnerability_validations ADD COLUMN IF NOT EXISTS validation_method_label TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS provisional INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS report_batch_id TEXT NOT NULL DEFAULT ''",
             ):
                 connection.execute(statement)
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vulnerabilities_report_batch "
+                "ON vulnerabilities(scan_id, report_batch_id)"
+            )
             connection.execute(
                 "UPDATE scans SET user_id = '' WHERE user_id IS NULL"
             )

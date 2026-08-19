@@ -158,6 +158,7 @@ export interface Vulnerability {
   threat_surface_node_id?: string;
   threat_method_node_id?: string;
   threat_code_path?: string;
+  provisional?: boolean;
   output_source?: OutputSource;
 }
 

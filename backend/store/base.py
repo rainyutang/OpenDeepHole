@@ -206,6 +206,28 @@ class ScanStoreBase(ABC):
     def upsert_incomplete_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
         """Replace a matching timeout/no-result vulnerability, or append a new result."""
 
+    def add_provisional_vulnerability(
+        self,
+        scan_id: str,
+        report_batch_id: str,
+        vuln: Vulnerability,
+    ) -> int:
+        """Append or replay one provisional vulnerability for an engine run."""
+        raise NotImplementedError
+
+    def reconcile_provisional_vulnerabilities(
+        self,
+        scan_id: str,
+        report_batch_ids: list[str],
+        vulnerabilities: list[Vulnerability],
+    ) -> list[tuple[int, Vulnerability]]:
+        """Atomically replace provisional batches with authoritative results."""
+        raise NotImplementedError
+
+    def promote_provisional_vulnerabilities(self, scan_id: str) -> int:
+        """Make interrupted provisional results durable partial results."""
+        raise NotImplementedError
+
     @abstractmethod
     def update_vulnerability(
         self,

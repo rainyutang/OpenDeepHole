@@ -18,6 +18,7 @@ from backend.models import (
     AgentScanCandidateBatch,
     AgentScanCandidates,
     AgentScanFinish,
+    AgentVulnerabilityReconcile,
     Candidate,
     FpReviewStatus,
     MiningEngineRunStatus,
@@ -1679,6 +1680,147 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             runs = {item.engine_id: item for item in stored.mining_engine_runs}
             self.assertEqual(runs["static_candidate"].status, "success")
             self.assertEqual(runs["threat_audit"].status, "pending")
+
+    def test_provisional_agent_report_is_visible_then_reconciled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-live-reconcile", ScanItemStatus.AUDITING, total=1)
+            store.save_scan(scan, _meta())
+            agent_api._running_scans[scan.scan_id] = scan
+            callback = Vulnerability(
+                file="callback.c",
+                line=10,
+                function="callback_issue",
+                vuln_type="memory_corruption",
+                severity="high",
+                description="callback result",
+                vulnerability_report="# Callback report",
+                confirmed=True,
+                ai_verdict="confirmed",
+            )
+            final = callback.model_copy(update={
+                "file": "final.c",
+                "line": 20,
+                "function": "final_issue",
+                "description": "authoritative final result",
+                "vulnerability_report": "# Authoritative final report",
+            })
+            published: list[tuple[str, str, dict]] = []
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch(
+                    "backend.sse.publish",
+                    side_effect=lambda scan_id, event_type, data: published.append(
+                        (scan_id, event_type, data),
+                    ),
+                ),
+            ):
+                live_response = asyncio.run(
+                    agent_api.agent_report_vulnerability(
+                        scan.scan_id,
+                        callback,
+                        provisional=True,
+                        report_batch_id="batch-1",
+                    )
+                )
+                self.assertTrue(live_response["provisional"])
+                self.assertTrue(store.get_vulnerabilities(scan.scan_id)[0].provisional)
+
+                reconciled = asyncio.run(
+                    agent_api.agent_reconcile_vulnerabilities(
+                        scan.scan_id,
+                        AgentVulnerabilityReconcile(
+                            report_batch_ids=["batch-1"],
+                            vulnerabilities=[final],
+                        ),
+                    )
+                )
+
+            stored = store.get_vulnerabilities(scan.scan_id)
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0].file, "final.c")
+            self.assertEqual(
+                stored[0].vulnerability_report,
+                "# Authoritative final report",
+            )
+            self.assertFalse(stored[0].provisional)
+            self.assertIn("# Authoritative final report", reconciled["items"][0]["report_markdown"])
+            self.assertEqual(
+                [event_type for _scan_id, event_type, _data in published],
+                ["scan_vulnerability", "scan_vulnerabilities_changed"],
+            )
+
+    def test_finish_fallback_reconciles_provisional_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-finish-reconcile", ScanItemStatus.AUDITING, total=1)
+            meta = _meta()
+            meta.auto_fp_review = False
+            store.save_scan(scan, meta)
+            agent_api._running_scans[scan.scan_id] = scan
+            callback = Vulnerability(
+                file="callback.c",
+                line=10,
+                function="callback_issue",
+                vuln_type="memory_corruption",
+                severity="high",
+                description="callback result",
+                vulnerability_report="# Callback report",
+                confirmed=True,
+                ai_verdict="confirmed",
+            )
+            final = callback.model_copy(update={
+                "file": "final.c",
+                "line": 20,
+                "function": "final_issue",
+                "description": "authoritative final result",
+                "vulnerability_report": "# Authoritative final report",
+            })
+            store.add_provisional_vulnerability(
+                scan.scan_id,
+                "batch-fallback",
+                callback,
+            )
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+            ):
+                asyncio.run(agent_api.agent_finish_scan(
+                    scan.scan_id,
+                    AgentScanFinish(
+                        vulnerabilities=[final],
+                        status="error",
+                        total_candidates=1,
+                        processed_candidates=1,
+                        error_message="reconciliation endpoint unavailable",
+                        replace_report_batch_ids=["batch-fallback"],
+                    ),
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+
+            stored = store.get_vulnerabilities(scan.scan_id)
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0].file, "final.c")
+            self.assertEqual(
+                stored[0].vulnerability_report,
+                "# Authoritative final report",
+            )
+            self.assertFalse(stored[0].provisional)
+            self.assertEqual(
+                store.load_scan(scan.scan_id)[0].status,
+                ScanItemStatus.ERROR,
+            )
 
     def test_upsert_incomplete_vulnerability_replaces_existing_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
