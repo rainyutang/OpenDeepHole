@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import { getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
@@ -42,6 +42,7 @@ type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue"
 type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failure" | "timeout" | "cancelled" | "unknown";
 type FlowNodeId = "index" | "static" | "threat" | "fp_review" | "validation" | `engine:${string}`;
 type FlowNodeStatus = "pending" | "running" | "done" | "warning" | "error" | "cancelled" | "skipped" | "unknown";
+type ReportExportFormat = "zip" | "csv";
 
 interface ScanQueueTask {
   id: string;
@@ -54,6 +55,17 @@ interface ScanQueueTask {
 
 function hasOutputSource(source?: OutputSource | null): boolean {
   return Boolean(source && (source.agent_name || source.agent_id || source.model || source.model_id || source.tool));
+}
+
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function fpReviewMethodLabel(
@@ -630,13 +642,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [scanInfoOpen, setScanInfoOpen] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [continuing, setContinuing] = useState(false);
-  const [exportingZip, setExportingZip] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportingReport, setExportingReport] = useState<ReportExportFormat | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [modelPoolOpen, setModelPoolOpen] = useState(false);
   const [detailLoadingResources, setDetailLoadingResources] = useState<Set<DetailResource>>(new Set());
   const [detailFailedResources, setDetailFailedResources] = useState<Set<DetailResource>>(new Set());
   const [lastSeenEvents, setLastSeenEvents] = useState(0);
   const logRef = useRef<HTMLDivElement>(null);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
   const scanRef = useRef<ScanStatusType | null>(null);
   const detailLoadingRef = useRef<Set<DetailResource>>(new Set());
   const detailAbortControllerRef = useRef(new AbortController());
@@ -696,6 +710,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     detailAbortControllerRef.current = new AbortController();
     setSidebarOpen(false);
     setScanInfoOpen(false);
+    setExportMenuOpen(false);
     detailLoadingRef.current.clear();
     setDetailLoadingResources(new Set());
     setDetailFailedResources(new Set());
@@ -721,6 +736,26 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [sidebarOpen]);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!exportMenuRef.current?.contains(event.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExportMenuOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [exportMenuOpen]);
 
   const refreshOverviewSummary = useCallback(async () => {
     const current = scanRef.current;
@@ -1329,24 +1364,26 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     }
   };
 
-  const handleExportZip = async () => {
-    if (!scan) return;
-    setExportingZip(true);
+  const handleExportReport = async (format: ReportExportFormat) => {
+    if (!scan || exportingReport) return;
+    const currentScanId = scan.scan_id;
+    setExportMenuOpen(false);
+    setExportingReport(format);
     try {
-      const blob = await downloadScanReportZip(scan.scan_id);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `scan-${scan.scan_id}-report.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      const blob = format === "zip"
+        ? await downloadScanReportZip(currentScanId)
+        : await downloadScanReport(currentScanId);
+      downloadBlob(
+        blob,
+        format === "zip"
+          ? `scan-${currentScanId}-report.zip`
+          : `report-${currentScanId}.csv`,
+      );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "未知错误";
-      alert(`导出报告失败：${msg}`);
+      alert(`${format === "zip" ? "导出压缩包" : "导出 CSV"}失败：${msg}`);
     } finally {
-      setExportingZip(false);
+      setExportingReport(null);
     }
   };
 
@@ -1552,7 +1589,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       validatingIndices={launchingValidations}
       stoppingValidationIndices={stoppingValidations}
       agentOnline={!!scan.agent_online}
-      enableCsvExport
       onTriggerValidation={scan.vulnerability_validation_enabled ? handleTriggerValidation : undefined}
       onStopValidation={handleStopValidation}
       onFeedbackCreated={addSelectedFeedbackIds}
@@ -1732,15 +1768,59 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 )}
               </>
             )}
-            {isDone && (
+            <div ref={exportMenuRef} className="relative">
               <button
-                onClick={handleExportZip}
-                disabled={exportingZip}
-                className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed rounded-lg transition-colors"
+                type="button"
+                onClick={() => setExportMenuOpen((open) => !open)}
+                disabled={exportingReport !== null}
+                aria-haspopup="menu"
+                aria-expanded={exportMenuOpen}
+                className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-800"
               >
-                {exportingZip ? "导出中..." : "导出报告"}
+                {exportingReport === "zip"
+                  ? "压缩包导出中..."
+                  : exportingReport === "csv"
+                    ? "CSV 导出中..."
+                    : "导出报告"}
+                {!exportingReport && (
+                  <svg
+                    className={`h-3.5 w-3.5 transition-transform ${exportMenuOpen ? "rotate-180" : ""}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                )}
               </button>
-            )}
+              {exportMenuOpen && (
+                <div
+                  role="menu"
+                  aria-label="导出报告格式"
+                  className="absolute right-0 top-full z-40 mt-2 w-52 overflow-hidden rounded-lg border border-slate-600 bg-slate-900 py-1 shadow-xl"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { void handleExportReport("zip"); }}
+                    className="block w-full px-3 py-2 text-left transition-colors hover:bg-slate-800 focus:bg-slate-800 focus:outline-none"
+                  >
+                    <span className="block text-sm font-medium text-slate-100">导出压缩包</span>
+                    <span className="block text-xs text-slate-400">Markdown 漏洞报告</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { void handleExportReport("csv"); }}
+                    className="block w-full border-t border-slate-700 px-3 py-2 text-left transition-colors hover:bg-slate-800 focus:bg-slate-800 focus:outline-none"
+                  >
+                    <span className="block text-sm font-medium text-slate-100">导出 CSV</span>
+                    <span className="block text-xs text-slate-400">全部扫描结果</span>
+                  </button>
+                </div>
+              )}
+            </div>
             {isRunning && (
               <button
                 onClick={handleStop}
