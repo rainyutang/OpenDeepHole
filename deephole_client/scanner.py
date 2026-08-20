@@ -8,7 +8,6 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from backend.models import (
     MiningEngineSelection,
@@ -367,81 +366,6 @@ def _stable_unique_vulnerabilities(
     return unique
 
 
-async def _queue_reconciled_validations(
-    *,
-    reporter: Reporter,
-    config: AgentConfig,
-    scan_id: str,
-    scan_mode: str,
-    project_path: Path,
-    code_scan_path: Path,
-    product: str,
-    vulnerability_validation: dict[str, Any] | None,
-    code_graph_mcp: dict[str, Any] | None,
-    knowledge_base_mcp: dict[str, Any] | None,
-    reconciliation: dict,
-) -> None:
-    """Queue validation only after authoritative indexes are persisted."""
-    if (
-        not isinstance(vulnerability_validation, dict)
-        or not bool(vulnerability_validation.get("enabled"))
-        or not product
-    ):
-        return
-    from . import server as client_server
-
-    for item in reconciliation.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        raw_vulnerability = item.get("vulnerability")
-        if not isinstance(raw_vulnerability, dict) or item.get("index") is None:
-            continue
-        try:
-            vulnerability = Vulnerability.model_validate(raw_vulnerability)
-        except (TypeError, ValueError):
-            continue
-        if not vulnerability.confirmed:
-            continue
-        try:
-            await client_server.enqueue_vulnerability_validation(
-                config=config,
-                reporter=reporter,
-                scan_id=scan_id,
-                scan_mode=scan_mode,
-                vuln_index=int(item["index"]),
-                vulnerability=vulnerability.model_dump(mode="json"),
-                report_markdown=str(
-                    item.get("report_markdown")
-                    or vulnerability.vulnerability_report
-                    or vulnerability.ai_analysis
-                ),
-                project_path=str(project_path),
-                code_scan_path=str(code_scan_path),
-                product=product,
-                validation_method_id=str(
-                    vulnerability_validation.get("method_id") or ""
-                ),
-                validation_method_label=str(
-                    vulnerability_validation.get("method_label") or ""
-                ),
-                validation_values=dict(
-                    vulnerability_validation.get("values") or {}
-                ),
-                validation_policy=dict(
-                    vulnerability_validation.get("policy") or {}
-                ),
-                report_queued=True,
-                code_graph_mcp=code_graph_mcp,
-                knowledge_base_mcp=knowledge_base_mcp,
-            )
-        except Exception as exc:
-            print(
-                "Warning: failed to queue validation for "
-                f"{scan_id}#{item.get('index')}: {exc}",
-                flush=True,
-            )
-
-
 async def _publish_engine_run(
     reporter: Reporter,
     scan_id: str,
@@ -763,14 +687,6 @@ async def run_scan(
         asyncio.Task[tuple[MiningEngineRun, dict[str, Any] | None]]
     ] = []
     audited: list[Vulnerability] = []
-    report_batch_ids = {
-        selection.engine_id: uuid4().hex
-        for selection in enabled_selections
-    }
-    streamed_vulnerabilities: dict[str, list[Vulnerability]] = {
-        selection.engine_id: []
-        for selection in enabled_selections
-    }
     accepted_streamed_vulnerabilities: dict[str, list[Vulnerability]] = {
         selection.engine_id: []
         for selection in enabled_selections
@@ -995,7 +911,6 @@ async def run_scan(
         run.status = "running"
         run.started_at = datetime.now(timezone.utc).isoformat()
         await _publish_engine_run(reporter, scan_id, run)
-        report_batch_id = report_batch_ids[selection.engine_id]
 
         async def report_values(
             values: list[Any],
@@ -1003,10 +918,6 @@ async def run_scan(
             normalized = normalize_mining_engine_vulnerabilities(
                 loaded,
                 values,
-            )
-            streamed_vulnerabilities[selection.engine_id].extend(
-                vulnerability.model_copy(deep=True)
-                for vulnerability in normalized
             )
             reported = await _report_process_vulnerabilities(
                 reporter=reporter,
@@ -1024,8 +935,6 @@ async def run_scan(
                 engine=selection,
                 values=normalized,
                 deduplicator=deduplicator,
-                provisional=True,
-                report_batch_id=report_batch_id,
             )
             for vulnerability, response in reported:
                 if not (
@@ -1093,16 +1002,6 @@ async def run_scan(
             engine_kwargs["codex_models"] = codex_models or []
         try:
             output = await run_mining_engine(loaded, **engine_kwargs)
-            normalized_output: list[Vulnerability] = []
-            for raw_vulnerability in output["vulnerabilities"]:
-                vulnerability = Vulnerability.model_validate(
-                    raw_vulnerability,
-                ).model_copy(deep=True)
-                vulnerability.engine_id = selection.engine_id
-                vulnerability.engine_label = selection.engine_label
-                vulnerability.provisional = False
-                normalized_output.append(vulnerability)
-            output["vulnerabilities"] = normalized_output
             run.status = str(output["status"])
             run.error_message = str(output["error_message"])
             return run, output
@@ -1119,30 +1018,11 @@ async def run_scan(
 
     def compose_engine_results(
         results: list[tuple[MiningEngineRun, dict[str, Any] | None]],
-        *,
-        accepted_streamed_only: bool = False,
     ) -> list[Vulnerability]:
-        """Apply the per-run callback/final-return precedence contract."""
+        """Return only findings accepted through report_vulnerabilities()."""
         combined: list[Vulnerability] = []
-        for run, output in results:
-            streamed = (
-                accepted_streamed_vulnerabilities.get(run.engine_id, [])
-                if accepted_streamed_only
-                else streamed_vulnerabilities.get(run.engine_id, [])
-            )
-            final_values = (
-                list(output.get("vulnerabilities") or [])
-                if isinstance(output, dict)
-                else []
-            )
-            if (
-                isinstance(output, dict)
-                and str(output.get("status") or "") == "success"
-                and final_values
-            ):
-                selected = final_values
-            else:
-                selected = [*streamed, *final_values]
+        for run, _output in results:
+            selected = accepted_streamed_vulnerabilities.get(run.engine_id, [])
             combined.extend(
                 vulnerability.model_copy(deep=True)
                 for vulnerability in selected
@@ -1163,86 +1043,6 @@ async def run_scan(
         for vulnerability in result:
             vulnerability.provisional = False
         return result
-
-    async def apply_authoritative_dedup(
-        candidates: list[Vulnerability],
-    ) -> list[Vulnerability]:
-        if not candidates:
-            return []
-        final_deduplicator = VulnerabilityDeduplicator(
-            scan_id=scan_id,
-            project_path=project,
-            required_capability=(
-                config.vulnerability_mining.required_capability
-            ),
-            existing_vulnerabilities=existing_vulnerabilities,
-            output=process_output,
-            cancel_event=None,
-        )
-        accepted: list[Vulnerability] = []
-        with opencode_task_context(
-            scan_id=scan_id,
-            project_dir=project,
-            work_dir=scan_dir,
-            feedback_entries=feedback_entries,
-            code_graph_mcp=code_graph_mcp,
-            knowledge_base_mcp=knowledge_base_mcp,
-            output=task_output,
-            cancel_event=None,
-            task_metadata={"scan_mode": runtime_scan_mode},
-        ):
-            for vulnerability in candidates:
-                decision = await final_deduplicator.assess(vulnerability)
-                if decision.accepted:
-                    vulnerability.provisional = False
-                    accepted.append(vulnerability)
-        return accepted
-
-    async def reconcile_authoritative_results(
-        vulnerabilities: list[Vulnerability],
-        *,
-        status: str,
-    ) -> list[str]:
-        batch_ids = list(report_batch_ids.values())
-        if not batch_ids:
-            return []
-        reconcile = getattr(reporter, "reconcile_vulnerabilities", None)
-        if reconcile is not None:
-            response = await reconcile(
-                scan_id,
-                batch_ids,
-                vulnerabilities,
-            )
-            if isinstance(response, dict) and response.get("ok") is True:
-                if status == "complete":
-                    await _queue_reconciled_validations(
-                        reporter=reporter,
-                        config=config,
-                        scan_id=scan_id,
-                        scan_mode=runtime_scan_mode,
-                        project_path=project,
-                        code_scan_path=scan_root,
-                        product=product,
-                        vulnerability_validation=vulnerability_validation,
-                        code_graph_mcp=code_graph_mcp,
-                        knowledge_base_mcp=knowledge_base_mcp,
-                        reconciliation=response,
-                    )
-                return []
-        else:
-            # Compatibility for tests and older in-process Reporter doubles:
-            # retain the pre-reconciliation live-report behavior for findings
-            # that were never sent through the callback.
-            streamed_identities = {
-                vulnerability_report_identity(vulnerability)
-                for values in accepted_streamed_vulnerabilities.values()
-                for vulnerability in values
-            }
-            for vulnerability in vulnerabilities:
-                if vulnerability_report_identity(vulnerability) in streamed_identities:
-                    continue
-                await reporter.report_vulnerability(scan_id, vulnerability)
-        return batch_ids
 
     try:
         if isinstance(code_graph_mcp, dict) and bool(
@@ -1342,18 +1142,7 @@ async def run_scan(
         else:
             status = "complete"
         warning = "; ".join(failures) or None
-        candidates = compose_engine_results(
-            results,
-            accepted_streamed_only=status == "cancelled",
-        )
-        if status == "cancelled":
-            audited[:] = candidates
-        else:
-            audited[:] = await apply_authoritative_dedup(candidates)
-        pending_report_batch_ids = await reconcile_authoritative_results(
-            audited,
-            status=status,
-        )
+        audited[:] = compose_engine_results(results)
         await emit(
             "complete" if status == "complete" else status,
             (
@@ -1381,7 +1170,6 @@ async def run_scan(
             processed=processed,
             error=warning,
             cancel_event=cancel_event,
-            replace_report_batch_ids=pending_report_batch_ids,
         )
     except asyncio.CancelledError:
         cancel_event.set()
@@ -1391,10 +1179,6 @@ async def run_scan(
             if not task.done():
                 task.cancel()
         audited[:] = compose_interrupted_results()
-        pending_report_batch_ids = await reconcile_authoritative_results(
-            audited,
-            status="cancelled",
-        )
         await _finish_scan(
             reporter,
             scan_id,
@@ -1403,7 +1187,6 @@ async def run_scan(
             total=total,
             processed=processed,
             cancel_event=cancel_event,
-            replace_report_batch_ids=pending_report_batch_ids,
         )
         raise
     except Exception as exc:
@@ -1414,10 +1197,6 @@ async def run_scan(
             if not task.done():
                 task.cancel()
         audited[:] = compose_interrupted_results()
-        pending_report_batch_ids = await reconcile_authoritative_results(
-            audited,
-            status="error",
-        )
         await emit("error", f"Scan failed: {exc}")
         await _finish_scan(
             reporter,
@@ -1428,7 +1207,6 @@ async def run_scan(
             processed=processed,
             error=str(exc),
             cancel_event=cancel_event,
-            replace_report_batch_ids=pending_report_batch_ids,
         )
     finally:
         pool_stop.set()

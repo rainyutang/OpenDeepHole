@@ -2396,6 +2396,7 @@ async def _continue_scan(
             _server_url_from_request(request),
             raise_on_error=True,
             require_unresolved=True,
+            allow_cancelled=True,
         )
         logger.info(
             "Continuing scan %s with FP-review work only: unresolved=%d",
@@ -2758,6 +2759,7 @@ async def _continue_scan(
             _server_url_from_request(request),
             raise_on_error=False,
             require_unresolved=True,
+            allow_cancelled=True,
         )
         if fp_resume is None:
             logger.warning(
@@ -3962,12 +3964,14 @@ async def _start_fp_review(
     *,
     raise_on_error: bool = True,
     require_unresolved: bool = False,
+    allow_cancelled: bool = False,
 ) -> dict | None:
     """Start an AI false-positive review for eligible vulnerabilities in a scan.
 
     Manual triggers review unresolved findings first and rerun all findings only
     after every eligible finding has an effective result. Automatic and resume
     callers can require unresolved work so they never start a full rerun.
+    Only explicit user actions may opt into reopening a cancelled review job.
     When ``raise_on_error`` is False, failures are logged and ``None`` is returned
     instead of raising — used by the auto-trigger path so a failed/blocked review
     never breaks scan-finish handling.
@@ -4019,7 +4023,7 @@ async def _start_fp_review(
         _ensure_fp_review_job_for_scan,
         scan_id,
         scan,
-        allow_cancelled=True,
+        allow_cancelled=allow_cancelled,
         publish_started=False,
         require_unresolved=require_unresolved,
     )
@@ -4127,7 +4131,12 @@ async def trigger_fp_review(
 ) -> dict:
     """Review unresolved findings, or rerun all after every finding is resolved."""
     await _check_scan_owner(scan_id, current_user)
-    return await _start_fp_review(scan_id, _server_url_from_request(request), raise_on_error=True)
+    return await _start_fp_review(
+        scan_id,
+        _server_url_from_request(request),
+        raise_on_error=True,
+        allow_cancelled=True,
+    )
 
 
 

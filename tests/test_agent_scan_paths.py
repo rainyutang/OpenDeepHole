@@ -827,7 +827,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             started.append(engine.manifest.engine_id)
             return {
                 "status": "success",
-                "vulnerabilities": [],
                 "error_message": "",
                 "total_candidates": 0,
                 "processed_candidates": 0,
@@ -1491,12 +1490,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                         "src/threat_retry.c",
                     ],
                 )
-                self.assertEqual(len(result["vulnerabilities"]), 2)
-                self.assertTrue(all(
-                    vulnerability["output_source"]["agent_session_id"]
-                    == "agent-session-retry"
-                    for vulnerability in result["vulnerabilities"]
-                ))
+                self.assertNotIn("vulnerabilities", result)
                 pushed_tasks = [
                     call.args[1]
                     for call in reporter.push_threat_audit_task.await_args_list
@@ -1715,11 +1709,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(both_started.wait(), timeout=1)
             if engine.manifest.engine_id == "bad":
                 raise RuntimeError("adapter exploded")
+            await engine_kwargs["report_vulnerabilities"]([
+                _vulnerability(),
+            ])
             return {
                 "status": "success",
-                "vulnerabilities": [
-                    Vulnerability.model_validate(_vulnerability()),
-                ],
                 "error_message": "",
                 "total_candidates": 1,
                 "processed_candidates": 1,
@@ -1893,7 +1887,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("codex_models", engine_kwargs)
             return {
                 "status": "success",
-                "vulnerabilities": [],
                 "error_message": "",
                 "total_candidates": 0,
                 "processed_candidates": 0,
@@ -1996,7 +1989,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             received_models.extend(engine_kwargs["codex_models"])
             return {
                 "status": "success",
-                "vulnerabilities": [],
                 "error_message": "",
                 "total_candidates": 0,
                 "processed_candidates": 0,
@@ -2105,15 +2097,15 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             get=lambda engine_id: loaded.get(engine_id),
         )
 
-        async def run_engine(engine, **_kwargs):
+        async def run_engine(engine, **engine_kwargs):
             value = _vulnerability()
             value["description"] = f"reported by {engine.manifest.engine_id}"
             value["vulnerability_report"] = (
                 f"# Report from {engine.manifest.engine_id}"
             )
+            await engine_kwargs["report_vulnerabilities"]([value])
             return {
                 "status": "success",
-                "vulnerabilities": [Vulnerability.model_validate(value)],
                 "error_message": "",
                 "total_candidates": 1,
                 "processed_candidates": 1,
@@ -2202,15 +2194,13 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             get=lambda engine_id: loaded if engine_id == "engine-a" else None,
         )
 
-        async def run_engine(_engine, **_kwargs):
+        async def run_engine(_engine, **engine_kwargs):
+            await engine_kwargs["report_vulnerabilities"]([{
+                **_vulnerability(),
+                "file": "./src\\a.c",
+            }])
             return {
                 "status": "success",
-                "vulnerabilities": [
-                    Vulnerability.model_validate({
-                        **_vulnerability(),
-                        "file": "./src\\a.c",
-                    }),
-                ],
                 "error_message": "",
                 "total_candidates": 1,
                 "processed_candidates": 1,
@@ -2272,7 +2262,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         reporter.report_vulnerability.assert_not_awaited()
         self.assertEqual(reporter.finish_scan.await_args.args[1], [])
 
-    async def test_live_report_provenance_does_not_trigger_final_replay(
+    async def test_live_report_is_final_and_queues_fp_before_engine_return(
         self,
     ) -> None:
         reporter = _reporter()
@@ -2291,23 +2281,26 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
 
         async def report_vulnerability(_scan_id, vulnerability):
             vulnerability.output_source.agent_session_id = "agent-session-1"
-            return {"index": 0}
+            return {
+                "index": 0,
+                "fp_review": {
+                    "queued": True,
+                    "vuln_index": 0,
+                    "review_id": "review-live",
+                    "method": "adversarial",
+                    "processed": 0,
+                },
+            }
 
         reporter.report_vulnerability.side_effect = report_vulnerability
+        enqueue_fp_review = AsyncMock()
 
         async def run_engine(_engine, **engine_kwargs):
             await engine_kwargs["report_vulnerabilities"]([_vulnerability()])
+            enqueue_fp_review.assert_awaited_once()
+            reporter.finish_scan.assert_not_awaited()
             return {
                 "status": "success",
-                "vulnerabilities": [
-                    Vulnerability.model_validate(_vulnerability()).model_copy(
-                        update={
-                            "engine_id": "good",
-                            "engine_label": "Good engine",
-                            "analysis_source": "good",
-                        },
-                    ),
-                ],
                 "error_message": "",
                 "total_candidates": 1,
                 "processed_candidates": 1,
@@ -2342,6 +2335,10 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                         "stats": {"files": 0},
                     }),
                 ),
+                patch(
+                    "deephole_client.server.enqueue_fp_review",
+                    new=enqueue_fp_review,
+                ),
             ):
                 await run_scan(
                     config=config,
@@ -2362,14 +2359,17 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         reporter.report_vulnerability.assert_awaited_once()
+        self.assertFalse(
+            reporter.report_vulnerability.await_args.args[1].provisional,
+        )
         final_vulnerabilities = reporter.finish_scan.await_args.args[1]
         self.assertEqual(len(final_vulnerabilities), 1)
         self.assertEqual(
             final_vulnerabilities[0].output_source.agent_session_id,
-            "",
+            "agent-session-1",
         )
 
-    async def test_engine_callback_results_follow_final_return_precedence(self) -> None:
+    async def test_engine_return_vulnerabilities_are_ignored(self) -> None:
         config = AgentConfig()
         manifest = SimpleNamespace(
             engine_id="custom-engine",
@@ -2472,7 +2472,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [value.vulnerability_report for value in success_values],
-            ["# final"],
+            ["# callback"],
         )
         self.assertEqual(success_reporter.finish_scan.await_args.args[2], "complete")
 
@@ -2494,7 +2494,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [value.vulnerability_report for value in error_values],
-            ["# callback", "# partial"],
+            ["# callback"],
         )
         self.assertEqual(error_reporter.finish_scan.await_args.args[2], "error")
 

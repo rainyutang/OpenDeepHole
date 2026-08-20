@@ -616,6 +616,7 @@ _RUNTIME_UPDATE_ACTIVE_STATUSES = {
 _RUNTIME_UPDATE_POLL_SECONDS = 2
 _RUNTIME_UPDATE_TIMEOUT_SECONDS = 15 * 60
 _OPENCODE_MODEL_RPC_TIMEOUT_SECONDS = 120.0
+_FINAL_VULNERABILITY_CALLBACKS_CAPABILITY = "final_vulnerability_callbacks"
 
 
 async def _complete_agent_response(
@@ -1119,12 +1120,13 @@ async def _reattach_active_agent_scans_async(
     agent_id: str,
     agent: AgentInfo,
     active_scans: list,
-) -> None:
+) -> list[str]:
     """Restore server-side running state for scans still running in this agent."""
     if not active_scans:
-        return
+        return []
 
     store = get_scan_store()
+    reattached_scan_ids: list[str] = []
     for item in active_scans:
         if not isinstance(item, dict):
             continue
@@ -1189,7 +1191,9 @@ async def _reattach_active_agent_scans_async(
         _running_scans[scan_id] = scan
         if meta.user_id:
             _scan_owners[scan_id] = meta.user_id
+        reattached_scan_ids.append(scan_id)
         logger.info("Reattached active scan %s from agent %s", scan_id, agent_id)
+    return reattached_scan_ids
 
 
 async def _reattach_active_fp_reviews_async(
@@ -1376,7 +1380,7 @@ def _reattach_active_agent_scans(
     agent_id: str,
     agent: AgentInfo,
     active_scans: list,
-) -> None:
+) -> list[str]:
     return _run_reconnect_helper(
         _reattach_active_agent_scans_async(agent_id, agent, active_scans)
     )
@@ -1400,6 +1404,174 @@ def _reattach_active_validations(
     return _run_reconnect_helper(
         _reattach_active_validations_async(agent_id, agent, active_validations)
     )
+
+
+def _websocket_server_url(websocket: WebSocket) -> str:
+    server_url = str(websocket.base_url).rstrip("/")
+    if server_url.startswith("ws://"):
+        return "http://" + server_url[len("ws://"):]
+    if server_url.startswith("wss://"):
+        return "https://" + server_url[len("wss://"):]
+    return server_url
+
+
+async def _promote_final_callback_agent_reports(
+    agent_id: str,
+    agent: AgentInfo,
+    reattached_scan_ids: list[str],
+) -> tuple[list[str], dict[str, list[int]]]:
+    """Make callback reports from an upgraded Agent immediately actionable."""
+    store = get_scan_store()
+    provisional_scan_ids = await run_store_call(
+        store,
+        "list_provisional_scan_ids_for_agent",
+        agent.agent_key,
+    )
+    candidate_scan_ids = list(dict.fromkeys([
+        *reattached_scan_ids,
+        *provisional_scan_ids,
+    ]))
+    recoverable_scan_ids: list[str] = []
+    promoted_by_scan: dict[str, list[int]] = {}
+    if not candidate_scan_ids:
+        return recoverable_scan_ids, promoted_by_scan
+
+    from backend.sse import publish
+
+    for scan_id in candidate_scan_ids:
+        meta = await run_store_call(store, "get_scan_meta", scan_id)
+        if meta is None or not agent.agent_key or meta.agent_key != agent.agent_key:
+            continue
+        if (
+            meta.agent_id
+            and meta.agent_id != agent_id
+            and meta.agent_id in _agent_ws
+        ):
+            logger.info(
+                "Deferred provisional vulnerability promotion for scan %s: "
+                "the previous Agent session is still connected",
+                scan_id,
+            )
+            continue
+
+        promoted_indexes = await run_store_call(
+            store,
+            "promote_provisional_vulnerability_indexes",
+            scan_id,
+        )
+        recoverable_scan_ids.append(scan_id)
+        if not promoted_indexes:
+            continue
+
+        vulnerabilities = await run_store_call(
+            store,
+            "get_vulnerabilities",
+            scan_id,
+        )
+        live_scan = _running_scans.get(scan_id)
+        if live_scan is not None:
+            live_scan.vulnerabilities = vulnerabilities
+        promoted_by_scan[scan_id] = promoted_indexes
+        publish(scan_id, "scan_vulnerabilities_changed", {
+            "count": len(vulnerabilities),
+        })
+        logger.info(
+            "Promoted %d callback-reported vulnerability result(s) after Agent "
+            "upgrade: agent_key=%s scan_id=%s",
+            len(promoted_indexes),
+            agent.agent_key,
+            scan_id,
+        )
+    return recoverable_scan_ids, promoted_by_scan
+
+
+async def _resume_final_callback_downstream(
+    agent: AgentInfo,
+    scan_ids: list[str],
+    promoted_by_scan: dict[str, list[int]],
+    *,
+    server_url: str,
+) -> None:
+    """Resume unresolved FP review and validation after the upgraded handshake."""
+    if not scan_ids:
+        return
+    from backend.api.scan import (
+        _scan_fp_review_settings,
+        _start_fp_review,
+        _trigger_vulnerability_validation,
+    )
+
+    store = get_scan_store()
+    for scan_id in scan_ids:
+        loaded = await run_store_call(store, "load_scan", scan_id)
+        if loaded is None:
+            continue
+        scan, meta = loaded
+        if not agent.agent_key or meta.agent_key != agent.agent_key:
+            continue
+        explicitly_stopped = (
+            scan.status == ScanItemStatus.CANCELLED
+            and not _is_infrastructure_interruption(
+                scan.status,
+                scan.error_message,
+            )
+        )
+        if explicitly_stopped:
+            continue
+
+        auto_fp_review, _method = _scan_fp_review_settings(scan_id, scan)
+        if auto_fp_review:
+            try:
+                await _start_fp_review(
+                    scan_id,
+                    server_url,
+                    raise_on_error=False,
+                    require_unresolved=True,
+                    allow_cancelled=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Unable to resume automatic FP review after Agent upgrade "
+                    "for scan %s: %s",
+                    scan_id,
+                    exc,
+                )
+
+        validation_config = meta.vulnerability_validation
+        if (
+            validation_config is None
+            or not validation_config.enabled
+            or not meta.product
+        ):
+            continue
+        existing_validation_indexes = {
+            item.vuln_index for item in scan.validations
+        }
+        for vuln_index in promoted_by_scan.get(scan_id, []):
+            if vuln_index in existing_validation_indexes:
+                continue
+            if vuln_index < 0 or vuln_index >= len(scan.vulnerabilities):
+                continue
+            vulnerability = scan.vulnerabilities[vuln_index]
+            if not (
+                vulnerability.confirmed
+                or vulnerability.ai_verdict == "confirmed"
+            ):
+                continue
+            try:
+                await _trigger_vulnerability_validation(
+                    scan_id,
+                    vuln_index,
+                    server_url,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Unable to resume vulnerability validation after Agent "
+                    "upgrade for scan %s index %d: %s",
+                    scan_id,
+                    vuln_index,
+                    exc,
+                )
 
 
 async def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
@@ -1579,6 +1751,17 @@ async def agent_websocket(websocket: WebSocket) -> None:
         if not isinstance(offered_protocols, list):
             offered_protocols = [1]
         protocol_version = 2 if 2 in offered_protocols else 1
+        reported_capabilities = (
+            msg.get("capabilities")
+            if isinstance(msg.get("capabilities"), dict)
+            else {}
+        )
+        final_vulnerability_callbacks = (
+            reported_capabilities.get(
+                _FINAL_VULNERABILITY_CALLBACKS_CAPABILITY,
+            )
+            is True
+        )
         agent_id = uuid.uuid4().hex
         ip = websocket.client.host if websocket.client else "unknown"
         now = datetime.now(timezone.utc).isoformat()
@@ -1700,7 +1883,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 WORKER_ID,
             )
 
-        await _reattach_active_agent_scans_async(
+        reattached_scan_ids = await _reattach_active_agent_scans_async(
             agent_id,
             agent_info,
             msg.get("active_scans") or [],
@@ -1715,6 +1898,16 @@ async def agent_websocket(websocket: WebSocket) -> None:
             agent_info,
             msg.get("active_validations") or [],
         )
+        recovery_scan_ids: list[str] = []
+        promoted_by_scan: dict[str, list[int]] = {}
+        if final_vulnerability_callbacks:
+            recovery_scan_ids, promoted_by_scan = (
+                await _promote_final_callback_agent_reports(
+                    agent_id,
+                    agent_info,
+                    reattached_scan_ids,
+                )
+            )
 
         await _send_agent_json(agent_id, {
             "type": "welcome",
@@ -1731,6 +1924,13 @@ async def agent_websocket(websocket: WebSocket) -> None:
         })
         for command in pending_validation_stops:
             await send_agent_command(agent_id, command)
+        if final_vulnerability_callbacks:
+            await _resume_final_callback_downstream(
+                agent_info,
+                recovery_scan_ids,
+                promoted_by_scan,
+                server_url=_websocket_server_url(websocket),
+            )
 
         logger.info("Agent connected via WebSocket: %s (%s) user=%s", agent_id, name, user_id or "(none)")
 

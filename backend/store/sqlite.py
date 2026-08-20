@@ -3456,12 +3456,29 @@ class SqliteScanStore(ScanStoreBase):
 
     def promote_provisional_vulnerabilities(self, scan_id: str) -> int:
         """Keep live results when a scan terminates before explicit reconciliation."""
+        return len(self.promote_provisional_vulnerability_indexes(scan_id))
+
+    def promote_provisional_vulnerability_indexes(self, scan_id: str) -> list[int]:
+        """Keep live results and return the indexes made durable."""
         with self._lock:
             self._conn.execute(
                 "UPDATE scans SET scan_id = scan_id WHERE scan_id = ?",
                 (scan_id,),
             )
-            cursor = self._conn.execute(
+            rows = self._conn.execute(
+                """\
+                SELECT idx
+                FROM vulnerabilities
+                WHERE scan_id = ? AND provisional = 1
+                ORDER BY idx
+                """,
+                (scan_id,),
+            ).fetchall()
+            indexes = [int(row["idx"]) for row in rows]
+            if not indexes:
+                self._conn.commit()
+                return []
+            self._conn.execute(
                 """\
                 UPDATE vulnerabilities
                 SET provisional = 0, report_batch_id = ''
@@ -3469,9 +3486,26 @@ class SqliteScanStore(ScanStoreBase):
                 """,
                 (scan_id,),
             )
-            promoted = cursor.rowcount
             self._conn.commit()
-            return promoted
+            return indexes
+
+    def list_provisional_scan_ids_for_agent(self, agent_key: str) -> list[str]:
+        """Find durable scans for one stable Agent with provisional findings."""
+        normalized = str(agent_key or "").strip()
+        if not normalized:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """\
+                SELECT DISTINCT v.scan_id
+                FROM vulnerabilities AS v
+                INNER JOIN scans AS s ON s.scan_id = v.scan_id
+                WHERE v.provisional = 1 AND s.agent_key = ?
+                ORDER BY v.scan_id
+                """,
+                (normalized,),
+            ).fetchall()
+        return [str(row["scan_id"]) for row in rows]
 
     def update_vulnerability(
         self,

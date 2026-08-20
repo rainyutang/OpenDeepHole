@@ -469,6 +469,47 @@ class VulnerabilityStoreTests(unittest.TestCase):
             self.assertEqual(replay[0][0], 1)
             self.assertEqual(len(store.get_vulnerabilities("scan-reconcile")), 2)
 
+    def test_agent_provisional_reports_are_promoted_with_stable_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            scan, meta = _make_scan("scan-agent-promotion")
+            meta.agent_key = "stable-agent"
+            store.save_scan(scan, meta)
+            index = store.add_provisional_vulnerability(
+                scan.scan_id,
+                "batch-before-upgrade",
+                _make_vuln(9),
+            )
+
+            self.assertEqual(
+                store.list_provisional_scan_ids_for_agent("stable-agent"),
+                [scan.scan_id],
+            )
+            self.assertEqual(
+                store.list_provisional_scan_ids_for_agent("different-agent"),
+                [],
+            )
+            self.assertEqual(
+                store.promote_provisional_vulnerability_indexes(scan.scan_id),
+                [index],
+            )
+            stored = store.get_vulnerabilities(scan.scan_id)[index]
+            self.assertFalse(stored.provisional)
+            row = store._conn.execute(
+                "SELECT report_batch_id FROM vulnerabilities "
+                "WHERE scan_id = ? AND idx = ?",
+                (scan.scan_id, index),
+            ).fetchone()
+            self.assertEqual(row["report_batch_id"], "")
+            self.assertEqual(
+                store.promote_provisional_vulnerability_indexes(scan.scan_id),
+                [],
+            )
+            self.assertEqual(
+                store.list_provisional_scan_ids_for_agent("stable-agent"),
+                [],
+            )
+
     def test_agent_identity_config_catalog_and_scan_key_persist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")

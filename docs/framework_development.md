@@ -260,11 +260,10 @@ with opencode_task_context(
 - 组件错误应带可操作的 `error_message`，框架负责隔离单引擎失败并发布生命周期。
 - 威胁分析方法可以返回非空 `reason` 或抛出异常；框架会持久化简明错误并在详情页展示，
   但组件不得上传完整堆栈、模型正文或密钥。
-- `report_vulnerabilities()` 用于尽早展示结果，回调项会以只读临时结果追加到问题列表。
-  若 `run()` 返回 `success` 且最终 `vulnerabilities` 非空，该列表会严格替换本次运行的
-  回调项；若最终列表为空或状态为 `error` / `cancelled`，则保留回调项并追加有效部分结果。
-  框架会在原子对账后才启动自动去误报和漏洞验证，因此引擎无需为了去重而把回调项机械地
-  重复放进成功返回列表。
+- `report_vulnerabilities()` 是漏洞上报的唯一入口。每次回调接受的结果都会立即成为正式漏洞，
+  开放人工反馈，并按扫描配置逐条进入自动去误报和漏洞验证；引擎失败或取消不删除已上报结果。
+- `run()` 只返回生命周期状态和进度。旧引擎携带 `vulnerabilities` 时该字段会被忽略并记录
+  迁移告警，不能作为完成阶段的补报渠道。
 
 ## 5. 新增漏洞挖掘引擎
 
@@ -330,7 +329,6 @@ async def run(**kwargs):
 
     return {
         "status": "cancelled" if cancel_event.is_set() else "success",
-        "vulnerabilities": vulnerabilities,
         "error_message": "",
         "total_candidates": 0,
         "processed_candidates": 0,
@@ -347,15 +345,15 @@ async def run(**kwargs):
 | 字段 | 必填 | 约定 |
 | --- | --- | --- |
 | `status` | 是 | 只能是 `success`、`error` 或 `cancelled` |
-| `vulnerabilities` | 是 | 漏洞或审计记录字典列表；没有结果时返回 `[]` |
 | `error_message` | 否 | 失败原因，默认空字符串 |
 | `total_candidates` | 否 | 非负整数，默认 `0` |
 | `processed_candidates` | 否 | 非负整数，默认 `0` |
 
 未知顶层字段会被忽略。返回值不是字典、缺少必填字段、状态非法或字段类型错误时，
-框架会将该引擎标记为失败，并在错误中包含引擎 ID 和字段位置。
+框架会将该引擎标记为失败，并在错误中包含引擎 ID 和字段位置。若返回值仍包含
+`vulnerabilities`，框架会整字段忽略并记录一次迁移告警。
 
-每个 `vulnerabilities` 元素至少返回：
+每个传给 `report_vulnerabilities()` 的元素至少包含：
 
 ```json
 {
@@ -376,8 +374,7 @@ async def run(**kwargs):
 由平台可信状态覆盖，引擎不要依赖自己填写这些字段。
 
 `vulnerability_report` 会原样作为扫描详情中的主报告渲染（支持 Markdown）；即使没有文件、
-函数、类型等结构化字段，不同报告内容也会保留为不同结果。流式回调与最终返回的覆盖、追加
-规则见 4.4 节。
+函数、类型等结构化字段，不同报告内容也会保留为不同结果。逐条上报和状态返回规则见 4.4 节。
 
 可复制的完整实现位于：
 

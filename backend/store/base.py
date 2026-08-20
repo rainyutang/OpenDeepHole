@@ -228,6 +228,14 @@ class ScanStoreBase(ABC):
         """Make interrupted provisional results durable partial results."""
         raise NotImplementedError
 
+    def promote_provisional_vulnerability_indexes(self, scan_id: str) -> list[int]:
+        """Promote provisional results and return their stable indexes."""
+        raise NotImplementedError
+
+    def list_provisional_scan_ids_for_agent(self, agent_key: str) -> list[str]:
+        """Return scans owned by one stable Agent that retain provisional results."""
+        raise NotImplementedError
+
     @abstractmethod
     def update_vulnerability(
         self,

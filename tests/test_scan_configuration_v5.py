@@ -265,7 +265,6 @@ def test_static_candidate_with_all_checkers_disabled_is_a_noop(tmp_path: Path) -
 
     assert result == {
         "status": "success",
-        "vulnerabilities": [],
         "total_candidates": 0,
         "processed_candidates": 0,
     }

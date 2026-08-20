@@ -512,6 +512,217 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(scan.status, ScanItemStatus.CANCELLED)
             self.assertNotIn("scan-1", agent_api._running_scans)
 
+    def test_upgraded_agent_promotes_existing_callback_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-upgrade", ScanItemStatus.AUDITING)
+            meta = _meta()
+            meta.agent_key = "stable-agent"
+            store.save_scan(scan, meta)
+            vuln_index = store.add_provisional_vulnerability(
+                scan.scan_id,
+                "legacy-batch",
+                Vulnerability(
+                    file="src/parser.c",
+                    line=42,
+                    function="parse",
+                    vuln_type="overflow",
+                    severity="high",
+                    description="reported before Agent upgrade",
+                    vulnerability_report="# Existing report",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            )
+            agent_api._running_scans[scan.scan_id] = scan
+            info = AgentInfo(
+                agent_id="agent-new",
+                agent_key="stable-agent",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch("backend.sse.publish") as publish,
+            ):
+                scan_ids, promoted = asyncio.run(
+                    agent_api._promote_final_callback_agent_reports(
+                        "agent-new",
+                        info,
+                        [scan.scan_id],
+                    )
+                )
+
+            self.assertEqual(scan_ids, [scan.scan_id])
+            self.assertEqual(promoted, {scan.scan_id: [vuln_index]})
+            stored = store.get_vulnerabilities(scan.scan_id)[vuln_index]
+            self.assertFalse(stored.provisional)
+            row = store._conn.execute(
+                "SELECT report_batch_id FROM vulnerabilities "
+                "WHERE scan_id = ? AND idx = ?",
+                (scan.scan_id, vuln_index),
+            ).fetchone()
+            self.assertEqual(row["report_batch_id"], "")
+            self.assertFalse(
+                agent_api._running_scans[scan.scan_id]
+                .vulnerabilities[vuln_index]
+                .provisional
+            )
+            publish.assert_called_once_with(
+                scan.scan_id,
+                "scan_vulnerabilities_changed",
+                {"count": 1},
+            )
+
+    def test_upgrade_recovery_resumes_unresolved_fp_review_but_not_user_stop(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-upgrade", ScanItemStatus.AUDITING)
+            scan.auto_fp_review = True
+            meta = _meta(agent_id="agent-new")
+            meta.agent_key = "stable-agent"
+            meta.auto_fp_review = True
+            store.save_scan(scan, meta)
+            store.add_vulnerability(
+                scan.scan_id,
+                Vulnerability(
+                    file="src/parser.c",
+                    line=42,
+                    function="parse",
+                    vuln_type="overflow",
+                    severity="high",
+                    description="confirmed issue",
+                    vulnerability_report="# Existing report",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            )
+            info = AgentInfo(
+                agent_id="agent-new",
+                agent_key="stable-agent",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            start_fp_review = AsyncMock(return_value={"ok": True})
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch(
+                    "backend.api.scan._start_fp_review",
+                    start_fp_review,
+                ),
+            ):
+                asyncio.run(agent_api._resume_final_callback_downstream(
+                    info,
+                    [scan.scan_id],
+                    {scan.scan_id: [0]},
+                    server_url="http://server",
+                ))
+                start_fp_review.assert_awaited_once_with(
+                    scan.scan_id,
+                    "http://server",
+                    raise_on_error=False,
+                    require_unresolved=True,
+                    allow_cancelled=False,
+                )
+
+                store.update_scan_progress(
+                    scan.scan_id,
+                    status=ScanItemStatus.CANCELLED,
+                    error_message="用户手动停止",
+                )
+                start_fp_review.reset_mock()
+                asyncio.run(agent_api._resume_final_callback_downstream(
+                    info,
+                    [scan.scan_id],
+                    {scan.scan_id: [0]},
+                    server_url="http://server",
+                ))
+                start_fp_review.assert_not_awaited()
+
+    def test_callback_capability_recovers_only_after_welcome(self) -> None:
+        class FakeClient:
+            host = "127.0.0.1"
+
+        class FakeWebSocket:
+            client = FakeClient()
+            base_url = "ws://server/"
+
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+                self.messages = [{
+                    "type": "hello",
+                    "name": "agent-1",
+                    "machine_name": "agent-machine",
+                    "capabilities": {
+                        "final_vulnerability_callbacks": True,
+                    },
+                    "active_scans": [],
+                }]
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive_json(self):
+                if self.messages:
+                    return self.messages.pop(0)
+                raise agent_api.WebSocketDisconnect()
+
+            async def send_json(self, payload: dict) -> None:
+                self.sent.append(payload)
+
+            async def close(self, code: int = 1000) -> None:
+                return None
+
+        websocket = FakeWebSocket()
+        promote = AsyncMock(return_value=([], {}))
+
+        async def resume(*_args, **kwargs) -> None:
+            self.assertEqual(websocket.sent[0]["type"], "welcome")
+            self.assertEqual(kwargs["server_url"], "http://server")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch(
+                    "backend.api.agent._promote_final_callback_agent_reports",
+                    promote,
+                ),
+                patch(
+                    "backend.api.agent._resume_final_callback_downstream",
+                    new=AsyncMock(side_effect=resume),
+                ) as resume_mock,
+                patch("backend.api.agent._schedule_agent_disconnect_cancel"),
+            ):
+                asyncio.run(asyncio.wait_for(
+                    agent_api.agent_websocket(websocket),
+                    timeout=1,
+                ))
+
+        promote.assert_awaited_once()
+        resume_mock.assert_awaited_once()
+
     def test_static_analysis_event_updates_total_from_candidate_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")

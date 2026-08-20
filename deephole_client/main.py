@@ -421,6 +421,9 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 hello_msg = {
                     "type": "hello",
                     "protocol_versions": [2, 1],
+                    "capabilities": {
+                        "final_vulnerability_callbacks": True,
+                    },
                     "name": name,
                     "machine_name": socket.gethostname(),
                     "config": remote_config_dict(config),
