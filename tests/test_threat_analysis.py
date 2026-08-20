@@ -12,7 +12,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import deephole_client.threat_analysis_runner as threat_analysis_runner
-from backend.models import ScanItemStatus, ScanMeta, ScanStatus, ThreatAuditTask
+from backend.api.agent import agent_push_threat_analysis
+from backend.models import (
+    ScanItemStatus,
+    ScanMeta,
+    ScanStatus,
+    ThreatAnalysisRunStatus,
+    ThreatAuditTask,
+)
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_data import parse_threat_analysis_data
 from deephole_client.process_artifacts import collect_json_artifacts
@@ -504,6 +511,62 @@ def test_opaque_artifact_bundle_round_trips_without_schema_conversion() -> None:
         assert stored == bundle
         assert loaded == bundle
         assert scan.threat_analysis == bundle
+
+
+def test_agent_threat_analysis_upload_completes_run_before_publishing_result() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = SqliteScanStore(Path(tmp) / "scan.db")
+        scan, meta = _scan("scan-1")
+        scan.threat_analysis_enabled = True
+        scan.threat_analysis_run = ThreatAnalysisRunStatus(
+            status="running",
+            started_at="2026-08-20T01:00:00+00:00",
+        )
+        store.save_scan(scan, meta)
+        published: list[tuple[str, str, dict]] = []
+
+        async def direct_store_call(target_store, operation, *args, **kwargs):
+            function = (
+                getattr(target_store, operation)
+                if isinstance(operation, str)
+                else operation
+            )
+            return function(*args, **kwargs)
+
+        with (
+            patch("backend.api.agent.get_scan_store", return_value=store),
+            patch("backend.api.agent.run_store_call", new=direct_store_call),
+            patch.dict(
+                "backend.api.agent._running_scans",
+                {"scan-1": scan},
+                clear=True,
+            ),
+            patch(
+                "backend.sse.publish",
+                side_effect=lambda scan_id, event_type, data: published.append(
+                    (scan_id, event_type, data)
+                ),
+            ),
+        ):
+            response = asyncio.run(
+                agent_push_threat_analysis("scan-1", _artifact_bundle())
+            )
+
+        loaded = store.load_scan("scan-1")
+        assert loaded is not None
+        stored_scan, _stored_meta = loaded
+        assert response == {"ok": True, "artifact_count": 3}
+        assert stored_scan.threat_analysis == _artifact_bundle()
+        assert stored_scan.threat_analysis_run is not None
+        assert stored_scan.threat_analysis_run.status == "success"
+        assert stored_scan.threat_analysis_run.error_message == ""
+        assert stored_scan.threat_analysis_run.started_at == "2026-08-20T01:00:00+00:00"
+        assert stored_scan.threat_analysis_run.finished_at
+        assert [event_type for _scan_id, event_type, _data in published] == [
+            "threat_analysis_run",
+            "threat_analysis",
+        ]
+        assert published[0][2]["run"]["status"] == "success"
 
 
 def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair(

@@ -1,9 +1,15 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
-import { getScanThreatAnalysis, ThreatAnalysisPanel } from "../features/threatAnalysis";
-import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineRunStatus, MiningEngineSelection } from "../types";
+import { getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getMiningEngineCatalog, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import {
+  getScanThreatAnalysis,
+  isThreatAnalysisResultReady,
+  THREAT_ANALYSIS_RESULT_TABS,
+  ThreatAnalysisPanel,
+} from "../features/threatAnalysis";
+import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
+import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import { isEffectiveFpReviewResult, isFpReviewNonProblem } from "../fpReview";
@@ -40,7 +46,7 @@ type MainTab = "overview" | "index" | "static" | "threat" | "mining" | "validati
 type DetailResource = "candidates" | "vulnerabilities" | "events" | "threat_tasks" | "validations";
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failure" | "timeout" | "cancelled" | "unknown";
-type FlowNodeId = "index" | "static" | "threat" | "fp_review" | "validation" | `engine:${string}`;
+type FlowNodeId = "index" | "static" | "threat" | "fp_review" | "validation" | "issues" | `engine:${string}` | `threat_result:${ThreatAnalysisResultTab}`;
 type FlowNodeStatus = "pending" | "running" | "done" | "warning" | "error" | "cancelled" | "skipped" | "unknown";
 type ReportExportFormat = "zip" | "csv";
 
@@ -410,12 +416,13 @@ function threatAnalysisMethodLabel(scan: ScanStatusType): string {
 
 function threatAnalysisFlowStatus(scan: ScanStatusType): FlowNodeStatus {
   if (!isThreatAnalysisSelected(scan)) return "skipped";
+  if (isThreatAnalysisResultReady(scan.threat_analysis)) return "done";
   const status = scan.threat_analysis_run?.status;
   if (status === "running") return "running";
   if (status === "error") return "error";
   if (status === "cancelled") return "cancelled";
   if (status === "skipped") return "skipped";
-  if (status === "success" || scan.threat_analysis) return "done";
+  if (status === "success") return "done";
   return "pending";
 }
 
@@ -567,7 +574,9 @@ function currentStageLabel(scan: ScanStatusType, events: ScanEvent[]): string {
     }
     return `漏洞挖掘 / ${running.engine.engine_label}`;
   }
-  if (scan.threat_analysis_run?.status === "running") return "威胁分析 / 攻击树分析";
+  if (scan.threat_analysis_run?.status === "running" && !isThreatAnalysisResultReady(scan.threat_analysis)) {
+    return "威胁分析 / 攻击树分析";
+  }
   if (scan.status === "complete") return "完成";
   const latest = [...events].reverse().find((event) => event.phase !== "opencode_output");
   if (latest?.phase === "fp_review") {
@@ -638,6 +647,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [scan, setScan] = useState<ScanStatusType | null>(null);
   const [activeTab, setActiveTab] = useState<MainTab>("overview");
   const [activeEngineId, setActiveEngineId] = useState("");
+  const [threatAnalysisResultTab, setThreatAnalysisResultTab] = useState<ThreatAnalysisResultTab>("valueAssets");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [scanInfoOpen, setScanInfoOpen] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -661,6 +671,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   // Feedback panel state
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
+  const [miningEngineCatalog, setMiningEngineCatalog] = useState<MiningEngineCatalogItem[]>([]);
   const [selectedFeedbackIds, setSelectedFeedbackIds] = useState<Set<string> | null>(null);
 
   // SKILL preview state
@@ -711,6 +722,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     detailAbortControllerRef.current.abort();
     detailAbortControllerRef.current = new AbortController();
     vulnerabilityListGenerationRef.current += 1;
+    setThreatAnalysisResultTab("valueAssets");
     setSidebarOpen(false);
     setScanInfoOpen(false);
     setExportMenuOpen(false);
@@ -878,11 +890,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   useEffect(() => {
     getCheckers().then(setCheckers).catch(() => {});
+    getMiningEngineCatalog()
+      .then((catalog) => setMiningEngineCatalog(catalog.engines))
+      .catch(() => setMiningEngineCatalog([]));
   }, []);
 
   // Initial full-state hydration on mount
   useEffect(() => {
     let cancelled = false;
+    let loadedThreatAnalysis: ThreatAnalysis | null = null;
     setScan((previous) => previous?.scan_id === scanId ? previous : null);
     setSelectedFeedbackIds(null);
     setFpReview(null);
@@ -892,7 +908,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     getScanStatus(scanId)
       .then((data) => {
         if (cancelled || data.scan_id !== scanId) return;
-        setScan(data);
+        setScan((previous) => ({
+          ...data,
+          threat_analysis: loadedThreatAnalysis
+            ?? (previous?.scan_id === scanId ? previous.threat_analysis : null)
+            ?? data.threat_analysis,
+        }));
         setSelectedFeedbackIds(new Set(data.feedback_ids ?? []));
       })
       .catch(() => {});
@@ -918,6 +939,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     getScanThreatAnalysis(scanId)
       .then((analysis) => {
         if (cancelled) return;
+        loadedThreatAnalysis = analysis;
         setScan((prev) => prev?.scan_id === scanId ? { ...prev, threat_analysis: analysis } : prev);
       })
       .catch(() => {})
@@ -1100,7 +1122,20 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     },
     onThreatAnalysis: (data) => {
       setThreatAnalysisLoading(false);
-      setScan((prev) => prev ? { ...prev, threat_analysis: data.analysis } : prev);
+      setScan((prev) => {
+        if (!prev) return prev;
+        const previousRun = prev.threat_analysis_run;
+        return {
+          ...prev,
+          threat_analysis: data.analysis,
+          threat_analysis_run: {
+            status: "success",
+            error_message: "",
+            started_at: previousRun?.started_at ?? "",
+            finished_at: previousRun?.finished_at || new Date().toISOString(),
+          },
+        };
+      });
     },
     onThreatAnalysisRun: (data) => {
       if (["success", "error", "cancelled"].includes(data.run.status)) {
@@ -1486,6 +1521,15 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   };
 
   const handleFlowNodeClick = (node: FlowNodeId) => {
+    if (node === "issues") {
+      setActiveTab("issues");
+      return;
+    }
+    if (node.startsWith("threat_result:")) {
+      setThreatAnalysisResultTab(node.slice("threat_result:".length) as ThreatAnalysisResultTab);
+      setActiveTab("threat");
+      return;
+    }
     if (node === "index") {
       setActiveTab("index");
       return;
@@ -1632,6 +1676,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     fpReview,
     activeTab,
     activeEngineId,
+    engineCatalog: miningEngineCatalog,
     threatAnalysisLoading,
     isDone: !!isDone,
     isFpReviewing,
@@ -1844,7 +1889,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           </div>
         </div>
 
-        <ProcessFlowNav flow={flowModel} onNodeClick={handleFlowNodeClick} />
+        <ProcessFlowNav
+          flow={flowModel}
+          onNodeClick={handleFlowNodeClick}
+          activeThreatResultTab={threatAnalysisResultTab}
+          issuesActive={activeTab === "issues"}
+        />
 
         {/* Error */}
         {visibleErrorMessage && (
@@ -1941,10 +1991,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           <ThreatAnalysisPanel
             analysis={scan.threat_analysis ?? null}
             events={threatAnalysisEvents}
-            loading={(threatAnalysisLoading || scan.threat_analysis_run?.status === "running") && !scan.threat_analysis}
+            loading={(threatAnalysisLoading || scan.threat_analysis_run?.status === "running") && !isThreatAnalysisResultReady(scan.threat_analysis)}
             isDone={!!isDone}
             methodLabel={threatAnalysisMethodLabel(scan)}
-            errorMessage={scan.threat_analysis_run?.status === "error"
+            resultTab={threatAnalysisResultTab}
+            onResultTabChange={setThreatAnalysisResultTab}
+            errorMessage={!isThreatAnalysisResultReady(scan.threat_analysis) && scan.threat_analysis_run?.status === "error"
               ? scan.threat_analysis_run.error_message
               : ""}
           />
@@ -2308,9 +2360,15 @@ interface MiningFlowEntry {
   node: FlowNodeView;
 }
 
+interface CatalogMiningFlowEntry extends MiningFlowEntry {
+  selected: boolean;
+}
+
 interface ProcessFlowModel {
   threatAnalysisNode: FlowNodeView;
+  threatResultsReady: boolean;
   miningEntries: MiningFlowEntry[];
+  allMiningEntries: CatalogMiningFlowEntry[];
   staticAnalysisNode: FlowNodeView;
   validationNode: FlowNodeView;
   fpReviewNode: FlowNodeView;
@@ -2325,6 +2383,7 @@ function buildProcessFlowModel({
   fpReview,
   activeTab,
   activeEngineId,
+  engineCatalog,
   threatAnalysisLoading,
   isDone,
   isFpReviewing,
@@ -2334,6 +2393,7 @@ function buildProcessFlowModel({
   fpReview: FpReviewJob | null;
   activeTab: MainTab;
   activeEngineId: string;
+  engineCatalog: MiningEngineCatalogItem[];
   threatAnalysisLoading: boolean;
   isDone: boolean;
   isFpReviewing: boolean;
@@ -2420,6 +2480,7 @@ function buildProcessFlowModel({
     ["failed", "failure", "error", "timeout", "no_result"].includes(String(task.status || "").toLowerCase()),
   ).length;
   const activeThreatTasks = threatTasks.filter((task) => isActiveThreatAuditStatus(task.status)).length;
+  const threatResultsReady = isThreatAnalysisResultReady(scan.threat_analysis);
   let threatAnalysisStatus = threatAnalysisFlowStatus(scan);
   if (
     threatAnalysisStatus === "pending"
@@ -2430,10 +2491,10 @@ function buildProcessFlowModel({
   const threatAnalysisNode: FlowNodeView = {
     id: "threat",
     label: threatAnalysisMethodLabel(scan),
-    detail: scan.threat_analysis_run?.status === "error"
-      ? scan.threat_analysis_run.error_message || "威胁分析执行失败"
-      : scan.threat_analysis
-        ? threatAnalysisSummary(scan.threat_analysis)
+    detail: threatResultsReady
+      ? threatAnalysisSummary(scan.threat_analysis!)
+      : scan.threat_analysis_run?.status === "error"
+        ? scan.threat_analysis_run.error_message || "威胁分析执行失败"
         : !threatSelected
           ? "本次扫描未选择威胁分析"
           : scan.threat_analysis_run?.error_message || "等待生成攻击树",
@@ -2525,9 +2586,44 @@ function buildProcessFlowModel({
       tone: engine.engine_id === THREAT_ENGINE_ID ? "green" : engine.engine_id === STATIC_ENGINE_ID ? "cyan" : "blue",
     };
   };
+  const selectedById = new Map(engines.map((engine) => [engine.engine_id, engine]));
+  const catalogIds = new Set<string>();
+  const allMiningEntries: CatalogMiningFlowEntry[] = engineCatalog.map((item) => {
+    catalogIds.add(item.engine_id);
+    const selectedEngine = selectedById.get(item.engine_id);
+    const engine = selectedEngine ?? {
+      engine_id: item.engine_id,
+      engine_label: canonicalMiningEngineLabel(item.engine_id, item.label),
+      enabled: false,
+    };
+    return {
+      engine,
+      selected: Boolean(selectedEngine),
+      node: selectedEngine
+        ? engineNode(selectedEngine)
+        : {
+            id: `engine:${item.engine_id}`,
+            label: canonicalMiningEngineLabel(item.engine_id, item.label),
+            detail: "本次扫描未选择",
+            status: "skipped",
+            active: false,
+            tone: item.engine_id === THREAT_ENGINE_ID ? "green" : item.engine_id === STATIC_ENGINE_ID ? "cyan" : "blue",
+          },
+    };
+  });
+  for (const engine of engines) {
+    if (catalogIds.has(engine.engine_id)) continue;
+    allMiningEntries.push({
+      engine,
+      node: engineNode(engine),
+      selected: true,
+    });
+  }
   return {
     threatAnalysisNode,
+    threatResultsReady,
     miningEntries: engines.map((engine) => ({ engine, node: engineNode(engine) })),
+    allMiningEntries,
     staticAnalysisNode,
     validationNode,
     fpReviewNode,
@@ -2540,13 +2636,19 @@ function buildProcessFlowModel({
 function ProcessFlowNav({
   flow,
   onNodeClick,
+  activeThreatResultTab,
+  issuesActive,
 }: {
   flow: ProcessFlowModel;
   onNodeClick: (node: FlowNodeId) => void;
+  activeThreatResultTab: ThreatAnalysisResultTab;
+  issuesActive: boolean;
 }) {
   const {
     threatAnalysisNode,
-    miningEntries,
+    threatResultsReady,
+    allMiningEntries,
+    staticAnalysisNode,
     validationNode,
     fpReviewNode,
     indexNode,
@@ -2555,8 +2657,6 @@ function ProcessFlowNav({
   } = flow;
   return (
     <nav className="border-t border-slate-700/60 pt-3" aria-label="扫描执行流程">
-      <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">执行流程</div>
-
       <div className="relative -mx-1">
         <div
           className="pointer-events-none absolute inset-y-1 left-0 z-10 w-8 bg-gradient-to-r from-slate-900/90 to-transparent xl:hidden"
@@ -2571,84 +2671,126 @@ function ProcessFlowNav({
           tabIndex={0}
           aria-label="执行流程图，可横向滚动"
         >
-          <div className="mx-auto w-max min-w-[72rem] px-4">
-            <div className="flex items-center justify-center">
-              <div
-                className="flex flex-col gap-2 rounded-xl border border-slate-700/60 bg-slate-950/40 p-2"
+          <div className="mx-auto w-max min-w-[96rem] px-3">
+            <div className="grid grid-cols-[minmax(21rem,1fr)_minmax(68rem,2fr)] items-stretch gap-3">
+              <section
+                className="flex min-h-[27rem] flex-col rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-3"
                 role="group"
                 aria-label="威胁分析"
               >
-                <div className="px-1 text-center text-xs font-semibold text-slate-400">威胁分析</div>
-                <FlowNodeButton node={threatAnalysisNode} onClick={onNodeClick} />
-              </div>
-              <FlowArrow label="分析结果" />
-              <div
-                role="group"
-                aria-label="漏洞挖掘"
-                className="relative flex-none rounded-xl border border-cyan-500/25 bg-gradient-to-br from-slate-950/80 via-slate-900/60 to-cyan-950/20 px-3 pb-3 pt-9 shadow-sm"
-              >
-                <div className="absolute inset-x-3 top-2 text-center text-sm font-semibold text-slate-100">
-                  漏洞挖掘 · {miningEntries.length} 个引擎
+                <h2 className="text-center text-sm font-semibold text-slate-100">威胁分析</h2>
+                <FlowStatusSummary node={threatAnalysisNode} />
+                <div className="mt-2 grid flex-1 grid-rows-4 gap-2">
+                  {THREAT_ANALYSIS_RESULT_TABS.map((item) => (
+                    <button
+                      key={item.key}
+                      type="button"
+                      disabled={!threatResultsReady}
+                      onClick={() => onNodeClick(`threat_result:${item.key}`)}
+                      aria-current={threatAnalysisNode.active && activeThreatResultTab === item.key ? "page" : undefined}
+                      className={`flex min-h-0 items-center justify-center rounded-lg border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 disabled:cursor-not-allowed disabled:opacity-45 ${
+                        threatAnalysisNode.active && activeThreatResultTab === item.key
+                          ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-100"
+                          : "border-slate-700 bg-slate-950/45 text-slate-200 hover:border-emerald-400/35 hover:bg-emerald-500/10"
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
                 </div>
-                <div className="flex w-[26rem] flex-col gap-2">
-                  {miningEntries.length > 0 ? miningEntries.map(({ engine, node }) => (
-                    <div key={engine.engine_id} className="rounded-lg border border-cyan-500/15 bg-cyan-500/5 p-2">
-                      <FlowNodeButton node={node} onClick={onNodeClick} wide />
-                      {engine.engine_id === STATIC_ENGINE_ID && (
+              </section>
+
+              <section
+                role="group"
+                aria-label="渗透执行"
+                className="flex min-h-[27rem] flex-col rounded-xl border border-cyan-500/25 bg-cyan-950/10 p-3"
+              >
+                <h2 className="text-center text-sm font-semibold text-slate-100">渗透执行</h2>
+                <div className="mt-2 grid flex-1 grid-cols-[minmax(10rem,1fr)_minmax(22rem,1.75fr)_4.5rem_minmax(10rem,1fr)_minmax(10rem,1fr)] items-stretch gap-2">
+                  <ProcessStageButton
+                    title="程序分析"
+                    contentLabel="静态分析"
+                    node={staticAnalysisNode}
+                    onClick={onNodeClick}
+                  />
+
+                  <section className="flex min-h-0 flex-col rounded-lg border border-cyan-500/25 bg-slate-950/45 p-2.5" aria-label="多引擎漏洞识别">
+                    <h3 className="text-center text-sm font-semibold text-slate-100">多引擎漏洞识别</h3>
+                    <div className="mt-2 grid flex-1 content-start gap-2">
+                      {allMiningEntries.map(({ engine, node, selected }) => (
                         <button
+                          key={engine.engine_id}
                           type="button"
-                          onClick={() => onNodeClick("static")}
-                          className="mt-1.5 w-full rounded-md border border-cyan-500/20 bg-slate-950/40 px-2 py-1 text-left text-xs text-cyan-200 transition-colors hover:border-cyan-400/40 hover:bg-cyan-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70"
+                          disabled={!selected}
+                          onClick={() => onNodeClick(node.id)}
+                          aria-current={node.active ? "page" : undefined}
+                          className={`rounded-lg border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/70 disabled:cursor-not-allowed ${
+                            selected
+                              ? node.active
+                                ? "border-cyan-300/70 bg-cyan-400/20 shadow-sm"
+                                : "border-cyan-400/35 bg-cyan-400/10 hover:border-cyan-300/60 hover:bg-cyan-400/15"
+                              : "border-slate-800 bg-slate-950/60 opacity-45"
+                          }`}
                         >
-                          内部阶段：静态分析 · 查看候选点生成详情
+                          <div className="flex items-start justify-between gap-2">
+                            <span className={`min-w-0 break-words text-xs font-medium ${selected ? "text-slate-100" : "text-slate-500"}`}>
+                              {node.label}
+                            </span>
+                            <StatusPill
+                              label={selected ? flowStatusLabel(node.status) : "未选择"}
+                              tone={selected ? flowStatusTone(node.status, node.tone) : "slate"}
+                            />
+                          </div>
+                          <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-slate-500">{node.detail}</div>
                         </button>
-                      )}
+                      ))}
                     </div>
-                  )) : (
-                    <div className="flex h-[5.75rem] items-center justify-center rounded-lg border border-dashed border-slate-700 px-4 text-center text-sm text-slate-500">
-                      本次扫描未选择漏洞挖掘引擎
-                    </div>
-                  )}
+                  </section>
+
+                  <button
+                    type="button"
+                    onClick={() => onNodeClick("issues")}
+                    aria-current={issuesActive ? "page" : undefined}
+                    className={`h-12 w-14 self-center justify-self-center rounded-lg border text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70 ${
+                      issuesActive
+                        ? "border-red-300/70 bg-red-400/20 text-red-100"
+                        : "border-red-500/40 bg-red-500/10 text-red-200 hover:border-red-300/70 hover:bg-red-500/20"
+                    }`}
+                  >
+                    问题
+                  </button>
+
+                  <ProcessStageButton
+                    title="不同视角分析"
+                    contentLabel={fpReviewNode.label}
+                    node={fpReviewNode}
+                    onClick={onNodeClick}
+                  />
+                  <ProcessStageButton
+                    title="漏洞验证"
+                    node={validationNode}
+                    onClick={onNodeClick}
+                  />
                 </div>
-              </div>
-              <FlowArrow label="确认问题" />
-              <div
-                className="flex flex-col gap-2 rounded-xl border border-slate-700/60 bg-slate-950/40 p-2"
-                role="group"
-                aria-label="漏洞挖掘后并行处理"
-              >
-                <div className="px-1 text-center text-xs font-semibold text-slate-400">漏洞挖掘后并行处理</div>
-                <div className="rounded-lg border border-purple-500/15 bg-purple-500/5 p-1.5">
-                  <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wider text-purple-300/80">主线</div>
-                  <FlowNodeButton node={validationNode} onClick={onNodeClick} />
-                </div>
-                <div className="rounded-lg border border-amber-500/15 bg-amber-500/5 p-1.5">
-                  <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wider text-amber-300/80">并行分支</div>
-                  <FlowNodeButton node={fpReviewNode} onClick={onNodeClick} />
-                </div>
-              </div>
+              </section>
             </div>
-            <div className="relative mt-4 pt-4">
-              <div className="absolute left-1/2 top-0 h-4 w-px bg-slate-600" aria-hidden="true" />
-              <div
-                className="rounded-xl border border-blue-500/25 bg-gradient-to-r from-blue-950/25 via-slate-950/65 to-blue-950/25 p-2"
-                role="group"
-                aria-label="扫描底层能力"
-              >
-                <div className="mb-2 text-center text-xs font-semibold uppercase tracking-wider text-blue-300/80">
-                  底层能力 · 支撑全部业务阶段
-                </div>
-                <FlowNodeButton node={indexNode} onClick={onNodeClick} wide />
-                <div
-                  className="mt-2 flex flex-wrap items-center justify-center gap-2"
-                  role="list"
-                  aria-label="扫描级 MCP 能力状态"
-                >
-                  <FlowCapabilityStatus label="CodeGraph MCP" enabled={codeGraphMcpEnabled} />
-                  <FlowCapabilityStatus label="知识库" enabled={knowledgeBaseEnabled} />
-                </div>
+
+            <section
+              className="mt-3 rounded-xl border border-blue-500/25 bg-blue-950/10 p-3"
+              role="group"
+              aria-label="基础能力"
+            >
+              <h2 className="text-center text-sm font-semibold text-slate-100">基础能力</h2>
+              <div className="mt-2 grid grid-cols-2 gap-3">
+                <CapabilityStatusCard
+                  label="代码图谱"
+                  enabled={codeGraphMcpEnabled}
+                  node={indexNode}
+                  onClick={onNodeClick}
+                />
+                <CapabilityStatusCard label="知识库" enabled={knowledgeBaseEnabled} />
               </div>
-            </div>
+            </section>
           </div>
         </div>
       </div>
@@ -2656,29 +2798,91 @@ function ProcessFlowNav({
   );
 }
 
-function FlowCapabilityStatus({
+function FlowStatusSummary({ node }: { node: FlowNodeView }) {
+  return (
+    <div className="mt-2 rounded-lg border border-slate-700 bg-slate-950/45 px-3 py-2.5" role="status">
+      <div className="flex items-start justify-between gap-2">
+        <span className="min-w-0 break-words text-sm font-medium text-slate-100">{node.label}</span>
+        <StatusPill label={flowStatusLabel(node.status)} tone={flowStatusTone(node.status, node.tone)} />
+      </div>
+      <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-400">{node.detail}</div>
+    </div>
+  );
+}
+
+function ProcessStageButton({
+  title,
+  contentLabel,
+  node,
+  onClick,
+}: {
+  title: string;
+  contentLabel?: string;
+  node: FlowNodeView;
+  onClick: (node: FlowNodeId) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(node.id)}
+      aria-current={node.active ? "page" : undefined}
+      className={`flex h-full min-h-0 flex-col rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 ${
+        node.active
+          ? `${toneBorder(node.tone)} ${toneBg(node.tone)}`
+          : "border-slate-700 bg-slate-950/45 hover:border-slate-500 hover:bg-slate-900/80"
+      }`}
+    >
+      <h3 className="text-center text-sm font-semibold text-slate-100">{title}</h3>
+      <div className="mt-4 flex flex-1 flex-col justify-center">
+        {contentLabel && <div className="mb-2 text-xs font-medium text-slate-300">{contentLabel}</div>}
+        <div><StatusPill label={flowStatusLabel(node.status)} tone={flowStatusTone(node.status, node.tone)} /></div>
+        <div className="mt-2 line-clamp-3 text-xs leading-5 text-slate-400">{node.detail}</div>
+      </div>
+    </button>
+  );
+}
+
+function CapabilityStatusCard({
   label,
   enabled,
+  node,
+  onClick,
 }: {
   label: string;
   enabled: boolean;
+  node?: FlowNodeView;
+  onClick?: (node: FlowNodeId) => void;
 }) {
-  const status = enabled ? "已启用" : "未启用";
-  return (
-    <div
-      role="listitem"
-      aria-label={`${label}：${status}`}
-      title="本次扫描创建时固化的配置状态，不代表实时连接结果"
-      className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium ${
-        enabled
-          ? "border-cyan-400/35 bg-cyan-400/10 text-cyan-100"
-          : "border-slate-700 bg-slate-900/70 text-slate-400"
-      }`}
-    >
-      <span>{label}</span>
-      <span className={enabled ? "text-emerald-300" : "text-slate-500"}>{status}</span>
-    </div>
+  const content = (
+    <>
+      <div className="flex items-start justify-between gap-3">
+        <span className="text-sm font-semibold text-slate-100">{label}</span>
+        <StatusPill label={enabled ? "已启用" : "未启用"} tone={enabled ? "green" : "slate"} />
+      </div>
+      {node && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <StatusPill label={flowStatusLabel(node.status)} tone={flowStatusTone(node.status, node.tone)} />
+          <span className="text-xs text-slate-400">{node.detail}</span>
+        </div>
+      )}
+    </>
   );
+  const className = `min-h-[5.5rem] rounded-lg border p-3 text-left ${
+    enabled ? "border-blue-400/35 bg-blue-400/10" : "border-slate-700 bg-slate-950/45"
+  }`;
+  if (node && onClick) {
+    return (
+      <button
+        type="button"
+        onClick={() => onClick(node.id)}
+        aria-current={node.active ? "page" : undefined}
+        className={`${className} transition-colors hover:border-blue-300/60 hover:bg-blue-400/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70`}
+      >
+        {content}
+      </button>
+    );
+  }
+  return <div className={className}>{content}</div>;
 }
 
 type ScanSidebarTool = "info" | "feedback" | "skill" | "models" | "reports" | "logs";
@@ -3228,74 +3432,6 @@ function sidebarStatusDotClass(status: FlowNodeStatus): string {
   if (status === "skipped") return "bg-slate-600";
   if (status === "unknown") return "bg-slate-500";
   return "bg-slate-400";
-}
-
-function FlowNodeButton({
-  node,
-  onClick,
-  compact = false,
-  wide = false,
-}: {
-  node: FlowNodeView;
-  onClick: (node: FlowNodeId) => void;
-  compact?: boolean;
-  wide?: boolean;
-}) {
-  const statusTone = flowStatusTone(node.status, node.tone);
-  const condensed = compact || wide;
-  const sizeClass = compact
-    ? "h-[4.75rem] w-36"
-    : wide
-      ? "min-h-[6.25rem] w-full"
-      : "min-h-[5.5rem] w-44";
-  return (
-    <button
-      type="button"
-      onClick={() => onClick(node.id)}
-      aria-current={node.active ? "step" : undefined}
-      aria-label={`${node.label}，${flowStatusLabel(node.status)}，${node.detail}`}
-      className={`${sizeClass} snap-center rounded-lg border px-3 ${condensed ? "py-1.5" : "py-2"} text-left transition-[background-color,border-color,box-shadow,transform] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/80 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900 motion-safe:hover:-translate-y-0.5 motion-reduce:transition-none ${
-        node.active
-          ? `${toneBorder(node.tone)} ${toneBg(node.tone)} ring-1 ring-current/20`
-          : "border-slate-700 bg-slate-900/70 hover:border-slate-600 hover:bg-slate-800/80"
-      }`}
-      title={`${node.label} · ${flowStatusLabel(node.status)} · ${node.detail}`}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <span className={`break-words text-sm font-semibold ${node.active ? toneText(node.tone) : "text-slate-100"}`}>
-          {node.label}
-        </span>
-        {node.status === "running" && (
-          <span className="mt-0.5 h-3 w-3 shrink-0 rounded-full border border-blue-500/30 border-t-blue-300 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-        )}
-      </div>
-      <div className={`${condensed ? "mt-1" : "mt-2"} flex flex-wrap items-center gap-1.5`}>
-        <StatusPill label={flowStatusLabel(node.status)} tone={statusTone} />
-      </div>
-      <div className={`${condensed ? "mt-0.5 truncate leading-4" : "mt-2 line-clamp-2 leading-5"} text-xs text-slate-400`}>
-        {node.detail}
-      </div>
-    </button>
-  );
-}
-
-function FlowArrow({ label, compact = false }: { label?: string; compact?: boolean }) {
-  return (
-    <div
-      className={`relative flex shrink-0 items-center ${compact ? "w-6" : "w-8"}`}
-      aria-hidden="true"
-    >
-      {label && !compact && (
-        <span className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-medium tracking-wide text-slate-500">
-          {label}
-        </span>
-      )}
-      <div className="h-px flex-1 bg-slate-600" />
-      <svg className="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-      </svg>
-    </div>
-  );
 }
 
 function flowStatusLabel(status: FlowNodeStatus): string {
@@ -3913,10 +4049,10 @@ function ScanOverview({
               label={threatAnalysisMethodLabel(scan)}
               status={flowStatusLabel(threatAnalysisStatus)}
               tone={flowStatusTone(threatAnalysisStatus, "green")}
-              detail={scan.threat_analysis_run?.status === "error"
-                ? scan.threat_analysis_run.error_message || "威胁分析执行失败"
-                : scan.threat_analysis
-                  ? threatAnalysisSummary(scan.threat_analysis)
+              detail={isThreatAnalysisResultReady(scan.threat_analysis)
+                ? threatAnalysisSummary(scan.threat_analysis)
+                : scan.threat_analysis_run?.status === "error"
+                  ? scan.threat_analysis_run.error_message || "威胁分析执行失败"
                   : isThreatAnalysisSelected(scan)
                     ? scan.threat_analysis_run?.error_message || "等待生成攻击树"
                     : "本次扫描未选择威胁分析"}

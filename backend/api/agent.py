@@ -3967,18 +3967,40 @@ async def agent_push_threat_analysis(scan_id: str, body: dict) -> dict:
         raise HTTPException(status_code=400, detail=f"Invalid threat analysis JSON: {exc}") from exc
 
     store = get_scan_store()
+    loaded = await run_store_call(store, "load_scan_overview", scan_id)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    stored_scan = loaded[0]
+    scan = await _ensure_running_scan(scan_id)
+    previous_run = (scan or stored_scan).threat_analysis_run
+    completed_run = ThreatAnalysisRunStatus(
+        status="success",
+        error_message="",
+        started_at=previous_run.started_at if previous_run is not None else "",
+        finished_at=datetime.now(timezone.utc).isoformat(),
+    )
     analysis = await run_store_call(
         store,
         "replace_threat_analysis",
         scan_id,
         analysis,
     )
-
-    scan = await _ensure_running_scan(scan_id)
+    stored_run = await run_store_call(
+        store,
+        "update_threat_analysis_run",
+        scan_id,
+        completed_run,
+    )
+    if stored_run is None:
+        raise HTTPException(status_code=404, detail="Scan not found")
     if scan is not None:
         scan.threat_analysis = analysis
+        scan.threat_analysis_run = stored_run
 
     from backend.sse import publish
+    publish(scan_id, "threat_analysis_run", {
+        "run": stored_run.model_dump(mode="json"),
+    })
     publish(scan_id, "threat_analysis", {"analysis": analysis})
     artifact_count = len(analysis.get("artifacts") or {})
     logger.info(
