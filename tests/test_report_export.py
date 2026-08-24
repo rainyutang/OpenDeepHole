@@ -29,6 +29,7 @@ def _vulnerability(
     ai_verdict: str = "confirmed",
     engine_id: str = "static_candidate",
     audit_index: int | None = None,
+    user_verdict: str | None = None,
 ) -> Vulnerability:
     return Vulnerability(
         file=f"src/{name}.c",
@@ -43,6 +44,7 @@ def _vulnerability(
         engine_id=engine_id,
         engine_label=engine_id,
         audit_index=audit_index,
+        user_verdict=user_verdict,
     )
 
 
@@ -166,7 +168,15 @@ class ReportExportTests(unittest.TestCase):
 
         self.assertEqual(
             fieldnames,
-            ["文件", "行号", "函数", "问题类型", "问题描述", "ZIP中的问题报告"],
+            [
+                "文件",
+                "行号",
+                "函数",
+                "问题类型",
+                "问题描述",
+                "人工反馈",
+                "ZIP中的问题报告",
+            ],
         )
         self.assertEqual([row["函数"] for row in rows], ["tp-first", "tp-second"])
         self.assertEqual(
@@ -177,6 +187,7 @@ class ReportExportTests(unittest.TestCase):
                 "函数": "tp-first",
                 "问题类型": "out_of_bounds",
                 "问题描述": "tp-first issue",
+                "人工反馈": "未标记",
                 "ZIP中的问题报告": "vuln-0-src_tp-first.c_10.md",
             },
         )
@@ -216,7 +227,15 @@ class ReportExportTests(unittest.TestCase):
         fieldnames, rows = self._rows(self._download(scan, fp_map))
         self.assertEqual(
             fieldnames,
-            ["文件", "行号", "函数", "问题类型", "问题描述", "ZIP中的问题报告"],
+            [
+                "文件",
+                "行号",
+                "函数",
+                "问题类型",
+                "问题描述",
+                "人工反馈",
+                "ZIP中的问题报告",
+            ],
         )
         self.assertEqual(rows, [])
 
@@ -227,6 +246,29 @@ class ReportExportTests(unittest.TestCase):
                 "本次扫描没有去误报最终确认为问题的漏洞",
                 archive.read("README.md").decode("utf-8"),
             )
+
+    def test_csv_exports_manual_feedback_labels(self) -> None:
+        scan = ScanStatus(
+            scan_id="scan-1",
+            status=ScanItemStatus.COMPLETE,
+            progress=1.0,
+            total_candidates=4,
+            processed_candidates=4,
+            vulnerabilities=[
+                _vulnerability("confirmed", user_verdict="confirmed"),
+                _vulnerability("false-positive", user_verdict="false_positive"),
+                _vulnerability("pending", user_verdict="pending_analysis"),
+                _vulnerability("unmarked"),
+            ],
+        )
+        fp_map = {index: _fp_result(index, "tp") for index in range(4)}
+
+        _, rows = self._rows(self._download(scan, fp_map))
+
+        self.assertEqual(
+            [row["人工反馈"] for row in rows],
+            ["确认正报", "实为误报", "待分析", "未标记"],
+        )
 
     def test_existing_duplicate_findings_are_deduplicated_only_in_reports(
         self,

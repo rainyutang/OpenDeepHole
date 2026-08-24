@@ -116,6 +116,11 @@ _scan_owners: dict[str, str] = {}
 
 _FINAL_USER_VERDICTS = {"confirmed", "false_positive"}
 _MARK_VERDICTS = _FINAL_USER_VERDICTS | {"pending_analysis"}
+_USER_FEEDBACK_LABELS = {
+    "confirmed": "确认正报",
+    "false_positive": "实为误报",
+    "pending_analysis": "待分析",
+}
 _FP_REVIEW_ACTIVE_STATUSES = {
     FpReviewStatus.PENDING.value,
     FpReviewStatus.RUNNING.value,
@@ -2857,6 +2862,7 @@ async def download_report(
         "函数",
         "问题类型",
         "问题描述",
+        "人工反馈",
         "ZIP中的问题报告",
     ])
     report_groups = _exportable_problem_groups(
@@ -2872,6 +2878,7 @@ async def download_report(
             v.function,
             v.vuln_type,
             v.description,
+            _USER_FEEDBACK_LABELS.get(v.user_verdict, "未标记"),
             _problem_report_filename(group),
         ])
     return Response(
