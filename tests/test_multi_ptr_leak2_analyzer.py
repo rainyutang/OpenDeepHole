@@ -1,8 +1,11 @@
 from pathlib import Path
 
+import pytest
+
 from deephole_client.vulnerability_mining.engines.static_candidate.rules.multi_ptr_leak2.analyzer import (
     Analyzer,
     _collect_source_files,
+    _walk,
 )
 
 
@@ -19,6 +22,43 @@ def test_multi_ptr_leak2_source_collection_excludes_project_opendeephole(tmp_pat
     assert [path.relative_to(tmp_path).as_posix() for path in _collect_source_files(tmp_path)] == [
         "sample.c"
     ]
+
+
+def test_multi_ptr_leak2_handles_deeply_nested_syntax_tree(tmp_path: Path) -> None:
+    nesting = 1200
+    _write_source(
+        tmp_path,
+        """
+typedef struct Packet {
+    char *payload;
+} Packet;
+
+void release_packet(Packet *pkt) {
+"""
+        + "{\n" * nesting
+        + "free(pkt);\n"
+        + "}\n" * nesting
+        + "}\n",
+    )
+
+    candidates = list(Analyzer().find_candidates(tmp_path))
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.function == "release_packet"
+    assert candidate.related_functions == ["free"]
+
+
+def test_multi_ptr_leak2_walk_enforces_depth_limit() -> None:
+    root = Analyzer()._parser.parse(
+        b"void f(void) { if (1) { return; } }"
+    ).root_node
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"AST traversal exceeded maximum depth 2$",
+    ):
+        list(_walk(root, max_depth=2))
 
 
 def test_multi_ptr_leak2_detects_outer_struct_free(tmp_path: Path) -> None:
