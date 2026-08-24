@@ -47,8 +47,8 @@ function agentAcceptsTasks(agent: AgentInfo) {
   return agent.online && agent.accepting_tasks !== false;
 }
 
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: () => void; label: string }) {
-  return <button type="button" role="switch" aria-label={label} aria-checked={checked} onClick={onChange} className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${checked ? "bg-blue-500" : "bg-slate-600"}`}>
+function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: () => void; label: string; disabled?: boolean }) {
+  return <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} onClick={onChange} className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${checked ? "bg-blue-500" : "bg-slate-600"}`}>
     <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${checked ? "translate-x-5" : "translate-x-0.5"}`} />
   </button>;
 }
@@ -273,9 +273,9 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="text-sm font-medium text-slate-200">启用知识库</h2>
-              <p className="mt-1 text-xs leading-5 text-slate-500">知识库连接由服务端统一配置；本次扫描只需拉取并选择知识库项目。</p>
+              <p className="mt-1 text-xs leading-5 text-slate-500">知识库连接由服务端统一配置；本次扫描只需拉取并选择知识库项目。实现中...</p>
             </div>
-            <Toggle checked={knowledgeEnabled} onChange={toggleKnowledge} label="启用知识库" />
+            <Toggle checked={knowledgeEnabled} onChange={toggleKnowledge} label="启用知识库" disabled />
           </div>
           {knowledgeEnabled && <div className="mt-5 space-y-4">
             <div className="flex flex-wrap items-center gap-3">
@@ -292,7 +292,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
           </div>}
         </Card>
 
-        <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">漏洞验证</h2><p className="mt-1 text-xs leading-5 text-slate-500">全局并发、重试、漏洞类型和模型策略在客户端配置中维护；这里仅决定本次扫描是否启用、使用哪个方法及其参数。</p></div><Toggle checked={validationEnabled} onChange={toggleValidation} label="启用漏洞验证" /></div>{validatorErrors.length > 0 && <div className="mt-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">{validatorErrors.join("；")}</div>}{validationEnabled && <div className="mt-5 space-y-4">{!product.trim() ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">请先在上方填写产品。</div> : compatibleMethods.length === 0 ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">当前产品没有可用的验证方法。</div> : <><Field label="验证方法"><select className={input} value={validationMethodId} onChange={(event) => chooseValidationMethod(event.target.value)}>{compatibleMethods.map((method) => <option key={method.method_id} value={method.method_id}>{method.method_label}</option>)}</select></Field>{selectedValidationMethod && <><div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3 text-xs text-slate-400">{selectedValidationMethod.description}</div>{selectedValidationMethod.fields.length > 0 ? <div className="grid gap-4 md:grid-cols-2">{selectedValidationMethod.fields.map((field) => <DynamicValidationField key={field.key} schema={field} value={validationValues[field.key]} onChange={(value) => setValidationValues((current) => ({ ...current, [field.key]: value }))} />)}</div> : <p className="text-sm text-slate-500">该验证方法没有额外参数。</p>}</>}</>}</div>}</Card>
+        <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">漏洞验证</h2><p className="mt-1 text-xs leading-5 text-slate-500">全局并发、重试、漏洞类型和模型策略在客户端配置中维护；这里仅决定本次扫描是否启用、使用哪个方法及其参数。实现中...</p></div><Toggle checked={validationEnabled} onChange={toggleValidation} label="启用漏洞验证" disabled /></div>{validatorErrors.length > 0 && <div className="mt-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">{validatorErrors.join("；")}</div>}{validationEnabled && <div className="mt-5 space-y-4">{!product.trim() ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">请先在上方填写产品。</div> : compatibleMethods.length === 0 ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">当前产品没有可用的验证方法。</div> : <><Field label="验证方法"><select className={input} value={validationMethodId} onChange={(event) => chooseValidationMethod(event.target.value)}>{compatibleMethods.map((method) => <option key={method.method_id} value={method.method_id}>{method.method_label}</option>)}</select></Field>{selectedValidationMethod && <><div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3 text-xs text-slate-400">{selectedValidationMethod.description}</div>{selectedValidationMethod.fields.length > 0 ? <div className="grid gap-4 md:grid-cols-2">{selectedValidationMethod.fields.map((field) => <DynamicValidationField key={field.key} schema={field} value={validationValues[field.key]} onChange={(value) => setValidationValues((current) => ({ ...current, [field.key]: value }))} />)}</div> : <p className="text-sm text-slate-500">该验证方法没有额外参数。</p>}</>}</>}</div>}</Card>
 
         <ScanCodeGraphMcpEditor value={codeGraphMcp} onChange={setCodeGraphMcp} />
 
