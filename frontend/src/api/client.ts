@@ -283,7 +283,7 @@ export async function createScan(body: {
   scan_mode?: string;
   threat_analysis_enabled?: boolean;
   threat_analysis_method?: string;
-  product?: string;
+  product: string;
   knowledge_base?: { enabled: boolean; project_id: string; project_name: string };
   vulnerability_validation?: { enabled: boolean; method_id: string; values: Record<string, unknown> };
   checkers?: string[];

@@ -37,8 +37,8 @@ interface Props {
 interface MiningEngineFormValue { selected: boolean }
 type ScanMode = "standard" | "custom";
 type ScanModeOption =
-  | { id: ScanMode; label: string; description: string; selectable: true }
-  | { id: "smart"; label: string; description: string; selectable: false };
+  | { id: ScanMode; label: string; selectable: true }
+  | { id: "smart"; label: string; selectable: false };
 
 const input = "w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 outline-none transition-colors focus:border-blue-500";
 const emptyMemory: ScanConfigMemory = { knowledge_base: null, validation_by_product: {} };
@@ -107,7 +107,6 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const selectedAgentInfo = agents.find((agent) => agent.agent_key === selectedAgent);
   const selectedAgentReady = Boolean(selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && selectedAgentInfo.has_explicit_model);
   const compatibleMethods = useMemo(() => validatorMethods.filter((method) => method.products.includes(product.trim())), [validatorMethods, product]);
-  const productSuggestions = useMemo(() => Array.from(new Set(validatorMethods.flatMap((method) => method.products))).sort(), [validatorMethods]);
   const selectedValidationMethod = compatibleMethods.find((method) => method.method_id === validationMethodId) || null;
   const enabledEngineCount = miningEngineCatalog.filter((engine) => miningEngines[engine.engine_id]?.selected).length;
   const threatAuditEnabled = Boolean(miningEngines[THREAT_AUDIT_ENGINE_ID]?.selected);
@@ -212,9 +211,9 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
     if (!selectedAgent) return setError("请选择一个客户端");
     if (!selectedAgentReady) return setError("所选客户端尚未配置模型，请先前往客户端配置添加并启用模型");
     if (!projectPath.trim()) return setError("请输入项目总路径");
+    if (!product.trim()) return setError("请输入产品名称");
     if (knowledgeEnabled && !selectedKnowledgeProject) return setError("启用知识库后请先拉取并选择项目");
     if (validationEnabled) {
-      if (!product.trim()) return setError("启用漏洞验证前必须填写产品");
       if (!selectedValidationMethod) return setError("当前产品没有可用的验证方法，请检查客户端 validator.yaml");
       const missing = selectedValidationMethod.fields.find((field) => field.required && (validationValues[field.key] === "" || validationValues[field.key] == null));
       if (missing) return setError(`请填写验证参数：${missing.label}`);
@@ -261,13 +260,13 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       {loading ? <div className="flex h-48 items-center justify-center"><div role="status" aria-label="加载扫描配置" className="page-spinner h-5 w-5 animate-spin rounded-full border-2" /></div> : <form onSubmit={handleSubmit} className="space-y-6">
         <Card><h2 className="mb-3 text-sm font-medium text-slate-300">选择客户端</h2>{agents.length === 0 ? <p className="text-sm text-slate-500">暂无客户端，请先运行 ./run_agent.sh</p> : <div className="space-y-2">{agents.map((agent) => <label key={agent.agent_key} className={`flex items-center gap-3 rounded-lg border p-3 ${agentAcceptsTasks(agent) ? "cursor-pointer" : "cursor-not-allowed opacity-60"} ${selectedAgent === agent.agent_key ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="sr-only" type="radio" checked={selectedAgent === agent.agent_key} disabled={!agentAcceptsTasks(agent)} onChange={() => setSelectedAgent(agent.agent_key)} /><span className={`h-2 w-2 rounded-full ${agentAcceptsTasks(agent) ? "bg-green-400" : "bg-slate-500"}`} /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{agent.machine_name || agent.name}</span><span className="text-xs text-slate-400">{agent.ip}</span></span><span className="text-xs text-slate-400">{agent.online ? agent.accepting_tasks === false ? "更新中" : "在线" : "离线"}</span>{!agent.has_explicit_model && <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs text-amber-300">未配置模型</span>}</label>)}</div>}{selectedAgentInfo && agentAcceptsTasks(selectedAgentInfo) && !selectedAgentInfo.has_explicit_model && <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200"><span>该客户端没有已启用的显式模型。</span><button type="button" onClick={() => onConfigureAgent(selectedAgentInfo.agent_key)} className="rounded border border-amber-400/40 px-3 py-1.5 text-xs">去客户端配置</button></div>}</Card>
 
-        <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2></div><div className="grid gap-5"><Field label="扫描名称"><input className={input} value={scanName} placeholder="例如 project_audit" onChange={(event) => setScanName(event.target.value)} /></Field><Field label="项目总路径"><input className={input} value={projectPath} placeholder="/path/to/project" onChange={(event) => setProjectPath(event.target.value)} /></Field><Field label="扫描模块路径" hint="可选，留空扫描项目总路径"><input className={input} value={codeScanPath} placeholder="子目录或绝对路径" onChange={(event) => setCodeScanPath(event.target.value)} /></Field><Field label="产品" hint="可输入任意值，也可选择建议"><input className={input} list="scan-product-suggestions" value={product} placeholder="例如 LTE" onChange={(event) => { const next = event.target.value; setProduct(next); if (validationEnabled) { const methods = validatorMethods.filter((method) => method.products.includes(next.trim())); const rememberedId = memory.validation_by_product[next.trim()]?.last_method_id || ""; const method = methods.find((item) => item.method_id === rememberedId) || methods[0]; chooseValidationMethod(method?.method_id || "", next.trim()); } }} /><datalist id="scan-product-suggestions">{productSuggestions.map((item) => <option key={item} value={item} />)}</datalist></Field></div></Card>
+        <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2></div><div className="grid gap-5"><Field label="扫描名称"><input className={input} value={scanName} placeholder="例如 project_audit" onChange={(event) => setScanName(event.target.value)} /></Field><Field label="项目总路径"><input className={input} value={projectPath} placeholder="/path/to/project" onChange={(event) => setProjectPath(event.target.value)} /></Field><Field label="扫描模块路径" hint="可选，留空扫描项目总路径"><input className={input} value={codeScanPath} placeholder="子目录或绝对路径" onChange={(event) => setCodeScanPath(event.target.value)} /></Field><Field label="产品"><input className={input} value={product} placeholder="请输入产品名称" onChange={(event) => { const next = event.target.value; setProduct(next); if (validationEnabled) { const methods = validatorMethods.filter((method) => method.products.includes(next.trim())); const rememberedId = memory.validation_by_product[next.trim()]?.last_method_id || ""; const method = methods.find((item) => item.method_id === rememberedId) || methods[0]; chooseValidationMethod(method?.method_id || "", next.trim()); } }} /></Field></div></Card>
 
         <Card><div><h2 className="text-sm font-semibold text-slate-200">扫描模式</h2></div><div className="mt-4 grid gap-3 md:grid-cols-3">{([
-          { id: "standard", label: "标准模式", description: "包含威胁分析、基于代码风险点和基于攻击威胁的漏洞挖掘引擎、对抗式复核去误报", selectable: true },
-          { id: "smart", label: "智能模式", description: "实现中...", selectable: false },
-          { id: "custom", label: "自定义模式", description: "可按需配置威胁分析、漏洞挖掘引擎及去误报方式", selectable: true },
-        ] as ScanModeOption[]).map((mode) => <label key={mode.id} aria-disabled={!mode.selectable} className={`rounded-lg border p-4 ${mode.selectable ? "cursor-pointer" : "cursor-not-allowed opacity-50"} ${mode.selectable && scanMode === mode.id ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" disabled={!mode.selectable} checked={mode.selectable && scanMode === mode.id} onChange={() => { if (mode.selectable) setScanMode(mode.id); }} /><span className="text-sm font-medium text-slate-100">{mode.label}</span><span className="mt-2 block text-xs leading-5 text-slate-500">{mode.description}</span></label>)}</div></Card>
+          { id: "standard", label: "标准模式", selectable: true },
+          { id: "smart", label: "智能模式", selectable: false },
+          { id: "custom", label: "自定义模式", selectable: true },
+        ] as ScanModeOption[]).map((mode) => <label key={mode.id} aria-disabled={!mode.selectable} className={`rounded-lg border p-4 ${mode.selectable ? "cursor-pointer" : "cursor-not-allowed opacity-50"} ${mode.selectable && scanMode === mode.id ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" disabled={!mode.selectable} checked={mode.selectable && scanMode === mode.id} onChange={() => { if (mode.selectable) setScanMode(mode.id); }} /><span className="text-sm font-medium text-slate-100">{mode.label}</span></label>)}</div></Card>
 
         <ScanCodeGraphMcpEditor value={codeGraphMcp} onChange={setCodeGraphMcp} />
 
