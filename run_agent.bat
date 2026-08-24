@@ -18,13 +18,13 @@ if exist "%BUNDLED_CTAGS_DIR%\ctags.exe" set "PATH=%BUNDLED_CTAGS_DIR%;%PATH%"
 
 set "PYTHON_CMD="
 
-where.exe /q python3 >nul 2>&1
+python3 --version >nul 2>&1
 if not errorlevel 1 (
     set "PYTHON_CMD=python3"
     goto :PYTHON_FOUND
 )
 
-where.exe /q python >nul 2>&1
+python --version >nul 2>&1
 if not errorlevel 1 (
     set "PYTHON_CMD=python"
     goto :PYTHON_FOUND

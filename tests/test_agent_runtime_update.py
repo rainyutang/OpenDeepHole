@@ -349,17 +349,18 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         self.assertIn("semgrep>=1.116.0", agent_requirements.splitlines())
 
-    def test_windows_launcher_detects_python_without_py_launcher(self) -> None:
+    def test_windows_launcher_probes_python_commands_with_version(self) -> None:
         root = Path(__file__).resolve().parent.parent
         batch_text = (root / "run_agent.bat").read_text(encoding="utf-8")
 
         self.assertIn('set "PYTHON_CMD="', batch_text)
-        self.assertIn("where.exe /q python3", batch_text)
-        self.assertIn("where.exe /q python", batch_text)
+        self.assertIn("python3 --version >nul 2>&1", batch_text)
+        self.assertIn("python --version >nul 2>&1", batch_text)
         self.assertLess(
-            batch_text.index("where.exe /q python3"),
-            batch_text.index("where.exe /q python >nul"),
+            batch_text.index("python3 --version >nul 2>&1"),
+            batch_text.index("python --version >nul 2>&1"),
         )
+        self.assertNotIn("where.exe /q python", batch_text)
         self.assertNotIn("PYTHON_CMD=py -3", batch_text)
         self.assertIn("[ERROR] Python was not found", batch_text)
         self.assertIn("%PYTHON_CMD% -m pip install -r requirements-agent.txt", batch_text)
