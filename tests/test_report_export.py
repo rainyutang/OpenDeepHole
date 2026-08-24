@@ -61,7 +61,6 @@ class ReportExportTests(unittest.TestCase):
         self,
         scan: ScanStatus,
         fp_map: dict[int, FpReviewResult] | None = None,
-        **filters: object,
     ) -> Response:
         user = User(user_id="owner", username="owner", role="user")
         with (
@@ -78,9 +77,7 @@ class ReportExportTests(unittest.TestCase):
                 new=AsyncMock(return_value=fp_map or {}),
             ),
         ):
-            return asyncio.run(
-                scan_api.download_report("scan-1", user, **filters)
-            )
+            return asyncio.run(scan_api.download_report("scan-1", user))
 
     def _download_zip(
         self,
@@ -142,16 +139,18 @@ class ReportExportTests(unittest.TestCase):
         reader = csv.DictReader(io.StringIO(response.body.decode("utf-8-sig")))
         return list(reader.fieldnames or []), list(reader)
 
-    def test_csv_exports_separate_fp_vulnerability_judgment(self) -> None:
+    def test_csv_and_zip_export_the_same_final_tp_reports(self) -> None:
         scan = ScanStatus(
             scan_id="scan-1",
             status=ScanItemStatus.COMPLETE,
             progress=1.0,
-            total_candidates=4,
-            processed_candidates=4,
+            total_candidates=6,
+            processed_candidates=6,
             vulnerabilities=[
-                _vulnerability("tp"),
+                _vulnerability("tp-first"),
                 _vulnerability("fp"),
+                _vulnerability("incomplete-tp"),
+                _vulnerability("tp-second", vuln_type="null_pointer"),
                 _vulnerability("uncertain"),
                 _vulnerability("not-reviewed"),
             ],
@@ -159,136 +158,75 @@ class ReportExportTests(unittest.TestCase):
         fp_map = {
             0: _fp_result(0, "tp"),
             1: _fp_result(1, "fp"),
-            2: _fp_result(2, "uncertain"),
+            2: _fp_result(2, "tp", reason="Review incomplete: no output"),
+            3: _fp_result(3, "tp"),
+            4: _fp_result(4, "uncertain"),
         }
         fieldnames, rows = self._rows(self._download(scan, fp_map))
 
-        self.assertIn("confirmed", fieldnames)
-        self.assertIn("fp_confirmed", fieldnames)
-        self.assertEqual(rows[0]["fp_verdict"], "tp")
-        self.assertEqual(rows[0]["fp_confirmed"], "True")
-        self.assertEqual(rows[1]["fp_verdict"], "fp")
-        self.assertEqual(rows[1]["fp_confirmed"], "False")
-        self.assertEqual(rows[2]["fp_verdict"], "uncertain")
-        self.assertEqual(rows[2]["fp_confirmed"], "")
-        self.assertEqual(rows[3]["fp_verdict"], "")
-        self.assertEqual(rows[3]["fp_confirmed"], "")
+        self.assertEqual(
+            fieldnames,
+            ["文件", "行号", "函数", "问题类型", "问题描述", "ZIP中的问题报告"],
+        )
+        self.assertEqual([row["函数"] for row in rows], ["tp-first", "tp-second"])
+        self.assertEqual(
+            rows[0],
+            {
+                "文件": "src/tp-first.c",
+                "行号": "10",
+                "函数": "tp-first",
+                "问题类型": "out_of_bounds",
+                "问题描述": "tp-first issue",
+                "ZIP中的问题报告": "vuln-0-src_tp-first.c_10.md",
+            },
+        )
 
-    def test_scanning_csv_filters_fp_state_and_uses_audit_order(self) -> None:
+        zip_response = self._download_zip(scan, fp_map)
+        with zipfile.ZipFile(io.BytesIO(zip_response.body)) as archive:
+            report_names = [name for name in archive.namelist() if name != "README.md"]
+            self.assertEqual(
+                [row["ZIP中的问题报告"] for row in rows],
+                report_names,
+            )
+            self.assertIn(
+                "共 2 个去误报最终确认问题",
+                archive.read("README.md").decode("utf-8"),
+            )
+
+    def test_exports_are_empty_without_final_tp_results(self) -> None:
         scan = ScanStatus(
             scan_id="scan-1",
             status=ScanItemStatus.AUDITING,
             progress=0.5,
             total_candidates=4,
-            processed_candidates=2,
+            processed_candidates=4,
             vulnerabilities=[
-                _vulnerability("pending", audit_index=30),
-                _vulnerability("tp", audit_index=20),
-                _vulnerability("fp", audit_index=10),
-                _vulnerability(
-                    "not-confirmed",
-                    confirmed=False,
-                    ai_verdict="not_confirmed",
-                    audit_index=0,
-                ),
+                _vulnerability("fp"),
+                _vulnerability("uncertain"),
+                _vulnerability("incomplete-tp"),
+                _vulnerability("not-reviewed"),
             ],
         )
         fp_map = {
-            0: _fp_result(0, "uncertain"),
-            1: _fp_result(1, "tp"),
-            2: _fp_result(2, "fp"),
+            0: _fp_result(0, "fp"),
+            1: _fp_result(1, "uncertain"),
+            2: _fp_result(2, "tp", reason="Review incomplete: no output"),
         }
 
-        _, rows = self._rows(self._download(scan, fp_map, filtered=True))
-        self.assertEqual([row["function"] for row in rows], ["fp", "tp", "pending"])
-
-        _, tp_rows = self._rows(self._download(
-            scan,
-            fp_map,
-            filtered=True,
-            fp_review_state="tp",
-        ))
-        self.assertEqual([row["function"] for row in tp_rows], ["tp"])
-
-        _, pending_rows = self._rows(self._download(
-            scan,
-            fp_map,
-            filtered=True,
-            fp_review_state="no_conclusion",
-        ))
-        self.assertEqual([row["function"] for row in pending_rows], ["pending"])
-
-        _, all_pending_rows = self._rows(self._download(
-            scan,
-            fp_map,
-            filtered=True,
-            show_all=True,
-            fp_review_state="no_conclusion",
-        ))
+        fieldnames, rows = self._rows(self._download(scan, fp_map))
         self.assertEqual(
-            [row["function"] for row in all_pending_rows],
-            ["not-confirmed", "pending"],
+            fieldnames,
+            ["文件", "行号", "函数", "问题类型", "问题描述", "ZIP中的问题报告"],
         )
+        self.assertEqual(rows, [])
 
-    def test_csv_combines_list_filters_and_returns_header_for_no_match(self) -> None:
-        scan = ScanStatus(
-            scan_id="scan-1",
-            status=ScanItemStatus.AUDITING,
-            progress=0.5,
-            total_candidates=3,
-            processed_candidates=2,
-            vulnerabilities=[
-                _vulnerability("running", engine_id="threat_audit", audit_index=2),
-                _vulnerability("verified", engine_id="threat_audit", audit_index=1),
-                _vulnerability(
-                    "other",
-                    severity="medium",
-                    vuln_type="npd",
-                    audit_index=0,
-                ),
-            ],
-            validations=[
-                VulnerabilityValidation(vuln_index=0, status="running", running=True),
-                VulnerabilityValidation(vuln_index=1, status="verified", running=False),
-            ],
-        )
-
-        _, rows = self._rows(self._download(
-            scan,
-            filtered=True,
-            severity="high",
-            vuln_type="out_of_bounds",
-            engine_id="threat_audit",
-            validation_state="verified",
-            fp_review_state="no_conclusion",
-        ))
-        self.assertEqual([row["function"] for row in rows], ["verified"])
-
-        fieldnames, no_rows = self._rows(self._download(
-            scan,
-            filtered=True,
-            severity="critical",
-        ))
-        self.assertIn("function", fieldnames)
-        self.assertEqual(no_rows, [])
-
-    def test_filtered_csv_uses_all_server_results_not_frontend_page_size(self) -> None:
-        vulnerabilities = [
-            _vulnerability(f"issue-{index}", audit_index=index)
-            for index in range(125)
-        ]
-        scan = ScanStatus(
-            scan_id="scan-1",
-            status=ScanItemStatus.AUDITING,
-            progress=0.8,
-            total_candidates=125,
-            processed_candidates=100,
-            vulnerabilities=vulnerabilities,
-        )
-
-        _, rows = self._rows(self._download(scan, filtered=True))
-        self.assertEqual(len(rows), 125)
-        self.assertEqual(rows[-1]["function"], "issue-124")
+        zip_response = self._download_zip(scan, fp_map)
+        with zipfile.ZipFile(io.BytesIO(zip_response.body)) as archive:
+            self.assertEqual(archive.namelist(), ["README.md"])
+            self.assertIn(
+                "本次扫描没有去误报最终确认为问题的漏洞",
+                archive.read("README.md").decode("utf-8"),
+            )
 
     def test_existing_duplicate_findings_are_deduplicated_only_in_reports(
         self,
@@ -328,15 +266,10 @@ class ReportExportTests(unittest.TestCase):
 
         _, rows = self._rows(self._download(scan, fp_map))
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["fp_verdict"], "tp")
-
-        _, filtered_rows = self._rows(self._download(
-            scan,
-            fp_map,
-            filtered=True,
-            fp_review_state="tp",
-        ))
-        self.assertEqual(len(filtered_rows), 1)
+        self.assertEqual(
+            rows[0]["ZIP中的问题报告"],
+            "vuln-0-src_duplicate.c_10.md",
+        )
 
         zip_response = self._download_zip(scan, fp_map)
         with zipfile.ZipFile(io.BytesIO(zip_response.body)) as archive:
@@ -344,9 +277,10 @@ class ReportExportTests(unittest.TestCase):
             report_names = [name for name in names if name != "README.md"]
             self.assertEqual(len(report_names), 1)
             self.assertIn(
-                "共 1 个 AI 确认问题",
+                "共 1 个去误报最终确认问题",
                 archive.read("README.md").decode("utf-8"),
             )
+            self.assertEqual(report_names, [rows[0]["ZIP中的问题报告"]])
             report_markdown = archive.read(report_names[0]).decode("utf-8")
             self.assertIn("confirmed by review", report_markdown)
             self.assertIn("newer validation", report_markdown)
@@ -371,7 +305,11 @@ class ReportExportTests(unittest.TestCase):
             vulnerabilities=[first, second],
         )
 
-        _, rows = self._rows(self._download(scan))
+        fp_map = {
+            0: _fp_result(0, "tp"),
+            1: _fp_result(1, "tp"),
+        }
+        _, rows = self._rows(self._download(scan, fp_map))
         self.assertEqual(len(rows), 2)
 
     def test_single_report_keeps_one_core_markdown_in_chinese_section_order(self) -> None:
@@ -481,7 +419,7 @@ class ReportExportTests(unittest.TestCase):
         )
         self.assertIn("- Entry: handle_request", markdown)
 
-    def test_public_csv_route_forwards_filters(self) -> None:
+    def test_public_csv_route_forwards_fixed_export(self) -> None:
         user = User(user_id="owner", username="owner", role="user")
         expected = Response(content="ok")
         download = AsyncMock(return_value=expected)
@@ -489,27 +427,10 @@ class ReportExportTests(unittest.TestCase):
             response = asyncio.run(integration_api.download_public_report(
                 "scan-1",
                 user,
-                filtered=True,
-                show_all=True,
-                severity="high",
-                vuln_type="out_of_bounds",
-                engine_id="threat_audit",
-                validation_state="verified",
-                fp_review_state="tp",
             ))
 
         self.assertIs(response, expected)
-        download.assert_awaited_once_with(
-            "scan-1",
-            user,
-            filtered=True,
-            show_all=True,
-            severity="high",
-            vuln_type="out_of_bounds",
-            engine_id="threat_audit",
-            validation_state="verified",
-            fp_review_state="tp",
-        )
+        download.assert_awaited_once_with("scan-1", user)
 
 
 if __name__ == "__main__":

@@ -1876,25 +1876,23 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                 <div
                   role="menu"
                   aria-label="导出报告格式"
-                  className="absolute right-0 top-full z-40 mt-2 w-52 overflow-hidden rounded-lg border border-slate-600 bg-slate-900 py-1 shadow-xl"
+                  className="absolute right-0 top-full z-40 mt-2 w-28 overflow-hidden rounded-lg border border-slate-600 bg-slate-900 py-1 shadow-xl"
                 >
                   <button
                     type="button"
                     role="menuitem"
                     onClick={() => { void handleExportReport("zip"); }}
-                    className="block w-full px-3 py-2 text-left transition-colors hover:bg-slate-800 focus:bg-slate-800 focus:outline-none"
+                    className="block w-full px-3 py-2 text-left text-sm font-medium text-slate-100 transition-colors hover:bg-slate-800 focus:bg-slate-800 focus:outline-none"
                   >
-                    <span className="block text-sm font-medium text-slate-100">导出压缩包</span>
-                    <span className="block text-xs text-slate-400">Markdown 漏洞报告</span>
+                    ZIP
                   </button>
                   <button
                     type="button"
                     role="menuitem"
                     onClick={() => { void handleExportReport("csv"); }}
-                    className="block w-full border-t border-slate-700 px-3 py-2 text-left transition-colors hover:bg-slate-800 focus:bg-slate-800 focus:outline-none"
+                    className="block w-full border-t border-slate-700 px-3 py-2 text-left text-sm font-medium text-slate-100 transition-colors hover:bg-slate-800 focus:bg-slate-800 focus:outline-none"
                   >
-                    <span className="block text-sm font-medium text-slate-100">导出 CSV</span>
-                    <span className="block text-xs text-slate-400">全部扫描结果</span>
+                    CSV
                   </button>
                 </div>
               )}

@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
-from typing import Literal
-
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -412,26 +410,8 @@ async def stop_public_scan(
 async def download_public_report(
     scan_id: str,
     current_user: User = Depends(_public_user_dependency),
-    *,
-    filtered: bool = False,
-    show_all: bool = False,
-    severity: str | None = None,
-    vuln_type: str | None = None,
-    engine_id: str | None = None,
-    validation_state: Literal["unverified", "running", "verified"] | None = None,
-    fp_review_state: Literal["no_conclusion", "tp", "fp"] | None = None,
 ) -> Response:
-    return await scan_api.download_report(
-        scan_id,
-        current_user,
-        filtered=filtered,
-        show_all=show_all,
-        severity=severity,
-        vuln_type=vuln_type,
-        engine_id=engine_id,
-        validation_state=validation_state,
-        fp_review_state=fp_review_state,
-    )
+    return await scan_api.download_report(scan_id, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/vulnerability/{idx}/report")

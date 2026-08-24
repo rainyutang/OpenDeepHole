@@ -16,7 +16,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AsyncGenerator, Literal
+from typing import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -2843,16 +2843,8 @@ async def delete_scan(
 async def download_report(
     scan_id: str,
     current_user: User = Depends(get_current_user),
-    *,
-    filtered: bool = False,
-    show_all: bool = False,
-    severity: str | None = None,
-    vuln_type: str | None = None,
-    engine_id: str | None = None,
-    validation_state: Literal["unverified", "running", "verified"] | None = None,
-    fp_review_state: Literal["no_conclusion", "tp", "fp"] | None = None,
 ) -> Response:
-    """Download the scan results as a CSV report."""
+    """Download current FP-review-confirmed issues as a CSV report."""
     await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     buf = io.StringIO()
@@ -2860,127 +2852,33 @@ async def download_report(
     fp_map = await run_store_call(get_scan_store(), _scan_fp_result_map, scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
     writer.writerow([
-        "engine_id", "engine_label", "file", "line", "function",
-        "vuln_type", "severity", "confirmed",
-        "fp_verdict", "fp_confirmed", "fp_severity",
-        "match_type", "match_reference", "variant_of",
-        "description", "ai_analysis",
+        "文件",
+        "行号",
+        "函数",
+        "问题类型",
+        "问题描述",
+        "ZIP中的问题报告",
     ])
-    report_groups = _report_vulnerability_groups(
+    report_groups = _exportable_problem_groups(
         scan.vulnerabilities,
         fp_map,
         validation_map,
     )
-    if filtered:
-        report_groups = [
-            group
-            for group in report_groups
-            if _matches_report_filters(
-                group.vulnerability,
-                group.fp_result,
-                group.validation,
-                show_all=show_all,
-                severity=severity,
-                vuln_type=vuln_type,
-                engine_id=engine_id,
-                validation_state=validation_state,
-                fp_review_state=fp_review_state,
-            )
-        ]
-        report_groups.sort(
-            key=lambda group: (
-                group.vulnerability.audit_index
-                if group.vulnerability.audit_index is not None
-                else group.index,
-                group.index,
-            )
-        )
     for group in report_groups:
         v = group.vulnerability
-        fp = group.fp_result
         writer.writerow([
-            v.engine_id, v.engine_label, v.file, v.line, v.function,
-            v.vuln_type, v.severity, v.confirmed,
-            fp.verdict if fp else "",
-            fp.verdict == "tp" if fp and is_effective_fp_review_result(fp) else "",
-            fp.severity if fp else "",
-            fp.match_type if fp else "", fp.match_reference if fp else "",
-            v.variant_of, v.description, v.ai_analysis,
+            v.file,
+            v.line,
+            v.function,
+            v.vuln_type,
+            v.description,
+            _problem_report_filename(group),
         ])
     return Response(
         content="﻿" + buf.getvalue(),
         media_type="text/csv; charset=utf-8-sig",
         headers={"Content-Disposition": f'attachment; filename="report-{scan_id}.csv"'},
     )
-
-
-def _report_validation_state(
-    validation: VulnerabilityValidation | None,
-) -> Literal["unverified", "running", "verified"]:
-    if validation is None:
-        return "unverified"
-    if validation.running or validation.status in {"queued", "running"}:
-        return "running"
-    if validation.status in {
-        "verified",
-        "success",
-        "failed",
-        "error",
-        "timeout",
-        "cancelled",
-        "skipped",
-    }:
-        return "verified"
-    return "unverified"
-
-
-def _report_fp_review_state(
-    result: FpReviewResult | None,
-) -> Literal["no_conclusion", "tp", "fp"]:
-    if result is None or not is_effective_fp_review_result(result):
-        return "no_conclusion"
-    return "fp" if result.verdict == "fp" else "tp"
-
-
-def _matches_report_filters(
-    vuln: Vulnerability,
-    fp_result: FpReviewResult | None,
-    validation: VulnerabilityValidation | None,
-    *,
-    show_all: bool,
-    severity: str | None,
-    vuln_type: str | None,
-    engine_id: str | None,
-    validation_state: Literal["unverified", "running", "verified"] | None,
-    fp_review_state: Literal["no_conclusion", "tp", "fp"] | None,
-) -> bool:
-    llm_issue = is_llm_issue(vuln)
-    fp_non_problem = (
-        llm_issue
-        and _report_fp_review_state(fp_result) == "fp"
-    )
-    problem = llm_issue and not fp_non_problem
-
-    if not show_all and not (problem or fp_non_problem):
-        return False
-    if severity and vuln.severity != severity:
-        return False
-    if vuln_type and vuln.vuln_type != vuln_type:
-        return False
-    effective_engine_id = vuln.engine_id or (
-        "threat_audit" if vuln.analysis_source == "threat_audit" else "static_candidate"
-    )
-    if engine_id and effective_engine_id != engine_id:
-        return False
-    if fp_review_state and _report_fp_review_state(fp_result) != fp_review_state:
-        return False
-    if validation_state:
-        if not problem:
-            return False
-        if _report_validation_state(validation) != validation_state:
-            return False
-    return True
-
 
 def _fp_review_stage_titles(scan_id: str | None = None) -> list[tuple[str, str]]:
     """Return snapshot stage labels, falling back to the repository catalog."""
@@ -3102,10 +3000,41 @@ def _report_vulnerability_groups(
     return result
 
 
+def _exportable_problem_groups(
+    vulnerabilities: list[Vulnerability],
+    fp_map: dict[int, FpReviewResult],
+    validation_map: dict[int, VulnerabilityValidation],
+) -> list[_ReportVulnerabilityGroup]:
+    """Return the same final-TP projection used by both scan exports."""
+    return [
+        group
+        for group in _report_vulnerability_groups(
+            vulnerabilities,
+            fp_map,
+            validation_map,
+        )
+        if (
+            group.fp_result is not None
+            and is_effective_fp_review_result(group.fp_result)
+            and group.fp_result.verdict == "tp"
+        )
+    ]
+
+
 def _safe_filename_part(text: str) -> str:
     """Sanitize a string for safe use inside a download filename / zip entry."""
     cleaned = re.sub(r"[^\w.-]+", "_", text.strip())
     return cleaned.strip("._") or "item"
+
+
+def _problem_report_filename(group: _ReportVulnerabilityGroup) -> str:
+    vulnerability = group.vulnerability
+    export_file = vulnerability.file or "unknown"
+    export_line = vulnerability.line if vulnerability.line > 0 else "unknown"
+    return (
+        f"vuln-{group.index}-{_safe_filename_part(export_file)}_"
+        f"{export_line}.md"
+    )
 
 
 def _format_output_source(source) -> str:
@@ -3610,40 +3539,36 @@ async def download_report_zip(
     scan_id: str,
     current_user: User = Depends(get_current_user),
 ) -> Response:
-    """Download all AI-confirmed vulnerabilities as a zip of Markdown reports."""
+    """Download current FP-review-confirmed issues as Markdown reports."""
     await _check_scan_owner(scan_id, current_user)
     scan = await get_scan_status(scan_id, current_user)
     store = get_scan_store()
     fp_map = await run_store_call(store, _scan_fp_result_map, scan_id)
     validation_map = {item.vuln_index: item for item in scan.validations}
-    confirmed = [
-        group
-        for group in _report_vulnerability_groups(
-            scan.vulnerabilities,
-            fp_map,
-            validation_map,
-        )
-        if (
-            group.vulnerability.confirmed
-            or group.vulnerability.ai_verdict == "confirmed"
-        )
-    ]
+    problems = _exportable_problem_groups(
+        scan.vulnerabilities,
+        fp_map,
+        validation_map,
+    )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        if not confirmed:
-            zf.writestr("README.md", f"# 扫描 {scan_id}\n\n本次扫描没有 AI 确认为问题的漏洞。\n")
+        if not problems:
+            zf.writestr(
+                "README.md",
+                f"# 扫描 {scan_id}\n\n本次扫描没有去误报最终确认为问题的漏洞。\n",
+            )
         else:
-            index_lines = [f"# 扫描 {scan_id} 漏洞报告索引", "", f"共 {len(confirmed)} 个 AI 确认问题：", ""]
+            index_lines = [
+                f"# 扫描 {scan_id} 漏洞报告索引",
+                "",
+                f"共 {len(problems)} 个去误报最终确认问题：",
+                "",
+            ]
             fp_review_stage_titles = _fp_review_stage_titles(scan_id)
-            for group in confirmed:
+            for group in problems:
                 i = group.index
                 v = group.vulnerability
-                export_file = v.file or "unknown"
-                export_line = v.line if v.line > 0 else "unknown"
-                entry = (
-                    f"vuln-{i}-{_safe_filename_part(export_file)}_"
-                    f"{export_line}.md"
-                )
+                entry = _problem_report_filename(group)
                 index_lines.append(
                     f"- [{v.engine_label} · "
                     f"{v.vuln_type or '未知类型'} @ "
