@@ -2398,6 +2398,13 @@ interface ProcessFlowModel {
   knowledgeBaseEnabled: boolean;
 }
 
+function processFlowEngineLabel(engineId: string, label: string): string {
+  if (engineId === STATIC_ENGINE_ID) {
+    return "DeepHole基于代码风险点的问题识别引擎";
+  }
+  return canonicalMiningEngineLabel(engineId, label);
+}
+
 function buildProcessFlowModel({
   scan,
   indexProgress,
@@ -2446,7 +2453,7 @@ function buildProcessFlowModel({
   const fpReviewTotal = fpReview?.total ?? 0;
 
   const validationDetail = !scan.vulnerability_validation_enabled
-    ? "本次扫描未启用漏洞验证"
+    ? "本次扫描未启用验证利用"
     : confirmedCount > 0
       ? `${validationRunningCount} 运行 · ${validationDoneCount}/${confirmedCount} 完成`
       : "等待确认问题";
@@ -2555,7 +2562,7 @@ function buildProcessFlowModel({
   };
   const validationNode: FlowNodeView = {
     id: "validation",
-    label: "漏洞验证",
+    label: "验证利用",
     detail: validationDetail,
     status: !scan.vulnerability_validation_enabled
       ? "disabled"
@@ -2582,7 +2589,7 @@ function buildProcessFlowModel({
     const threatRunStatus = engine.engine_id === THREAT_ENGINE_ID
       ? threatAuditFlowStatus(scan, run)
       : null;
-    const label = canonicalMiningEngineLabel(engine.engine_id, engine.engine_label);
+    const label = processFlowEngineLabel(engine.engine_id, engine.engine_label);
     const detail = engine.engine_id === THREAT_ENGINE_ID
       ? threatTasks.length > 0
         ? `${activeThreatTasks} 运行 · ${completedThreatTasks}/${threatTasks.length} 完成${failedThreatTasks ? ` · ${failedThreatTasks} 未成功` : ""}`
@@ -2625,7 +2632,7 @@ function buildProcessFlowModel({
         ? engineNode(selectedEngine)
         : {
             id: `engine:${item.engine_id}`,
-            label: canonicalMiningEngineLabel(item.engine_id, item.label),
+            label: processFlowEngineLabel(item.engine_id, item.label),
             detail: "本次扫描未选择",
             status: "skipped",
             active: false,
@@ -2781,7 +2788,7 @@ function ProcessFlowNav({
                     onClick={onNodeClick}
                   />
                   <ProcessStageButton
-                    title="漏洞验证"
+                    title={validationNode.label}
                     node={validationNode}
                     onClick={onNodeClick}
                   />
@@ -3033,14 +3040,6 @@ function ScanSidebarContent({
             current={activeTab === "overview"}
             onClick={() => select(onHome)}
           />
-          <SidebarNavigationButton
-            label="疑似问题"
-            detail={`最终确认 ${issueCount} · 已验证 ${verifiedIssueCount}`}
-            current={activeTab === "issues"}
-            tone="red"
-            badge={issueCount}
-            onClick={() => select(onIssues)}
-          />
         </SidebarSection>
 
         <SidebarSection title="执行流程">
@@ -3054,36 +3053,36 @@ function ScanSidebarContent({
           />
 
           <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-2">
+            <div className="mb-2 px-1 text-xs font-semibold text-cyan-100">程序分析</div>
+            <SidebarNavigationButton
+              label={flow.staticAnalysisNode.label}
+              detail={flow.staticAnalysisNode.detail}
+              current={flow.staticAnalysisNode.active}
+              status={flow.staticAnalysisNode.status}
+              tone={flow.staticAnalysisNode.tone}
+              compact
+              onClick={() => select(() => onNodeClick(flow.staticAnalysisNode.id))}
+            />
+          </div>
+
+          <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-2">
             <div className="mb-2 flex items-center justify-between gap-2 px-1 text-xs font-semibold text-cyan-100">
-              <span>漏洞挖掘</span>
+              <span>多引擎问题识别</span>
               <span className="text-[10px] font-medium text-cyan-300/80">{flow.miningEntries.length} 个引擎</span>
             </div>
             {flow.miningEntries.length > 0 ? (
               <div className="space-y-2">
                 {flow.miningEntries.map(({ engine, node }) => (
-                  <div key={engine.engine_id} className="space-y-1.5">
-                    <SidebarNavigationButton
-                      label={node.label}
-                      detail={node.detail}
-                      current={node.active}
-                      status={node.status}
-                      tone={node.tone}
-                      compact
-                      onClick={() => select(() => onNodeClick(node.id))}
-                    />
-                    {engine.engine_id === STATIC_ENGINE_ID && (
-                      <SidebarNavigationButton
-                        label={flow.staticAnalysisNode.label}
-                        detail={flow.staticAnalysisNode.detail}
-                        current={flow.staticAnalysisNode.active}
-                        status={flow.staticAnalysisNode.status}
-                        tone={flow.staticAnalysisNode.tone}
-                        compact
-                        nested
-                        onClick={() => select(() => onNodeClick(flow.staticAnalysisNode.id))}
-                      />
-                    )}
-                  </div>
+                  <SidebarNavigationButton
+                    key={engine.engine_id}
+                    label={node.label}
+                    detail={node.detail}
+                    current={node.active}
+                    status={node.status}
+                    tone={node.tone}
+                    compact
+                    onClick={() => select(() => onNodeClick(node.id))}
+                  />
                 ))}
               </div>
             ) : (
@@ -3091,6 +3090,19 @@ function ScanSidebarContent({
                 本次扫描未选择漏洞挖掘引擎
               </div>
             )}
+          </div>
+
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-2">
+            <div className="mb-2 px-1 text-xs font-semibold text-amber-100">问题复核</div>
+            <SidebarNavigationButton
+              label={flow.fpReviewNode.label}
+              detail={flow.fpReviewNode.detail}
+              current={flow.fpReviewNode.active}
+              status={flow.fpReviewNode.status}
+              tone={flow.fpReviewNode.tone}
+              compact
+              onClick={() => select(() => onNodeClick(flow.fpReviewNode.id))}
+            />
           </div>
 
           <SidebarNavigationButton
@@ -3102,12 +3114,12 @@ function ScanSidebarContent({
             onClick={() => select(() => onNodeClick(flow.validationNode.id))}
           />
           <SidebarNavigationButton
-            label={flow.fpReviewNode.label}
-            detail={flow.fpReviewNode.detail}
-            current={flow.fpReviewNode.active}
-            status={flow.fpReviewNode.status}
-            tone={flow.fpReviewNode.tone}
-            onClick={() => select(() => onNodeClick(flow.fpReviewNode.id))}
+            label="疑似问题"
+            detail={`最终确认 ${issueCount} · 已验证 ${verifiedIssueCount}`}
+            current={activeTab === "issues"}
+            tone="red"
+            badge={issueCount}
+            onClick={() => select(onIssues)}
           />
         </SidebarSection>
 
@@ -3181,7 +3193,6 @@ function SidebarNavigationButton({
   tone = "blue",
   badge = 0,
   compact = false,
-  nested = false,
   onClick,
 }: {
   label: string;
@@ -3192,12 +3203,11 @@ function SidebarNavigationButton({
   tone?: TaskTone;
   badge?: number;
   compact?: boolean;
-  nested?: boolean;
   onClick: () => void;
 }) {
   const active = current || expanded;
   return (
-    <div className={nested ? "pl-4" : ""}>
+    <div>
       <button
         type="button"
         onClick={onClick}
