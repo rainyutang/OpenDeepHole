@@ -490,7 +490,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
     ("task_type", "expected_priority"),
     [
         ("vulnerability_validation", 90),
-        ("threat_analysis", 75),
+        ("threat_analysis", 50),
         ("fp_review", 60),
         ("vulnerability_mining", 50),
         ("skill_create", 70),

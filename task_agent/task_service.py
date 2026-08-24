@@ -51,7 +51,7 @@ TERMINAL_TASK_STATUSES = {"success", "failure", "timeout", "cancelled"}
 _DEFAULT_TASK_PRIORITY = 50
 _TASK_TYPE_PRIORITIES = {
     "vulnerability_validation": 90,
-    "threat_analysis": 75,
+    "threat_analysis": 50,
     "skill_create": 70,
     "fp_review": 60,
     "vulnerability_mining": 50,

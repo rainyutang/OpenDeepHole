@@ -89,7 +89,7 @@ result = await run_opencode_task(
 
 `task_type` 是文档约定的字符串，而不是导出的枚举。面向业务调用者的稳定类型只有 `vulnerability_mining`、`threat_analysis`、`fp_review` 和 `vulnerability_validation`；未知值会在提交前被拒绝。Agent 自身使用的辅助任务类型属于内部实现，不作为公共调用指导的一部分。
 
-任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：`vulnerability_validation=90`、`threat_analysis=75`、`fp_review=60`、`vulnerability_mining=50`。同优先级任务按进入队列的先后顺序执行。
+任务优先级由 `task_type` 自动决定，数值越大越先取得模型 Lease：`vulnerability_validation=90`、`fp_review=60`、`threat_analysis=50`、`vulnerability_mining=50`。同优先级任务按进入队列的先后顺序执行，因此威胁分析和漏洞挖掘可以按实际入队顺序共享模型容量。
 
 漏洞挖掘中的候选点审计、项目级审计、威胁审计和漏洞根因去重都传
 `task_type="vulnerability_mining"`。内置调用分别使用 `candidate-audit-*`、
