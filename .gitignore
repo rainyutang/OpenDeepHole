@@ -38,6 +38,8 @@ tests/test_data/memleak_cases/code_index.db
 # Local source checkouts
 SecAnt/
 ThreatAnalysis/
+/codex-security-mod/
+/skills/
 
 # Environment
 .env
