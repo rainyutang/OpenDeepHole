@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getMiningEngineCatalog, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import { getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getCheckerCatalog, getMiningEngineCatalog, isPublicScan, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import {
   getThreatAnalysisResultCounts,
   getScanThreatAnalysis,
@@ -13,7 +13,7 @@ import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
-import { isEffectiveFpReviewResult, isFpReviewNonProblem } from "../fpReview";
+import { isEffectiveFpReviewResult } from "../fpReview";
 import {
   STATIC_CANDIDATE_ENGINE_ID as STATIC_ENGINE_ID,
   STATIC_CANDIDATE_ENGINE_LABEL,
@@ -50,6 +50,7 @@ type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failu
 type FlowNodeId = "index" | "static" | "threat" | "fp_review" | "validation" | "issues" | `engine:${string}` | `threat_result:${ThreatAnalysisResultTab}`;
 type FlowNodeStatus = "pending" | "running" | "done" | "warning" | "error" | "cancelled" | "disabled" | "skipped" | "unknown";
 type ReportExportFormat = "zip" | "csv";
+type CheckerDisplayMetadata = Pick<CheckerInfo, "name" | "label">;
 
 interface ScanQueueTask {
   id: string;
@@ -147,6 +148,17 @@ function vulnerabilityFunctionLabel(vuln: Vulnerability): string {
   return vuln.function?.trim() || "未知函数";
 }
 
+function checkerChineseLabel(checker: CheckerDisplayMetadata): string {
+  const label = checker.label.trim();
+  const localizedParts = label
+    .split(/\s*\/\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return [...localizedParts].reverse().find((part) => /[\u3400-\u9fff]/.test(part))
+    || label
+    || checker.name.toUpperCase();
+}
+
 function isStaticCandidateVulnerability(vuln: Vulnerability): boolean {
   return (vuln.analysis_source || "static_candidate") === "static_candidate";
 }
@@ -156,31 +168,19 @@ function isStaticCandidate(item: Candidate): boolean {
     && String(item.metadata?.source || "").toLowerCase() !== "threat_analysis";
 }
 
-function effectiveIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
-  if (scan.detail_counts?.effective_issue_count != null) {
-    return scan.detail_counts.effective_issue_count;
-  }
-  const fpMap = new Map(
-    (fpReview?.results ?? [])
-      .filter(isEffectiveFpReviewResult)
-      .map((result) => [result.vuln_index, result]),
+function finalReviewedIssueIndices(fpReview: FpReviewJob | null): Set<number> {
+  const latestResults = new Map(
+    (fpReview?.results ?? []).map((result) => [result.vuln_index, result]),
   );
-  return scan.vulnerabilities.filter((vuln, index) => {
-    if (!isAiConfirmed(vuln)) return false;
-    if (isFpReviewNonProblem(fpMap.get(index))) return false;
-    return true;
-  }).length;
+  return new Set(
+    [...latestResults.entries()]
+      .filter(([, result]) => isEffectiveFpReviewResult(result) && result.verdict === "tp")
+      .map(([index]) => index),
+  );
 }
 
-function issueItems(scan: ScanStatusType, fpReview: FpReviewJob | null): { vuln: Vulnerability; index: number }[] {
-  const fpMap = new Map(
-    (fpReview?.results ?? [])
-      .filter(isEffectiveFpReviewResult)
-      .map((result) => [result.vuln_index, result]),
-  );
-  return scan.vulnerabilities
-    .map((vuln, index) => ({ vuln, index }))
-    .filter(({ vuln, index }) => isAiConfirmed(vuln) && !isFpReviewNonProblem(fpMap.get(index)));
+function finalReviewedIssueCount(fpReview: FpReviewJob | null): number {
+  return finalReviewedIssueIndices(fpReview).size;
 }
 
 function isValidationTerminalStatus(status: string): boolean {
@@ -188,11 +188,9 @@ function isValidationTerminalStatus(status: string): boolean {
 }
 
 function validatedIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
-  if (scan.detail_counts?.validated_issue_count != null) {
-    return scan.detail_counts.validated_issue_count;
-  }
+  const issueIndices = finalReviewedIssueIndices(fpReview);
   const validationMap = new Map((scan.validations ?? []).map((item) => [item.vuln_index, item]));
-  return issueItems(scan, fpReview).filter(({ index }) => {
+  return [...issueIndices].filter((index) => {
     const validation = validationMap.get(index);
     return Boolean(validation && !validation.running && isValidationTerminalStatus(validation.status));
   }).length;
@@ -664,8 +662,17 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   // Feedback panel state
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [checkers, setCheckers] = useState<CheckerInfo[]>([]);
+  const [checkerDisplayMetadata, setCheckerDisplayMetadata] = useState<CheckerDisplayMetadata[]>([]);
   const [miningEngineCatalog, setMiningEngineCatalog] = useState<MiningEngineCatalogItem[]>([]);
   const [selectedFeedbackIds, setSelectedFeedbackIds] = useState<Set<string> | null>(null);
+  const staticRuleTypeLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    checkerDisplayMetadata.forEach((checker) => {
+      const name = checker.name.trim().toLowerCase();
+      if (name) labels.set(name, checkerChineseLabel(checker));
+    });
+    return labels;
+  }, [checkerDisplayMetadata]);
 
   // SKILL preview state
   const [skillOpen, setSkillOpen] = useState(false);
@@ -882,11 +889,29 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   }, [scanId]);
 
   useEffect(() => {
-    getCheckers().then(setCheckers).catch(() => {});
+    let cancelled = false;
+    const loadCheckerMetadata = async () => {
+      const [availableCheckers, checkerCatalog] = await Promise.all([
+        getCheckers().catch(() => []),
+        isPublicScan(scanId) ? Promise.resolve([]) : getCheckerCatalog().catch(() => []),
+      ]);
+      if (cancelled) return;
+      setCheckers(availableCheckers);
+      setCheckerDisplayMetadata(checkerCatalog.length > 0 ? checkerCatalog : availableCheckers);
+    };
+    setCheckerDisplayMetadata([]);
+    void loadCheckerMetadata();
     getMiningEngineCatalog()
-      .then((catalog) => setMiningEngineCatalog(catalog.engines))
-      .catch(() => setMiningEngineCatalog([]));
-  }, []);
+      .then((catalog) => {
+        if (!cancelled) setMiningEngineCatalog(catalog.engines);
+      })
+      .catch(() => {
+        if (!cancelled) setMiningEngineCatalog([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [scanId]);
 
   // Initial full-state hydration on mount
   useEffect(() => {
@@ -1304,11 +1329,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   const requiredDetailResources = useMemo(() => {
     const resources = detailResourcesForTab(activeTab, activeEngineId);
+    const needsCompleteIssueValidationCount = finalReviewedIssueCount(fpReview) > 0;
     return Array.from(new Set<DetailResource>([
       ...resources,
+      ...(needsCompleteIssueValidationCount ? ["validations" as DetailResource] : []),
       ...(logOpen ? ["events" as DetailResource] : []),
     ]));
-  }, [activeEngineId, activeTab, logOpen]);
+  }, [activeEngineId, activeTab, fpReview, logOpen]);
 
   useEffect(() => {
     setDetailFailedResources((previous) => {
@@ -1645,7 +1672,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const displayedReports = reports.length > 0 ? reports : (scan.skill_reports ?? []);
   const activeReport = displayedReports[activeReportIndex] ?? displayedReports[0];
   const continuableCount = scan.continuable_task_count || 0;
-  const issueCount = effectiveIssueCount(scan, fpReview);
+  const issueCount = finalReviewedIssueCount(fpReview);
   const verifiedIssueCount = validatedIssueCount(scan, fpReview);
   const variantIssueCount = scan.vulnerabilities.filter((v) => v.variant_of).length;
   const showGitHistoryStages = gitHistory.length > 0
@@ -1688,6 +1715,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       fpReviewStages={selectedFpReviewStages}
       currentFpReviewIndices={currentFpReviewIndices}
       fpReviewRunning={isFpReviewing}
+      viewMode="final_tp"
+      staticRuleTypeLabels={staticRuleTypeLabels}
       validations={scan.validations ?? []}
       validatingIndices={launchingValidations}
       stoppingValidationIndices={stoppingValidations}
@@ -3007,8 +3036,8 @@ function ScanSidebarContent({
             onClick={() => select(onHome)}
           />
           <SidebarNavigationButton
-            label="发现的问题"
-            detail={`发现 ${issueCount} · 已验证 ${verifiedIssueCount}`}
+            label="疑似问题"
+            detail={`最终确认 ${issueCount} · 已验证 ${verifiedIssueCount}`}
             current={activeTab === "issues"}
             tone="red"
             badge={issueCount}
@@ -3997,7 +4026,7 @@ function ScanOverview({
         {staticEngineSelected && (
           <OverviewMetric icon="target" label="候选点" value={scan.total_candidates || scan.vulnerabilities.length} detail={`${scan.processed_candidates} 已审计`} tone="blue" />
         )}
-        <OverviewMetric icon="alert" label="发现的问题" value={issueCount} detail={`${verifiedIssueCount} 已验证`} tone="red" onClick={() => onNavigate("issues")} />
+        <OverviewMetric icon="alert" label="疑似问题" value={issueCount} detail={`${verifiedIssueCount} 已验证`} tone="red" onClick={() => onNavigate("issues")} />
         {showGitHistoryStages && (
           <OverviewMetric icon="history" label="历史模式" value={gitHistoryCount} detail={`${variantIssueCount} 个变体候选`} tone="purple" onClick={() => onNavigate("threat")} />
         )}
