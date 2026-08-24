@@ -511,6 +511,12 @@ def test_threat_processes_run_with_task_agent_only() -> None:
         )
         assert "JSON Schema" in run_task.await_args.kwargs["prompt"]
         assert "裸 JSON List" in run_task.await_args.kwargs["prompt"]
+        assert run_task.await_args.kwargs["prompt"].endswith(
+            "\n\n请使用中文输出"
+        )
+        assert run_task.await_args.kwargs["prompt"].count(
+            "请使用中文输出"
+        ) == 1
         assert run_task.await_args.kwargs["output_schema"]["type"] == "array"
         assert run_task.await_args.kwargs["output_schema"]["minItems"] == 0
         assert (
@@ -996,6 +1002,8 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         assert "JSON Schema" in prompt
         assert '"vulnerable_code"' in prompt
         assert '"markdown_reports"' not in prompt
+        assert prompt.endswith("\n\n请使用中文输出")
+        assert prompt.count("请使用中文输出") == 1
         assert run_task.await_args.kwargs["output_schema"]["type"] == "object"
         assert "output" not in run_task.await_args.kwargs
         assert task_context.call_args.kwargs["skill_paths"] == [

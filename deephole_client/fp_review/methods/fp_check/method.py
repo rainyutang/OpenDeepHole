@@ -391,6 +391,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             + "\n\n输入上下文：\n"
             + json.dumps(context, ensure_ascii=False, indent=2)
             + _schema_instruction(schema)
+            + "\n\n请使用中文输出"
         )
         await _emit(
             output,

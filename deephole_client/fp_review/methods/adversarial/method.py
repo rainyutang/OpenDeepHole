@@ -272,6 +272,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
             + json.dumps(_STAGE_SCHEMA, ensure_ascii=False, indent=2)
         )
+        prompt += "\n\n请使用中文输出"
         result = await run_opencode_task(
             task_name=(
                 f"fp-review-{kwargs['review_id']}-{item_index}-{stage}"

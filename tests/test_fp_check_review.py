@@ -122,10 +122,10 @@ async def _run(tmp: str, index: int, output=None):
 
 class FpCheckReviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_standard_path_returns_one_binary_vulnerability_result(self) -> None:
-        calls: list[str] = []
+        calls: list[dict] = []
 
         async def invoke(**kwargs):
-            calls.append(kwargs["task_name"])
+            calls.append(kwargs)
             if kwargs["task_name"].endswith("-claim_context"):
                 return _task_result(_claim("standard"))
             return _task_result(_standard())
@@ -144,6 +144,14 @@ class FpCheckReviewTests(unittest.IsolatedAsyncioTestCase):
             {"claim_context", "standard_verification"},
         )
         self.assertEqual(len(calls), 2)
+        for call in calls:
+            prompt = call["prompt"]
+            self.assertTrue(prompt.endswith("\n\n请使用中文输出"))
+            self.assertEqual(prompt.count("请使用中文输出"), 1)
+            self.assertIn("JSON Schema", prompt)
+            self.assertFalse(
+                call["invalid_json_retry_prompt"].endswith("请使用中文输出")
+            )
         self.assertTrue(all(event["data"].get("vuln_index") == 3 for event in events))
 
     async def test_deep_path_runs_declared_stages_and_writes_per_vulnerability_artifacts(self) -> None:
