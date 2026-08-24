@@ -52,11 +52,17 @@ const HIGH_RISK_FIELDS = {
   external: "是否外部暴露面",
 } as const;
 
-export const THREAT_ANALYSIS_RESULT_TABS: Array<{ key: ThreatAnalysisResultTab; label: string }> = [
-  { key: "valueAssets", label: "价值资产" },
-  { key: "highRiskModules", label: "高风险模块" },
-  { key: "internalNodes", label: "内部节点" },
-  { key: "attackTrees", label: "攻击树" },
+export type ThreatAnalysisResultCounts = Record<ThreatAnalysisResultTab, number>;
+
+export const THREAT_ANALYSIS_RESULT_TABS: Array<{
+  key: ThreatAnalysisResultTab;
+  label: string;
+  unit: "项" | "棵";
+}> = [
+  { key: "valueAssets", label: "价值资产", unit: "项" },
+  { key: "highRiskModules", label: "高风险模块", unit: "项" },
+  { key: "internalNodes", label: "内部节点", unit: "项" },
+  { key: "attackTrees", label: "攻击树", unit: "棵" },
 ];
 
 export function isThreatAnalysisResultReady(analysis: ThreatAnalysis | null | undefined): analysis is ThreatAnalysis {
@@ -71,6 +77,21 @@ export function isThreatAnalysisResultReady(analysis: ThreatAnalysis | null | un
       && typeof attackTrees === "object"
       && Array.isArray(attackTrees.attack_trees),
     );
+}
+
+export function getThreatAnalysisResultCounts(
+  analysis: ThreatAnalysis | null | undefined,
+): ThreatAnalysisResultCounts {
+  const normalized = analysis ?? null;
+  const assets = artifactArray<NativeThreatValueAsset>(normalized, "value_asset_path");
+  const modules = artifactArray<NativeThreatHighRiskModule>(normalized, "high_risk_modules_path");
+  const trees = attackTreesFromAnalysis(normalized);
+  return {
+    valueAssets: assets.length,
+    highRiskModules: modules.length,
+    internalNodes: collectInternalNodes(trees).length,
+    attackTrees: trees.length,
+  };
 }
 
 export function ThreatAnalysisPanel({
@@ -130,12 +151,7 @@ export function ThreatAnalysisPanel({
     );
   }
 
-  const counts: Record<ThreatAnalysisResultTab, number> = {
-    valueAssets: assets.length,
-    highRiskModules: modules.length,
-    internalNodes: internalNodes.length,
-    attackTrees: trees.length,
-  };
+  const counts = getThreatAnalysisResultCounts(analysis);
 
   const handleTabKeyDown = (
     event: KeyboardEvent<HTMLButtonElement>,
@@ -202,7 +218,7 @@ export function ThreatAnalysisPanel({
           <PanelHeading
             title={THREAT_ANALYSIS_RESULT_TABS.find((item) => item.key === resultTab)?.label ?? ""}
             count={counts[resultTab]}
-            unit={resultTab === "attackTrees" ? "棵" : "项"}
+            unit={THREAT_ANALYSIS_RESULT_TABS.find((item) => item.key === resultTab)?.unit ?? "项"}
           />
           {resultTab === "valueAssets" && <ValueAssetsTable assets={assets} />}
           {resultTab === "highRiskModules" && <HighRiskModulesTable modules={modules} />}

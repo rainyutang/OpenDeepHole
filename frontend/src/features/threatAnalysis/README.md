@@ -13,11 +13,14 @@
 
 ```tsx
 import {
+  getThreatAnalysisResultCounts,
   ThreatAnalysisPanel,
   getScanThreatAnalysis,
 } from "../features/threatAnalysis";
 ```
 
 扫描页负责加载数据、处理 SSE，并控制当前结果页签；攻击树展示细节仍保留在本 feature 内。
+`getThreatAnalysisResultCounts()` 统一计算价值资产、高风险模块、去重后的内部节点和攻击树数量，
+供结果页与扫描流程图共用。
 有效 artifact bundle 是结果已就绪的判据；没有有效结果且
 `threat_analysis_run.status=error` 时，面板继续显示已持久化的 `error_message`。
