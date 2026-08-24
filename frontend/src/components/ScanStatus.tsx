@@ -3040,6 +3040,14 @@ function ScanSidebarContent({
             current={activeTab === "overview"}
             onClick={() => select(onHome)}
           />
+          <SidebarNavigationButton
+            label="疑似问题"
+            detail={`最终确认 ${issueCount} · 已验证 ${verifiedIssueCount}`}
+            current={activeTab === "issues"}
+            tone="red"
+            badge={issueCount}
+            onClick={() => select(onIssues)}
+          />
         </SidebarSection>
 
         <SidebarSection title="执行流程">
@@ -3112,14 +3120,6 @@ function ScanSidebarContent({
             status={flow.validationNode.status}
             tone={flow.validationNode.tone}
             onClick={() => select(() => onNodeClick(flow.validationNode.id))}
-          />
-          <SidebarNavigationButton
-            label="疑似问题"
-            detail={`最终确认 ${issueCount} · 已验证 ${verifiedIssueCount}`}
-            current={activeTab === "issues"}
-            tone="red"
-            badge={issueCount}
-            onClick={() => select(onIssues)}
           />
         </SidebarSection>
 
