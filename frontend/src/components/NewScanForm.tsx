@@ -39,7 +39,10 @@ interface Props {
 }
 
 interface MiningEngineFormValue { selected: boolean }
-type ScanMode = "quick" | "standard" | "custom";
+type ScanMode = "standard" | "custom";
+type ScanModeOption =
+  | { id: ScanMode; label: string; description: string; selectable: true }
+  | { id: "smart"; label: string; description: string; selectable: false };
 
 const input = "w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 outline-none transition-colors focus:border-blue-500";
 const emptyMemory: ScanConfigMemory = { knowledge_base: null, validation_by_product: {} };
@@ -87,7 +90,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
   const [projectPath, setProjectPath] = useState("");
   const [codeScanPath, setCodeScanPath] = useState("");
   const [product, setProduct] = useState("");
-  const [scanMode, setScanMode] = useState<ScanMode>("quick");
+  const [scanMode, setScanMode] = useState<ScanMode>("standard");
 
   const [knowledgeEnabled, setKnowledgeEnabled] = useState(false);
   const [knowledgeProjects, setKnowledgeProjects] = useState<KnowledgeBaseProject[]>([]);
@@ -279,11 +282,11 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
 
         <Card><div className="mb-4"><h2 className="text-sm font-semibold text-slate-200">扫描基本信息</h2><p className="mt-1 text-xs text-slate-500">这些信息会作为扫描范围快照保存。</p></div><div className="grid gap-5 md:grid-cols-2"><Field label="扫描名称" hint="同一用户不可重复；留空自动生成“目录名_4位十六进制数”"><input className={input} value={scanName} placeholder="例如 project_audit" onChange={(event) => setScanName(event.target.value)} /></Field><Field label="项目总路径"><input className={input} value={projectPath} placeholder="/path/to/project" onChange={(event) => setProjectPath(event.target.value)} /></Field><Field label="代码扫描路径" hint="可选，留空扫描项目总路径"><input className={input} value={codeScanPath} placeholder="子目录或绝对路径" onChange={(event) => setCodeScanPath(event.target.value)} /></Field><Field label="产品" hint="可输入任意值，也可选择建议"><input className={input} list="scan-product-suggestions" value={product} placeholder="例如 LTE" onChange={(event) => { const next = event.target.value; setProduct(next); if (validationEnabled) { const methods = validatorMethods.filter((method) => method.products.includes(next.trim())); const rememberedId = memory.validation_by_product[next.trim()]?.last_method_id || ""; const method = methods.find((item) => item.method_id === rememberedId) || methods[0]; chooseValidationMethod(method?.method_id || "", next.trim()); } }} /><datalist id="scan-product-suggestions">{productSuggestions.map((item) => <option key={item} value={item} />)}</datalist></Field></div></Card>
 
-        <Card><div><h2 className="text-sm font-semibold text-slate-200">扫描模式</h2><p className="mt-1 text-xs text-slate-500">快速和标准模式使用固定流程；规则可在客户端高级配置中分别调整。</p></div><div className="mt-4 grid gap-3 md:grid-cols-3">{([
-          { id: "quick", label: "快速模式", description: "两个内置引擎、威胁分析/审计和自动去误报；默认排除敏感信息与测试规则。" },
-          { id: "standard", label: "标准模式", description: "两个内置引擎、威胁分析/审计和自动去误报；默认启用除测试规则外的全部规则。" },
-          { id: "custom", label: "自定义模式", description: "自行选择威胁分析、漏洞挖掘引擎和自动去误报。" },
-        ] as { id: ScanMode; label: string; description: string }[]).map((mode) => <label key={mode.id} className={`cursor-pointer rounded-lg border p-4 ${scanMode === mode.id ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" checked={scanMode === mode.id} onChange={() => setScanMode(mode.id)} /><span className="text-sm font-medium text-slate-100">{mode.label}</span><span className="mt-2 block text-xs leading-5 text-slate-500">{mode.description}</span></label>)}</div></Card>
+        <Card><div><h2 className="text-sm font-semibold text-slate-200">扫描模式</h2><p className="mt-1 text-xs text-slate-500">标准模式使用固定流程；智能模式正在实现中；自定义模式可按需配置。</p></div><div className="mt-4 grid gap-3 md:grid-cols-3">{([
+          { id: "standard", label: "标准模式", description: "包含威胁分析、基于代码风险点和基于攻击威胁的漏洞挖掘引擎、对抗式复核去误报", selectable: true },
+          { id: "smart", label: "智能模式", description: "实现中...", selectable: false },
+          { id: "custom", label: "自定义模式", description: "可按需配置威胁分析、漏洞挖掘引擎及去误报方式", selectable: true },
+        ] as ScanModeOption[]).map((mode) => <label key={mode.id} aria-disabled={!mode.selectable} className={`rounded-lg border p-4 ${mode.selectable ? "cursor-pointer" : "cursor-not-allowed opacity-50"} ${mode.selectable && scanMode === mode.id ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" disabled={!mode.selectable} checked={mode.selectable && scanMode === mode.id} onChange={() => { if (mode.selectable) setScanMode(mode.id); }} /><span className="text-sm font-medium text-slate-100">{mode.label}</span><span className="mt-2 block text-xs leading-5 text-slate-500">{mode.description}</span></label>)}</div></Card>
 
         <Card>
           <div className="flex items-start justify-between gap-3">
