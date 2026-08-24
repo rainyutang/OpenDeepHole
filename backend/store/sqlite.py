@@ -4844,7 +4844,12 @@ class SqliteScanStore(ScanStoreBase):
                 placeholders = ",".join("?" * len(chunk))
                 cur = self._conn.execute(
                     f"""\
-                    SELECT j.scan_id, r.vuln_index, r.verdict, r.severity, r.reason, r.created_at
+                    SELECT j.scan_id, r.vuln_index, r.verdict, r.severity, r.reason,
+                           CASE
+                               WHEN COALESCE(r.vulnerability_report, '') <> '' THEN '1'
+                               ELSE ''
+                           END AS vulnerability_report,
+                           r.created_at
                     FROM fp_review_results r
                     JOIN fp_review_jobs j ON j.review_id = r.review_id
                     WHERE j.scan_id IN ({placeholders})
@@ -4859,6 +4864,7 @@ class SqliteScanStore(ScanStoreBase):
                             verdict=r["verdict"],
                             severity=r["severity"],
                             reason=r["reason"],
+                            vulnerability_report=r["vulnerability_report"],
                             created_at=r["created_at"],
                         )
                     )

@@ -29,10 +29,12 @@ class FakeScanStore:
         meta: ScanMeta,
         *,
         fp_states: list[tuple[str, str]] | None = None,
+        fp_results: list[FpReviewResult] | None = None,
     ) -> None:
         self.scan = scan
         self.meta = meta
         self.fp_states = fp_states or []
+        self.fp_results = fp_results
 
     def list_scans(self) -> list[ScanSummary]:
         return [self._summary()]
@@ -67,6 +69,8 @@ class FakeScanStore:
     def list_fp_review_results_by_scan(self, scan_id: str) -> list[FpReviewResult]:
         if scan_id != self.scan.scan_id:
             return []
+        if self.fp_results is not None:
+            return list(self.fp_results)
         return [
             FpReviewResult(
                 vuln_index=1,
@@ -121,7 +125,7 @@ class FakeScanStore:
 
 
 class ScanHistorySummaryTests(unittest.TestCase):
-    def test_list_scans_uses_project_name_and_effective_issue_counts(self) -> None:
+    def test_list_scans_uses_project_name_and_post_fp_issue_counts(self) -> None:
         scan = ScanStatus(
             scan_id="scan-1",
             project_id="project-1",
@@ -189,10 +193,28 @@ class ScanHistorySummaryTests(unittest.TestCase):
             product="LTE",
             agent_name="agent-1",
         )
+        store = FakeScanStore(
+            scan,
+            meta,
+            fp_results=[
+                FpReviewResult(
+                    vuln_index=0,
+                    verdict="tp",
+                    reason="reviewed issue",
+                    created_at="2026-01-01T00:00:00+00:00",
+                ),
+                FpReviewResult(
+                    vuln_index=1,
+                    verdict="fp",
+                    reason="reviewed false positive",
+                    created_at="2026-01-01T00:00:00+00:00",
+                ),
+            ],
+        )
 
         with (
-            patch("backend.api.scan.get_scan_store", return_value=FakeScanStore(scan, meta)),
-            patch("backend.api.agent.get_scan_store", return_value=FakeScanStore(scan, meta)),
+            patch("backend.api.scan.get_scan_store", return_value=store),
+            patch("backend.api.agent.get_scan_store", return_value=store),
             patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
             patch("backend.api.agent.is_agent_name_online", return_value=True),
         ):
@@ -211,7 +233,7 @@ class ScanHistorySummaryTests(unittest.TestCase):
         self.assertEqual(response[0].vulnerability_count, 2)
         self.assertEqual(response[0].human_confirmed_count, 2)
         self.assertEqual(response[0].suspected_issue_count, 0)
-        self.assertEqual(response[0].confirmed_vulnerability_count, 2)
+        self.assertEqual(response[0].confirmed_vulnerability_count, 1)
 
     def test_list_scans_keeps_complete_core_scan_running_while_fp_review_runs(self) -> None:
         scan = ScanStatus(
@@ -264,7 +286,8 @@ class ScanHistorySummaryTests(unittest.TestCase):
         self.assertEqual(response[0].status, ScanItemStatus.COMPLETE)
         self.assertTrue(response[0].fp_review_running)
         self.assertFalse(response[0].can_continue)
-        self.assertEqual(response[0].suspected_issue_count, 1)
+        self.assertEqual(response[0].suspected_issue_count, 0)
+        self.assertEqual(response[0].confirmed_vulnerability_count, 0)
 
     def test_list_scans_v2_counts_unreviewed_fp_work_without_prior_job(self) -> None:
         scan = ScanStatus(
@@ -319,6 +342,8 @@ class ScanHistorySummaryTests(unittest.TestCase):
         self.assertFalse(page.items[0].fp_review_running)
         self.assertTrue(page.items[0].can_continue)
         self.assertEqual(page.items[0].continuable_task_count, 1)
+        self.assertEqual(page.items[0].suspected_issue_count, 0)
+        self.assertEqual(page.items[0].confirmed_vulnerability_count, 0)
 
     def test_list_scans_does_not_count_threat_failures_as_retryable_candidates(self) -> None:
         scan = ScanStatus(

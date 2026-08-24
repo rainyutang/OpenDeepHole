@@ -637,7 +637,7 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
                   </th>
                   <th className="min-w-[6.5rem] whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-400">状态</th>
                   <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">疑似问题</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">确认漏洞</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">确认问题</th>
                   {user.role === "admin" && (
                     <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">
                       <HeaderFilter

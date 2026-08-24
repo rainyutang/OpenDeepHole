@@ -28,10 +28,15 @@ class ScanMetricsTests(unittest.TestCase):
         )))
         self.assertTrue(is_effective_fp_review_result(FpReviewResult(
             **base,
+            reason="",
+            vulnerability_report="# Final report",
+        )))
+        self.assertTrue(is_effective_fp_review_result(FpReviewResult(
+            **base,
             reason="reachable",
         )))
 
-    def test_pending_analysis_is_not_counted_as_human_verdict(self) -> None:
+    def test_homepage_counts_only_final_tp_and_keeps_pending_suspected(self) -> None:
         metrics = calculate_issue_metrics(
             [
                 Vulnerability(
@@ -70,15 +75,49 @@ class ScanMetricsTests(unittest.TestCase):
                     ai_verdict="confirmed",
                     user_verdict="false_positive",
                 ),
+                Vulnerability(
+                    file="legacy-confirmed.c",
+                    line=4,
+                    function="legacy_confirmed",
+                    vuln_type="npd",
+                    severity="high",
+                    description="confirmed without final fp review",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                    user_verdict="confirmed",
+                ),
+                Vulnerability(
+                    file="unreviewed.c",
+                    line=5,
+                    function="unreviewed",
+                    vuln_type="npd",
+                    severity="high",
+                    description="unreviewed",
+                    ai_analysis="analysis",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
             ],
-            {},
+            latest_fp_review_result_map([
+                FpReviewResult(
+                    vuln_index=index,
+                    verdict="tp",
+                    severity="high",
+                    reason="confirmed by fp review",
+                    created_at="2026-08-04T00:00:00+00:00",
+                )
+                for index in range(3)
+            ]),
         )
 
-        self.assertEqual(metrics.human_confirmed_count, 1)
+        self.assertEqual(metrics.fp_review_issue_count, 3)
+        self.assertEqual(metrics.human_confirmed_issue_count, 1)
+        self.assertEqual(metrics.human_confirmed_count, 2)
         self.assertEqual(metrics.human_false_positive_count, 1)
         self.assertEqual(metrics.suspected_issue_count, 1)
-        self.assertEqual(metrics.accuracy_basis_count, 3)
-        self.assertEqual(metrics.accuracy, 0.3333)
+        self.assertEqual(metrics.accuracy_basis_count, 5)
+        self.assertEqual(metrics.accuracy, 0.4)
 
     def test_suspected_count_excludes_effective_fp_review_false_positives(self) -> None:
         vulnerability = Vulnerability(
@@ -106,6 +145,7 @@ class ScanMetricsTests(unittest.TestCase):
 
         self.assertEqual(metrics.effective_issue_count, 0)
         self.assertEqual(metrics.suspected_issue_count, 0)
+        self.assertEqual(metrics.human_confirmed_issue_count, 0)
 
     def test_validated_issue_count_excludes_fp_nonissues_and_running_validations(self) -> None:
         vulnerabilities = [

@@ -1794,7 +1794,7 @@ async def _enrich_scan_summaries(
         s.vulnerability_count = metrics.effective_issue_count
         s.human_confirmed_count = metrics.human_confirmed_count
         s.suspected_issue_count = metrics.suspected_issue_count
-        s.confirmed_vulnerability_count = metrics.human_confirmed_count
+        s.confirmed_vulnerability_count = metrics.human_confirmed_issue_count
     return summaries
 
 

@@ -13,6 +13,7 @@ from backend.models import (
     Vulnerability,
 )
 from backend.scan_event_log import SCAN_EVENT_RETENTION_LIMIT
+from backend.scan_metrics import latest_fp_review_result_map
 from backend.store.sqlite import SqliteScanStore
 
 
@@ -680,7 +681,7 @@ class FpReviewVerdictsStoreTests(unittest.TestCase):
                     vuln_index=0,
                     verdict="tp",
                     severity="high",
-                    reason="new true positive",
+                    reason="",
                     vulnerability_report="big report",
                     created_at="2026-01-02T00:01:00+00:00",
                 ),
@@ -694,8 +695,15 @@ class FpReviewVerdictsStoreTests(unittest.TestCase):
                 [(r.vuln_index, r.verdict, r.reason) for r in verdicts["scan-1"]],
                 [(r.vuln_index, r.verdict, r.reason) for r in full],
             )
-            # 轻量查询不携带大字段
-            self.assertEqual(verdicts["scan-1"][0].vulnerability_report, "")
+            # 轻量查询不携带大字段，只保留报告存在标记供有效结论判定。
+            self.assertEqual(
+                [r.vulnerability_report for r in verdicts["scan-1"]],
+                ["1", "1"],
+            )
+            self.assertEqual(
+                latest_fp_review_result_map(verdicts["scan-1"])[0].verdict,
+                "tp",
+            )
 
 
 class ScanMetaStoreTests(unittest.TestCase):
