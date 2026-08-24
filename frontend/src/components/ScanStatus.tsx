@@ -3042,7 +3042,7 @@ function ScanSidebarContent({
           />
           <SidebarNavigationButton
             label="疑似问题"
-            detail={`最终确认 ${issueCount} · 已验证 ${verifiedIssueCount}`}
+            detail={`问题总数：${issueCount}，已验证：${verifiedIssueCount}`}
             current={activeTab === "issues"}
             tone="red"
             badge={issueCount}
