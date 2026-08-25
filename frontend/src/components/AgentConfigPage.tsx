@@ -447,7 +447,7 @@ export default function AgentConfigPage({ onBack, initialAgentKey = "" }: Props)
             </div>
             <div className="border-t border-slate-700 pt-6">
               <h3 className="mb-4 text-sm font-semibold text-slate-200">模型配置</h3>
-              <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={() => void openModelPicker()} pool={pool} />
+              <ModelEditor config={config} setCfg={setCfg} online={Boolean(selectedAgent?.online)} onImport={() => void openModelPicker(true)} pool={pool} />
             </div>
           </div> : <div className="space-y-3">
             {advancedSections.map((item) => {

@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -26,8 +27,6 @@ from urllib.parse import quote
 
 import httpx
 
-import logging
-
 from .config_json import (
     is_sensitive_opencode_config_key,
     redact_opencode_config_content,
@@ -40,13 +39,18 @@ from .token_usage import (
     token_usage_from_models,
 )
 
-logger = logging.getLogger(__name__)
+# Keep Task Agent usable as a standalone package while still routing Serve
+# diagnostics through the full Agent's configured ``opendeephole`` logger.
+# Using ``__name__`` here leaves INFO records invisible in the Agent console
+# because the full Agent intentionally configures only that named hierarchy.
+logger = logging.getLogger(f"opendeephole.{__name__}")
 
 _SERVE_START_TIMEOUT_SECONDS = 60.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS = 5.0
 _SERVE_HEALTH_POLL_INTERVAL_SECONDS = 1.0
+_SERVE_HEALTH_PROGRESS_INTERVAL_SECONDS = 10.0
 _SERVE_EVENT_FLUSH_INTERVAL_SECONDS = 1.0
 _SERVE_EVENT_CONNECT_TIMEOUT_SECONDS = 2.0
 _SERVE_EVENT_RECONNECT_DELAY_SECONDS = 1.0
@@ -304,6 +308,14 @@ class OpenCodeModelInfo:
 class OpenCodeModelListResult:
     models: list[OpenCodeModelInfo]
     message: str = ""
+
+
+@dataclass(frozen=True)
+class _ServeHealthResult:
+    healthy: bool
+    status_code: int | None = None
+    version: str = ""
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -707,6 +719,57 @@ def _with_serve_startup_log(
     return f"{message}\n\nOpenCode serve startup output:\n{tail}{warning_note}"
 
 
+@dataclass
+class _ServeStartupLogCursor:
+    offset: int = 0
+    pending: bytes = b""
+
+
+def _log_serve_startup_output_updates(
+    path: Path | None,
+    cursor: _ServeStartupLogCursor,
+    *,
+    config_content: str = "",
+    final: bool = False,
+) -> None:
+    """Forward new, redacted Serve startup lines to the Agent console logger."""
+    if path is None:
+        return
+    try:
+        size = path.stat().st_size
+        if size < cursor.offset:
+            cursor.offset = 0
+            cursor.pending = b""
+        with path.open("rb") as stream:
+            stream.seek(cursor.offset)
+            chunk = stream.read()
+            cursor.offset = stream.tell()
+    except Exception as exc:
+        logger.debug("Failed to follow OpenCode serve startup output %s: %s", path, exc)
+        return
+
+    buffered = cursor.pending + chunk
+    complete: list[bytes] = []
+    while b"\n" in buffered:
+        line, buffered = buffered.split(b"\n", 1)
+        complete.append(line.rstrip(b"\r"))
+    if final and buffered:
+        complete.append(buffered.rstrip(b"\r"))
+        buffered = b""
+    elif len(buffered) > _SERVE_STARTUP_LOG_TAIL_LIMIT:
+        complete.append(buffered)
+        buffered = b""
+    cursor.pending = buffered
+
+    for raw_line in complete:
+        line = _redact_serve_startup_text(
+            raw_line.decode("utf-8", errors="replace"),
+            config_content,
+        ).strip()
+        if line:
+            logger.info("OpenCode serve startup output: %s", line)
+
+
 def _serve_startup_retry_kind(error: BaseException) -> str:
     text = str(error).lower()
     if any(marker in text for marker in _SERVE_NON_PORT_FAILURE_MARKERS):
@@ -806,7 +869,10 @@ def _log_serve_startup_debug(
         *_serve_startup_env_debug(env),
         f"  popen_kwargs={popen_kwargs!r}",
     ]
-    logger.info("%s", "\n".join(lines))
+    # Emit one record per physical line so the Agent console formatter places a
+    # timestamp on every item and Windows terminal output remains scannable.
+    for line in lines:
+        logger.info("%s", line)
 
 
 def _remove_file(path: Path | None) -> None:
@@ -4123,14 +4189,19 @@ class OpenCodeServeManager:
 
     def _mark_serve_unhealthy(self, operation: str, status_code: int) -> None:
         """Require the next Session acquisition to replace a broken Serve."""
+        self._mark_serve_restart_required(
+            f"request {operation} returned HTTP {status_code}",
+        )
+
+    def _mark_serve_restart_required(self, reason: str) -> None:
+        """Invalidate cached state after a transport or health failure."""
         self._restart_required = True
         self._serve_failure_generation += 1
         self._invalidate_model_cache()
         logger.warning(
-            "OpenCode serve request %s returned HTTP %s; "
+            "OpenCode serve is unavailable (%s); "
             "the next Session attempt will restart the shared Serve",
-            operation,
-            status_code,
+            reason,
         )
 
     def _raise_for_session_control_status(
@@ -6543,6 +6614,11 @@ class OpenCodeServeManager:
         config_elapsed = 0.0
         used_config_fallback = False
 
+        logger.info(
+            "OpenCode serve provider lookup start base_url=%s directory=%s",
+            self.base_url,
+            directory or "(none)",
+        )
         async with httpx.AsyncClient(
             base_url=self.base_url,
             timeout=_SERVE_REQUEST_TIMEOUT_SECONDS,
@@ -6609,6 +6685,14 @@ class OpenCodeServeManager:
                 details.append(f"/config/providers: {_one_line_preview(config_error)}")
             else:
                 details.append("/config/providers: invalid response")
+            logger.warning(
+                "OpenCode serve provider lookup failed provider_ms=%s config_ms=%s "
+                "fallback=%s detail=%s",
+                round(provider_elapsed * 1000),
+                round(config_elapsed * 1000),
+                used_config_fallback,
+                "; ".join(details),
+            )
             raise RuntimeError("OpenCode model listing failed (" + "; ".join(details) + ")")
         if config_error is not None and provider_payload_valid:
             logger.warning(
@@ -6738,6 +6822,13 @@ class OpenCodeServeManager:
                 if self._dirty:
                     refresh_deferred = True
 
+            # A live process handle isn't sufficient evidence that the local
+            # endpoint can serve requests. Always gate /provider enumeration on
+            # the documented health response, including the reuse path.
+            await self._ensure_model_listing_health_locked(
+                key,
+                startup_cwd=startup_cwd,
+            )
             async with self._idle:
                 self._active_model_listings += 1
             return refresh_deferred
@@ -6791,6 +6882,113 @@ class OpenCodeServeManager:
                 return response.status_code < 500
         except Exception:
             return False
+
+    async def _probe_model_listing_health(self) -> _ServeHealthResult:
+        """Require the documented healthy response before provider enumeration."""
+        url = f"{self.base_url}/global/health"
+        started_at = time.monotonic()
+        logger.info("OpenCode serve model preflight start endpoint=%s", url)
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=2.0,
+                trust_env=False,
+            ) as client:
+                response = await client.get("/global/health")
+        except Exception as exc:
+            result = _ServeHealthResult(
+                healthy=False,
+                detail=f"{type(exc).__name__}: {_one_line_preview(exc)}",
+            )
+        else:
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            try:
+                payload = response.json()
+            except Exception as exc:
+                result = _ServeHealthResult(
+                    healthy=False,
+                    status_code=status_code,
+                    detail=f"响应不是有效 JSON：{type(exc).__name__}: {_one_line_preview(exc)}",
+                )
+            else:
+                healthy = (
+                    status_code == 200
+                    and isinstance(payload, dict)
+                    and payload.get("healthy") is True
+                )
+                version = (
+                    str(payload.get("version") or "").strip()
+                    if isinstance(payload, dict)
+                    else ""
+                )
+                if status_code != 200:
+                    detail = f"HTTP {status_code}"
+                elif not isinstance(payload, dict):
+                    detail = f"响应类型为 {type(payload).__name__}，预期为对象"
+                elif payload.get("healthy") is not True:
+                    detail = f"healthy={payload.get('healthy')!r}，预期为 true"
+                else:
+                    detail = ""
+                result = _ServeHealthResult(
+                    healthy=healthy,
+                    status_code=status_code,
+                    version=version,
+                    detail=detail,
+                )
+
+        logger.info(
+            "OpenCode serve model preflight result healthy=%s status=%s version=%s "
+            "elapsed_ms=%s detail=%s",
+            result.healthy,
+            result.status_code if result.status_code is not None else "(none)",
+            result.version or "(unknown)",
+            round((time.monotonic() - started_at) * 1000),
+            result.detail or "(none)",
+        )
+        return result
+
+    async def _ensure_model_listing_health_locked(
+        self,
+        key: OpenCodeServeKey,
+        *,
+        startup_cwd: Path | None,
+    ) -> None:
+        """Health-gate provider lookup and recover one idle unhealthy Serve."""
+        result = await self._probe_model_listing_health()
+        if result.healthy:
+            return
+
+        detail = result.detail or "未返回 healthy=true"
+        self._mark_serve_restart_required(
+            f"GET /global/health failed before model listing: {detail}",
+        )
+        if self._active_sessions > 0:
+            raise RuntimeError(
+                "OpenCode Serve 模型拉取前健康检查失败：\n"
+                f"GET /global/health: {detail}\n"
+                f"当前仍有 {self._active_sessions} 个活动 Session；"
+                "为避免中断任务，本次不重启 Serve，也不会请求 Provider。"
+            )
+
+        logger.warning(
+            "OpenCode serve model preflight failed while idle; restarting once before "
+            "provider lookup detail=%s",
+            detail,
+        )
+        await self._ensure_started_locked(key, startup_cwd=startup_cwd)
+        retry = await self._probe_model_listing_health()
+        if retry.healthy:
+            return
+
+        retry_detail = retry.detail or "未返回 healthy=true"
+        self._mark_serve_restart_required(
+            f"GET /global/health still failed after restart: {retry_detail}",
+        )
+        raise RuntimeError(
+            "OpenCode Serve 模型拉取前健康检查失败：\n"
+            f"GET /global/health: {retry_detail}\n"
+            "Serve 已在空闲状态下重启一次，但仍不可用；未请求 Provider。"
+        )
 
     def _record_owned_listener_pids(
         self,
@@ -7301,91 +7499,133 @@ class OpenCodeServeManager:
         return _PreviousServeCleanupResult()
 
     async def _wait_health_locked(self, startup_log_path: Path | None = None) -> None:
-        deadline = time.monotonic() + _SERVE_START_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            if self._proc is not None and self._proc.poll() is not None:
-                if await self._try_adopt_owned_listener_locked():
-                    return
-                cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
-                raise RuntimeError(_with_serve_startup_log(
-                    f"OpenCode serve exited during startup with code {self._proc.returncode}{cwd_note}",
-                    startup_log_path,
-                    config_content=(self._key.config_content if self._key else ""),
-                ))
-            try:
-                async with httpx.AsyncClient(
-                    base_url=self.base_url,
-                    timeout=2.0,
-                    trust_env=False,
-                ) as client:
-                    response = await client.get("/global/health")
-                    if response.status_code < 500:
-                        proc = self._proc
-                        launcher_pid = int(getattr(proc, "pid", 0) or 0)
-                        ownership_mismatch = False
-                        if launcher_pid > 0 and self._port is not None:
-                            listeners, owned, ownership_verified = await asyncio.to_thread(
-                                _owned_listener_pids_for_launcher,
-                                self._port,
-                                launcher_pid,
-                            )
-                            ownership_mismatch = (
-                                bool(listeners)
-                                and ownership_verified
-                                and not owned
-                            )
-                            if owned:
-                                self._record_owned_listener_pids(
-                                    launcher_pid=launcher_pid,
-                                    listener_pids=owned,
-                                )
-                        if ownership_mismatch:
-                            logger.debug(
-                                "Ignoring OpenCode health response on 127.0.0.1:%s "
-                                "because its listener is outside launcher pid %s's process tree",
-                                self._port,
-                                launcher_pid,
-                            )
-                        else:
-                            if self._proc is not None and self._proc.poll() is not None:
-                                if await self._try_adopt_owned_listener_locked():
-                                    return
-                                cwd_note = (
-                                    f" startup_cwd={self._startup_cwd}"
-                                    if self._startup_cwd
-                                    else ""
-                                )
-                                raise RuntimeError(_with_serve_startup_log(
-                                    "OpenCode serve exited during startup with code "
-                                    f"{self._proc.returncode}{cwd_note}",
-                                    startup_log_path,
-                                    config_content=(
-                                        self._key.config_content if self._key else ""
-                                    ),
-                                ))
-                            return
-            except Exception:
+        started_at = time.monotonic()
+        deadline = started_at + _SERVE_START_TIMEOUT_SECONDS
+        next_progress_at = started_at + _SERVE_HEALTH_PROGRESS_INTERVAL_SECONDS
+        output_cursor = _ServeStartupLogCursor()
+        config_content = self._key.config_content if self._key else ""
+        last_health_detail = "尚未收到响应"
+
+        def forward_startup_output(*, final: bool = False) -> None:
+            _log_serve_startup_output_updates(
+                startup_log_path,
+                output_cursor,
+                config_content=config_content,
+                final=final,
+            )
+
+        try:
+            while time.monotonic() < deadline:
+                forward_startup_output()
                 if self._proc is not None and self._proc.poll() is not None:
                     if await self._try_adopt_owned_listener_locked():
                         return
-                    cwd_note = (
-                        f" startup_cwd={self._startup_cwd}"
-                        if self._startup_cwd
-                        else ""
-                    )
+                    cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
                     raise RuntimeError(_with_serve_startup_log(
-                        "OpenCode serve exited during startup with code "
-                        f"{self._proc.returncode}{cwd_note}",
+                        f"OpenCode serve exited during startup with code {self._proc.returncode}{cwd_note}",
                         startup_log_path,
-                        config_content=(self._key.config_content if self._key else ""),
+                        config_content=config_content,
                     ))
-            await asyncio.sleep(_SERVE_HEALTH_POLL_INTERVAL_SECONDS)
-        cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
-        raise TimeoutError(_with_serve_startup_log(
-            f"OpenCode serve did not become healthy{cwd_note}",
-            startup_log_path,
-            config_content=(self._key.config_content if self._key else ""),
-        ))
+                try:
+                    async with httpx.AsyncClient(
+                        base_url=self.base_url,
+                        timeout=2.0,
+                        trust_env=False,
+                    ) as client:
+                        response = await client.get("/global/health")
+                        last_health_detail = f"HTTP {response.status_code}"
+                        if response.status_code < 500:
+                            proc = self._proc
+                            launcher_pid = int(getattr(proc, "pid", 0) or 0)
+                            ownership_mismatch = False
+                            if launcher_pid > 0 and self._port is not None:
+                                listeners, owned, ownership_verified = await asyncio.to_thread(
+                                    _owned_listener_pids_for_launcher,
+                                    self._port,
+                                    launcher_pid,
+                                )
+                                ownership_mismatch = (
+                                    bool(listeners)
+                                    and ownership_verified
+                                    and not owned
+                                )
+                                if owned:
+                                    self._record_owned_listener_pids(
+                                        launcher_pid=launcher_pid,
+                                        listener_pids=owned,
+                                    )
+                            if ownership_mismatch:
+                                last_health_detail = (
+                                    f"HTTP {response.status_code}, listener ownership mismatch"
+                                )
+                                logger.debug(
+                                    "Ignoring OpenCode health response on 127.0.0.1:%s "
+                                    "because its listener is outside launcher pid %s's process tree",
+                                    self._port,
+                                    launcher_pid,
+                                )
+                            else:
+                                if self._proc is not None and self._proc.poll() is not None:
+                                    if await self._try_adopt_owned_listener_locked():
+                                        return
+                                    cwd_note = (
+                                        f" startup_cwd={self._startup_cwd}"
+                                        if self._startup_cwd
+                                        else ""
+                                    )
+                                    raise RuntimeError(_with_serve_startup_log(
+                                        "OpenCode serve exited during startup with code "
+                                        f"{self._proc.returncode}{cwd_note}",
+                                        startup_log_path,
+                                        config_content=config_content,
+                                    ))
+                                logger.info(
+                                    "OpenCode serve startup health ready endpoint=%s/global/health "
+                                    "status=%s elapsed_ms=%s",
+                                    self.base_url,
+                                    response.status_code,
+                                    round((time.monotonic() - started_at) * 1000),
+                                )
+                                return
+                except Exception as exc:
+                    last_health_detail = f"{type(exc).__name__}: {_one_line_preview(exc)}"
+                    if self._proc is not None and self._proc.poll() is not None:
+                        if await self._try_adopt_owned_listener_locked():
+                            return
+                        cwd_note = (
+                            f" startup_cwd={self._startup_cwd}"
+                            if self._startup_cwd
+                            else ""
+                        )
+                        raise RuntimeError(_with_serve_startup_log(
+                            "OpenCode serve exited during startup with code "
+                            f"{self._proc.returncode}{cwd_note}",
+                            startup_log_path,
+                            config_content=config_content,
+                        ))
+
+                now = time.monotonic()
+                if now >= next_progress_at:
+                    logger.info(
+                        "OpenCode serve startup waiting endpoint=%s/global/health "
+                        "elapsed_s=%.1f pid=%s last_health=%s startup_log_path=%s",
+                        self.base_url,
+                        now - started_at,
+                        int(getattr(self._proc, "pid", 0) or 0),
+                        last_health_detail,
+                        startup_log_path or "(none)",
+                    )
+                    next_progress_at = now + _SERVE_HEALTH_PROGRESS_INTERVAL_SECONDS
+                await asyncio.sleep(_SERVE_HEALTH_POLL_INTERVAL_SECONDS)
+            cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
+            raise TimeoutError(_with_serve_startup_log(
+                f"OpenCode serve did not become healthy{cwd_note}; "
+                f"last_health={last_health_detail}",
+                startup_log_path,
+                config_content=config_content,
+            ))
+        finally:
+            forward_startup_output(final=True)
 
     async def _abort_session(
         self,

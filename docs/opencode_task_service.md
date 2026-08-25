@@ -293,6 +293,7 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 - standalone 的 `serve.port` 是显式固定端口，占用时会报告外部监听 PID，无监听却绑定失败时会提示 Windows 排除/保留端口或端点安全软件，不会换号或终止未证明属于本组件的进程。完整 Agent 在未配置端口时才使用自动模式：实际端口只保存在当前进程内，不写回受管配置；其它进程占用候选端口或旧进程已消失但原端口仍处于 Windows 连接回收期时，避开对应端口并最多尝试 3 个不同端口。首次只返回无明确原因的 `Error: Unexpected error` 时仍只作一次恢复性换号。当前受管 Serve 仍存活或身份无法安全确认时禁止换号，同一 Agent 进程最多登记一个 Serve。
 - 未显式 shutdown 时，组件会登记自己通过 `Popen` 启动的精确 PID 和独立进程组，在解释器正常退出、`SIGINT`（Ctrl-C）或 `SIGTERM` 时同步清理，再恢复或转交宿主原有信号处理器。启动器 PID 退出不再等同于整棵进程树退出：POSIX 会继续检查进程组和已确认归属的监听 PID，发送 `SIGTERM` 5 秒后仍存活则升级为 `SIGKILL`；Windows ownership marker 额外记录进程创建标识，恢复时结合进程快照防止把复用的 PID 当成旧 Serve，只对身份仍匹配的进程执行 `taskkill /T /F`。TCP、监听表和带 `SO_EXCLUSIVEADDRUSE` 的独占绑定分别用于判断端点及端口状态，不再替代进程存活判断：旧进程已消失时删除 marker，端口可用则复用，暂不可绑定则由自动模式避开、固定模式报告；旧进程仍存活或状态无法确认时继续保留 marker 和管理器状态供重试。
 - 启动失败会同时报告固定/自动端口模式、已尝试端口和可执行文件版本，并附上脱敏后的启动日志尾部。`OPENCODE_SERVER_PASSWORD is not set` 是 Agent 仅监听 `127.0.0.1` 时的预期警告，日志会明确说明它不是 Serve 退出原因。
+- Web 从 Serve 读取模型时始终先请求 `GET /global/health`，且仅在收到 `200` 与 `healthy: true` 后请求 `/provider`（必要时回退 `/config/providers`）。复用进程但健康检查失败时，空闲 Serve 只安全重启一次并复查；存在活动 Session 时不强制重启且不会访问 Provider。Agent 终端会按时间打印请求编号、配置的 executable、实际解析路径、版本、启动命令、端口、健康检查、Provider 查询耗时和已脱敏的 Serve 启动输出。
 - `SIGKILL` 和 `os._exit()` 不运行 Python 的信号处理器或 `atexit` 回调，无法保证当场清理；下次启动会继续使用既有归属标记和端口恢复逻辑回收残留 Serve。
 - 若应用已经注册后端宿主绑定，则完全使用宿主配置，不读取独立 YAML；此时再传 `config_path` 会报冲突。
 

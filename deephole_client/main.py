@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import socket
 import sys
 from pathlib import Path
+
+from task_agent.output_format import with_local_timestamp
 
 
 _WS_MAX_MESSAGE_ENV = "OPENDEEPHOLE_WS_MAX_MESSAGE_MB"
@@ -60,6 +63,13 @@ def _ws_message_too_big_hint(error: Exception, max_message_mb: int) -> str:
         f"Agent WebSocket receive limit is {max_message_mb} MiB; increase "
         f"{_WS_MAX_MESSAGE_ENV} and restart the Agent if larger commands are expected"
     )
+
+
+async def _send_ws_json(ws, lock: asyncio.Lock, payload: dict) -> None:
+    """Serialize Agent-originated frames so long commands cannot race heartbeat sends."""
+    message = json.dumps(payload)
+    async with lock:
+        await ws.send(message)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -414,6 +424,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 ping_timeout=ping_timeout,
                 max_size=max_message_bytes,
             ) as ws:
+                ws_send_lock = asyncio.Lock()
                 # Handshake
                 validator_result = await run_vulnerability_validation(
                     operation="catalog",
@@ -436,7 +447,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 }
                 if config.owner_token:
                     hello_msg["owner_token"] = config.owner_token
-                await ws.send(json.dumps(hello_msg))
+                await _send_ws_json(ws, ws_send_lock, hello_msg)
 
                 welcome_raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
                 welcome = json.loads(welcome_raw)
@@ -475,7 +486,24 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 async def _heartbeat() -> None:
                     while True:
                         await asyncio.sleep(heartbeat_interval)
-                        await ws.send(json.dumps({"type": "heartbeat"}))
+                        try:
+                            await _send_ws_json(
+                                ws,
+                                ws_send_lock,
+                                {"type": "heartbeat"},
+                            )
+                        except Exception as exc:
+                            print(with_local_timestamp(
+                                "HEARTBEAT_SEND_FAILED "
+                                f"error={type(exc).__name__}: {exc}",
+                                prefix="[agent_connection]",
+                            ), flush=True)
+                            with contextlib.suppress(Exception):
+                                await ws.close(
+                                    code=4002,
+                                    reason="agent heartbeat send failed",
+                                )
+                            raise
 
                 async def _watchdog() -> None:
                     nonlocal last_seen
@@ -483,9 +511,13 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         await asyncio.sleep(max(1, min(heartbeat_interval, 10)))
                         idle = loop.time() - last_seen
                         if idle > watchdog_timeout:
-                            print(
-                                f"Connection stale: no server message for {idle:.0f}s; reconnecting..."
-                            )
+                            print(with_local_timestamp(
+                                "WATCHDOG_TIMEOUT "
+                                f"no_server_message_seconds={idle:.0f} "
+                                f"watchdog_timeout_seconds={watchdog_timeout} "
+                                f"heartbeat_interval_seconds={heartbeat_interval}; reconnecting",
+                                prefix="[agent_connection]",
+                            ), flush=True)
                             await ws.close(code=4001, reason="agent heartbeat watchdog timeout")
                             return
 
@@ -497,7 +529,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                         try:
                             response = await _handle_command(msg, config, task_manager, reporter)
                             if response:
-                                await ws.send(json.dumps(response))
+                                await _send_ws_json(ws, ws_send_lock, response)
                         except Exception as e:
                             print(f"Error handling command: {e}")
 
@@ -541,7 +573,10 @@ async def _ws_loop(config, task_manager, reporter) -> None:
             hint = _ws_message_too_big_hint(e, max_message_mb)
             if hint:
                 message += f" {hint}."
-            print(f"{message} Reconnecting in {reconnect_delay}s...")
+            print(with_local_timestamp(
+                f"{message} Reconnecting in {reconnect_delay}s...",
+                prefix="[agent_connection]",
+            ), flush=True)
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, 60)
 

@@ -271,7 +271,7 @@ def test_legacy_session_model_listing_route_remains_compatible(monkeypatch) -> N
     resolver.assert_awaited_once_with("legacy-session")
 
 
-def test_agent_handler_labels_serve_failure_stage(monkeypatch, tmp_path) -> None:
+def test_agent_handler_labels_serve_failure_stage(monkeypatch, tmp_path, capsys) -> None:
     manager = SimpleNamespace(
         list_models=AsyncMock(side_effect=RuntimeError(
             "OpenCode Serve 准备失败（启动或复用阶段）：\n"
@@ -306,3 +306,9 @@ def test_agent_handler_labels_serve_failure_stage(monkeypatch, tmp_path) -> None
     assert "阶段：准备 OpenCode Serve 并查询 Provider" in result["message"]
     assert "错误类型：RuntimeError" in result["message"]
     assert "OpenCode serve startup output:\nprovider failed to load" in result["message"]
+    console = capsys.readouterr().out
+    assert "[opencode_models] REQUEST request_id=request-1 refresh=False" in console
+    assert "[opencode_models] RUNTIME request_id=request-1" in console
+    assert "executable=opencode" in console
+    assert "[opencode_models] OpenCode Serve 模型枚举失败" in console
+    assert "provider failed to load" in console

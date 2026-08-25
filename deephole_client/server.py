@@ -1332,6 +1332,10 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
     """Return models visible to the Agent's OpenCode-compatible serve process."""
     started_at = time.monotonic()
     stage = "初始化 Agent 配置"
+    print(with_local_timestamp(
+        f"REQUEST request_id={request_id or '(empty)'} refresh={bool(refresh)}",
+        prefix="[opencode_models]",
+    ), flush=True)
     try:
         from task_agent.serve_client import get_serve_manager
         from deephole_client.opencode_integration import (
@@ -1348,6 +1352,15 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             _config.opencode,
             directory=Path.cwd(),
         )
+        print(with_local_timestamp(
+            "RUNTIME "
+            f"request_id={request_id or '(empty)'} "
+            f"tool={runtime.tool} executable={runtime.executable} "
+            f"directory={runtime.directory} "
+            f"config_workspace={runtime.config_workspace} "
+            f"port_mode={'auto' if runtime.serve_port_auto else 'fixed'}",
+            prefix="[opencode_models]",
+        ), flush=True)
         stage = "准备 OpenCode Serve 并查询 Provider"
         model_result = await get_serve_manager().list_models(
             tool=runtime.tool,
@@ -1359,6 +1372,12 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             serve_port_auto=runtime.serve_port_auto,
             refresh=refresh,
         )
+        print(with_local_timestamp(
+            "SUCCESS "
+            f"request_id={request_id or '(empty)'} models={len(model_result.models)} "
+            f"elapsed_seconds={max(0.0, time.monotonic() - started_at):.1f}",
+            prefix="[opencode_models]",
+        ), flush=True)
         return {
             "type": "opencode_models_result",
             "request_id": request_id,
@@ -1385,6 +1404,10 @@ async def handle_opencode_models(request_id: str, refresh: bool = False) -> dict
             "详细信息：",
             str(exc).strip() or "未提供具体错误信息。",
         ))
+        print(with_local_timestamp(
+            diagnostic,
+            prefix="[opencode_models]",
+        ), flush=True)
         return {
             "type": "opencode_models_result",
             "request_id": request_id,

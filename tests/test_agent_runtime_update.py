@@ -95,6 +95,55 @@ class AgentWebSocketMessageLimitTests(unittest.TestCase):
             "",
         )
 
+    def test_agent_websocket_sends_are_serialized_with_heartbeats(self) -> None:
+        class FakeWebSocket:
+            def __init__(self) -> None:
+                self.active_sends = 0
+                self.max_active_sends = 0
+                self.messages: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def send(self, raw: str) -> None:
+                self.active_sends += 1
+                self.max_active_sends = max(
+                    self.max_active_sends,
+                    self.active_sends,
+                )
+                try:
+                    if not self.messages:
+                        self.first_started.set()
+                        await self.release_first.wait()
+                    self.messages.append(json.loads(raw))
+                finally:
+                    self.active_sends -= 1
+
+        async def run() -> None:
+            websocket = FakeWebSocket()
+            send_lock = asyncio.Lock()
+            first = asyncio.create_task(agent_main._send_ws_json(
+                websocket,
+                send_lock,
+                {"type": "opencode_models_result"},
+            ))
+            await websocket.first_started.wait()
+            heartbeat = asyncio.create_task(agent_main._send_ws_json(
+                websocket,
+                send_lock,
+                {"type": "heartbeat"},
+            ))
+            await asyncio.sleep(0)
+
+            assert websocket.max_active_sends == 1
+            websocket.release_first.set()
+            await asyncio.gather(first, heartbeat)
+            assert websocket.messages == [
+                {"type": "opencode_models_result"},
+                {"type": "heartbeat"},
+            ]
+
+        asyncio.run(run())
+
     def test_resume_command_larger_than_old_limit_is_dispatched_once(self) -> None:
         large_description = "x" * (1024 * 1024 + 1024)
         command = {

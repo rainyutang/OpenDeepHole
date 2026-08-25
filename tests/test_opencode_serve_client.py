@@ -21,6 +21,8 @@ from task_agent.serve_client import (
     OpenCodeServeManager,
     _ScanMcpLease,
     _ServeEventState,
+    _ServeHealthResult,
+    _ServeStartupLogCursor,
     _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
     _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS,
     _EventChannelRuntime,
@@ -31,6 +33,7 @@ from task_agent.serve_client import (
     _config_hash,
     _flush_event_state_periodically,
     _handle_serve_event,
+    _log_serve_startup_output_updates,
     _message_token_entries,
     _next_event_reconnect_delay,
     _opencode_mcp_tool_ids,
@@ -6797,6 +6800,189 @@ def test_wait_health_redacts_startup_output_and_explains_password_warning(
     asyncio.run(run())
 
 
+def test_startup_output_updates_are_streamed_once_and_redacted(
+    caplog,
+    tmp_path: Path,
+) -> None:
+    startup_log_path = tmp_path / "serve-startup.log"
+    startup_log_path.write_text(
+        "loading provider\napiKey=super-secret-key\npartial",
+        encoding="utf-8",
+    )
+    cursor = _ServeStartupLogCursor()
+    config_content = json.dumps({
+        "provider": {"corp": {"options": {"apiKey": "super-secret-key"}}}
+    })
+    caplog.set_level(
+        "INFO",
+        logger="opendeephole.task_agent.serve_client",
+    )
+
+    _log_serve_startup_output_updates(
+        startup_log_path,
+        cursor,
+        config_content=config_content,
+    )
+    _log_serve_startup_output_updates(
+        startup_log_path,
+        cursor,
+        config_content=config_content,
+        final=True,
+    )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "OpenCode serve startup output: loading provider",
+        "OpenCode serve startup output: apiKey=***",
+        "OpenCode serve startup output: partial",
+    ]
+    assert "super-secret-key" not in "\n".join(messages)
+
+
+def test_model_listing_health_probe_uses_documented_global_endpoint(
+    monkeypatch,
+) -> None:
+    async def run() -> None:
+        _FakeModelAsyncClient.instances = []
+        _FakeModelAsyncClient.responses = {
+            "/global/health": {"healthy": True, "version": "nga-test"},
+        }
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeModelAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+
+        result = await manager._probe_model_listing_health()
+
+        assert result == _ServeHealthResult(
+            healthy=True,
+            status_code=200,
+            version="nga-test",
+        )
+        assert _FakeModelAsyncClient.instances[0].gets == [
+            {"path": "/global/health"},
+        ]
+
+    asyncio.run(run())
+
+
+def test_model_listing_checks_health_before_querying_provider() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        order: list[str] = []
+
+        async def probe_health() -> _ServeHealthResult:
+            order.append("health")
+            return _ServeHealthResult(healthy=True, status_code=200)
+
+        async def fetch_models(_directory: Path | None) -> list[OpenCodeModelInfo]:
+            order.append("provider")
+            return []
+
+        key = OpenCodeServeKey(tool="opencode", executable="nga")
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = key
+        manager._probe_model_listing_health = probe_health
+        manager._fetch_models = fetch_models
+
+        result = await manager.list_models(
+            tool="opencode",
+            executable="nga",
+            refresh=True,
+        )
+
+        assert result == OpenCodeModelListResult(models=[])
+        assert order == ["health", "provider"]
+
+    asyncio.run(run())
+
+
+def test_unhealthy_idle_serve_restarts_once_before_provider_lookup() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        key = OpenCodeServeKey(tool="opencode", executable="nga")
+        models = [OpenCodeModelInfo(
+            id="provider/model",
+            provider_id="provider",
+            model_id="model",
+        )]
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = key
+        manager._probe_model_listing_health = AsyncMock(side_effect=[
+            _ServeHealthResult(healthy=False, detail="connection refused"),
+            _ServeHealthResult(healthy=True, status_code=200),
+        ])
+        manager._wait_until_idle_locked = AsyncMock()
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+        manager._fetch_models = AsyncMock(return_value=models)
+
+        result = await manager.list_models(
+            tool="opencode",
+            executable="nga",
+            refresh=True,
+        )
+
+        assert result == OpenCodeModelListResult(models=models)
+        manager._stop_locked.assert_awaited_once()
+        manager._start_locked.assert_awaited_once()
+        restarted_key = manager._start_locked.await_args.args[0]
+        assert restarted_key.tool == "opencode"
+        assert restarted_key.executable == "nga"
+        assert manager._start_locked.await_args.kwargs == {"startup_cwd": None}
+        manager._fetch_models.assert_awaited_once_with(None)
+
+    asyncio.run(run())
+
+
+def test_unhealthy_active_serve_never_queries_provider_or_restarts() -> None:
+    async def run() -> None:
+        class FakeProc:
+            def poll(self):
+                return None
+
+        key = OpenCodeServeKey(tool="opencode", executable="nga")
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 12345
+        manager._key = key
+        manager._active_sessions = 1
+        manager._probe_model_listing_health = AsyncMock(return_value=
+            _ServeHealthResult(healthy=False, detail="connection refused")
+        )
+        manager._stop_locked = AsyncMock()
+        manager._start_locked = AsyncMock()
+        manager._fetch_models = AsyncMock()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await manager.list_models(
+                tool="opencode",
+                executable="nga",
+                refresh=True,
+            )
+
+        message = str(excinfo.value)
+        assert "健康检查失败" in message
+        assert "不会请求 Provider" in message
+        manager._stop_locked.assert_not_awaited()
+        manager._start_locked.assert_not_awaited()
+        manager._fetch_models.assert_not_awaited()
+
+    asyncio.run(run())
+
+
 def test_model_listing_reuses_compatible_idle_serve_despite_config_hash_change() -> None:
     async def run() -> None:
         class FakeProc:
@@ -6814,6 +7000,7 @@ def test_model_listing_reuses_compatible_idle_serve_despite_config_hash_change()
         manager._wait_until_idle_locked = AsyncMock()
         manager._stop_locked = AsyncMock()
         manager._start_locked = AsyncMock()
+        manager._ensure_model_listing_health_locked = AsyncMock()
 
         deferred = await manager._acquire_model_listing(OpenCodeServeKey(
             tool="opencode",
@@ -6846,6 +7033,7 @@ def test_dirty_idle_serve_restarts_before_model_listing() -> None:
         manager._wait_until_idle_locked = AsyncMock()
         manager._stop_locked = AsyncMock()
         manager._start_locked = AsyncMock()
+        manager._ensure_model_listing_health_locked = AsyncMock()
 
         deferred = await manager._acquire_model_listing(key)
 
@@ -6926,6 +7114,7 @@ def test_dirty_active_session_defers_model_reload_without_waiting_or_restarting(
         manager._stop_locked = AsyncMock()
         manager._start_locked = AsyncMock()
         manager._fetch_models = AsyncMock(return_value=models)
+        manager._ensure_model_listing_health_locked = AsyncMock()
 
         result = await manager.list_models(
             tool="opencode",
@@ -6973,6 +7162,7 @@ def test_refresh_with_active_session_fetches_live_without_reload_or_deferred_mes
         manager._stop_locked = AsyncMock()
         manager._start_locked = AsyncMock()
         manager._fetch_models = AsyncMock(side_effect=[cached_models, live_models])
+        manager._ensure_model_listing_health_locked = AsyncMock()
 
         initial = await manager.list_models(tool="opencode", executable="opencode")
         refreshed = await manager.list_models(
@@ -7030,6 +7220,7 @@ def test_incompatible_active_serve_defers_model_reload_without_waiting(
         manager._stop_locked = AsyncMock()
         manager._start_locked = AsyncMock()
         manager._fetch_models = AsyncMock(return_value=models)
+        manager._ensure_model_listing_health_locked = AsyncMock()
 
         result = await manager.list_models(**request_kwargs)
 
@@ -7085,6 +7276,7 @@ def test_prompt_config_change_waits_for_model_listing_then_restarts_serve() -> N
         manager._stop_locked = AsyncMock()
         manager._start_locked = AsyncMock()
         manager._fetch_models = fetch_models
+        manager._ensure_model_listing_health_locked = AsyncMock()
 
         listing_task = asyncio.create_task(manager.list_models(
             tool="opencode",
