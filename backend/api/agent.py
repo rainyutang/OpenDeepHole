@@ -102,6 +102,10 @@ from backend.scan_event_log import (
     SCAN_EVENT_RETENTION_LIMIT,
     is_agent_local_task_output,
 )
+from backend.scan_runtime import (
+    RUNNING_SCAN_STATUSES as _RUNNING_SCAN_STATUSES,
+    terminal_opencode_pool_status as _terminal_opencode_pool_status,
+)
 from backend.threat_data import parse_threat_analysis_data
 from backend.vulnerability_identity import vulnerability_report_identity
 
@@ -601,11 +605,6 @@ _AGENT_DISCONNECT_GRACE_SECONDS = 120
 _SERVER_STARTED_AT = datetime.now(timezone.utc)
 _RUNTIME_DOWNLOAD_TOKEN_TTL_SECONDS = 300
 
-_RUNNING_SCAN_STATUSES = (
-    ScanItemStatus.PENDING,
-    ScanItemStatus.ANALYZING,
-    ScanItemStatus.AUDITING,
-)
 _RUNTIME_UPDATE_PENDING = "pending"
 _RUNTIME_UPDATE_UPDATING = "updating"
 _RUNTIME_UPDATE_FAILED = "failed"
@@ -1099,6 +1098,7 @@ def reconcile_offline_agent_scan_state(scan_id: str, scan: ScanStatus) -> ScanSt
         scan.status = ScanItemStatus.CANCELLED
         scan.error_message = AGENT_DISCONNECT_ERROR
         scan.current_candidate = None
+        scan.opencode_pool = _terminal_opencode_pool_status(scan.opencode_pool)
     return scan
 
 
@@ -1618,24 +1618,6 @@ async def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
     return scan
 
 
-def _terminal_opencode_pool_status(status: OpenCodePoolStatus | None) -> OpenCodePoolStatus | None:
-    """Clear transient model-pool state while preserving historical counters."""
-    if status is None:
-        return None
-    cleared = status.model_copy(deep=True)
-    cleared.global_running = 0
-    cleared.global_queued = 0
-    cleared.queued_tasks = []
-    cleared.planned_tasks = []
-    for model in cleared.models:
-        model.running = 0
-        model.queued = 0
-        model.active_tasks = []
-        if model.last_status in {"running", "queued"}:
-            model.last_status = ""
-    return cleared
-
-
 def _merge_completed_opencode_tasks(
     previous: OpenCodePoolStatus | None,
     current: OpenCodePoolStatus,
@@ -1703,22 +1685,49 @@ async def _mark_agent_scans_cancelled_async(agent_id: str) -> None:
         AGENT_DISCONNECT_ERROR,
     )
 
+    stale_local_scan_ids: set[str] = set()
     for scan_id in list(_running_scans):
         meta = await run_store_call(store, "get_scan_meta", scan_id)
         if meta is None:
             continue
         if meta.agent_id != agent_id:
             continue
-        scan = _running_scans.get(scan_id)
-        if scan is not None:
-            scan.status = ScanItemStatus.CANCELLED
-            scan.error_message = AGENT_DISCONNECT_ERROR
-            scan.current_candidate = None
-        cancelled_scan_ids.add(scan_id)
+        if scan_id in cancelled_scan_ids:
+            scan = _running_scans.get(scan_id)
+            if scan is not None:
+                scan.status = ScanItemStatus.CANCELLED
+                scan.error_message = AGENT_DISCONNECT_ERROR
+                scan.current_candidate = None
+                scan.opencode_pool = _terminal_opencode_pool_status(
+                    scan.opencode_pool,
+                )
+            continue
+        loaded = await run_store_call(store, "load_scan_overview", scan_id)
+        if loaded is not None and loaded[0].status not in _RUNNING_SCAN_STATUSES:
+            stale_local_scan_ids.add(scan_id)
 
-    for scan_id in cancelled_scan_ids:
+    for scan_id in cancelled_scan_ids | stale_local_scan_ids:
         _running_scans.pop(scan_id, None)
         _scan_owners.pop(scan_id, None)
+
+    if cancelled_scan_ids:
+        from backend.sse import publish
+
+        refreshed = await asyncio.gather(*(
+            run_store_call(store, "load_scan_overview", scan_id)
+            for scan_id in sorted(cancelled_scan_ids)
+        ))
+        for scan_id, loaded in zip(sorted(cancelled_scan_ids), refreshed):
+            persisted = loaded[0] if loaded is not None else None
+            publish(scan_id, "scan_status", {
+                "status": ScanItemStatus.CANCELLED,
+                "error_message": AGENT_DISCONNECT_ERROR,
+                "opencode_pool": (
+                    persisted.opencode_pool.model_dump(mode="json")
+                    if persisted is not None and persisted.opencode_pool is not None
+                    else None
+                ),
+            })
 
     if cancelled_scan_ids or fp_review_count:
         logger.info(

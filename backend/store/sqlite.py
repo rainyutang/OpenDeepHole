@@ -15,6 +15,10 @@ from backend.scan_event_log import (
     is_agent_local_task_output,
     task_output_glob_patterns,
 )
+from backend.scan_runtime import (
+    is_terminal_scan_status,
+    terminal_opencode_pool_status,
+)
 from backend.models import (
     Announcement,
     AgentMcpConfig,
@@ -276,6 +280,11 @@ def _opencode_pool_status(value: str | None) -> OpenCodePoolStatus | None:
         return OpenCodePoolStatus(**data)
     except Exception:
         return None
+
+
+def _terminal_opencode_pool_json(value: str | None) -> str:
+    status = terminal_opencode_pool_status(_opencode_pool_status(value))
+    return status.model_dump_json() if status is not None else "{}"
 
 
 def _vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
@@ -1673,7 +1682,10 @@ class SqliteScanStore(ScanStoreBase):
         current = None
         if row["current_candidate"]:
             current = Candidate.model_validate_json(row["current_candidate"])
+        scan_status = ScanItemStatus(row["status"])
         pool = _opencode_pool_status(row["opencode_pool"])
+        if is_terminal_scan_status(scan_status):
+            pool = terminal_opencode_pool_status(pool)
         return ScanStatus(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
@@ -1735,7 +1747,7 @@ class SqliteScanStore(ScanStoreBase):
                 MiningEngineRunStatus,
             ),
             created_at=row["created_at"],
-            status=ScanItemStatus(row["status"]),
+            status=scan_status,
             progress=row["progress"],
             total_candidates=row["total_candidates"],
             processed_candidates=row["processed_candidates"],
@@ -2259,10 +2271,19 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
 
     def update_opencode_pool_status(self, scan_id: str, status: OpenCodePoolStatus) -> None:
+        active_json = status.model_dump_json()
+        terminal_status = terminal_opencode_pool_status(status) or OpenCodePoolStatus()
         with self._lock:
             self._conn.execute(
-                "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
-                (status.model_dump_json(), scan_id),
+                """\
+                UPDATE scans
+                SET opencode_pool = CASE
+                    WHEN status IN ('pending', 'analyzing', 'auditing') THEN ?
+                    ELSE ?
+                END
+                WHERE scan_id = ?
+                """,
+                (active_json, terminal_status.model_dump_json(), scan_id),
             )
             self._conn.commit()
 
@@ -2648,11 +2669,65 @@ class SqliteScanStore(ScanStoreBase):
         if not updates:
             return
 
-        params.append(scan_id)
-        sql = f"UPDATE scans SET {', '.join(updates)} WHERE scan_id = ?"
         with self._lock:
-            self._conn.execute(sql, params)
+            params.append(scan_id)
+            sql = f"UPDATE scans SET {', '.join(updates)} WHERE scan_id = ?"
+            if is_terminal_scan_status(status):
+                row = self._conn.execute(
+                    f"{sql} RETURNING opencode_pool",
+                    params,
+                ).fetchone()
+                if row is not None:
+                    self._conn.execute(
+                        "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
+                        (
+                            _terminal_opencode_pool_json(row["opencode_pool"]),
+                            scan_id,
+                        ),
+                    )
+            else:
+                self._conn.execute(sql, params)
             self._conn.commit()
+
+    def claim_scan_for_resume(
+        self,
+        scan_id: str,
+        *,
+        processed_candidates: int,
+        progress: float,
+    ) -> bool:
+        """Claim one terminal scan for resume across processes and workers."""
+        with self._lock:
+            row = self._conn.execute(
+                """\
+                UPDATE scans
+                SET status = 'pending',
+                    processed_candidates = ?,
+                    progress = ?,
+                    error_message = '',
+                    current_candidate = NULL
+                WHERE scan_id = ?
+                  AND status IN ('complete', 'error', 'cancelled')
+                RETURNING opencode_pool
+                """,
+                (
+                    max(0, int(processed_candidates)),
+                    max(0.0, min(1.0, float(progress))),
+                    scan_id,
+                ),
+            ).fetchone()
+            if row is None:
+                self._conn.commit()
+                return False
+            self._conn.execute(
+                "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
+                (
+                    _terminal_opencode_pool_json(row["opencode_pool"]),
+                    scan_id,
+                ),
+            )
+            self._conn.commit()
+            return True
 
     def update_scan_agent(
         self,
@@ -4583,45 +4658,59 @@ class SqliteScanStore(ScanStoreBase):
 
     def mark_running_as_error(self) -> int:
         with self._lock:
-            cur = self._conn.execute(
+            rows = self._conn.execute(
                 """\
                 UPDATE scans SET status = 'error',
                                  error_message = 'Process terminated unexpectedly',
                                  current_candidate = NULL
                 WHERE status IN ('pending', 'analyzing', 'auditing')
                   AND (agent_name IS NULL OR agent_name = '')
+                RETURNING scan_id, opencode_pool
                 """
-            )
+            ).fetchall()
+            if rows:
+                self._conn.executemany(
+                    "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
+                    [
+                        (
+                            _terminal_opencode_pool_json(row["opencode_pool"]),
+                            row["scan_id"],
+                        )
+                        for row in rows
+                    ],
+                )
             self._conn.commit()
-            return cur.rowcount
+            return len(rows)
 
     def mark_agent_scans_cancelled(self, agent_id: str, error_message: str) -> list[str]:
         if not agent_id:
             return []
-        running_statuses = ("pending", "analyzing", "auditing")
         with self._lock:
-            cur = self._conn.execute(
+            rows = self._conn.execute(
                 """\
-                SELECT scan_id
-                FROM scans
-                WHERE agent_id = ?
-                  AND status IN (?, ?, ?)
-                """,
-                (agent_id, *running_statuses),
-            )
-            scan_ids = [row[0] for row in cur.fetchall()]
-            if not scan_ids:
-                return []
-            placeholders = ", ".join("?" for _ in scan_ids)
-            self._conn.execute(
-                f"""\
                 UPDATE scans
                 SET status = 'cancelled',
                     error_message = ?,
                     current_candidate = NULL
-                WHERE scan_id IN ({placeholders})
+                WHERE agent_id = ?
+                  AND status IN ('pending', 'analyzing', 'auditing')
+                RETURNING scan_id, opencode_pool
                 """,
-                (error_message, *scan_ids),
+                (error_message, agent_id),
+            ).fetchall()
+            scan_ids = [str(row["scan_id"]) for row in rows]
+            if not scan_ids:
+                self._conn.commit()
+                return []
+            self._conn.executemany(
+                "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
+                [
+                    (
+                        _terminal_opencode_pool_json(row["opencode_pool"]),
+                        row["scan_id"],
+                    )
+                    for row in rows
+                ],
             )
             self._conn.commit()
             return scan_ids

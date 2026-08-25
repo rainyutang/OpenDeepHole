@@ -739,8 +739,19 @@ class AgentRuntimePackageTests(unittest.TestCase):
         async def check_update(update: dict, command: dict) -> bool:
             calls.append("update")
             self.assertEqual(update, {"hash": "new-runtime"})
-            self.assertEqual(command["retry_threat_audit_task_ids"], ["threat-timeout"])
+            self.assertEqual(
+                command["resume_manifest_url"],
+                "http://server.example/api/agent/v2/resume-manifests/token-1",
+            )
             return False
+
+        async def fetch_manifest(url: str) -> dict:
+            calls.append("manifest")
+            self.assertEqual(
+                url,
+                "http://server.example/api/agent/v2/resume-manifests/token-1",
+            )
+            return manifest
 
         async def handle_resume(**kwargs) -> None:
             calls.append("resume")
@@ -757,9 +768,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 {"enabled": True, "transport": "remote"},
             )
 
-        command = {
-            "type": "resume",
-            "scan_id": "scan-1",
+        manifest = {
             "project_path": "/repo/project",
             "code_scan_path": "/repo/project/src",
             "checkers": ["npd"],
@@ -771,15 +780,24 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "retry_mining_engine_ids": ["threat_audit"],
             "retry_threat_audit_task_ids": ["threat-timeout"],
             "code_graph_mcp": {"enabled": True, "transport": "remote"},
+        }
+        command = {
+            "type": "resume",
+            "scan_id": "scan-1",
+            "resume_manifest_url": (
+                "http://server.example/api/agent/v2/resume-manifests/token-1"
+            ),
             "agent_runtime_update": {"hash": "new-runtime"},
         }
+        reporter = AsyncMock()
+        reporter.fetch_resume_manifest.side_effect = fetch_manifest
         with (
             patch("deephole_client.updater.ensure_runtime_updated", new=check_update),
             patch("deephole_client.server.handle_resume", new=handle_resume),
         ):
-            asyncio.run(agent_main._handle_command(command, None, None, None))
+            asyncio.run(agent_main._handle_command(command, None, None, reporter))
 
-        self.assertEqual(calls, ["update", "resume"])
+        self.assertEqual(calls, ["update", "manifest", "resume"])
 
     def test_runtime_update_preserves_resume_command_before_install_and_restart(self) -> None:
         calls: list[str] = []

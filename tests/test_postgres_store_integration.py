@@ -17,6 +17,7 @@ import pytest
 from backend.models import (
     AgentInfo,
     Candidate,
+    OpenCodePoolStatus,
     ScanEvent,
     ScanItemStatus,
     ScanMeta,
@@ -230,6 +231,59 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
         assert peer.try_advisory_lock(lock_key) is False
         store.release_advisory_lock(lock_key)
         assert peer.try_advisory_lock(lock_key) is True
+
+        stale_scan, stale_meta = _scan()
+        stale_scan.scan_id = "postgres-stale-scan"
+        stale_scan.project_id = "postgres-stale-project"
+        stale_scan.opencode_pool = OpenCodePoolStatus(
+            scope_id=stale_scan.scan_id,
+            global_running=1,
+            global_queued=1,
+            queued_tasks=[{"task_id": "queued"}],
+            planned_tasks=[{"task_id": "planned"}],
+            completed_tasks=[{"task_id": "done", "outcome": "success"}],
+            total_tasks=3,
+            completed_task_count=1,
+            models=[{
+                "id": "high",
+                "model": "provider/model",
+                "max_concurrency": 1,
+                "running": 1,
+                "queued": 1,
+                "active_tasks": [{"task_id": "running"}],
+            }],
+        )
+        stale_meta.agent_id = "postgres-stale-agent"
+        stale_meta.agent_key = "postgres-stale-key"
+        stale_meta.scan_name = "PostgreSQL stale scan"
+        store.save_scan(stale_scan, stale_meta)
+
+        cancelled = store.cancel_stale_agent_work(
+            stale_seconds=1,
+            error_message="Agent 断开连接",
+        )
+        assert stale_scan.scan_id in cancelled
+        cancelled_scan, _meta = peer.load_scan(stale_scan.scan_id)
+        assert cancelled_scan.status == ScanItemStatus.CANCELLED
+        assert cancelled_scan.opencode_pool is not None
+        assert cancelled_scan.opencode_pool.global_running == 0
+        assert cancelled_scan.opencode_pool.global_queued == 0
+        assert cancelled_scan.opencode_pool.queued_tasks == []
+        assert cancelled_scan.opencode_pool.planned_tasks == []
+        assert cancelled_scan.opencode_pool.models[0].active_tasks == []
+        assert cancelled_scan.opencode_pool.completed_tasks == [
+            {"task_id": "done", "outcome": "success"},
+        ]
+        assert store.claim_scan_for_resume(
+            stale_scan.scan_id,
+            processed_candidates=0,
+            progress=0.0,
+        ) is True
+        assert peer.claim_scan_for_resume(
+            stale_scan.scan_id,
+            processed_candidates=0,
+            progress=0.0,
+        ) is False
     finally:
         peer.close()
         store.close()

@@ -144,9 +144,20 @@ async def run_distributed_runtime(store, *, leader: bool = False) -> None:
                         from backend.sse import publish
 
                         for scan_id in stale_scans:
+                            loaded = await run_store_call(
+                                store,
+                                "load_scan_overview",
+                                scan_id,
+                            )
+                            persisted = loaded[0] if loaded is not None else None
                             publish(scan_id, "scan_status", {
                                 "status": "cancelled",
                                 "error_message": "Agent 断开连接",
+                                "opencode_pool": (
+                                    persisted.opencode_pool.model_dump(mode="json")
+                                    if persisted is not None and persisted.opencode_pool is not None
+                                    else None
+                                ),
                             })
                         logger.warning(
                             "Cancelled %d scan(s) with stale Agent sessions",

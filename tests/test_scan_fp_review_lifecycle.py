@@ -9,6 +9,7 @@ from backend.api import scan as scan_api
 from backend.models import (
     FpReviewResult,
     FpReviewStatus,
+    OpenCodePoolStatus,
     ScanItemStatus,
     ScanMeta,
     ScanStatus,
@@ -73,10 +74,59 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
         scan_api._running_scans.clear()
         scan_api._scan_owners.clear()
 
+    def test_stop_drops_stale_local_scan_without_rewriting_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            persisted = _scan(ScanItemStatus.CANCELLED)
+            persisted.error_message = "Agent 断开连接"
+            store.save_scan(persisted, _meta())
+            stale_live = persisted.model_copy(deep=True)
+            stale_live.status = ScanItemStatus.AUDITING
+            scan_api._running_scans["scan-1"] = stale_live
+            scan_api._scan_owners["scan-1"] = "user-1"
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    new=AsyncMock(return_value=None),
+                ),
+            ):
+                response = asyncio.run(scan_api.stop_scan(
+                    "scan-1",
+                    User(user_id="user-1", username="alice", role="user"),
+                ))
+
+            stored, _meta_value = store.load_scan("scan-1")
+            self.assertFalse(response["main_scan_stopped"])
+            self.assertEqual(stored.status, ScanItemStatus.CANCELLED)
+            self.assertEqual(stored.error_message, "Agent 断开连接")
+            self.assertNotIn("scan-1", scan_api._running_scans)
+            self.assertNotIn("scan-1", scan_api._scan_owners)
+
     def test_stop_notifies_main_scan_and_all_active_fp_reviews(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")
             scan = _scan(ScanItemStatus.AUDITING)
+            scan.opencode_pool = OpenCodePoolStatus(
+                scope_id="scan-1",
+                global_running=1,
+                global_queued=1,
+                total_tasks=2,
+                completed_task_count=1,
+                queued_tasks=[{"task_id": "queued"}],
+                planned_tasks=[{"task_id": "planned"}],
+                completed_tasks=[{"task_id": "done", "outcome": "success"}],
+                models=[{
+                    "id": "high",
+                    "model": "provider/model",
+                    "max_concurrency": 1,
+                    "running": 1,
+                    "queued": 1,
+                    "active_tasks": [{"task_id": "running"}],
+                }],
+            )
             store.save_scan(scan, _meta())
             store.create_fp_review_job(
                 "review-pending", "scan-1", 2, "2026-08-11T00:01:00+00:00"
@@ -110,6 +160,17 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
                 ["review-pending", "review-running"],
             )
             self.assertEqual(store.load_scan("scan-1")[0].status, ScanItemStatus.CANCELLED)
+            terminal_pool = store.load_scan("scan-1")[0].opencode_pool
+            self.assertIsNotNone(terminal_pool)
+            self.assertEqual(terminal_pool.global_running, 0)
+            self.assertEqual(terminal_pool.global_queued, 0)
+            self.assertEqual(terminal_pool.queued_tasks, [])
+            self.assertEqual(terminal_pool.planned_tasks, [])
+            self.assertEqual(terminal_pool.models[0].active_tasks, [])
+            self.assertEqual(
+                terminal_pool.completed_tasks,
+                [{"task_id": "done", "outcome": "success"}],
+            )
             self.assertEqual(
                 [status for _, status in store.list_fp_review_states_by_scans(["scan-1"])["scan-1"]],
                 ["cancelled", "cancelled"],

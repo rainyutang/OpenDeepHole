@@ -88,6 +88,7 @@ from backend.scan_metrics import (
     is_llm_issue,
     latest_fp_review_result_map,
 )
+from backend.scan_runtime import terminal_opencode_pool_status
 from backend.store import get_scan_store
 from backend.store.async_ops import run_store_call
 from backend.store.base import DuplicateScanNameError
@@ -2260,23 +2261,11 @@ async def stop_scan(
         raise HTTPException(status_code=404, detail="Scan not found")
     stored_scan, meta = loaded
     live_scan = _running_scans.get(scan_id)
-    core_running = (
-        stored_scan.status
-        in {
-            ScanItemStatus.PENDING,
-            ScanItemStatus.ANALYZING,
-            ScanItemStatus.AUDITING,
-        }
-        or (
-            live_scan is not None
-            and live_scan.status
-            in {
-                ScanItemStatus.PENDING,
-                ScanItemStatus.ANALYZING,
-                ScanItemStatus.AUDITING,
-            }
-        )
-    )
+    core_running = stored_scan.status in {
+        ScanItemStatus.PENDING,
+        ScanItemStatus.ANALYZING,
+        ScanItemStatus.AUDITING,
+    }
     cancelled_review_ids = await run_store_call(
         store,
         "cancel_active_fp_reviews_for_scan",
@@ -2298,6 +2287,37 @@ async def stop_scan(
             scan.status = ScanItemStatus.CANCELLED
             scan.error_message = "用户手动停止"
         _scan_owners.pop(scan_id, None)
+    elif live_scan is not None:
+        # Another worker may already have persisted the terminal transition.
+        # Drop this worker's stale cache without rewriting the durable result.
+        _running_scans.pop(scan_id, None)
+        _scan_owners.pop(scan_id, None)
+
+    if cancelled_review_ids and not core_running:
+        # Reapplying the existing terminal status atomically clears whatever
+        # pool snapshot is current, without overwriting newer history counters.
+        await run_store_call(
+            store,
+            "update_scan_progress",
+            scan_id,
+            status=stored_scan.status,
+        )
+
+    if core_running or cancelled_review_ids:
+        from backend.sse import publish
+
+        refreshed = await run_store_call(store, "load_scan_overview", scan_id)
+        persisted = refreshed[0] if refreshed is not None else stored_scan
+        terminal_pool = terminal_opencode_pool_status(persisted.opencode_pool)
+        publish(scan_id, "scan_status", {
+            "status": persisted.status,
+            "error_message": persisted.error_message,
+            "opencode_pool": (
+                terminal_pool.model_dump(mode="json")
+                if terminal_pool is not None
+                else None
+            ),
+        })
 
     agent_id = await _resolve_scan_agent_id(meta)
     if agent_id:
@@ -2356,9 +2376,6 @@ async def _continue_scan(
         resolve_agent_connection_async,
     )
 
-    if scan_id in _running_scans:
-        raise HTTPException(status_code=400, detail="Scan is already running")
-
     store = get_scan_store()
     result = await run_store_call(store, "load_scan", scan_id)
     if result is None:
@@ -2367,6 +2384,11 @@ async def _continue_scan(
     scan, meta = result
     if scan.status in {ScanItemStatus.PENDING, ScanItemStatus.ANALYZING, ScanItemStatus.AUDITING}:
         raise HTTPException(status_code=400, detail="Scan is already running")
+    # PostgreSQL workers keep process-local scan caches only as an optimization.
+    # A cancellation handled by another worker can leave this entry behind even
+    # though the durable row is terminal; never let that stale cache veto resume.
+    _running_scans.pop(scan_id, None)
+    _scan_owners.pop(scan_id, None)
 
     processed_keys, fp_verdicts, fp_states = await asyncio.gather(
         run_store_call(store, "get_processed_keys", scan_id),
@@ -2579,41 +2601,6 @@ async def _continue_scan(
         engine_runs_by_id.values(),
         key=lambda item: (item.engine_label, item.engine_id),
     )
-    if resume_threat_analysis or retry_mining_engine_ids:
-        replaced = await run_store_call(
-            store,
-            "replace_scan_stage_runs",
-            scan_id,
-            pending_threat_analysis_run,
-            pending_mining_engine_runs,
-        )
-        if not replaced:
-            raise HTTPException(status_code=404, detail="Scan not found")
-        scan.threat_analysis_run = pending_threat_analysis_run
-        scan.mining_engine_runs = pending_mining_engine_runs
-
-    scan.status = ScanItemStatus.PENDING
-    scan.error_message = None
-    scan.current_candidate = None
-    scan.agent_name = agent.name
-    scan.agent_online = True
-    scan.processed_candidates = processed_offset
-    scan.progress = progress
-    await run_store_call(
-        store,
-        "update_scan_progress",
-        scan_id,
-        status=ScanItemStatus.PENDING,
-        processed_candidates=processed_offset,
-        progress=progress,
-        error_message="",
-        clear_current_candidate=True,
-    )
-    await run_store_call(store, "remove_processed_keys", scan_id, retry_keys)
-
-    _running_scans[scan_id] = scan
-    _scan_owners[scan_id] = current_user.user_id
-
     from backend.api.agent import (
         create_agent_task_runtime_update_payload_async,
         send_agent_command,
@@ -2719,7 +2706,52 @@ async def _continue_scan(
         }
     else:
         command = resume_payload
-    ok = await send_agent_command(agent_id, command)
+
+    claimed = await run_store_call(
+        store,
+        "claim_scan_for_resume",
+        scan_id,
+        processed_candidates=processed_offset,
+        progress=progress,
+    )
+    if not claimed:
+        raise HTTPException(status_code=400, detail="Scan is already running")
+
+    scan.opencode_pool = terminal_opencode_pool_status(scan.opencode_pool)
+    if resume_threat_analysis or retry_mining_engine_ids:
+        replaced = await run_store_call(
+            store,
+            "replace_scan_stage_runs",
+            scan_id,
+            pending_threat_analysis_run,
+            pending_mining_engine_runs,
+        )
+        if not replaced:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        scan.threat_analysis_run = pending_threat_analysis_run
+        scan.mining_engine_runs = pending_mining_engine_runs
+
+    scan.status = ScanItemStatus.PENDING
+    scan.error_message = None
+    scan.current_candidate = None
+    scan.agent_name = agent.name
+    scan.agent_online = True
+    scan.processed_candidates = processed_offset
+    scan.progress = progress
+    await run_store_call(store, "remove_processed_keys", scan_id, retry_keys)
+
+    _running_scans[scan_id] = scan
+    _scan_owners[scan_id] = current_user.user_id
+
+    try:
+        ok = await send_agent_command(agent_id, command)
+    except Exception:
+        logger.exception(
+            "Failed to dispatch resume command for scan %s via agent %s",
+            scan_id,
+            agent_id,
+        )
+        ok = False
     if not ok:
         if resume_threat_analysis or retry_mining_engine_ids:
             await run_store_call(
@@ -2746,6 +2778,7 @@ async def _continue_scan(
         )
         scan.status = ScanItemStatus.ERROR
         _running_scans.pop(scan_id, None)
+        _scan_owners.pop(scan_id, None)
         logger.error("Failed to resume scan %s: agent %s not connected", scan_id, agent_id)
         raise HTTPException(status_code=502, detail="Agent not connected")
 
@@ -2758,6 +2791,20 @@ async def _continue_scan(
         retry_mining_engine_ids,
         resume_threat_analysis,
     )
+    from backend.sse import publish
+
+    publish(scan_id, "scan_status", {
+        "status": ScanItemStatus.PENDING,
+        "progress": progress,
+        "total_candidates": total_candidates,
+        "processed_candidates": processed_offset,
+        "error_message": "",
+        "opencode_pool": (
+            scan.opencode_pool.model_dump(mode="json")
+            if scan.opencode_pool is not None
+            else None
+        ),
+    })
     if fp_resume_count:
         fp_resume = await _start_fp_review(
             scan_id,

@@ -29,6 +29,7 @@ from .sqlite import (
     SqliteScanStore,
     _canonicalize_mining_engine_json,
     _deduplicated_scan_names,
+    _terminal_opencode_pool_json,
     _retire_agent_opencode_config,
 )
 
@@ -983,12 +984,22 @@ class PostgresScanStore(SqliteScanStore):
                       WHERE session.agent_id = scan.agent_id
                         AND session.last_seen > ?
                   )
-                RETURNING scan.scan_id
+                RETURNING scan.scan_id, scan.opencode_pool
                 """,
                 (error_message, cutoff),
             ).fetchall()
             scan_ids = [str(row["scan_id"]) for row in rows]
             if scan_ids:
+                self._conn.executemany(
+                    "UPDATE scans SET opencode_pool = ? WHERE scan_id = ?",
+                    [
+                        (
+                            _terminal_opencode_pool_json(row["opencode_pool"]),
+                            row["scan_id"],
+                        )
+                        for row in rows
+                    ],
+                )
                 placeholders = ", ".join("?" for _ in scan_ids)
                 self._conn.execute(
                     f"""\

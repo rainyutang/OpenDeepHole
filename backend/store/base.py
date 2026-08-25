@@ -161,6 +161,20 @@ class ScanStoreBase(ABC):
         Use *clear_current_candidate=True* to set current_candidate to NULL.
         """
 
+    @abstractmethod
+    def claim_scan_for_resume(
+        self,
+        scan_id: str,
+        *,
+        processed_candidates: int,
+        progress: float,
+    ) -> bool:
+        """Atomically move a terminal scan to pending for one resume attempt.
+
+        Returns ``False`` when the scan is missing, is not terminal, or another
+        request has already moved it into a running state.
+        """
+
     # -- Static-analysis candidates --
 
     @abstractmethod
