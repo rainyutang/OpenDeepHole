@@ -67,6 +67,75 @@ description: 系统验证已经发现的安全问题，通过完整证据链排�
 2. 深度路径严格按依赖顺序执行数据流、可利用性、影响、PoC、反方审查和六道门。
 3. 只使用当前调用传入的漏洞上下文形成结论，不读取、汇总或修改其它漏洞的结果。
 
+## DeepHole 分阶段输入合同
+
+DeepHole 会为每个阶段创建独立任务。业务 Prompt 的第一行是 `/fp-check`，随后只提供当前阶段
+任务、`原始漏洞报告`、当前阶段 JSON Schema，以及确有依赖时的 `已完成阶段报告` Markdown。
+不得要求完整漏洞 JSON、人工反馈、历史模式或 `prior_stages` JSON。
+
+只执行 Prompt 指定的当前阶段，不得提前执行后续阶段。每个阶段都必须读取真实代码并在最终回复
+中只返回一个纯 JSON 对象，不得使用 Markdown 代码围栏或附加说明。完整、可供后续阶段阅读的
+论证写入 `stage_markdown`。
+
+### `claim_context`：主张与上下文
+
+应用 `references/bug-class-verification.md`，精确重述主张并选择路径。返回：
+
+- `route`：`standard` 或 `deep`
+- `claim`、`root_cause`、`trigger`、`claimed_impact`、`threat_model`、`bug_class`
+- `stage_markdown`
+
+### `standard_verification`：标准验证
+
+应用 `references/standard-verification.md`、`references/false-positive-patterns.md` 和
+`references/gate-reviews.md`。返回：
+
+- `decision`：`verdict`、`escalate` 或 `incomplete`
+- `reason`、`evidence`、`stage_markdown`
+- `gates`：必须逐项给出布尔值 `process`、`reachability`、`real_impact`、
+  `poc_validation`、`math_bounds`、`environment`
+- `completeness`：必须逐项给出布尔值 `claim_restatement`、`data_flow`、
+  `escalation_checkpoint_one`、`exploitability`、`impact`、
+  `escalation_checkpoint_two`、`poc`、`devil_advocate`、`gate_review`
+
+### `data_flow`：数据流分析
+
+应用 `references/deep-verification.md` 和 `agents/data-flow-analyzer.md`。返回 `complete`、
+`reason`、`evidence`、`stage_markdown`，并在 `completeness` 中逐项给出布尔值
+`phase_1_1`、`phase_1_2`、`phase_1_3`、`phase_1_4`。
+
+### `exploitability`：可利用性验证
+
+应用 `references/deep-verification.md` 和 `agents/exploitability-verifier.md`。返回 `complete`、
+`reason`、`evidence`、`stage_markdown`，并在 `completeness` 中逐项给出布尔值
+`phase_2_1`、`phase_2_2`、`phase_2_3`、`phase_2_4`。
+
+### `impact`：影响评估
+
+应用 `references/deep-verification.md`。返回 `complete`、`reason`、`evidence`、
+`stage_markdown`，并在 `completeness` 中逐项给出布尔值 `confidentiality`、`integrity`、
+`availability`、`authentication`、`authorization`、`primary_vs_defense_in_depth`。
+
+### `poc`：PoC 构建
+
+应用 `references/deep-verification.md` 和 `agents/poc-builder.md`。返回 `complete`、`reason`、
+`evidence`、`stage_markdown`，并在 `completeness` 中逐项给出布尔值 `phase_4_1`、
+`phase_4_2`、`phase_4_3`、`phase_4_4`、`phase_4_5`。
+
+### `devil_advocate`：反方审查
+
+逐项应用 `references/false-positive-patterns.md`。返回 `complete`、`reason`、`evidence`、
+`stage_markdown`，并在 `completeness` 中逐项给出布尔值 `challenge_1` 至 `challenge_13`。
+
+### `gate_review`：六道门复核
+
+应用 `references/gate-reviews.md` 综合全部报告。返回 `complete`、`reason`、`evidence`、
+`stage_markdown`，并在 `gates` 中逐项给出布尔值 `process`、`reachability`、
+`real_impact`、`poc_validation`、`math_bounds`、`environment`。
+
+所有 `reason` 必须是非空结论摘要，所有 `evidence` 必须是字符串数组。`stage_markdown` 必须包含
+当前阶段结论、关键 `file:line` 证据、完整推理和仍未解决的问题，不能只是字段摘要。
+
 ## 结论规则
 
 - 六道门全部通过：`TRUE POSITIVE`，严重性为高。

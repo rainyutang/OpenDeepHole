@@ -1992,8 +1992,11 @@ def test_fp_review_and_validation_processes_run_per_vulnerability() -> None:
         assert reviewed["verdict"] == "false_positive"
         assert run_task.await_count > 0
         assert all(
-            "JSON Schema" in call.kwargs["prompt"]
+            call.kwargs["prompt"].startswith("/prove-bug\n\n")
+            and "# OOB report" in call.kwargs["prompt"]
+            and "## 输出 JSON Schema" in call.kwargs["prompt"]
             and '"verdict"' in call.kwargs["prompt"]
+            and "verdict" in call.kwargs["output_schema"]["properties"]
             for call in run_task.await_args_list
         )
 

@@ -32,8 +32,8 @@ async def run(**kwargs) -> dict:
 | `review_id` | 是 | str | 本轮去误报标识 |
 | `vuln_index` | 是 | int | 漏洞在扫描结果中的索引 |
 | `vulnerability` | 是 | dict | 单个漏洞对象 |
-| `feedback_entries` | 否 | `list[dict]` | 人工反馈 |
-| `history` | 否 | `list[dict]` | 历史问题模式 |
+| `feedback_entries` | 否 | `list[dict]` | 兼容输入；内置方法不传入模型 Prompt |
+| `history` | 否 | `list[dict]` | 兼容输入；内置方法不传入模型 Prompt |
 | `required_capability` | 否 | `low\|high` | 默认 `high` |
 | `invalid_json_retry_count` | 否 | int | 结构化输出重试次数，默认 `2` |
 | `task_agent_config` | 否 | path | 独立 Task Agent 配置 |
@@ -43,11 +43,26 @@ async def run(**kwargs) -> dict:
 成功返回必须包含 `status=success`、二元 `verdict`（`true_positive` 或
 `false_positive`）及非空 `reason`。阶段输出只能使用 `method.yaml` 声明的 key。
 
+## 模型 Prompt 合同
+
+平台方法入口仍接收完整 `vulnerability` 对象用于索引、调度和结果回传，但内置方法不得直接把
+该对象序列化给模型。首轮业务 Prompt 固定使用 `/{skill_name}`、简短阶段任务、完整
+`vulnerability_report` 和当前阶段 JSON Schema；旧记录报告为空时使用统一引擎报告构造器生成
+Markdown fallback。
+后续阶段只允许追加确有依赖的 `stage_markdown`（为空时回退 `reason`），不得内联人工反馈、
+历史模式、`prior_stages` JSON 或 Skill 正文。同一 Schema 也必须通过公共 Task Agent 参数传入：
+Prompt 负责首轮模型输出约束，`output_schema` 负责程序侧解析、校验与失败纠正。
+
+内置 `adversarial` 依次使用 `/prove-bug`、`/prove-fp` 和 `/final-judge`；正方判定误报时仍
+直接早退，否则最终裁决只接收原始、正方和反方三份 Markdown 报告。内置 `fp_check` 的所有阶段
+使用 `/fp-check`，每个后续阶段按执行顺序接收已经完成的阶段报告。
+
 ## 清单
 
 `method.yaml` 严格接受 `label`、`description`、`default`、`max_concurrency`、`stages`
 和 `documents`。仓库内必须恰好有一个可用方法设置 `default: true`。`documents` 用于扫描详情页
-展示方法说明；方法目录中的 `skills/` 会自动加入该任务的 Skill 搜索路径。
+展示方法说明；方法目录中的 `skills/<skill-name>/SKILL.md` 会自动加入该任务的 Skill 搜索路径，
+业务 Prompt 应通过 `/<skill-name>` 调用，不应读取后再拼接 Skill 正文。
 
 ```bash
 python -m deephole_client.fp_review --method adversarial \

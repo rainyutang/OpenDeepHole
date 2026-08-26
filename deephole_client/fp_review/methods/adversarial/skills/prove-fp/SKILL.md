@@ -20,27 +20,20 @@ compatibility: opencode
 
 ## 输入
 
-你可能会收到：
-
-- 静态分析命中的代码位置
-- 疑似漏洞类型
-- 命中文件、函数、行号
-- 疑似 source / sink / 变量名
-- `prior_stages.prove_bug` 中的结构化阶段结果与完整 `stage_markdown`
-- 部分上下文代码
-- project_id
-
-你必须先审查 `prior_stages.prove_bug`，再主动阅读代码寻找反证。不要直接接受 `prove_bug` 的结论，也不得创建或修改项目文件。
+业务 Prompt 的分析上下文只提供一个 `原始漏洞报告` Markdown 区块，并在末尾给出输出 JSON
+Schema。你必须独立审查原始漏洞主张，主动阅读当前项目中的真实代码寻找反证，不会收到也不得
+依赖正方论证结果。不得创建或修改项目文件。
 
 ## 阶段 Markdown 输出
 
-你必须在最终 JSON 的 `stage_markdown` 字段中返回反方论证，逐条反驳或确认 `prior_stages.prove_bug` 中的关键证据，并包含完整代码链、关键代码片段和证据说明。输出风格参考 memleak：读者不重新查看代码也能判断是否是问题。
+你必须在最终 JSON 的 `stage_markdown` 字段中返回反方论证，逐项审查原始报告中的关键主张，
+并包含完整代码链、关键代码片段和证据说明。输出风格参考 memleak：读者不重新查看代码也能判断是否是问题。
 
 Markdown 至少包含：
 
 - `# Prove False Positive`
 - `## Verdict`
-- `## Prove-Bug Evidence Review`
+- `## Original Claim Review`
 - `## Rebuttal Code Chain`
 - `## Key Code Evidence`
 - `## Analysis`
@@ -167,15 +160,10 @@ for (...; byteNum != 0; byteNum -= contentLen, loop++) {
 - contentLen 异常时不会继续循环
 - byteNum 和 array 容量之间有协议约束或代码约束
 
-### 8. 反驳漏洞成立论证
+### 8. 审查原始漏洞主张
 
-如果输入中包含 `prove-bug` 的漏洞成立论证，需要逐条反驳：
-
-- 它声称存在外部输入源，是否真实？
-- 它声称存在调用链，是否完整？
-- 它声称变量可控，是否真的能控制到危险值？
-- 它声称校验不足，是否忽略了某个前置校验？
-- 它声称 sink 危险，是否误判了真实对象大小？
+逐项核对原始报告声称的外部输入源、调用链、变量可控性、校验缺失和 sink 风险，确认这些主张
+是否与真实代码一致，以及报告是否遗漏了足以否定漏洞的约束。
 
 ## 返回结果
 
@@ -187,7 +175,6 @@ for (...; byteNum != 0; byteNum -= contentLen, loop++) {
 - `evidence`：关键 `path:line` 及反证数组
 - `stage_markdown`：必须包含下面格式的完整论证
 - `vulnerability_report`：`verdict=true_positive` 时必须填写或修正 Markdown 问题报告
-- `match_type` / `match_reference`：本阶段不适用时返回空字符串
 
 `stage_markdown` 必须按以下格式输出：
 
@@ -196,6 +183,9 @@ for (...; byteNum != 0; byteNum -= contentLen, loop++) {
 
 Verdict:
 FALSE_POSITIVE / LIKELY_FALSE_POSITIVE / NOT_FALSE_POSITIVE / INSUFFICIENT_EVIDENCE
+
+Original Claim Review:
+逐项说明原始漏洞主张中哪些内容成立、哪些不成立。
 
 Primary FP Reason:
 NOT_EXTERNALLY_TRIGGERABLE / UNREACHABLE / NOT_CONTROLLABLE / SUFFICIENT_GUARD / SAFE_OBJECT_SIZE / SAFE_MEMFUNC_USAGE / SAFE_LOOP_BOUND / ERROR_PATH_BLOCKS / OTHER

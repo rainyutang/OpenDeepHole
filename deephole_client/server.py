@@ -832,15 +832,6 @@ async def _run_single_fp_review_item(
     loaded = load_fp_review_methods().get(item.method)
     if loaded is None:
         raise RuntimeError(f"FP review method unavailable: {item.method}")
-    try:
-        history = await item.reporter.get_git_history(item.scan_id)
-        history_payload = [
-            value.model_dump() if hasattr(value, "model_dump") else dict(value)
-            for value in history
-        ]
-    except Exception:
-        history_payload = []
-
     async def process_output(event: dict[str, Any]) -> None:
         data = event.get("data") if isinstance(event.get("data"), dict) else {}
         kind = str(event.get("kind") or "")
@@ -883,7 +874,6 @@ async def _run_single_fp_review_item(
             vuln_index=vuln_index,
             vulnerability=item.vulnerability,
             feedback_entries=item.feedback_entries,
-            history=history_payload,
             required_capability="high",
             output=process_output,
             cancel_event=item.cancel_event,

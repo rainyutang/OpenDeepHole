@@ -1,7 +1,7 @@
-# git 历史问题挖掘 + 同类变体排查 + 历史/校验匹配 — 可扫描场景
+# git 历史问题挖掘 + 同类变体排查 — 可扫描场景
 
-本文档描述迁移自 SecAnt 的三项能力（`deephole_client/git_history.py`、`deephole_client/variant_hunter.py`、
-去误报 `history_match` 阶段）所针对的典型场景，便于评估召回与误报边界。
+本文档描述迁移自 SecAnt 的两项能力（`deephole_client/git_history.py`、
+`deephole_client/variant_hunter.py`）所针对的典型场景，便于评估召回与误报边界。
 
 ## 1. git 历史问题挖掘（git_history_mine.md）
 
@@ -39,12 +39,3 @@
 ### 不命中（不产出）
 
 - 已正确校验 / 已修复 / 不满足相似条件的站点（避免误报淹没结果）。
-
-## 3. 去误报「历史/校验匹配」（`fp_review/skills/history_match.md`）
-
-复核候选时优先判断能否对应上历史问题或其它函数的正确校验。
-
-- **match_type=history**：候选与某条历史问题模式同根因 → 直接判 high。
-- **match_type=validation**：全仓存在对同一原语把校验做对了的站点，而本候选缺失 → 直接判 high。
-- 两类匹配均**跳过三阶段对抗辩论**，并在报告 `match_reference` 中标明对应的修复/校验。
-- 无法对应上 → 转入三阶段辩论，论证是否外部可触发：可触发 → high，否则 → low。

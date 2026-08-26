@@ -8,6 +8,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from deephole_client.fp_review.prompts import (
+    build_skill_prompt,
+    completed_stage_reports,
+    original_vulnerability_report,
+)
 from task_agent import run_opencode_task
 
 
@@ -22,6 +27,16 @@ FP_CHECK_STAGE_KEYS = (
     "devil_advocate",
     "gate_review",
 )
+_STAGE_LABELS = {
+    "claim_context": "主张与上下文",
+    "standard_verification": "标准验证",
+    "data_flow": "数据流分析",
+    "exploitability": "可利用性验证",
+    "impact": "影响评估",
+    "poc": "PoC 构建",
+    "devil_advocate": "反方审查",
+    "gate_review": "六道门复核",
+}
 _DEEP_STAGE_KEYS = FP_CHECK_STAGE_KEYS[2:]
 _ALLOWED_KEYS = {
     "scan_mode",
@@ -221,26 +236,6 @@ def _normalize_vulnerability(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-def _skill_root() -> Path:
-    return Path(__file__).resolve().parent / "skills" / "fp-check"
-
-
-def _read_skill(relative: str) -> str:
-    path = _skill_root() / relative
-    if not path.is_file():
-        raise FileNotFoundError(f"fp-check 中文 Skill 文件缺失: {path}")
-    return path.read_text(encoding="utf-8")
-
-
-def _schema_instruction(schema: dict[str, Any]) -> str:
-    return (
-        "\n\n最终回复只能是一个符合下列 JSON Schema 的纯 JSON 值，"
-        "不得使用 Markdown 代码围栏或附加解释。所有必填阶段必须有具体证据；"
-        "无法完成时将 complete/decision 标为不完整，不得猜测结论。\nJSON Schema：\n"
-        + json.dumps(schema, ensure_ascii=False, indent=2)
-    )
-
-
 def _artifact_dir(work_dir: Path) -> Path:
     return work_dir / "artifacts"
 
@@ -278,14 +273,6 @@ def _task_payload(result: Any) -> dict[str, Any]:
     payload["_task_status"] = "success"
     payload["_output_source"] = dict(result.output_source or {})
     return payload
-
-
-def _public_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in payload.items()
-        if not key.startswith("_")
-    }
 
 
 def _all_gates_pass(payload: dict[str, Any]) -> bool:
@@ -361,8 +348,8 @@ async def run(**kwargs: Any) -> dict[str, Any]:
         isinstance(item, dict) for item in history
     ):
         raise TypeError("history must be a list of dicts")
+    report_markdown = original_vulnerability_report(vulnerability)
     state: dict[str, Any] = {
-        "vulnerability": vulnerability,
         "stages": {},
         "failed": False,
         "route": "",
@@ -373,25 +360,25 @@ async def run(**kwargs: Any) -> dict[str, Any]:
         instructions: str,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
-        context = {
-            "vulnerability": state["vulnerability"],
-            "feedback_entries": feedback_entries,
-            "history": history,
-            "prior_stages": {
-                key: _public_payload(value)
-                for key, value in state["stages"].items()
-            },
-        }
-        prompt = (
-            "/fp-check\n\n"
-            + instructions
-            + f"\n\n当前漏洞编号：{vuln_index}\n"
-            + "必须读取项目中的真实代码并引用具体 file:line；不得仅复述原报告。"
-            + "只执行当前单漏洞阶段，不得生成跨漏洞结论。"
-            + "\n\n输入上下文：\n"
-            + json.dumps(context, ensure_ascii=False, indent=2)
-            + _schema_instruction(schema)
-            + "\n\n请使用中文输出"
+        prior_reports = completed_stage_reports(
+            (
+                _STAGE_LABELS[key],
+                value,
+            )
+            for key, value in state["stages"].items()
+        )
+        sections = [("原始漏洞报告", report_markdown)]
+        if prior_reports:
+            sections.append(("已完成阶段报告", prior_reports))
+        prompt = build_skill_prompt(
+            skill_name="fp-check",
+            task=(
+                f"请使用中文执行 fp-check 的“{_STAGE_LABELS[stage]}”阶段。"
+                f"{instructions}必须读取项目中的真实代码，只处理当前漏洞和当前阶段，"
+                "不得修改任何项目文件。最终只返回当前阶段约定的 JSON。"
+            ),
+            sections=sections,
+            output_schema=schema,
         )
         await _emit(
             output,
@@ -494,7 +481,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             ],
             "revised_severity": "high" if verdict == "true_positive" else "low",
             "vulnerability_report": (
-                str(vulnerability.get("vulnerability_report") or "")
+                report_markdown
                 if verdict == "true_positive"
                 else ""
             ),

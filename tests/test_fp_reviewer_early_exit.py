@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,6 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from deephole_client.fp_review import run_fp_review
+
+
+def _prompt_schema(prompt: str) -> dict:
+    raw = prompt.rsplit("```json\n", 1)[1].split("\n```", 1)[0]
+    return json.loads(raw)
 
 
 def _stage_result(
@@ -40,6 +46,7 @@ def _vulnerability() -> dict:
         "severity": "medium",
         "description": "desc",
         "ai_analysis": "analysis",
+        "vulnerability_report": "# 原始漏洞报告\n\n来自漏洞挖掘阶段的完整 Markdown。",
     }
 
 
@@ -64,12 +71,22 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invoke.await_count, 1)
         self.assertIn("prove_bug", invoke.await_args.kwargs["task_name"])
         prompt = invoke.await_args.kwargs["prompt"]
-        self.assertIn("不得调用 write、edit、apply_patch、patch", prompt)
-        self.assertNotIn("prove-bug.md", prompt)
-        self.assertIn('"prior_stages": {}', prompt)
-        self.assertTrue(prompt.endswith("\n\n请使用中文输出"))
-        self.assertEqual(prompt.count("请使用中文输出"), 1)
+        self.assertTrue(prompt.startswith("/prove-bug\n\n任务："))
+        self.assertIn("## 原始漏洞报告", prompt)
+        self.assertIn("来自漏洞挖掘阶段的完整 Markdown。", prompt)
+        self.assertNotIn('"index"', prompt)
+        self.assertNotIn('"feedback_entries"', prompt)
+        self.assertNotIn('"history"', prompt)
+        self.assertNotIn('"prior_stages"', prompt)
+        self.assertNotIn("# Prove Bug Skill", prompt)
+        self.assertIn("## 输出 JSON Schema", prompt)
+        self.assertIn('"verdict"', prompt)
         self.assertNotIn("invalid_json_retry_prompt", invoke.await_args.kwargs)
+        self.assertIn("output_schema", invoke.await_args.kwargs)
+        self.assertEqual(
+            _prompt_schema(prompt),
+            invoke.await_args.kwargs["output_schema"],
+        )
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["verdict"], "false_positive")
         self.assertEqual(result["revised_severity"], "low")
@@ -80,9 +97,17 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_prove_bug_non_fp_runs_the_full_debate(self) -> None:
         invoke = AsyncMock(side_effect=[
-            _stage_result("true_positive", severity="high"),
-            _stage_result("uncertain"),
-            _stage_result("true_positive", severity="high"),
+            _stage_result(
+                "true_positive",
+                severity="high",
+                reason="正方整合报告",
+            ),
+            _stage_result("uncertain", reason="反方整合报告"),
+            _stage_result(
+                "true_positive",
+                severity="high",
+                reason="最终裁决报告",
+            ),
         ])
         with tempfile.TemporaryDirectory() as tmp, patch(
             "task_agent.run_opencode_task",
@@ -110,8 +135,32 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["verdict"], "true_positive")
         self.assertEqual(result["revised_severity"], "high")
 
-    async def test_history_match_true_positive_short_circuits_debate(self) -> None:
-        invoke = AsyncMock(return_value=_stage_result("true_positive"))
+        prove_bug_prompt = invoke.await_args_list[0].kwargs["prompt"]
+        prove_fp_prompt = invoke.await_args_list[1].kwargs["prompt"]
+        final_prompt = invoke.await_args_list[2].kwargs["prompt"]
+        self.assertTrue(prove_bug_prompt.startswith("/prove-bug\n\n任务："))
+        self.assertTrue(prove_fp_prompt.startswith("/prove-fp\n\n任务："))
+        self.assertNotIn("正方整合报告", prove_fp_prompt)
+        self.assertIn("来自漏洞挖掘阶段的完整 Markdown。", prove_fp_prompt)
+        self.assertTrue(final_prompt.startswith("/final-judge\n\n任务："))
+        self.assertIn("## 原始漏洞报告", final_prompt)
+        self.assertIn("## 正方论证报告", final_prompt)
+        self.assertIn("正方整合报告", final_prompt)
+        self.assertIn("## 反方论证报告", final_prompt)
+        self.assertIn("反方整合报告", final_prompt)
+        self.assertNotIn('"prior_stages"', final_prompt)
+        self.assertIn("## 输出 JSON Schema", final_prompt)
+        self.assertIn('"verdict"', final_prompt)
+        for call in invoke.await_args_list:
+            self.assertEqual(
+                _prompt_schema(call.kwargs["prompt"]),
+                call.kwargs["output_schema"],
+            )
+
+    async def test_history_input_no_longer_adds_history_match_stage(self) -> None:
+        invoke = AsyncMock(return_value=_stage_result("false_positive"))
+        vulnerability = _vulnerability()
+        vulnerability["variant_of"] = "legacy-history-pattern"
         with tempfile.TemporaryDirectory() as tmp, patch(
             "task_agent.run_opencode_task",
             new=invoke,
@@ -124,11 +173,14 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
                 scan_id="scan-1",
                 review_id="review-3",
                 vuln_index=3,
-                vulnerability=_vulnerability(),
+                vulnerability=vulnerability,
                 history=[{"reference": "known issue"}],
             )
 
         self.assertEqual(invoke.await_count, 1)
-        self.assertIn("history_match", invoke.await_args.kwargs["task_name"])
-        self.assertEqual(result["verdict"], "true_positive")
-        self.assertEqual(result["revised_severity"], "high")
+        self.assertIn("prove_bug", invoke.await_args.kwargs["task_name"])
+        self.assertNotIn("history_match", invoke.await_args.kwargs["task_name"])
+        self.assertNotIn("known issue", invoke.await_args.kwargs["prompt"])
+        self.assertNotIn("legacy-history-pattern", invoke.await_args.kwargs["prompt"])
+        self.assertEqual(result["verdict"], "false_positive")
+        self.assertEqual(result["revised_severity"], "low")

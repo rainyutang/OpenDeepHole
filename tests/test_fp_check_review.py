@@ -146,9 +146,9 @@ class FpCheckReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 2)
         for call in calls:
             prompt = call["prompt"]
-            self.assertTrue(prompt.endswith("\n\n请使用中文输出"))
-            self.assertEqual(prompt.count("请使用中文输出"), 1)
-            self.assertIn("JSON Schema", prompt)
+            self.assertTrue(prompt.startswith("/fp-check\n\n任务："))
+            self.assertIn("请使用中文", prompt)
+            self.assertIn("## 输出 JSON Schema", prompt)
             self.assertFalse(
                 call["invalid_json_retry_prompt"].endswith("请使用中文输出")
             )
