@@ -1782,6 +1782,14 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         assert formatter_acquire["strict_capability"] is True
         assert formatter_acquire["prefer_lowest_capability"] is True
         assert formatter_acquire["wait_when_unavailable"] is False
+        formatter_context = formatter_acquire["task_context"]
+        correction_context = acquire_mock.await_args_list[2].kwargs["task_context"]
+        assert formatter_context["task_phase"] == "json_format"
+        assert correction_context["task_phase"] == "json_correction"
+        assert formatter_context["prompt"] == "initial prompt"
+        assert correction_context["prompt"] == "initial prompt"
+        assert formatter_context["prompt_length"] == len("initial prompt")
+        assert correction_context["prompt_length"] == len("initial prompt")
         assert all(
             "Your previous response" not in call["prompt"]
             for call in calls
@@ -2073,6 +2081,14 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
         assert acquire_mock.await_args_list[0].kwargs["avoid_model_identities"] == set()
         assert acquire_mock.await_args_list[1].kwargs["required_capability"] == "low"
         assert acquire_mock.await_args_list[3].kwargs["avoid_model_identities"] == identity
+        assert acquire_mock.await_args_list[1].kwargs["task_context"] == {
+            **acquire_mock.await_args_list[0].kwargs["task_context"],
+            "task_phase": "json_format",
+        }
+        assert acquire_mock.await_args_list[2].kwargs["task_context"] == {
+            **acquire_mock.await_args_list[0].kwargs["task_context"],
+            "task_phase": "json_correction",
+        }
         assert (
             "[opencode][ses_first][session] "
             "JSON_RETRY 1/1 reason=invalid_json next_session=same"

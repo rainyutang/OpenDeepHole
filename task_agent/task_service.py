@@ -1248,17 +1248,13 @@ class OpenCodeTaskService:
                     {"token_usage": accumulated_usage.as_dict()},
                 )
 
-        def recovery_task_context(phase: str, prompt_length: int) -> dict[str, Any]:
+        def recovery_task_context(phase: str) -> dict[str, Any]:
             value = _model_pool_task_context(
                 record,
                 session_attempt=session_attempt,
                 total_session_attempts=total_session_attempts,
             )
-            value.update({
-                "task_phase": phase,
-                "prompt": f"[{phase}]",
-                "prompt_length": max(0, int(prompt_length)),
-            })
+            value["task_phase"] = phase
             value.pop("planned_task_id", None)
             return value
 
@@ -1285,10 +1281,7 @@ class OpenCodeTaskService:
                 prefer_high=False,
                 cancel_event=combined_cancel,
                 stats_scope_id=context.scan_id,
-                task_context=recovery_task_context(
-                    "json_format",
-                    len(formatter_prompt),
-                ),
+                task_context=recovery_task_context("json_format"),
                 priority=spec.priority,
                 task_id=record.task_id,
                 revision=record.revision,
@@ -1478,10 +1471,7 @@ class OpenCodeTaskService:
                 prefer_high=False,
                 cancel_event=combined_cancel,
                 stats_scope_id=context.scan_id,
-                task_context=recovery_task_context(
-                    "json_correction",
-                    len(correction_prompt),
-                ),
+                task_context=recovery_task_context("json_correction"),
                 priority=spec.priority,
                 task_id=record.task_id,
                 revision=record.revision,
