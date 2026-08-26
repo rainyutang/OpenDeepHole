@@ -30,6 +30,13 @@ import {
   normalizeOpenCodePool,
   sameOpenCodePoolSnapshot,
 } from "../scanRuntime";
+import {
+  STATIC_AUDIT_STATUS_LABELS,
+  STATIC_AUDIT_STATUS_ORDER,
+  staticAuditConclusion,
+  staticAuditStatus,
+} from "../staticAudit";
+import type { StaticAuditStatus } from "../staticAudit";
 import RuntimeErrorBoundary from "./RuntimeErrorBoundary";
 
 const MAX_LOG_LINES = 200;
@@ -235,7 +242,7 @@ function sameShallowValues(left: object | null | undefined, right: object | null
 
 function detailResourcesForTab(tab: MainTab, engineId: string): DetailResource[] {
   if (tab === "static") {
-    return ["candidates", "vulnerabilities", "validations", "events"];
+    return ["candidates", "vulnerabilities", "events"];
   }
   if (tab === "issues" || tab === "validation" || tab === "fp_review") {
     return ["vulnerabilities", "validations", "events"];
@@ -2004,9 +2011,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             indexProgress={indexProgress}
             candidates={scan.candidates ?? []}
             vulnerabilities={scan.vulnerabilities}
-            validations={scan.validations ?? []}
             currentCandidate={scan.current_candidate}
-            processedCandidates={scan.processed_candidates}
             events={filterEvents(scan.events, ["static_analysis"])}
           />
         )}
@@ -4720,24 +4725,19 @@ function StaticTaskPanel({
   indexProgress,
   candidates,
   vulnerabilities,
-  validations,
   currentCandidate,
-  processedCandidates,
   events,
 }: {
   scan: ScanStatusType;
   indexProgress: ReturnType<typeof formatIndexProgress>;
   candidates: ScanCandidate[];
   vulnerabilities: IndexedVulnerability[];
-  validations: VulnerabilityValidation[];
   currentCandidate: Candidate | null;
-  processedCandidates: number;
   events: ScanEvent[];
 }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [typeFilter, setTypeFilter] = useState(ALL_STATIC_FILTER);
   const [auditFilter, setAuditFilter] = useState(ALL_STATIC_FILTER);
-  const [validationFilter, setValidationFilter] = useState(ALL_STATIC_FILTER);
   const [currentPage, setCurrentPage] = useState(1);
   const running = scan.status === "analyzing" && !scan.static_analysis_done;
   const seen = scan.static_analysis_done || running || scan.status === "auditing" || events.length > 0;
@@ -4765,69 +4765,57 @@ function StaticTaskPanel({
     });
     return out;
   }, [vulnerabilities]);
-  const validationByIndex = useMemo(
-    () => new Map(validations.map((validation) => [validation.vuln_index, validation])),
-    [validations],
-  );
   const currentKey = currentCandidate ? candidateKey(currentCandidate) : "";
   const annotated = useMemo(
     () =>
       displayedCandidates.map((candidate) => {
-        const vulnEntry = vulnerabilityByKey.get(candidateKey(candidate));
-        const validation = vulnEntry ? validationByIndex.get(vulnEntry.index) : undefined;
-        const auditStatus = currentKey && candidateKey(candidate) === currentKey
-          ? "running"
-          : vulnEntry
-            ? "done"
-            : "pending";
-        const validationStatus = !vulnEntry || !isAiConfirmed(vulnEntry.vuln)
-          ? "not_applicable"
-          : validation?.running || validation?.status === "running" || validation?.status === "queued"
-            ? "running"
-            : validation && isValidationTerminalStatus(validation.status)
-              ? isValidationFailed(validation.status) || validation.status === "failed"
-                ? "failed"
-                : "verified"
-              : "unverified";
+        const key = candidateKey(candidate);
+        const vulnEntry = vulnerabilityByKey.get(key);
         return {
           candidate,
           vulnerability: vulnEntry?.vuln,
           vulnerabilityIndex: vulnEntry?.index,
-          validation,
-          auditStatus,
-          validationStatus,
+          auditStatus: staticAuditStatus(vulnEntry?.vuln, Boolean(currentKey && key === currentKey)),
         };
       }),
-    [currentKey, displayedCandidates, validationByIndex, vulnerabilityByKey],
+    [currentKey, displayedCandidates, vulnerabilityByKey],
   );
   const typeOptions = useMemo(
     () => valueOptions(displayedCandidates.map((candidate) => candidate.vuln_type), (value) => value.toUpperCase()),
     [displayedCandidates],
   );
-  const auditOptions = useMemo(() => countStaticOptions(annotated.map((item) => item.auditStatus), AUDIT_FILTER_LABELS), [annotated]);
-  const validationOptions = useMemo(
-    () => countStaticOptions(annotated.map((item) => item.validationStatus), VALIDATION_FILTER_LABELS),
+  const auditOptions = useMemo(
+    () => countStaticAuditOptions(annotated.map((item) => item.auditStatus)),
     [annotated],
   );
   const visible = useMemo(() => {
     let list = annotated;
     if (typeFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.candidate.vuln_type === typeFilter);
     if (auditFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.auditStatus === auditFilter);
-    if (validationFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.validationStatus === validationFilter);
     return list;
-  }, [annotated, auditFilter, typeFilter, validationFilter]);
+  }, [annotated, auditFilter, typeFilter]);
   const totalPages = Math.max(1, Math.ceil(visible.length / STATIC_CANDIDATE_PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPages);
   const paged = visible.slice((safePage - 1) * STATIC_CANDIDATE_PAGE_SIZE, safePage * STATIC_CANDIDATE_PAGE_SIZE);
   const selected = selectedIndex === null
     ? null
     : annotated.find((item) => item.candidate.idx === selectedIndex) ?? null;
-  const verifiedCount = annotated.filter((item) => item.validationStatus === "verified" || item.validationStatus === "failed").length;
-  const runningValidationCount = annotated.filter((item) => item.validationStatus === "running").length;
+  const auditCounts = useMemo(() => {
+    const counts: Record<StaticAuditStatus, number> = {
+      success: 0,
+      failed: 0,
+      pending: 0,
+      running: 0,
+    };
+    annotated.forEach((item) => {
+      counts[item.auditStatus] += 1;
+    });
+    return counts;
+  }, [annotated]);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [auditFilter, typeFilter, validationFilter]);
+  }, [auditFilter, typeFilter]);
 
   useEffect(() => {
     if (visible.length === 0) {
@@ -4852,15 +4840,15 @@ function StaticTaskPanel({
         <MiniMetric label="候选点" value={displayedCandidates.length || scan.total_candidates} tone="blue" />
       </div>
       <ProgressBlock label="候选点生成" current={scannedFiles} total={totalFiles} fallback="等待静态分析进度" />
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        <MiniMetric label="已审计" value={processedCandidates} tone="blue" />
-        <MiniMetric label="验证中" value={runningValidationCount} tone="cyan" />
-        <MiniMetric label="已验证" value={verifiedCount} tone="green" />
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+        <MiniMetric label="审计成功" value={auditCounts.success} tone="green" />
+        <MiniMetric label="审计失败" value={auditCounts.failed} tone="red" />
+        <MiniMetric label="待审计" value={auditCounts.pending} />
+        <MiniMetric label="审计中" value={auditCounts.running} tone="blue" />
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <StaticFilterSelect label="类型" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />
         <StaticFilterSelect label="审计" value={auditFilter} options={auditOptions} onChange={setAuditFilter} />
-        <StaticFilterSelect label="验证" value={validationFilter} options={validationOptions} onChange={setValidationFilter} />
       </div>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,24rem)_1fr]">
         <div className="flex flex-col rounded-xl border border-slate-700 bg-slate-900/40">
@@ -4974,20 +4962,6 @@ function CallGraphBuildPanel({
 
 const ALL_STATIC_FILTER = "__all__";
 
-const AUDIT_FILTER_LABELS: Record<string, string> = {
-  pending: "待审计",
-  running: "审计中",
-  done: "已审计",
-};
-
-const VALIDATION_FILTER_LABELS: Record<string, string> = {
-  unverified: "未验证",
-  running: "验证中",
-  verified: "已验证",
-  failed: "验证异常",
-  not_applicable: "无验证目标",
-};
-
 interface StaticFilterOption {
   value: string;
   label: string;
@@ -4998,9 +4972,7 @@ interface StaticCandidateItem {
   candidate: ScanCandidate;
   vulnerability?: Vulnerability;
   vulnerabilityIndex?: number;
-  validation?: VulnerabilityValidation;
-  auditStatus: string;
-  validationStatus: string;
+  auditStatus: StaticAuditStatus;
 }
 
 function valueOptions(
@@ -5014,14 +4986,21 @@ function valueOptions(
     .map(([value, count]) => ({ value, label: formatLabel(value), count }));
 }
 
-function countStaticOptions(values: string[], labels: Record<string, string>): StaticFilterOption[] {
+function countStaticAuditOptions(values: StaticAuditStatus[]): StaticFilterOption[] {
   const counts = new Map<string, number>();
   values.forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
-  return Object.entries(labels).map(([value, label]) => ({
+  return STATIC_AUDIT_STATUS_ORDER.map((value) => ({
     value,
-    label,
+    label: STATIC_AUDIT_STATUS_LABELS[value],
     count: counts.get(value) ?? 0,
   }));
+}
+
+function staticAuditTone(status: StaticAuditStatus): TaskTone {
+  if (status === "success") return "green";
+  if (status === "failed") return "red";
+  if (status === "running") return "blue";
+  return "slate";
 }
 
 function StaticFilterSelect({
@@ -5064,15 +5043,6 @@ function StaticCandidateListItem({
   onClick: () => void;
 }) {
   const fileName = item.candidate.file.split("/").pop() || item.candidate.file;
-  const auditTone: TaskTone = item.auditStatus === "running" ? "blue" : item.auditStatus === "done" ? "green" : "slate";
-  const validationToneValue: TaskTone =
-    item.validationStatus === "running"
-      ? "blue"
-      : item.validationStatus === "verified"
-        ? "green"
-        : item.validationStatus === "failed"
-          ? "red"
-          : "slate";
   return (
     <li>
       <button
@@ -5095,8 +5065,7 @@ function StaticCandidateListItem({
           <span className="rounded bg-slate-700/50 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-400">
             {item.candidate.vuln_type}
           </span>
-          <StatusPill label={AUDIT_FILTER_LABELS[item.auditStatus] ?? item.auditStatus} tone={auditTone} />
-          <StatusPill label={VALIDATION_FILTER_LABELS[item.validationStatus] ?? item.validationStatus} tone={validationToneValue} />
+          <StatusPill label={STATIC_AUDIT_STATUS_LABELS[item.auditStatus]} tone={staticAuditTone(item.auditStatus)} />
         </div>
         {item.candidate.function && (
           <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={item.candidate.function}>
@@ -5131,8 +5100,7 @@ function StaticCandidateDetail({ item }: { item: StaticCandidateItem }) {
             <div className="mt-1 truncate font-mono text-xs text-slate-500">{item.candidate.function}</div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <StatusPill label={AUDIT_FILTER_LABELS[item.auditStatus] ?? item.auditStatus} tone={item.auditStatus === "done" ? "green" : item.auditStatus === "running" ? "blue" : "slate"} />
-            <StatusPill label={VALIDATION_FILTER_LABELS[item.validationStatus] ?? item.validationStatus} tone={item.validationStatus === "verified" ? "green" : item.validationStatus === "running" ? "blue" : item.validationStatus === "failed" ? "red" : "slate"} />
+            <StatusPill label={STATIC_AUDIT_STATUS_LABELS[item.auditStatus]} tone={staticAuditTone(item.auditStatus)} />
           </div>
         </div>
       </div>
@@ -5147,18 +5115,7 @@ function StaticCandidateDetail({ item }: { item: StaticCandidateItem }) {
           <section>
             <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">AI 审计结论</h4>
             <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
-              <MarkdownContent content={item.vulnerability.ai_analysis || "（无分析）"} />
-            </div>
-          </section>
-        )}
-        {item.validation && (
-          <section>
-            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">漏洞验证状态</h4>
-            <div className="flex flex-wrap gap-2">
-              <StatusPill label={validationStatusLabel(item.validation.status)} tone={validationTone(item.validation)} />
-              <StatusPill label={`验证成功：${formatNullableBool(item.validation.validation_success)}`} tone={nullableBoolTone(item.validation.validation_success)} />
-              <StatusPill label={`是否问题：${formatNullableBool(item.validation.is_problem)}`} tone={nullableBoolTone(item.validation.is_problem)} />
-              <StatusPill label={`人工介入：${formatNullableBool(item.validation.requires_human_intervention)}`} tone={humanInterventionTone(item.validation.requires_human_intervention)} />
+              <MarkdownContent content={staticAuditConclusion(item.vulnerability)} />
             </div>
           </section>
         )}
