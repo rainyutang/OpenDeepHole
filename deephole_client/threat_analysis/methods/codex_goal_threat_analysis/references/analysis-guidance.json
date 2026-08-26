@@ -1,0 +1,79 @@
+{
+  "guidance_version": 1,
+  "role": "项目级白盒威胁建模工程师",
+  "objective": "从实际源码识别价值资产、承载攻击面的高风险模块，以及攻击者从入口影响价值资产的可解释攻击树",
+  "workflow": [
+    {
+      "step": "project_reconnaissance",
+      "requirements": [
+        "识别项目用途、主要组件、进程或服务边界、外部入口和部署边界",
+        "定位认证授权、协议解析、数据存储、加解密、更新升级、管理控制、日志审计和第三方交互代码",
+        "使用源码、配置、构建文件和接口定义交叉验证，不根据目录名直接下结论"
+      ]
+    },
+    {
+      "step": "value_assets",
+      "requirements": [
+        "只记录被破坏后会造成明确机密性、完整性、可用性或控制权损失的资产",
+        "资产描述和攻击损失必须体现项目语境，原因必须引用可验证的代码职责"
+      ]
+    },
+    {
+      "step": "high_risk_modules",
+      "requirements": [
+        "优先分析外部暴露、处理不可信输入、实施安全决策、操作敏感数据或控制关键资源的模块",
+        "代码目录必须真实存在，位于源码根目录内，并写成源码根目录相对 POSIX 路径",
+        "面临威胁和判定原因必须说明入口、关键处理和潜在影响，所有是否字段只能填写是或否"
+      ]
+    },
+    {
+      "step": "attack_trees",
+      "requirements": [
+        "根节点表示价值资产受损，内部节点表示攻击步骤或条件，叶子节点表示可实施的初始攻击入口",
+        "根节点的 module_name 必须为 null 且 is_high_risk_module 为 false；叶子节点必须对应外部暴露的高风险模块，is_high_risk_module 和 external_exposure 均为 true",
+        "普通内部节点可以是不在高风险模块列表中的内部模块；只有标记为高风险、作为叶子节点或被 related_high_risk_modules 引用的模块才必须来自高风险模块文件",
+        "边方向统一从攻击入口或前置步骤指向后续影响，node_ids 与 edge_ids 按攻击推进顺序排列",
+        "每条攻击路径必须能够从叶子节点沿边到达对应价值资产的根节点",
+        "仅关联确实出现在该路径上的高风险模块；攻击模式只能来自扫描上下文且必须说明关联依据"
+      ]
+    }
+  ],
+  "cross_artifact_invariants": [
+    "每棵攻击树的 value_asset 必须对应价值资产文件中的一个资产，名称、类别、描述和攻击损失保持一致",
+    "攻击树节点和路径引用的高风险模块必须存在于高风险模块文件，模块名称保持一致",
+    "同一棵树内 tree_id、node_id、edge_id 和 path_id 必须唯一，所有 ID 引用必须能够解析",
+    "external_exposure、path_role 和 external_interface_description 必须与模块证据和节点位置一致",
+    "没有代码证据时不得编造资产、模块、接口、调用关系或攻击路径"
+  ],
+  "optional_inputs": {
+    "product_mcp": "非空时，仅在同名 MCP 实际可用的情况下查询产品知识；不可用时继续基于源码分析，不得伪造查询结果",
+    "attack_modes": "仅使用扫描上下文提供的攻击模式；无法建立证据充分的关联时，attack_patterns 使用空数组"
+  },
+  "outputs": [
+    {
+      "result_key": "value_asset_path",
+      "file_name": "value-assets.json",
+      "top_level": "array",
+      "schema_file": "value-assets.schema.json"
+    },
+    {
+      "result_key": "high_risk_modules_path",
+      "file_name": "high-risk-modules.json",
+      "top_level": "array",
+      "schema_file": "high-risk-modules.schema.json"
+    },
+    {
+      "result_key": "attack_tree_path",
+      "file_name": "attack-trees.json",
+      "top_level": "object",
+      "required_top_level_property": "attack_trees",
+      "schema_file": "attack-trees.schema.json"
+    }
+  ],
+  "completion_checks": [
+    "三份文件均存在并且可以按 UTF-8 JSON 解析",
+    "每份文件严格符合对应 JSON Schema，包括 required、enum、minItems、minLength 和 additionalProperties",
+    "逐项检查跨产物名称和 ID 引用的一致性",
+    "确认除指定产物目录外没有修改任何文件"
+  ]
+}

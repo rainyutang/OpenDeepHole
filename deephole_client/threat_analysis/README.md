@@ -5,6 +5,10 @@
 一个方法，扫描创建后会固化方法 ID、名称和说明快照。内置方法 ID 是
 `deephole_threat_analysis`，界面名称是“DeepHole威胁分析”。
 
+仓库还提供 `codex_goal_threat_analysis`：它通过 `codex_sdk` 启动一个可恢复
+Goal，用一段不超过 4000 字符的提示词完成三类产物生成。提示词只携带路径和关键约束，
+完整接口契约与三份字段 Schema 均来自该方法自己的 `references/*.json`。
+
 ## 目录约定
 
 ```text

@@ -4701,8 +4701,20 @@ async def agent_get_feedback(vuln_types: Optional[str] = None) -> list:
 # Agent package download
 # ---------------------------------------------------------------------------
 
-_AGENT_DIRS = ["deephole_client", "task_agent", "mcp_server", "backend"]
-_AGENT_RUNTIME_DIRS = ["deephole_client", "task_agent", "mcp_server", "backend"]
+_AGENT_DIRS = [
+    "deephole_client",
+    "task_agent",
+    "codex_sdk",
+    "mcp_server",
+    "backend",
+]
+_AGENT_RUNTIME_DIRS = [
+    "deephole_client",
+    "task_agent",
+    "codex_sdk",
+    "mcp_server",
+    "backend",
+]
 _AGENT_TOOL_DIRS = ["ctags-p6.2.20260517.0-x64"]
 _AGENT_RUNTIME_ROOT_FILES = ["requirements-agent.txt"]
 _AGENT_ROOT_FILES = [
