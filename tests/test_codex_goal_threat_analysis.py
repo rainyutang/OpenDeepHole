@@ -245,6 +245,24 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
 ) -> None:
     implementation = _implementation()
     captured: dict[str, Any] = {}
+    from deephole_client import codex_runtime
+
+    model = SimpleNamespace(
+        id="provider/threat-model",
+        model_id="threat-model",
+        profile="opendeephole-provider-threat-model",
+    )
+    monkeypatch.setattr(
+        codex_runtime,
+        "get_codex_runtime_state",
+        lambda: SimpleNamespace(
+            available=True,
+            command=("/opt/codex",),
+            error="",
+            models=(model,),
+            model_config_error="",
+        ),
+    )
 
     class FakeController:
         def __init__(self, **kwargs: Any) -> None:
@@ -261,12 +279,14 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
             captured["thread_options"] = options
             return self.thread_id
 
-        def goal(self, prompt: str):
+        def goal(self, prompt: str, *, model: str | None = None):
             captured["prompt"] = prompt
+            captured["model"] = model
             return SimpleNamespace(goal=SimpleNamespace(status="complete"))
 
     fake_sdk = ModuleType("codex_sdk")
     fake_sdk.ApprovalMode = SimpleNamespace(deny_all="deny_all")
+    fake_sdk.CodexConfig = lambda **kwargs: SimpleNamespace(**kwargs)
     fake_sdk.CodexController = FakeController
     fake_sdk.OutputMode = SimpleNamespace(HUMAN="human")
     fake_sdk.ResumePolicy = lambda **kwargs: SimpleNamespace(**kwargs)
@@ -280,12 +300,159 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     )
 
     assert status == "complete"
-    assert captured["controller"]["cwd"] == str(tmp_path)
+    sdk_config = captured["controller"]["codex_config"]
+    assert sdk_config.cwd == str(tmp_path)
+    assert sdk_config.launch_args_override == (
+        "/opt/codex",
+        "--profile",
+        "opendeephole-provider-threat-model",
+        "app-server",
+        "--listen",
+        "stdio://",
+    )
     assert captured["thread_options"]["sandbox"] == "workspace-write"
     assert captured["thread_options"]["approval_mode"] == "deny_all"
+    assert captured["thread_options"]["model"] == "threat-model"
+    assert captured["model"] == "threat-model"
     assert captured["thread_options"]["config"] == {
         "sandbox_workspace_write": {
             "network_access": False,
             "writable_roots": [str(tmp_path)],
         }
     }
+    state = json.loads(
+        (tmp_path / "codex-goal-state.json").read_text(encoding="utf-8")
+    )
+    assert state == {
+        "thread_id": "thread-new",
+        "goal_status": "complete",
+        "model_id": "provider/threat-model",
+        "profile": "opendeephole-provider-threat-model",
+    }
+    assert "Codex managed model: provider/threat-model" in (
+        tmp_path / "codex-goal.log"
+    ).read_text(encoding="utf-8")
+
+
+def test_goal_requires_managed_model_instead_of_interactive_login(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    implementation = _implementation()
+    from deephole_client import codex_runtime
+
+    monkeypatch.setattr(
+        codex_runtime,
+        "get_codex_runtime_state",
+        lambda: SimpleNamespace(
+            available=True,
+            command=("codex",),
+            error="",
+            models=(),
+            model_config_error="no explicit models",
+        ),
+    )
+
+    result = implementation.run_threat_analysis(
+        tmp_path,
+        tmp_path / "artifacts",
+    )
+
+    assert result["result"] is False
+    assert (
+        "requires a synchronized OpenDeepHole model profile"
+        in result["reason"]
+    )
+    assert "interactive login" in result["reason"]
+    assert "no explicit models" in result["reason"]
+
+
+def test_resume_keeps_saved_managed_model_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    implementation = _implementation()
+    captured: dict[str, Any] = {}
+    from deephole_client import codex_runtime
+
+    models = (
+        SimpleNamespace(
+            id="provider/first",
+            model_id="first",
+            profile="profile-first",
+        ),
+        SimpleNamespace(
+            id="provider/saved",
+            model_id="saved",
+            profile="profile-saved",
+        ),
+    )
+    monkeypatch.setattr(
+        codex_runtime,
+        "get_codex_runtime_state",
+        lambda: SimpleNamespace(
+            available=True,
+            command=("codex",),
+            error="",
+            models=models,
+            model_config_error="",
+        ),
+    )
+    (tmp_path / "codex-goal-state.json").write_text(
+        json.dumps({
+            "thread_id": "thread-saved",
+            "goal_status": "paused",
+            "model_id": "provider/saved",
+            "profile": "profile-saved",
+        }),
+        encoding="utf-8",
+    )
+
+    class FakeController:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["controller"] = kwargs
+            self.thread_id = kwargs["thread_id"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def resume_thread(self, thread_id: str, **options: Any) -> str:
+            captured["resumed"] = (thread_id, options)
+            return thread_id
+
+        def get_goal(self):
+            return SimpleNamespace(status="paused")
+
+        def resume_goal(self, *, model: str | None = None):
+            captured["resume_goal"] = model
+            return SimpleNamespace(goal=SimpleNamespace(status="complete"))
+
+    fake_sdk = ModuleType("codex_sdk")
+    fake_sdk.ApprovalMode = SimpleNamespace(deny_all="deny_all")
+    fake_sdk.CodexConfig = lambda **kwargs: SimpleNamespace(**kwargs)
+    fake_sdk.CodexController = FakeController
+    fake_sdk.OutputMode = SimpleNamespace(HUMAN="human")
+    fake_sdk.ResumePolicy = lambda **kwargs: SimpleNamespace(**kwargs)
+    fake_sdk.Sandbox = SimpleNamespace(workspace_write="workspace-write")
+    monkeypatch.setitem(sys.modules, "codex_sdk", fake_sdk)
+
+    status = implementation._run_goal(
+        prompt="continue",
+        artifact_root=tmp_path,
+        is_resume=True,
+    )
+
+    assert status == "complete"
+    assert captured["resume_goal"] == "saved"
+    assert captured["resumed"][1]["model"] == "saved"
+    assert captured["controller"]["codex_config"].launch_args_override == (
+        "codex",
+        "--profile",
+        "profile-saved",
+        "app-server",
+        "--listen",
+        "stdio://",
+    )

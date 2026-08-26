@@ -2,6 +2,7 @@
 
 ## 2026-08-26
 
+- **修复** 新增的 `codex_goal_threat_analysis` 威胁分析方法此前只通过 Python SDK 启动裸 Codex app-server，没有消费 Agent 已从 OpenCode Provider/模型同步到 `$CODEX_HOME` 的托管 profile，因此即使 CLI 已安装也可能落到默认 OpenAI 登录路径，并在未登录环境中以 Goal `blocked` 结束；现在新 Goal 使用第一个同步模型的 `codex --profile <name> app-server` 启动参数，续扫按状态文件固定同一 `provider/model`，无托管模型时直接返回可操作配置错误而不再触发交互登录；用户 Codex 默认配置保持不变
 - **修复** OpenCode 兼容 Provider 把 RPM/TPM `*.429` 配额错误包装在 HTTP 成功的 assistant 类型校验异常中时，Task Agent 不再只显示 `UnknownError` 或把模型永久判坏：现在递归提取允许公开的错误码、配额类型和重试时间，按实际模型身份执行 30/60/120 秒起、最高 300 秒的临时熔断；有备用模型时 fresh Session 立即切换，全部模型冷却时当前逻辑任务可取消地有限等待并只放行一个半开探测，成功后自动恢复，重复限流重新退避，既有模型重试次数及威胁分析的一次增量加一次 clean fallback 保持不变
 - **修复** Windows 当前内存中的 OpenCode/nga Serve 停止路径此前未复用 ownership marker 的 PID 创建时间校验，可能在启动器已退出、监听 PID 已复用或监听表滞后时反复 `taskkill`、触发拒绝访问并让后续重试被“进程树未完全停止”覆盖：当前实例与历史 marker 现在统一区分 owned、absent、foreign 和 unknown，只终止确认归属的进程并安全退役已消失/复用 PID，未知身份继续阻断；Serve 冷启动健康门统一要求 `/global/health` 返回 `200` 与 `healthy: true`，启动健康错误不会再被二次清理错误覆盖，Windows `.cmd`/`.bat` 启动和版本探测使用显式命令处理器 argv，停止原因、配置哈希及任务/尝试/消息关联日志同步补齐
 - **修复** Agent 启动及每次任务同步配置时不再用设置页的代理跳过列表覆盖系统已有 `NO_PROXY/no_proxy`：大小写变量现在分别保留各自的系统原值，并以逗号追加用户在客户端设置中配置的 `base.no_proxy`，重复启动不会反复累加，配置更新会替换旧的设置部分；OpenCode/nga Serve 最终组装 `Popen` 环境时也会把任意调用方传入的大小写绕过列表分别追加到父进程原值，避免实际启动命令再次覆盖

@@ -123,7 +123,7 @@ def build_goal_prompt(
 不得修改源码，只能写指定产物。不得编造接口、调用关系或攻击路径，不得输出 Schema 之外的字段。
 
 ##完成条件:
-1. 需要输出的三份文件，逐项检查 JSON Schema 和跨产物引用，必须检查通过；
+1. 需要输出的三份文件，逐项检查 JSON Schema 和跨产物引用，必须检查通过；不合格就修正后再结束 Goal；
 2. 分析必须完整，没有遗漏价值资产、高风险模块和威胁，攻击树中要考虑所有可能的攻击模式，至少输出最高风险的前10个威胁，根据实际情况如果没有10个威胁也可以"""
     if len(prompt) > MAX_GOAL_PROMPT_CHARS:
         raise ValueError(
@@ -138,19 +138,37 @@ def _run_goal(
     artifact_root: Path,
     is_resume: bool,
 ) -> str:
+    state_path = artifact_root / _STATE_FILE
+    saved_state = _read_state(state_path) if is_resume else {}
+    saved_thread_id = str(saved_state.get("thread_id") or "").strip() or None
+    codex_state, codex_model = _resolve_codex_runtime(
+        str(saved_state.get("model_id") or "").strip() or None,
+    )
     # Imported lazily so method discovery remains available before optional
     # Agent dependencies have been installed.
     from codex_sdk import (
         ApprovalMode,
+        CodexConfig,
         CodexController,
         OutputMode,
         ResumePolicy,
         Sandbox,
     )
 
-    state_path = artifact_root / _STATE_FILE
-    saved_thread_id = _saved_thread_id(state_path) if is_resume else None
+    launch_args = (
+        *codex_state.command,
+        "--profile",
+        codex_model.profile,
+        "app-server",
+        "--listen",
+        "stdio://",
+    )
+    sdk_config = CodexConfig(
+        cwd=str(artifact_root),
+        launch_args_override=launch_args,
+    )
     thread_options = {
+        "model": codex_model.model_id,
         "approval_mode": ApprovalMode.deny_all,
         "sandbox": Sandbox.workspace_write,
         "config": {
@@ -165,10 +183,15 @@ def _run_goal(
 
     log_mode = "a" if is_resume else "w"
     with log_path.open(log_mode, encoding="utf-8") as output:
+        output.write(
+            "Codex managed model: "
+            f"{codex_model.id} (profile={codex_model.profile})\n"
+        )
+        output.flush()
         with CodexController(
             # Keep the writable workspace on the artifact side. The source is
             # supplied as an absolute, read-only reference in the prompt.
-            cwd=str(artifact_root),
+            codex_config=sdk_config,
             thread_id=saved_thread_id,
             output_mode=OutputMode.HUMAN,
             output=output,
@@ -181,18 +204,80 @@ def _run_goal(
                     state_path,
                     controller.thread_id,
                     current.status if current else None,
+                    model_id=codex_model.id,
+                    profile=codex_model.profile,
                 )
                 if current is not None and current.status in _RESUMABLE_GOAL_STATUSES:
-                    result = controller.resume_goal()
+                    result = controller.resume_goal(model=codex_model.model_id)
                 else:
-                    result = controller.goal(prompt)
+                    result = controller.goal(
+                        prompt,
+                        model=codex_model.model_id,
+                    )
             else:
                 controller.start_thread(**thread_options)
-                _write_state(state_path, controller.thread_id, "active")
-                result = controller.goal(prompt)
+                _write_state(
+                    state_path,
+                    controller.thread_id,
+                    "active",
+                    model_id=codex_model.id,
+                    profile=codex_model.profile,
+                )
+                result = controller.goal(
+                    prompt,
+                    model=codex_model.model_id,
+                )
 
-            _write_state(state_path, controller.thread_id, result.goal.status)
+            _write_state(
+                state_path,
+                controller.thread_id,
+                result.goal.status,
+                model_id=codex_model.id,
+                profile=codex_model.profile,
+            )
             return result.goal.status
+
+
+def _resolve_codex_runtime(preferred_model_id: str | None) -> tuple[Any, Any]:
+    """Select one synchronized model and never fall back to interactive login."""
+    from deephole_client.codex_runtime import get_codex_runtime_state
+
+    state = get_codex_runtime_state()
+    if not state.available or not state.command:
+        detail = str(state.error or "Codex has no executable command").strip()
+        raise ValueError(f"Codex CLI is unavailable: {detail}")
+
+    models = tuple(state.models or ())
+    if not models:
+        detail = str(state.model_config_error or "").strip()
+        suffix = f" Profile sync failed: {detail}." if detail else ""
+        raise ValueError(
+            "Codex Goal requires a synchronized OpenDeepHole model profile. "
+            "Configure at least one user-level OpenCode provider/model with "
+            "baseURL and, when required, apiKey (or an API-key environment "
+            "reference), then restart the Agent. Bare Codex fallback is "
+            f"disabled because it could enter interactive login.{suffix}"
+        )
+
+    if preferred_model_id:
+        selected = next(
+            (model for model in models if model.id == preferred_model_id),
+            None,
+        )
+        if selected is None:
+            raise ValueError(
+                "The Codex model saved for this resumable Goal is no longer "
+                f"available: {preferred_model_id}. Restore that OpenCode "
+                "model configuration or start a clean threat-analysis run."
+            )
+    else:
+        selected = models[0]
+
+    if not str(selected.profile or "").strip():
+        raise ValueError(
+            f"Synchronized Codex model {selected.id} has no profile name"
+        )
+    return state, selected
 
 
 def _reference_paths() -> tuple[Path, dict[str, Path]]:
@@ -275,23 +360,31 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
-def _saved_thread_id(path: Path) -> str | None:
+def _read_state(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        return {}
     if not isinstance(value, dict):
-        return None
-    thread_id = str(value.get("thread_id") or "").strip()
-    return thread_id or None
+        return {}
+    return value
 
 
-def _write_state(path: Path, thread_id: str | None, goal_status: str | None) -> None:
+def _write_state(
+    path: Path,
+    thread_id: str | None,
+    goal_status: str | None,
+    *,
+    model_id: str,
+    profile: str,
+) -> None:
     _write_json(
         path,
         {
             "thread_id": str(thread_id or ""),
             "goal_status": str(goal_status or "unknown"),
+            "model_id": model_id,
+            "profile": profile,
         },
     )
 
