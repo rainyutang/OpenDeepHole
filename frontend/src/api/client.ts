@@ -2,6 +2,7 @@ import axios from "axios";
 import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 import {
   isRecord,
+  mergeIndexedVulnerabilities,
   normalizeFpReviewJob,
   normalizeScanCandidate,
   normalizeScanEvent,
@@ -299,15 +300,34 @@ export async function createScan(body: {
 
 export async function getScanStatus(scanId: string): Promise<ScanStatus> {
   if (isPublicScan(scanId)) {
-    const { data } = await api.get<unknown>(
-      publicScanPath(""),
-      { params: publicParams() },
-    );
-    const normalized = normalizeScanStatus(data);
-    if (!normalized || normalized.scan_id !== scanId) {
+    const [{ data }, vulnerabilities] = await Promise.all([
+      api.get<unknown>(publicScanPath(""), { params: publicParams() }),
+      getScanVulnerabilitiesPage(scanId),
+    ]);
+    const base = normalizeScanStatus(data);
+    if (!base || base.scan_id !== scanId) {
       throw new Error("扫描状态响应无效");
     }
-    return normalized;
+    const detailCounts = base.detail_counts ?? {
+      candidates: base.candidates.length,
+      vulnerabilities: base.vulnerabilities.length,
+      events: base.events.length,
+      threat_audit_tasks: base.threat_audit_tasks?.length ?? 0,
+      validations: base.validations?.length ?? 0,
+      skill_reports: base.skill_reports.length,
+    };
+    return {
+      ...base,
+      vulnerabilities: mergeIndexedVulnerabilities([], vulnerabilities.items),
+      detail_counts: detailCounts,
+      detail_pages: {
+        candidates_next_cursor: null,
+        vulnerabilities_next_cursor: vulnerabilities.next_cursor,
+        events_next_cursor: null,
+        threat_tasks_next_cursor: null,
+        validations_next_cursor: null,
+      },
+    };
   }
   const [overview, candidates, vulnerabilities, events, threatTasks, validations] = await Promise.all([
     getScanOverview(scanId),
@@ -317,7 +337,7 @@ export async function getScanStatus(scanId: string): Promise<ScanStatus> {
     getScanThreatTasksPage(scanId),
     getScanValidationsPage(scanId),
   ]);
-  const indexedVulnerabilities = vulnerabilities.items.map((item) => item.vulnerability);
+  const indexedVulnerabilities = mergeIndexedVulnerabilities([], vulnerabilities.items);
   const normalized = normalizeScanStatus({
     ...overview,
     total_candidates: Math.max(

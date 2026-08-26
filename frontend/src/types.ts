@@ -162,6 +162,11 @@ export interface Vulnerability {
   output_source?: OutputSource;
 }
 
+/** Frontend scan-detail record with the stable backend vulnerability index. */
+export interface IndexedVulnerability extends Vulnerability {
+  vuln_index: number;
+}
+
 export interface VulnerabilityValidation {
   scan_id?: string;
   vuln_index: number;
@@ -465,7 +470,7 @@ export interface ScanStatus {
   total_candidates: number;
   processed_candidates: number;
   candidates: ScanCandidate[];
-  vulnerabilities: Vulnerability[];
+  vulnerabilities: IndexedVulnerability[];
   skill_reports: SkillReport[];
   threat_analysis?: ThreatAnalysis | null;
   threat_audit_tasks?: ThreatAuditTask[];

@@ -10,7 +10,7 @@ import {
   ThreatAnalysisPanel,
 } from "../features/threatAnalysis";
 import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
-import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
+import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexedVulnerability, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
 import { isEffectiveFpReviewResult } from "../fpReview";
@@ -24,7 +24,12 @@ import {
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
 import { ThemeToggle } from "./ThemeToggle";
-import { normalizeOpenCodePool, sameOpenCodePoolSnapshot } from "../scanRuntime";
+import {
+  findIndexedVulnerability,
+  mergeIndexedVulnerabilities,
+  normalizeOpenCodePool,
+  sameOpenCodePoolSnapshot,
+} from "../scanRuntime";
 import RuntimeErrorBoundary from "./RuntimeErrorBoundary";
 
 const MAX_LOG_LINES = 200;
@@ -311,11 +316,9 @@ function mergeDetailPage(previous: ScanStatusType, page: LoadedDetailPage): Scan
   }
 
   if (page.resource === "vulnerabilities") {
-    const vulnerabilities = [...previous.vulnerabilities];
-    for (const item of page.items) vulnerabilities[item.index] = item.vulnerability;
     return {
       ...previous,
-      vulnerabilities,
+      vulnerabilities: mergeIndexedVulnerabilities(previous.vulnerabilities, page.items),
       detail_pages: { ...detailPages, vulnerabilities_next_cursor: page.nextCursor },
     };
   }
@@ -1056,9 +1059,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     onScanVulnerability: (data) => {
       setScan((prev) => {
         if (!prev) return prev;
-        const vulns = [...prev.vulnerabilities];
-        vulns[data.index] = data.vulnerability;
-        return { ...prev, vulnerabilities: vulns };
+        return {
+          ...prev,
+          vulnerabilities: mergeIndexedVulnerabilities(prev.vulnerabilities, [{
+            index: data.index,
+            vulnerability: data.vulnerability,
+          }]),
+        };
       });
       scheduleOverviewSummaryRefresh();
     },
@@ -1080,13 +1087,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             signal.aborted
             || generation !== vulnerabilityListGenerationRef.current
           ) return;
-          const vulnerabilities: Vulnerability[] = [];
-          for (const item of page.items) {
-            vulnerabilities[item.index] = item.vulnerability;
-          }
           setScan((prev) => prev ? {
             ...prev,
-            vulnerabilities,
+            vulnerabilities: mergeIndexedVulnerabilities([], page.items),
             detail_counts: prev.detail_counts ? {
               ...prev.detail_counts,
               vulnerabilities: data.count,
@@ -1663,8 +1666,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const currentFpReviewIndices = new Set(fpIndicesSource.filter((i) => i >= 0));
   const currentFpReviewTargets = [...currentFpReviewIndices]
     .sort((a, b) => a - b)
-    .map((i) => scan.vulnerabilities[i])
-    .filter(Boolean);
+    .map((i) => findIndexedVulnerability(scan.vulnerabilities, i))
+    .filter((vulnerability): vulnerability is IndexedVulnerability => Boolean(vulnerability));
   const reportCheckers = checkers.filter(
     (checker) => scan.scan_items.includes(checker.name) && checker.result_mode === "markdown_reports",
   );
@@ -1674,7 +1677,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const continuableCount = scan.continuable_task_count || 0;
   const issueCount = finalReviewedIssueCount(fpReview);
   const verifiedIssueCount = validatedIssueCount(scan, fpReview);
-  const variantIssueCount = scan.vulnerabilities.filter((v) => v.variant_of).length;
+  const variantIssueCount = scan.vulnerabilities.filter((v) => Boolean(v?.variant_of)).length;
   const showGitHistoryStages = gitHistory.length > 0
     || variantIssueCount > 0
     || hasEvent(scan.events, ["git_history", "variant_hunt"]);
@@ -4725,7 +4728,7 @@ function StaticTaskPanel({
   scan: ScanStatusType;
   indexProgress: ReturnType<typeof formatIndexProgress>;
   candidates: ScanCandidate[];
-  vulnerabilities: Vulnerability[];
+  vulnerabilities: IndexedVulnerability[];
   validations: VulnerabilityValidation[];
   currentCandidate: Candidate | null;
   processedCandidates: number;
@@ -4744,8 +4747,8 @@ function StaticTaskPanel({
     if (candidates.length > 0) return candidates.filter(isStaticCandidate);
     return vulnerabilities
       .filter(isStaticCandidateVulnerability)
-      .map((vuln, index) => ({
-        idx: index,
+      .map((vuln) => ({
+        idx: vuln.vuln_index,
         file: vuln.file,
         line: vuln.line,
         function: vuln.function,
@@ -4757,8 +4760,8 @@ function StaticTaskPanel({
   }, [candidates, vulnerabilities]);
   const vulnerabilityByKey = useMemo(() => {
     const out = new Map<string, { vuln: Vulnerability; index: number }>();
-    vulnerabilities.forEach((vuln, index) => {
-      out.set(candidateKey(vuln), { vuln, index });
+    vulnerabilities.forEach((vuln) => {
+      out.set(candidateKey(vuln), { vuln, index: vuln.vuln_index });
     });
     return out;
   }, [vulnerabilities]);
@@ -5257,7 +5260,7 @@ function FpReviewPanel({
   onTrigger,
   onStop,
 }: {
-  vulnerabilities: Vulnerability[];
+  vulnerabilities: IndexedVulnerability[];
   reviewDataLoaded: boolean;
   fpReview: FpReviewJob | null;
   methodLabel: string;
@@ -5273,7 +5276,7 @@ function FpReviewPanel({
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const confirmed = useMemo(
     () => vulnerabilities
-      .map((vuln, index) => ({ vuln, index }))
+      .map((vuln) => ({ vuln, index: vuln.vuln_index }))
       .filter(({ vuln }) => (
         !vuln.provisional
         && isAiConfirmed(vuln)
@@ -5598,7 +5601,7 @@ function ValidationPanel({
   events,
   onStopValidation,
 }: {
-  vulnerabilities: Vulnerability[];
+  vulnerabilities: IndexedVulnerability[];
   validations: VulnerabilityValidation[];
   stoppingValidationIndices?: Set<number>;
   events: ScanEvent[];
@@ -5606,7 +5609,7 @@ function ValidationPanel({
 }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const confirmed = vulnerabilities
-    .map((vuln, index) => ({ vuln, index }))
+    .map((vuln) => ({ vuln, index: vuln.vuln_index }))
     .filter(({ vuln }) => isAiConfirmed(vuln));
   const validationByIndex = new Map(validations.map((item) => [item.vuln_index, item]));
   const items = confirmed

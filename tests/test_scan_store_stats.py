@@ -470,6 +470,37 @@ class VulnerabilityStoreTests(unittest.TestCase):
             self.assertEqual(replay[0][0], 1)
             self.assertEqual(len(store.get_vulnerabilities("scan-reconcile")), 2)
 
+    def test_reconcile_can_leave_non_contiguous_stable_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.save_scan(*_make_scan("scan-index-gap"))
+
+            first_index = store.add_provisional_vulnerability(
+                "scan-index-gap",
+                "batch-a",
+                _make_vuln(1),
+            )
+            second_index = store.add_provisional_vulnerability(
+                "scan-index-gap",
+                "batch-b",
+                _make_vuln(2),
+            )
+            self.assertEqual((first_index, second_index), (0, 1))
+
+            store.reconcile_provisional_vulnerabilities(
+                "scan-index-gap",
+                ["batch-a"],
+                [],
+            )
+
+            page = store.get_vulnerabilities_page(
+                "scan-index-gap",
+                after_index=-1,
+                limit=100,
+            )
+            self.assertEqual([index for index, _ in page], [1])
+            self.assertEqual(page[0][1].file, "f2.c")
+
     def test_agent_provisional_reports_are_promoted_with_stable_indexes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")
