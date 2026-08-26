@@ -575,6 +575,7 @@ base:
   # 实现固定为 OpenCode；启动文件可填写名称或完整路径。
   tool: "opencode"
   executable: "opencode"  # 也可以是 nga、/opt/bin/nga 或 Windows 完整路径
+  # 逗号分隔；任务启动时分别追加到系统已有的 NO_PROXY 和 no_proxy。
   no_proxy: "10.0.0.0/8"
   # null 时由 Agent 进程自动选择并复用一个空闲端口
   opencode_serve_port: null
