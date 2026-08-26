@@ -204,7 +204,7 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 | `serve.port` | 默认 `4096`，范围 `1..65535` | 本机 Serve 固定监听端口。该值会成为最终的 `OPENCODE_SERVE_PORT`，覆盖 `serve.environment` 中的同名值；standalone 不会自动改号。 |
 | `serve.timeout` | 默认 `3600`，最小 `1` | 默认单次模型消息执行超时，单位为秒；排队等待模型 Lease 的时间不计入。 |
 | `serve.max_retries` | 默认 `2`，最小 `0` | 首次 Session 之外最多创建多少个全新 Session 进行重试；不等同于同 Session 的 JSON 纠正次数。 |
-| `serve.environment` | 默认 `{}` | 附加或覆盖到 Serve 子进程的环境变量。键转为字符串，值必须是标量并会转为字符串；`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式会被忽略并从父进程环境清除，只允许 `NO_PROXY`/`no_proxy` 代理绕过变量。 |
+| `serve.environment` | 默认 `{}` | 附加或覆盖到 Serve 子进程的环境变量。键转为字符串，值必须是标量并会转为字符串；`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式会被忽略并从父进程环境清除。`NO_PROXY` 与 `no_proxy` 分别以逗号追加到父进程同名变量，不会覆盖原值。 |
 | `serve.opencode_config` | 默认 `{}` | 必须是可 JSON 序列化的映射；作为 standalone 最高优先级用户层与已发现配置合并，再由 Task Agent 写入受管权限并生成 `workspace_dir/opencode.json`。 |
 
 `serve.opencode_config` 可以包含 OpenCode 当前版本支持的 `$schema`、Provider、Agent、MCP、Skill 等原生配置。Task Agent 不校验这些子字段，也不保证不同 OpenCode 版本的原生字段兼容；最终配置中的 `read`、`list`、`glob`、`grep`、`external_directory`、`edit`、`bash` 和 `skill` 会由 Task Agent 覆盖为受管边界，不能依赖这里的 `permission` 放宽任务边界。

@@ -281,6 +281,7 @@ _SERVE_DEBUG_ENV_NAMES = (
     "OPENCODE_CONFIG_CONTENT",
 )
 _SERVE_PROXY_ENV_NAMES = {"http_proxy", "https_proxy", "all_proxy"}
+_SERVE_NO_PROXY_ENV_NAME = "no_proxy"
 
 
 @dataclass(frozen=True)
@@ -2607,6 +2608,19 @@ def _normalized_env_overrides(env_overrides: dict[str, str] | None) -> tuple[tup
             continue
         normalized.append((name, str(value)))
     return tuple(sorted(normalized))
+
+
+def _append_no_proxy_env_value(existing: str | None, configured: str) -> str:
+    """Append a no-proxy override to one same-case inherited variable."""
+    entries: list[str] = []
+    seen: set[str] = set()
+    for value in (existing or "", configured):
+        for item in str(value or "").split(","):
+            normalized = item.strip()
+            if normalized and normalized not in seen:
+                entries.append(normalized)
+                seen.add(normalized)
+    return ",".join(entries)
 
 
 def _env_hash(env_overrides: tuple[tuple[str, str], ...]) -> str:
@@ -7639,7 +7653,10 @@ class OpenCodeServeManager:
         for name, value in key.env_overrides:
             if name.lower() in _SERVE_PROXY_ENV_NAMES:
                 continue
-            env[name] = value
+            if name.lower() == _SERVE_NO_PROXY_ENV_NAME:
+                env[name] = _append_no_proxy_env_value(env.get(name), value)
+            else:
+                env[name] = value
         # The resolved config is file-backed. Environment overrides are never
         # allowed to re-introduce content injection or ambient user config.
         for name in (

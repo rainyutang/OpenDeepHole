@@ -4909,6 +4909,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         monkeypatch.setenv("https_proxy", "http://system.example:8080")
         monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9999")
         monkeypatch.setenv("all_proxy", "http://127.0.0.1:9999")
+        monkeypatch.setenv("NO_PROXY", "system-upper,shared.local")
+        monkeypatch.setenv("no_proxy", "system-lower")
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ambient-config"))
         monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "ambient.json"))
         monkeypatch.setenv("OPENCODE_CONFIG_PATH", str(tmp_path / "legacy.json"))
@@ -4927,7 +4929,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
                 ("https_proxy", "http://configured.example:8080"),
                 ("ALL_PROXY", "socks5://configured.example:1080"),
                 ("all_proxy", "socks5://configured.example:1080"),
-                ("NO_PROXY", "127.0.0.1,localhost"),
+                ("NO_PROXY", "shared.local,10.0.0.0/8"),
+                ("no_proxy", "10.0.0.0/8"),
             ),
         ), startup_cwd=startup_cwd)
 
@@ -4988,7 +4991,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
             "all_proxy",
         ):
             assert proxy_name not in envs[0]
-        assert envs[0]["NO_PROXY"] == "127.0.0.1,localhost"
+        assert envs[0]["NO_PROXY"] == "system-upper,shared.local,10.0.0.0/8"
+        assert envs[0]["no_proxy"] == "system-lower,10.0.0.0/8"
         assert envs[0]["PYTHONIOENCODING"] == "utf-8"
         assert envs[0]["PYTHONUTF8"] == "1"
         assert git_init_cwds == [startup_cwd]
@@ -5018,7 +5022,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert "all_proxy=(unset)" in log_text
         assert "system.example" not in log_text
         assert "configured.example" not in log_text
-        assert "NO_PROXY=127.0.0.1,localhost" in log_text
+        assert "NO_PROXY=system-upper,shared.local,10.0.0.0/8" in log_text
+        assert "no_proxy=system-lower,10.0.0.0/8" in log_text
         assert "OPENCODE_CONFIG_CONTENT=(unset)" in log_text
         assert f"XDG_CONFIG_HOME={startup_cwd / '.opendeephole-xdg-config'}" in log_text
         assert f"OPENCODE_CONFIG_DIR={startup_cwd}" in log_text
