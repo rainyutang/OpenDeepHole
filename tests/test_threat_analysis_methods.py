@@ -56,15 +56,22 @@ def _write_method(
     return directory
 
 
-def test_builtin_method_catalog_uses_directory_id_and_minimal_yaml() -> None:
+def test_method_catalog_uses_directory_ids_and_minimal_yaml() -> None:
     catalog = build_threat_analysis_method_catalog()
 
     assert catalog["errors"] == []
-    assert catalog["methods"] == [{
-        "method_id": DEFAULT_THREAT_ANALYSIS_METHOD_ID,
-        "label": "DeepHole威胁分析",
-        "description": "生成价值资产、高风险模块和攻击树。",
-    }]
+    assert catalog["methods"] == [
+        {
+            "method_id": DEFAULT_THREAT_ANALYSIS_METHOD_ID,
+            "label": "DeepHole威胁分析",
+            "description": "生成价值资产、高风险模块和攻击树。",
+        },
+        {
+            "method_id": "codex_goal_threat_analysis",
+            "label": "威胁分析",
+            "description": "生成价值资产、高风险模块和攻击树。",
+        },
+    ]
     raw = yaml.safe_load(
         (
             THREAT_ANALYSIS_METHODS_DIR

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "high-risk-modules.schema.json",
+  "title": "Threat Analysis High Risk Modules",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "模块名称",
+      "代码目录",
+      "面临威胁",
+      "是否涉及设备或系统对外提供管理和控制接口相关的代码",
+      "是否涉及对不可信来源数据进行解析或处理的代码",
+      "是否涉及安全相关类代码(如，认证、授权、接入控制、加解密、密钥管理、日志审计、软件完整性保护等模块)",
+      "是否涉及个人数据或者敏感数据的代码",
+      "是否涉及web相关处理",
+      "是否外部暴露面",
+      "判断为高风险模块的原因"
+    ],
+    "properties": {
+      "模块名称": {
+        "type": "string",
+        "minLength": 1
+      },
+      "代码目录": {
+        "type": [
+          "string",
+          "array"
+        ],
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "面临威胁": {
+        "type": "string",
+        "minLength": 1
+      },
+      "是否涉及设备或系统对外提供管理和控制接口相关的代码": {
+        "type": "string",
+        "enum": [
+          "是",
+          "否"
+        ]
+      },
+      "是否涉及对不可信来源数据进行解析或处理的代码": {
+        "type": "string",
+        "enum": [
+          "是",
+          "否"
+        ]
+      },
+      "是否涉及安全相关类代码(如，认证、授权、接入控制、加解密、密钥管理、日志审计、软件完整性保护等模块)": {
+        "type": "string",
+        "enum": [
+          "是",
+          "否"
+        ]
+      },
+      "是否涉及个人数据或者敏感数据的代码": {
+        "type": "string",
+        "enum": [
+          "是",
+          "否"
+        ]
+      },
+      "是否涉及web相关处理": {
+        "type": "string",
+        "enum": [
+          "是",
+          "否"
+        ]
+      },
+      "是否外部暴露面": {
+        "type": "string",
+        "enum": [
+          "是",
+          "否"
+        ]
+      },
+      "判断为高风险模块的原因": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "additionalProperties": false
+  }
+}

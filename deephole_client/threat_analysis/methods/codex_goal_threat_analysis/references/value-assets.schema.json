@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "value-assets.schema.json",
+  "title": "Threat Analysis Value Assets",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "资产名",
+      "资产类别",
+      "资产描述",
+      "攻击损失",
+      "判断为价值资产的原因"
+    ],
+    "properties": {
+      "资产名": {
+        "type": "string",
+        "minLength": 1
+      },
+      "资产类别": {
+        "type": "string",
+        "enum": [
+          "数据资产",
+          "软件资产",
+          "硬件资产",
+          "服务资产"
+        ]
+      },
+      "资产描述": {
+        "type": "string",
+        "minLength": 1
+      },
+      "攻击损失": {
+        "type": "string",
+        "minLength": 1
+      },
+      "判断为价值资产的原因": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "additionalProperties": false
+  }
+}

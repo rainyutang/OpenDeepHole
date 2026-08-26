@@ -398,6 +398,21 @@ class AgentRuntimePackageTests(unittest.TestCase):
 
         self.assertIn("semgrep>=1.116.0", agent_requirements.splitlines())
 
+    def test_codex_sdk_dependency_is_pinned_and_probed_by_launchers(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        agent_requirements = (root / "requirements-agent.txt").read_text(
+            encoding="utf-8"
+        )
+        script_text = (root / "run_agent.sh").read_text(encoding="utf-8")
+        batch_text = (root / "run_agent.bat").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "openai-codex>=0.144.4,<0.145",
+            agent_requirements.splitlines(),
+        )
+        self.assertIn("openai_codex", script_text)
+        self.assertIn("openai_codex", batch_text)
+
     def test_windows_launcher_probes_python_commands_with_version(self) -> None:
         root = Path(__file__).resolve().parent.parent
         batch_text = (root / "run_agent.bat").read_text(encoding="utf-8")
@@ -423,8 +438,14 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 zf.extractall(root)
             self.assertEqual(compute_runtime_hash(root), agent_api._agent_runtime_hash())
 
-    def test_runtime_hash_scope_includes_top_level_task_agent(self) -> None:
-        expected_dirs = ["deephole_client", "task_agent", "mcp_server", "backend"]
+    def test_runtime_hash_scope_includes_top_level_runtime_packages(self) -> None:
+        expected_dirs = [
+            "deephole_client",
+            "task_agent",
+            "codex_sdk",
+            "mcp_server",
+            "backend",
+        ]
         self.assertEqual(updater.runtime_hash_scope()["version"], 3)
         self.assertEqual(updater.runtime_hash_scope()["dirs"], expected_dirs)
         self.assertEqual(agent_api._agent_runtime_hash_scope(), updater.runtime_hash_scope())

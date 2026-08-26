@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "attack-trees.schema.json",
+  "title": "Threat Analysis Attack Trees",
+  "type": "object",
+  "required": [
+    "attack_trees"
+  ],
+  "properties": {
+    "attack_trees": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "tree_id",
+          "value_asset",
+          "nodes",
+          "edges",
+          "attack_paths"
+        ],
+        "properties": {
+          "tree_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "value_asset": {
+            "type": "object",
+            "required": [
+              "asset_name",
+              "asset_category",
+              "asset_description",
+              "attack_loss"
+            ],
+            "properties": {
+              "asset_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "asset_category": {
+                "type": "string",
+                "enum": [
+                  "数据资产",
+                  "软件资产",
+                  "硬件资产",
+                  "服务资产"
+                ]
+              },
+              "asset_description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "attack_loss": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          "nodes": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "required": [
+                "node_id",
+                "node_type",
+                "node_name",
+                "description",
+                "module_name",
+                "is_high_risk_module",
+                "external_exposure",
+                "external_interface_description"
+              ],
+              "properties": {
+                "node_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "node_type": {
+                  "type": "string",
+                  "enum": [
+                    "根节点",
+                    "内部节点",
+                    "叶子节点"
+                  ]
+                },
+                "node_name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "module_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "is_high_risk_module": {
+                  "type": "boolean"
+                },
+                "external_exposure": {
+                  "type": "boolean"
+                },
+                "external_interface_description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "edges": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "edge_id",
+                "source_node_id",
+                "target_node_id",
+                "influence_type",
+                "description"
+              ],
+              "properties": {
+                "edge_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source_node_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "target_node_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "influence_type": {
+                  "type": "string",
+                  "enum": [
+                    "调用",
+                    "数据传递",
+                    "消息传递",
+                    "控制",
+                    "依赖",
+                    "直接影响"
+                  ]
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "attack_paths": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "path_id",
+                "path_name",
+                "node_ids",
+                "edge_ids",
+                "path_description",
+                "related_high_risk_modules",
+                "attack_patterns"
+              ],
+              "properties": {
+                "path_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "path_name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "node_ids": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "edge_ids": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "path_description": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "related_high_risk_modules": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "module_name",
+                      "node_id",
+                      "external_exposure",
+                      "path_role",
+                      "association_description"
+                    ],
+                    "properties": {
+                      "module_name": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "node_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "external_exposure": {
+                        "type": "boolean"
+                      },
+                      "path_role": {
+                        "type": "string",
+                        "enum": [
+                          "外部攻击入口",
+                          "内部影响模块",
+                          "直接资产影响模块"
+                        ]
+                      },
+                      "association_description": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "attack_patterns": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "pattern_id",
+                      "pattern_name",
+                      "association_description"
+                    ],
+                    "properties": {
+                      "pattern_id": {
+                        "type": "string"
+                      },
+                      "pattern_name": {
+                        "type": "string"
+                      },
+                      "association_description": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
