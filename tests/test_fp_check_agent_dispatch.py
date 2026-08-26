@@ -330,6 +330,7 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("operation", kwargs)
         self.assertEqual(result["status"], "success")
         reporter.push_fp_result.assert_awaited_once()
+        reporter.get_git_history.assert_not_awaited()
         skill_paths = task_context.call_args.kwargs["skill_paths"]
         self.assertEqual(
             task_context.call_args.kwargs["task_metadata"]["scan_mode"],

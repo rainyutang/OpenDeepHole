@@ -2,6 +2,7 @@ import type {
   Candidate,
   FpReviewJob,
   FpReviewResult,
+  IndexedVulnerability,
   OpenCodeModelTokenUsage,
   OpenCodePoolModelStats,
   OpenCodePoolStatus,
@@ -100,6 +101,59 @@ export function normalizeVulnerability(value: unknown): Vulnerability {
     confirmed: raw.confirmed === true,
     provisional: raw.provisional === true,
   } as Vulnerability;
+}
+
+export function normalizeIndexedVulnerability(
+  value: unknown,
+  fallbackIndex: number,
+): IndexedVulnerability | null {
+  if (!isRecord(value)) return null;
+  const rawIndex = value.vuln_index;
+  const vulnIndex = Number.isInteger(rawIndex) && Number(rawIndex) >= 0
+    ? Number(rawIndex)
+    : fallbackIndex;
+  if (!Number.isInteger(vulnIndex) || vulnIndex < 0) return null;
+  return {
+    ...normalizeVulnerability(value),
+    vuln_index: vulnIndex,
+  };
+}
+
+export function normalizeIndexedVulnerabilities(value: unknown): IndexedVulnerability[] {
+  if (!Array.isArray(value)) return [];
+  const byIndex = new Map<number, IndexedVulnerability>();
+  value.forEach((item, index) => {
+    const normalized = normalizeIndexedVulnerability(item, index);
+    if (normalized) byIndex.set(normalized.vuln_index, normalized);
+  });
+  return [...byIndex.values()].sort((left, right) => left.vuln_index - right.vuln_index);
+}
+
+export function mergeIndexedVulnerabilities(
+  existing: readonly IndexedVulnerability[],
+  incoming: readonly { index: number; vulnerability: Vulnerability }[],
+): IndexedVulnerability[] {
+  const byIndex = new Map<number, IndexedVulnerability>();
+  for (const vulnerability of existing) {
+    if (!vulnerability || !Number.isInteger(vulnerability.vuln_index) || vulnerability.vuln_index < 0) continue;
+    byIndex.set(vulnerability.vuln_index, vulnerability);
+  }
+  for (const item of incoming) {
+    if (!Number.isInteger(item.index) || item.index < 0) continue;
+    if (!isRecord(item.vulnerability)) continue;
+    byIndex.set(item.index, {
+      ...normalizeVulnerability(item.vulnerability),
+      vuln_index: item.index,
+    });
+  }
+  return [...byIndex.values()].sort((left, right) => left.vuln_index - right.vuln_index);
+}
+
+export function findIndexedVulnerability(
+  vulnerabilities: readonly IndexedVulnerability[],
+  vulnIndex: number,
+): IndexedVulnerability | undefined {
+  return vulnerabilities.find((vulnerability) => vulnerability.vuln_index === vulnIndex);
 }
 
 export function normalizeThreatTask(value: unknown): ThreatAuditTask {
@@ -323,9 +377,7 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
     candidates: Array.isArray(value.candidates)
       ? value.candidates.map((item, index) => normalizeCandidate(item, index) as ScanCandidate)
       : [],
-    vulnerabilities: Array.isArray(value.vulnerabilities)
-      ? value.vulnerabilities.map(normalizeVulnerability)
-      : [],
+    vulnerabilities: normalizeIndexedVulnerabilities(value.vulnerabilities),
     skill_reports: recordArray(value.skill_reports) as unknown as ScanStatus["skill_reports"],
     threat_audit_tasks: Array.isArray(value.threat_audit_tasks)
       ? value.threat_audit_tasks.map(normalizeThreatTask)

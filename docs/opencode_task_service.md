@@ -371,6 +371,8 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 4. 格式匹配输出通过 Schema 后，只把该 JSON 作为 `structured`；公开结果仍返回原业务 `session_id`、原 `text`、原 `model` 和原输出来源。格式匹配失败、返回固定非法值或请求异常时，服务重新取得符合原业务能力要求的已启用模型 Lease，并在原业务 Session 最多追加 `invalid_json_retry_count` 次纠正消息。
 5. 原 Session 纠正仍失败后，才按 `serve.max_retries` 重新排队并创建 fresh 业务 Session。格式不合规与固定非法值属于健康中性失败；格式匹配或纠正请求本身发生 Provider/Auth/API 失败或超时时，仍按真实请求结果更新对应模型健康状态。
 
+独立格式匹配和原 Session 纠正会通过模型池上下文的 `task_phase` 标记当前恢复阶段，但任务队列及完成历史中的 `prompt`、`prompt_length` 始终保留调用方首次提交的业务 Prompt 及其长度，不会替换为内部格式匹配/纠正提示或阶段占位符。
+
 原 Session 纠正使用 `invalid_json_retry_prompt`：值为 `None` 时使用当前包含完整 Schema 的中文默认提示词；传入非空字符串时，每次都原样发送该字符串，不追加 Schema、重试序号或其它内容。空字符串、纯空白和非字符串会在提交任务前报错。未传 `output_schema` 时不启用文件 JSON 回退，但仍跟踪并清理非白名单新文件；`invalid_json_retry_count=0` 时同时关闭独立格式匹配与原 Session 纠正，但既有 fresh Session 重试策略保持不变。
 
 若同 Session 纠正耗尽，内部服务会按对应任务策略的 `max_retries` 释放 Lease、重新排队并创建全新 Session。模型消息超时和其它可重试执行错误也使用同一预算；`max_retries=2` 表示首次 Session 之外最多再创建 2 个 Session，即最多执行 3 次。业务方不再传 `attempt`。

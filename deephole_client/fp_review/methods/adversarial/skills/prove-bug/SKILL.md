@@ -20,17 +20,9 @@ compatibility: opencode
 
 ## 输入
 
-你可能会收到：
-
-- Semgrep / 静态分析命中的代码位置
-- 疑似漏洞类型
-- 命中文件、函数、行号
-- 相关变量名，例如 len、idx、loop、count、contentLen、dstsz
-- 相关 sink，例如数组访问、指针偏移、memcpy_s、memmove_s、strncpy_s
-- 原始描述和原始 AI 分析
-- project_id
-
-你需要主动阅读代码，补齐上下文。静态分析结果只是候选线索，不是结论。
+业务 Prompt 的分析上下文只提供一个 `原始漏洞报告` Markdown 区块，并在末尾给出输出 JSON
+Schema。该报告是漏洞挖掘阶段形成的候选结论，只能作为调查线索，不能作为最终证据。你必须
+主动阅读当前项目中的真实代码，补齐文件、函数、调用链、变量、校验和 sink 上下文。
 
 ## 阶段 Markdown 输出
 
@@ -142,7 +134,6 @@ Markdown 至少包含：
 - `evidence`：关键 `path:line` 及证据数组
 - `stage_markdown`：必须包含下面格式的完整论证
 - `vulnerability_report`：`verdict=true_positive` 时必须填写 Markdown 问题报告
-- `match_type` / `match_reference`：本阶段不适用时返回空字符串
 
 `stage_markdown` 必须按以下格式输出：
 

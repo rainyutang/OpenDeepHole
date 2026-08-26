@@ -75,11 +75,25 @@ class FpReviewMethodDiscoveryTests(unittest.TestCase):
         self.assertEqual(set(methods), {"adversarial", "fp_check"})
         self.assertTrue(methods["adversarial"]["default"])
         self.assertEqual(methods["adversarial"]["max_concurrency"], 2)
+        self.assertEqual(
+            [stage["key"] for stage in methods["adversarial"]["stages"]],
+            ["prove_bug", "prove_fp", "final_judge"],
+        )
         self.assertEqual(methods["fp_check"]["max_concurrency"], 4)
         self.assertIn(
             "gate_review",
             {stage["key"] for stage in methods["fp_check"]["stages"]},
         )
+        adversarial = load_fp_review_methods().get("adversarial")
+        self.assertIsNotNone(adversarial)
+        self.assertEqual(
+            [path.name for path in adversarial.manifest.skill_paths],
+            ["skills"],
+        )
+        self.assertTrue(all(
+            document.path.name == "SKILL.md"
+            for document in adversarial.manifest.documents
+        ))
 
     def test_discovery_is_strict_and_loader_requires_async_kwargs_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:scan-runtime": "node tests/scanRuntime.test.mjs",
+    "test:static-audit": "node tests/staticAudit.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

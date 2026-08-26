@@ -8,6 +8,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from deephole_client.fp_review.prompts import (
+    build_skill_prompt,
+    original_vulnerability_report,
+    stage_markdown_report,
+)
 from task_agent import run_opencode_task
 
 
@@ -39,11 +44,27 @@ _REQUIRED_KEYS = {
     "vuln_index",
     "vulnerability",
 }
-_STAGE_FILES = {
-    "history_match": "history_match.md",
-    "prove_bug": "prove_bug.md",
-    "prove_fp": "prove_fp.md",
-    "final_judge": "final_judge.md",
+_STAGE_SKILLS = {
+    "prove_bug": "prove-bug",
+    "prove_fp": "prove-fp",
+    "final_judge": "final-judge",
+}
+_STAGE_TASKS = {
+    "prove_bug": (
+        "请使用中文针对下面的原始漏洞报告进行漏洞成立论证。必须读取项目中的真实代码，"
+        "验证外部输入源、调用链、变量可控性、现有校验、危险操作和实际影响；"
+        "不得修改任何项目文件。最终只返回本 Skill 约定的 JSON。"
+    ),
+    "prove_fp": (
+        "请使用中文针对下面的原始漏洞报告进行误报论证。必须独立读取项目中的真实代码，"
+        "重点寻找不可达、不可控、校验充分、容量与索引绑定、危险操作实际安全或错误路径"
+        "提前终止等反证；不得修改任何项目文件。最终只返回本 Skill 约定的 JSON。"
+    ),
+    "final_judge": (
+        "请使用中文结合下面三份报告完成最终裁决。必须重新核对项目中的真实代码，"
+        "分别判断正方和反方证据是否成立，不得按两边结论投票，也不得修改任何项目文件。"
+        "最终只返回本 Skill 约定的 JSON。"
+    ),
 }
 _STAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -57,8 +78,6 @@ _STAGE_SCHEMA: dict[str, Any] = {
         "revised_severity": {"type": "string"},
         "vulnerability_report": {"type": "string"},
         "stage_markdown": {"type": "string"},
-        "match_type": {"type": "string"},
-        "match_reference": {"type": "string"},
     },
     "required": [
         "verdict",
@@ -67,8 +86,6 @@ _STAGE_SCHEMA: dict[str, Any] = {
         "revised_severity",
         "vulnerability_report",
         "stage_markdown",
-        "match_type",
-        "match_reference",
     ],
 }
 
@@ -96,45 +113,6 @@ def _normalize_vulnerability(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError("vulnerability must be a dict")
     return dict(value)
-
-
-def _read_skills() -> dict[str, str]:
-    skills_dir = Path(__file__).resolve().parent / "skills"
-    result: dict[str, str] = {}
-    for stage, filename in _STAGE_FILES.items():
-        path = skills_dir / filename
-        if not path.is_file():
-            raise FileNotFoundError(f"FP review skill is missing: {path}")
-        result[stage] = path.read_text(encoding="utf-8")
-    return result
-
-
-def _stage_prompt(
-    *,
-    stage: str,
-    skill: str,
-    vulnerability: dict[str, Any],
-    feedback_entries: list[dict[str, Any]],
-    history: list[dict[str, Any]],
-    prior_stages: dict[str, dict[str, Any]],
-) -> str:
-    context: dict[str, Any] = {
-        "vulnerability": vulnerability,
-        "feedback_entries": feedback_entries,
-        "history": history,
-        "prior_stages": prior_stages,
-    }
-    return (
-        f"{skill}\n\n"
-        f"当前阶段：{stage}\n"
-        "必须读取当前项目中的真实代码，不得仅依据原报告复述结论。"
-        "前序阶段内容只从输入上下文的 prior_stages 获取。"
-        "不得调用 write、edit、apply_patch、patch 或其它文件写入工具，"
-        "不得创建、修改或删除任何项目文件。"
-        "请严格返回约定 JSON；stage_markdown 写出本阶段可独立阅读的分析。\n\n"
-        "输入上下文：\n"
-        + json.dumps(context, ensure_ascii=False, indent=2)
-    )
 
 
 def _stage_payload(result: Any) -> dict[str, Any]:
@@ -234,7 +212,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
     if capability not in {"low", "high"}:
         raise ValueError("required_capability must be 'low' or 'high'")
     retry_count = max(0, int(kwargs.get("invalid_json_retry_count") or 2))
-    skills = _read_skills()
+    report_markdown = original_vulnerability_report(vulnerability)
 
     await _emit(
         output,
@@ -247,9 +225,8 @@ async def run(**kwargs: Any) -> dict[str, Any]:
     async def run_stage(
         *,
         item_index: int,
-        vulnerability: dict[str, Any],
         stage: str,
-        prior_stages: dict[str, dict[str, Any]],
+        report_sections: tuple[tuple[str, str], ...] = (),
     ) -> dict[str, Any]:
         await _emit(
             output,
@@ -258,21 +235,15 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             vuln_index=item_index,
             stage=stage,
         )
-        prompt = _stage_prompt(
-            stage=stage,
-            skill=skills[stage],
-            vulnerability=vulnerability,
-            feedback_entries=feedback_entries,
-            history=history,
-            prior_stages=prior_stages,
+        prompt = build_skill_prompt(
+            skill_name=_STAGE_SKILLS[stage],
+            task=_STAGE_TASKS[stage],
+            sections=(
+                ("原始漏洞报告", report_markdown),
+                *report_sections,
+            ),
+            output_schema=_STAGE_SCHEMA,
         )
-        prompt += (
-            "\n\n请将最终结果作为符合下方 JSON Schema 的纯 JSON 文本返回。"
-            "最终回复只能包含这一个 JSON 值，不要使用 Markdown 代码围栏，"
-            "也不要附加任何解释。应用程序会自行解析回复文本。\nJSON Schema：\n"
-            + json.dumps(_STAGE_SCHEMA, ensure_ascii=False, indent=2)
-        )
-        prompt += "\n\n请使用中文输出"
         result = await run_opencode_task(
             task_name=(
                 f"fp-review-{kwargs['review_id']}-{item_index}-{stage}"
@@ -318,47 +289,35 @@ async def run(**kwargs: Any) -> dict[str, Any]:
                 "stage_outputs": {},
                 "stage_output_sources": {},
             }
-        if history or vulnerability.get("variant_of"):
-            stages["history_match"] = await run_stage(
-                item_index=vuln_index,
-                vulnerability=vulnerability,
-                stage="history_match",
-                prior_stages=stages,
-            )
-        if (
-            stages.get("history_match", {}).get("verdict")
-            == "true_positive"
-        ):
-            final = stages["history_match"]
+        stages["prove_bug"] = await run_stage(
+            item_index=vuln_index,
+            stage="prove_bug",
+        )
+        if stages["prove_bug"]["verdict"] == "false_positive":
+            final = stages["prove_bug"]
             final["revised_severity"] = (
-                final.get("revised_severity") or "high"
+                final.get("revised_severity") or "low"
             )
         else:
-            stages["prove_bug"] = await run_stage(
+            stages["prove_fp"] = await run_stage(
                 item_index=vuln_index,
-                vulnerability=vulnerability,
-                stage="prove_bug",
-                prior_stages=stages,
+                stage="prove_fp",
             )
-            if stages["prove_bug"]["verdict"] == "false_positive":
-                final = stages["prove_bug"]
-                final["revised_severity"] = (
-                    final.get("revised_severity") or "low"
-                )
-            else:
-                stages["prove_fp"] = await run_stage(
-                    item_index=vuln_index,
-                    vulnerability=vulnerability,
-                    stage="prove_fp",
-                    prior_stages=stages,
-                )
-                stages["final_judge"] = await run_stage(
-                    item_index=vuln_index,
-                    vulnerability=vulnerability,
-                    stage="final_judge",
-                    prior_stages=stages,
-                )
-                final = stages["final_judge"]
+            stages["final_judge"] = await run_stage(
+                item_index=vuln_index,
+                stage="final_judge",
+                report_sections=(
+                    (
+                        "正方论证报告",
+                        stage_markdown_report(stages["prove_bug"]),
+                    ),
+                    (
+                        "反方论证报告",
+                        stage_markdown_report(stages["prove_fp"]),
+                    ),
+                ),
+            )
+            final = stages["final_judge"]
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -423,19 +382,11 @@ async def run(**kwargs: Any) -> dict[str, Any]:
         ),
         "vulnerability_report": str(
             (final or {}).get("vulnerability_report")
-            or (
-                vulnerability.get("vulnerability_report")
-                if verdict == "true_positive"
-                else ""
-            )
+            or (report_markdown if verdict == "true_positive" else "")
             or ""
         ),
-        "match_type": str((final or {}).get("match_type") or ""),
-        "match_reference": str(
-            (final or {}).get("match_reference")
-            or vulnerability.get("variant_of")
-            or ""
-        ),
+        "match_reference": "",
+        "match_type": "",
         "stage_outputs": stage_outputs,
         "stage_output_sources": stage_sources,
         "output_source": dict((final or {}).get("output_source") or {}),
