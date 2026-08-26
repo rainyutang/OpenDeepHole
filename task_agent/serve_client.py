@@ -249,6 +249,7 @@ _SERVE_BIND_FAILURE_MARKERS = (
     "only one usage of each socket address",
 )
 _SERVE_NON_PORT_FAILURE_MARKERS = (
+    "cleanup after startup failure also failed",
     "filesystem.open",
     "configerror",
     "jsonerror",
@@ -329,6 +330,36 @@ class OpenCodePromptResult:
     model: str = ""
     token_usage: OpenCodeTokenUsage | None = None
     raw: Any = field(default=None, repr=False, compare=False)
+
+
+class OpenCodeProviderQuotaError(RuntimeError):
+    """Recoverable Provider-side quota exhaustion reported by OpenCode."""
+
+    def __init__(
+        self,
+        *,
+        error_code: str,
+        quota_type: str = "",
+        identity: str = "",
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        self.error_code = error_code
+        self.quota_type = quota_type
+        self.identity = identity
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        scope = f" ({self.quota_type})" if self.quota_type else ""
+        retry_note = (
+            f"，建议 {self.retry_after_seconds:g} 秒后重试"
+            if self.retry_after_seconds is not None
+            else "，将按退避策略重试"
+        )
+        return (
+            f"模型 Provider 请求配额暂不可用{scope}"
+            f"，错误码 {self.error_code or 'unknown'}{retry_note}"
+        )
 
 
 @dataclass(frozen=True)
@@ -447,7 +478,7 @@ def _run_command_text(cmd: list[str], timeout: float = 3.0) -> str:
         completed = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -459,7 +490,34 @@ def _run_command_text(cmd: list[str], timeout: float = 3.0) -> str:
     except Exception as exc:
         logger.debug("Failed to run %s: %s", cmd[0] if cmd else cmd, exc)
         return ""
-    return completed.stdout or ""
+    output = completed.stdout or completed.stderr or ""
+    if completed.returncode != 0:
+        logger.debug(
+            "Command probe failed executable=%s exit_code=%s output=%s",
+            cmd[0] if cmd else "",
+            completed.returncode,
+            _one_line_preview(output, 500),
+        )
+    return output
+
+
+def _executable_argv(executable: str, *arguments: str) -> list[str]:
+    """Build argv that can launch Windows .cmd/.bat shims without shell=True."""
+    direct = [executable, *arguments]
+    if sys.platform != "win32" or Path(executable).suffix.casefold() not in {".cmd", ".bat"}:
+        return direct
+    command_processor = (
+        os.environ.get("COMSPEC")
+        or shutil.which("cmd.exe")
+        or "cmd.exe"
+    )
+    return [
+        command_processor,
+        "/d",
+        "/s",
+        "/c",
+        subprocess.list2cmdline(direct),
+    ]
 
 
 def _new_serve_startup_log_path(tool: str, port: int) -> Path:
@@ -842,6 +900,8 @@ def _log_serve_startup_debug(
     port_mode: str,
     attempt: int,
     executable_version: str,
+    executable_resolved: str,
+    version_argv: list[str],
 ) -> None:
     try:
         config_content = config_path.read_text(encoding="utf-8")
@@ -851,8 +911,9 @@ def _log_serve_startup_debug(
         "OpenCode serve startup debug:",
         f"  tool={key.tool}",
         f"  executable_config={key.executable}",
-        f"  executable_resolved={cmd[0]}",
+        f"  executable_resolved={executable_resolved}",
         f"  executable_version={executable_version or '(unknown)'}",
+        f"  version_argv={json.dumps(version_argv, ensure_ascii=False)}",
         f"  port={port}",
         f"  port_mode={port_mode}",
         f"  startup_attempt={attempt}",
@@ -1894,6 +1955,14 @@ def _stop_owned_serve_record(
     }
     if marker is not None:
         known_listener_pids.update(_marker_listener_pids(marker))
+    if sys.platform == "win32" and marker is not None:
+        return _stop_current_windows_serve_record(
+            record,
+            marker=marker,
+            reason=reason,
+            port=effective_port,
+            listener_pids=known_listener_pids,
+        )
 
     wait_method = getattr(record.proc, "wait", None)
     wait = (
@@ -2022,6 +2091,127 @@ def _windows_marker_pid_states(
         else:
             states[pid] = "absent"
     return states
+
+
+def _stop_current_windows_serve_record(
+    record: _OwnedServeProcess,
+    *,
+    marker: dict[str, Any],
+    reason: str,
+    port: int,
+    listener_pids: set[int],
+) -> bool:
+    """Stop the live manager record using the marker's PID creation tokens."""
+    tracked_pids = {record.pid, *listener_pids}
+    killable_states = {"owned", "owned-legacy"}
+    blocking_states = {*killable_states, "unknown"}
+
+    def snapshot() -> tuple[set[int], dict[int, str]]:
+        current_listeners = _listener_pids_for_port(port) if port > 0 else set()
+        states = _windows_marker_pid_states(
+            marker,
+            tracked_pids,
+            listener_pids=current_listeners,
+        )
+        return current_listeners, states
+
+    def pid_still_blocks(pid: int, *, require_listener: bool = False) -> bool:
+        current_listeners, states = snapshot()
+        if require_listener and pid not in current_listeners:
+            return False
+        return states.get(pid, "unknown") in blocking_states
+
+    current_listeners, pid_states = snapshot()
+    primary_state = pid_states.get(record.pid, "unknown")
+    if primary_state in killable_states:
+        wait_method = getattr(record.proc, "wait", None)
+        wait = (
+            (lambda timeout, method=wait_method: method(timeout=timeout))
+            if callable(wait_method)
+            else None
+        )
+        logger.info(
+            "Stopping OpenCode Serve process tree pid %s during %s pid_state=%s",
+            record.pid,
+            reason,
+            primary_state,
+        )
+        _terminate_process_tree(
+            record.pid,
+            wait=wait,
+            is_running=lambda: pid_still_blocks(record.pid),
+        )
+    elif primary_state == "unknown":
+        logger.warning(
+            "Refusing to terminate OpenCode Serve pid %s during %s because "
+            "its marker creation-time identity could not be verified",
+            record.pid,
+            reason,
+        )
+    else:
+        logger.info(
+            "Skipping OpenCode Serve pid %s termination during %s pid_state=%s",
+            record.pid,
+            reason,
+            primary_state,
+        )
+
+    current_listeners, pid_states = snapshot()
+    listener_candidates = listener_pids & current_listeners
+    for listener_pid in sorted(listener_candidates):
+        listener_state = pid_states.get(listener_pid, "unknown")
+        if listener_state not in killable_states:
+            if listener_state == "unknown":
+                logger.warning(
+                    "Refusing to terminate OpenCode Serve listener pid %s during %s "
+                    "because its marker creation-time identity could not be verified",
+                    listener_pid,
+                    reason,
+                )
+            continue
+        logger.info(
+            "Stopping owned OpenCode Serve listener pid %s during %s pid_state=%s",
+            listener_pid,
+            reason,
+            listener_state,
+        )
+        _terminate_process_tree(
+            listener_pid,
+            is_running=lambda listener_pid=listener_pid: pid_still_blocks(
+                listener_pid,
+                require_listener=True,
+            ),
+        )
+
+    current_listeners, pid_states = snapshot()
+    primary_state = pid_states.get(record.pid, "unknown")
+    # The post-termination creation-time classification is authoritative. A
+    # non-zero taskkill exit can race with normal process exit, while a reused
+    # foreign PID must never keep this marker alive or become a kill target.
+    tree_stopped = primary_state in {"absent", "foreign"}
+    remaining_listener_pids = {
+        pid
+        for pid in listener_pids & current_listeners
+        if pid_states.get(pid, "unknown") in blocking_states
+    }
+    stopped = tree_stopped and not remaining_listener_pids
+    if stopped:
+        _remove_marker_for_pid(record.marker_path, record.pid)
+    else:
+        state_note = ",".join(
+            f"{pid}:{pid_states.get(pid, 'unknown')}"
+            for pid in sorted(tracked_pids)
+        )
+        logger.warning(
+            "OpenCode Serve cleanup incomplete pid=%s listener_pids=%s reason=%s "
+            "pid_states=%s; retaining ownership marker %s",
+            record.pid,
+            sorted(remaining_listener_pids),
+            reason,
+            state_note or "none",
+            record.marker_path,
+        )
+    return stopped
 
 
 def _stop_previous_windows_serve_marker(
@@ -2982,6 +3172,107 @@ def _error_summary(value: object) -> str:
             return name
         return _json_one_line(value)
     return _one_line_preview(value)
+
+
+def _embedded_json_objects(value: str) -> list[object]:
+    """Decode bounded JSON objects embedded in wrapper validation messages."""
+    text = str(value or "")[:20_000]
+    decoder = json.JSONDecoder()
+    decoded: list[object] = []
+    for index, char in enumerate(text):
+        if char not in "[{":
+            continue
+        try:
+            item, _ = decoder.raw_decode(text[index:])
+        except (TypeError, ValueError):
+            continue
+        decoded.append(item)
+        if len(decoded) >= 12:
+            break
+    return decoded
+
+
+def _provider_quota_error(value: object) -> OpenCodeProviderQuotaError | None:
+    """Extract an allowlisted quota signal from nested OpenCode/Provider errors."""
+    queue: list[tuple[object, int]] = [(value, 0)]
+    seen: set[int] = set()
+    candidates: list[dict[str, object]] = []
+    while queue:
+        current, depth = queue.pop(0)
+        if depth > 7:
+            continue
+        if isinstance(current, (dict, list)):
+            marker = id(current)
+            if marker in seen:
+                continue
+            seen.add(marker)
+        if isinstance(current, dict):
+            candidates.append(current)
+            for key, nested in current.items():
+                if key in {
+                    "error",
+                    "data",
+                    "cause",
+                    "message",
+                    "error_msg",
+                    "details",
+                    "value",
+                }:
+                    queue.append((nested, depth + 1))
+        elif isinstance(current, list):
+            queue.extend((item, depth + 1) for item in current[:20])
+        elif isinstance(current, str):
+            queue.extend(
+                (item, depth + 1)
+                for item in _embedded_json_objects(current)
+            )
+
+    for candidate in candidates:
+        error_code = str(candidate.get("error_code") or "").strip()
+        quota_type = str(candidate.get("type") or "").strip().upper()
+        message = str(
+            candidate.get("message")
+            or candidate.get("error_msg")
+            or ""
+        ).strip()
+        normalized_message = message.casefold()
+        is_rate_limit_code = error_code.endswith(".429") or error_code == "429"
+        is_quota_message = (
+            "quota" in normalized_message
+            or "rate limit" in normalized_message
+            or quota_type in {"RPM", "TPM"}
+        )
+        if not (is_rate_limit_code and is_quota_message):
+            continue
+        detail_candidate = next(
+            (
+                item
+                for item in candidates
+                if str(item.get("type") or "").strip().upper() in {"RPM", "TPM"}
+            ),
+            {},
+        )
+        if not quota_type:
+            quota_type = str(detail_candidate.get("type") or "").strip().upper()
+        retry_after = candidate.get("retry_after")
+        retry_after_seconds: float | None = None
+        try:
+            parsed_retry_after = float(retry_after)
+        except (TypeError, ValueError):
+            parsed_retry_after = -1
+        if parsed_retry_after > 0:
+            retry_after_seconds = parsed_retry_after
+        return OpenCodeProviderQuotaError(
+            error_code=error_code,
+            quota_type=quota_type,
+            identity=str(
+                candidate.get("identity")
+                or detail_candidate.get("identity")
+                or ""
+            ).strip(),
+            retry_after_seconds=retry_after_seconds,
+        )
+    return None
 
 
 def _assistant_message_error(value: object) -> object | None:
@@ -5342,6 +5633,8 @@ class OpenCodeServeManager:
         return_details: bool = False,
         show_serve_status: bool = False,
         log_stage: str = "opencode",
+        task_id: str = "",
+        task_attempt: int = 0,
     ) -> list[str] | OpenCodePromptResult:
         normalized_log_stage = task_output_stage(log_stage)
         active_session_id = str(session_id or "").strip()
@@ -5413,6 +5706,7 @@ class OpenCodeServeManager:
         session_started = False
         session_outcome = "failure"
         session_error = ""
+        response_message_id_for_log = ""
         scan_mcp_lease: _ScanMcpLease | None = None
         knowledge_mcp_lease: _ScanMcpLease | None = None
         knowledge_binding_path: Path | None = None
@@ -5592,9 +5886,15 @@ class OpenCodeServeManager:
                         await result
                 if on_line:
                     config_note = f" config={config_workspace}" if config_workspace else ""
+                    correlation_note = (
+                        f" task={task_id} attempt={task_attempt}"
+                        if task_id
+                        else ""
+                    )
                     emit(
                         "session",
-                        f"START mode={session_mode} directory={directory}{config_note}",
+                        f"START mode={session_mode} directory={directory}"
+                        f"{correlation_note}{config_note}",
                     )
                     session_started = True
                 ignored_file_message_ids: tuple[str, ...] = ()
@@ -5918,6 +6218,7 @@ class OpenCodeServeManager:
                         f"bytes={response_body_bytes}",
                     )
                 await capture_token_usage(response_data)
+                response_message_id_for_log = _response_message_id(response_data)
                 response_model = _response_model(response_data)
                 if response_model and on_response_model:
                     result = on_response_model(response_model)
@@ -5946,6 +6247,10 @@ class OpenCodeServeManager:
                         and cancel_event.is_set()
                     ):
                         raise asyncio.CancelledError()
+                    quota_error = _provider_quota_error(assistant_error)
+                    if quota_error is not None:
+                        await emit_model_request_failure("quota")
+                        raise quota_error
                     await emit_model_request_failure(
                         "failure"
                         if _assistant_error_affects_model_health(assistant_error)
@@ -6031,9 +6336,20 @@ class OpenCodeServeManager:
                             if session_error
                             else ""
                         )
+                        correlation_note = (
+                            f" task={task_id} attempt={task_attempt}"
+                            if task_id
+                            else ""
+                        )
+                        message_note = (
+                            f" message={response_message_id_for_log}"
+                            if task_id and response_message_id_for_log
+                            else ""
+                        )
                         emit(
                             "session",
-                            f"STOP status={session_outcome} retained=true{error_note}",
+                            f"STOP status={session_outcome} retained=true"
+                            f"{correlation_note}{message_note}{error_note}",
                         )
                 finally:
                     try:
@@ -7134,7 +7450,19 @@ class OpenCodeServeManager:
         reload_generation = self._serve_config_generation
         await self._wait_until_idle_locked()
         failure_generation = self._serve_failure_generation
-        await self._stop_locked()
+        config_changed = bool(
+            self._key is not None
+            and self._key.config_hash != key.config_hash
+        )
+        if self._restart_required:
+            restart_reason = "previous Serve request failure"
+        elif self._dirty or config_changed:
+            restart_reason = "runtime config changed"
+        elif self._proc is not None:
+            restart_reason = "Serve runtime key changed"
+        else:
+            restart_reason = "Serve startup preparation"
+        await self._stop_locked(reason=restart_reason, requested_key=key)
         await self._start_locked(key, startup_cwd=startup_cwd)
         if self._serve_config_generation == reload_generation:
             self._dirty = False
@@ -7163,8 +7491,9 @@ class OpenCodeServeManager:
         startup_cwd: Path | None = None,
     ) -> None:
         executable = _resolve_executable(key.executable)
+        version_argv = _executable_argv(executable, "--version")
         executable_version = _one_line_preview(
-            _run_command_text([executable, "--version"]),
+            _run_command_text(version_argv),
             200,
         )
         requested_port = _serve_port(key.env_overrides)
@@ -7326,14 +7655,14 @@ class OpenCodeServeManager:
         env[_SERVE_PORT_ENV] = str(port)
         env.pop("OPENCODE_SERVER_PASSWORD", None)
         env.pop("OPENCODE_SERVER_USERNAME", None)
-        cmd = [
+        cmd = _executable_argv(
             executable,
             "serve",
             "--hostname",
             "127.0.0.1",
             "--port",
             str(port),
-        ]
+        )
         kwargs: dict[str, Any] = {}
         if sys.platform != "win32":
             kwargs["start_new_session"] = True
@@ -7352,6 +7681,8 @@ class OpenCodeServeManager:
             port_mode="auto" if key.serve_port_auto else "fixed",
             attempt=attempt,
             executable_version=executable_version,
+            executable_resolved=executable,
+            version_argv=_executable_argv(executable, "--version"),
         )
         try:
             with startup_log_path.open("ab") as startup_log:
@@ -7376,8 +7707,15 @@ class OpenCodeServeManager:
         _write_marker(self._marker_path, proc=self._proc, key=key, port=port)
         try:
             await self._wait_health_locked(startup_log_path)
-        except Exception:
-            await self._stop_locked()
+        except Exception as startup_error:
+            try:
+                await self._stop_locked(reason="startup health failure cleanup")
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    f"{startup_error}\n\n"
+                    "OpenCode Serve cleanup after startup failure also failed: "
+                    f"{cleanup_error}"
+                ) from startup_error
             raise
         _remove_file(startup_log_path)
         config_note = f" config_hash={key.config_hash[:12]}" if key.config_hash else ""
@@ -7534,7 +7872,27 @@ class OpenCodeServeManager:
                     ) as client:
                         response = await client.get("/global/health")
                         last_health_detail = f"HTTP {response.status_code}"
-                        if response.status_code < 500:
+                        health_payload: object = None
+                        if response.status_code == 200:
+                            try:
+                                health_payload = response.json()
+                            except (TypeError, ValueError) as exc:
+                                last_health_detail = (
+                                    f"HTTP 200, invalid JSON: {_one_line_preview(exc)}"
+                                )
+                            else:
+                                if not (
+                                    isinstance(health_payload, dict)
+                                    and health_payload.get("healthy") is True
+                                ):
+                                    last_health_detail = (
+                                        "HTTP 200, healthy flag is not true"
+                                    )
+                        if (
+                            response.status_code == 200
+                            and isinstance(health_payload, dict)
+                            and health_payload.get("healthy") is True
+                        ):
                             proc = self._proc
                             launcher_pid = int(getattr(proc, "pid", 0) or 0)
                             ownership_mismatch = False
@@ -7693,7 +8051,12 @@ class OpenCodeServeManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _stop_locked(self) -> None:
+    async def _stop_locked(
+        self,
+        *,
+        reason: str = "serve shutdown",
+        requested_key: OpenCodeServeKey | None = None,
+    ) -> None:
         await self._reset_managed_mcp_process_state()
         await self._stop_event_hub()
         proc = self._proc
@@ -7705,6 +8068,26 @@ class OpenCodeServeManager:
             _remove_file(startup_log_path)
             return
         pid = int(getattr(proc, "pid", 0) or 0)
+        current_config_hash = self._key.config_hash if self._key is not None else ""
+        requested_config_hash = (
+            requested_key.config_hash if requested_key is not None else ""
+        )
+        logger.info(
+            "OpenCode Serve stop requested pid=%s port=%s reason=%s dirty=%s "
+            "restart_required=%s config_changed=%s current_config_hash=%s "
+            "requested_config_hash=%s",
+            pid,
+            port or "",
+            reason,
+            self._dirty,
+            self._restart_required,
+            bool(
+                requested_key is not None
+                and current_config_hash != requested_config_hash
+            ),
+            current_config_hash[:12] or "(none)",
+            requested_config_hash[:12] or "(none)",
+        )
         stopped = True
         try:
             if pid > 0:
@@ -7719,7 +8102,7 @@ class OpenCodeServeManager:
                 stopped = await asyncio.to_thread(
                     _stop_owned_serve_record,
                     record,
-                    reason="serve shutdown",
+                    reason=reason,
                     port=port,
                     listener_pids=listener_pids,
                 )

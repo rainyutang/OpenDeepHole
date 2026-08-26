@@ -23,7 +23,11 @@ from task_agent.model_pool import (
     ModelLease,
     ModelOption,
 )
-from task_agent.serve_client import OpenCodeFileWrite, OpenCodePromptResult
+from task_agent.serve_client import (
+    OpenCodeFileWrite,
+    OpenCodePromptResult,
+    OpenCodeProviderQuotaError,
+)
 from task_agent.task_service import (
     OpenCodeExecutionContext,
     OpenCodeTaskError,
@@ -2168,6 +2172,72 @@ def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
         assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
         assert release_mock.await_args_list[1].kwargs["outcome"] == "success"
         assert release_mock.await_args_list[1].kwargs["health_outcome"] == "success"
+
+    asyncio.run(run())
+
+
+def test_provider_quota_error_requeues_with_circuit_metadata(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls = 0
+
+        async def run_prompt(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await _notify_model_request_failure(kwargs, "quota")
+                raise OpenCodeProviderQuotaError(
+                    error_code="InferHub.002002010.429",
+                    quota_type="RPM",
+                    identity="appId",
+                    retry_after_seconds=45,
+                )
+            callback = kwargs["on_session_id"]("ses_success")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses_success",
+                message_id="msg_success",
+                lines=["done"],
+                text="done",
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2] as release_mock,
+            patches[3],
+            patches[4],
+            patches[5],
+        ):
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="retry quota",
+                    prompt="run",
+                    directory=tmp_path,
+                    attempt=1,
+                ))
+
+        assert result.status == "success"
+        assert calls == 2
+        first_release = release_mock.await_args_list[0].kwargs
+        assert first_release["health_outcome"] == "quota"
+        assert first_release["quota_retry_after_seconds"] == 45
+        assert first_release["record_completion"] is False
+        identity = {("provider/model-low", False, "opencode", "opencode")}
+        assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
+        budgets = [
+            call.kwargs["quota_wait_budget"]
+            for call in acquire_mock.await_args_list
+        ]
+        assert budgets[0] is budgets[1]
+        assert budgets[0].remaining_seconds == 300
 
     asyncio.run(run())
 

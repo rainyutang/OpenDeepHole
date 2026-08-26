@@ -6,6 +6,8 @@ import pytest
 
 import task_agent.model_pool as model_pool_module
 from task_agent.model_pool import (
+    ModelQuotaCircuitOpenError,
+    ModelQuotaWaitBudget,
     NoAvailableModelError,
     acquire_model_lease,
     clear_planned_task,
@@ -1314,6 +1316,144 @@ def test_health_outcome_is_independent_from_task_outcome_and_clamped() -> None:
         assert recovered["health_penalty_level"] == 3
         assert recovered["effective_weight"] == 1
         assert recovered["last_health_failure_kind"] == "failure"
+
+    asyncio.run(run())
+
+
+def test_quota_circuit_switches_to_alternative_model_immediately() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[
+            {
+                "id": "primary",
+                "model": "provider/primary",
+                "weight": 10,
+                "max_concurrency": 1,
+            },
+            {
+                "id": "secondary",
+                "model": "provider/secondary",
+                "weight": 1,
+                "max_concurrency": 1,
+            },
+        ])
+        failed = await acquire_model_lease(cfg, global_concurrency=2)
+        assert failed is not None and failed.option.id == "primary"
+        failed_identity = failed.health_identity
+        await release_model_lease(
+            failed,
+            outcome="failure",
+            health_outcome="quota",
+            record_completion=False,
+        )
+
+        retry = await acquire_model_lease(
+            cfg,
+            global_concurrency=2,
+            avoid_model_identities={failed_identity},
+            quota_wait_deadline=model_pool_module.time.monotonic() + 1,
+        )
+        try:
+            assert retry is not None
+            assert retry.option.id == "secondary"
+            assert retry.quota_half_open_probe is False
+        finally:
+            await release_model_lease(retry, outcome="success")
+
+    asyncio.run(run())
+
+
+def test_quota_circuit_allows_only_one_half_open_probe_per_identity() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[
+            {
+                "id": "duplicate-a",
+                "model": "provider/same",
+                "max_concurrency": 1,
+            },
+            {
+                "id": "duplicate-b",
+                "model": "provider/same",
+                "max_concurrency": 1,
+            },
+        ])
+        failed = await acquire_model_lease(cfg, global_concurrency=2)
+        assert failed is not None
+        await release_model_lease(
+            failed,
+            outcome="failure",
+            health_outcome="quota",
+            record_completion=False,
+        )
+        state = model_pool_module._model_health_by_id[failed.option.id]
+        state.quota_open_until = model_pool_module.time.monotonic() - 0.01
+
+        probe = await acquire_model_lease(
+            cfg,
+            global_concurrency=2,
+            quota_wait_deadline=model_pool_module.time.monotonic() + 1,
+        )
+        assert probe is not None and probe.quota_half_open_probe is True
+        follower = asyncio.create_task(acquire_model_lease(
+            cfg,
+            global_concurrency=2,
+            wait_when_unavailable=True,
+            quota_wait_deadline=model_pool_module.time.monotonic() + 1,
+        ))
+        await asyncio.sleep(0.03)
+        assert not follower.done()
+
+        await release_model_lease(
+            probe,
+            outcome="success",
+            health_outcome="success",
+            record_completion=False,
+        )
+        next_lease = await asyncio.wait_for(follower, timeout=1)
+        assert next_lease is not None
+        assert next_lease.quota_half_open_probe is False
+        await release_model_lease(next_lease, outcome="success")
+
+    asyncio.run(run())
+
+
+def test_quota_circuit_wait_is_bounded_and_cancelable() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "primary",
+            "model": "provider/primary",
+            "max_concurrency": 1,
+        }])
+        failed = await acquire_model_lease(cfg, global_concurrency=1)
+        assert failed is not None
+        await release_model_lease(
+            failed,
+            outcome="failure",
+            health_outcome="quota",
+            quota_retry_after_seconds=300,
+            record_completion=False,
+        )
+
+        budget = ModelQuotaWaitBudget(total_seconds=0.03)
+        with pytest.raises(ModelQuotaCircuitOpenError):
+            await acquire_model_lease(
+                cfg,
+                global_concurrency=1,
+                wait_when_unavailable=True,
+                quota_wait_budget=budget,
+            )
+        assert budget.remaining_seconds == 0
+
+        cancel_event = asyncio.Event()
+        waiting = asyncio.create_task(acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            wait_when_unavailable=True,
+            cancel_event=cancel_event,
+            quota_wait_budget=ModelQuotaWaitBudget(total_seconds=1),
+        ))
+        await asyncio.sleep(0.03)
+        cancel_event.set()
+        assert await asyncio.wait_for(waiting, timeout=1) is None
 
     asyncio.run(run())
 
