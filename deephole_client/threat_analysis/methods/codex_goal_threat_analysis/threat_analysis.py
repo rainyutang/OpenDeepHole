@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -207,7 +208,7 @@ def _run_goal(
                 if saved_thread_id:
                     controller.resume_thread(saved_thread_id, **thread_options)
                     current = controller.get_goal()
-                    _write_state(
+                    _write_codex_goal_state(
                         state_path,
                         controller.thread_id,
                         current.status if current else None,
@@ -221,10 +222,18 @@ def _run_goal(
                         result = controller.goal(prompt)
                 else:
                     controller.start_thread(**thread_options)
-                    _write_state(state_path, controller.thread_id, "active")
+                    _write_codex_goal_state(
+                        state_path,
+                        controller.thread_id,
+                        "active",
+                    )
                     result = controller.goal(prompt)
 
-                _write_state(state_path, controller.thread_id, result.goal.status)
+                _write_codex_goal_state(
+                    state_path,
+                    controller.thread_id,
+                    result.goal.status,
+                )
                 return result.goal.status
         except Exception as exc:
             # Startup failures happen before the controller can render an
@@ -235,6 +244,7 @@ def _run_goal(
                 f"! Codex Goal runtime failure ({type(exc).__name__})"
                 f"{f': {detail}' if detail else ''}\n"
             )
+            output.write(traceback.format_exc())
             output.flush()
             raise
 
@@ -371,14 +381,13 @@ def _read_state(path: Path) -> dict[str, Any]:
     return value
 
 
-def _write_state(
+def _write_codex_goal_state(
     path: Path,
     thread_id: str | None,
     goal_status: str | None,
-    *,
-    model_id: str,
-    profile: str,
 ) -> None:
+    """Persist only state owned by this threat-analysis method."""
+
     _write_json(
         path,
         {
@@ -395,6 +404,9 @@ def _safe_reason(exc: Exception) -> str:
         return f"Codex Goal produced invalid threat-analysis artifacts: {exc}"
     if isinstance(exc, (FileNotFoundError, NotADirectoryError, ValueError)):
         return str(exc)
+    if isinstance(exc, TypeError):
+        detail = _exception_detail(exc)
+        return f"Codex Goal type error{f': {detail}' if detail else ''}"
     if type(exc).__name__ == "TransportClosedError":
         detail = _exception_detail(exc)
         return (
