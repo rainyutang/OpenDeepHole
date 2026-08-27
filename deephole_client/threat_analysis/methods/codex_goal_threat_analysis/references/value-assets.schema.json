@@ -3,6 +3,7 @@
   "$id": "value-assets.schema.json",
   "title": "Threat Analysis Value Assets",
   "type": "array",
+  "minItems": 1,
   "items": {
     "type": "object",
     "required": [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -55,8 +56,8 @@ def _valid_artifacts() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict
                 {
                     "node_id": "root",
                     "node_type": "根节点",
-                    "node_name": "认证服务受损",
-                    "description": "攻击者绕过认证",
+                    "node_name": "认证服务",
+                    "description": "认证服务被绕过后会导致未授权访问",
                     "module_name": None,
                     "is_high_risk_module": False,
                     "external_exposure": False,
@@ -65,7 +66,7 @@ def _valid_artifacts() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict
                 {
                     "node_id": "leaf",
                     "node_type": "叶子节点",
-                    "node_name": "恶意认证请求",
+                    "node_name": "认证入口",
                     "description": "构造输入触发认证缺陷",
                     "module_name": "认证入口",
                     "is_high_risk_module": True,
@@ -93,7 +94,11 @@ def _valid_artifacts() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict
                     "path_role": "外部攻击入口",
                     "association_description": "负责接收不可信认证请求",
                 }],
-                "attack_patterns": [],
+                "attack_patterns": [{
+                    "pattern_id": "CAPEC-1",
+                    "pattern_name": "访问功能未正确地约束访问控制列表",
+                    "association_description": "外部认证入口的访问控制缺失会直接影响认证服务。",
+                }],
             }],
         }],
     }
@@ -113,6 +118,30 @@ def _write_valid_artifacts(root: Path) -> None:
             json.dumps(value, ensure_ascii=False),
             encoding="utf-8",
         )
+
+
+def _run_artifact_validator(
+    implementation: ModuleType,
+    artifact_root: Path,
+) -> subprocess.CompletedProcess[str]:
+    method_root = Path(implementation.__file__).resolve().parent
+    return subprocess.run(
+        [
+            sys.executable,
+            str(method_root / "schema_validation.py"),
+            "--value-assets",
+            str(artifact_root / "final" / "value-assets.json"),
+            "--high-risk-modules",
+            str(artifact_root / "final" / "high-risk-modules.json"),
+            "--attack-trees",
+            str(artifact_root / "final" / "attack-trees.json"),
+            "--references-root",
+            str(method_root / "references"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_goal_prompt_is_short_and_uses_reference_paths(tmp_path: Path) -> None:
@@ -138,9 +167,16 @@ def test_goal_prompt_is_short_and_uses_reference_paths(tmp_path: Path) -> None:
     assert str(code_root) in prompt
     assert all(str(path) in prompt for path in paths.values())
     assert "deephole_threat_analysis" not in prompt
+    assert str(artifact_root / "scan-context.json") in prompt
+    assert str(guidance_path.parent / "attack_mode.json") in prompt
     assert "先识别项目架构、信任边界、外部入口" in prompt
-    assert "三类产物必须一致" in prompt
-    assert "不合格就修正后再结束 Goal" in prompt
+    assert "三类产物必须保持来源一致" in prompt
+    assert "内部节点只能是路径中的真实内部源码模块" in prompt
+    assert "有足够适用模式时至少输出10个" in prompt
+    assert "schema_validation.py" in prompt
+    assert "--value-assets" in prompt
+    assert "命令退出码为0才允许结束 Goal" in prompt
+    assert "如果失败，必须根据错误修正产物并反复执行" in prompt
 
 
 def test_analysis_guidance_and_schemas_are_private_json_files() -> None:
@@ -149,6 +185,8 @@ def test_analysis_guidance_and_schemas_are_private_json_files() -> None:
     references_root = Path(implementation.__file__).resolve().parent / "references"
 
     assert guidance_path.parent == references_root
+    attack_mode_path = references_root / "attack_mode.json"
+    assert attack_mode_path.is_file()
     assert set(schema_paths) == {
         "value_asset_path",
         "high_risk_modules_path",
@@ -163,7 +201,12 @@ def test_analysis_guidance_and_schemas_are_private_json_files() -> None:
     ]
     assert len(guidance["outputs"]) == 3
     assert guidance["cross_artifact_invariants"]
+    assert guidance["attack_tree_method"]["internal_node"]
+    assert guidance["attack_tree_method"]["attack_pattern_matching"]
     assert guidance["completion_checks"]
+    attack_modes = json.loads(attack_mode_path.read_text(encoding="utf-8"))
+    assert len(attack_modes) > 1000
+    assert all("攻击模式名称" in mode for mode in attack_modes)
     for schema_path in schema_paths.values():
         assert schema_path.parent == references_root
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -216,7 +259,7 @@ def test_method_runs_one_goal_and_returns_schema_valid_artifacts(
     }
 
 
-def test_method_rejects_goal_output_missing_required_fields(
+def test_method_does_not_revalidate_goal_output_after_completion(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -235,8 +278,141 @@ def test_method_rejects_goal_output_missing_required_fields(
 
     result = implementation.run_threat_analysis(code_root, artifact_root)
 
-    assert result["result"] is False
-    assert "missing required property" in result["reason"]
+    assert result["result"] is True
+
+
+def test_goal_validator_command_accepts_valid_artifacts(tmp_path: Path) -> None:
+    implementation = _implementation()
+    _write_valid_artifacts(tmp_path)
+
+    completed = _run_artifact_validator(implementation, tmp_path)
+
+    assert completed.returncode == 0
+    assert completed.stdout.startswith("VALID:")
+
+
+def test_goal_validator_command_rejects_schema_error(tmp_path: Path) -> None:
+    implementation = _implementation()
+    _write_valid_artifacts(tmp_path)
+    value_path = tmp_path / "final" / "value-assets.json"
+    value_path.write_text('[{"资产名": "缺少其它字段"}]', encoding="utf-8")
+
+    completed = _run_artifact_validator(implementation, tmp_path)
+
+    assert completed.returncode == 1
+    assert "missing required property" in completed.stderr
+
+
+def test_goal_validator_rejects_root_name_that_differs_from_its_value_asset(
+    tmp_path: Path,
+) -> None:
+    implementation = _implementation()
+    _write_valid_artifacts(tmp_path)
+    attack_tree_path = tmp_path / "final" / "attack-trees.json"
+    attack_trees = json.loads(attack_tree_path.read_text(encoding="utf-8"))
+    attack_trees["attack_trees"][0]["nodes"][0]["node_name"] = (
+        "攻击价值资产：认证服务"
+    )
+    attack_tree_path.write_text(
+        json.dumps(attack_trees, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    completed = _run_artifact_validator(implementation, tmp_path)
+
+    assert completed.returncode == 1
+    assert "must exactly equal value asset name" in completed.stderr
+
+
+def test_goal_validator_rejects_leaf_that_is_not_the_external_module(
+    tmp_path: Path,
+) -> None:
+    implementation = _implementation()
+    _write_valid_artifacts(tmp_path)
+    attack_tree_path = tmp_path / "final" / "attack-trees.json"
+    attack_trees = json.loads(attack_tree_path.read_text(encoding="utf-8"))
+    attack_trees["attack_trees"][0]["nodes"][1]["node_name"] = "恶意认证请求"
+    attack_tree_path.write_text(
+        json.dumps(attack_trees, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    completed = _run_artifact_validator(implementation, tmp_path)
+
+    assert completed.returncode == 1
+    assert "leaf node_name and module_name must be exactly identical" in completed.stderr
+
+
+def test_goal_validator_allows_path_without_a_reasonable_attack_pattern(
+    tmp_path: Path,
+) -> None:
+    implementation = _implementation()
+    _write_valid_artifacts(tmp_path)
+    attack_tree_path = tmp_path / "final" / "attack-trees.json"
+    attack_trees = json.loads(attack_tree_path.read_text(encoding="utf-8"))
+    attack_trees["attack_trees"][0]["attack_paths"][0]["attack_patterns"] = []
+    attack_tree_path.write_text(
+        json.dumps(attack_trees, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    completed = _run_artifact_validator(implementation, tmp_path)
+
+    assert completed.returncode == 0
+
+
+def test_goal_validator_allows_more_than_ten_applicable_attack_patterns(
+    tmp_path: Path,
+) -> None:
+    implementation = _implementation()
+    attack_mode_path = (
+        Path(implementation.__file__).resolve().parent
+        / "references"
+        / "attack_mode.json"
+    )
+    attack_modes = json.loads(attack_mode_path.read_text(encoding="utf-8"))[:11]
+
+    _write_valid_artifacts(tmp_path)
+    attack_tree_path = tmp_path / "final" / "attack-trees.json"
+    attack_trees = json.loads(attack_tree_path.read_text(encoding="utf-8"))
+    attack_trees["attack_trees"][0]["attack_paths"][0]["attack_patterns"] = [
+        {
+            "pattern_id": "、".join(mode.get("攻击模式编号") or []),
+            "pattern_name": mode["攻击模式名称"],
+            "association_description": "候选攻击模式关联说明",
+        }
+        for mode in attack_modes
+    ]
+    attack_tree_path.write_text(
+        json.dumps(attack_trees, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    completed = _run_artifact_validator(implementation, tmp_path)
+
+    assert completed.returncode == 0
+
+
+def test_goal_validator_rejects_attack_pattern_not_in_reference_library(
+    tmp_path: Path,
+) -> None:
+    implementation = _implementation()
+    _write_valid_artifacts(tmp_path)
+    attack_tree_path = tmp_path / "final" / "attack-trees.json"
+    attack_trees = json.loads(attack_tree_path.read_text(encoding="utf-8"))
+    pattern = attack_trees["attack_trees"][0]["attack_paths"][0][
+        "attack_patterns"
+    ][0]
+    pattern["pattern_id"] = "MADE-UP-1"
+    attack_tree_path.write_text(
+        json.dumps(attack_trees, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    completed = _run_artifact_validator(implementation, tmp_path)
+
+    assert completed.returncode == 1
+    assert "must exactly match attack_mode.json" in completed.stderr
 
 
 def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
@@ -318,6 +494,7 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     ) == {
         "thread_id": "thread-new",
         "goal_status": "complete",
+        "validation_policy_version": 1,
     }
 
 

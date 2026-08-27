@@ -1,5 +1,5 @@
 {
-  "guidance_version": 1,
+  "guidance_version": 2,
   "role": "项目级白盒威胁建模工程师",
   "objective": "从实际源码识别价值资产、承载攻击面的高风险模块，以及攻击者从入口影响价值资产的可解释攻击树",
   "workflow": [
@@ -29,25 +29,92 @@
     {
       "step": "attack_trees",
       "requirements": [
-        "根节点表示价值资产受损，内部节点表示攻击步骤或条件，叶子节点表示可实施的初始攻击入口",
-        "根节点的 module_name 必须为 null 且 is_high_risk_module 为 false；叶子节点必须对应外部暴露的高风险模块，is_high_risk_module 和 external_exposure 均为 true",
-        "普通内部节点可以是不在高风险模块列表中的内部模块；只有标记为高风险、作为叶子节点或被 related_high_risk_modules 引用的模块才必须来自高风险模块文件",
-        "边方向统一从攻击入口或前置步骤指向后续影响，node_ids 与 edge_ids 按攻击推进顺序排列",
+        "每个价值资产至少建立一棵树，传播方向固定为：外部暴露高风险模块（叶子）→零个或多个内部源码模块（内部节点）→价值资产（根）",
+        "tree.value_asset 必须引用一个已识别价值资产，名称、类别、描述和攻击损失使用该资产条目的原始字段",
+        "根节点就是 tree.value_asset 对应的价值资产，node_name 必须与该价值资产的 asset_name 完全相同；不得添加‘攻击价值资产’等前后缀，也不得改成攻击目标、攻击结果、外部接口或内部模块",
+        "叶子节点就是一个已识别且‘是否外部暴露面=是’的高风险模块，node_name 和 module_name 必须与该模块的‘模块名称’完全相同",
+        "内部节点表示叶子与资产之间可由源码定位的内部模块、组件、子系统或明确功能单元，不表示攻击步骤、前置条件、权限状态、漏洞或攻击结果",
+        "普通内部节点可以是不在高风险模块列表中的真实内部源码模块；非外部暴露高风险模块也可作内部节点，但名称必须逐字一致并标记 is_high_risk_module=true、external_exposure=false",
+        "边方向统一从源模块指向其后续影响的模块或资产，node_ids 与 edge_ids 按影响传播顺序排列",
         "每条攻击路径必须能够从叶子节点沿边到达对应价值资产的根节点",
-        "仅关联确实出现在该路径上的高风险模块；攻击模式只能来自扫描上下文且必须说明关联依据"
+        "仅关联确实出现在该路径上的全部高风险模块；分析路径适用的攻击模式并按可能性从高到低排列，有足够适用模式时至少输出10个，确实不足10个时输出全部实际适用模式"
       ]
     }
   ],
+  "attack_tree_method": {
+    "analysis_scope": [
+      "攻击树是基于模块职责、调用关系、数据流、消息流、控制关系和依赖关系的理论影响传播分析，不代表已确认具体漏洞存在或可利用",
+      "代码证据用于证明模块身份、外部暴露、模块关系和资产影响；不得因危险函数或风险类别直接断言漏洞存在",
+      "每条独立的叶子到根传播链分别输出为 attack_path，可共享节点和边，但不得输出孤立节点、无根路径或循环路径"
+    ],
+    "root_node": {
+      "identity": "根节点就是 tree.value_asset 引用的已识别价值资产，节点名称不改写为攻击目标或受损结果",
+      "required_values": {
+        "node_type": "根节点",
+        "node_name": "与 tree.value_asset.asset_name 完全相同，不添加任何前后缀",
+        "description": "结合原始资产描述和攻击损失说明该资产可能受到的最终影响",
+        "module_name": null,
+        "is_high_risk_module": false,
+        "external_exposure": false,
+        "external_interface_description": null
+      }
+    },
+    "leaf_node": {
+      "identity": "叶子节点来源于 high-risk-modules.json 中一个‘是否外部暴露面=是’的高风险模块，不创建接口、请求或攻击动作节点替代模块",
+      "required_values": {
+        "node_type": "叶子节点",
+        "node_name": "逐字等于规范模块名称",
+        "module_name": "逐字等于同一个规范模块名称",
+        "is_high_risk_module": true,
+        "external_exposure": true,
+        "external_interface_description": "填写该模块接收外部请求、报文、文件、消息、命令或其他不可信输入的代码证据"
+      },
+      "forbidden_examples": [
+        "HTTP /login 接口",
+        "构造恶意报文",
+        "发送异常请求",
+        "命令注入",
+        "获得管理员权限"
+      ]
+    },
+    "internal_node": {
+      "identity": "内部节点是外部模块与价值资产之间真实存在的内部源码模块，负责继续接收、处理、传递、控制、访问或保护相关数据和能力",
+      "ordinary_module": "不在高风险模块列表时，module_name/node_name 使用代码中可定位的模块名称，is_high_risk_module=false、external_exposure=false",
+      "internal_high_risk_module": "在高风险模块列表且‘是否外部暴露面=否’时，module_name/node_name 逐字使用规范模块名称，is_high_risk_module=true、external_exposure=false",
+      "forbidden_categories": [
+        "接口、端口、函数或参数",
+        "漏洞类型或漏洞利用动作",
+        "构造输入、发送请求等攻击动作",
+        "绕过认证、提升权限等攻击条件或权限状态",
+        "泄露、篡改、中断等攻击结果"
+      ]
+    },
+    "path_construction": [
+      "先从 high-risk-modules.json 筛出‘是否外部暴露面=是’且代码证实可接收外部输入的模块作为候选叶子",
+      "再沿调用、数据传递、消息传递、控制或依赖关系向内追踪真实模块，直到该模块可直接访问、处理、修改、传输、保护或控制价值资产",
+      "路径第一个 node_id 必须是叶子，最后一个必须是当前树唯一根节点，中间每个节点都必须是内部节点",
+      "edge_ids 数量等于 node_ids 数量减一；第 i 条边的 source/target 必须分别等于第 i 和 i+1 个 node_id",
+      "related_high_risk_modules 必须且只能覆盖路径上 is_high_risk_module=true 的节点，名称、暴露属性和节点 ID 必须对齐"
+    ],
+    "attack_pattern_matching": [
+      "必须先读取 attack_mode.json；它是默认且权威的攻击模式目录，扫描上下文 attack_modes 只可用于筛选或优先级提示",
+      "对每条路径综合叶子模块的外部输入形式与面临威胁、内部模块的传播方式以及根资产的受损方式进行匹配，不得只按名称关键词匹配",
+      "对适用模式按可能性从高到低排序，attack_patterns 数组顺序即排序结果；存在至少10个适用模式时必须输出不少于10个，实际适用模式不足10个时输出全部适用模式，无合理匹配时输出空数组",
+      "pattern_name 逐字复制‘攻击模式名称’；pattern_id 取‘攻击模式编号’，多个编号按原顺序使用中文顿号连接，无编号时为空字符串",
+      "不得创建、翻译、改写或补全 attack_mode.json 中不存在的模式；association_description 必须解释该模式与本路径入口、传播关系和资产影响的对应点"
+    ]
+  },
   "cross_artifact_invariants": [
-    "每棵攻击树的 value_asset 必须对应价值资产文件中的一个资产，名称、类别、描述和攻击损失保持一致",
-    "攻击树节点和路径引用的高风险模块必须存在于高风险模块文件，模块名称保持一致",
-    "同一棵树内 tree_id、node_id、edge_id 和 path_id 必须唯一，所有 ID 引用必须能够解析",
+    "每棵攻击树的 value_asset 必须来源于价值资产文件中的一个资产，且每个价值资产至少被一棵树覆盖",
+    "根节点 node_name 必须与该树 value_asset.asset_name 完全相同；叶子节点 node_name/module_name 必须与高风险模块文件中‘是否外部暴露面=是’模块的名称完全相同",
+    "tree_id 在文件内唯一；同一棵树内 node_id、edge_id 和 path_id 分别唯一，所有 ID 引用必须能够解析",
     "external_exposure、path_role 和 external_interface_description 必须与模块证据和节点位置一致",
+    "每条路径的攻击模式按可能性降序排列；有足够适用模式时至少输出10个，实际不足时输出全部适用模式；所有已选择模式的编号和名称组合必须存在于 attack_mode.json 且不得重复",
     "没有代码证据时不得编造资产、模块、接口、调用关系或攻击路径"
   ],
   "optional_inputs": {
     "product_mcp": "非空时，仅在同名 MCP 实际可用的情况下查询产品知识；不可用时继续基于源码分析，不得伪造查询结果",
-    "attack_modes": "仅使用扫描上下文提供的攻击模式；无法建立证据充分的关联时，attack_patterns 使用空数组"
+    "attack_modes": "非空时只作为 attack_mode.json 的筛选范围或优先级提示；不能把该映射中的任意键值直接当作攻击模式，也不能扩充权威模式目录"
   },
   "outputs": [
     {
@@ -73,7 +140,8 @@
   "completion_checks": [
     "三份文件均存在并且可以按 UTF-8 JSON 解析",
     "每份文件严格符合对应 JSON Schema，包括 required、enum、minItems、minLength 和 additionalProperties",
-    "逐项检查跨产物名称和 ID 引用的一致性",
+    "逐项检查根节点名称是否与价值资产名完全相同、叶子节点名称是否与外部暴露高风险模块名完全相同、高风险内部节点和路径模块引用是否有对应来源",
+    "逐条确认路径从外部叶子经内部模块到根资产，边按相邻节点连接；攻击模式按可能性排序，有足够模式时至少输出10个，实际不足时才可少于10个",
     "确认除指定产物目录外没有修改任何文件"
   ]
 }
