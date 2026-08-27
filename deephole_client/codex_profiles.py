@@ -1,4 +1,4 @@
-"""Safely mirror user-level OpenCode models into Codex profile files."""
+"""Safely mirror platform-selected OpenCode models into Codex profiles."""
 
 from __future__ import annotations
 
@@ -6,27 +6,28 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
-
-from task_agent.config_discovery import (
-    config_home_candidates,
-    deep_merge_opencode_config,
-)
-from task_agent.config_json import parse_opencode_jsonc
 
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 Agent compatibility.
-    tomllib = None  # type: ignore[assignment]
+    import tomli as tomllib
 
 
 _MANAGED_MARKER = (
     "# Managed by OpenDeepHole Codex model sync. Do not edit."
+)
+_DEFAULT_CONFIG_BEGIN = (
+    "# BEGIN OpenDeepHole managed Codex default model"
+)
+_DEFAULT_CONFIG_END = (
+    "# END OpenDeepHole managed Codex default model"
 )
 _PROFILE_GLOB = "opendeephole-*.config.toml"
 _ENV_REFERENCE_RE = re.compile(
@@ -65,6 +66,8 @@ class CodexProfileSyncResult:
     """Outcome of a best-effort OpenCode-to-Codex profile sync."""
 
     models: tuple[CodexModelProfile, ...] = ()
+    managed_default_model: CodexModelProfile | None = None
+    user_default_preserved: bool = False
     warnings: tuple[str, ...] = ()
     error: str = ""
 
@@ -73,54 +76,36 @@ class CodexProfileSyncResult:
 class _RenderedProfile:
     model: CodexModelProfile
     content: str
+    provider_key: str
+    provider_name: str
+    base_url: str
+    env_key: str = ""
+    bearer_token: str = ""
+    context_window: int | None = None
 
 
-def _path_key(path: Path) -> str:
-    return os.path.normcase(os.path.abspath(str(path)))
+@dataclass(frozen=True)
+class _DefaultConfigPlan:
+    path: Path
+    write_content: bytes | None = None
+    original_content: bytes | None = None
+    original_mode: int = 0o600
+    mode: int = 0o600
+    managed_default_model: CodexModelProfile | None = None
+    user_default_preserved: bool = False
+    error: str = ""
 
 
-def _global_opencode_paths(
-    env: Mapping[str, str],
-    *,
-    platform: str,
-) -> tuple[Path, ...]:
-    """Return only user-level OpenCode JSON/JSONC paths, low to high."""
-    paths: list[Path] = []
-    seen: set[str] = set()
-    for config_home in config_home_candidates(env, platform=platform):
-        config_dir = config_home / "opencode"
-        for filename in ("opencode.json", "opencode.jsonc"):
-            candidate = config_dir / filename
-            key = _path_key(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            paths.append(candidate)
-    return tuple(paths)
+@dataclass(frozen=True)
+class _ReconcileResult:
+    managed_default_model: CodexModelProfile | None = None
+    user_default_preserved: bool = False
+    warnings: tuple[str, ...] = ()
+    error: str = ""
 
 
-def _load_global_opencode_config(
-    env: Mapping[str, str],
-    *,
-    platform: str,
-) -> tuple[dict[str, Any], str]:
-    merged: dict[str, Any] = {}
-    for path in _global_opencode_paths(env, platform=platform):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-            config = parse_opencode_jsonc(text, source=str(path))
-        except Exception as exc:
-            # Parser messages can contain source details.  Deliberately expose
-            # only the path and exception type so malformed secrets are never
-            # copied into Agent output.
-            return {}, (
-                f"could not parse user OpenCode config {path} "
-                f"({type(exc).__name__})"
-            )
-        merged = deep_merge_opencode_config(merged, config)
-    return merged, ""
+class _CodexConfigChangedError(RuntimeError):
+    pass
 
 
 def _codex_home(
@@ -227,7 +212,6 @@ def _render_profile(
             "missing or invalid",
         )
 
-    warnings: list[str] = []
     api_key = options.get("apiKey")
     env_key = ""
     bearer_token = ""
@@ -238,9 +222,9 @@ def _render_profile(
         else:
             bearer_token = api_key
     elif api_key is not None:
-        warnings.append(
+        return None, (
             f"OpenCode model {canonical_id} has a non-string apiKey; "
-            "the generated profile has no provider credential"
+            "Codex configuration was not changed",
         )
 
     profile = CodexModelProfile(
@@ -277,67 +261,94 @@ def _render_profile(
     content = "\n".join(lines) + "\n"
     # Treat our own serializer as untrusted before any secret-bearing content
     # reaches the user's Codex directory.
-    if tomllib is not None:
-        tomllib.loads(content)
-    return _RenderedProfile(model=profile, content=content), tuple(warnings)
+    tomllib.loads(content)
+    return _RenderedProfile(
+        model=profile,
+        content=content,
+        provider_key=provider_key,
+        provider_name=provider_name or provider_id,
+        base_url=base_url,
+        env_key=env_key,
+        bearer_token=bearer_token,
+        context_window=context_window,
+    ), ()
 
 
 def _render_profiles(
     config: Mapping[str, Any],
-) -> tuple[tuple[_RenderedProfile, ...], tuple[str, ...]]:
+    selected_model_ids: Sequence[str],
+) -> tuple[tuple[_RenderedProfile, ...], tuple[str, ...], str]:
+    selected: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for raw_model_id in selected_model_ids:
+        canonical_id = str(raw_model_id or "").strip()
+        if not canonical_id or canonical_id in seen:
+            continue
+        provider_id, separator, model_id = canonical_id.partition("/")
+        if not separator or not provider_id.strip() or not model_id.strip():
+            return (), (), (
+                "could not map platform model "
+                f"{canonical_id or '<empty>'}: expected provider/model"
+            )
+        provider_id = provider_id.strip()
+        model_id = model_id.strip()
+        canonical_id = f"{provider_id}/{model_id}"
+        if canonical_id in seen:
+            continue
+        seen.add(canonical_id)
+        selected.append((canonical_id, provider_id, model_id))
+
+    if not selected:
+        return (), (), ""
+
     providers = config.get("provider")
-    if providers is None:
-        return (), ()
     if not isinstance(providers, Mapping):
-        return (), (
-            "Skipped OpenCode models: top-level provider must be an object",
+        return (), (), (
+            "could not map platform models: effective OpenCode provider "
+            "configuration is missing or invalid"
         )
 
     rendered: list[_RenderedProfile] = []
     warnings: list[str] = []
-    for raw_provider_id in sorted(providers, key=lambda item: str(item)):
-        provider_id = str(raw_provider_id).strip()
-        provider_config = providers[raw_provider_id]
-        if not provider_id or not isinstance(provider_config, Mapping):
-            warnings.append(
-                "Skipped an OpenCode provider with an invalid id or value"
+    for canonical_id, provider_id, model_id in selected:
+        provider_config = providers.get(provider_id)
+        if not isinstance(provider_config, Mapping):
+            return (), tuple(warnings), (
+                f"could not map platform model {canonical_id}: provider "
+                "is absent from the effective client OpenCode configuration"
             )
-            continue
         models = provider_config.get("models")
-        if models is None:
-            continue
         if not isinstance(models, Mapping):
-            warnings.append(
-                f"Skipped OpenCode provider {provider_id}: models must be "
-                "an object"
+            return (), tuple(warnings), (
+                f"could not map platform model {canonical_id}: provider "
+                "models are missing or invalid"
             )
-            continue
-        for raw_model_id in sorted(models, key=lambda item: str(item)):
-            model_id = str(raw_model_id).strip()
-            model_config = models[raw_model_id]
-            if not model_id or not isinstance(model_config, Mapping):
-                warnings.append(
-                    f"Skipped an invalid model under OpenCode provider "
-                    f"{provider_id}"
-                )
-                continue
-            try:
-                item, item_warnings = _render_profile(
-                    provider_id=provider_id,
-                    provider_config=provider_config,
-                    model_id=model_id,
-                    model_config=model_config,
-                )
-            except Exception as exc:
-                warnings.append(
-                    f"Skipped OpenCode model {provider_id}/{model_id}: "
-                    f"profile conversion failed ({type(exc).__name__})"
-                )
-                continue
-            warnings.extend(item_warnings)
-            if item is not None:
-                rendered.append(item)
-    return tuple(rendered), tuple(warnings)
+        model_config = models.get(model_id)
+        if not isinstance(model_config, Mapping):
+            return (), tuple(warnings), (
+                f"could not map platform model {canonical_id}: model is "
+                "absent from the effective client OpenCode configuration"
+            )
+        try:
+            item, item_warnings = _render_profile(
+                provider_id=provider_id,
+                provider_config=provider_config,
+                model_id=model_id,
+                model_config=model_config,
+            )
+        except Exception as exc:
+            return (), tuple(warnings), (
+                f"could not map platform model {canonical_id}: profile "
+                f"conversion failed ({type(exc).__name__})"
+            )
+        warnings.extend(item_warnings)
+        if item is None:
+            return (), tuple(warnings), (
+                f"could not map platform model {canonical_id}; existing "
+                "managed Codex configuration was kept"
+            )
+        rendered.append(item)
+    return tuple(rendered), tuple(warnings), ""
 
 
 def _is_owned_profile(path: Path) -> bool:
@@ -360,22 +371,258 @@ def _owned_profiles(codex_home: Path) -> tuple[Path, ...]:
     )
 
 
-def _stage_profile(path: Path, content: str) -> Path:
+def _available_provider_key(
+    base_key: str,
+    configured: Mapping[object, object],
+) -> str:
+    existing = {str(item) for item in configured}
+    if base_key not in existing:
+        return base_key
+    suffix = 1
+    while f"{base_key}_{suffix}" in existing:
+        suffix += 1
+    return f"{base_key}_{suffix}"
+
+
+def _managed_default_block(
+    profiles: tuple[_RenderedProfile, ...],
+    user_config: Mapping[str, Any],
+) -> tuple[str, _RenderedProfile | None, str]:
+    if not profiles:
+        return "", None, ""
+
+    selected = profiles[0]
+    configured_providers = user_config.get("model_providers")
+    if isinstance(configured_providers, Mapping):
+        provider_key = _available_provider_key(
+            selected.provider_key,
+            configured_providers,
+        )
+    elif "model_providers" in user_config:
+        return "", None, (
+            "existing model_providers cannot be extended safely without "
+            "rewriting a user-owned value"
+        )
+    else:
+        provider_key = selected.provider_key
+
+    lines = [
+        _DEFAULT_CONFIG_BEGIN,
+        f"model = {_toml_string(selected.model.model_id)}",
+        f"model_provider = {_toml_string(provider_key)}",
+    ]
+    if (
+        selected.context_window is not None
+        and "model_context_window" not in user_config
+    ):
+        lines.append(f"model_context_window = {selected.context_window}")
+    prefix = f"model_providers.{provider_key}"
+    lines.extend((
+        f"{prefix}.name = {_toml_string(selected.provider_name)}",
+        f"{prefix}.base_url = {_toml_string(selected.base_url)}",
+        f'{prefix}.wire_api = "responses"',
+    ))
+    if selected.env_key:
+        lines.append(
+            f"{prefix}.env_key = {_toml_string(selected.env_key)}"
+        )
+    elif selected.bearer_token:
+        lines.append(
+            f"{prefix}.experimental_bearer_token = "
+            f"{_toml_string(selected.bearer_token)}"
+        )
+    lines.extend((_DEFAULT_CONFIG_END, ""))
+    return "\n".join(lines), selected, ""
+
+
+def _split_managed_default(content: str) -> tuple[str, bool, str]:
+    prefix = f"{_DEFAULT_CONFIG_BEGIN}\n"
+    end_token = f"\n{_DEFAULT_CONFIG_END}\n"
+    if not content.startswith(prefix):
+        if (
+            _DEFAULT_CONFIG_BEGIN in content
+            or _DEFAULT_CONFIG_END in content
+        ):
+            return content, False, (
+                "OpenDeepHole managed default markers are malformed or "
+                "misplaced"
+            )
+        return content, False, ""
+
+    end_index = content.find(end_token, len(prefix))
+    if end_index < 0:
+        return content, False, (
+            "OpenDeepHole managed default markers are incomplete"
+        )
+    remainder_start = end_index + len(end_token)
+    if content[remainder_start:remainder_start + 1] == "\n":
+        remainder_start += 1
+    remainder = content[remainder_start:]
+    if (
+        _DEFAULT_CONFIG_BEGIN in remainder
+        or _DEFAULT_CONFIG_END in remainder
+    ):
+        return content, False, (
+            "OpenDeepHole managed default markers are duplicated"
+        )
+    return remainder, True, ""
+
+
+def _plan_default_config(
+    codex_home: Path,
+    profiles: tuple[_RenderedProfile, ...],
+) -> _DefaultConfigPlan:
+    config_path = codex_home / "config.toml"
+    try:
+        if config_path.is_symlink():
+            return _DefaultConfigPlan(
+                path=config_path,
+                error=(
+                    f"refused to modify symlinked Codex config {config_path}; "
+                    "existing config and managed profiles were kept"
+                ),
+            )
+        exists = config_path.exists()
+        if exists and not config_path.is_file():
+            return _DefaultConfigPlan(
+                path=config_path,
+                error=(
+                    f"refused to modify non-file Codex config {config_path}; "
+                    "existing config and managed profiles were kept"
+                ),
+            )
+        original_bytes = config_path.read_bytes() if exists else None
+        original_text = (
+            original_bytes.decode("utf-8")
+            if original_bytes is not None
+            else ""
+        )
+        mode = (
+            stat.S_IMODE(config_path.stat().st_mode)
+            if exists
+            else 0o600
+        )
+    except (OSError, UnicodeError) as exc:
+        return _DefaultConfigPlan(
+            path=config_path,
+            error=(
+                f"could not read existing Codex config {config_path} "
+                f"({type(exc).__name__}); existing config and managed "
+                "profiles were kept"
+            ),
+        )
+
+    user_text, had_managed_default, marker_error = (
+        _split_managed_default(original_text)
+    )
+    if marker_error:
+        return _DefaultConfigPlan(
+            path=config_path,
+            error=(
+                f"could not update Codex config {config_path}: "
+                f"{marker_error}; existing config and managed profiles "
+                "were kept"
+            ),
+        )
+    try:
+        parsed = tomllib.loads(user_text)
+    except Exception as exc:
+        return _DefaultConfigPlan(
+            path=config_path,
+            error=(
+                f"could not parse existing Codex config {config_path} "
+                f"({type(exc).__name__}); existing config and managed "
+                "profiles were kept"
+            ),
+        )
+
+    user_default_preserved = any(
+        key in parsed
+        for key in (
+            "model",
+            "profile",
+            "model_provider",
+            "openai_base_url",
+            "oss_provider",
+        )
+    )
+    managed_default_model: CodexModelProfile | None = None
+    contains_literal_secret = False
+    if user_default_preserved:
+        desired_text = user_text
+    elif profiles:
+        block, managed_default, block_error = _managed_default_block(
+            profiles,
+            parsed,
+        )
+        if block_error:
+            return _DefaultConfigPlan(
+                path=config_path,
+                error=(
+                    f"could not update Codex config {config_path}: "
+                    f"{block_error}; existing config and managed profiles "
+                    "were kept"
+                ),
+            )
+        assert managed_default is not None
+        managed_default_model = managed_default.model
+        contains_literal_secret = (
+            ".experimental_bearer_token = " in block
+        )
+        desired_text = block + ("\n" + user_text if user_text else "")
+    else:
+        desired_text = user_text
+
+    try:
+        tomllib.loads(desired_text)
+    except Exception as exc:
+        return _DefaultConfigPlan(
+            path=config_path,
+            error=(
+                f"could not safely merge Codex config {config_path} "
+                f"({type(exc).__name__}); existing config and managed "
+                "profiles were kept"
+            ),
+        )
+
+    desired_bytes = desired_text.encode("utf-8")
+    write_content = (
+        None
+        if original_bytes is not None and desired_bytes == original_bytes
+        else desired_bytes
+    )
+    if original_bytes is None and not desired_bytes:
+        write_content = None
+    if user_default_preserved and not had_managed_default:
+        write_content = None
+
+    return _DefaultConfigPlan(
+        path=config_path,
+        write_content=write_content,
+        original_content=original_bytes,
+        original_mode=mode,
+        mode=0o600 if contains_literal_secret else mode,
+        managed_default_model=managed_default_model,
+        user_default_preserved=user_default_preserved,
+    )
+
+
+def _stage_file(path: Path, content: bytes, *, mode: int) -> Path:
     temporary = path.parent / (
         f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     )
     descriptor = os.open(
         temporary,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        0o600,
+        mode,
     )
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
             descriptor = -1
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
+        os.chmod(temporary, mode)
         return temporary
     except BaseException:
         if descriptor >= 0:
@@ -387,10 +634,38 @@ def _stage_profile(path: Path, content: str) -> Path:
         raise
 
 
+def _discard_staged(paths: tuple[Path, ...]) -> None:
+    for path in paths:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _default_config_is_unchanged(plan: _DefaultConfigPlan) -> bool:
+    try:
+        if plan.path.is_symlink():
+            return False
+        if plan.original_content is None:
+            return not plan.path.exists()
+        if not plan.path.is_file():
+            return False
+        return (
+            plan.path.read_bytes() == plan.original_content
+            and stat.S_IMODE(plan.path.stat().st_mode) == plan.original_mode
+        )
+    except OSError:
+        return False
+
+
 def _write_and_reconcile(
     codex_home: Path,
     profiles: tuple[_RenderedProfile, ...],
-) -> tuple[str, tuple[str, ...]]:
+) -> _ReconcileResult:
+    default_plan = _plan_default_config(codex_home, profiles)
+    if default_plan.error:
+        return _ReconcileResult(error=default_plan.error)
+
     desired = {
         codex_home / f"{item.model.profile}.config.toml": item.content
         for item in profiles
@@ -398,10 +673,11 @@ def _write_and_reconcile(
     try:
         existing_owned = set(_owned_profiles(codex_home))
     except Exception as exc:
-        return (
-            f"could not inspect Codex profile directory {codex_home} "
-            f"({type(exc).__name__})",
-            (),
+        return _ReconcileResult(
+            error=(
+                f"could not inspect Codex profile directory {codex_home} "
+                f"({type(exc).__name__})"
+            ),
         )
 
     try:
@@ -420,104 +696,175 @@ def _write_and_reconcile(
             None,
         )
     except OSError as exc:
-        return (
-            "could not inspect a target Codex profile "
-            f"({type(exc).__name__})",
-            (),
+        return _ReconcileResult(
+            error=(
+                "could not inspect a target Codex profile "
+                f"({type(exc).__name__})"
+            ),
         )
     if foreign_destination is not None:
-        return (
-            f"refused to overwrite non-OpenDeepHole Codex profile "
-            f"{foreign_destination}",
-            (),
+        return _ReconcileResult(
+            error=(
+                "refused to overwrite non-OpenDeepHole Codex profile "
+                f"{foreign_destination}"
+            ),
         )
 
-    if desired:
+    changed_desired: dict[Path, str] = {}
+    try:
+        for destination, content in desired.items():
+            if destination not in existing_owned:
+                changed_desired[destination] = content
+                continue
+            if (
+                destination.read_bytes() != content.encode("utf-8")
+                or stat.S_IMODE(destination.stat().st_mode) != 0o600
+            ):
+                changed_desired[destination] = content
+    except OSError as exc:
+        return _ReconcileResult(
+            error=(
+                "could not inspect an existing managed Codex profile "
+                f"({type(exc).__name__})"
+            ),
+        )
+
+    if changed_desired or default_plan.write_content is not None:
         try:
             codex_home.mkdir(parents=True, exist_ok=True, mode=0o700)
         except OSError as exc:
-            return (
-                f"could not create Codex profile directory {codex_home} "
-                f"({type(exc).__name__})",
-                (),
+            return _ReconcileResult(
+                error=(
+                    f"could not create Codex profile directory {codex_home} "
+                    f"({type(exc).__name__})"
+                ),
             )
 
     staged: dict[Path, Path] = {}
+    staged_config: Path | None = None
     try:
-        for destination, content in desired.items():
-            staged[destination] = _stage_profile(destination, content)
+        for destination, content in changed_desired.items():
+            staged[destination] = _stage_file(
+                destination,
+                content.encode("utf-8"),
+                mode=0o600,
+            )
+        if default_plan.write_content is not None:
+            staged_config = _stage_file(
+                default_plan.path,
+                default_plan.write_content,
+                mode=default_plan.mode,
+            )
+            if not _default_config_is_unchanged(default_plan):
+                raise _CodexConfigChangedError(
+                    "Codex config changed during model synchronization"
+                )
         for destination, temporary in staged.items():
+            if destination.exists() and not _is_owned_profile(destination):
+                raise _CodexConfigChangedError(
+                    "Codex profile ownership changed during synchronization"
+                )
             os.replace(temporary, destination)
+        if staged_config is not None:
+            if not _default_config_is_unchanged(default_plan):
+                raise _CodexConfigChangedError(
+                    "Codex config changed during model synchronization"
+                )
+            os.replace(staged_config, default_plan.path)
     except Exception as exc:
-        for temporary in staged.values():
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
-        return (
-            "could not atomically write managed Codex profiles "
-            f"({type(exc).__name__}); existing stale profiles were kept",
-            (),
+        _discard_staged(tuple(staged.values()) + (
+            (staged_config,) if staged_config is not None else ()
+        ))
+        return _ReconcileResult(
+            error=(
+                "could not atomically write managed Codex configuration "
+                f"({type(exc).__name__}); existing config and stale profiles "
+                "were kept"
+            ),
         )
 
     warnings: list[str] = []
     for stale in sorted(existing_owned - set(desired), key=str):
         try:
-            stale.unlink()
+            if _is_owned_profile(stale):
+                stale.unlink()
+            elif stale.exists():
+                warnings.append(
+                    "Could not remove stale Codex profile because its "
+                    f"ownership marker changed: {stale}"
+                )
         except OSError as exc:
             warnings.append(
                 f"Could not remove stale managed Codex profile {stale} "
                 f"({type(exc).__name__})"
             )
-    return "", tuple(warnings)
+    return _ReconcileResult(
+        managed_default_model=default_plan.managed_default_model,
+        user_default_preserved=default_plan.user_default_preserved,
+        warnings=tuple(warnings),
+    )
 
 
 def sync_codex_profiles(
     *,
     codex_version: str,
+    opencode_config: Mapping[str, Any],
+    selected_model_ids: Sequence[str],
     env: Mapping[str, str] | None = None,
     platform: str | None = None,
     codex_home: Path | None = None,
 ) -> CodexProfileSyncResult:
-    """Synchronize global OpenCode models without changing Codex defaults."""
+    """Synchronize selected client models and fill a missing default safely."""
+    if not isinstance(opencode_config, Mapping):
+        return CodexProfileSyncResult(
+            error="effective OpenCode configuration is not an object",
+        )
     effective_env = dict(os.environ) if env is None else dict(env)
     active_platform = platform or sys.platform
     version_error, version_warning = _version_support_error(codex_version)
     if version_error:
         return CodexProfileSyncResult(error=version_error)
 
-    config, parse_error = _load_global_opencode_config(
-        effective_env,
-        platform=active_platform,
+    rendered, conversion_warnings, conversion_error = _render_profiles(
+        opencode_config,
+        selected_model_ids,
     )
-    if parse_error:
-        return CodexProfileSyncResult(error=parse_error)
+    warnings = tuple(
+        item
+        for item in (version_warning, *conversion_warnings)
+        if item
+    )
+    if conversion_error:
+        return CodexProfileSyncResult(
+            warnings=warnings,
+            error=conversion_error,
+        )
 
-    rendered, conversion_warnings = _render_profiles(config)
     destination = codex_home or _codex_home(
         effective_env,
         platform=active_platform,
     )
-    write_error, reconciliation_warnings = _write_and_reconcile(
+    reconciliation = _write_and_reconcile(
         destination,
         rendered,
     )
     warnings = tuple(
         item
         for item in (
-            version_warning,
-            *conversion_warnings,
-            *reconciliation_warnings,
+            *warnings,
+            *reconciliation.warnings,
         )
         if item
     )
-    if write_error:
+    if reconciliation.error:
         return CodexProfileSyncResult(
             warnings=warnings,
-            error=write_error,
+            error=reconciliation.error,
         )
     return CodexProfileSyncResult(
         models=tuple(item.model for item in rendered),
+        managed_default_model=reconciliation.managed_default_model,
+        user_default_preserved=reconciliation.user_default_preserved,
         warnings=warnings,
     )
 

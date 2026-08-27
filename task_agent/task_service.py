@@ -2495,6 +2495,8 @@ async def _run_component_task(
         if hasattr(result.output_source, "model_dump")
         else dict(result.output_source or {})
     )
+    if result.session_id:
+        output_source["serve_session_id"] = result.session_id
     if result.status == "cancelled":
         raise asyncio.CancelledError(result.error or "OpenCode task cancelled")
     if result.status == "success":

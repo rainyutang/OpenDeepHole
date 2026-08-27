@@ -1297,6 +1297,7 @@ async def create_agent_scan(
     from backend.api.agent import (
         _registered_agents,
         agent_config_has_explicit_model,
+        agent_explicit_model_ids,
         ensure_agent_accepting_tasks_async,
         get_scan_agent_config_async,
         resolve_agent_connection_async,
@@ -1610,6 +1611,7 @@ async def create_agent_scan(
             item.model_dump(mode="json")
             for item in mining_engine_selections
         ],
+        "codex_model_ids": agent_explicit_model_ids(managed_config),
         "code_graph_mcp": (
             code_graph_mcp.model_dump(mode="json")
             if code_graph_mcp is not None

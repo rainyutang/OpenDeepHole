@@ -40,6 +40,14 @@ def test_model_readiness_requires_enabled_explicit_model() -> None:
             "enabled": True,
         }]},
     ))
+    assert agent_api.agent_explicit_model_ids(AgentRemoteConfig(
+        model_pool={"models": [
+            {"id": "first", "model": "p/one", "enabled": True},
+            {"id": "duplicate", "model": "p/one", "enabled": True},
+            {"id": "disabled", "model": "p/two", "enabled": False},
+            {"id": "second", "model": "q/three", "enabled": True},
+        ]},
+    )) == ["p/one", "q/three"]
 
 
 def test_create_scan_rejects_client_without_model_before_persisting() -> None:
@@ -235,3 +243,4 @@ def test_fixed_modes_snapshot_pipeline_defaults(scan_mode: str) -> None:
     ]
     assert scan.scan_items == meta.scan_items == ["normal"]
     assert command["checkers"] == ["normal"]
+    assert command["codex_model_ids"] == ["provider/model"]

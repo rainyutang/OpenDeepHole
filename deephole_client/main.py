@@ -99,6 +99,25 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             if isinstance(post_update_command, dict):
                 return await _handle_command(post_update_command, config, task_manager, reporter)
             return None
+        try:
+            from deephole_client.codex_runtime import sync_platform_codex_models
+
+            task_model_ids = msg.get("codex_model_ids")
+            sync_platform_codex_models(
+                config,
+                model_ids=(
+                    task_model_ids
+                    if isinstance(task_model_ids, list)
+                    else None
+                ),
+                force=True,
+                reason=f"scan creation {msg.get('scan_id', '')}",
+            )
+        except Exception as exc:
+            print(
+                "Warning: Codex scan-start model synchronization failed "
+                f"({type(exc).__name__}); scan execution will continue."
+            )
         await agent_server.handle_task(
             scan_id=msg["scan_id"],
             project_path=msg["project_path"],
@@ -378,6 +397,11 @@ async def _apply_live_config_update(config) -> None:
     )
     configure_opencode_component()
     refresh_global_opencode_config()
+    from deephole_client.codex_runtime import sync_platform_codex_models
+    sync_platform_codex_models(
+        config,
+        reason="platform model configuration",
+    )
     get_serve_manager().update_managed_mcp_configs(
         build_managed_mcp_runtime_specs(config)
     )
