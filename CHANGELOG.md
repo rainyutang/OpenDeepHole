@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-08-27
+
+- **新增** 扫描详情问题页的漏洞报告及 AI 去误报输出来源会直接显示生成该输出的 OpenCode Session ID（如 `ses_xxx`）；Task Agent 公共结果在上报前以最终 `session_id` 回填 `output_source.serve_session_id`，历史数据缺少该字段时保持原显示
+
 ## 2026-08-26
 
 - **修复** 新增的 `codex_goal_threat_analysis` 威胁分析方法此前只通过 Python SDK 启动裸 Codex app-server，没有消费 Agent 已从 OpenCode Provider/模型同步到 `$CODEX_HOME` 的托管 profile，因此即使 CLI 已安装也可能落到默认 OpenAI 登录路径，并在未登录环境中以 Goal `blocked` 结束；现在新 Goal 使用第一个同步模型的 `codex --profile <name> app-server` 启动参数，续扫按状态文件固定同一 `provider/model`，无托管模型时直接返回可操作配置错误而不再触发交互登录；用户 Codex 默认配置保持不变

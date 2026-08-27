@@ -59,7 +59,7 @@ result = await run_opencode_task(
 
 不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；两者只生成路径级 `read`、`external_directory` 和 `edit` 放行规则，不能启用 `bash` 或改变其它权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
 
-返回的 `OpenCodeResult.output_source` 是可 JSON 序列化的 dict，用于由客户端协调器原样上报实际模型和 Session 来源。
+返回的 `OpenCodeResult.output_source` 是可 JSON 序列化的 dict，用于由客户端协调器原样上报实际模型和 Session 来源。其中 `serve_session_id` 始终回填为生成该结果的最终 OpenCode `session_id`；问题详情页会把它直接显示在对应输出来源中，历史结果缺少该字段时保持兼容。
 
 `task_type` 直接传字符串，不提供枚举。面向业务调用者的稳定类型如下；其它公共调用值会立即抛出 `ValueError`：
 

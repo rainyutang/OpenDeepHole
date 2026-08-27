@@ -450,13 +450,15 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                 session_id="ses-existing",
             )
 
+        expected_output_source = internal.output_source.model_dump()
+        expected_output_source["serve_session_id"] = "ses-1"
         assert result == OpenCodeResult(
             session_id="ses-1",
             status="success",
             text='{"answer": 7}',
             structured={"answer": 7},
             model="provider/model",
-            output_source=internal.output_source.model_dump(),
+            output_source=expected_output_source,
             token_usage=internal.token_usage,
         )
         spec = service.run_task.await_args.args[0]
