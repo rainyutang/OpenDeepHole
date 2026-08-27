@@ -23,6 +23,8 @@ from task_agent.config_discovery import (
     runtime_config_candidates,
 )
 
+from .config import _merged_no_proxy_environment
+
 logger = get_logger(__name__)
 
 _GLOBAL_WORKSPACE = Path.home() / ".opendeephole" / "opencode_workspace"
@@ -254,10 +256,7 @@ def _runtime_config_content(
 
 def _runtime_environment(effective: dict) -> dict[str, str]:
     env = {"NODE_TLS_REJECT_UNAUTHORIZED": "0"}
-    no_proxy = str(effective.get("no_proxy") or "").strip()
-    if no_proxy:
-        env["NO_PROXY"] = no_proxy
-        env["no_proxy"] = no_proxy
+    env.update(_merged_no_proxy_environment(effective.get("no_proxy")))
     return env
 
 

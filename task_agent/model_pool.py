@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,6 +17,9 @@ CAPABILITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 MODEL_HEALTH_MAX_PENALTY_LEVEL = 4
 MODEL_HEALTH_RECOVERY_SECONDS = 10 * 60
 MODEL_HEALTH_MIN_WEIGHT_FACTOR = 0.1
+MODEL_QUOTA_BACKOFF_INITIAL_SECONDS = 30.0
+MODEL_QUOTA_BACKOFF_MAX_SECONDS = 300.0
+MODEL_QUOTA_CIRCUIT_MAX_WAIT_SECONDS = 300.0
 NO_AVAILABLE_MODEL_MESSAGE = (
     "模型池没有已启用的模型；请先添加并启用模型。"
     "如需使用 CLI 默认模型，请显式添加“默认模型”。"
@@ -27,6 +31,55 @@ class NoAvailableModelError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(NO_AVAILABLE_MODEL_MESSAGE)
+
+
+class ModelQuotaCircuitOpenError(RuntimeError):
+    """Raised when every eligible model stayed quota-blocked past the task limit."""
+
+    def __init__(self, *, wait_limit_reached: bool = True) -> None:
+        suffix = (
+            "本任务已达到 5 分钟有限等待上限，请稍后重试。"
+            if wait_limit_reached
+            else "当前调用不等待冷却，请稍后重试。"
+        )
+        super().__init__(f"所有符合条件的模型仍处于 Provider 配额冷却期；{suffix}")
+
+
+@dataclass
+class ModelQuotaWaitBudget:
+    """Mutable per-logical-task budget consumed only while all models cool."""
+
+    total_seconds: float = MODEL_QUOTA_CIRCUIT_MAX_WAIT_SECONDS
+    remaining_seconds: float = 0.0
+    active_since: float | None = None
+
+    def __post_init__(self) -> None:
+        self.total_seconds = max(0.0, float(self.total_seconds))
+        self.remaining_seconds = self.total_seconds
+
+    def start(self, now: float) -> None:
+        if self.active_since is None:
+            self.active_since = now
+
+    def pause(self, now: float) -> None:
+        if self.active_since is None:
+            return
+        self.remaining_seconds = max(
+            0.0,
+            self.remaining_seconds - max(0.0, now - self.active_since),
+        )
+        self.active_since = None
+
+    def remaining(self, now: float) -> float:
+        if self.active_since is None:
+            return self.remaining_seconds
+        return max(
+            0.0,
+            self.remaining_seconds - max(0.0, now - self.active_since),
+        )
+
+
+logger = logging.getLogger(f"opendeephole.{__name__}")
 
 
 @dataclass(frozen=True)
@@ -62,6 +115,7 @@ class ModelLease:
     task_id: str = ""
     health_identity: tuple[str, bool, str, str] = ()
     health_generation: str = ""
+    quota_half_open_probe: bool = False
 
 
 @dataclass
@@ -92,6 +146,9 @@ class _ModelHealthState:
     last_health_failure_at: str = ""
     last_health_failure_kind: str = ""
     recovery_anchor: float | None = None
+    quota_failure_count: int = 0
+    quota_open_until: float | None = None
+    quota_half_open_probe_in_flight: bool = False
 
 
 @dataclass
@@ -114,6 +171,9 @@ class _PendingLeaseRequest:
     wait_when_unavailable: bool = False
     avoid_model_ids: frozenset[str] = frozenset()
     avoid_model_identities: frozenset[tuple[str, bool, str, str]] = frozenset()
+    quota_wait_deadline: float | None = None
+    quota_wait_budget: ModelQuotaWaitBudget | None = None
+    quota_wait_logged: bool = False
 
 
 @dataclass
@@ -349,9 +409,35 @@ def _effective_model_weight_locked(option: ModelOption) -> float:
     return option.weight * factor
 
 
+def _quota_circuit_available_locked(
+    option: ModelOption,
+    *,
+    now: float | None = None,
+) -> bool:
+    state = _ensure_model_health_locked(option)
+    if state.quota_open_until is None:
+        return True
+    current = time.monotonic() if now is None else now
+    if current < state.quota_open_until:
+        return False
+    return not state.quota_half_open_probe_in_flight
+
+
+def _quota_backoff_seconds(
+    failure_count: int,
+    retry_after_seconds: float | None,
+) -> float:
+    if retry_after_seconds is not None and retry_after_seconds > 0:
+        return min(MODEL_QUOTA_BACKOFF_MAX_SECONDS, max(1.0, retry_after_seconds))
+    exponential = MODEL_QUOTA_BACKOFF_INITIAL_SECONDS * (2 ** max(0, failure_count - 1))
+    return min(MODEL_QUOTA_BACKOFF_MAX_SECONDS, exponential)
+
+
 def _apply_model_health_outcome_locked(
     lease: ModelLease,
     health_outcome: str,
+    *,
+    quota_retry_after_seconds: float | None = None,
 ) -> bool:
     state = _model_health_by_id.get(lease.option.id)
     if (
@@ -374,7 +460,7 @@ def _apply_model_health_outcome_locked(
             return False
     now = time.monotonic()
     _recover_model_health_locked(state, now=now)
-    if health_outcome in {"failure", "timeout"}:
+    if health_outcome in {"failure", "timeout", "quota"}:
         state.penalty_level = min(
             MODEL_HEALTH_MAX_PENALTY_LEVEL,
             state.penalty_level + 1,
@@ -382,11 +468,46 @@ def _apply_model_health_outcome_locked(
         state.last_health_failure_at = _now_iso()
         state.last_health_failure_kind = health_outcome
         state.recovery_anchor = now
+        state.quota_half_open_probe_in_flight = False
+        if health_outcome == "quota":
+            state.quota_failure_count += 1
+            delay = _quota_backoff_seconds(
+                state.quota_failure_count,
+                quota_retry_after_seconds,
+            )
+            state.quota_open_until = now + delay
+            logger.warning(
+                "Opened model Provider quota circuit model_id=%s model=%s "
+                "cooldown_seconds=%s failure_count=%s",
+                lease.option.id,
+                lease.option.model or "<cli-default>",
+                f"{delay:g}",
+                state.quota_failure_count,
+            )
         return True
-    if health_outcome == "success" and state.penalty_level > 0:
-        state.penalty_level -= 1
-        if state.penalty_level <= 0:
-            state.recovery_anchor = None
+    if health_outcome == "success":
+        changed = False
+        if state.penalty_level > 0:
+            state.penalty_level -= 1
+            if state.penalty_level <= 0:
+                state.recovery_anchor = None
+            changed = True
+        if state.quota_open_until is not None or state.quota_failure_count:
+            logger.info(
+                "Closed model Provider quota circuit after successful request "
+                "model_id=%s model=%s",
+                lease.option.id,
+                lease.option.model or "<cli-default>",
+            )
+            state.quota_failure_count = 0
+            state.quota_open_until = None
+            changed = True
+        if state.quota_half_open_probe_in_flight:
+            state.quota_half_open_probe_in_flight = False
+            changed = True
+        return changed
+    if lease.quota_half_open_probe and state.quota_half_open_probe_in_flight:
+        state.quota_half_open_probe_in_flight = False
         return True
     return False
 
@@ -597,15 +718,21 @@ def _choose_available_for_request_locked(
     request: _PendingLeaseRequest,
 ) -> tuple[ModelOption | None, list[ModelOption]]:
     eligible, hard_global_concurrency, all_options = _eligible_options_for_request_locked(request)
+    now = time.monotonic()
+    circuit_available = [
+        option
+        for option in eligible
+        if _quota_circuit_available_locked(option, now=now)
+    ]
     untried = [
-        option for option in eligible
+        option for option in circuit_available
         if option.id not in request.avoid_model_ids
         and _model_health_identity(option) not in request.avoid_model_identities
     ]
     # A fresh-session retry must wait for an eligible, time-active alternative
     # even when the previous model has capacity right now. Only fall back after
     # every eligible alternative has been attempted (or none exists).
-    selection_options = untried or eligible
+    selection_options = untried or circuit_available
     for option in _available_options(
         selection_options,
         global_concurrency=hard_global_concurrency,
@@ -615,6 +742,19 @@ def _choose_available_for_request_locked(
         if _planned_order_allows_option_locked(request, option):
             return option, all_options
     return None, all_options
+
+
+def _request_blocked_by_quota_circuits_locked(
+    request: _PendingLeaseRequest,
+) -> bool:
+    eligible, _, _ = _eligible_options_for_request_locked(request)
+    if not eligible:
+        return False
+    now = time.monotonic()
+    return not any(
+        _quota_circuit_available_locked(option, now=now)
+        for option in eligible
+    )
 
 
 def _context_queue_group(context: dict[str, Any] | None) -> str:
@@ -723,8 +863,13 @@ def _consume_planned_task_locked(request: _PendingLeaseRequest) -> None:
         _touch_queue_locked(request.stats_scope_id)
 
 
-def _fail_no_available_model_locked(request: _PendingLeaseRequest) -> None:
-    """Remove a lease request and persist its terminal no-model failure."""
+def _fail_pending_request_locked(
+    request: _PendingLeaseRequest,
+    failure_reason: str,
+) -> None:
+    """Remove a lease request and persist its terminal scheduling failure."""
+    if request.quota_wait_budget is not None:
+        request.quota_wait_budget.pause(time.monotonic())
     _consume_planned_task_locked(request)
     _remove_pending_request_locked(request)
     finished_at = _now_iso()
@@ -746,11 +891,15 @@ def _fail_no_available_model_locked(request: _PendingLeaseRequest) -> None:
                 "finished_at": finished_at,
                 "duration_seconds": max(0.0, time.monotonic() - request.queued_at),
                 "outcome": "failure",
-                "failure_reason": NO_AVAILABLE_MODEL_MESSAGE,
+                "failure_reason": failure_reason,
             }
         )
     _touch_queue_locked(request.stats_scope_id)
     _condition.notify_all()
+
+
+def _fail_no_available_model_locked(request: _PendingLeaseRequest) -> None:
+    _fail_pending_request_locked(request, NO_AVAILABLE_MODEL_MESSAGE)
 
 
 async def register_planned_task(
@@ -876,6 +1025,18 @@ def _grant_lease_locked(
         _scope_updated_at[request.stats_scope_id] = item.last_started_at
     _global_updated_at = started_at_iso
     health_state = _ensure_model_health_locked(option)
+    quota_half_open_probe = bool(
+        health_state.quota_open_until is not None
+        and time.monotonic() >= health_state.quota_open_until
+        and not health_state.quota_half_open_probe_in_flight
+    )
+    if quota_half_open_probe:
+        health_state.quota_half_open_probe_in_flight = True
+        logger.info(
+            "Starting half-open model Provider quota probe model_id=%s model=%s",
+            option.id,
+            option.model or "<cli-default>",
+        )
     return ModelLease(
         option=option,
         running=_running_by_model[option.id],
@@ -886,6 +1047,7 @@ def _grant_lease_locked(
         task_id=task_id,
         health_identity=health_state.identity,
         health_generation=health_state.generation,
+        quota_half_open_probe=quota_half_open_probe,
     )
 
 
@@ -981,6 +1143,8 @@ async def acquire_model_lease(
         | frozenset[tuple[str, bool, str, str]]
         | None
     ) = None,
+    quota_wait_deadline: float | None = None,
+    quota_wait_budget: ModelQuotaWaitBudget | None = None,
 ) -> ModelLease | None:
     required = normalize_requirement(required_capability)
     request: _PendingLeaseRequest | None = None
@@ -993,6 +1157,8 @@ async def acquire_model_lease(
         if cancel_event is not None and cancel_event.is_set():
             if request is not None:
                 async with _condition:
+                    if request.quota_wait_budget is not None:
+                        request.quota_wait_budget.pause(time.monotonic())
                     _consume_planned_task_locked(request)
                     if _remove_pending_request_locked(request):
                         _touch_queue_locked(request.stats_scope_id)
@@ -1035,6 +1201,12 @@ async def acquire_model_lease(
                         for identity in (avoid_model_identities or ())
                         if isinstance(identity, (tuple, list)) and len(identity) == 4
                     ),
+                    quota_wait_deadline=(
+                        float(quota_wait_deadline)
+                        if quota_wait_deadline is not None
+                        else None
+                    ),
+                    quota_wait_budget=quota_wait_budget,
                 )
                 option, all_options = _choose_available_for_request_locked(request)
                 if not all_options and not request.wait_when_unavailable:
@@ -1050,6 +1222,54 @@ async def acquire_model_lease(
                 if not all_options and not request.wait_when_unavailable:
                     _fail_no_available_model_locked(request)
                     raise NoAvailableModelError()
+
+            blocked_by_quota = _request_blocked_by_quota_circuits_locked(request)
+            if blocked_by_quota:
+                now = time.monotonic()
+                if request.quota_wait_budget is not None:
+                    request.quota_wait_budget.start(now)
+                budget_expired = bool(
+                    request.quota_wait_budget is not None
+                    and request.quota_wait_budget.remaining(now) <= 0
+                )
+                if (
+                    budget_expired
+                    or (
+                        request.quota_wait_deadline is not None
+                        and now >= request.quota_wait_deadline
+                    )
+                    or (
+                        request.quota_wait_deadline is None
+                        and not request.wait_when_unavailable
+                    )
+                ):
+                    error = ModelQuotaCircuitOpenError(
+                        wait_limit_reached=(
+                            budget_expired
+                            or request.quota_wait_deadline is not None
+                        ),
+                    )
+                    _fail_pending_request_locked(request, str(error))
+                    raise error
+                if not request.quota_wait_logged:
+                    remaining = (
+                        request.quota_wait_budget.remaining(now)
+                        if request.quota_wait_budget is not None
+                        else (
+                            max(0.0, request.quota_wait_deadline - now)
+                            if request.quota_wait_deadline is not None
+                            else None
+                        )
+                    )
+                    logger.info(
+                        "Waiting for model Provider quota circuit cooldown task_id=%s "
+                        "remaining_limit_seconds=%s",
+                        request.request_id,
+                        f"{remaining:.1f}" if remaining is not None else "unbounded",
+                    )
+                    request.quota_wait_logged = True
+            elif request.quota_wait_budget is not None:
+                request.quota_wait_budget.pause(time.monotonic())
 
             next_runnable = _next_runnable_pending_locked()
             if next_runnable is not None:
@@ -1068,6 +1288,7 @@ async def release_model_lease(
     *,
     outcome: str | None = None,
     health_outcome: str | None = None,
+    quota_retry_after_seconds: float | None = None,
     duration_seconds: float | None = None,
     record_completion: bool = True,
 ) -> None:
@@ -1103,11 +1324,23 @@ async def release_model_lease(
         global_item.last_finished_at = finished_at
         normalized_health_outcome = (
             health_outcome
-            if health_outcome in {"success", "failure", "timeout"}
+            if health_outcome in {"success", "failure", "timeout", "quota"}
             else ""
         )
         if normalized_health_outcome:
-            _apply_model_health_outcome_locked(lease, normalized_health_outcome)
+            _apply_model_health_outcome_locked(
+                lease,
+                normalized_health_outcome,
+                quota_retry_after_seconds=quota_retry_after_seconds,
+            )
+        elif lease.quota_half_open_probe:
+            state = _model_health_by_id.get(lease.option.id)
+            if (
+                state is not None
+                and state.identity == lease.health_identity
+                and state.generation == lease.health_generation
+            ):
+                state.quota_half_open_probe_in_flight = False
         if record_completion and active_task is not None and lease.stats_scope_id:
             context = dict(active_task.get("context") or {})
             prompt = context.get("prompt")
@@ -1301,6 +1534,11 @@ def _pending_request_snapshot(request: _PendingLeaseRequest) -> dict[str, Any]:
         blocked_reason = (
             f"没有满足 {request.required_capability} 能力要求且当前可用的模型；"
             "等待模型配置或时间窗口变化。"
+        )
+    elif not any(_quota_circuit_available_locked(option) for option in eligible):
+        blocked_reason = (
+            "所有满足能力要求的模型都处于 Provider 配额冷却或半开探测中；"
+            "等待模型恢复。"
         )
     else:
         blocked_reason = ""

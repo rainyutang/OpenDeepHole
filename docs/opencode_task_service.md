@@ -204,7 +204,7 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 | `serve.port` | 默认 `4096`，范围 `1..65535` | 本机 Serve 固定监听端口。该值会成为最终的 `OPENCODE_SERVE_PORT`，覆盖 `serve.environment` 中的同名值；standalone 不会自动改号。 |
 | `serve.timeout` | 默认 `3600`，最小 `1` | 默认单次模型消息执行超时，单位为秒；排队等待模型 Lease 的时间不计入。 |
 | `serve.max_retries` | 默认 `2`，最小 `0` | 首次 Session 之外最多创建多少个全新 Session 进行重试；不等同于同 Session 的 JSON 纠正次数。 |
-| `serve.environment` | 默认 `{}` | 附加或覆盖到 Serve 子进程的环境变量。键转为字符串，值必须是标量并会转为字符串；`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式会被忽略并从父进程环境清除，只允许 `NO_PROXY`/`no_proxy` 代理绕过变量。 |
+| `serve.environment` | 默认 `{}` | 附加或覆盖到 Serve 子进程的环境变量。键转为字符串，值必须是标量并会转为字符串；`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式会被忽略并从父进程环境清除。`NO_PROXY` 与 `no_proxy` 分别以逗号追加到父进程同名变量，不会覆盖原值。 |
 | `serve.opencode_config` | 默认 `{}` | 必须是可 JSON 序列化的映射；作为 standalone 最高优先级用户层与已发现配置合并，再由 Task Agent 写入受管权限并生成 `workspace_dir/opencode.json`。 |
 
 `serve.opencode_config` 可以包含 OpenCode 当前版本支持的 `$schema`、Provider、Agent、MCP、Skill 等原生配置。Task Agent 不校验这些子字段，也不保证不同 OpenCode 版本的原生字段兼容；最终配置中的 `read`、`list`、`glob`、`grep`、`external_directory`、`edit`、`bash` 和 `skill` 会由 Task Agent 覆盖为受管边界，不能依赖这里的 `permission` 放宽任务边界。
@@ -270,6 +270,8 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 
 只有已经进入模型消息请求后的 Provider/Auth/API 执行失败或总超时才会增加一级惩罚；即使消息接口返回 HTTP 200，assistant `info.error` 中的这类 Provider 执行错误也按真实请求失败处理。`ContextOverflowError`、`MessageOutputLengthError`、`StructuredOutputError` 和非主动取消产生的 `MessageAbortedError` 会让当前任务换模重试，但不会降权。Serve 启动或配置失败、MCP/回调故障、主动取消、没有可用模型，以及返回内容未通过 JSON Schema 校验，也都不属于模型健康故障。一次最终成功会恢复一级；没有新模型消息请求故障满 10 分钟也会恢复一级。JSON 纠错耗尽后仍会进入 fresh Session 换模重试，但该 JSON 失败本身既不降权也不恢复健康；若纠错消息请求本身超时或发生 Provider/Auth/API 执行失败，仍按真实请求故障处理。
 
+assistant 错误可能把 Provider 原始对象包在 `UnknownError`、类型校验文本以及多层 JSON 字符串中。Task Agent 只提取允许公开的错误码、RPM/TPM 类型、身份类别和重试时间；当错误码为 `*.429` 且内容表示请求/Token 配额暂不可用时，按实际模型身份打开临时配额熔断，而不是永久禁用该模型。默认冷却序列为 30、60、120、240、300 秒，Provider 给出的正数 `retry_after` 优先使用并限制到 300 秒，`-1` 或无效值使用默认退避。其它合格身份立即接管；全部合格模型都在冷却时，逻辑任务在既有 fresh Session 重试预算内等待，累计上限为 5 分钟且取消事件会立即生效。冷却到期只允许一个半开请求，成功关闭熔断，重复配额错误重新打开；该状态与健康惩罚一样只存在于当前进程。
+
 健康状态不会写回配置或跨进程持久化，Agent/Task Agent 进程重启后从零惩罚和基础权重重新开始。运行中只修改基础权重、并发数或时间窗时继续沿用同一实际模型身份的健康状态；模型 ID 对应的真实模型、默认模型标记或全局可执行文件变化时视为新身份。
 
 每个 `time_windows` 项支持以下字段：
@@ -291,9 +293,9 @@ standalone 加载器只负责创建 `workspace_dir`，不会自动创建、复�
 - 首个独立调用会锁定配置路径，并在同一进程内复用同一个任务服务和 Serve 单例。同一路径可重复传入；若要切换 YAML，必须先执行 `await shutdown_opencode()`。
 - 单个任务返回不会停止 Serve；这是同一 Python 进程内跨阶段、跨任务复用的基础。显式调用 `await shutdown_opencode()` 会终止组件实际启动的 Serve 进程树并清除单例。
 - standalone 的 `serve.port` 是显式固定端口，占用时会报告外部监听 PID，无监听却绑定失败时会提示 Windows 排除/保留端口或端点安全软件，不会换号或终止未证明属于本组件的进程。完整 Agent 在未配置端口时才使用自动模式：实际端口只保存在当前进程内，不写回受管配置；其它进程占用候选端口或旧进程已消失但原端口仍处于 Windows 连接回收期时，避开对应端口并最多尝试 3 个不同端口。首次只返回无明确原因的 `Error: Unexpected error` 时仍只作一次恢复性换号。当前受管 Serve 仍存活或身份无法安全确认时禁止换号，同一 Agent 进程最多登记一个 Serve。
-- 未显式 shutdown 时，组件会登记自己通过 `Popen` 启动的精确 PID 和独立进程组，在解释器正常退出、`SIGINT`（Ctrl-C）或 `SIGTERM` 时同步清理，再恢复或转交宿主原有信号处理器。启动器 PID 退出不再等同于整棵进程树退出：POSIX 会继续检查进程组和已确认归属的监听 PID，发送 `SIGTERM` 5 秒后仍存活则升级为 `SIGKILL`；Windows ownership marker 额外记录进程创建标识，恢复时结合进程快照防止把复用的 PID 当成旧 Serve，只对身份仍匹配的进程执行 `taskkill /T /F`。TCP、监听表和带 `SO_EXCLUSIVEADDRUSE` 的独占绑定分别用于判断端点及端口状态，不再替代进程存活判断：旧进程已消失时删除 marker，端口可用则复用，暂不可绑定则由自动模式避开、固定模式报告；旧进程仍存活或状态无法确认时继续保留 marker 和管理器状态供重试。
-- 启动失败会同时报告固定/自动端口模式、已尝试端口和可执行文件版本，并附上脱敏后的启动日志尾部。`OPENCODE_SERVER_PASSWORD is not set` 是 Agent 仅监听 `127.0.0.1` 时的预期警告，日志会明确说明它不是 Serve 退出原因。
-- Web 从 Serve 读取模型时始终先请求 `GET /global/health`，且仅在收到 `200` 与 `healthy: true` 后请求 `/provider`（必要时回退 `/config/providers`）。复用进程但健康检查失败时，空闲 Serve 只安全重启一次并复查；存在活动 Session 时不强制重启且不会访问 Provider。Agent 终端会按时间打印请求编号、配置的 executable、实际解析路径、版本、启动命令、端口、健康检查、Provider 查询耗时和已脱敏的 Serve 启动输出。
+- 未显式 shutdown 时，组件会登记自己通过 `Popen` 启动的精确 PID 和独立进程组，在解释器正常退出、`SIGINT`（Ctrl-C）或 `SIGTERM` 时同步清理，再恢复或转交宿主原有信号处理器。启动器 PID 退出不再等同于整棵进程树退出：POSIX 会继续检查进程组和已确认归属的监听 PID，发送 `SIGTERM` 5 秒后仍存活则升级为 `SIGKILL`；Windows ownership marker 额外记录进程创建标识，历史 marker 恢复与当前管理器停止共用同一身份分类，只对 `owned` 进程执行 `taskkill /T /F`，`absent`/`foreign` 会清理本方状态且不终止外部 PID，`unknown` 则保留 marker 和管理器状态继续阻断。TCP、监听表和带 `SO_EXCLUSIVEADDRUSE` 的独占绑定分别用于判断端点及端口状态，不再替代进程存活判断：旧进程已消失时删除 marker，端口可用则复用，暂不可绑定则由自动模式避开、固定模式报告。
+- 启动失败会同时报告固定/自动端口模式、已尝试端口、解析后的可执行文件、版本探测 argv 和版本输出，并附上脱敏后的启动日志尾部；Windows `.cmd`/`.bat` shim 通过命令处理器的独立 argv 启动而不使用 `shell=True`。健康失败后的清理若也失败，最终异常会同时保留原始健康错误和清理错误，不再由后者覆盖前者。停止日志会记录重启原因、dirty/restart 标志和当前/目标配置哈希。`OPENCODE_SERVER_PASSWORD is not set` 是 Agent 仅监听 `127.0.0.1` 时的预期警告，日志会明确说明它不是 Serve 退出原因。
+- Serve 冷启动和 Web 模型导入都以 `GET /global/health` 的 HTTP `200` 且 JSON `healthy: true` 作为唯一健康成功条件；其它 2xx、无效 JSON 或 `healthy` 非 true 都继续等待或失败。复用进程但模型导入健康检查失败时，空闲 Serve 只安全重启一次并复查；存在活动 Session 时不强制重启且不会访问 Provider。Agent 终端会按时间打印请求编号、executable 配置与解析路径、版本、启动命令、端口、健康检查、Provider 耗时和已脱敏的 Serve 启动输出。
 - `SIGKILL` 和 `os._exit()` 不运行 Python 的信号处理器或 `atexit` 回调，无法保证当场清理；下次启动会继续使用既有归属标记和端口恢复逻辑回收残留 Serve。
 - 若应用已经注册后端宿主绑定，则完全使用宿主配置，不读取独立 YAML；此时再传 `config_path` 会报冲突。
 
@@ -307,7 +309,7 @@ Task Agent 的进度行统一使用下面三个头字段：
 
 - `vulnerability_validation` 映射为 stage `validation`；其它任务直接使用 `task_type`。Session 尚未创建时第二段为 `pending`，创建或续写后改为真实 Session ID。
 - 第三段只会是 `task`、`session`、`tool` 或 `skill`：`task` 覆盖排队、模型 Lease、Serve 准备和任务终态；`session` 覆盖当前消息执行的启动、停止、Provider 重试、新 Session `RETRY`、独立格式匹配 `JSON_FORMAT_RETRY` / `JSON_FORMAT_RECOVERED` / `JSON_FORMAT_FAILED`、原 Session `JSON_RETRY`、错误及工具发现；`tool`、`skill` 分别表示一次真实工具调用或 SKILL 读取。OpenCode 内部 step 的 START、STOP 和 FAIL 不打印。
-- 每次消息执行都会打印 `session START` 和 `session STOP`。`STOP status=success retained=true` 同时表示本次消息结束且成功，Session 本身仍保留并可续写；超时和取消分别标记 `status=timeout`、`status=cancelled`。
+- 每次消息执行都会打印 `session START` 和 `session STOP`。Task Agent 发起的消息会在既有三段头部后追加逻辑 `task`、`attempt`，并在响应已形成时追加 `message`，从而把 fresh Session 重试和具体消息关联起来；直接调用底层 Serve 客户端且未传任务关联信息时保持原格式。`STOP status=success retained=true` 同时表示本次消息结束且成功，Session 本身仍保留并可续写；超时和取消分别标记 `status=timeout`、`status=cancelled`。
 - assistant text 和 reasoning 不打印到控制台，仍在内部聚合并作为最终 `text` 返回或用于 JSON 校验。Tool/SKILL 调用每次只打印一行：`read` 打印 `path` 及可选 `offset`/`limit`，`write` 打印 `path`/`content_chars`，`edit` 打印 `path`/`old_chars`/`new_chars` 及可选 `replace_all`，`bash`/`shell` 打印完整 `command` 及可选 `workdir`/`timeout`/`description`，`grep`/`glob`/`list` 打印各自的模式与目录；当前扫描实际选中的代码图谱 MCP 打印实际工具名及完整、无截断、无脱敏的单行 `input` JSON，其它未识别的 Tool 和 MCP Tool 仍只打印名称。Bash 命令与代码图谱 MCP 输入使用 JSON 转义保持单行，其中的 Token、密码、请求头或其它敏感值会原样进入日志。成功不追加完成行，调用失败才在同一类别下追加脱敏 `ERROR`；write/edit 正文、其它未列出的调用参数和工具返回正文仍不打印。嵌套 `opencode_task_context(...)` 省略 `output` 时继承宿主回调，只有显式传入 `output=None` 才关闭输出。
 
 独立模式直接把这些行打印到终端；宿主模式只交给宿主绑定的输出回调。宿主添加本地时间戳时会保留上述三个头字段，不再叠加旧的阶段或模型前缀；扫描器转发结构化 Task Agent 行时也不会重复添加进程阶段前缀。
@@ -382,6 +384,8 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 OpenCode 同步消息接口若在 HTTP 成功后返回空正文或非 JSON，Task Agent 会查询同一 Session 的消息历史，只接受相对于发送前基线新增且已经完成的 assistant 消息，并将其送回正常的错误、模型、Token、文本和文件写入处理链；恢复成功时控制台输出 `RESPONSE_RECOVERED reason=empty_body|invalid_json source=session_messages`。续写 Session 无法取得发送前基线时不会用历史消息兜底，避免把上一轮结果误认为本轮成功。若没有可确认的新消息，则错误只包含状态码、Content-Type、响应字节数和恢复失败类别，不包含响应正文或模型文本，并作为健康中性失败进入 fresh Session 换模重试，不降低模型权重。
 
 fresh Session 重试会累计本次逻辑任务已经尝试过的实际模型身份。只要还存在满足能力与当前时间窗的未尝试模型，调度器就排除已经尝试的模型；即使未尝试模型的并发容量暂满，也继续排队等待它，而不是立即回到刚失败的模型。只有单模型可用，或所有合格模型都已经尝试后，才重新允许全部候选按当前有效权重竞争 Lease。该换模规则同样适用于 JSON 纠错耗尽，但 JSON 校验失败和纠错耗尽本身不触发健康降权。
+
+Provider 的 RPM/TPM `*.429` 配额错误也使用同一 fresh Session 预算，但在重新排队前会打开上述临时熔断。有替代模型时下一次 Lease 立即选择替代身份；没有替代模型时等待冷却并执行单个半开探测，因此后续 Provider 恢复后同一逻辑任务仍可继续，而不会把一次 `quota=0` 固化成永久不可用。最终耗尽 Session 次数或 5 分钟配额等待上限时才返回明确失败；威胁分析外层仍只保留一次增量恢复加一次 clean fallback，不额外叠加业务层循环。
 
 只有预算耗尽后的超时、主动取消和没有可用模型会成为终止结果：
 
