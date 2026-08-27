@@ -302,6 +302,14 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     assert status == "complete"
     codex_config = captured["controller"]["codex_config"]
     assert codex_config.cwd == str(tmp_path)
+    assert codex_config.launch_args_override == (
+        "/opt/codex",
+        "--profile",
+        "opendeephole-provider-threat-model",
+        "app-server",
+        "--listen",
+        "stdio://",
+    )
     assert codex_config.env == {
         "CODEX_SQLITE_HOME": str(tmp_path / ".codex-state"),
     }
@@ -315,6 +323,14 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
             "network_access": False,
             "writable_roots": [str(tmp_path)],
         }
+    }
+    assert json.loads(
+        (tmp_path / "codex-goal-state.json").read_text(encoding="utf-8")
+    ) == {
+        "thread_id": "thread-new",
+        "goal_status": "complete",
+        "model_id": "provider/threat-model",
+        "profile": "opendeephole-provider-threat-model",
     }
 
 

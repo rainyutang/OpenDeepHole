@@ -165,10 +165,6 @@ def _run_goal(
         "--listen",
         "stdio://",
     )
-    sdk_config = CodexConfig(
-        cwd=str(artifact_root),
-        launch_args_override=launch_args,
-    )
     thread_options = {
         "model": codex_model.model_id,
         "approval_mode": ApprovalMode.deny_all,
@@ -186,6 +182,7 @@ def _run_goal(
     sqlite_home.mkdir(parents=True, exist_ok=True, mode=0o700)
     codex_config = CodexConfig(
         cwd=str(artifact_root),
+        launch_args_override=launch_args,
         # A Goal launched by an Agent can otherwise contend with an enclosing
         # Codex process for the user's shared state databases.  Keep auth,
         # models, and config in the existing CODEX_HOME while isolating only
@@ -212,27 +209,41 @@ def _run_goal(
                         state_path,
                         controller.thread_id,
                         current.status if current else None,
+                        model_id=codex_model.id,
+                        profile=codex_model.profile,
                     )
                     if (
                         current is not None
                         and current.status in _RESUMABLE_GOAL_STATUSES
                     ):
-                        result = controller.resume_goal()
+                        result = controller.resume_goal(
+                            model=codex_model.model_id,
+                        )
                     else:
-                        result = controller.goal(prompt)
+                        result = controller.goal(
+                            prompt,
+                            model=codex_model.model_id,
+                        )
                 else:
                     controller.start_thread(**thread_options)
                     _write_codex_goal_state(
                         state_path,
                         controller.thread_id,
                         "active",
+                        model_id=codex_model.id,
+                        profile=codex_model.profile,
                     )
-                    result = controller.goal(prompt)
+                    result = controller.goal(
+                        prompt,
+                        model=codex_model.model_id,
+                    )
 
                 _write_codex_goal_state(
                     state_path,
                     controller.thread_id,
                     result.goal.status,
+                    model_id=codex_model.id,
+                    profile=codex_model.profile,
                 )
                 return result.goal.status
         except Exception as exc:
@@ -385,6 +396,9 @@ def _write_codex_goal_state(
     path: Path,
     thread_id: str | None,
     goal_status: str | None,
+    *,
+    model_id: str,
+    profile: str,
 ) -> None:
     """Persist only state owned by this threat-analysis method."""
 
