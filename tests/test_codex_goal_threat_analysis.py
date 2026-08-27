@@ -314,3 +314,19 @@ def test_transport_closed_reason_keeps_bounded_stderr_diagnostic() -> None:
         "Codex Goal runtime closed unexpectedly: Codex process closed stdout. "
         "stderr_tail=failed to initialize sqlite state runtime"
     )
+
+
+def test_type_error_reason_keeps_parameter_diagnostic() -> None:
+    implementation = _implementation()
+
+    result = implementation._safe_reason(
+        TypeError(
+            "_write_state() missing 2 required keyword-only arguments: "
+            "'model_id' and 'profile'"
+        )
+    )
+
+    assert result == (
+        "Codex Goal type error: _write_state() missing 2 required keyword-only "
+        "arguments: 'model_id' and 'profile'"
+    )
