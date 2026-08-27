@@ -18,6 +18,7 @@ _CONTEXT_FILE = "scan-context.json"
 _STATE_FILE = "codex-goal-state.json"
 _PROMPT_FILE = "codex-goal-prompt.txt"
 _LOG_FILE = "codex-goal.log"
+_CODEX_SQLITE_DIR = ".codex-state"
 _RESUMABLE_GOAL_STATUSES = {"active", "paused", "usageLimited"}
 
 
@@ -124,7 +125,8 @@ def build_goal_prompt(
 
 ##完成条件:
 1. 需要输出的三份文件，逐项检查 JSON Schema 和跨产物引用，必须检查通过；
-2. 分析必须完整，没有遗漏价值资产、高风险模块和威胁，攻击树中要考虑所有可能的攻击模式，至少输出最高风险的前10个威胁，根据实际情况如果没有10个威胁也可以"""
+2. 分析必须完整，没有遗漏价值资产、高风险模块和威胁，攻击树中要考虑所有可能的攻击模式，至少输出最高风险的前10个威胁，根据实际情况如果没有10个威胁也可以；
+3. 不合格就修正后再结束 Goal。"""
     if len(prompt) > MAX_GOAL_PROMPT_CHARS:
         raise ValueError(
             f"Codex Goal prompt exceeds {MAX_GOAL_PROMPT_CHARS} characters: {len(prompt)}"
@@ -142,6 +144,7 @@ def _run_goal(
     # Agent dependencies have been installed.
     from codex_sdk import (
         ApprovalMode,
+        CodexConfig,
         CodexController,
         OutputMode,
         ResumePolicy,
@@ -162,37 +165,62 @@ def _run_goal(
     }
     policy = ResumePolicy(max_attempts=6, max_elapsed_seconds=7200)
     log_path = artifact_root / _LOG_FILE
+    sqlite_home = artifact_root / _CODEX_SQLITE_DIR
+    sqlite_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    codex_config = CodexConfig(
+        cwd=str(artifact_root),
+        # A Goal launched by an Agent can otherwise contend with an enclosing
+        # Codex process for the user's shared state databases.  Keep auth,
+        # models, and config in the existing CODEX_HOME while isolating only
+        # the writable SQLite state needed by this resumable Goal.
+        env={"CODEX_SQLITE_HOME": str(sqlite_home)},
+    )
 
     log_mode = "a" if is_resume else "w"
     with log_path.open(log_mode, encoding="utf-8") as output:
-        with CodexController(
-            # Keep the writable workspace on the artifact side. The source is
-            # supplied as an absolute, read-only reference in the prompt.
-            cwd=str(artifact_root),
-            thread_id=saved_thread_id,
-            output_mode=OutputMode.HUMAN,
-            output=output,
-            resume_policy=policy,
-        ) as controller:
-            if saved_thread_id:
-                controller.resume_thread(saved_thread_id, **thread_options)
-                current = controller.get_goal()
-                _write_state(
-                    state_path,
-                    controller.thread_id,
-                    current.status if current else None,
-                )
-                if current is not None and current.status in _RESUMABLE_GOAL_STATUSES:
-                    result = controller.resume_goal()
+        try:
+            with CodexController(
+                # Keep the writable workspace on the artifact side. The source is
+                # supplied as an absolute, read-only reference in the prompt.
+                codex_config=codex_config,
+                thread_id=saved_thread_id,
+                output_mode=OutputMode.HUMAN,
+                output=output,
+                resume_policy=policy,
+            ) as controller:
+                if saved_thread_id:
+                    controller.resume_thread(saved_thread_id, **thread_options)
+                    current = controller.get_goal()
+                    _write_state(
+                        state_path,
+                        controller.thread_id,
+                        current.status if current else None,
+                    )
+                    if (
+                        current is not None
+                        and current.status in _RESUMABLE_GOAL_STATUSES
+                    ):
+                        result = controller.resume_goal()
+                    else:
+                        result = controller.goal(prompt)
                 else:
+                    controller.start_thread(**thread_options)
+                    _write_state(state_path, controller.thread_id, "active")
                     result = controller.goal(prompt)
-            else:
-                controller.start_thread(**thread_options)
-                _write_state(state_path, controller.thread_id, "active")
-                result = controller.goal(prompt)
 
-            _write_state(state_path, controller.thread_id, result.goal.status)
-            return result.goal.status
+                _write_state(state_path, controller.thread_id, result.goal.status)
+                return result.goal.status
+        except Exception as exc:
+            # Startup failures happen before the controller can render an
+            # event.  Preserve the SDK's stderr tail instead of leaving an
+            # empty log and a bare TransportClosedError in the scan UI.
+            detail = _exception_detail(exc)
+            output.write(
+                f"! Codex Goal runtime failure ({type(exc).__name__})"
+                f"{f': {detail}' if detail else ''}\n"
+            )
+            output.flush()
+            raise
 
 
 def _reference_paths() -> tuple[Path, dict[str, Path]]:
@@ -301,4 +329,19 @@ def _safe_reason(exc: Exception) -> str:
         return f"Codex Goal produced invalid threat-analysis artifacts: {exc}"
     if isinstance(exc, (FileNotFoundError, NotADirectoryError, ValueError)):
         return str(exc)
+    if type(exc).__name__ == "TransportClosedError":
+        detail = _exception_detail(exc)
+        return (
+            "Codex Goal runtime closed unexpectedly"
+            f"{f': {detail}' if detail else ''}"
+        )
     return f"Codex Goal threat analysis failed ({type(exc).__name__})"
+
+
+def _exception_detail(exc: BaseException, *, limit: int = 2000) -> str:
+    """Return a bounded one-line SDK diagnostic suitable for logs and UI."""
+
+    detail = " ".join(str(exc).split())
+    if len(detail) <= limit:
+        return detail
+    return detail[: limit - 3].rstrip() + "..."

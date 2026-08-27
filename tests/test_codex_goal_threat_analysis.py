@@ -267,6 +267,7 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
 
     fake_sdk = ModuleType("codex_sdk")
     fake_sdk.ApprovalMode = SimpleNamespace(deny_all="deny_all")
+    fake_sdk.CodexConfig = lambda **kwargs: SimpleNamespace(**kwargs)
     fake_sdk.CodexController = FakeController
     fake_sdk.OutputMode = SimpleNamespace(HUMAN="human")
     fake_sdk.ResumePolicy = lambda **kwargs: SimpleNamespace(**kwargs)
@@ -280,7 +281,12 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     )
 
     assert status == "complete"
-    assert captured["controller"]["cwd"] == str(tmp_path)
+    codex_config = captured["controller"]["codex_config"]
+    assert codex_config.cwd == str(tmp_path)
+    assert codex_config.env == {
+        "CODEX_SQLITE_HOME": str(tmp_path / ".codex-state"),
+    }
+    assert (tmp_path / ".codex-state").is_dir()
     assert captured["thread_options"]["sandbox"] == "workspace-write"
     assert captured["thread_options"]["approval_mode"] == "deny_all"
     assert captured["thread_options"]["config"] == {
@@ -289,3 +295,22 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
             "writable_roots": [str(tmp_path)],
         }
     }
+
+
+def test_transport_closed_reason_keeps_bounded_stderr_diagnostic() -> None:
+    implementation = _implementation()
+
+    class TransportClosedError(RuntimeError):
+        pass
+
+    result = implementation._safe_reason(
+        TransportClosedError(
+            "Codex process closed stdout.\n"
+            "stderr_tail=failed to initialize sqlite state runtime"
+        )
+    )
+
+    assert result == (
+        "Codex Goal runtime closed unexpectedly: Codex process closed stdout. "
+        "stderr_tail=failed to initialize sqlite state runtime"
+    )

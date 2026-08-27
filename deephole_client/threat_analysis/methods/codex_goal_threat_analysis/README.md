@@ -24,4 +24,7 @@
 跨产物关系和完成检查由同目录的 `analysis-guidance.json` 定义。动态路径、续扫状态、产品 MCP
 名称和攻击模式写入 `output_path/scan-context.json`。Goal 和返回前校验器读取相同的私有参考
 文件，不依赖其它威胁分析方法。Goal 初始提示词运行时硬性限制为不超过 4000 字符，并另存为
-`output_path/codex-goal-prompt.txt`。
+`output_path/codex-goal-prompt.txt`。为避免 Agent 内嵌 Codex 与外层 Codex 争用用户目录中的
+SQLite 数据库，本方法将 `CODEX_SQLITE_HOME` 隔离到 `output_path/.codex-state/`；登录、模型和
+用户配置仍从原 `CODEX_HOME` 读取。运行日志写入 `output_path/codex-goal.log`，Codex 进程提前
+退出时会保留 SDK 返回的 stderr 尾部用于诊断。
