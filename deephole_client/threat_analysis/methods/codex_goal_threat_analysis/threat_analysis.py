@@ -143,9 +143,7 @@ def _run_goal(
     state_path = artifact_root / _STATE_FILE
     saved_state = _read_state(state_path) if is_resume else {}
     saved_thread_id = str(saved_state.get("thread_id") or "").strip() or None
-    codex_state, codex_model = _resolve_codex_runtime(
-        str(saved_state.get("model_id") or "").strip() or None,
-    )
+    codex_state = _require_codex_runtime()
     # Imported lazily so method discovery remains available before optional
     # Agent dependencies have been installed.
     from codex_sdk import (
@@ -159,14 +157,11 @@ def _run_goal(
 
     launch_args = (
         *codex_state.command,
-        "--profile",
-        codex_model.profile,
         "app-server",
         "--listen",
         "stdio://",
     )
     thread_options = {
-        "model": codex_model.model_id,
         "approval_mode": ApprovalMode.deny_all,
         "sandbox": Sandbox.workspace_write,
         "config": {
@@ -209,41 +204,27 @@ def _run_goal(
                         state_path,
                         controller.thread_id,
                         current.status if current else None,
-                        model_id=codex_model.id,
-                        profile=codex_model.profile,
                     )
                     if (
                         current is not None
                         and current.status in _RESUMABLE_GOAL_STATUSES
                     ):
-                        result = controller.resume_goal(
-                            model=codex_model.model_id,
-                        )
+                        result = controller.resume_goal()
                     else:
-                        result = controller.goal(
-                            prompt,
-                            model=codex_model.model_id,
-                        )
+                        result = controller.goal(prompt)
                 else:
                     controller.start_thread(**thread_options)
                     _write_codex_goal_state(
                         state_path,
                         controller.thread_id,
                         "active",
-                        model_id=codex_model.id,
-                        profile=codex_model.profile,
                     )
-                    result = controller.goal(
-                        prompt,
-                        model=codex_model.model_id,
-                    )
+                    result = controller.goal(prompt)
 
                 _write_codex_goal_state(
                     state_path,
                     controller.thread_id,
                     result.goal.status,
-                    model_id=codex_model.id,
-                    profile=codex_model.profile,
                 )
                 return result.goal.status
         except Exception as exc:
@@ -260,8 +241,8 @@ def _run_goal(
             raise
 
 
-def _resolve_codex_runtime(preferred_model_id: str | None) -> tuple[Any, Any]:
-    """Select one synchronized model and never fall back to interactive login."""
+def _require_codex_runtime() -> Any:
+    """Return the prepared Codex CLI runtime used by app-server."""
     from deephole_client.codex_runtime import get_codex_runtime_state
 
     state = get_codex_runtime_state()
@@ -269,37 +250,7 @@ def _resolve_codex_runtime(preferred_model_id: str | None) -> tuple[Any, Any]:
         detail = str(state.error or "Codex has no executable command").strip()
         raise ValueError(f"Codex CLI is unavailable: {detail}")
 
-    models = tuple(state.models or ())
-    if not models:
-        detail = str(state.model_config_error or "").strip()
-        suffix = f" Profile sync failed: {detail}." if detail else ""
-        raise ValueError(
-            "Codex Goal requires a synchronized OpenDeepHole model profile. "
-            "Configure at least one user-level OpenCode provider/model with "
-            "baseURL and, when required, apiKey (or an API-key environment "
-            "reference), then restart the Agent. Bare Codex fallback is "
-            f"disabled because it could enter interactive login.{suffix}"
-        )
-
-    if preferred_model_id:
-        selected = next(
-            (model for model in models if model.id == preferred_model_id),
-            None,
-        )
-        if selected is None:
-            raise ValueError(
-                "The Codex model saved for this resumable Goal is no longer "
-                f"available: {preferred_model_id}. Restore that OpenCode "
-                "model configuration or start a clean threat-analysis run."
-            )
-    else:
-        selected = models[0]
-
-    if not str(selected.profile or "").strip():
-        raise ValueError(
-            f"Synchronized Codex model {selected.id} has no profile name"
-        )
-    return state, selected
+    return state
 
 
 def _reference_paths() -> tuple[Path, dict[str, Path]]:
@@ -396,9 +347,6 @@ def _write_codex_goal_state(
     path: Path,
     thread_id: str | None,
     goal_status: str | None,
-    *,
-    model_id: str,
-    profile: str,
 ) -> None:
     """Persist only state owned by this threat-analysis method."""
 
@@ -407,8 +355,6 @@ def _write_codex_goal_state(
         {
             "thread_id": str(thread_id or ""),
             "goal_status": str(goal_status or "unknown"),
-            "model_id": model_id,
-            "profile": profile,
         },
     )
 

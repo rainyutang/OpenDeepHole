@@ -247,11 +247,6 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     captured: dict[str, Any] = {}
     from deephole_client import codex_runtime
 
-    model = SimpleNamespace(
-        id="provider/threat-model",
-        model_id="threat-model",
-        profile="opendeephole-provider-threat-model",
-    )
     monkeypatch.setattr(
         codex_runtime,
         "get_codex_runtime_state",
@@ -259,8 +254,6 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
             available=True,
             command=("/opt/codex",),
             error="",
-            models=(model,),
-            model_config_error="",
         ),
     )
 
@@ -279,9 +272,8 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
             captured["thread_options"] = options
             return self.thread_id
 
-        def goal(self, prompt: str, *, model: str | None = None):
+        def goal(self, prompt: str):
             captured["prompt"] = prompt
-            captured["model"] = model
             return SimpleNamespace(goal=SimpleNamespace(status="complete"))
 
     fake_sdk = ModuleType("codex_sdk")
@@ -304,8 +296,6 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     assert codex_config.cwd == str(tmp_path)
     assert codex_config.launch_args_override == (
         "/opt/codex",
-        "--profile",
-        "opendeephole-provider-threat-model",
         "app-server",
         "--listen",
         "stdio://",
@@ -316,8 +306,7 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     assert (tmp_path / ".codex-state").is_dir()
     assert captured["thread_options"]["sandbox"] == "workspace-write"
     assert captured["thread_options"]["approval_mode"] == "deny_all"
-    assert captured["thread_options"]["model"] == "threat-model"
-    assert captured["model"] == "threat-model"
+    assert "model" not in captured["thread_options"]
     assert captured["thread_options"]["config"] == {
         "sandbox_workspace_write": {
             "network_access": False,
@@ -329,8 +318,6 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     ) == {
         "thread_id": "thread-new",
         "goal_status": "complete",
-        "model_id": "provider/threat-model",
-        "profile": "opendeephole-provider-threat-model",
     }
 
 
@@ -358,12 +345,11 @@ def test_type_error_reason_keeps_parameter_diagnostic() -> None:
 
     result = implementation._safe_reason(
         TypeError(
-            "_write_state() missing 2 required keyword-only arguments: "
-            "'model_id' and 'profile'"
+            "controller.goal() got an unexpected keyword argument 'model'"
         )
     )
 
     assert result == (
-        "Codex Goal type error: _write_state() missing 2 required keyword-only "
-        "arguments: 'model_id' and 'profile'"
+        "Codex Goal type error: controller.goal() got an unexpected keyword "
+        "argument 'model'"
     )
