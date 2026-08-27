@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import locale
 import os
 import shutil
 import signal
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from .codex_profiles import CodexModelProfile, sync_codex_profiles
 
@@ -62,6 +64,7 @@ class _CodexSetupError(RuntimeError):
 
 
 _runtime_state: CodexRuntimeState | None = None
+_last_platform_model_fingerprint: str | None = None
 
 
 def _is_windows() -> bool:
@@ -399,51 +402,194 @@ def _print_unavailable(error: str) -> None:
     )
 
 
-def _sync_runtime_models(state: CodexRuntimeState) -> CodexRuntimeState:
-    """Attach secret-free model metadata without making CLI readiness fail."""
-    try:
-        result = sync_codex_profiles(codex_version=state.version)
-    except Exception as exc:
-        result_error = (
-            "unexpected model profile sync failure "
-            f"({type(exc).__name__})"
+def _value(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _normalize_model_ids(model_ids: Sequence[str] | str) -> tuple[str, ...]:
+    values: Sequence[str] = (
+        (model_ids,) if isinstance(model_ids, str) else model_ids
+    )
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_model_id in values:
+        model_id = str(raw_model_id or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        normalized.append(model_id)
+    return tuple(normalized)
+
+
+def configured_codex_model_ids(config: Any) -> tuple[str, ...]:
+    """Return ordered enabled explicit models from the applied Agent config."""
+    opencode = _value(config, "opencode")
+    models = _value(opencode, "models", ()) or ()
+    selected: list[str] = []
+    for model in models:
+        if not bool(_value(model, "enabled", True)):
+            continue
+        if bool(_value(model, "use_default_model", False)):
+            continue
+        selected.append(str(_value(model, "model", "") or ""))
+    return _normalize_model_ids(selected)
+
+
+def _effective_opencode_config(config: Any) -> dict[str, Any]:
+    from .opencode_integration import build_opencode_session_runtime
+
+    runtime = build_opencode_session_runtime(
+        _value(config, "opencode"),
+        directory=Path.cwd(),
+    )
+    raw = str(runtime.config_content or "{}").strip() or "{}"
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("effective OpenCode config must be an object")
+    return parsed
+
+
+def _model_config_fingerprint(
+    selected: tuple[str, ...],
+    opencode_config: dict[str, Any],
+) -> str:
+    providers = opencode_config.get("provider")
+    relevant_providers: dict[str, Any] = {}
+    for canonical_id in selected:
+        provider_id, separator, model_id = canonical_id.partition("/")
+        provider = (
+            providers.get(provider_id)
+            if separator and isinstance(providers, dict)
+            else None
         )
+        if not isinstance(provider, dict):
+            relevant_providers[canonical_id] = None
+            continue
+        models = provider.get("models")
+        relevant_providers[canonical_id] = {
+            "name": provider.get("name"),
+            "options": provider.get("options"),
+            "model": (
+                models.get(model_id)
+                if isinstance(models, dict)
+                else None
+            ),
+        }
+    serialized = json.dumps(
+        {
+            "model_ids": selected,
+            "providers": relevant_providers,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def sync_platform_codex_models(
+    config: Any,
+    *,
+    model_ids: Sequence[str] | str | None = None,
+    force: bool = False,
+    reason: str = "platform configuration",
+) -> CodexRuntimeState:
+    """Reconcile Codex with platform-selected models without blocking Agent work."""
+    global _last_platform_model_fingerprint, _runtime_state
+
+    selected = (
+        configured_codex_model_ids(config)
+        if model_ids is None
+        else _normalize_model_ids(model_ids)
+    )
+    state = get_codex_runtime_state()
+    if _runtime_state is None:
+        _runtime_state = state
+    if not state.available:
+        error = state.error or "Codex CLI is unavailable"
+        _runtime_state = replace(state, model_config_error=error)
         print(
-            "Warning: Codex model profile sync failed: "
-            f"{result_error}. Codex engines will use the user's default "
-            "Codex configuration; Agent startup will continue.",
+            "Warning: Codex model synchronization skipped: "
+            f"{error}. Trigger: {reason}.",
             flush=True,
         )
-        return replace(state, model_config_error=result_error)
+        return _runtime_state
+
+    try:
+        opencode_config = _effective_opencode_config(config) if selected else {}
+        fingerprint = _model_config_fingerprint(selected, opencode_config)
+        if not force and fingerprint == _last_platform_model_fingerprint:
+            return get_codex_runtime_state()
+        result = sync_codex_profiles(
+            codex_version=state.version,
+            opencode_config=opencode_config,
+            selected_model_ids=selected,
+        )
+    except Exception as exc:
+        error = (
+            "unexpected model profile synchronization failure "
+            f"({type(exc).__name__})"
+        )
+        _runtime_state = replace(state, model_config_error=error)
+        print(
+            "Warning: Codex model synchronization failed: "
+            f"{error}. Existing managed configuration was left unchanged. "
+            f"Trigger: {reason}.",
+            flush=True,
+        )
+        return _runtime_state
 
     for warning in result.warnings:
         print(f"Warning: {warning}", flush=True)
     if result.error:
+        _runtime_state = replace(
+            state,
+            model_config_warnings=result.warnings,
+            model_config_error=result.error,
+        )
         print(
-            "Warning: Codex model profile sync failed: "
-            f"{result.error}. Codex engines will use the user's default "
-            "Codex configuration; Agent startup will continue.",
+            "Warning: Codex model synchronization failed: "
+            f"{result.error}. Existing managed configuration was left "
+            f"unchanged. Trigger: {reason}.",
             flush=True,
         )
-    elif result.models:
-        print(
-            "Codex model profiles ready: synchronized "
-            f"{len(result.models)} model(s) from user OpenCode config.",
-            flush=True,
-        )
-    else:
-        print(
-            "Codex model profiles: no explicit user OpenCode models were "
-            "found; Codex engines will use the user's default Codex "
-            "configuration.",
-            flush=True,
-        )
-    return replace(
+        return _runtime_state
+
+    _last_platform_model_fingerprint = fingerprint
+    _runtime_state = replace(
         state,
         models=result.models,
         model_config_warnings=result.warnings,
-        model_config_error=result.error,
+        model_config_error="",
     )
+    if result.models:
+        print(
+            "Codex model profiles ready: synchronized "
+            f"{len(result.models)} platform model(s). Trigger: {reason}.",
+            flush=True,
+        )
+        if result.managed_default_model is not None:
+            print(
+                "Codex default model ready: "
+                f"{result.managed_default_model.id}.",
+                flush=True,
+            )
+        elif result.user_default_preserved:
+            print(
+                "Codex default model unchanged: existing user configuration "
+                "was preserved; platform models remain available as managed "
+                "profiles.",
+                flush=True,
+            )
+    else:
+        print(
+            "Codex managed model profiles removed: the platform has no "
+            f"enabled explicit model. Trigger: {reason}.",
+            flush=True,
+        )
+    return _runtime_state
 
 
 async def initialize_codex_runtime(
@@ -458,11 +604,10 @@ async def initialize_codex_runtime(
     executable = shutil.which("codex")
     if executable:
         try:
-            probed_state = await _probe_codex(
+            _runtime_state = await _probe_codex(
                 executable,
                 timeout=CODEX_PROBE_TIMEOUT_SECONDS,
             )
-            _runtime_state = _sync_runtime_models(probed_state)
             print(
                 f"Codex CLI ready: {_runtime_state.version}",
                 flush=True,
@@ -505,7 +650,7 @@ async def initialize_codex_runtime(
         _print_unavailable(error)
         return _runtime_state
 
-    _runtime_state = _sync_runtime_models(installed_state)
+    _runtime_state = installed_state
     print(
         f"Codex CLI installed successfully: {_runtime_state.version}",
         flush=True,
@@ -531,14 +676,17 @@ def get_codex_runtime_state() -> CodexRuntimeState:
 
 
 def _reset_codex_runtime_state_for_tests() -> None:
-    global _runtime_state
+    global _last_platform_model_fingerprint, _runtime_state
     _runtime_state = None
+    _last_platform_model_fingerprint = None
 
 
 __all__ = [
     "CODEX_INSTALL_TIMEOUT_SECONDS",
     "CodexModelProfile",
     "CodexRuntimeState",
+    "configured_codex_model_ids",
     "get_codex_runtime_state",
     "initialize_codex_runtime",
+    "sync_platform_codex_models",
 ]

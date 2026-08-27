@@ -307,11 +307,26 @@ def _authorize_agent_record(record: dict | None, current_user: User) -> dict:
     return record
 
 
+def agent_explicit_model_ids(config: AgentRemoteConfig) -> list[str]:
+    """Return the ordered, deduplicated explicit models selected on platform."""
+    model_ids: list[str] = []
+    seen: set[str] = set()
+    for model in config.model_pool.models:
+        model_id = str(model.model or "").strip()
+        if (
+            not model.enabled
+            or model.use_default_model
+            or not model_id
+            or model_id in seen
+        ):
+            continue
+        seen.add(model_id)
+        model_ids.append(model_id)
+    return model_ids
+
+
 def agent_config_has_explicit_model(config: AgentRemoteConfig) -> bool:
-    return any(
-        model.enabled and bool(str(model.model or "").strip()) and not model.use_default_model
-        for model in config.model_pool.models
-    )
+    return bool(agent_explicit_model_ids(config))
 
 
 def get_managed_agent_config(agent_key: str) -> AgentRemoteConfig:

@@ -4,6 +4,8 @@
 
 - **新增** 扫描详情问题页的漏洞报告及 AI 去误报输出来源会直接显示生成该输出的 OpenCode Session ID（如 `ses_xxx`）；Task Agent 公共结果在上报前以最终 `session_id` 回填 `output_source.serve_session_id`，历史数据缺少该字段时保持原显示
 
+- **修复** Codex 模型配置不再在安装或 Agent 启动阶段扫描用户全局 OpenCode 模型，而是在平台新增、修改、启禁用客户端审计模型后，按平台顺序只同步已启用模型；创建扫描时服务端同时下发当前模型快照，存量客户端会在运行时更新完成后、扫描开始前强制进行幂等同步。Provider、地址、凭据和模型定义复用客户端 OpenCode Serve 的有效合并配置；任一模型无法映射时保留上一次成功结果。`$CODEX_HOME/config.toml` 已有用户默认模型、profile 或 Provider 选择时完全不改，没有时才增加带所有权标记的默认块；后续只更新或清理 OpenDeepHole 自有块及 profile，不覆盖用户内容或同名外来文件。威胁分析实现及其说明保持不变
+
 ## 2026-08-26
 
 - **修复** 新增的 `codex_goal_threat_analysis` 威胁分析方法此前只通过 Python SDK 启动裸 Codex app-server，没有消费 Agent 已从 OpenCode Provider/模型同步到 `$CODEX_HOME` 的托管 profile，因此即使 CLI 已安装也可能落到默认 OpenAI 登录路径，并在未登录环境中以 Goal `blocked` 结束；现在新 Goal 使用第一个同步模型的 `codex --profile <name> app-server` 启动参数，续扫按状态文件固定同一 `provider/model`，无托管模型时直接返回可操作配置错误而不再触发交互登录；用户 Codex 默认配置保持不变

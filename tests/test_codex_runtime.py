@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -12,7 +13,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import deephole_client.main as agent_main
 from deephole_client import codex_runtime
-from deephole_client.codex_profiles import CodexProfileSyncResult
+from deephole_client.codex_profiles import (
+    CodexModelProfile,
+    CodexProfileSyncResult,
+)
 
 
 class CodexRuntimeTests(unittest.TestCase):
@@ -63,9 +67,7 @@ class CodexRuntimeTests(unittest.TestCase):
             [call.args[0] for call in which.call_args_list],
             ["codex"],
         )
-        self.profile_sync.assert_called_once_with(
-            codex_version="codex-cli 1.2.3",
-        )
+        self.profile_sync.assert_not_called()
 
     def test_missing_npm_is_non_fatal_and_cached_for_this_process(self) -> None:
         with (
@@ -93,34 +95,203 @@ class CodexRuntimeTests(unittest.TestCase):
             for call in output.call_args_list
         ))
 
-    def test_model_sync_failure_keeps_ready_cli_and_default_fallback(
-        self,
-    ) -> None:
-        self.profile_sync.return_value = CodexProfileSyncResult(
-            error="profile directory denied",
-        )
-        ready = codex_runtime.CodexRuntimeState(
+    @staticmethod
+    def _ready_state(
+        *,
+        models: tuple[CodexModelProfile, ...] = (),
+    ) -> codex_runtime.CodexRuntimeState:
+        return codex_runtime.CodexRuntimeState(
             available=True,
             command=("/opt/bin/codex",),
             executable="/opt/bin/codex",
-            version="codex-cli 0.146.1",
+            version="codex-cli 0.149.1",
+            models=models,
         )
 
-        with patch("builtins.print") as output:
-            state = codex_runtime._sync_runtime_models(ready)
-
-        self.assertTrue(state.available)
-        self.assertEqual(state.command, ("/opt/bin/codex",))
-        self.assertEqual(state.models, ())
-        self.assertEqual(
-            state.model_config_error,
-            "profile directory denied",
+    @staticmethod
+    def _agent_config(*models: SimpleNamespace) -> SimpleNamespace:
+        return SimpleNamespace(
+            opencode=SimpleNamespace(
+                executable="opencode",
+                models=list(models),
+            ),
         )
+
+    def test_platform_sync_uses_effective_client_config_and_platform_order(
+        self,
+    ) -> None:
+        config = self._agent_config(
+            SimpleNamespace(model="z/last", enabled=True),
+            SimpleNamespace(model="a/first", enabled=True),
+            SimpleNamespace(model="z/last", enabled=True),
+            SimpleNamespace(model="off/ignored", enabled=False),
+        )
+        effective = {
+            "provider": {
+                "z": {
+                    "options": {"baseURL": "https://z.example/v1"},
+                    "models": {"last": {}},
+                },
+                "a": {
+                    "options": {"baseURL": "https://a.example/v1"},
+                    "models": {"first": {}},
+                },
+            },
+        }
+        first = CodexModelProfile(
+            id="z/last",
+            provider_id="z",
+            model_id="last",
+            profile="opendeephole-z-last",
+        )
+        second = CodexModelProfile(
+            id="a/first",
+            provider_id="a",
+            model_id="first",
+            profile="opendeephole-a-first",
+        )
+        self.profile_sync.return_value = CodexProfileSyncResult(
+            models=(first, second),
+            managed_default_model=first,
+        )
+        codex_runtime._runtime_state = self._ready_state()
+
+        with (
+            patch(
+                "deephole_client.opencode_integration."
+                "build_opencode_session_runtime",
+                return_value=SimpleNamespace(
+                    config_content=json.dumps(effective),
+                ),
+            ) as build_runtime,
+            patch("builtins.print") as output,
+        ):
+            state = codex_runtime.sync_platform_codex_models(config)
+
+        self.assertEqual(state.models, (first, second))
+        build_runtime.assert_called_once_with(
+            config.opencode,
+            directory=Path.cwd(),
+        )
+        self.profile_sync.assert_called_once_with(
+            codex_version="codex-cli 0.149.1",
+            opencode_config=effective,
+            selected_model_ids=("z/last", "a/first"),
+        )
+        rendered = "\n".join(str(call) for call in output.call_args_list)
+        self.assertIn("2 platform model", rendered)
+        self.assertIn("Codex default model ready", rendered)
+
+    def test_config_fingerprint_tracks_provider_changes_and_scan_force(self) -> None:
+        config = self._agent_config(
+            SimpleNamespace(model="p/model", enabled=True),
+        )
+        codex_runtime._runtime_state = self._ready_state()
+        runtime = SimpleNamespace(config_content=json.dumps({
+            "provider": {
+                "p": {
+                    "options": {"baseURL": "https://p.example/v1"},
+                    "models": {"model": {}},
+                },
+            },
+        }))
+
+        with (
+            patch(
+                "deephole_client.opencode_integration."
+                "build_opencode_session_runtime",
+                return_value=runtime,
+            ) as build_runtime,
+            patch("builtins.print"),
+        ):
+            codex_runtime.sync_platform_codex_models(config)
+            codex_runtime.sync_platform_codex_models(config)
+            runtime.config_content = json.dumps({
+                "provider": {
+                    "p": {
+                        "options": {"baseURL": "https://p.example/v1"},
+                        "models": {"model": {}},
+                    },
+                },
+                "mcp": {"unrelated": {"type": "local"}},
+            })
+            codex_runtime.sync_platform_codex_models(config)
+            runtime.config_content = json.dumps({
+                "provider": {
+                    "p": {
+                        "options": {
+                            "baseURL": "https://p-new.example/v1",
+                        },
+                        "models": {"model": {}},
+                    },
+                },
+            })
+            codex_runtime.sync_platform_codex_models(config)
+            codex_runtime.sync_platform_codex_models(
+                config,
+                model_ids=["p/model"],
+                force=True,
+                reason="scan creation scan-1",
+            )
+
+        self.assertEqual(build_runtime.call_count, 5)
+        self.assertEqual(self.profile_sync.call_count, 3)
+
+    def test_model_sync_failure_preserves_last_successful_models(self) -> None:
+        previous = CodexModelProfile(
+            id="old/model",
+            provider_id="old",
+            model_id="model",
+            profile="opendeephole-old-model",
+        )
+        config = self._agent_config(
+            SimpleNamespace(model="new/model", enabled=True),
+        )
+        codex_runtime._runtime_state = self._ready_state(models=(previous,))
+        self.profile_sync.return_value = CodexProfileSyncResult(
+            error="profile directory denied",
+        )
+
+        with (
+            patch(
+                "deephole_client.opencode_integration."
+                "build_opencode_session_runtime",
+                return_value=SimpleNamespace(config_content="{}"),
+            ),
+            patch("builtins.print") as output,
+        ):
+            state = codex_runtime.sync_platform_codex_models(
+                config,
+                force=True,
+                reason="scan creation scan-1",
+            )
+
+        self.assertEqual(state.models, (previous,))
+        self.assertEqual(state.model_config_error, "profile directory denied")
         self.assertTrue(any(
-            "user's default Codex configuration" in str(call)
-            and "Agent startup will continue" in str(call)
+            "left unchanged" in str(call)
             for call in output.call_args_list
         ))
+
+    def test_configured_model_ids_filter_disabled_default_and_duplicates(
+        self,
+    ) -> None:
+        config = self._agent_config(
+            SimpleNamespace(model=" p/one ", enabled=True),
+            SimpleNamespace(model="p/one", enabled=True),
+            SimpleNamespace(model="p/two", enabled=False),
+            SimpleNamespace(
+                model="",
+                enabled=True,
+                use_default_model=True,
+            ),
+            SimpleNamespace(model="q/three", enabled=True),
+        )
+
+        self.assertEqual(
+            codex_runtime.configured_codex_model_ids(config),
+            ("p/one", "q/three"),
+        )
 
     def test_windows_batch_shim_uses_separate_cmd_call_argv(self) -> None:
         npm = r"C:\Program Files\nodejs\npm.CMD"

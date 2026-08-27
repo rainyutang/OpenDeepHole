@@ -6,6 +6,8 @@ httpx>=0.27.0
 websockets>=12.0
 pyyaml>=6.0
 pydantic>=2.0
+# Python 3.10 compatibility for safe Codex config.toml parsing.
+tomli>=2.0.1; python_version < "3.11"
 # Goal-based threat-analysis methods use the stable Python Codex SDK. Keep the
 # minor version aligned with codex_sdk's private Goal-protocol compatibility layer.
 openai-codex>=0.144.4,<0.145

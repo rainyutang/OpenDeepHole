@@ -9,7 +9,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 
@@ -772,6 +772,103 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(update.await_count, 2)
         handler.assert_awaited_once()
+
+    def test_scan_task_syncs_codex_after_runtime_update_before_start(self) -> None:
+        calls: list[str] = []
+        config = AgentConfig()
+
+        async def update(_payload, _command) -> bool:
+            calls.append("update")
+            return False
+
+        def sync(received_config, **kwargs):
+            calls.append("codex")
+            self.assertIs(received_config, config)
+            self.assertEqual(kwargs["model_ids"], ["provider/model"])
+            self.assertTrue(kwargs["force"])
+            self.assertIn("scan-1", kwargs["reason"])
+
+        async def handle_task(**kwargs) -> None:
+            calls.append("task")
+            self.assertEqual(kwargs["scan_id"], "scan-1")
+
+        with (
+            patch(
+                "deephole_client.updater.ensure_runtime_updated",
+                new=update,
+            ),
+            patch(
+                "deephole_client.codex_runtime.sync_platform_codex_models",
+                new=sync,
+            ),
+            patch(
+                "deephole_client.server.handle_task",
+                new=handle_task,
+            ),
+        ):
+            asyncio.run(agent_main._handle_command(
+                {
+                    "type": "task",
+                    "scan_id": "scan-1",
+                    "project_path": "/repo/project",
+                    "codex_model_ids": ["provider/model"],
+                    "agent_runtime_update": {"hash": "new-runtime"},
+                },
+                config,
+                None,
+                None,
+            ))
+
+        self.assertEqual(calls, ["update", "codex", "task"])
+
+    def test_live_config_refreshes_opencode_before_codex_sync(self) -> None:
+        calls: list[str] = []
+        config = AgentConfig()
+        serve_manager = SimpleNamespace(
+            update_managed_mcp_configs=MagicMock(),
+        )
+
+        def refresh_global() -> None:
+            calls.append("opencode")
+
+        def sync(received_config, **kwargs) -> None:
+            calls.append("codex")
+            self.assertIs(received_config, config)
+            self.assertFalse(kwargs.get("force", False))
+            self.assertEqual(kwargs["reason"], "platform model configuration")
+
+        with (
+            patch("deephole_client.config.apply_network_env"),
+            patch("deephole_client.platform_runtime.refresh_platform_runtime_config"),
+            patch("deephole_client.opencode_integration.configure_opencode_component"),
+            patch(
+                "deephole_client.opencode_integration.refresh_global_opencode_config",
+                new=refresh_global,
+            ),
+            patch(
+                "deephole_client.codex_runtime.sync_platform_codex_models",
+                new=sync,
+            ),
+            patch(
+                "deephole_client.opencode_integration.build_managed_mcp_runtime_specs",
+                return_value={},
+            ),
+            patch("task_agent.serve_client.get_serve_manager", return_value=serve_manager),
+            patch("task_agent.serve_client.mark_serve_config_dirty"),
+            patch(
+                "task_agent.model_pool.refresh_configured_model_pool",
+                new=AsyncMock(),
+            ),
+            patch(
+                "task_agent.model_pool.notify_model_pool_config_changed",
+                new=AsyncMock(),
+            ),
+            patch("deephole_client.server.refresh_validation_scheduling"),
+        ):
+            asyncio.run(agent_main._apply_live_config_update(config))
+
+        self.assertEqual(calls, ["opencode", "codex"])
+        serve_manager.update_managed_mcp_configs.assert_called_once_with({})
 
     def test_fp_review_command_checks_runtime_update_before_review(self) -> None:
         update = AsyncMock(return_value=False)

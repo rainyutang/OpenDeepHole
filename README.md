@@ -169,7 +169,8 @@ DeepHole 2.0 Agent
   Server  : http://your-server:8000
 
 Codex CLI ready: codex-cli 0.x.y
-Codex model profiles ready: synchronized 4 model(s) from user OpenCode config.
+Codex model profiles ready: synchronized 4 platform model(s). Trigger: platform model configuration.
+Codex default model ready: corp/threat-model.
 
   Connected via WebSocket, agent_id: a1b2c3d4...
 ```
@@ -180,16 +181,24 @@ Agent 在连接服务端前检查一次 Codex CLI。若本机没有可调用的 
 共享 120 秒总超时。缺少 npm、安装失败或超时只会打印告警并继续连接，未声明依赖 Codex 的
 漏洞挖掘引擎不受影响；失败后到下次重启 Agent 才会再次尝试。
 
-Codex CLI 可用后，Agent 还会读取用户级 OpenCode `opencode.json` / `opencode.jsonc` 中显式
-声明的 `provider.<id>.models`，为每个模型在当前 `$CODEX_HOME`（默认 `~/.codex`）生成一个
-独立的 OpenDeepHole 托管 profile。该过程不会修改 Codex 的 `config.toml` 或默认模型，也不会
-读取项目级、可执行文件旁或显式路径指定的 OpenCode 配置。同步失败、没有可映射模型或 Codex
+Codex CLI 可用后不会在安装或 Agent 启动阶段自行扫描模型。Agent 收到平台客户端配置时，只同步
+`model_pool.models` 中已启用的显式 `provider/model`；创建扫描时，平台还会把同一有序模型快照随
+任务下发，客户端完成运行时更新后、真正开始扫描前再次进行幂等同步，因此此前已经配置模型且不会再
+修改配置的存量客户端也能补齐 Codex。Provider、模型定义、地址和凭据来自客户端启动 OpenCode
+Serve 时使用的同一份有效合并配置，不从平台传输密钥。
+
+每个选中模型会在当前 `$CODEX_HOME`（默认 `~/.codex`）生成一个独立的 OpenDeepHole 托管
+profile。如果 Codex 用户配置没有已有默认模型、profile 或 Provider 选择，Agent 会增加一个带
+所有权标记的默认模型/Provider 块，使用平台顺序中的第一个模型，使直接运行的 Codex CLI 和默认
+启动的 SDK app-server 都能读取该模型。用户已有内容逐字保留，只允许更新或清理 OpenDeepHole
+自己创建的块和 profile；同名非托管文件、配置损坏或模型无法从客户端有效配置映射时，本次同步只
+输出脱敏告警并保留上一次成功配置。同步失败、没有可映射模型或 Codex
 版本低于 0.134 时只告警，通用 `requires_codex` 漏洞挖掘引擎仍可回退到用户自己的 Codex
 默认配置；`codex_goal_threat_analysis` 威胁分析方法则为了保证非交互执行，必须存在至少一个同步成功的
 托管 profile。它在新 Goal 中选用第一个 profile，并以 `codex --profile <name> app-server`
 启动 SDK；续扫会继续使用已保存的模型。因此工具任务不会进入 Codex 登录流程；如果 profile 缺失会直接
-报告可操作的配置错误。Agent 不会在启动时探测模型服务，协议或凭据错误会在引擎实际调用时报告。直接运行不带
-`--profile` 的裸 `codex` 仍使用用户个人默认配置，可能正常提示登录，这不代表工具内的托管 profile 未生效。
+报告可操作的配置错误。Agent 不会在启动时探测模型服务，协议或凭据错误会在引擎实际调用时报告。
+直接运行不带 `--profile` 的 `codex` 时，已有用户默认保持优先；没有用户默认时使用上述托管选择。
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。Agent 默认允许接收最大 64 MiB 的单条
 WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续扫命令仍超过该限制，可设置正整数
