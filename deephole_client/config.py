@@ -14,6 +14,43 @@ import yaml
 
 _CANONICAL_AI_TOOL = "opencode"
 _LEGACY_AI_TOOL_EXECUTABLES = {"nga", "opencode"}
+_NO_PROXY_ENV_NAMES = ("NO_PROXY", "no_proxy")
+
+
+def _capture_no_proxy_environment() -> dict[str, str | None]:
+    """Snapshot the Agent's inherited proxy-bypass environment once."""
+    return {name: os.environ.get(name) for name in _NO_PROXY_ENV_NAMES}
+
+
+def _append_no_proxy_value(existing: str | None, configured: object) -> str | None:
+    """Append configured comma-separated entries without duplicating values."""
+    if existing is None and not str(configured or "").strip():
+        return None
+    entries: list[str] = []
+    seen: set[str] = set()
+    for value in (existing or "", str(configured or "")):
+        for item in value.split(","):
+            normalized = item.strip()
+            if normalized and normalized not in seen:
+                entries.append(normalized)
+                seen.add(normalized)
+    return ",".join(entries)
+
+
+def _merged_no_proxy_environment(
+    configured: object,
+    environment: dict[str, str | None] | None = None,
+) -> dict[str, str]:
+    """Build independent uppercase/lowercase no-proxy values."""
+    source = environment if environment is not None else {
+        name: os.environ.get(name) for name in _NO_PROXY_ENV_NAMES
+    }
+    merged: dict[str, str] = {}
+    for name in _NO_PROXY_ENV_NAMES:
+        value = _append_no_proxy_value(source.get(name), configured)
+        if value is not None:
+            merged[name] = value
+    return merged
 
 
 @dataclass
@@ -303,6 +340,14 @@ class AgentConfig:
     vulnerability_validation: VulnerabilityValidationConfig = field(default_factory=VulnerabilityValidationConfig)
     # Runtime-only: path to the loaded config file (not serialized)
     config_file: Optional[Path] = field(default=None, repr=False, compare=False)
+    # Runtime-only: preserve each inherited variable independently so repeated
+    # task/config refreshes replace the managed suffix instead of accumulating it.
+    _no_proxy_environment: dict[str, str | None] = field(
+        default_factory=_capture_no_proxy_environment,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
 
 def _apply_policy(target: ModelTaskPolicyConfig, raw: object) -> None:
@@ -567,6 +612,7 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
         model_pool = remote.get("model_pool") if isinstance(remote.get("model_pool"), dict) else {}
         if "no_proxy" in base:
             config.no_proxy = str(base.get("no_proxy") or "")
+            config.opencode.no_proxy = config.no_proxy
         if "tool" in base:
             config.opencode.tool = str(base.get("tool") or "")
         if "executable" in base:
@@ -676,12 +722,15 @@ def apply_remote_config(config: AgentConfig, remote: dict) -> None:
 
 def apply_network_env(config: AgentConfig) -> None:
     """Apply network-related Agent config to the current process environment."""
-    if config.no_proxy:
-        os.environ["no_proxy"] = config.no_proxy
-        os.environ["NO_PROXY"] = config.no_proxy
-    else:
-        os.environ.pop("no_proxy", None)
-        os.environ.pop("NO_PROXY", None)
+    merged = _merged_no_proxy_environment(
+        config.no_proxy,
+        config._no_proxy_environment,
+    )
+    for name in _NO_PROXY_ENV_NAMES:
+        if name in merged:
+            os.environ[name] = merged[name]
+        else:
+            os.environ.pop(name, None)
 
 
 def remote_config_dict(config: AgentConfig) -> dict:

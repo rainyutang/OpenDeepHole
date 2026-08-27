@@ -643,15 +643,82 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(cfg.git_history.max_commits, 3)
             self.assertFalse(cfg.git_history.variant_hunt)
 
-    def test_apply_network_env_clears_blank_no_proxy(self) -> None:
-        cfg = AgentConfig(no_proxy="")
-
-        with patch.dict("os.environ", {"no_proxy": "old", "NO_PROXY": "old"}, clear=False):
+    def test_apply_network_env_preserves_system_values_when_config_is_blank(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"NO_PROXY": "system-upper", "no_proxy": "system-lower"},
+            clear=True,
+        ):
+            cfg = AgentConfig(no_proxy="")
             apply_network_env(cfg)
             import os
 
-            self.assertNotIn("no_proxy", os.environ)
-            self.assertNotIn("NO_PROXY", os.environ)
+            self.assertEqual(os.environ["NO_PROXY"], "system-upper")
+            self.assertEqual(os.environ["no_proxy"], "system-lower")
+
+    def test_apply_network_env_appends_each_case_once_and_replaces_config(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "NO_PROXY": "system-upper,shared.local",
+                "no_proxy": "system-lower",
+            },
+            clear=True,
+        ):
+            cfg = AgentConfig(no_proxy="shared.local,user.local")
+
+            apply_network_env(cfg)
+            apply_network_env(cfg)
+            import os
+
+            self.assertEqual(
+                os.environ["NO_PROXY"],
+                "system-upper,shared.local,user.local",
+            )
+            self.assertEqual(
+                os.environ["no_proxy"],
+                "system-lower,shared.local,user.local",
+            )
+
+            cfg.no_proxy = "next.local"
+            apply_network_env(cfg)
+
+            self.assertEqual(
+                os.environ["NO_PROXY"],
+                "system-upper,shared.local,next.local",
+            )
+            self.assertEqual(os.environ["no_proxy"], "system-lower,next.local")
+
+    def test_apply_network_env_keeps_upper_and_lower_sources_independent(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"NO_PROXY": "system-only"},
+            clear=True,
+        ):
+            cfg = AgentConfig(no_proxy="configured.local")
+
+            apply_network_env(cfg)
+            import os
+
+            self.assertEqual(os.environ["NO_PROXY"], "system-only,configured.local")
+            self.assertEqual(os.environ["no_proxy"], "configured.local")
+
+    def test_managed_no_proxy_is_synchronized_to_opencode_runtime(self) -> None:
+        cfg = AgentConfig()
+
+        apply_remote_config(cfg, {
+            "schema_version": 7,
+            "base": {
+                "tool": "opencode",
+                "executable": "nga",
+                "no_proxy": "configured.local,127.0.0.1",
+                "opencode_serve_port": None,
+            },
+            "model_pool": {"global_concurrency": 4, "models": []},
+        })
+
+        self.assertEqual(cfg.no_proxy, "configured.local,127.0.0.1")
+        self.assertEqual(cfg.opencode.no_proxy, "configured.local,127.0.0.1")
 
     def test_remote_config_round_trips_opencode_model_pool(self) -> None:
         cfg = AgentConfig()

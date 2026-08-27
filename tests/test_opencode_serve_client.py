@@ -17,6 +17,7 @@ from task_agent.serve_client import (
     OpenCodeModelInfo,
     OpenCodeModelListResult,
     OpenCodePromptResult,
+    OpenCodeProviderQuotaError,
     OpenCodeServeKey,
     OpenCodeServeManager,
     _ScanMcpLease,
@@ -31,6 +32,7 @@ from task_agent.serve_client import (
     _KNOWLEDGE_PROJECT_PLUGIN_HASH,
     _KNOWLEDGE_PROJECT_PLUGIN_SOURCE,
     _config_hash,
+    _executable_argv,
     _flush_event_state_periodically,
     _handle_serve_event,
     _log_serve_startup_output_updates,
@@ -1572,6 +1574,99 @@ def test_run_prompt_rejects_assistant_error_response_and_classifies_health(
 
         assert request_failures == expected_failures
         assert response_models == ["provider/actual"]
+
+    asyncio.run(run())
+
+
+def test_run_prompt_classifies_nested_provider_quota_error(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    provider_value = {
+        "text": "[DONE]",
+        "error": {
+            "error_msg": json.dumps({
+                "type": "RPM",
+                "message": "There is no request model quota",
+                "identity": "appId",
+                "quota": 0,
+                "used": 0,
+            }),
+            "error_code": "InferHub.002002010.429",
+        },
+        "error_code": "InferHub.002002010.429",
+        "error_msg": json.dumps({
+            "type": "RPM",
+            "message": "There is no request model quota",
+            "identity": "appId",
+            "quota": 0,
+            "used": 0,
+        }),
+        "retry_after": "-1",
+        "need_model_switch": "true",
+    }
+
+    class ProviderQuotaAsyncClient(_FakeAsyncClient):
+        message_info = {
+            "id": "message-quota",
+            "sessionID": "session-1",
+            "role": "assistant",
+            "providerID": "provider",
+            "modelID": "actual",
+            "error": {
+                "name": "UnknownError",
+                "data": {
+                    "message": (
+                        "Type validation failed: Value: "
+                        f"{json.dumps(provider_value)}. Error message: invalid_union"
+                    ),
+                },
+            },
+        }
+
+    async def run() -> None:
+        ProviderQuotaAsyncClient.instances = []
+        ProviderQuotaAsyncClient.event_lines = []
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            ProviderQuotaAsyncClient,
+        )
+        manager = OpenCodeServeManager()
+        manager._port = 4096
+        manager._acquire_session = AsyncMock(return_value="reused")
+        manager.ensure_managed_mcp = AsyncMock()
+        request_failures: list[str] = []
+        output: list[str] = []
+
+        with pytest.raises(OpenCodeProviderQuotaError) as excinfo:
+            await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=tmp_path,
+                prompt="fail",
+                model="provider/model",
+                timeout=1,
+                on_model_request_failure=request_failures.append,
+                on_line=output.append,
+                task_id="task-quota",
+                task_attempt=2,
+            )
+
+        assert excinfo.value.error_code == "InferHub.002002010.429"
+        assert excinfo.value.quota_type == "RPM"
+        assert excinfo.value.retry_after_seconds is None
+        assert "模型 Provider 请求配额暂不可用 (RPM)" in str(excinfo.value)
+        assert "invalid_union" not in str(excinfo.value)
+        assert request_failures == ["quota"]
+        assert any(
+            "START mode=created" in line
+            and "task=task-quota attempt=2" in line
+            for line in output
+        )
+        assert output[-1].startswith(
+            "[opencode][session-1][session] STOP status=failure retained=true "
+            "task=task-quota attempt=2 message=message-quota"
+        )
 
     asyncio.run(run())
 
@@ -4814,6 +4909,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         monkeypatch.setenv("https_proxy", "http://system.example:8080")
         monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9999")
         monkeypatch.setenv("all_proxy", "http://127.0.0.1:9999")
+        monkeypatch.setenv("NO_PROXY", "system-upper,shared.local")
+        monkeypatch.setenv("no_proxy", "system-lower")
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ambient-config"))
         monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "ambient.json"))
         monkeypatch.setenv("OPENCODE_CONFIG_PATH", str(tmp_path / "legacy.json"))
@@ -4832,7 +4929,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
                 ("https_proxy", "http://configured.example:8080"),
                 ("ALL_PROXY", "socks5://configured.example:1080"),
                 ("all_proxy", "socks5://configured.example:1080"),
-                ("NO_PROXY", "127.0.0.1,localhost"),
+                ("NO_PROXY", "shared.local,10.0.0.0/8"),
+                ("no_proxy", "10.0.0.0/8"),
             ),
         ), startup_cwd=startup_cwd)
 
@@ -4893,7 +4991,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
             "all_proxy",
         ):
             assert proxy_name not in envs[0]
-        assert envs[0]["NO_PROXY"] == "127.0.0.1,localhost"
+        assert envs[0]["NO_PROXY"] == "system-upper,shared.local,10.0.0.0/8"
+        assert envs[0]["no_proxy"] == "system-lower,10.0.0.0/8"
         assert envs[0]["PYTHONIOENCODING"] == "utf-8"
         assert envs[0]["PYTHONUTF8"] == "1"
         assert git_init_cwds == [startup_cwd]
@@ -4923,7 +5022,8 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert "all_proxy=(unset)" in log_text
         assert "system.example" not in log_text
         assert "configured.example" not in log_text
-        assert "NO_PROXY=127.0.0.1,localhost" in log_text
+        assert "NO_PROXY=system-upper,shared.local,10.0.0.0/8" in log_text
+        assert "no_proxy=system-lower,10.0.0.0/8" in log_text
         assert "OPENCODE_CONFIG_CONTENT=(unset)" in log_text
         assert f"XDG_CONFIG_HOME={startup_cwd / '.opendeephole-xdg-config'}" in log_text
         assert f"OPENCODE_CONFIG_DIR={startup_cwd}" in log_text
@@ -5118,6 +5218,27 @@ def test_start_locked_uses_bootstrap_cwd_without_runtime_workspace(monkeypatch, 
         assert (bootstrap_cwd / ".git").is_dir()
 
     asyncio.run(run())
+
+
+def test_windows_batch_executable_uses_command_processor(monkeypatch) -> None:
+    monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
+
+    argv = _executable_argv(
+        r"C:\Users\tester\AppData\Roaming\npm\nga.cmd",
+        "serve",
+        "--port",
+        "4096",
+    )
+
+    assert argv[:4] == [
+        r"C:\Windows\System32\cmd.exe",
+        "/d",
+        "/s",
+        "/c",
+    ]
+    assert "nga.cmd" in argv[4]
+    assert "serve --port 4096" in argv[4]
 
 
 def test_wait_health_reports_startup_output_on_early_exit(tmp_path: Path) -> None:
@@ -5355,14 +5476,20 @@ def test_wait_health_polls_once_per_second_after_unhealthy_attempts(monkeypatch)
                 return None
 
         class FakeHealthResponse:
-            def __init__(self, status_code: int) -> None:
+            def __init__(self, status_code: int, data: object) -> None:
                 self.status_code = status_code
+                self.data = data
+
+            def json(self):
+                return self.data
 
         class FakeHealthClient:
             outcomes = [
                 OSError("not ready"),
-                FakeHealthResponse(500),
-                FakeHealthResponse(200),
+                FakeHealthResponse(500, {"healthy": False}),
+                FakeHealthResponse(204, {"healthy": True}),
+                FakeHealthResponse(200, {"healthy": False}),
+                FakeHealthResponse(200, {"healthy": True}),
             ]
             requests: list[str] = []
 
@@ -5399,8 +5526,10 @@ def test_wait_health_polls_once_per_second_after_unhealthy_attempts(monkeypatch)
 
         await manager._wait_health_locked()
 
-        assert FakeHealthClient.requests == ["/global/health"] * 3
+        assert FakeHealthClient.requests == ["/global/health"] * 5
         assert sleeps == [
+            _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
+            _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
             _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
             _SERVE_HEALTH_POLL_INTERVAL_SECONDS,
         ]
@@ -5741,6 +5870,143 @@ def test_stop_locked_reclaims_listener_when_parent_already_exited(monkeypatch, t
 
         assert terminated == [44444]
         assert not marker_path.exists()
+
+    asyncio.run(run())
+
+
+def test_stop_locked_windows_retires_absent_root_and_reused_listener(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            pid = 23256
+
+            def poll(self):
+                return None
+
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "agent_pid": os.getpid(),
+                "pid": 23256,
+                "launcher_pid": 23256,
+                "port": 21442,
+                "tool": "opencode",
+                "executable": "nga.cmd",
+                "listener_pids": [26848],
+                "process_creation_times": {
+                    "23256": 100,
+                    "26848": 200,
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_parent_snapshot",
+            lambda: {os.getpid(): 1, 26848: 23256},
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_creation_time",
+            lambda pid: 300 if pid == 26848 else None,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda port: {26848} if port == 21442 else set(),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            pytest.fail,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.asyncio.to_thread",
+            fake_to_thread,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 21442
+        manager._listener_pids = {26848}
+        manager._key = OpenCodeServeKey(tool="opencode", executable="nga.cmd")
+
+        await manager._stop_locked(reason="fresh-session retry")
+
+        assert manager._proc is None
+        assert manager._port is None
+        assert manager._listener_pids == set()
+        assert not marker_path.exists()
+
+    asyncio.run(run())
+
+
+def test_stop_locked_windows_retains_unknown_owned_pid_without_killing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        class FakeProc:
+            pid = 23256
+
+            def poll(self):
+                return None
+
+        marker_path = tmp_path / "serve-marker.json"
+        marker_path.write_text(
+            json.dumps({
+                "owner": "opendeephole-agent-serve-v1",
+                "agent_pid": os.getpid(),
+                "pid": 23256,
+                "port": 21442,
+                "tool": "opencode",
+                "executable": "nga.cmd",
+                "process_creation_times": {"23256": 100},
+            }),
+            encoding="utf-8",
+        )
+
+        async def fake_to_thread(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setenv("OPENCODE_SERVE_MARKER", str(marker_path))
+        monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_parent_snapshot",
+            lambda: {os.getpid(): 1, 23256: os.getpid()},
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._windows_process_creation_time",
+            lambda _pid: None,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._listener_pids_for_port",
+            lambda _port: set(),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._terminate_process_tree",
+            pytest.fail,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client.asyncio.to_thread",
+            fake_to_thread,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._proc = FakeProc()
+        manager._port = 21442
+        manager._key = OpenCodeServeKey(tool="opencode", executable="nga.cmd")
+
+        with pytest.raises(RuntimeError, match="did not stop completely"):
+            await manager._stop_locked(reason="fresh-session retry")
+
+        assert manager._proc is not None
+        assert marker_path.exists()
 
     asyncio.run(run())
 
@@ -6612,9 +6878,15 @@ def test_start_locked_auto_port_does_not_retry_when_cleanup_is_incomplete(
                 )
 
             assert popen_ports == [4096]
-            assert "did not stop completely" in str(excinfo.value)
+            message = str(excinfo.value)
+            assert "Error: Unexpected error" in message
+            assert "cleanup after startup failure also failed" in message
+            assert "did not stop completely" in message
             assert marker_path.exists()
             manager._stop_locked.assert_awaited_once()
+            assert manager._stop_locked.await_args.kwargs["reason"] == (
+                "startup health failure cleanup"
+            )
         finally:
             serve_client._unregister_owned_serve_process(34567)
 

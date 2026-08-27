@@ -12,6 +12,7 @@ base:
   # OpenCode is the fixed implementation; executable may be opencode, nga, or a full path.
   tool: "opencode"
   executable: "opencode"
+  # Comma-separated; appended independently to inherited NO_PROXY and no_proxy.
   no_proxy: "10.0.0.0/8"
   # null = choose one free local port once for this Agent process.
   opencode_serve_port: null

@@ -7,7 +7,9 @@
 
 仓库还提供 `codex_goal_threat_analysis`：它通过 `codex_sdk` 启动一个可恢复
 Goal，用一段不超过 4000 字符的提示词完成三类产物生成。提示词只携带路径和关键约束，
-完整接口契约与三份字段 Schema 均来自该方法自己的 `references/*.json`。
+完整接口契约与三份字段 Schema 均来自该方法自己的 `references/*.json`。该方法
+显式使用 Agent 启动时从 OpenCode 模型配置生成的 Codex 托管 profile，不会回退到
+需要交互登录的裸 Codex 默认 Provider。
 
 ## 目录约定
 

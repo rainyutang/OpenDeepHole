@@ -99,6 +99,8 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             "https_proxy": "http://system.example:8080",
             "ALL_PROXY": "socks5://system.example:1080",
             "all_proxy": "socks5://system.example:1080",
+            "NO_PROXY": "system-upper,127.0.0.1,localhost",
+            "no_proxy": "system-lower,127.0.0.1,localhost",
         }
         with patch.dict(os.environ, system_proxies, clear=True):
             env = _runtime_environment({
@@ -108,8 +110,8 @@ class OpencodeWorkspaceTests(unittest.TestCase):
 
         self.assertEqual(env, {
             "NODE_TLS_REJECT_UNAUTHORIZED": "0",
-            "NO_PROXY": "127.0.0.1,localhost",
-            "no_proxy": "127.0.0.1,localhost",
+            "NO_PROXY": "system-upper,127.0.0.1,localhost",
+            "no_proxy": "system-lower,127.0.0.1,localhost",
         })
 
     def test_agent_serve_port_precedence_and_auto_port_reuse(self) -> None:

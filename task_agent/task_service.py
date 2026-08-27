@@ -32,6 +32,8 @@ from .llm_json import (
 )
 from .model_pool import (
     ModelLease,
+    ModelQuotaCircuitOpenError,
+    ModelQuotaWaitBudget,
     NoAvailableModelError,
     acquire_model_lease,
     configured_global_concurrency,
@@ -42,7 +44,12 @@ from .model_pool import (
     update_model_lease_context,
 )
 from .output_format import format_task_output, task_output_stage
-from .serve_client import OpenCodeFileWrite, OpenCodePromptResult, get_serve_manager
+from .serve_client import (
+    OpenCodeFileWrite,
+    OpenCodePromptResult,
+    OpenCodeProviderQuotaError,
+    get_serve_manager,
+)
 from .token_usage import OpenCodeTokenUsage, merge_token_usages
 
 logger = logging.getLogger(__name__)
@@ -651,6 +658,7 @@ class OpenCodeTaskService:
         last_source = OutputSource()
         task_token_usage: OpenCodeTokenUsage | None = None
         avoid_model_identities: set[tuple[str, bool, str, str]] = set()
+        quota_wait_budget = ModelQuotaWaitBudget()
 
         session_attempt = 1
         while session_attempt <= total_session_attempts:
@@ -667,6 +675,7 @@ class OpenCodeTaskService:
             model = ""
             retry_reason = ""
             health_outcome: str | None = None
+            quota_retry_after_seconds: float | None = None
             avoid_model_on_retry = False
             model_request_failed = False
             model_request_failure = ""
@@ -695,6 +704,7 @@ class OpenCodeTaskService:
                     prefer_lowest_capability=True,
                     wait_when_unavailable=not validation_debug,
                     avoid_model_identities=set(avoid_model_identities),
+                    quota_wait_budget=quota_wait_budget,
                 )
                 if lease is None:
                     if record.requeue_requested:
@@ -775,9 +785,9 @@ class OpenCodeTaskService:
                 def record_model_request_failure(kind: str) -> None:
                     nonlocal model_request_failed, model_request_failure
                     normalized = str(kind or "").strip().lower()
-                    if normalized in {"failure", "timeout", "neutral"}:
+                    if normalized in {"failure", "timeout", "quota", "neutral"}:
                         model_request_failed = True
-                    if normalized in {"failure", "timeout"}:
+                    if normalized in {"failure", "timeout", "quota"}:
                         model_request_failure = normalized
 
                 async def record_token_usage(value: OpenCodeTokenUsage) -> None:
@@ -845,6 +855,8 @@ class OpenCodeTaskService:
                                 log_stage=task_output_stage(
                                     record.execution_context.task_metadata.get("task_type")
                                 ),
+                                task_id=record.task_id,
+                                task_attempt=session_attempt,
                             )
                             assert isinstance(details, OpenCodePromptResult)
                             session_id = details.session_id
@@ -970,7 +982,7 @@ class OpenCodeTaskService:
                     ),
                 )
                 return
-            except NoAvailableModelError as exc:
+            except (NoAvailableModelError, ModelQuotaCircuitOpenError) as exc:
                 attempt_outcome = "failure"
                 last_source = source
                 self._finish_record(
@@ -988,6 +1000,31 @@ class OpenCodeTaskService:
                     ),
                 )
                 return
+            except OpenCodeProviderQuotaError as exc:
+                attempt_outcome = "failure"
+                retry_reason = str(exc)
+                avoid_model_on_retry = True
+                health_outcome = "quota"
+                quota_retry_after_seconds = exc.retry_after_seconds
+                if message_id:
+                    last_message_id = message_id
+                if text:
+                    last_text = text
+                last_model = source.model or model or last_model
+                last_source = source
+                logger.warning(
+                    "OpenCode task %s session attempt %d/%d hit recoverable "
+                    "Provider quota error code=%s retry_after=%s",
+                    record.task_id,
+                    session_attempt,
+                    total_session_attempts,
+                    exc.error_code or "unknown",
+                    (
+                        f"{exc.retry_after_seconds:g}"
+                        if exc.retry_after_seconds is not None
+                        else "backoff"
+                    ),
+                )
             except _InvalidStructuredOutput as exc:
                 retry_reason = str(exc)
                 # Invalid JSON should try another model on a fresh Session, but
@@ -1048,6 +1085,7 @@ class OpenCodeTaskService:
                     lease,
                     outcome=attempt_outcome,
                     health_outcome=health_outcome,
+                    quota_retry_after_seconds=quota_retry_after_seconds,
                     duration_seconds=attempt_duration if lease is not None else None,
                     record_completion=terminal_release,
                 )
@@ -1073,6 +1111,7 @@ class OpenCodeTaskService:
                         system_prompt=system_prompt,
                         validation_debug=validation_debug,
                         token_usage=task_token_usage,
+                        quota_wait_budget=quota_wait_budget,
                     )
                 except asyncio.CancelledError:
                     if record.requeue_requested:
@@ -1217,6 +1256,7 @@ class OpenCodeTaskService:
         system_prompt: str,
         validation_debug: bool,
         token_usage: OpenCodeTokenUsage | None,
+        quota_wait_budget: ModelQuotaWaitBudget,
     ) -> _StructuredRecoveryOutcome:
         """Run one low-capability formatter Session, then original-Session retries."""
         started_at = time.monotonic()
@@ -1272,6 +1312,7 @@ class OpenCodeTaskService:
         formatter_lease: ModelLease | None = None
         formatter_session_id = ""
         formatter_model_failure = ""
+        formatter_quota_retry_after_seconds: float | None = None
         formatter_started_at = time.monotonic()
         try:
             formatter_lease = await acquire_model_lease(
@@ -1315,7 +1356,7 @@ class OpenCodeTaskService:
             def record_formatter_failure(kind: str) -> None:
                 nonlocal formatter_model_failure
                 normalized = str(kind or "").strip().lower()
-                if normalized in {"failure", "timeout"}:
+                if normalized in {"failure", "timeout", "quota"}:
                     formatter_model_failure = normalized
 
             async def record_formatter_usage(value: OpenCodeTokenUsage) -> None:
@@ -1346,6 +1387,8 @@ class OpenCodeTaskService:
                 return_details=True,
                 show_serve_status=False,
                 log_stage=log_stage,
+                task_id=record.task_id,
+                task_attempt=session_attempt,
             )
             assert isinstance(details, OpenCodePromptResult)
             formatter_text = details.text or "\n".join(details.lines)
@@ -1423,11 +1466,15 @@ class OpenCodeTaskService:
                 )
             raise
         except Exception as exc:
+            if isinstance(exc, OpenCodeProviderQuotaError):
+                formatter_model_failure = "quota"
+                formatter_quota_retry_after_seconds = exc.retry_after_seconds
             if formatter_lease is not None:
                 await release_model_lease(
                     formatter_lease,
                     outcome=("timeout" if isinstance(exc, asyncio.TimeoutError) else "failure"),
                     health_outcome=formatter_model_failure or None,
+                    quota_retry_after_seconds=formatter_quota_retry_after_seconds,
                     duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
                     record_completion=False,
                 )
@@ -1449,6 +1496,7 @@ class OpenCodeTaskService:
         correction_lease: ModelLease | None = None
         correction_started_at = time.monotonic()
         correction_model_failure = ""
+        correction_quota_retry_after_seconds: float | None = None
         correction_source = original_source
         correction_model = original_model
         correction_message_id = message_id
@@ -1478,6 +1526,7 @@ class OpenCodeTaskService:
                 strict_capability=True,
                 prefer_lowest_capability=True,
                 wait_when_unavailable=not validation_debug,
+                quota_wait_budget=quota_wait_budget,
             )
             if correction_lease is None:
                 raise asyncio.CancelledError()
@@ -1521,7 +1570,7 @@ class OpenCodeTaskService:
             def record_correction_failure(kind: str) -> None:
                 nonlocal correction_model_failure
                 normalized = str(kind or "").strip().lower()
-                if normalized in {"failure", "timeout"}:
+                if normalized in {"failure", "timeout", "quota"}:
                     correction_model_failure = normalized
 
             async def record_correction_usage(value: OpenCodeTokenUsage) -> None:
@@ -1575,6 +1624,8 @@ class OpenCodeTaskService:
                         return_details=True,
                         show_serve_status=False,
                         log_stage=log_stage,
+                        task_id=record.task_id,
+                        task_attempt=session_attempt,
                     )
                     assert isinstance(details, OpenCodePromptResult)
                     correction_message_id = details.message_id
@@ -1664,6 +1715,9 @@ class OpenCodeTaskService:
                 correction_lease = None
             raise
         except Exception as exc:
+            if isinstance(exc, OpenCodeProviderQuotaError):
+                correction_model_failure = "quota"
+                correction_quota_retry_after_seconds = exc.retry_after_seconds
             correction_outcome = (
                 "timeout" if isinstance(exc, asyncio.TimeoutError) else "failure"
             )
@@ -1681,6 +1735,7 @@ class OpenCodeTaskService:
                     correction_lease,
                     outcome=correction_outcome,
                     health_outcome=correction_model_failure or None,
+                    quota_retry_after_seconds=correction_quota_retry_after_seconds,
                     duration_seconds=max(0.0, time.monotonic() - correction_started_at),
                     record_completion=not has_fresh_retry,
                 )

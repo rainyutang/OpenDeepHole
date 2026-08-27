@@ -2,6 +2,10 @@
 
 ## 2026-08-26
 
+- **修复** 新增的 `codex_goal_threat_analysis` 威胁分析方法此前只通过 Python SDK 启动裸 Codex app-server，没有消费 Agent 已从 OpenCode Provider/模型同步到 `$CODEX_HOME` 的托管 profile，因此即使 CLI 已安装也可能落到默认 OpenAI 登录路径，并在未登录环境中以 Goal `blocked` 结束；现在新 Goal 使用第一个同步模型的 `codex --profile <name> app-server` 启动参数，续扫按状态文件固定同一 `provider/model`，无托管模型时直接返回可操作配置错误而不再触发交互登录；用户 Codex 默认配置保持不变
+- **修复** OpenCode 兼容 Provider 把 RPM/TPM `*.429` 配额错误包装在 HTTP 成功的 assistant 类型校验异常中时，Task Agent 不再只显示 `UnknownError` 或把模型永久判坏：现在递归提取允许公开的错误码、配额类型和重试时间，按实际模型身份执行 30/60/120 秒起、最高 300 秒的临时熔断；有备用模型时 fresh Session 立即切换，全部模型冷却时当前逻辑任务可取消地有限等待并只放行一个半开探测，成功后自动恢复，重复限流重新退避，既有模型重试次数及威胁分析的一次增量加一次 clean fallback 保持不变
+- **修复** Windows 当前内存中的 OpenCode/nga Serve 停止路径此前未复用 ownership marker 的 PID 创建时间校验，可能在启动器已退出、监听 PID 已复用或监听表滞后时反复 `taskkill`、触发拒绝访问并让后续重试被“进程树未完全停止”覆盖：当前实例与历史 marker 现在统一区分 owned、absent、foreign 和 unknown，只终止确认归属的进程并安全退役已消失/复用 PID，未知身份继续阻断；Serve 冷启动健康门统一要求 `/global/health` 返回 `200` 与 `healthy: true`，启动健康错误不会再被二次清理错误覆盖，Windows `.cmd`/`.bat` 启动和版本探测使用显式命令处理器 argv，停止原因、配置哈希及任务/尝试/消息关联日志同步补齐
+- **修复** Agent 启动及每次任务同步配置时不再用设置页的代理跳过列表覆盖系统已有 `NO_PROXY/no_proxy`：大小写变量现在分别保留各自的系统原值，并以逗号追加用户在客户端设置中配置的 `base.no_proxy`，重复启动不会反复累加，配置更新会替换旧的设置部分；OpenCode/nga Serve 最终组装 `Popen` 环境时也会把任意调用方传入的大小写绕过列表分别追加到父进程原值，避免实际启动命令再次覆盖
 - **修复** 扫描详情“程序分析”的静态候选点不再把模型失败、超时或无结果统一标为“已审计”：汇总、筛选和候选标签现在严格区分审计成功、审计失败、待审计与审计中，成功结论展示漏洞描述或非问题理由，失败结论优先展示持久化错误信息；该页面同时移除漏洞验证指标、筛选、标签和详情，独立漏洞验证页面及执行流程保持不变
 - **优化** `adversarial` 与 `fp_check` 两种去误报方法的首轮业务 Prompt 收敛为 Slash Skill、当前阶段任务、Markdown 漏洞报告和当前阶段 JSON Schema：不再序列化完整漏洞对象、人工反馈、历史模式或 `prior_stages`，也不再把 Skill 正文拼入 Prompt；对抗式复核移除 `history_match`，正方与反方分别只审查原始报告，最终裁决仅接收原始、正方和反方三份报告并保留正方误报早退，fp-check 后续阶段只接收已完成阶段的 `stage_markdown`。同一 Schema 继续通过 `output_schema` 用于程序侧校验，既有并发、取消、补跑、历史结果读取及旧匹配字段保持兼容
 - **修复** 审计任务进入独立 JSON 格式匹配或原 Session JSON 纠正后，模型池任务上下文不再用 `[json_format]` / `[json_correction]` 阶段占位符覆盖原审计 Prompt；扫描详情任务队列及完成历史继续展示调用方首次提交的完整业务 Prompt 和对应长度，内部恢复阶段、实际格式匹配/纠正提示及 Session 行为保持不变
