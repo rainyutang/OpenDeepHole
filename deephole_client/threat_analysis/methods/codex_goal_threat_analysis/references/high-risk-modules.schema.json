@@ -3,6 +3,7 @@
   "$id": "high-risk-modules.schema.json",
   "title": "Threat Analysis High Risk Modules",
   "type": "array",
+  "minItems": 1,
   "items": {
     "type": "object",
     "required": [

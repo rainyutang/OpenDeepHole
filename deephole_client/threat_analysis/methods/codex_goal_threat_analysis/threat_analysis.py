@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
+import shlex
+import sys
 import traceback
 from pathlib import Path
 from typing import Any, Mapping
-
-from .schema_validation import ArtifactValidationError, validate_artifacts
-
 
 MAX_GOAL_PROMPT_CHARS = 4000
 _FINAL_DIR = "final"
@@ -20,6 +19,8 @@ _STATE_FILE = "codex-goal-state.json"
 _PROMPT_FILE = "codex-goal-prompt.txt"
 _LOG_FILE = "codex-goal.log"
 _CODEX_SQLITE_DIR = ".codex-state"
+_ATTACK_MODE_FILE = "attack_mode.json"
+_VALIDATION_POLICY_VERSION = 1
 _RESUMABLE_GOAL_STATUSES = {"active", "paused", "usageLimited"}
 
 
@@ -38,14 +39,9 @@ def run_threat_analysis(
         paths = _artifact_paths(artifact_root)
         guidance_path, schema_paths = _reference_paths()
 
-        if is_resume:
-            try:
-                _validate_outputs(paths, schema_paths)
-            except ArtifactValidationError:
-                pass
-            else:
-                return _success(paths)
-        else:
+        if is_resume and _completed_goal_outputs(artifact_root, paths):
+            return _success(paths)
+        if not is_resume:
             _clear_outputs(paths)
 
         context_path = artifact_root / _CONTEXT_FILE
@@ -88,7 +84,6 @@ def run_threat_analysis(
                 "reason": f"Codex Goal stopped before completion (status={goal_status})",
             }
 
-        _validate_outputs(paths, schema_paths)
         return _success(paths)
     except Exception as exc:
         return {
@@ -107,10 +102,27 @@ def build_goal_prompt(
 ) -> str:
     """Build the single Goal prompt and enforce its hard size limit."""
 
+    attack_mode_path = guidance_path.parent / _ATTACK_MODE_FILE
+    validator_path = Path(__file__).resolve().parent / "schema_validation.py"
+    validation_command = shlex.join(
+        (
+            sys.executable,
+            str(validator_path),
+            "--value-assets",
+            str(paths["value_asset_path"]),
+            "--high-risk-modules",
+            str(paths["high_risk_modules_path"]),
+            "--attack-trees",
+            str(paths["attack_tree_path"]),
+            "--references-root",
+            str(guidance_path.parent),
+        )
+    )
     prompt = f"""你是威胁分析工程师。请使用攻击树威胁分析方法分析真实源码，生成可供后续威胁审计直接消费的最终产物。
 
 开始前依次读取并遵守：
-- 分析指南 JSON（规定分析步骤、证据要求、三类产物关系和完成检查）：{guidance_path}
+- 分析指南（完整节点定义、分析方法、跨产物约束和完成检查）：{guidance_path}
+- 攻击模式库（路径中只能原样引用这里的编号和名称）：{attack_mode_path}
 - 价值资产输出 Schema：{schema_paths['value_asset_path']}
 - 高风险模块输出 Schema：{schema_paths['high_risk_modules_path']}
 - 攻击树输出 Schema：{schema_paths['attack_tree_path']}
@@ -118,15 +130,19 @@ def build_goal_prompt(
 分析范围：{code_root}（只读）。先识别项目架构、信任边界、外部入口、敏感数据流和安全关键职责，再按以下顺序落盘，可以参考代码仓中已有的相关文档：
 1. 从代码职责和攻击损失识别价值资产，写入：{paths['value_asset_path']}
 2. 找出外部暴露、处理不可信输入、执行安全决策或操作敏感数据的模块；“代码目录”使用源码根目录相对 POSIX 路径，写入：{paths['high_risk_modules_path']}
-3. 以价值资产受损为根节点、可实施攻击入口为叶子节点，构造有代码证据支撑的节点、边和完整攻击路径，写入：{paths['attack_tree_path']}
+3. 按“外部暴露高风险模块（叶）→内部源码模块（中）→价值资产（根）”构造有代码证据支撑的攻击路径，写入：{paths['attack_tree_path']}
 
-三类产物必须一致：攻击树中的资产与价值资产条目一致；引用的高风险模块真实存在且名称一致；同一树内 ID 唯一，所有节点和边引用可解析，路径顺序能从叶子到根。攻击模式只能取自扫描上下文，无法证实关联时使用空数组。
+关键硬约束：每棵树的根节点必须是一个已识别价值资产，node_name 与该价值资产的资产名完全相同，tree.value_asset 使用该资产的原始四字段；每个叶子节点必须是“是否外部暴露面=是”的高风险模块，node_name/module_name 与该模块的规范名称完全相同；内部节点只能是路径中的真实内部源码模块，不是漏洞、攻击动作、条件、权限或结果。
+
+三类产物必须保持来源一致：根节点关联的资产来自价值资产文件，叶子和路径引用的高风险模块来自高风险模块文件。路径首节点为叶子、末节点为根，中间只能是内部节点，边与节点逐段对应。扫描上下文中的 attack_modes 只作筛选或优先级提示，不能替代或扩写攻击模式库。
 
 不得修改源码，只能写指定产物。不得编造接口、调用关系或攻击路径，不得输出 Schema 之外的字段。
 
 ##完成条件:
-1. 需要输出的三份文件，逐项检查 JSON Schema 和跨产物引用，必须检查通过；不合格就修正后再结束 Goal；
-2. 分析必须完整，没有遗漏价值资产、高风险模块和威胁，攻击树中要考虑所有可能的攻击模式，至少输出最高风险的前10个威胁，根据实际情况如果没有10个威胁也可以"""
+1. 三份文件写完后，必须在本 Goal 内执行以下校验命令：
+{validation_command}
+命令退出码为0才允许结束 Goal；如果失败，必须根据错误修正产物并反复执行，直至通过。不得跳过命令或只做人工目测；
+2. 分析必须完整，没有遗漏价值资产、高风险模块和威胁；针对每条攻击路径分析适用攻击模式并按可能性从高到低排列，有足够适用模式时至少输出10个，确实不足10个时输出全部实际适用模式"""
     if len(prompt) > MAX_GOAL_PROMPT_CHARS:
         raise ValueError(
             f"Codex Goal prompt exceeds {MAX_GOAL_PROMPT_CHARS} characters: {len(prompt)}"
@@ -256,12 +272,13 @@ def _require_codex_runtime() -> Any:
 def _reference_paths() -> tuple[Path, dict[str, Path]]:
     references_root = Path(__file__).resolve().parent / "references"
     guidance_path = references_root / "analysis-guidance.json"
+    attack_mode_path = references_root / _ATTACK_MODE_FILE
     schema_paths = {
         "value_asset_path": references_root / "value-assets.schema.json",
         "high_risk_modules_path": references_root / "high-risk-modules.schema.json",
         "attack_tree_path": references_root / "attack-trees.schema.json",
     }
-    for path in (guidance_path, *schema_paths.values()):
+    for path in (guidance_path, attack_mode_path, *schema_paths.values()):
         if not path.is_file():
             raise FileNotFoundError(f"threat-analysis reference file is missing: {path}")
     return guidance_path, schema_paths
@@ -277,17 +294,15 @@ def _artifact_paths(root: Path) -> dict[str, Path]:
     }
 
 
-def _validate_outputs(
+def _completed_goal_outputs(
+    artifact_root: Path,
     paths: Mapping[str, Path],
-    schema_paths: Mapping[str, Path],
-) -> None:
-    validate_artifacts(
-        value_asset_path=paths["value_asset_path"],
-        high_risk_modules_path=paths["high_risk_modules_path"],
-        attack_tree_path=paths["attack_tree_path"],
-        value_asset_schema_path=schema_paths["value_asset_path"],
-        high_risk_modules_schema_path=schema_paths["high_risk_modules_path"],
-        attack_tree_schema_path=schema_paths["attack_tree_path"],
+) -> bool:
+    state = _read_state(artifact_root / _STATE_FILE)
+    return (
+        state.get("goal_status") == "complete"
+        and state.get("validation_policy_version") == _VALIDATION_POLICY_VERSION
+        and all(path.is_file() for path in paths.values())
     )
 
 
@@ -355,13 +370,12 @@ def _write_codex_goal_state(
         {
             "thread_id": str(thread_id or ""),
             "goal_status": str(goal_status or "unknown"),
+            "validation_policy_version": _VALIDATION_POLICY_VERSION,
         },
     )
 
 
 def _safe_reason(exc: Exception) -> str:
-    if isinstance(exc, ArtifactValidationError):
-        return f"Codex Goal produced invalid threat-analysis artifacts: {exc}"
     if isinstance(exc, (FileNotFoundError, NotADirectoryError, ValueError)):
         return str(exc)
     if isinstance(exc, TypeError):
