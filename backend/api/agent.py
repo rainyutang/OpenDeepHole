@@ -4748,21 +4748,34 @@ _AGENT_DOWNLOAD_SKIP_DIRS = {
 }
 _AGENT_RUNTIME_SKIP_DIRS = set(_AGENT_DOWNLOAD_SKIP_DIRS)
 _AGENT_SKIP_SUFFIXES = {".pyc", ".pyo"}
+_AGENT_SKIP_FILES = {
+    "deephole_client/llm_proxy/LLM_Proxy/config.yaml",
+}
 
 
 def _agent_runtime_hash_scope() -> dict:
     return {
-        "version": 3,
+        "version": 4,
         "dirs": list(_AGENT_RUNTIME_DIRS),
         "tool_dirs": list(_AGENT_TOOL_DIRS),
         "root_files": list(_AGENT_RUNTIME_ROOT_FILES),
         "skip_dirs": sorted(_AGENT_RUNTIME_SKIP_DIRS),
         "skip_suffixes": sorted(_AGENT_SKIP_SUFFIXES),
+        "skip_files": sorted(_AGENT_SKIP_FILES),
     }
 
 
 def _should_skip_agent_file(path: Path, skip_dirs: set[str]) -> bool:
-    return path.suffix in _AGENT_SKIP_SUFFIXES or any(part in skip_dirs for part in path.parts)
+    normalized = path.as_posix()
+    generated = any(
+        normalized == item or normalized.endswith(f"/{item}")
+        for item in _AGENT_SKIP_FILES
+    )
+    return (
+        generated
+        or path.suffix in _AGENT_SKIP_SUFFIXES
+        or any(part in skip_dirs for part in path.parts)
+    )
 
 
 def _iter_agent_runtime_files():

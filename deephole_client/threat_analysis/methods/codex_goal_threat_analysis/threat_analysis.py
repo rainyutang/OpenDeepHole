@@ -121,6 +121,7 @@ def build_goal_prompt(
     prompt = f"""你是威胁分析工程师。请使用攻击树威胁分析方法分析真实源码，生成可供后续威胁审计直接消费的最终产物。
 
 开始前依次读取并遵守：
+- 扫描上下文（源码范围、产物路径和可选输入）：{context_path}
 - 分析指南（完整节点定义、分析方法、跨产物约束和完成检查）：{guidance_path}
 - 攻击模式库（路径中只能原样引用这里的编号和名称）：{attack_mode_path}
 - 价值资产输出 Schema：{schema_paths['value_asset_path']}
@@ -159,7 +160,14 @@ def _run_goal(
     state_path = artifact_root / _STATE_FILE
     saved_state = _read_state(state_path) if is_resume else {}
     saved_thread_id = str(saved_state.get("thread_id") or "").strip() or None
-    codex_state = _require_codex_runtime()
+    codex_state, codex_model = _resolve_codex_runtime(
+        preferred_model_id=(
+            str(saved_state.get("model_id") or "").strip() or None
+        ),
+        preferred_profile=(
+            str(saved_state.get("profile") or "").strip() or None
+        ),
+    )
     # Imported lazily so method discovery remains available before optional
     # Agent dependencies have been installed.
     from codex_sdk import (
@@ -173,11 +181,14 @@ def _run_goal(
 
     launch_args = (
         *codex_state.command,
+        "--profile",
+        codex_model.profile,
         "app-server",
         "--listen",
         "stdio://",
     )
     thread_options = {
+        "model": codex_model.id,
         "approval_mode": ApprovalMode.deny_all,
         "sandbox": Sandbox.workspace_write,
         "config": {
@@ -203,6 +214,11 @@ def _run_goal(
 
     log_mode = "a" if is_resume else "w"
     with log_path.open(log_mode, encoding="utf-8") as output:
+        output.write(
+            "Codex managed model: "
+            f"{codex_model.id} (profile={codex_model.profile})\n"
+        )
+        output.flush()
         try:
             with CodexController(
                 # Keep the writable workspace on the artifact side. The source is
@@ -220,27 +236,41 @@ def _run_goal(
                         state_path,
                         controller.thread_id,
                         current.status if current else None,
+                        model_id=codex_model.id,
+                        profile=codex_model.profile,
                     )
                     if (
                         current is not None
                         and current.status in _RESUMABLE_GOAL_STATUSES
                     ):
-                        result = controller.resume_goal()
+                        result = controller.resume_goal(
+                            model=codex_model.id,
+                        )
                     else:
-                        result = controller.goal(prompt)
+                        result = controller.goal(
+                            prompt,
+                            model=codex_model.id,
+                        )
                 else:
                     controller.start_thread(**thread_options)
                     _write_codex_goal_state(
                         state_path,
                         controller.thread_id,
                         "active",
+                        model_id=codex_model.id,
+                        profile=codex_model.profile,
                     )
-                    result = controller.goal(prompt)
+                    result = controller.goal(
+                        prompt,
+                        model=codex_model.id,
+                    )
 
                 _write_codex_goal_state(
                     state_path,
                     controller.thread_id,
                     result.goal.status,
+                    model_id=codex_model.id,
+                    profile=codex_model.profile,
                 )
                 return result.goal.status
         except Exception as exc:
@@ -257,8 +287,12 @@ def _run_goal(
             raise
 
 
-def _require_codex_runtime() -> Any:
-    """Return the prepared Codex CLI runtime used by app-server."""
+def _resolve_codex_runtime(
+    *,
+    preferred_model_id: str | None,
+    preferred_profile: str | None,
+) -> tuple[Any, Any]:
+    """Select one managed profile and never fall back to bare Codex."""
     from deephole_client.codex_runtime import get_codex_runtime_state
 
     state = get_codex_runtime_state()
@@ -266,7 +300,45 @@ def _require_codex_runtime() -> Any:
         detail = str(state.error or "Codex has no executable command").strip()
         raise ValueError(f"Codex CLI is unavailable: {detail}")
 
-    return state
+    models = tuple(state.models or ())
+    if state.model_config_error or not models:
+        detail = str(state.model_config_error or "").strip()
+        suffix = f" Detail: {detail}." if detail else ""
+        raise ValueError(
+            "Codex Goal requires a ready OpenDeepHole managed model "
+            "profile and local LLM proxy. Bare Codex fallback is disabled."
+            f"{suffix}"
+        )
+
+    selected = None
+    if preferred_model_id:
+        selected = next(
+            (model for model in models if model.id == preferred_model_id),
+            None,
+        )
+    elif preferred_profile:
+        selected = next(
+            (model for model in models if model.profile == preferred_profile),
+            None,
+        )
+    else:
+        selected = models[0]
+    if selected is None:
+        saved = preferred_model_id or preferred_profile or "<unknown>"
+        raise ValueError(
+            "The Codex model profile saved for this resumable Goal is no "
+            f"longer available: {saved}"
+        )
+    if preferred_profile and selected.profile != preferred_profile:
+        raise ValueError(
+            "The Codex profile saved for this resumable Goal no longer "
+            f"matches its model: {preferred_profile}"
+        )
+    if not str(selected.profile or "").strip():
+        raise ValueError(
+            f"Synchronized Codex model {selected.id} has no profile name"
+        )
+    return state, selected
 
 
 def _reference_paths() -> tuple[Path, dict[str, Path]]:
@@ -362,6 +434,9 @@ def _write_codex_goal_state(
     path: Path,
     thread_id: str | None,
     goal_status: str | None,
+    *,
+    model_id: str,
+    profile: str,
 ) -> None:
     """Persist only state owned by this threat-analysis method."""
 
@@ -370,6 +445,8 @@ def _write_codex_goal_state(
         {
             "thread_id": str(thread_id or ""),
             "goal_status": str(goal_status or "unknown"),
+            "model_id": model_id,
+            "profile": profile,
             "validation_policy_version": _VALIDATION_POLICY_VERSION,
         },
     )

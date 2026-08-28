@@ -877,6 +877,24 @@ async def run_scan(
                 )
                 await _publish_engine_run(reporter, scan_id, run)
                 return run, None
+            if codex_state.model_config_error or not codex_state.models:
+                reason = (
+                    codex_state.model_config_error
+                    or "no synchronized Codex model is available"
+                )
+                run.status = "error"
+                run.error_message = (
+                    "Codex model configuration is unavailable: "
+                    f"{reason}"
+                )
+                run.finished_at = datetime.now(timezone.utc).isoformat()
+                await emit(
+                    "mining_engine",
+                    f"{selection.engine_label} cannot start: "
+                    f"{run.error_message}",
+                )
+                await _publish_engine_run(reporter, scan_id, run)
+                return run, None
             codex_command = list(codex_state.command)
             codex_models = [
                 model.engine_value(codex_state.command)

@@ -170,7 +170,7 @@ DeepHole 2.0 Agent
 
 Codex CLI ready: codex-cli 0.x.y
 Codex model profiles ready: synchronized 4 platform model(s). Trigger: platform model configuration.
-Codex default model ready: corp/threat-model.
+Codex default model ready: codemate/threat-model.
 
   Connected via WebSocket, agent_id: a1b2c3d4...
 ```
@@ -181,29 +181,31 @@ Agent 在连接服务端前检查一次 Codex CLI。若本机没有可调用的 
 共享 120 秒总超时。缺少 npm、安装失败或超时只会打印告警并继续连接，未声明依赖 Codex 的
 漏洞挖掘引擎不受影响；失败后到下次重启 Agent 才会再次尝试。
 
-Codex CLI 可用后不会在安装或 Agent 启动阶段自行扫描模型。Agent 收到平台客户端配置时，只同步
-`model_pool.models` 中已启用的显式 `provider/model`；创建扫描时，平台还会把同一有序模型快照随
-任务下发，客户端完成运行时更新后、真正开始扫描前再次进行幂等同步，因此此前已经配置模型且不会再
-修改配置的存量客户端也能补齐 Codex。Provider、模型定义、地址和凭据来自客户端启动 OpenCode
-Serve 时使用的同一份有效合并配置，不从平台传输密钥。
+Codex CLI 可用后，Agent 在收到平台客户端配置、创建扫描或恢复扫描时，只同步
+`model_pool.models` 中已启用的显式 `codemate/model`。Provider、模型定义和上游地址来自客户端
+启动 OpenCode Serve 时使用的同一份有效合并配置，不从平台传输密钥。Agent 将
+`options.baseURL` 追加 `/chat/completions`，按当前模型顺序生成
+`deephole_client/llm_proxy/LLM_Proxy/config.yaml`，再用当前 Python 解释器在该目录运行
+`main.py`。代理固定监听 `127.0.0.1:31943`，以 `/v1/models` 返回全部预期模型作为就绪条件；
+配置内容未变化时复用原进程，地址或模型变化时只重启代理，不重启正在运行的 Codex。
 
-每个选中模型会在当前 `$CODEX_HOME`（默认 `~/.codex`）生成一个独立的 OpenDeepHole 托管
-profile。如果 Codex 用户配置没有已有默认模型、profile 或 Provider 选择，Agent 会增加一个带
-所有权标记的默认模型/Provider 块，使用平台顺序中的第一个模型，使直接运行的 Codex CLI 和默认
-启动的 SDK app-server 都能读取该模型。用户已有内容逐字保留，只允许更新或清理 OpenDeepHole
-自己创建的块和 profile；同名非托管文件、配置损坏或模型无法从客户端有效配置映射时，本次同步只
-输出脱敏告警并保留上一次成功配置。同步失败、没有可映射模型或 Codex
-版本低于 0.134 时只告警，通用 `requires_codex` 漏洞挖掘引擎仍可回退到用户自己的 Codex
-默认配置；`codex_goal_threat_analysis` 威胁分析方法则为了保证非交互执行，必须存在至少一个同步成功的
-托管 profile。它在新 Goal 中选用第一个 profile，并以 `codex --profile <name> app-server`
-启动 SDK；续扫会继续使用已保存的模型。因此工具任务不会进入 Codex 登录流程；如果 profile 缺失会直接
-报告可操作的配置错误。Agent 不会在启动时探测模型服务，协议或凭据错误会在引擎实际调用时报告。
-直接运行不带 `--profile` 的 `codex` 时，已有用户默认保持优先；没有用户默认时使用上述托管选择。
+`LLM_Proxy` 实现及 `hooks/codemate_hook.py` 需要随客户端放在上述目录，OpenDeepHole 只负责生成
+配置和管理进程，不复制代理实现。生成的 YAML 不包含 `apiKey`，上游鉴权继续由现有代理及 Hook 处理；
+该文件不进入 Git、客户端下载包或 runtime hash，自更新也不会把客户端上的现有文件误删。代理启动
+失败、入口缺失、十秒内未就绪或固定端口被未知进程占用时，只禁用 Codex 相关能力，Agent 与非 Codex
+引擎继续运行；Agent 只终止自己创建的代理进程。
+
+每个选中模型会在当前 `$CODEX_HOME`（默认 `~/.codex`）生成独立的 OpenDeepHole 托管
+profile，Provider 固定使用 `base_url = "http://127.0.0.1:31943/v1"` 和 Responses 协议，模型名
+保持完整的 `codemate/model`。用户已有 Codex 配置逐字保留，只更新或清理 OpenDeepHole 自有块和
+profile。`requires_codex` 引擎必须同时具备可用 CLI、代理和托管 profile，不再回退到用户自己的
+默认 Provider。`codex_goal_threat_analysis` 以 `codex --profile <name> app-server` 启动，
+并把模型与 profile 写入 Goal 状态；续扫继续使用原选择，缺失时直接报告配置错误。
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。Agent 默认允许接收最大 64 MiB 的单条
 WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续扫命令仍超过该限制，可设置正整数
 环境变量 `OPENDEEPHOLE_WS_MAX_MESSAGE_MB` 后重启 Agent。
-启动后的 Agent 支持任务执行前自动更新运行时代码。服务端更新 `deephole_client/`（包含各独立过程及其规则、技能和验证器）、`task_agent/`、`backend/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描、恢复扫描、去误报或漏洞验证任务前下载最新 runtime 并重启后继续执行；runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash。创建或恢复扫描时，选中的用户规则还会按 `static/` 与 `audit/` 两个根目录传输。如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
+启动后的 Agent 支持任务执行前自动更新运行时代码。服务端更新 `deephole_client/`（包含 LLM Proxy 目录、各独立过程及其规则、技能和验证器）、`task_agent/`、`backend/`、`mcp_server/`、包内 Windows ctags 目录或 `requirements-agent.txt` 后，旧 Agent 会在下次启动扫描、恢复扫描、去误报或漏洞验证任务前下载最新 runtime 并重启后继续执行；重启前会先停止自有 LLM Proxy，runtime 更新包会携带快照 manifest，用于校验下载 zip 的文件集合和逐文件 hash。创建或恢复扫描时，选中的用户规则还会按 `static/` 与 `audit/` 两个根目录传输。如果更新了 `run_agent.sh` 或 `run_agent.bat`，需要重新下载 Agent 包。
 
 验证方法的 manifest、kwargs、返回值和 OpenCode 调用约定见 [`docs/vulnerability_validation.md`](docs/vulnerability_validation.md)。
 

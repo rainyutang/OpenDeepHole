@@ -2,6 +2,8 @@
 
 ## 2026-08-28
 
+- **新增** Codex 模型通过客户端内置的 LLM 转换代理访问 Codemate：Agent 从当前有效 OpenCode `codemate` Provider 生成 `deephole_client/llm_proxy/LLM_Proxy/config.yaml`，将上游 `baseURL` 追加 `/chat/completions`，固定在 `127.0.0.1:31943` 运行现有 `python main.py`，并让托管 Codex profile 使用本地 `/v1` Responses 接口及完整 `codemate/model` 路由。新建、恢复和在线模型配置更新都会等待代理就绪；配置变化只重启代理，不重启 Codex
+- **修复** LLM Proxy 入口缺失、启动失败、就绪超时或未知端口占用时只禁用依赖 Codex 的过程，非 Codex 扫描与 Agent 连接继续运行；Codex Goal 显式启动并持久化托管 profile，续扫不再回退到裸 Codex。Agent 退出或自更新前会停止自有代理，生成的 `config.yaml` 不进入下载包、runtime hash 或过期文件清理
 - **优化** 漏洞去重模型的比较材料不再包装为包含 `current_report` / `existing_reports` 的 JSON，改为按编号直接传递当前及同函数已接受的完整 Markdown 漏洞报告；Prompt 仅要求判断当前问题是否已经存在，原有 `duplicate` / `reason` 结构化输出、确定性位置去重及模型失败放行行为保持不变
 - **变更** 威胁审计的每个模型任务由可返回多个问题收敛为最多返回一个问题：裸 JSON List 契约继续保留，未发现问题返回 `[]`，确认问题时仅返回单元素 List，Schema 新增 `maxItems: 1` 强制校验；同时发现多个符合要求的问题时，Prompt 要求只保留真实可利用性、代码证据和完整调用链最充分的问题，证据相当时选择严重程度最高的问题，且不得把多个独立问题合并为一个问题。任务拆分、并发、存储、前端接口及历史结果保持不变
 

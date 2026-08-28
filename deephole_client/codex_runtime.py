@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .codex_profiles import CodexModelProfile, sync_codex_profiles
+from .llm_proxy import LLM_PROXY_BASE_URL, sync_llm_proxy
 
 
 CODEX_INSTALL_TIMEOUT_SECONDS = 120.0
@@ -489,14 +490,14 @@ def _model_config_fingerprint(
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def sync_platform_codex_models(
+async def sync_platform_codex_models(
     config: Any,
     *,
     model_ids: Sequence[str] | str | None = None,
     force: bool = False,
     reason: str = "platform configuration",
 ) -> CodexRuntimeState:
-    """Reconcile Codex with platform-selected models without blocking Agent work."""
+    """Reconcile the local proxy and managed Codex model profiles."""
     global _last_platform_model_fingerprint, _runtime_state
 
     selected = (
@@ -509,7 +510,11 @@ def sync_platform_codex_models(
         _runtime_state = state
     if not state.available:
         error = state.error or "Codex CLI is unavailable"
-        _runtime_state = replace(state, model_config_error=error)
+        _runtime_state = replace(
+            state,
+            models=(),
+            model_config_error=error,
+        )
         print(
             "Warning: Codex model synchronization skipped: "
             f"{error}. Trigger: {reason}.",
@@ -520,19 +525,48 @@ def sync_platform_codex_models(
     try:
         opencode_config = _effective_opencode_config(config) if selected else {}
         fingerprint = _model_config_fingerprint(selected, opencode_config)
-        if not force and fingerprint == _last_platform_model_fingerprint:
+        proxy_result = await sync_llm_proxy(opencode_config, selected)
+        if not proxy_result.available:
+            error = proxy_result.error or "LLM proxy is unavailable"
+            _last_platform_model_fingerprint = None
+            _runtime_state = replace(
+                state,
+                models=(),
+                model_config_warnings=(),
+                model_config_error=error,
+            )
+            print(
+                "Warning: Codex LLM proxy synchronization failed: "
+                f"{error}. Codex-dependent capabilities are disabled. "
+                f"Trigger: {reason}.",
+                flush=True,
+            )
+            return _runtime_state
+        if (
+            not force
+            and fingerprint == _last_platform_model_fingerprint
+            and not state.model_config_error
+        ):
             return get_codex_runtime_state()
         result = sync_codex_profiles(
             codex_version=state.version,
             opencode_config=opencode_config,
             selected_model_ids=selected,
+            proxy_base_url=LLM_PROXY_BASE_URL,
+            proxy_provider_name="OpenDeepHole LLM Proxy",
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         error = (
             "unexpected model profile synchronization failure "
             f"({type(exc).__name__})"
         )
-        _runtime_state = replace(state, model_config_error=error)
+        _runtime_state = replace(
+            state,
+            models=(),
+            model_config_error=error,
+        )
         print(
             "Warning: Codex model synchronization failed: "
             f"{error}. Existing managed configuration was left unchanged. "
@@ -546,6 +580,7 @@ def sync_platform_codex_models(
     if result.error:
         _runtime_state = replace(
             state,
+            models=(),
             model_config_warnings=result.warnings,
             model_config_error=result.error,
         )

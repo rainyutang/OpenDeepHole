@@ -79,6 +79,7 @@ class _RenderedProfile:
     provider_key: str
     provider_name: str
     base_url: str
+    codex_model_id: str
     env_key: str = ""
     bearer_token: str = ""
     context_window: int | None = None
@@ -200,19 +201,23 @@ def _render_profile(
     provider_config: Mapping[str, Any],
     model_id: str,
     model_config: Mapping[str, Any],
+    proxy_base_url: str = "",
+    proxy_provider_name: str = "",
 ) -> tuple[_RenderedProfile | None, tuple[str, ...]]:
     canonical_id = f"{provider_id}/{model_id}"
     options = provider_config.get("options")
     if not isinstance(options, Mapping):
         options = {}
-    base_url = _valid_base_url(options.get("baseURL"))
+    base_url = _valid_base_url(
+        proxy_base_url or options.get("baseURL")
+    )
     if not base_url:
         return None, (
             f"Skipped OpenCode model {canonical_id}: provider baseURL is "
             "missing or invalid",
         )
 
-    api_key = options.get("apiKey")
+    api_key = None if proxy_base_url else options.get("apiKey")
     env_key = ""
     bearer_token = ""
     if isinstance(api_key, str) and api_key:
@@ -234,12 +239,17 @@ def _render_profile(
         profile=_profile_name(provider_id, model_id),
     )
     provider_key = _provider_key(provider_id)
-    provider_name = str(provider_config.get("name") or provider_id).strip()
+    provider_name = str(
+        proxy_provider_name
+        or provider_config.get("name")
+        or provider_id
+    ).strip()
     context_window = _context_window(model_config)
+    codex_model_id = canonical_id if proxy_base_url else model_id
 
     lines = [
         _MANAGED_MARKER,
-        f"model = {_toml_string(model_id)}",
+        f"model = {_toml_string(codex_model_id)}",
         f"model_provider = {_toml_string(provider_key)}",
     ]
     if context_window is not None:
@@ -268,6 +278,7 @@ def _render_profile(
         provider_key=provider_key,
         provider_name=provider_name or provider_id,
         base_url=base_url,
+        codex_model_id=codex_model_id,
         env_key=env_key,
         bearer_token=bearer_token,
         context_window=context_window,
@@ -277,6 +288,9 @@ def _render_profile(
 def _render_profiles(
     config: Mapping[str, Any],
     selected_model_ids: Sequence[str],
+    *,
+    proxy_base_url: str = "",
+    proxy_provider_name: str = "",
 ) -> tuple[tuple[_RenderedProfile, ...], tuple[str, ...], str]:
     selected: list[tuple[str, str, str]] = []
     seen: set[str] = set()
@@ -335,6 +349,8 @@ def _render_profiles(
                 provider_config=provider_config,
                 model_id=model_id,
                 model_config=model_config,
+                proxy_base_url=proxy_base_url,
+                proxy_provider_name=proxy_provider_name,
             )
         except Exception as exc:
             return (), tuple(warnings), (
@@ -408,7 +424,7 @@ def _managed_default_block(
 
     lines = [
         _DEFAULT_CONFIG_BEGIN,
-        f"model = {_toml_string(selected.model.model_id)}",
+        f"model = {_toml_string(selected.codex_model_id)}",
         f"model_provider = {_toml_string(provider_key)}",
     ]
     if (
@@ -813,6 +829,8 @@ def sync_codex_profiles(
     env: Mapping[str, str] | None = None,
     platform: str | None = None,
     codex_home: Path | None = None,
+    proxy_base_url: str = "",
+    proxy_provider_name: str = "",
 ) -> CodexProfileSyncResult:
     """Synchronize selected client models and fill a missing default safely."""
     if not isinstance(opencode_config, Mapping):
@@ -828,6 +846,8 @@ def sync_codex_profiles(
     rendered, conversion_warnings, conversion_error = _render_profiles(
         opencode_config,
         selected_model_ids,
+        proxy_base_url=proxy_base_url,
+        proxy_provider_name=proxy_provider_name,
     )
     warnings = tuple(
         item

@@ -17,6 +17,10 @@ from deephole_client.codex_profiles import (
     CodexModelProfile,
     CodexProfileSyncResult,
 )
+from deephole_client.llm_proxy import (
+    LLM_PROXY_BASE_URL,
+    LLMProxySyncResult,
+)
 
 
 class CodexRuntimeTests(unittest.TestCase):
@@ -29,6 +33,16 @@ class CodexRuntimeTests(unittest.TestCase):
         )
         self.profile_sync = self.profile_sync_patcher.start()
         self.addCleanup(self.profile_sync_patcher.stop)
+        self.proxy_sync_patcher = patch.object(
+            codex_runtime,
+            "sync_llm_proxy",
+            new=AsyncMock(return_value=LLMProxySyncResult(
+                available=True,
+                running=True,
+            )),
+        )
+        self.proxy_sync = self.proxy_sync_patcher.start()
+        self.addCleanup(self.proxy_sync_patcher.stop)
 
     def tearDown(self) -> None:
         codex_runtime._reset_codex_runtime_state_for_tests()
@@ -121,34 +135,30 @@ class CodexRuntimeTests(unittest.TestCase):
         self,
     ) -> None:
         config = self._agent_config(
-            SimpleNamespace(model="z/last", enabled=True),
-            SimpleNamespace(model="a/first", enabled=True),
-            SimpleNamespace(model="z/last", enabled=True),
+            SimpleNamespace(model="codemate/last", enabled=True),
+            SimpleNamespace(model="codemate/first", enabled=True),
+            SimpleNamespace(model="codemate/last", enabled=True),
             SimpleNamespace(model="off/ignored", enabled=False),
         )
         effective = {
             "provider": {
-                "z": {
-                    "options": {"baseURL": "https://z.example/v1"},
-                    "models": {"last": {}},
-                },
-                "a": {
-                    "options": {"baseURL": "https://a.example/v1"},
-                    "models": {"first": {}},
+                "codemate": {
+                    "options": {"baseURL": "https://models.example/v1"},
+                    "models": {"last": {}, "first": {}},
                 },
             },
         }
         first = CodexModelProfile(
-            id="z/last",
-            provider_id="z",
+            id="codemate/last",
+            provider_id="codemate",
             model_id="last",
-            profile="opendeephole-z-last",
+            profile="opendeephole-codemate-last",
         )
         second = CodexModelProfile(
-            id="a/first",
-            provider_id="a",
+            id="codemate/first",
+            provider_id="codemate",
             model_id="first",
-            profile="opendeephole-a-first",
+            profile="opendeephole-codemate-first",
         )
         self.profile_sync.return_value = CodexProfileSyncResult(
             models=(first, second),
@@ -166,7 +176,9 @@ class CodexRuntimeTests(unittest.TestCase):
             ) as build_runtime,
             patch("builtins.print") as output,
         ):
-            state = codex_runtime.sync_platform_codex_models(config)
+            state = asyncio.run(
+                codex_runtime.sync_platform_codex_models(config)
+            )
 
         self.assertEqual(state.models, (first, second))
         build_runtime.assert_called_once_with(
@@ -176,7 +188,13 @@ class CodexRuntimeTests(unittest.TestCase):
         self.profile_sync.assert_called_once_with(
             codex_version="codex-cli 0.149.1",
             opencode_config=effective,
-            selected_model_ids=("z/last", "a/first"),
+            selected_model_ids=("codemate/last", "codemate/first"),
+            proxy_base_url=LLM_PROXY_BASE_URL,
+            proxy_provider_name="OpenDeepHole LLM Proxy",
+        )
+        self.proxy_sync.assert_awaited_once_with(
+            effective,
+            ("codemate/last", "codemate/first"),
         )
         rendered = "\n".join(str(call) for call in output.call_args_list)
         self.assertIn("2 platform model", rendered)
@@ -184,13 +202,13 @@ class CodexRuntimeTests(unittest.TestCase):
 
     def test_config_fingerprint_tracks_provider_changes_and_scan_force(self) -> None:
         config = self._agent_config(
-            SimpleNamespace(model="p/model", enabled=True),
+            SimpleNamespace(model="codemate/model", enabled=True),
         )
         codex_runtime._runtime_state = self._ready_state()
         runtime = SimpleNamespace(config_content=json.dumps({
             "provider": {
-                "p": {
-                    "options": {"baseURL": "https://p.example/v1"},
+                "codemate": {
+                    "options": {"baseURL": "https://models.example/v1"},
                     "models": {"model": {}},
                 },
             },
@@ -204,40 +222,42 @@ class CodexRuntimeTests(unittest.TestCase):
             ) as build_runtime,
             patch("builtins.print"),
         ):
-            codex_runtime.sync_platform_codex_models(config)
-            codex_runtime.sync_platform_codex_models(config)
+            asyncio.run(codex_runtime.sync_platform_codex_models(config))
+            asyncio.run(codex_runtime.sync_platform_codex_models(config))
             runtime.config_content = json.dumps({
                 "provider": {
-                    "p": {
-                        "options": {"baseURL": "https://p.example/v1"},
+                    "codemate": {
+                        "options": {"baseURL": "https://models.example/v1"},
                         "models": {"model": {}},
                     },
                 },
                 "mcp": {"unrelated": {"type": "local"}},
             })
-            codex_runtime.sync_platform_codex_models(config)
+            asyncio.run(codex_runtime.sync_platform_codex_models(config))
             runtime.config_content = json.dumps({
                 "provider": {
-                    "p": {
+                    "codemate": {
                         "options": {
-                            "baseURL": "https://p-new.example/v1",
+                            "baseURL": "https://models-new.example/v1",
                         },
                         "models": {"model": {}},
                     },
                 },
             })
-            codex_runtime.sync_platform_codex_models(config)
-            codex_runtime.sync_platform_codex_models(
-                config,
-                model_ids=["p/model"],
-                force=True,
-                reason="scan creation scan-1",
+            asyncio.run(codex_runtime.sync_platform_codex_models(config))
+            asyncio.run(
+                codex_runtime.sync_platform_codex_models(
+                    config,
+                    model_ids=["codemate/model"],
+                    force=True,
+                    reason="scan creation scan-1",
+                )
             )
 
         self.assertEqual(build_runtime.call_count, 5)
         self.assertEqual(self.profile_sync.call_count, 3)
 
-    def test_model_sync_failure_preserves_last_successful_models(self) -> None:
+    def test_model_sync_failure_disables_stale_models(self) -> None:
         previous = CodexModelProfile(
             id="old/model",
             provider_id="old",
@@ -245,7 +265,7 @@ class CodexRuntimeTests(unittest.TestCase):
             profile="opendeephole-old-model",
         )
         config = self._agent_config(
-            SimpleNamespace(model="new/model", enabled=True),
+            SimpleNamespace(model="codemate/model", enabled=True),
         )
         codex_runtime._runtime_state = self._ready_state(models=(previous,))
         self.profile_sync.return_value = CodexProfileSyncResult(
@@ -260,16 +280,67 @@ class CodexRuntimeTests(unittest.TestCase):
             ),
             patch("builtins.print") as output,
         ):
-            state = codex_runtime.sync_platform_codex_models(
-                config,
-                force=True,
-                reason="scan creation scan-1",
+            state = asyncio.run(
+                codex_runtime.sync_platform_codex_models(
+                    config,
+                    force=True,
+                    reason="scan creation scan-1",
+                )
             )
 
-        self.assertEqual(state.models, (previous,))
+        self.assertEqual(state.models, ())
         self.assertEqual(state.model_config_error, "profile directory denied")
         self.assertTrue(any(
             "left unchanged" in str(call)
+            for call in output.call_args_list
+        ))
+
+    def test_proxy_failure_disables_only_managed_models(self) -> None:
+        previous = CodexModelProfile(
+            id="codemate/old",
+            provider_id="codemate",
+            model_id="old",
+            profile="opendeephole-codemate-old",
+        )
+        config = self._agent_config(
+            SimpleNamespace(model="codemate/model", enabled=True),
+        )
+        codex_runtime._runtime_state = self._ready_state(models=(previous,))
+        self.proxy_sync.return_value = LLMProxySyncResult(
+            available=False,
+            error="LLM proxy entrypoint is missing",
+        )
+
+        with (
+            patch(
+                "deephole_client.opencode_integration."
+                "build_opencode_session_runtime",
+                return_value=SimpleNamespace(config_content=json.dumps({
+                    "provider": {
+                        "codemate": {
+                            "options": {
+                                "baseURL": "https://models.example/v1",
+                            },
+                            "models": {"model": {}},
+                        },
+                    },
+                })),
+            ),
+            patch("builtins.print") as output,
+        ):
+            state = asyncio.run(
+                codex_runtime.sync_platform_codex_models(config)
+            )
+
+        self.assertTrue(state.available)
+        self.assertEqual(state.models, ())
+        self.assertEqual(
+            state.model_config_error,
+            "LLM proxy entrypoint is missing",
+        )
+        self.profile_sync.assert_not_called()
+        self.assertTrue(any(
+            "Codex-dependent capabilities are disabled" in str(call)
             for call in output.call_args_list
         ))
 

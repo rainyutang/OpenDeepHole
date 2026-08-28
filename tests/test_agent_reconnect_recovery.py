@@ -76,6 +76,20 @@ def _meta(
     )
 
 
+def _managed_agent_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        model_pool=SimpleNamespace(
+            models=[
+                SimpleNamespace(
+                    model="codemate/test-model",
+                    enabled=True,
+                    use_default_model=False,
+                )
+            ]
+        )
+    )
+
+
 async def _run_websocket_and_cancel_disconnect(websocket) -> None:
     await agent_api.agent_websocket(websocket)
     tasks = list(agent_api._agent_disconnect_tasks.values())
@@ -1470,7 +1484,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ),
                 patch(
                     "backend.api.agent.get_scan_agent_config_async",
-                    new=AsyncMock(return_value=object()),
+                    new=AsyncMock(return_value=_managed_agent_config()),
                 ),
                 patch(
                     "backend.api.agent.agent_config_has_explicit_model",
@@ -1592,7 +1606,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ),
                 patch(
                     "backend.api.agent.get_scan_agent_config_async",
-                    new=AsyncMock(return_value=object()),
+                    new=AsyncMock(return_value=_managed_agent_config()),
                 ),
                 patch(
                     "backend.api.agent.agent_config_has_explicit_model",
@@ -1609,6 +1623,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(sent["type"], "resume")
             self.assertEqual(sent["retry_total_candidates"], 4)
             self.assertEqual(sent["retry_processed_offset"], 1)
+            self.assertEqual(sent["codex_model_ids"], ["codemate/test-model"])
             self.assertEqual(
                 sent["retry_mining_engine_ids"],
                 ["static_candidate"],
@@ -1734,7 +1749,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ),
                 patch(
                     "backend.api.agent.get_scan_agent_config_async",
-                    new=AsyncMock(return_value=object()),
+                    new=AsyncMock(return_value=_managed_agent_config()),
                 ),
                 patch(
                     "backend.api.agent.agent_config_has_explicit_model",
@@ -1813,7 +1828,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ),
                 patch(
                     "backend.api.agent.get_scan_agent_config_async",
-                    new=AsyncMock(return_value=object()),
+                    new=AsyncMock(return_value=_managed_agent_config()),
                 ),
                 patch(
                     "backend.api.agent.agent_config_has_explicit_model",
@@ -1926,7 +1941,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ),
                 patch(
                     "backend.api.agent.get_scan_agent_config_async",
-                    new=AsyncMock(return_value=object()),
+                    new=AsyncMock(return_value=_managed_agent_config()),
                 ),
                 patch(
                     "backend.api.agent.agent_config_has_explicit_model",

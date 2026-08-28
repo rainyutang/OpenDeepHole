@@ -32,6 +32,7 @@ Thumbs.db
 *.log
 logs/
 task-agent.yaml
+/deephole_client/llm_proxy/LLM_Proxy/config.yaml
 tests/test_data/code_index.db
 tests/test_data/memleak_cases/code_index.db
 

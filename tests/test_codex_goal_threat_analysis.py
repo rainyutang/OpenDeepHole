@@ -423,6 +423,12 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     captured: dict[str, Any] = {}
     from deephole_client import codex_runtime
 
+    model = SimpleNamespace(
+        id="codemate/threat-model",
+        model_id="threat-model",
+        profile="opendeephole-codemate-threat-model",
+    )
+
     monkeypatch.setattr(
         codex_runtime,
         "get_codex_runtime_state",
@@ -430,6 +436,8 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
             available=True,
             command=("/opt/codex",),
             error="",
+            models=(model,),
+            model_config_error="",
         ),
     )
 
@@ -448,8 +456,9 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
             captured["thread_options"] = options
             return self.thread_id
 
-        def goal(self, prompt: str):
+        def goal(self, prompt: str, *, model: str | None = None):
             captured["prompt"] = prompt
+            captured["model"] = model
             return SimpleNamespace(goal=SimpleNamespace(status="complete"))
 
     fake_sdk = ModuleType("codex_sdk")
@@ -472,6 +481,8 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     assert codex_config.cwd == str(tmp_path)
     assert codex_config.launch_args_override == (
         "/opt/codex",
+        "--profile",
+        "opendeephole-codemate-threat-model",
         "app-server",
         "--listen",
         "stdio://",
@@ -482,7 +493,8 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     assert (tmp_path / ".codex-state").is_dir()
     assert captured["thread_options"]["sandbox"] == "workspace-write"
     assert captured["thread_options"]["approval_mode"] == "deny_all"
-    assert "model" not in captured["thread_options"]
+    assert captured["thread_options"]["model"] == "codemate/threat-model"
+    assert captured["model"] == "codemate/threat-model"
     assert captured["thread_options"]["config"] == {
         "sandbox_workspace_write": {
             "network_access": False,
@@ -494,8 +506,135 @@ def test_goal_uses_persisted_thread_and_workspace_write_sandbox(
     ) == {
         "thread_id": "thread-new",
         "goal_status": "complete",
+        "model_id": "codemate/threat-model",
+        "profile": "opendeephole-codemate-threat-model",
         "validation_policy_version": 1,
     }
+    assert "Codex managed model: codemate/threat-model" in (
+        tmp_path / "codex-goal.log"
+    ).read_text(encoding="utf-8")
+
+
+def test_goal_requires_ready_managed_profile_and_proxy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    implementation = _implementation()
+    from deephole_client import codex_runtime
+
+    monkeypatch.setattr(
+        codex_runtime,
+        "get_codex_runtime_state",
+        lambda: SimpleNamespace(
+            available=True,
+            command=("codex",),
+            error="",
+            models=(),
+            model_config_error="LLM proxy entrypoint is missing",
+        ),
+    )
+
+    result = implementation.run_threat_analysis(
+        tmp_path,
+        tmp_path / "artifacts",
+    )
+
+    assert result["result"] is False
+    assert "local LLM proxy" in result["reason"]
+    assert "Bare Codex fallback is disabled" in result["reason"]
+    assert "LLM proxy entrypoint is missing" in result["reason"]
+
+
+def test_resume_keeps_saved_managed_model_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    implementation = _implementation()
+    captured: dict[str, Any] = {}
+    from deephole_client import codex_runtime
+
+    models = (
+        SimpleNamespace(
+            id="codemate/first",
+            model_id="first",
+            profile="profile-first",
+        ),
+        SimpleNamespace(
+            id="codemate/saved",
+            model_id="saved",
+            profile="profile-saved",
+        ),
+    )
+    monkeypatch.setattr(
+        codex_runtime,
+        "get_codex_runtime_state",
+        lambda: SimpleNamespace(
+            available=True,
+            command=("codex",),
+            error="",
+            models=models,
+            model_config_error="",
+        ),
+    )
+    (tmp_path / "codex-goal-state.json").write_text(
+        json.dumps({
+            "thread_id": "thread-saved",
+            "goal_status": "paused",
+            "model_id": "codemate/saved",
+            "profile": "profile-saved",
+            "validation_policy_version": 1,
+        }),
+        encoding="utf-8",
+    )
+
+    class FakeController:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["controller"] = kwargs
+            self.thread_id = kwargs["thread_id"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def resume_thread(self, thread_id: str, **options: Any) -> str:
+            captured["resumed"] = (thread_id, options)
+            return thread_id
+
+        def get_goal(self):
+            return SimpleNamespace(status="paused")
+
+        def resume_goal(self, *, model: str | None = None):
+            captured["resume_goal"] = model
+            return SimpleNamespace(goal=SimpleNamespace(status="complete"))
+
+    fake_sdk = ModuleType("codex_sdk")
+    fake_sdk.ApprovalMode = SimpleNamespace(deny_all="deny_all")
+    fake_sdk.CodexConfig = lambda **kwargs: SimpleNamespace(**kwargs)
+    fake_sdk.CodexController = FakeController
+    fake_sdk.OutputMode = SimpleNamespace(HUMAN="human")
+    fake_sdk.ResumePolicy = lambda **kwargs: SimpleNamespace(**kwargs)
+    fake_sdk.Sandbox = SimpleNamespace(workspace_write="workspace-write")
+    monkeypatch.setitem(sys.modules, "codex_sdk", fake_sdk)
+
+    status = implementation._run_goal(
+        prompt="continue",
+        artifact_root=tmp_path,
+        is_resume=True,
+    )
+
+    assert status == "complete"
+    assert captured["resume_goal"] == "codemate/saved"
+    assert captured["resumed"][1]["model"] == "codemate/saved"
+    assert captured["controller"]["codex_config"].launch_args_override == (
+        "codex",
+        "--profile",
+        "profile-saved",
+        "app-server",
+        "--listen",
+        "stdio://",
+    )
 
 
 def test_transport_closed_reason_keeps_bounded_stderr_diagnostic() -> None:

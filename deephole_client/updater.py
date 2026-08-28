@@ -37,6 +37,9 @@ SKIP_DIRS = {
     "system_skills",
 }
 SKIP_SUFFIXES = {".pyc", ".pyo"}
+SKIP_FILES = {
+    "deephole_client/llm_proxy/LLM_Proxy/config.yaml",
+}
 PENDING_COMMANDS_FILE = Path.home() / ".opendeephole" / "pending_commands.json"
 
 
@@ -45,17 +48,27 @@ def runtime_root() -> Path:
 
 
 def _should_skip(path: Path) -> bool:
-    return path.suffix in SKIP_SUFFIXES or any(part in SKIP_DIRS for part in path.parts)
+    normalized = path.as_posix()
+    generated = any(
+        normalized == item or normalized.endswith(f"/{item}")
+        for item in SKIP_FILES
+    )
+    return (
+        generated
+        or path.suffix in SKIP_SUFFIXES
+        or any(part in SKIP_DIRS for part in path.parts)
+    )
 
 
 def runtime_hash_scope() -> dict[str, Any]:
     return {
-        "version": 3,
+        "version": 4,
         "dirs": list(RUNTIME_DIRS),
         "tool_dirs": list(RUNTIME_TOOL_DIRS),
         "root_files": list(RUNTIME_ROOT_FILES),
         "skip_dirs": sorted(SKIP_DIRS),
         "skip_suffixes": sorted(SKIP_SUFFIXES),
+        "skip_files": sorted(SKIP_FILES),
     }
 
 
@@ -168,6 +181,8 @@ async def ensure_runtime_updated(update: dict[str, Any] | None, command: dict[st
         raise RuntimeError(f"runtime update download failed: {e}") from e
 
     save_pending_command(command)
+    from deephole_client.llm_proxy import stop_llm_proxy
+    await stop_llm_proxy()
     _install_update_archive(archive, expected_hash, update.get("manifest"))
     _install_requirements_if_needed()
     _restart_process()

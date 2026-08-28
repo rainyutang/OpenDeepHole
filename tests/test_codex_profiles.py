@@ -99,6 +99,64 @@ class CodexProfileSyncTests(unittest.TestCase):
             if os.name != "nt":
                 self.assertEqual(literal_path.stat().st_mode & 0o777, 0o600)
 
+    def test_proxy_profiles_use_local_responses_route_and_full_model_id(
+        self,
+    ) -> None:
+        secret = "must-not-reach-local-proxy-profile"
+        config = {
+            "provider": {
+                "codemate": {
+                    "name": "Codemate upstream",
+                    "options": {
+                        "baseURL": "https://upstream.example/api/v2",
+                        "apiKey": secret,
+                    },
+                    "models": {
+                        "MiniMax-M2.7": {
+                            "limit": {"context": 65536},
+                        },
+                    },
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            result = codex_profiles.sync_codex_profiles(
+                codex_version="codex-cli 0.149.1",
+                opencode_config=config,
+                selected_model_ids=["codemate/MiniMax-M2.7"],
+                codex_home=codex_home,
+                proxy_base_url="http://127.0.0.1:31943/v1",
+                proxy_provider_name="OpenDeepHole LLM Proxy",
+            )
+
+            self.assertEqual(result.error, "")
+            profile_path = codex_home / (
+                f"{result.models[0].profile}.config.toml"
+            )
+            profile = codex_profiles.tomllib.loads(
+                profile_path.read_text(encoding="utf-8")
+            )
+            provider = profile["model_providers"][profile["model_provider"]]
+            self.assertEqual(profile["model"], "codemate/MiniMax-M2.7")
+            self.assertEqual(profile["model_context_window"], 65536)
+            self.assertEqual(provider["name"], "OpenDeepHole LLM Proxy")
+            self.assertEqual(
+                provider["base_url"],
+                "http://127.0.0.1:31943/v1",
+            )
+            self.assertEqual(provider["wire_api"], "responses")
+            self.assertNotIn("env_key", provider)
+            self.assertNotIn("experimental_bearer_token", provider)
+            self.assertNotIn(
+                secret,
+                profile_path.read_text(encoding="utf-8"),
+            )
+            default = codex_profiles.tomllib.loads(
+                (codex_home / "config.toml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(default["model"], "codemate/MiniMax-M2.7")
+
     def test_missing_default_uses_first_platform_model_and_preserves_user_bytes(
         self,
     ) -> None:

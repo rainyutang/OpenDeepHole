@@ -1296,8 +1296,8 @@ async def create_agent_scan(
     """Create a new scan and dispatch it to the specified agent daemon."""
     from backend.api.agent import (
         _registered_agents,
-        agent_config_has_explicit_model,
         agent_explicit_model_ids,
+        agent_config_has_explicit_model,
         ensure_agent_accepting_tasks_async,
         get_scan_agent_config_async,
         resolve_agent_connection_async,
@@ -2372,6 +2372,7 @@ async def _continue_scan(
     await _check_scan_owner_v2(scan_id, current_user)
     from backend.api.agent import (
         _registered_agents,
+        agent_explicit_model_ids,
         agent_config_has_explicit_model,
         ensure_agent_accepting_tasks_async,
         get_scan_agent_config_async,
@@ -2657,6 +2658,7 @@ async def _continue_scan(
             item.model_dump(mode="json")
             for item in meta.mining_engines
         ],
+        "codex_model_ids": agent_explicit_model_ids(managed_config),
         "retry_candidates": (
             [candidate.model_dump() for candidate in candidate_payload]
             if candidate_payload is not None

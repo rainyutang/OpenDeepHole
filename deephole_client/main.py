@@ -103,7 +103,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             from deephole_client.codex_runtime import sync_platform_codex_models
 
             task_model_ids = msg.get("codex_model_ids")
-            sync_platform_codex_models(
+            await sync_platform_codex_models(
                 config,
                 model_ids=(
                     task_model_ids
@@ -170,6 +170,25 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 "type": "resume",
                 "scan_id": msg["scan_id"],
             }
+        try:
+            from deephole_client.codex_runtime import sync_platform_codex_models
+
+            resume_model_ids = msg.get("codex_model_ids")
+            await sync_platform_codex_models(
+                config,
+                model_ids=(
+                    resume_model_ids
+                    if isinstance(resume_model_ids, list)
+                    else None
+                ),
+                force=True,
+                reason=f"scan resume {msg.get('scan_id', '')}",
+            )
+        except Exception as exc:
+            print(
+                "Warning: Codex resume model synchronization failed "
+                f"({type(exc).__name__}); scan execution will continue."
+            )
         await agent_server.handle_resume(
             scan_id=msg["scan_id"],
             project_path=msg.get("project_path"),
@@ -398,7 +417,7 @@ async def _apply_live_config_update(config) -> None:
     configure_opencode_component()
     refresh_global_opencode_config()
     from deephole_client.codex_runtime import sync_platform_codex_models
-    sync_platform_codex_models(
+    await sync_platform_codex_models(
         config,
         reason="platform model configuration",
     )
@@ -654,6 +673,11 @@ async def _main() -> None:
     try:
         await _ws_loop(config, task_manager, reporter)
     finally:
+        try:
+            from deephole_client.llm_proxy import stop_llm_proxy
+            await stop_llm_proxy()
+        except Exception as exc:
+            print(f"Warning: failed to stop Codex LLM proxy: {exc}")
         try:
             from task_agent import shutdown_opencode
             await shutdown_opencode()

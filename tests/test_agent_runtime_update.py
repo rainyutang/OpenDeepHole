@@ -446,9 +446,44 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "mcp_server",
             "backend",
         ]
-        self.assertEqual(updater.runtime_hash_scope()["version"], 3)
+        self.assertEqual(updater.runtime_hash_scope()["version"], 4)
         self.assertEqual(updater.runtime_hash_scope()["dirs"], expected_dirs)
+        self.assertEqual(
+            updater.runtime_hash_scope()["skip_files"],
+            ["deephole_client/llm_proxy/LLM_Proxy/config.yaml"],
+        )
         self.assertEqual(agent_api._agent_runtime_hash_scope(), updater.runtime_hash_scope())
+
+    def test_runtime_hash_and_archive_skip_generated_proxy_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proxy_root = (
+                root
+                / "deephole_client"
+                / "llm_proxy"
+                / "LLM_Proxy"
+            )
+            proxy_root.mkdir(parents=True)
+            (proxy_root / "main.py").write_text(
+                "print('proxy')\n",
+                encoding="utf-8",
+            )
+            config_path = proxy_root / "config.yaml"
+            config_path.write_text("server: {}\n", encoding="utf-8")
+
+            first = compute_runtime_hash(root)
+            config_path.write_text("server: {port: 31943}\n", encoding="utf-8")
+            second = compute_runtime_hash(root)
+
+        self.assertEqual(first, second)
+        runtime_paths = {
+            arcname
+            for arcname, _path in agent_api._iter_agent_runtime_files()
+        }
+        self.assertNotIn(
+            "deephole_client/llm_proxy/LLM_Proxy/config.yaml",
+            runtime_paths,
+        )
 
     def test_runtime_hash_includes_task_agent_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -599,6 +634,18 @@ class AgentRuntimePackageTests(unittest.TestCase):
             )
             (root / "deephole_client" / "main.py").write_text("print('old')\n", encoding="utf-8")
             (root / "deephole_client" / "stale.py").write_text("# stale\n", encoding="utf-8")
+            proxy_config = (
+                root
+                / "deephole_client"
+                / "llm_proxy"
+                / "LLM_Proxy"
+                / "config.yaml"
+            )
+            proxy_config.parent.mkdir(parents=True)
+            proxy_config.write_text(
+                "server: {port: 31943}\n",
+                encoding="utf-8",
+            )
             (root / "deephole_client" / "opencode").mkdir()
             (root / "deephole_client" / "opencode" / "api.py").write_text(
                 "# stale component package\n",
@@ -625,6 +672,10 @@ class AgentRuntimePackageTests(unittest.TestCase):
             self.assertTrue((root / "deephole_client" / "vulnerability_validation" / "product_validators" / "demo" / "validator.yaml").is_file())
             self.assertFalse((root / "deephole_client" / "vulnerability_validation" / "local_validator.py").exists())
             self.assertFalse((root / "deephole_client" / "stale.py").exists())
+            self.assertEqual(
+                proxy_config.read_text(encoding="utf-8"),
+                "server: {port: 31943}\n",
+            )
             self.assertFalse((root / "deephole_client" / "opencode").exists())
             self.assertFalse((root / "deephole_client" / "task_agent").exists())
             self.assertFalse((root / "backend" / "old.py").exists())
@@ -781,7 +832,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             calls.append("update")
             return False
 
-        def sync(received_config, **kwargs):
+        async def sync(received_config, **kwargs):
             calls.append("codex")
             self.assertIs(received_config, config)
             self.assertEqual(kwargs["model_ids"], ["provider/model"])
@@ -831,7 +882,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         def refresh_global() -> None:
             calls.append("opencode")
 
-        def sync(received_config, **kwargs) -> None:
+        async def sync(received_config, **kwargs) -> None:
             calls.append("codex")
             self.assertIs(received_config, config)
             self.assertFalse(kwargs.get("force", False))
@@ -920,6 +971,15 @@ class AgentRuntimePackageTests(unittest.TestCase):
             )
             return manifest
 
+        async def sync(_config, **kwargs) -> None:
+            calls.append("codex")
+            self.assertEqual(
+                kwargs["model_ids"],
+                ["codemate/resume-model"],
+            )
+            self.assertTrue(kwargs["force"])
+            self.assertIn("scan-1", kwargs["reason"])
+
         async def handle_resume(**kwargs) -> None:
             calls.append("resume")
             self.assertEqual(kwargs["retry_candidates"][0]["file"], "src/a.c")
@@ -947,6 +1007,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "retry_mining_engine_ids": ["threat_audit"],
             "retry_threat_audit_task_ids": ["threat-timeout"],
             "code_graph_mcp": {"enabled": True, "transport": "remote"},
+            "codex_model_ids": ["codemate/resume-model"],
         }
         command = {
             "type": "resume",
@@ -960,11 +1021,15 @@ class AgentRuntimePackageTests(unittest.TestCase):
         reporter.fetch_resume_manifest.side_effect = fetch_manifest
         with (
             patch("deephole_client.updater.ensure_runtime_updated", new=check_update),
+            patch(
+                "deephole_client.codex_runtime.sync_platform_codex_models",
+                new=sync,
+            ),
             patch("deephole_client.server.handle_resume", new=handle_resume),
         ):
             asyncio.run(agent_main._handle_command(command, None, None, reporter))
 
-        self.assertEqual(calls, ["update", "manifest", "resume"])
+        self.assertEqual(calls, ["update", "manifest", "codex", "resume"])
 
     def test_runtime_update_preserves_resume_command_before_install_and_restart(self) -> None:
         calls: list[str] = []
@@ -990,6 +1055,9 @@ class AgentRuntimePackageTests(unittest.TestCase):
             calls.append("save")
             original_save_pending_command(saved)
 
+        async def stop_proxy() -> None:
+            calls.append("stop-proxy")
+
         with tempfile.TemporaryDirectory() as tmp:
             pending_file = Path(tmp) / "pending_commands.json"
             with (
@@ -997,6 +1065,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 patch("deephole_client.updater.compute_runtime_hash", return_value="old-runtime"),
                 patch("deephole_client.updater._download_update", new=download),
                 patch("deephole_client.updater.save_pending_command", side_effect=save_pending),
+                patch("deephole_client.llm_proxy.stop_llm_proxy", new=stop_proxy),
                 patch("deephole_client.updater._install_update_archive", side_effect=lambda *_args: calls.append("install")),
                 patch("deephole_client.updater._install_requirements_if_needed", side_effect=lambda: calls.append("requirements")),
                 patch("deephole_client.updater._restart_process", side_effect=lambda: calls.append("restart")),
@@ -1010,7 +1079,14 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 pending_commands = updater.load_pending_commands(clear=True)
 
         self.assertTrue(updated)
-        self.assertEqual(calls, ["download", "save", "install", "requirements", "restart"])
+        self.assertEqual(calls, [
+            "download",
+            "save",
+            "stop-proxy",
+            "install",
+            "requirements",
+            "restart",
+        ])
         expected_command = dict(command)
         expected_command.pop("agent_runtime_update")
         self.assertEqual(pending_commands, [expected_command])
