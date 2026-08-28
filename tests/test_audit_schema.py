@@ -268,15 +268,42 @@ def test_list_schema_rejects_mixed_or_multiple_false_results() -> None:
             )
 
 
-def test_threat_audit_schema_accepts_empty_or_confirmed_only_results() -> None:
+def test_threat_audit_schema_accepts_empty_or_single_confirmed_result() -> None:
     item = _confirmed_item()
     del item["confirmed"]
 
-    for value in ([], [item, {**item, "function": "parse_header"}]):
+    for value in ([], [item]):
         assert parse_llm_json_schema(
             json.dumps(value, ensure_ascii=False),
             THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
         ) == value
+
+
+def test_threat_audit_schema_rejects_multiple_confirmed_results() -> None:
+    item = _confirmed_item()
+    del item["confirmed"]
+
+    with pytest.raises(LLMJsonParseError):
+        parse_llm_json_schema(
+            json.dumps(
+                [item, {**item, "function": "parse_header"}],
+                ensure_ascii=False,
+            ),
+            THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+        )
+
+
+def test_threat_audit_output_instruction_limits_each_task_to_one_result() -> None:
+    instruction = threat_audit_output_instruction(
+        THREAT_AUDIT_VULNERABILITY_LIST_SCHEMA,
+    )
+
+    assert "每个威胁审计任务最多输出一个已确认漏洞" in instruction
+    assert "只返回真实可利用性、代码证据和完整调用链最充分的问题" in instruction
+    assert "证据相当时选择严重程度最高的问题" in instruction
+    assert "不得将多个独立问题合并为一个问题" in instruction
+    assert '"minItems":0' in instruction
+    assert '"maxItems":1' in instruction
 
 
 @pytest.mark.parametrize(
