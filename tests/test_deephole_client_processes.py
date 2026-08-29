@@ -1013,9 +1013,7 @@ def test_static_and_candidate_audit_processes_form_a_minimal_pipeline() -> None:
         assert candidate_results[0]["completed_candidates"] == 1
         assert candidate_results[0]["checker_name"] == "demo"
         assert candidate_results[0]["vulnerabilities"][0]["ai_verdict"] == "not_confirmed"
-        assert audited["processed_keys"] == [{
-            "file": "sample.c", "line": 1, "function": "bad", "vuln_type": "demo",
-        }]
+        assert audited["processed_candidate_indexes"] == [0]
         assert audited["completed_candidates"] == 1
 
     with tempfile.TemporaryDirectory() as temp:
@@ -1810,7 +1808,7 @@ def test_candidate_audit_cancellation_does_not_drain_the_backlog() -> None:
         assert audited["status"] == "cancelled"
         assert len(model_calls) == 1
         assert candidate_results == []
-        assert audited["processed_keys"] == []
+        assert audited["processed_candidate_indexes"] == []
         assert audited["completed_candidates"] == 5
         assert sum(
             event["message"].startswith("Auditing candidate")
@@ -1849,24 +1847,14 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
                 "serve_session_id": "session-failed",
             },
         )
-        project_result = _task_result([
-            _audit_item(
-                confirmed=True,
-                file="project.c",
-                line=9,
-                function="project_issue",
-                description="project-level issue",
-                vuln_type="project-sql-injection",
-            ),
-            _audit_item(
-                confirmed=True,
-                file="other.c",
-                line=12,
-                function="other_issue",
-                description="second project-level issue",
-                vuln_type="project-auth-bypass",
-            ),
-        ])
+        project_result = _task_result(_audit_item(
+            confirmed=True,
+            file="project.c",
+            line=9,
+            function="project_issue",
+            description="highest-risk project-level issue",
+            vuln_type="project-sql-injection",
+        ))
         candidates = [
             {
                 "file": "same.c",
@@ -1935,22 +1923,21 @@ def test_candidate_result_callback_covers_all_terminal_outcomes() -> None:
         }
         assert by_index[0]["vulnerabilities"][0]["ai_verdict"] == "not_confirmed"
         assert by_index[1]["vulnerabilities"][0]["ai_verdict"] == "filtered_same_pattern"
+        assert by_index[1]["vulnerabilities"][0]["failure_reason"] == (
+            "候选点去重：同模式代表点已被 AI 审计为非问题，"
+            "本候选未再次调用模型。"
+        )
+        assert [item["candidate_idx"] for item in candidate_results] == [0, 1, 2, 3, 4]
         assert by_index[2]["vulnerabilities"][0]["ai_verdict"] == "no_result"
         assert by_index[3]["vulnerabilities"][0]["ai_verdict"] == "failed"
-        assert len(by_index[4]["vulnerabilities"]) == 2
-        assert all(
-            item["ai_verdict"] == "confirmed"
-            for item in by_index[4]["vulnerabilities"]
-        )
-        assert [
-            item["vuln_type"]
-            for item in by_index[4]["vulnerabilities"]
-        ] == ["project-sql-injection", "project-auth-bypass"]
+        assert len(by_index[4]["vulnerabilities"]) == 1
+        assert by_index[4]["vulnerabilities"][0]["ai_verdict"] == "confirmed"
+        assert by_index[4]["vulnerabilities"][0]["vuln_type"] == "project-sql-injection"
         assert by_index[4]["skill_reports"] == []
         project_call = run_task.await_args_list[-1]
-        assert project_call.kwargs["output_schema"]["type"] == "array"
-        assert "裸 JSON List" in project_call.kwargs["prompt"]
-        assert len(audited["processed_keys"]) == 5
+        assert project_call.kwargs["output_schema"]["type"] == "object"
+        assert "本任务只返回一个 JSON 对象" in project_call.kwargs["prompt"]
+        assert len(audited["processed_candidate_indexes"]) == 5
         assert [
             item["completed_candidates"]
             for item in candidate_results

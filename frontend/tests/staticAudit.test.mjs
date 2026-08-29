@@ -83,12 +83,16 @@ test("shows descriptions for successful vulnerability and non-problem conclusion
   assert.equal(audit.staticAuditConclusion(vulnerability()), "有效 Guard 阻止攻击者输入到达危险状态");
 });
 
-test("shows the recorded filtering reason for same-pattern conclusions", () => {
+test("shows the fixed candidate dedup conclusion for same-pattern results", () => {
   assert.equal(audit.staticAuditConclusion(vulnerability({
     ai_verdict: "filtered_same_pattern",
     description: "原候选描述",
     failure_reason: "Filtered by a previously rejected same-pattern candidate",
-  })), "Filtered by a previously rejected same-pattern candidate");
+  })), audit.SAME_PATTERN_AUDIT_CONCLUSION);
+  assert.equal(
+    audit.SAME_PATTERN_AUDIT_CONCLUSION,
+    "候选点去重：同模式代表点已被 AI 审计为非问题，本候选未再次调用模型。",
+  );
 });
 
 test("prefers failure_reason and falls back to legacy ai_analysis", () => {

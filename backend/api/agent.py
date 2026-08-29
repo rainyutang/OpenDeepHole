@@ -66,6 +66,7 @@ from backend.models import (
     AgentMcpTargetStatus,
     AgentOpenCodePoolStatus,
     AgentInfo,
+    AgentCandidateAuditResult,
     AgentRemoteConfig,
     AgentValidatorCatalog,
     AgentProcessedKeyBatch,
@@ -3285,10 +3286,9 @@ def _normalize_candidate_progress(
 ) -> tuple[int, int]:
     """Apply the scan-level candidate counter invariants.
 
-    Persisted candidate rows own the denominator once available.  Older scans
-    may only have the legacy counter, so retain it as a fallback when no rows
-    exist.  The final candidate is exposed only after the static engine has
-    published its success lifecycle state.
+    Persisted candidate rows own both counters once available. Older scans may
+    only have the legacy counter, so retain lifecycle reconciliation solely as
+    a fallback when no candidate rows exist.
     """
     stored_total = max(0, int(scan.total_candidates or 0))
     candidate_count = max(0, int(candidate_count or 0))
@@ -3298,6 +3298,8 @@ def _normalize_candidate_progress(
         else max(stored_total, max(0, int(reported_total or 0)))
     )
     completed = max(0, int(processed or 0))
+    if candidate_count > 0:
+        return total, min(completed, total)
     run_status = _static_candidate_run_status(scan)
     if total == 0:
         return 0, 0
@@ -3328,17 +3330,21 @@ async def _reconcile_candidate_progress(
     stored_scan, _meta, counts = loaded
     live = _running_scans.get(scan_id)
     scan = live or stored_scan
-    processed_key_count = await run_store_call(
-        store,
-        "count_processed_keys",
-        scan_id,
+    terminal_audit_count, processed_key_count = await asyncio.gather(
+        run_store_call(store, "count_terminal_candidate_audits", scan_id),
+        # Legacy Agents still checkpoint location tuples. New Agents use the
+        # authoritative candidate row exclusively.
+        run_store_call(store, "count_processed_keys", scan_id),
     )
-    raw_processed = max(
-        processed_key_count,
-        int(stored_scan.processed_candidates or 0),
-        int(scan.processed_candidates or 0),
-        max(0, int(reported_processed or 0)),
-    )
+    if int(counts["candidates"] or 0) > 0:
+        raw_processed = terminal_audit_count
+    else:
+        raw_processed = max(
+            processed_key_count,
+            int(stored_scan.processed_candidates or 0),
+            int(scan.processed_candidates or 0),
+            max(0, int(reported_processed or 0)),
+        )
     total, processed = _normalize_candidate_progress(
         scan,
         candidate_count=counts["candidates"],
@@ -3370,6 +3376,24 @@ async def _reconcile_candidate_progress(
             "static_analysis_done": scan.static_analysis_done,
         })
     return processed, total
+
+
+def _candidate_audit_state(vulnerability: Vulnerability) -> str:
+    verdict = str(vulnerability.ai_verdict or "").strip().lower()
+    return "failed" if verdict in {"failed", "timeout", "no_result"} else "success"
+
+
+def _same_pattern_candidate_result(vulnerability: Vulnerability) -> Vulnerability:
+    if str(vulnerability.ai_verdict or "").strip().lower() != "filtered_same_pattern":
+        return vulnerability
+    conclusion = (
+        "候选点去重：同模式代表点已被 AI 审计为非问题，"
+        "本候选未再次调用模型。"
+    )
+    return vulnerability.model_copy(update={
+        "ai_analysis": conclusion,
+        "failure_reason": conclusion,
+    })
 
 
 @router.post("/scan/{scan_id}/mining-engine-run")
@@ -3580,6 +3604,35 @@ async def agent_report_vulnerability(
             scan.vulnerabilities.append(vuln)
 
     from backend.sse import publish
+    stored_candidate = None
+    if (
+        str(vuln.analysis_source or "static_candidate") == "static_candidate"
+        and vuln.audit_index is not None
+        and vuln.audit_index >= 0
+    ):
+        candidate_result = _same_pattern_candidate_result(vuln)
+        stored_candidate = await run_store_call(
+            store,
+            "update_scan_candidate_audit",
+            scan_id,
+            vuln.audit_index,
+            state=_candidate_audit_state(candidate_result),
+            result=candidate_result,
+            vulnerability_idx=vuln_index,
+            dedup_decision=(
+                {"method": "same_pattern"}
+                if candidate_result.ai_verdict == "filtered_same_pattern"
+                else {}
+            ),
+        )
+        if stored_candidate is not None and scan is not None:
+            by_index = {candidate.idx: candidate for candidate in scan.candidates}
+            by_index[stored_candidate.idx] = stored_candidate
+            scan.candidates = [by_index[index] for index in sorted(by_index)]
+        if stored_candidate is not None:
+            publish(scan_id, "scan_candidate_audit", {
+                "candidate": stored_candidate.model_dump(mode="json"),
+            })
     if is_new_report:
         publish(scan_id, "scan_vulnerability", {
             "index": vuln_index,
@@ -3900,6 +3953,56 @@ async def agent_report_scan_candidates_v2(
         "offset": body.offset,
         "count": len(persisted),
         "total": total,
+    }
+
+
+@router.post("/scan/{scan_id}/candidate-audit")
+async def agent_report_candidate_audit(
+    scan_id: str,
+    body: AgentCandidateAuditResult,
+) -> dict:
+    """Upsert the one authoritative audit result owned by candidate_idx."""
+    result = body.result
+    if result is not None:
+        result = _same_pattern_candidate_result(
+            result.model_copy(update={"audit_index": body.candidate_idx})
+        )
+    stored = await run_store_call(
+        get_scan_store(),
+        "update_scan_candidate_audit",
+        scan_id,
+        body.candidate_idx,
+        state=body.state,
+        result=result,
+        vulnerability_idx=body.vulnerability_idx,
+        dedup_decision=body.dedup_decision,
+    )
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Candidate index not found")
+
+    scan = _running_scans.get(scan_id)
+    if scan is not None:
+        by_index = {candidate.idx: candidate for candidate in scan.candidates}
+        by_index[stored.idx] = stored
+        scan.candidates = [by_index[index] for index in sorted(by_index)]
+
+    processed, total = await _reconcile_candidate_progress(
+        scan_id,
+        reported_processed=body.completed_candidates,
+        reported_total=body.total_candidates,
+    )
+    from backend.sse import publish
+
+    publish(scan_id, "scan_candidate_audit", {
+        "candidate": stored.model_dump(mode="json"),
+    })
+    return {
+        "ok": True,
+        "candidate_idx": stored.idx,
+        "state": stored.audit_state,
+        "processed": processed,
+        "total": total,
+        "vulnerability_idx": stored.vulnerability_idx,
     }
 
 
@@ -4495,6 +4598,17 @@ async def agent_get_processed(scan_id: str) -> list:
         {"file": f, "line": line, "function": fn, "vuln_type": vt}
         for f, line, fn, vt in keys
     ]
+
+
+@router.get("/scan/{scan_id}/candidate-audits/processed")
+async def agent_get_processed_candidate_indexes(scan_id: str) -> list[int]:
+    """Return terminal candidate indexes for idx-based resume."""
+    indexes = await run_store_call(
+        get_scan_store(),
+        "get_processed_candidate_indexes",
+        scan_id,
+    )
+    return sorted(indexes)
 
 
 # ---------------------------------------------------------------------------

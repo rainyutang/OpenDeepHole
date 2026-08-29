@@ -276,6 +276,56 @@ class AgentReporterTests(unittest.TestCase):
         self.assertEqual(processed["json"]["processed_candidates"], 3)
         self.assertEqual(processed["json"]["total_candidates"], 10)
 
+    def test_candidate_audit_uses_index_and_stamps_agent_source(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.posts: list[dict] = []
+
+            async def post(self, url, json=None, timeout=None):
+                self.posts.append({"url": url, "json": json, "timeout": timeout})
+                return httpx.Response(
+                    200,
+                    request=httpx.Request("POST", url),
+                    json={"ok": True},
+                )
+
+        reporter = Reporter("http://server")
+        reporter.set_agent_id("agent-1")
+        reporter.set_agent_name("agent")
+        fake_client = FakeClient()
+        reporter._client = fake_client  # type: ignore[assignment]
+        result = Vulnerability(
+            file="same.c",
+            line=7,
+            function="same_function",
+            vuln_type="npd",
+            severity="low",
+            description="candidate result",
+            confirmed=False,
+            ai_verdict="not_confirmed",
+            audit_index=7,
+        )
+
+        asyncio.run(reporter.report_candidate_audit(
+            "scan-1",
+            7,
+            state="success",
+            result=result,
+            completed_candidates=1,
+            total_candidates=2,
+        ))
+
+        self.assertEqual(len(fake_client.posts), 1)
+        post = fake_client.posts[0]
+        self.assertTrue(post["url"].endswith(
+            "/api/agent/scan/scan-1/candidate-audit",
+        ))
+        self.assertEqual(post["json"]["candidate_idx"], 7)
+        self.assertEqual(post["json"]["result"]["audit_index"], 7)
+        self.assertEqual(post["json"]["result"]["output_source"]["agent_id"], "agent-1")
+        self.assertEqual(post["json"]["result"]["output_source"]["agent_name"], "agent")
+        self.assertEqual(result.output_source.agent_id, "")
+
     def test_failed_processed_batch_restores_keys_and_absolute_progress(self) -> None:
         class FakeClient:
             async def post(self, url, json=None, timeout=None):

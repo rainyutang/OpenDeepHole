@@ -61,3 +61,24 @@ test("finds vulnerabilities by stable index instead of array position", () => {
   assert.equal(runtime.findIndexedVulnerability(merged, 9)?.file, "nine.c");
   assert.equal(runtime.findIndexedVulnerability(merged, 1), undefined);
 });
+
+test("normalizes candidate-owned audit state by stable idx", () => {
+  const candidate = runtime.normalizeScanCandidate({
+    idx: 7,
+    file: "same.c",
+    line: 9,
+    function: "same",
+    description: "candidate",
+    vuln_type: "npd",
+    audit_state: "success",
+    audit_result: vulnerability("same.c"),
+    vulnerability_idx: 12,
+    dedup_decision: { method: "semantic" },
+  });
+
+  assert.equal(candidate.idx, 7);
+  assert.equal(candidate.audit_state, "success");
+  assert.equal(candidate.audit_result.file, "same.c");
+  assert.equal(candidate.vulnerability_idx, 12);
+  assert.deepEqual(candidate.dedup_decision, { method: "semantic" });
+});

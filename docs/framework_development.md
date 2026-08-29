@@ -97,7 +97,7 @@ flowchart TD
 | 代码图谱构建 | `run_code_graph_build(**kwargs)` | 项目路径、扫描范围、工作目录 | `status`、`index_db_path`、`cache_hit`、`stats`、`indexer_version` |
 | 威胁分析 | `threat_analysis_runner.run_threat_analysis(**kwargs)` | 项目总路径、代码扫描路径、产物目录、恢复标记 | 原生 `result`、失败 `reason`，以及三类 JSON 产物路径 |
 | 静态分析 | `run_static_analysis(**kwargs)` | 代码索引、规则目录、Checker 选择 | `status`、`candidates`、`stats` |
-| 候选点审计 | `run_candidate_audit(**kwargs)` | 候选点、规则 Skill、代码索引 | `status`、`vulnerabilities`、`processed_keys` |
+| 候选点审计 | `run_candidate_audit(**kwargs)` | 带扫描内 `idx` 的候选点、规则 Skill、代码索引 | `status`、单候选唯一 `vulnerabilities`、`processed_candidate_indexes` |
 | 威胁审计 | `run_threat_audit(**kwargs)` | 攻击树、高风险模块、扫描上下文 | `status`、`tasks`、`vulnerabilities` |
 | 去误报方法 | `run_fp_review(**kwargs)` | 方法 ID、代码路径、单个漏洞、历史反馈 | 单项 `status`、二元 `verdict`、`reason` 和阶段证据 |
 | 漏洞验证 | `run_vulnerability_validation(**kwargs)` | 产品、方法 ID、漏洞批次、全局策略快照和方法 field 值 | `status`、`validations`，或验证方法目录 `catalog` |

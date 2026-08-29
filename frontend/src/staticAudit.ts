@@ -17,6 +17,8 @@ export const STATIC_AUDIT_STATUS_LABELS: Record<StaticAuditStatus, string> = {
 };
 
 const FAILED_AI_VERDICTS = new Set(["failed", "timeout", "no_result"]);
+export const SAME_PATTERN_AUDIT_CONCLUSION =
+  "候选点去重：同模式代表点已被 AI 审计为非问题，本候选未再次调用模型。";
 
 type StaticAuditVulnerability = Pick<
   Vulnerability,
@@ -66,11 +68,7 @@ export function staticAuditConclusion(vulnerability: StaticAuditVulnerability): 
   }
 
   if (vulnerability.ai_verdict === "filtered_same_pattern") {
-    return nonemptyText(
-      vulnerability.failure_reason,
-      vulnerability.ai_analysis,
-      vulnerability.description,
-    ) || "审计成功，但未记录审计结论";
+    return SAME_PATTERN_AUDIT_CONCLUSION;
   }
 
   return nonemptyText(vulnerability.description, vulnerability.ai_analysis)

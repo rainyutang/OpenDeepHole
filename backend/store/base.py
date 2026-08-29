@@ -210,6 +210,34 @@ class ScanStoreBase(ABC):
     ) -> list[ScanCandidate]:
         raise NotImplementedError
 
+    def update_scan_candidate_audit(
+        self,
+        scan_id: str,
+        candidate_idx: int,
+        *,
+        state: str,
+        result: Vulnerability | None,
+        vulnerability_idx: int | None,
+        dedup_decision: dict,
+    ) -> ScanCandidate | None:
+        """Replace the one authoritative result owned by a candidate index."""
+        raise NotImplementedError
+
+    def get_processed_candidate_indexes(self, scan_id: str) -> set[int]:
+        """Return candidate indexes that have a terminal audit result."""
+        raise NotImplementedError
+
+    def count_terminal_candidate_audits(self, scan_id: str) -> int:
+        raise NotImplementedError
+
+    def reset_scan_candidate_audits(
+        self,
+        scan_id: str,
+        candidate_indexes: list[int],
+    ) -> None:
+        """Clear authoritative results for an explicit candidate retry set."""
+        raise NotImplementedError
+
     # -- Vulnerabilities --
 
     @abstractmethod

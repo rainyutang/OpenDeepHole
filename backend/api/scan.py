@@ -52,6 +52,7 @@ from backend.models import (
     MiningEngineRunStatus,
     MiningEngineSelection,
     ScanItemStatus,
+    ScanCandidate,
     ScanCandidatePage,
     ScanEventPage,
     ScanMeta,
@@ -1061,6 +1062,14 @@ def _is_static_scan_candidate(candidate: Candidate) -> bool:
 
 
 def _retry_incomplete_candidates(scan: ScanStatus) -> list[Candidate]:
+    if scan.candidates:
+        return [
+            candidate
+            for candidate in scan.candidates
+            if candidate.audit_state == "failed"
+            and candidate.audit_result is not None
+            and _is_retryable_vuln(candidate.audit_result)
+        ]
     candidates: list[Candidate] = []
     for vuln in scan.vulnerabilities:
         if not _is_retryable_vuln(vuln):
@@ -1081,6 +1090,32 @@ def _retry_incomplete_count(scan: ScanStatus) -> int:
     return len(_retry_incomplete_candidates(scan))
 
 
+def _apply_candidate_audit_progress(scan: ScanStatus) -> None:
+    """Derive audit counters from candidate-owned terminal states."""
+    candidates = [
+        candidate
+        for candidate in scan.candidates
+        if _is_static_scan_candidate(candidate)
+    ]
+    if not candidates:
+        return
+    candidate_count = len(candidates)
+    if scan.static_analysis_done:
+        scan.total_candidates = candidate_count
+    else:
+        scan.total_candidates = max(
+            candidate_count,
+            max(0, int(scan.total_candidates or 0)),
+        )
+    scan.processed_candidates = sum(
+        1
+        for candidate in candidates
+        if candidate.audit_state in {"success", "failed"}
+    )
+    if scan.total_candidates > 0:
+        scan.progress = scan.processed_candidates / scan.total_candidates
+
+
 def _incomplete_threat_audit_tasks(scan: ScanStatus) -> list[ThreatAuditTask]:
     return [
         task
@@ -1093,34 +1128,22 @@ def _incomplete_threat_audit_tasks(scan: ScanStatus) -> list[ThreatAuditTask]:
 def _continuable_candidates(
     scan: ScanStatus,
     processed_keys: set[tuple[str, int, str, str]],
-) -> list[Candidate]:
-    """Return the deduplicated union of unprocessed and retryable candidates."""
-    candidates: list[Candidate] = []
-    seen: set[tuple[str, int, str, str]] = set()
-
-    for stored in scan.candidates:
-        candidate = Candidate(**stored.model_dump(exclude={"idx"}))
+) -> list[ScanCandidate]:
+    """Return unfinished/retryable candidates by their persisted scan-local index."""
+    del processed_keys  # legacy location checkpoints are intentionally ignored
+    candidates: list[ScanCandidate] = []
+    for candidate in scan.candidates:
         if not _is_static_scan_candidate(candidate):
             continue
-        key = _candidate_key(candidate)
-        if key in processed_keys or key in seen:
+        if candidate.audit_state in {"pending", "running"}:
+            candidates.append(candidate)
             continue
-        candidates.append(candidate)
-        seen.add(key)
-
-    stored_by_key = {
-        _candidate_key(Candidate(**stored.model_dump(exclude={"idx"}))): stored
-        for stored in scan.candidates
-        if _is_static_scan_candidate(stored)
-    }
-    for retry in _retry_incomplete_candidates(scan):
-        key = _candidate_key(retry)
-        if key in seen:
-            continue
-        stored = stored_by_key.get(key)
-        candidate = Candidate(**stored.model_dump(exclude={"idx"})) if stored is not None else retry
-        candidates.append(candidate)
-        seen.add(key)
+        if (
+            candidate.audit_state == "failed"
+            and candidate.audit_result is not None
+            and _is_retryable_vuln(candidate.audit_result)
+        ):
+            candidates.append(candidate)
     return candidates
 
 
@@ -1898,6 +1921,7 @@ async def get_scan_status(
         scan.agent_online = session is not None
     else:
         scan = reconcile_offline_agent_scan_state(scan_id, scan)
+    _apply_candidate_audit_progress(scan)
     scan.retryable_candidates_count = _retry_incomplete_count(scan)
     _apply_task_progress(scan)
     processed_keys, fp_verdicts, fp_states = await asyncio.gather(
@@ -1980,12 +2004,16 @@ async def get_scan_overview_v2(
             run_store_call(store, "list_fp_review_states_by_scans", [scan_id]),
         )
         vulnerabilities = vuln_stats.get(scan_id, [])
-        scan.retryable_candidates_count = sum(
-            1 for vuln in vulnerabilities if _is_retryable_vuln(vuln)
+        scan.retryable_candidates_count = int(
+            counts.get("candidate_audit_failed", 0) or 0
         )
-        candidate_count = (
-            max(scan.total_candidates - scan.processed_candidates, 0)
-            + scan.retryable_candidates_count
+        candidate_count = sum(
+            int(counts.get(key, 0) or 0)
+            for key in (
+                "candidate_audit_pending",
+                "candidate_audit_running",
+                "candidate_audit_failed",
+            )
         )
         threat_task_count = incomplete_counts.get(scan_id, 0)
         continuable_count = (
@@ -2023,32 +2051,24 @@ async def get_scan_overview_v2(
             int(scan.total_candidates or 0),
             persisted_candidate_count,
         )
-    static_run_status = next(
-        (
-            str(item.status or "")
-            for item in scan.mining_engine_runs
-            if item.engine_id == "static_candidate"
-        ),
-        "",
+    terminal_candidate_count = sum(
+        max(0, int(counts.get(key, 0) or 0))
+        for key in ("candidate_audit_success", "candidate_audit_failed")
     )
-    if scan.total_candidates <= 0:
-        scan.processed_candidates = 0
-    elif static_run_status == "success" or (
-        not static_run_status and scan.status == ScanItemStatus.COMPLETE
-    ):
-        scan.processed_candidates = scan.total_candidates
-    elif static_run_status in {"pending", "running"} or (
-        not static_run_status and scan.status == ScanItemStatus.AUDITING
-    ):
+    if persisted_candidate_count > 0:
         scan.processed_candidates = min(
-            max(0, int(scan.processed_candidates or 0)),
-            scan.total_candidates - 1,
+            terminal_candidate_count,
+            scan.total_candidates,
         )
+    elif scan.total_candidates <= 0:
+        scan.processed_candidates = 0
     else:
         scan.processed_candidates = min(
             max(0, int(scan.processed_candidates or 0)),
             scan.total_candidates,
         )
+    if scan.total_candidates > 0:
+        scan.progress = scan.processed_candidates / scan.total_candidates
 
     scan.agent_name = meta.agent_name
     if distributed:
@@ -2568,6 +2588,10 @@ async def _continue_scan(
 
     retry_keys = [_candidate_key(candidate) for candidate in continue_candidates]
     removed_processed_keys = [key for key in retry_keys if key in processed_keys]
+    retry_candidate_indexes = [candidate.idx for candidate in continue_candidates]
+    previous_candidate_audits = [
+        candidate.model_copy(deep=True) for candidate in continue_candidates
+    ]
 
     previous_threat_analysis_run = (
         scan.threat_analysis_run.model_copy(deep=True)
@@ -2658,7 +2682,19 @@ async def _continue_scan(
             for item in meta.mining_engines
         ],
         "retry_candidates": (
-            [candidate.model_dump() for candidate in candidate_payload]
+            [
+                candidate.model_dump(
+                    mode="json",
+                    exclude={
+                        "audit_state",
+                        "audit_result",
+                        "vulnerability_idx",
+                        "dedup_decision",
+                        "audit_updated_at",
+                    },
+                )
+                for candidate in candidate_payload
+            ]
             if candidate_payload is not None
             else None
         ),
@@ -2740,6 +2776,25 @@ async def _continue_scan(
     scan.agent_online = True
     scan.processed_candidates = processed_offset
     scan.progress = progress
+    await run_store_call(
+        store,
+        "reset_scan_candidate_audits",
+        scan_id,
+        retry_candidate_indexes,
+    )
+    retry_index_set = set(retry_candidate_indexes)
+    scan.candidates = [
+        candidate.model_copy(update={
+            "audit_state": "pending",
+            "audit_result": None,
+            "vulnerability_idx": None,
+            "dedup_decision": {},
+            "audit_updated_at": "",
+        })
+        if candidate.idx in retry_index_set
+        else candidate
+        for candidate in scan.candidates
+    ]
     await run_store_call(store, "remove_processed_keys", scan_id, retry_keys)
 
     _running_scans[scan_id] = scan
@@ -2771,6 +2826,24 @@ async def _continue_scan(
             scan_id,
             removed_processed_keys,
         )
+        for candidate in previous_candidate_audits:
+            await run_store_call(
+                store,
+                "update_scan_candidate_audit",
+                scan_id,
+                candidate.idx,
+                state=candidate.audit_state,
+                result=candidate.audit_result,
+                vulnerability_idx=candidate.vulnerability_idx,
+                dedup_decision=candidate.dedup_decision,
+            )
+        restored_by_index = {
+            candidate.idx: candidate for candidate in previous_candidate_audits
+        }
+        scan.candidates = [
+            restored_by_index.get(candidate.idx, candidate)
+            for candidate in scan.candidates
+        ]
         await run_store_call(
             store,
             "update_scan_progress",

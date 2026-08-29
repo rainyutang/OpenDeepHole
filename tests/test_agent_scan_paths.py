@@ -47,10 +47,12 @@ def _reporter() -> SimpleNamespace:
         send_static_progress=AsyncMock(),
         report_candidates=AsyncMock(),
         get_processed_keys=AsyncMock(return_value=set()),
+        get_processed_candidate_indexes=AsyncMock(return_value=set()),
         replace_skill_reports=AsyncMock(),
         report_vulnerability=AsyncMock(return_value={"index": 0}),
         get_vulnerability_dedup_context=AsyncMock(return_value=[]),
         report_processed_key=AsyncMock(),
+        report_candidate_audit=AsyncMock(return_value={"ok": True}),
         get_threat_audit_tasks=AsyncMock(return_value=[]),
         push_threat_analysis=AsyncMock(),
         report_threat_analysis_run=AsyncMock(),
@@ -377,7 +379,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(kwargs["index_db_path"], index_path)
                 self.assertIn("static_candidate/rules", kwargs["checker_dirs"][0].as_posix())
                 self.assertEqual(kwargs["product_mcp"], "product-info")
-                processed_key = {
+                candidate = {
                     "file": "src/a.c",
                     "line": 10,
                     "function": "parse",
@@ -385,28 +387,30 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 }
                 await kwargs["on_candidate_result"]({
                     "audit_index": 0,
+                    "candidate_idx": 0,
                     "checker_name": "npd",
                     "candidate": {
-                        **processed_key,
+                        **candidate,
                         "description": "candidate",
                     },
                     "vulnerabilities": [_vulnerability()],
                     "skill_reports": [],
-                    "processed_key": processed_key,
+                    "completed_candidates": 1,
                 })
                 self.assertEqual(
                     reporter.report_vulnerability.await_count,
                     1,
                 )
                 self.assertEqual(
-                    reporter.report_processed_key.await_count,
+                    reporter.report_candidate_audit.await_count,
                     1,
                 )
                 return {
                     "status": "success",
                     "vulnerabilities": [_vulnerability()],
                     "skill_reports": {},
-                    "processed_keys": [processed_key],
+                    "processed_candidate_indexes": [0],
+                    "completed_candidates": 1,
                 }
 
             task_context = MagicMock(return_value=nullcontext())
@@ -471,7 +475,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             done=True,
         )
         reporter.report_vulnerability.assert_awaited_once()
-        reporter.report_processed_key.assert_awaited_once()
+        reporter.report_candidate_audit.assert_awaited_once()
         reporter.finish_scan.assert_awaited_once()
         self.assertEqual(
             reporter.finish_scan.await_args.args[3],
@@ -1640,7 +1644,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                         "status": "success",
                         "vulnerabilities": [],
                         "skill_reports": {},
-                        "processed_keys": [],
+                        "processed_candidate_indexes": [],
                     }),
                 ),
             ):

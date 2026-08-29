@@ -424,11 +424,20 @@ class PostgresScanStore(SqliteScanStore):
                 "ALTER TABLE vulnerability_validations ADD COLUMN IF NOT EXISTS validation_method_label TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS provisional INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS report_batch_id TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS audit_state TEXT NOT NULL DEFAULT 'pending'",
+                "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS audit_result TEXT",
+                "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS vulnerability_idx INTEGER",
+                "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS dedup_decision TEXT NOT NULL DEFAULT '{}'",
+                "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS audit_updated_at TEXT NOT NULL DEFAULT ''",
             ):
                 connection.execute(statement)
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_vulnerabilities_report_batch "
                 "ON vulnerabilities(scan_id, report_batch_id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scan_candidates_audit_state "
+                "ON scan_candidates(scan_id, audit_state)"
             )
             connection.execute(
                 "UPDATE scans SET user_id = '' WHERE user_id IS NULL"
@@ -534,6 +543,8 @@ class PostgresScanStore(SqliteScanStore):
                 "ON fp_review_jobs(created_order)"
             )
             connection.commit()
+        self._backfill_candidate_audits()
+        self._conn.commit()
 
     def close(self) -> None:
         for key in list(self._advisory_connections):
