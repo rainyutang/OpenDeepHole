@@ -95,8 +95,8 @@ def _valid_artifacts() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict
                     "association_description": "负责接收不可信认证请求",
                 }],
                 "attack_patterns": [{
-                    "pattern_id": "CAPEC-1",
-                    "pattern_name": "访问功能未正确地约束访问控制列表",
+                    "pattern_id": "ODH-SYS-05",
+                    "pattern_name": "授权决策与受控操作脱节",
                     "association_description": "外部认证入口的访问控制缺失会直接影响认证服务。",
                 }],
             }],
@@ -205,8 +205,48 @@ def test_analysis_guidance_and_schemas_are_private_json_files() -> None:
     assert guidance["attack_tree_method"]["attack_pattern_matching"]
     assert guidance["completion_checks"]
     attack_modes = json.loads(attack_mode_path.read_text(encoding="utf-8"))
-    assert len(attack_modes) > 1000
-    assert all("攻击模式名称" in mode for mode in attack_modes)
+    assert 30 <= len(attack_modes) <= 60
+    assert all(set(mode) == {
+        "攻击模式编号",
+        "攻击模式标签",
+        "攻击模式名称",
+        "攻击模式描述",
+    } for mode in attack_modes)
+    pattern_ids = [mode["攻击模式编号"][0] for mode in attack_modes]
+    assert len(pattern_ids) == len(set(pattern_ids))
+    assert {
+        "ODH-PROTO-12",
+        "ODH-PROTO-13",
+        "ODH-PROTO-14",
+        "ODH-PROTO-15",
+        "ODH-CRYPTO-11",
+        "ODH-SYS-12",
+        "ODH-SYS-13",
+        "ODH-SYS-14",
+        "ODH-SYS-15",
+    }.issubset(pattern_ids)
+    assert "ODH-PROTO-03" not in pattern_ids
+    assert {pattern_id.split("-")[1] for pattern_id in pattern_ids} == {
+        "NATIVE",
+        "PROTO",
+        "CRYPTO",
+        "SYS",
+    }
+    impact_terms = (
+        "破坏", "泄露", "崩溃", "执行", "绕过", "越界", "中断", "未授权",
+        "冒充", "篡改", "耗尽", "降级", "恢复", "读取", "写入", "伪造",
+        "劫持", "拒绝", "不可用", "下降", "窃取", "解密", "接受", "提升权限",
+        "异常", "危险", "暴露", "误导", "停滞", "降低", "改变",
+    )
+    for mode in attack_modes:
+        description = mode["攻击模式描述"]
+        assert description.startswith("攻击者")
+        assert "从而" in description
+        impact = description.rpartition("从而")[2]
+        assert any(term in impact for term in impact_terms), mode["攻击模式编号"]
+    catalog_text = json.dumps(attack_modes, ensure_ascii=False).casefold()
+    for web_term in ("web", "http", "浏览器", "cookie", "跨站"):
+        assert web_term not in catalog_text
     for schema_path in schema_paths.values():
         assert schema_path.parent == references_root
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
