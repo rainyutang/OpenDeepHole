@@ -757,6 +757,9 @@ def test_threat_audit_creates_one_task_for_each_leaf_pattern_pair(
     assert "主链路" not in prompt
     assert tasks[1]["task_id"] not in prompt
     assert '"confirmed":' not in prompt
+    assert "每个威胁审计任务最多输出一个已确认漏洞" in prompt
+    assert "只返回真实可利用性、代码证据和完整调用链最充分的问题" in prompt
+    assert '"maxItems":1' in prompt
 
     store = SqliteScanStore(tmp_path / "scan.db")
     store.save_scan(*_scan("scan-1"))
