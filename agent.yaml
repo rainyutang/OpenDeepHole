@@ -27,7 +27,7 @@ threat_analysis:
   model_policy:
     required_capability: "high"
     timeout_seconds: 3600
-    max_retries: 2
+    max_retries: 5
 
 vulnerability_mining:
   required_capability: "high"
