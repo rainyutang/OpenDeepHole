@@ -121,8 +121,9 @@ def build_goal_prompt(
     prompt = f"""你是威胁分析工程师。请使用攻击树威胁分析方法分析真实源码，生成可供后续威胁审计直接消费的最终产物。
 
 开始前依次读取并遵守：
+- 扫描上下文（动态输入与输出路径）：{context_path}
 - 分析指南（完整节点定义、分析方法、跨产物约束和完成检查）：{guidance_path}
-- 攻击模式库（路径中只能原样引用这里的编号和名称）：{attack_mode_path}
+- 精简攻击模式库（C/C++、协议、密码学、系统边界；无 Web 专属模式；只能原样引用编号和名称）：{attack_mode_path}
 - 价值资产输出 Schema：{schema_paths['value_asset_path']}
 - 高风险模块输出 Schema：{schema_paths['high_risk_modules_path']}
 - 攻击树输出 Schema：{schema_paths['attack_tree_path']}

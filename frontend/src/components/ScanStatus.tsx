@@ -19,6 +19,7 @@ import {
   STATIC_CANDIDATE_ENGINE_LABEL,
   THREAT_AUDIT_ENGINE_ID as THREAT_ENGINE_ID,
   THREAT_AUDIT_ENGINE_LABEL,
+  THREAT_PATTERN_AUDIT_ENGINE_LABEL,
   canonicalMiningEngineLabel,
 } from "../miningEngines";
 import VulnerabilityList from "./VulnerabilityList";
@@ -515,6 +516,11 @@ function isThreatAuditPoolTask(task: Record<string, unknown>): boolean {
     && poolTaskName(task).startsWith("threat-audit-");
 }
 
+function isThreatPatternAuditPoolTask(task: Record<string, unknown>): boolean {
+  return poolTaskType(task) === "vulnerability_mining"
+    && poolTaskName(task).startsWith("threat-pattern-audit-");
+}
+
 function isVulnerabilityDedupPoolTask(task: Record<string, unknown>): boolean {
   return poolTaskType(task) === "vulnerability_mining"
     && poolTaskName(task).startsWith("vulnerability-dedup-");
@@ -523,6 +529,7 @@ function isVulnerabilityDedupPoolTask(task: Record<string, unknown>): boolean {
 function isCandidateAuditPoolTask(task: Record<string, unknown>): boolean {
   return isVulnerabilityMiningPoolTask(task)
     && !isThreatAuditPoolTask(task)
+    && !isThreatPatternAuditPoolTask(task)
     && !isVulnerabilityDedupPoolTask(task);
 }
 
@@ -4663,6 +4670,7 @@ function scanQueueTaskTypeLabel(task: Record<string, unknown>): string {
     if (taskName.startsWith("candidate-audit-")) return `${STATIC_CANDIDATE_ENGINE_LABEL} / 候选点审计`;
     if (taskName.startsWith("project-audit-")) return `${STATIC_CANDIDATE_ENGINE_LABEL} / 项目级审计`;
     if (taskName.startsWith("threat-audit-")) return `${THREAT_AUDIT_ENGINE_LABEL} / 威胁审计`;
+    if (taskName.startsWith("threat-pattern-audit-")) return `${THREAT_PATTERN_AUDIT_ENGINE_LABEL} / 攻击模式审计`;
     return "漏洞挖掘";
   }
   if (type === "audit") return `${STATIC_CANDIDATE_ENGINE_LABEL} / 候选点审计`;

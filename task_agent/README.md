@@ -93,7 +93,8 @@ result = await run_opencode_task(
 
 漏洞挖掘中的候选点审计、项目级审计、威胁审计和漏洞根因去重都传
 `task_type="vulnerability_mining"`。内置调用分别使用 `candidate-audit-*`、
-`project-audit-*`、`threat-audit-*` 和 `vulnerability-dedup-*` 任务名前缀，模型看板据此
+`project-audit-*`、`threat-audit-*`、`threat-pattern-audit-*` 和
+`vulnerability-dedup-*` 任务名前缀，模型看板据此
 显示具体子任务；漏洞去重不会计入候选点审计活动状态，自定义名称无法匹配这些前缀时统一
 显示为“漏洞挖掘”。
 

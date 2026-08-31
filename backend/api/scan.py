@@ -102,6 +102,7 @@ from deephole_client.scan_modes import (
     SCAN_MODE_QUICK,
     SCAN_MODE_STANDARD,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS,
     component_scan_mode,
     normalize_scan_mode,
 )
@@ -399,12 +400,18 @@ def _resolve_scan_mining_engines(
         scan_mode=scan_mode,
         selections=selections,
     )
-    if any(item.engine_id == "threat_audit" for item in selections) and not (
-        effective_threat_analysis_enabled
-    ):
+    dependent = next(
+        (
+            item
+            for item in selections
+            if item.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS
+        ),
+        None,
+    )
+    if dependent is not None and not effective_threat_analysis_enabled:
         raise HTTPException(
             status_code=400,
-            detail=f"{THREAT_AUDIT_ENGINE_LABEL}要求本次扫描启用威胁分析",
+            detail=f"{dependent.engine_label}要求本次扫描启用威胁分析",
         )
     if not selections and not effective_threat_analysis_enabled:
         raise HTTPException(
@@ -427,7 +434,7 @@ def _resolve_threat_analysis_enabled(
     if scan_mode == SCAN_MODE_THREAT_ANALYSIS_ONLY:
         return True
     return any(
-        item.enabled and item.engine_id == "threat_audit"
+        item.enabled and item.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS
         for item in selections
     )
 
@@ -2498,9 +2505,13 @@ async def _continue_scan(
         ]
         if not retry_mining_engine_ids and meta.threat_analysis_enabled:
             resume_threat_analysis = True
-    if threat_audit_enabled and "threat_audit" in retry_mining_engine_ids:
-        # The engine consumes the native result object from the current Agent
-        # process.  Resume the analysis first so it can reuse or reconstruct it.
+    if any(
+        engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS
+        for engine_id in retry_mining_engine_ids
+    ):
+        # Threat-analysis-dependent engines consume the native result object
+        # from the current Agent process. Resume analysis so it can reuse or
+        # reconstruct that object before the engines run.
         resume_threat_analysis = True
     if meta.threat_analysis_enabled:
         try:
