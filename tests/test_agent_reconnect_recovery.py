@@ -19,6 +19,7 @@ from backend.models import (
     AgentScanCandidateBatch,
     AgentScanCandidates,
     AgentScanFinish,
+    AgentScanFinishV2,
     AgentVulnerabilityReconcile,
     Candidate,
     FpReviewStatus,
@@ -1131,6 +1132,150 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(completed.total_candidates, 3)
             self.assertEqual(completed.processed_candidates, 3)
             self.assertEqual(completed.progress, 1.0)
+
+    def test_missing_stage_run_returns_structured_scan_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch.object(agent_api.logger, "warning") as warning,
+            ):
+                with self.assertRaises(agent_api.HTTPException) as raised:
+                    asyncio.run(agent_api.agent_report_threat_analysis_run(
+                        "missing-scan",
+                        ThreatAnalysisRunStatus(status="running"),
+                    ))
+
+            self.assertEqual(raised.exception.status_code, 404)
+            self.assertEqual(
+                raised.exception.detail,
+                {
+                    "code": "scan_not_found",
+                    "scan_id": "missing-scan",
+                    "endpoint": "threat-analysis-run",
+                },
+            )
+            warning.assert_called_once()
+            warning_args = warning.call_args.args
+            self.assertIn("storage_target=%s", warning_args[0])
+            self.assertEqual(warning_args[1], "missing-scan")
+
+    def test_v2_finish_merges_terminal_stage_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.AUDITING)
+            scan.threat_analysis_enabled = True
+            scan.threat_analysis_run = ThreatAnalysisRunStatus(
+                status="running",
+                started_at="2026-01-01T00:00:00+00:00",
+            )
+            scan.mining_engine_runs = [MiningEngineRunStatus(
+                engine_id="engine_b",
+                engine_label="Engine B",
+                status="success",
+            )]
+            meta = _meta()
+            meta.threat_analysis_enabled = True
+            meta.mining_engines = [
+                MiningEngineSelection(
+                    engine_id="engine_a",
+                    engine_label="Engine A",
+                ),
+                MiningEngineSelection(
+                    engine_id="engine_b",
+                    engine_label="Engine B",
+                ),
+            ]
+            store.save_scan(scan, meta)
+            agent_api._running_scans["scan-1"] = store.load_scan("scan-1")[0]
+            published: list[tuple[str, str, dict]] = []
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch(
+                    "backend.sse.publish",
+                    side_effect=lambda scan_id, event_type, data: published.append(
+                        (scan_id, event_type, data),
+                    ),
+                ),
+            ):
+                asyncio.run(agent_api.agent_finish_scan_v2(
+                    "scan-1",
+                    AgentScanFinishV2(
+                        status="error",
+                        total_candidates=0,
+                        processed_candidates=0,
+                        error_message="scan failed",
+                        threat_analysis_run=ThreatAnalysisRunStatus(
+                            status="error",
+                            error_message="threat analysis failed",
+                            finished_at="2026-01-01T00:01:00+00:00",
+                        ),
+                        mining_engine_runs=[MiningEngineRunStatus(
+                            engine_id="engine_a",
+                            engine_label="untrusted label",
+                            status="cancelled",
+                            finished_at="2026-01-01T00:01:00+00:00",
+                        )],
+                    ),
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.threat_analysis_run.status, "error")
+            self.assertEqual(
+                {
+                    run.engine_id: (run.engine_label, run.status)
+                    for run in stored.mining_engine_runs
+                },
+                {
+                    "engine_a": ("Engine A", "cancelled"),
+                    "engine_b": ("Engine B", "success"),
+                },
+            )
+            event_types = [event_type for _scan_id, event_type, _data in published]
+            self.assertIn("threat_analysis_run", event_types)
+            self.assertIn("mining_engine_run", event_types)
+            self.assertIn("scan_finish", event_types)
+
+    def test_finish_missing_scan_returns_structured_404(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch.object(agent_api.logger, "warning"),
+            ):
+                with self.assertRaises(agent_api.HTTPException) as raised:
+                    asyncio.run(agent_api.agent_finish_scan(
+                        "missing-scan",
+                        AgentScanFinish(
+                            vulnerabilities=[],
+                            status="error",
+                            total_candidates=0,
+                            processed_candidates=0,
+                        ),
+                        SimpleNamespace(base_url="http://testserver/"),
+                    ))
+
+            self.assertEqual(raised.exception.status_code, 404)
+            self.assertEqual(
+                raised.exception.detail["code"],
+                "scan_not_found",
+            )
+            self.assertEqual(raised.exception.detail["endpoint"], "finish")
 
     def test_finalized_candidate_list_cannot_be_replaced_by_retry_subset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

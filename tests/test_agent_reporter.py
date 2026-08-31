@@ -2,7 +2,7 @@ import asyncio
 import io
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import httpx
 
@@ -99,6 +99,185 @@ class AgentReporterTests(unittest.TestCase):
             "/api/agent/scan/scan-1/threat-analysis-run",
         ))
         self.assertEqual(fake_client.posts[0]["json"]["status"], "running")
+
+    def test_stage_run_retries_structured_scan_not_found(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.posts: list[dict] = []
+
+            async def post(self, url, json=None, timeout=None):
+                self.posts.append({"url": url, "json": json, "timeout": timeout})
+                return httpx.Response(
+                    404,
+                    request=httpx.Request("POST", url),
+                    json={
+                        "detail": {
+                            "code": "scan_not_found",
+                            "scan_id": "scan-1",
+                            "endpoint": "threat-analysis-run",
+                        },
+                    },
+                )
+
+        reporter = Reporter("http://server")
+        fake_client = FakeClient()
+        reporter._client = fake_client  # type: ignore[assignment]
+
+        output = io.StringIO()
+        with (
+            redirect_stdout(output),
+            patch(
+                "deephole_client.reporter.asyncio.sleep",
+                new=AsyncMock(),
+            ) as sleep,
+        ):
+            asyncio.run(reporter.report_threat_analysis_run(
+                "scan-1",
+                ThreatAnalysisRunStatus(status="error", error_message="failed"),
+            ))
+
+        self.assertEqual(len(fake_client.posts), 3)
+        self.assertEqual(sleep.await_args_list, [call(1.0), call(2.0)])
+        warning = output.getvalue()
+        self.assertIn("scan record not found after 3 attempts", warning)
+        self.assertIn("scan_id=scan-1", warning)
+        self.assertIn('"code":"scan_not_found"', warning)
+
+    def test_stage_run_does_not_retry_route_not_found(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.posts: list[dict] = []
+
+            async def post(self, url, json=None, timeout=None):
+                self.posts.append({"url": url, "json": json, "timeout": timeout})
+                return httpx.Response(
+                    404,
+                    request=httpx.Request("POST", url),
+                    json={"detail": "Not Found"},
+                )
+
+        reporter = Reporter("http://server")
+        fake_client = FakeClient()
+        reporter._client = fake_client  # type: ignore[assignment]
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            asyncio.run(reporter.report_mining_engine_run(
+                "scan-1",
+                {
+                    "engine_id": "static_candidate",
+                    "engine_label": "Static",
+                    "status": "error",
+                },
+            ))
+
+        self.assertEqual(len(fake_client.posts), 1)
+        warning = output.getvalue()
+        self.assertIn("route not found", warning)
+        self.assertIn("response=", warning)
+
+    def test_finish_scan_carries_terminal_stage_snapshots_and_clears_them(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.posts: list[dict] = []
+
+            async def post(self, url, json=None, timeout=None):
+                self.posts.append({"url": url, "json": json, "timeout": timeout})
+                return httpx.Response(
+                    200,
+                    request=httpx.Request("POST", url),
+                    json={"ok": True},
+                )
+
+        async def exercise() -> tuple[Reporter, FakeClient]:
+            reporter = Reporter("http://server")
+            reporter.set_protocol_version(2)
+            fake_client = FakeClient()
+            reporter._client = fake_client  # type: ignore[assignment]
+            await reporter.report_threat_analysis_run(
+                "scan-1",
+                ThreatAnalysisRunStatus(
+                    status="error",
+                    error_message="threat analysis failed",
+                ),
+            )
+            await reporter.report_mining_engine_run(
+                "scan-1",
+                {
+                    "engine_id": "static_candidate",
+                    "engine_label": "Static",
+                    "status": "success",
+                },
+            )
+            await reporter.report_mining_engine_run(
+                "scan-1",
+                {
+                    "engine_id": "still_running",
+                    "engine_label": "Still running",
+                    "status": "running",
+                },
+            )
+            await reporter.finish_scan(
+                "scan-1",
+                [],
+                "error",
+                total_candidates=0,
+                processed_candidates=0,
+                error_message="failed",
+            )
+            return reporter, fake_client
+
+        reporter, fake_client = asyncio.run(exercise())
+
+        finish = next(
+            post
+            for post in fake_client.posts
+            if post["url"].endswith("/api/agent/v2/scan/scan-1/finish")
+        )
+        self.assertEqual(finish["json"]["threat_analysis_run"]["status"], "error")
+        self.assertEqual(
+            [run["engine_id"] for run in finish["json"]["mining_engine_runs"]],
+            ["static_candidate"],
+        )
+        self.assertNotIn("scan-1", reporter._threat_analysis_run_snapshots)
+        self.assertNotIn("scan-1", reporter._mining_engine_run_snapshots)
+
+    def test_failed_finish_keeps_stage_snapshots_for_retry(self) -> None:
+        class FakeClient:
+            async def post(self, url, json=None, timeout=None):
+                status = 404 if url.endswith("/finish") else 200
+                return httpx.Response(
+                    status,
+                    request=httpx.Request("POST", url),
+                    json={"detail": "Not Found"} if status == 404 else {"ok": True},
+                )
+
+        async def exercise() -> Reporter:
+            reporter = Reporter("http://server")
+            reporter._client = FakeClient()  # type: ignore[assignment]
+            await reporter.report_threat_analysis_run(
+                "scan-1",
+                ThreatAnalysisRunStatus(status="error", error_message="failed"),
+            )
+            with patch(
+                "deephole_client.reporter.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                await reporter.finish_scan(
+                    "scan-1",
+                    [],
+                    "error",
+                    total_candidates=0,
+                    processed_candidates=0,
+                )
+            return reporter
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            reporter = asyncio.run(exercise())
+
+        self.assertIn("scan-1", reporter._threat_analysis_run_snapshots)
+        self.assertIn("failed to deliver results", output.getvalue())
 
     def test_index_status_payload_includes_stage_and_stats(self) -> None:
         class FakeClient:

@@ -14,6 +14,7 @@ from backend.models import (
     Candidate,
     FeedbackEntry,
     HistoryPattern,
+    MiningEngineRunStatus,
     OutputSource,
     ScanEvent,
     ThreatAnalysisRunStatus,
@@ -27,11 +28,46 @@ OPENCODE_POOL_DEBOUNCE_SECONDS = 2.0
 OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 60.0
 AGENT_BATCH_SIZE = 100
 AGENT_BATCH_FLUSH_SECONDS = 0.25
+STAGE_RUN_RETRY_DELAYS = (1.0, 2.0)
+THREAT_ANALYSIS_TERMINAL_STATUSES = {"success", "error", "cancelled"}
+MINING_ENGINE_TERMINAL_STATUSES = {
+    "success",
+    "error",
+    "cancelled",
+    "skipped",
+}
 
 
 def _snapshot_signature(snapshot: dict) -> str:
     """Return a stable signature for deciding whether a pool snapshot changed."""
     return json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _response_detail(response: httpx.Response) -> object:
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+    if isinstance(payload, dict):
+        return payload.get("detail")
+    return None
+
+
+def _is_scan_not_found_response(response: httpx.Response) -> bool:
+    if response.status_code != 404:
+        return False
+    detail = _response_detail(response)
+    if isinstance(detail, dict):
+        return str(detail.get("code") or "").strip() == "scan_not_found"
+    return str(detail or "").strip().lower() == "scan not found"
+
+
+def _response_context(response: httpx.Response) -> str:
+    response_text = (response.text or "").strip()
+    suffix = f" status={response.status_code}"
+    if response_text:
+        suffix += f" response={response_text[:500]!r}"
+    return suffix
 
 
 class Reporter:
@@ -53,6 +89,14 @@ class Reporter:
         self._processed_progress_buffers: dict[str, tuple[int, int]] = {}
         self._processed_flush_tasks: dict[str, asyncio.Task] = {}
         self._undelivered_vulnerabilities: dict[str, list[Vulnerability]] = {}
+        self._threat_analysis_run_snapshots: dict[
+            str,
+            ThreatAnalysisRunStatus,
+        ] = {}
+        self._mining_engine_run_snapshots: dict[
+            str,
+            dict[str, MiningEngineRunStatus],
+        ] = {}
 
     def set_agent_id(self, agent_id: str) -> None:
         self.agent_id = agent_id
@@ -302,24 +346,22 @@ class Reporter:
         run: dict,
     ) -> None:
         """Create or update one mining-engine lifecycle state."""
+        snapshot = MiningEngineRunStatus.model_validate(run)
+        self._mining_engine_run_snapshots.setdefault(scan_id, {})[
+            snapshot.engine_id
+        ] = snapshot.model_copy(deep=True)
         if self.dry_run:
             print(
                 "  [ENGINE] "
-                f"{run.get('engine_id')}: {run.get('status')}"
+                f"{snapshot.engine_id}: {snapshot.status}"
             )
             return
-        try:
-            resp = await self._client.post(
-                f"{self.server_url}/api/agent/scan/{scan_id}/mining-engine-run",
-                json=run,
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-        except Exception as exc:
-            print(
-                "Warning: failed to upload mining-engine state: "
-                f"{exc}"
-            )
+        await self._post_stage_run(
+            scan_id,
+            endpoint=f"/api/agent/scan/{scan_id}/mining-engine-run",
+            payload=snapshot.model_dump(mode="json"),
+            label="mining-engine",
+        )
 
     async def report_threat_analysis_run(
         self,
@@ -327,21 +369,70 @@ class Reporter:
         run: ThreatAnalysisRunStatus,
     ) -> None:
         """Create or update the standalone threat-analysis lifecycle state."""
+        snapshot = run.model_copy(deep=True)
+        self._threat_analysis_run_snapshots[scan_id] = snapshot
         if self.dry_run:
-            print(f"  [THREAT_ANALYSIS] {run.status}")
+            print(f"  [THREAT_ANALYSIS] {snapshot.status}")
             return
-        try:
-            resp = await self._client.post(
-                f"{self.server_url}/api/agent/scan/{scan_id}/threat-analysis-run",
-                json=run.model_dump(mode="json"),
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-        except Exception as exc:
-            print(
-                "Warning: failed to upload threat-analysis state: "
-                f"{exc}"
-            )
+        await self._post_stage_run(
+            scan_id,
+            endpoint=f"/api/agent/scan/{scan_id}/threat-analysis-run",
+            payload=snapshot.model_dump(mode="json"),
+            label="threat-analysis",
+        )
+
+    async def _post_stage_run(
+        self,
+        scan_id: str,
+        *,
+        endpoint: str,
+        payload: dict,
+        label: str,
+    ) -> None:
+        target = f"{self.server_url}{endpoint}"
+        attempts = len(STAGE_RUN_RETRY_DELAYS) + 1
+        for attempt in range(attempts):
+            try:
+                response = await self._client.post(
+                    target,
+                    json=payload,
+                    timeout=10.0,
+                )
+                if _is_scan_not_found_response(response):
+                    if attempt < len(STAGE_RUN_RETRY_DELAYS):
+                        await asyncio.sleep(STAGE_RUN_RETRY_DELAYS[attempt])
+                        continue
+                    print(
+                        f"Warning: failed to upload {label} state: "
+                        "scan record not found after 3 attempts "
+                        f"scan_id={scan_id} endpoint={endpoint}"
+                        f"{_response_context(response)}",
+                        flush=True,
+                    )
+                    return
+                response.raise_for_status()
+                return
+            except httpx.HTTPStatusError as exc:
+                reason = (
+                    "route not found"
+                    if exc.response.status_code == 404
+                    else "HTTP request failed"
+                )
+                print(
+                    f"Warning: failed to upload {label} state: {reason} "
+                    f"scan_id={scan_id} endpoint={endpoint}"
+                    f"{_response_context(exc.response)}",
+                    flush=True,
+                )
+                return
+            except Exception as exc:
+                print(
+                    f"Warning: failed to upload {label} state: "
+                    f"scan_id={scan_id} endpoint={endpoint} "
+                    f"error_type={type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                return
 
     async def report_vulnerability_validation(
         self,
@@ -623,6 +714,30 @@ class Reporter:
             "error_message": error_message,
             "replace_report_batch_ids": list(replace_report_batch_ids or []),
         }
+        threat_analysis_run = self._threat_analysis_run_snapshots.get(scan_id)
+        if (
+            threat_analysis_run is not None
+            and threat_analysis_run.status in THREAT_ANALYSIS_TERMINAL_STATUSES
+        ):
+            payload["threat_analysis_run"] = threat_analysis_run.model_dump(
+                mode="json",
+            )
+        mining_engine_runs = sorted(
+            (
+                run
+                for run in self._mining_engine_run_snapshots.get(
+                    scan_id,
+                    {},
+                ).values()
+                if run.status in MINING_ENGINE_TERMINAL_STATUSES
+            ),
+            key=lambda run: (run.engine_label, run.engine_id),
+        )
+        if mining_engine_runs:
+            payload["mining_engine_runs"] = [
+                run.model_dump(mode="json")
+                for run in mining_engine_runs
+            ]
         await self._flush_scan_batches(scan_id)
         async with self._batch_lock:
             has_undelivered_vulnerabilities = bool(
@@ -648,10 +763,22 @@ class Reporter:
                 resp.raise_for_status()
                 async with self._batch_lock:
                     self._undelivered_vulnerabilities.pop(scan_id, None)
+                self._threat_analysis_run_snapshots.pop(scan_id, None)
+                self._mining_engine_run_snapshots.pop(scan_id, None)
                 return
             except Exception as e:
                 if attempt == 2:
-                    print(f"Warning: failed to deliver results to server after 3 attempts: {e}")
+                    context = (
+                        _response_context(e.response)
+                        if isinstance(e, httpx.HTTPStatusError)
+                        else f" error_type={type(e).__name__}: {e}"
+                    )
+                    print(
+                        "Warning: failed to deliver results to server after "
+                        f"3 attempts scan_id={scan_id} endpoint={finish_path}"
+                        f"{context}",
+                        flush=True,
+                    )
                     return
                 await asyncio.sleep(2**attempt)
 

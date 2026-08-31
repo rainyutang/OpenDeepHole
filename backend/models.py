@@ -817,6 +817,8 @@ class AgentScanFinish(BaseModel):
     processed_candidates: int
     error_message: str | None = None
     replace_report_batch_ids: list[str] = Field(default_factory=list)
+    threat_analysis_run: ThreatAnalysisRunStatus | None = None
+    mining_engine_runs: list[MiningEngineRunStatus] = Field(default_factory=list)
 
 
 class AgentVulnerabilityReconcile(BaseModel):
@@ -882,6 +884,8 @@ class AgentScanFinishV2(BaseModel):
     total_candidates: int = Field(ge=0)
     processed_candidates: int = Field(ge=0)
     error_message: str | None = None
+    threat_analysis_run: ThreatAnalysisRunStatus | None = None
+    mining_engine_runs: list[MiningEngineRunStatus] = Field(default_factory=list)
 
 
 class AgentVulnerabilityValidationUpdate(BaseModel):

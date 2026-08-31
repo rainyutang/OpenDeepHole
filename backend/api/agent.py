@@ -28,6 +28,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 import re
 import secrets
 import socket
@@ -37,7 +38,8 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
+from urllib.parse import urlsplit
 
 from fastapi import (
     APIRouter,
@@ -86,6 +88,7 @@ from backend.models import (
     OpenCodeTokenUsage,
     ScanEvent,
     ScanItemStatus,
+    ScanMeta,
     STATIC_CANDIDATE_ENGINE_LABEL,
     SkillReport,
     THREAT_AUDIT_ENGINE_LABEL,
@@ -115,6 +118,32 @@ public_router = APIRouter()  # Routes not under /api/agent prefix
 logger = get_logger(__name__)
 _HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _STATIC_CANDIDATE_ENGINE_ID = "static_candidate"
+_MINING_ENGINE_RUN_STATUSES = {
+    "pending",
+    "running",
+    "success",
+    "error",
+    "cancelled",
+    "skipped",
+}
+_MINING_ENGINE_TERMINAL_STATUSES = {
+    "success",
+    "error",
+    "cancelled",
+    "skipped",
+}
+_THREAT_ANALYSIS_RUN_STATUSES = {
+    "pending",
+    "running",
+    "success",
+    "error",
+    "cancelled",
+}
+_THREAT_ANALYSIS_TERMINAL_STATUSES = {
+    "success",
+    "error",
+    "cancelled",
+}
 
 # Root of the project (two levels up from this file: backend/api/ → backend/ → project root)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -134,6 +163,58 @@ _AGENT_TOUCH_PERSIST_INTERVAL_SECONDS = 10.0
 # are still read for tests and pre-v2 HTTP agents.
 _agent_configs: dict[str, AgentRemoteConfig] = {}
 _agent_opencode_pool_latest: dict[str, OpenCodePoolStatus] = {}
+
+
+def _storage_target_fingerprint(store) -> str:
+    config = get_config().storage
+    database_url = str(config.database_url or "").strip()
+    if database_url:
+        try:
+            parsed = urlsplit(database_url)
+            target = (
+                f"{parsed.scheme.lower()}://"
+                f"{(parsed.hostname or '').lower()}:"
+                f"{parsed.port or ''}{parsed.path}?{parsed.query}"
+            )
+        except Exception:
+            target = f"{type(store).__name__}:configured-database"
+    else:
+        target = str((Path(config.scans_dir).resolve() / "scans.db"))
+    return hashlib.sha256(target.encode("utf-8")).hexdigest()[:12]
+
+
+def _scan_not_found(
+    scan_id: str,
+    *,
+    endpoint: str,
+    store,
+) -> NoReturn:
+    worker_id = f"{socket.gethostname()}:{os.getpid()}"
+    if getattr(store, "distributed", False):
+        try:
+            from backend.distributed import WORKER_ID
+
+            worker_id = WORKER_ID
+        except Exception:
+            pass
+    logger.warning(
+        "Agent scan lookup failed scan_id=%s endpoint=%s pid=%d "
+        "worker_id=%s storage=%s storage_target=%s",
+        scan_id,
+        endpoint,
+        os.getpid(),
+        worker_id,
+        type(store).__name__,
+        _storage_target_fingerprint(store),
+    )
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "code": "scan_not_found",
+            "scan_id": scan_id,
+            "endpoint": endpoint,
+        },
+    )
 
 
 def _stored_agent_config(record: dict | None) -> AgentRemoteConfig:
@@ -3396,29 +3477,23 @@ def _same_pattern_candidate_result(vulnerability: Vulnerability) -> Vulnerabilit
     })
 
 
-@router.post("/scan/{scan_id}/mining-engine-run")
-async def agent_report_mining_engine_run(
-    scan_id: str,
+def _validated_mining_engine_run(
+    meta: ScanMeta,
     body: MiningEngineRunStatus,
-) -> dict:
-    """Agent reports one isolated mining-engine lifecycle state."""
-    allowed_statuses = {
-        "pending",
-        "running",
-        "success",
-        "error",
-        "cancelled",
-        "skipped",
-    }
+    *,
+    terminal_only: bool = False,
+) -> MiningEngineRunStatus:
+    allowed_statuses = (
+        _MINING_ENGINE_TERMINAL_STATUSES
+        if terminal_only
+        else _MINING_ENGINE_RUN_STATUSES
+    )
     if body.status not in allowed_statuses:
+        scope = "最终" if terminal_only else ""
         raise HTTPException(
             status_code=422,
-            detail=f"无效的漏洞挖掘引擎状态：{body.status}",
+            detail=f"无效的漏洞挖掘引擎{scope}状态：{body.status}",
         )
-    store = get_scan_store()
-    meta = await run_store_call(store, "get_scan_meta", scan_id)
-    if meta is None:
-        raise HTTPException(status_code=404, detail="Scan not found")
     selection = next(
         (
             item
@@ -3433,10 +3508,59 @@ async def agent_report_mining_engine_run(
             detail=f"未知或未启用的漏洞挖掘引擎：{body.engine_id}",
         )
     if selection is not None:
-        body = body.model_copy(update={
+        return body.model_copy(update={
             "engine_label": selection.engine_label,
         })
+    return body
+
+
+def _validated_threat_analysis_run(
+    meta: ScanMeta,
+    body: ThreatAnalysisRunStatus,
+    *,
+    terminal_only: bool = False,
+) -> ThreatAnalysisRunStatus:
+    allowed_statuses = (
+        _THREAT_ANALYSIS_TERMINAL_STATUSES
+        if terminal_only
+        else _THREAT_ANALYSIS_RUN_STATUSES
+    )
+    if body.status not in allowed_statuses:
+        scope = "最终" if terminal_only else ""
+        raise HTTPException(
+            status_code=422,
+            detail=f"无效的威胁分析{scope}状态：{body.status}",
+        )
+    if not meta.threat_analysis_enabled:
+        raise HTTPException(
+            status_code=422,
+            detail="本次扫描未启用威胁分析",
+        )
+    return body
+
+
+@router.post("/scan/{scan_id}/mining-engine-run")
+async def agent_report_mining_engine_run(
+    scan_id: str,
+    body: MiningEngineRunStatus,
+) -> dict:
+    """Agent reports one isolated mining-engine lifecycle state."""
+    store = get_scan_store()
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    if meta is None:
+        _scan_not_found(
+            scan_id,
+            endpoint="mining-engine-run",
+            store=store,
+        )
+    body = _validated_mining_engine_run(meta, body)
     runs = await run_store_call(store, "update_mining_engine_run", scan_id, body)
+    if not runs:
+        _scan_not_found(
+            scan_id,
+            endpoint="mining-engine-run",
+            store=store,
+        )
     scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         scan.mining_engine_runs = runs
@@ -3479,27 +3603,15 @@ async def agent_report_threat_analysis_run(
     body: ThreatAnalysisRunStatus,
 ) -> dict:
     """Agent reports the standalone threat-analysis lifecycle state."""
-    allowed_statuses = {
-        "pending",
-        "running",
-        "success",
-        "error",
-        "cancelled",
-    }
-    if body.status not in allowed_statuses:
-        raise HTTPException(
-            status_code=422,
-            detail=f"无效的威胁分析状态：{body.status}",
-        )
     store = get_scan_store()
     meta = await run_store_call(store, "get_scan_meta", scan_id)
     if meta is None:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    if not meta.threat_analysis_enabled:
-        raise HTTPException(
-            status_code=422,
-            detail="本次扫描未启用威胁分析",
+        _scan_not_found(
+            scan_id,
+            endpoint="threat-analysis-run",
+            store=store,
         )
+    body = _validated_threat_analysis_run(meta, body)
     stored = await run_store_call(
         store,
         "update_threat_analysis_run",
@@ -3507,7 +3619,11 @@ async def agent_report_threat_analysis_run(
         body,
     )
     if stored is None:
-        raise HTTPException(status_code=404, detail="Scan not found")
+        _scan_not_found(
+            scan_id,
+            endpoint="threat-analysis-run",
+            store=store,
+        )
     scan = await _ensure_running_scan(scan_id)
     if scan is not None:
         scan.threat_analysis_run = stored
@@ -4259,6 +4375,82 @@ async def agent_replace_skill_reports(scan_id: str, body: dict) -> dict:
     return {"ok": True, "count": len(reports)}
 
 
+async def _merge_finish_stage_runs(
+    scan_id: str,
+    body: AgentScanFinish,
+    *,
+    store,
+    scan,
+    meta: ScanMeta,
+) -> None:
+    reported_threat_run = (
+        _validated_threat_analysis_run(
+            meta,
+            body.threat_analysis_run,
+            terminal_only=True,
+        )
+        if body.threat_analysis_run is not None
+        else None
+    )
+    reported_engine_runs = [
+        _validated_mining_engine_run(
+            meta,
+            run,
+            terminal_only=True,
+        )
+        for run in body.mining_engine_runs
+    ]
+    if reported_threat_run is None and not reported_engine_runs:
+        return
+
+    merged_threat_run = reported_threat_run or scan.threat_analysis_run
+    engine_runs_by_id = {
+        run.engine_id: run
+        for run in scan.mining_engine_runs
+    }
+    for run in reported_engine_runs:
+        engine_runs_by_id[run.engine_id] = run
+    merged_engine_runs = sorted(
+        engine_runs_by_id.values(),
+        key=lambda run: (run.engine_label, run.engine_id),
+    )
+    replaced = await run_store_call(
+        store,
+        "replace_scan_stage_runs",
+        scan_id,
+        merged_threat_run,
+        merged_engine_runs,
+    )
+    if not replaced:
+        _scan_not_found(
+            scan_id,
+            endpoint="finish-stage-runs",
+            store=store,
+        )
+
+    scan.threat_analysis_run = merged_threat_run
+    scan.mining_engine_runs = merged_engine_runs
+    live_scan = _running_scans.get(scan_id)
+    if live_scan is not None:
+        live_scan.threat_analysis_run = merged_threat_run
+        live_scan.mining_engine_runs = merged_engine_runs
+
+    from backend.sse import publish
+
+    if reported_threat_run is not None:
+        publish(scan_id, "threat_analysis_run", {
+            "run": reported_threat_run.model_dump(mode="json"),
+        })
+    for run in reported_engine_runs:
+        publish(scan_id, "mining_engine_run", {
+            "run": run.model_dump(mode="json"),
+            "runs": [
+                item.model_dump(mode="json")
+                for item in merged_engine_runs
+            ],
+        })
+
+
 @router.post("/scan/{scan_id}/finish")
 async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Request) -> dict:
     """Agent pushes final results when the scan completes, errors, or is cancelled."""
@@ -4272,42 +4464,44 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
     final_status = status_map.get(body.status, ScanItemStatus.ERROR)
 
     loaded = await run_store_call(store, "load_scan_overview", scan_id)
-    existing_scan = loaded[0] if loaded is not None else None
-    if existing_scan is not None:
-        final_total, final_processed = _normalize_candidate_progress(
-            existing_scan,
-            candidate_count=loaded[2]["candidates"],
-            processed=max(
-                int(existing_scan.processed_candidates or 0),
-                int(body.processed_candidates or 0),
-            ),
-            reported_total=body.total_candidates,
+    if loaded is None:
+        _scan_not_found(
+            scan_id,
+            endpoint="finish",
+            store=store,
         )
-        # Legacy scans may predate per-engine lifecycle rows, and a transient
-        # lifecycle upload can leave the run marked "running".  A successful
-        # finish that itself reports the full absolute count is terminal proof.
-        if (
-            final_status == ScanItemStatus.COMPLETE
-            and (
-                not _static_candidate_run_status(existing_scan)
-                or int(body.processed_candidates or 0) >= final_total
-            )
-        ):
-            final_processed = final_total
-    else:
-        final_total = max(0, int(body.total_candidates or 0))
-        final_processed = min(
-            final_total,
-            max(0, int(body.processed_candidates or 0)),
+    existing_scan, meta, counts = loaded
+    await _merge_finish_stage_runs(
+        scan_id,
+        body,
+        store=store,
+        scan=existing_scan,
+        meta=meta,
+    )
+    final_total, final_processed = _normalize_candidate_progress(
+        existing_scan,
+        candidate_count=counts["candidates"],
+        processed=max(
+            int(existing_scan.processed_candidates or 0),
+            int(body.processed_candidates or 0),
+        ),
+        reported_total=body.total_candidates,
+    )
+    # Legacy scans may predate per-engine lifecycle rows, and a transient
+    # lifecycle upload can leave the run marked "running".  A successful
+    # finish that itself reports the full absolute count is terminal proof.
+    if (
+        final_status == ScanItemStatus.COMPLETE
+        and (
+            not _static_candidate_run_status(existing_scan)
+            or int(body.processed_candidates or 0) >= final_total
         )
+    ):
+        final_processed = final_total
 
     from backend.sse import publish
 
-    mining_engine_selections = (
-        loaded[1].mining_engines
-        if loaded is not None
-        else []
-    )
+    mining_engine_selections = meta.mining_engines
     replacement_batch_ids = list(dict.fromkeys(
         batch_id
         for value in body.replace_report_batch_ids
@@ -4489,6 +4683,8 @@ async def agent_finish_scan_v2(
             total_candidates=body.total_candidates,
             processed_candidates=body.processed_candidates,
             error_message=body.error_message,
+            threat_analysis_run=body.threat_analysis_run,
+            mining_engine_runs=body.mining_engine_runs,
         ),
         request,
     )
