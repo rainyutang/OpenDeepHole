@@ -583,6 +583,161 @@ class CodexConfigSyncTests(unittest.TestCase):
             self.assertEqual(stale.read_text(encoding="utf-8"), stale_content)
             self.assertEqual(list(codex_home.glob(".*.tmp")), [])
 
+    def test_trusted_projects_are_cumulative_and_preserve_model_and_user_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            user_content = (
+                b"# Personal settings stay byte-for-byte intact.\r\n"
+                b"[features]\r\nmemories = true\r\n"
+            )
+            config_path.write_bytes(user_content)
+
+            first = codex_profiles.sync_codex_trusted_projects(
+                ("/repo/one", "/home/user/.opendeephole"),
+                codex_home=codex_home,
+            )
+            model = self._sync(
+                codex_home,
+                _effective_config(),
+                ["env/alpha"],
+            )
+            second = codex_profiles.sync_codex_trusted_projects(
+                ("/repo/two", "/repo/one"),
+                codex_home=codex_home,
+            )
+            content = config_path.read_bytes().decode("utf-8")
+            remainder, has_default, default_error = (
+                codex_profiles._split_managed_default(content)
+            )
+            restored, managed, has_trust, trust_error = (
+                codex_profiles._split_managed_trust(remainder)
+            )
+
+            self.assertEqual(first.error, "")
+            self.assertEqual(model.error, "")
+            self.assertEqual(second.error, "")
+            self.assertTrue(has_default)
+            self.assertTrue(has_trust)
+            self.assertEqual(default_error, "")
+            self.assertEqual(trust_error, "")
+            self.assertEqual(restored.encode("utf-8"), user_content)
+            self.assertEqual(
+                set(managed),
+                {"/repo/one", "/repo/two", "/home/user/.opendeephole"},
+            )
+            parsed = codex_profiles.tomllib.loads(content)
+            self.assertEqual(parsed["model"], "alpha")
+            self.assertTrue(parsed["features"]["memories"])
+            self.assertTrue(all(
+                parsed["projects"][path]["trust_level"] == "trusted"
+                for path in managed
+            ))
+
+            with patch.object(codex_profiles, "_stage_file") as stage:
+                repeated = codex_profiles.sync_codex_trusted_projects(
+                    ("/repo/two",),
+                    codex_home=codex_home,
+                )
+            self.assertEqual(repeated.error, "")
+            stage.assert_not_called()
+
+            removed_model = self._sync(codex_home, {}, [])
+            self.assertEqual(removed_model.error, "")
+            parsed_without_model = codex_profiles.tomllib.loads(
+                config_path.read_text(encoding="utf-8")
+            )
+            self.assertNotIn("model", parsed_without_model)
+            self.assertEqual(set(parsed_without_model["projects"]), set(managed))
+
+    def test_user_owned_project_trust_is_reused_and_untrusted_is_respected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            original = (
+                b'[projects."/already"]\ntrust_level = "trusted"\n\n'
+                b'[projects."/blocked"]\ntrust_level = "untrusted"\n'
+            )
+            config_path.write_bytes(original)
+
+            trusted = codex_profiles.sync_codex_trusted_projects(
+                ("/already",),
+                codex_home=codex_home,
+            )
+            blocked = codex_profiles.sync_codex_trusted_projects(
+                ("/blocked",),
+                codex_home=codex_home,
+            )
+
+            self.assertEqual(trusted.error, "")
+            self.assertEqual(trusted.trusted_paths, ("/already",))
+            self.assertIn("not trusted", blocked.error)
+            self.assertEqual(config_path.read_bytes(), original)
+
+    def test_windows_and_unc_trusted_paths_round_trip_through_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            paths = (
+                r"C:\Users\Alice Smith\project",
+                r"C:\Users\Alice Smith\.opendeephole",
+                r"\\server\share\scan",
+            )
+
+            result = codex_profiles.sync_codex_trusted_projects(
+                paths,
+                codex_home=codex_home,
+                platform="win32",
+            )
+
+            self.assertEqual(result.error, "")
+            parsed = codex_profiles.tomllib.loads(
+                (codex_home / "config.toml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(set(parsed["projects"]), set(paths))
+            self.assertIn(r"C:\\Users\\Alice Smith", (
+                codex_home / "config.toml"
+            ).read_text(encoding="utf-8"))
+
+    def test_malformed_trust_markers_and_symlink_are_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            malformed = (
+                f"{codex_profiles._TRUST_CONFIG_BEGIN}\n"
+                '[projects."/old"]\ntrust_level = "trusted"\n'
+            ).encode("utf-8")
+            config_path.write_bytes(malformed)
+
+            invalid = codex_profiles.sync_codex_trusted_projects(
+                ("/new",),
+                codex_home=codex_home,
+            )
+
+            self.assertIn("markers", invalid.error)
+            self.assertEqual(config_path.read_bytes(), malformed)
+            if os.name != "nt":
+                config_path.unlink()
+                target = root / "personal.toml"
+                target.write_text('model = "personal"\n', encoding="utf-8")
+                config_path.symlink_to(target)
+                symlinked = codex_profiles.sync_codex_trusted_projects(
+                    ("/new",),
+                    codex_home=codex_home,
+                )
+                self.assertIn("symlinked", symlinked.error)
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"),
+                    'model = "personal"\n',
+                )
+
     def test_windows_codex_home_fallback_is_supported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             userprofile = Path(tmp) / "user"

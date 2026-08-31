@@ -24,6 +24,8 @@ from .code_graph_build import run_code_graph_build
 from .codex_runtime import (
     CodexRuntimeState,
     get_codex_runtime_state,
+    prepare_scan_codex_access_async,
+    sync_scan_codex_mcp_async,
 )
 from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
@@ -569,6 +571,27 @@ async def run_scan(
     for error in registry.errors:
         await emit("mining_engine", f"Engine discovery warning: {error}")
 
+    scan_codex_access_error = ""
+    access_result = await prepare_scan_codex_access_async(
+        project_path=project,
+        scan_dir=scan_dir,
+    )
+    for warning in access_result.warnings:
+        await emit("codex", f"Codex configuration warning: {warning}")
+    if access_result.error:
+        scan_codex_access_error = access_result.error
+        await emit(
+            "codex",
+            "Codex scan path configuration failed; Codex-dependent stages "
+            f"will use their existing fallback: {access_result.error}",
+        )
+    else:
+        await emit(
+            "codex",
+            "Codex scan paths trusted: "
+            f"{len(access_result.trusted_paths)}",
+        )
+
     threat_dependent_engine_selected = any(
         item.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS
         for item in enabled_selections
@@ -610,7 +633,13 @@ async def run_scan(
     scan_codex_state: CodexRuntimeState | None = None
     if codex_threat_selected or codex_engine_selected:
         scan_codex_state = get_codex_runtime_state()
-        if scan_codex_state.models:
+        if scan_codex_access_error:
+            await emit(
+                "threat_analysis" if codex_threat_selected else "codex",
+                "Codex is unavailable for this scan because its required "
+                "paths could not be configured",
+            )
+        elif scan_codex_state.models:
             await emit(
                 "codex",
                 "Using configured Codex default model: "
@@ -642,6 +671,25 @@ async def run_scan(
                     "code_graph_mcp",
                     "Scan code graph MCP preparation failed; continuing with file tools only",
                 )
+
+    scan_mcp_result = await sync_scan_codex_mcp_async(
+        project_path=project,
+        scan_dir=scan_dir,
+        code_graph_mcp=code_graph_mcp,
+    )
+    for warning in scan_mcp_result.warnings:
+        await emit("codex", f"Codex CodeGraph MCP warning: {warning}")
+    if scan_mcp_result.error:
+        await emit(
+            "codex",
+            "Codex CodeGraph MCP configuration failed; Codex will continue "
+            f"with file tools: {scan_mcp_result.error}",
+        )
+    elif scan_mcp_result.mcp_configured:
+        await emit(
+            "codex",
+            "Scan CodeGraph MCP configured for Codex",
+        )
 
     try:
         graph_result = await run_code_graph_build(
@@ -802,7 +850,8 @@ async def run_scan(
             if method_id != CODEX_THREAT_ANALYSIS_METHOD_ID:
                 return await invoke()
             if (
-                scan_codex_state is None
+                scan_codex_access_error
+                or scan_codex_state is None
                 or not scan_codex_state.available
                 or not scan_codex_state.command
                 or not scan_codex_state.models
@@ -819,6 +868,8 @@ async def run_scan(
                 )
 
         def codex_unavailable_reason() -> str:
+            if scan_codex_access_error:
+                return scan_codex_access_error
             if scan_codex_state is None:
                 return "Codex model preparation did not complete"
             if not scan_codex_state.available:
@@ -1010,12 +1061,14 @@ async def run_scan(
         if bool(getattr(loaded.manifest, "requires_codex", False)):
             codex_state = scan_codex_state or get_codex_runtime_state()
             if (
-                not codex_state.available
+                scan_codex_access_error
+                or not codex_state.available
                 or not codex_state.command
                 or not codex_state.models
             ):
                 reason = (
-                    codex_state.model_config_error
+                    scan_codex_access_error
+                    or codex_state.model_config_error
                     or codex_state.error
                     or "Codex CLI has no executable command on this Agent"
                 )

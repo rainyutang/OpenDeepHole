@@ -1,4 +1,4 @@
-"""Safely configure one effective Codex default model."""
+"""Safely configure Codex defaults and trusted OpenDeepHole paths."""
 
 from __future__ import annotations
 
@@ -28,6 +28,12 @@ _DEFAULT_CONFIG_BEGIN = (
 )
 _DEFAULT_CONFIG_END = (
     "# END OpenDeepHole managed Codex default model"
+)
+_TRUST_CONFIG_BEGIN = (
+    "# BEGIN OpenDeepHole managed Codex trusted projects"
+)
+_TRUST_CONFIG_END = (
+    "# END OpenDeepHole managed Codex trusted projects"
 )
 _ENV_BEGIN = "# BEGIN OpenDeepHole managed Codex NO_PROXY"
 _ENV_END = "# END OpenDeepHole managed Codex NO_PROXY"
@@ -64,6 +70,15 @@ class CodexConfigSyncResult:
     models: tuple[CodexModelConfig, ...] = ()
     managed_default_model: CodexModelConfig | None = None
     user_default_preserved: bool = False
+    warnings: tuple[str, ...] = ()
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class CodexTrustSyncResult:
+    """Outcome of adding OpenDeepHole-required Codex trust entries."""
+
+    trusted_paths: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     error: str = ""
 
@@ -440,6 +455,300 @@ def _split_managed_default(content: str) -> tuple[str, bool, str]:
             "OpenDeepHole managed default markers are duplicated"
         )
     return remainder, True, ""
+
+
+def _split_managed_trust(
+    content: str,
+) -> tuple[str, tuple[str, ...], bool, str]:
+    """Remove and parse the one OpenDeepHole-owned trailing trust block."""
+    begin_count = content.count(_TRUST_CONFIG_BEGIN)
+    end_count = content.count(_TRUST_CONFIG_END)
+    if begin_count == 0 and end_count == 0:
+        return content, (), False, ""
+    if begin_count != 1 or end_count != 1:
+        return content, (), False, (
+            "OpenDeepHole managed Codex trust markers are incomplete or "
+            "duplicated"
+        )
+
+    start = content.find(_TRUST_CONFIG_BEGIN)
+    end = content.find(
+        _TRUST_CONFIG_END,
+        start + len(_TRUST_CONFIG_BEGIN),
+    )
+    body_start = start + len(_TRUST_CONFIG_BEGIN)
+    after = end + len(_TRUST_CONFIG_END)
+    if (
+        start < 0
+        or end < 0
+        or (start > 0 and content[start - 1] != "\n")
+        or content[body_start:body_start + 1] != "\n"
+        or content[end - 1:end] != "\n"
+        or content[after:] not in {"", "\n"}
+    ):
+        return content, (), False, (
+            "OpenDeepHole managed Codex trust block is misplaced"
+        )
+
+    body = content[body_start + 1:end]
+    try:
+        parsed = tomllib.loads(body)
+    except Exception as exc:
+        return content, (), False, (
+            "OpenDeepHole managed Codex trust block is invalid "
+            f"({type(exc).__name__})"
+        )
+    projects = parsed.get("projects")
+    if set(parsed) != {"projects"} or not isinstance(projects, Mapping):
+        return content, (), False, (
+            "OpenDeepHole managed Codex trust block has unexpected keys"
+        )
+
+    paths: list[str] = []
+    for raw_path, raw_config in projects.items():
+        if (
+            not isinstance(raw_path, str)
+            or not raw_path
+            or not isinstance(raw_config, Mapping)
+            or set(raw_config) != {"trust_level"}
+            or raw_config.get("trust_level") != "trusted"
+        ):
+            return content, (), False, (
+                "OpenDeepHole managed Codex trust block has unexpected "
+                "project values"
+            )
+        paths.append(raw_path)
+
+    user_content = "" if start == 0 else content[:start - 1]
+    return user_content, tuple(paths), True, ""
+
+
+def _normalize_trust_paths(
+    paths: Sequence[str | os.PathLike[str]],
+    *,
+    platform: str,
+) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    windows = platform == "win32"
+    for raw_path in paths:
+        value = os.fspath(raw_path)
+        if not isinstance(value, str) or not value or "\x00" in value:
+            raise ValueError("trusted project paths must be non-empty strings")
+        key = value.casefold() if windows else value
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(value)
+    return tuple(sorted(normalized, key=lambda item: (item.casefold(), item)))
+
+
+def _render_managed_trust(
+    user_content: str,
+    paths: Sequence[str],
+) -> str:
+    if not paths:
+        return user_content
+    lines = [_TRUST_CONFIG_BEGIN]
+    for path in paths:
+        lines.extend((
+            f"[projects.{_toml_string(path)}]",
+            'trust_level = "trusted"',
+            "",
+        ))
+    lines.extend((_TRUST_CONFIG_END, ""))
+    block = "\n".join(lines)
+    return block if not user_content else user_content + "\n" + block
+
+
+def sync_codex_trusted_projects(
+    paths: Sequence[str | os.PathLike[str]],
+    *,
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    codex_home: Path | None = None,
+) -> CodexTrustSyncResult:
+    """Add trusted projects without rewriting user-owned Codex settings."""
+    effective_env = dict(os.environ) if env is None else dict(env)
+    active_platform = platform or sys.platform
+    destination = codex_home or _codex_home(
+        effective_env,
+        platform=active_platform,
+    )
+    config_path = destination / "config.toml"
+    try:
+        requested = _normalize_trust_paths(paths, platform=active_platform)
+    except (TypeError, ValueError) as exc:
+        return CodexTrustSyncResult(error=str(exc))
+    if not requested:
+        return CodexTrustSyncResult()
+
+    try:
+        if config_path.is_symlink():
+            return CodexTrustSyncResult(
+                error=(
+                    f"refused to modify symlinked Codex config {config_path}; "
+                    "existing configuration was kept"
+                ),
+            )
+        exists = config_path.exists()
+        if exists and not config_path.is_file():
+            return CodexTrustSyncResult(
+                error=(
+                    f"refused to modify non-file Codex config {config_path}; "
+                    "existing configuration was kept"
+                ),
+            )
+        original_bytes = config_path.read_bytes() if exists else None
+        original_text = (
+            original_bytes.decode("utf-8")
+            if original_bytes is not None
+            else ""
+        )
+        mode = (
+            stat.S_IMODE(config_path.stat().st_mode)
+            if exists
+            else 0o600
+        )
+    except (OSError, UnicodeError) as exc:
+        return CodexTrustSyncResult(
+            error=(
+                f"could not read existing Codex config {config_path} "
+                f"({type(exc).__name__}); existing configuration was kept"
+            ),
+        )
+
+    remainder, _had_default, default_error = _split_managed_default(
+        original_text,
+    )
+    if default_error:
+        return CodexTrustSyncResult(
+            error=(
+                f"could not update Codex config {config_path}: "
+                f"{default_error}; existing configuration was kept"
+            ),
+        )
+    default_prefix_length = len(original_text) - len(remainder)
+    default_prefix = original_text[:default_prefix_length]
+    user_text, managed_paths, _had_trust, trust_error = (
+        _split_managed_trust(remainder)
+    )
+    if trust_error:
+        return CodexTrustSyncResult(
+            error=(
+                f"could not update Codex config {config_path}: "
+                f"{trust_error}; existing configuration was kept"
+            ),
+        )
+
+    try:
+        parsed_user = tomllib.loads(user_text)
+    except Exception as exc:
+        return CodexTrustSyncResult(
+            error=(
+                f"could not parse existing Codex config {config_path} "
+                f"({type(exc).__name__}); existing configuration was kept"
+            ),
+        )
+    raw_user_projects = parsed_user.get("projects", {})
+    if not isinstance(raw_user_projects, Mapping):
+        return CodexTrustSyncResult(
+            error=(
+                f"could not update Codex config {config_path}: existing "
+                "projects setting is not a table; existing configuration "
+                "was kept"
+            ),
+        )
+
+    windows = active_platform == "win32"
+    user_projects = {
+        (str(path).casefold() if windows else str(path)): (str(path), value)
+        for path, value in raw_user_projects.items()
+    }
+    try:
+        combined = _normalize_trust_paths(
+            (*managed_paths, *requested),
+            platform=active_platform,
+        )
+    except (TypeError, ValueError) as exc:
+        return CodexTrustSyncResult(error=str(exc))
+
+    managed_desired: list[str] = []
+    effective_paths: list[str] = []
+    for path in combined:
+        key = path.casefold() if windows else path
+        user_project = user_projects.get(key)
+        if user_project is None:
+            managed_desired.append(path)
+            effective_paths.append(path)
+            continue
+        user_path, raw_config = user_project
+        level = (
+            raw_config.get("trust_level")
+            if isinstance(raw_config, Mapping)
+            else None
+        )
+        if level == "trusted":
+            effective_paths.append(user_path)
+            continue
+        return CodexTrustSyncResult(
+            error=(
+                f"could not trust Codex project {path}: the user-owned "
+                f"configuration for {user_path} is not trusted; existing "
+                "configuration was kept"
+            ),
+        )
+
+    desired_remainder = _render_managed_trust(
+        user_text,
+        managed_desired,
+    )
+    desired_text = default_prefix + desired_remainder
+    try:
+        tomllib.loads(desired_text)
+    except Exception as exc:
+        return CodexTrustSyncResult(
+            error=(
+                f"could not safely merge Codex trusted projects into "
+                f"{config_path} ({type(exc).__name__}); existing "
+                "configuration was kept"
+            ),
+        )
+
+    desired_bytes = desired_text.encode("utf-8")
+    if original_bytes == desired_bytes:
+        return CodexTrustSyncResult(
+            trusted_paths=tuple(effective_paths),
+        )
+
+    plan = _DefaultConfigPlan(
+        path=config_path,
+        original_content=original_bytes,
+        original_mode=mode,
+        mode=mode,
+    )
+    staged: Path | None = None
+    try:
+        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staged = _stage_file(config_path, desired_bytes, mode=mode)
+        if not _default_config_is_unchanged(plan):
+            raise _CodexConfigChangedError(
+                "Codex config changed during trusted-project synchronization"
+            )
+        os.replace(staged, config_path)
+        staged = None
+    except Exception as exc:
+        if staged is not None:
+            _discard_staged((staged,))
+        return CodexTrustSyncResult(
+            error=(
+                "could not atomically write managed Codex trusted projects "
+                f"({type(exc).__name__}); existing configuration was kept"
+            ),
+        )
+    return CodexTrustSyncResult(
+        trusted_paths=tuple(effective_paths),
+    )
 
 
 def _plan_default_config(
@@ -939,7 +1248,9 @@ def sync_codex_config(
 __all__ = [
     "CodexConfigSyncResult",
     "CodexModelConfig",
+    "CodexTrustSyncResult",
     "inspect_codex_user_default",
     "normalize_codex_base_url",
     "sync_codex_config",
+    "sync_codex_trusted_projects",
 ]

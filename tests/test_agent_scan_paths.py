@@ -13,6 +13,7 @@ from deephole_client.config import AgentConfig
 from deephole_client.codex_runtime import (
     CodexModelConfig,
     CodexRuntimeState,
+    ScanCodexConfigResult,
 )
 from deephole_client.scanner import (
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
@@ -98,6 +99,22 @@ def _threat_vulnerability() -> dict:
 
 
 class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.codex_access = AsyncMock(return_value=ScanCodexConfigResult())
+        self.codex_mcp = AsyncMock(return_value=ScanCodexConfigResult())
+        self.access_patcher = patch(
+            "deephole_client.scanner.prepare_scan_codex_access_async",
+            new=self.codex_access,
+        )
+        self.mcp_patcher = patch(
+            "deephole_client.scanner.sync_scan_codex_mcp_async",
+            new=self.codex_mcp,
+        )
+        self.access_patcher.start()
+        self.mcp_patcher.start()
+        self.addCleanup(self.access_patcher.stop)
+        self.addCleanup(self.mcp_patcher.stop)
+
     async def test_replaced_attempt_suppresses_stale_terminal_report(self) -> None:
         reporter = _reporter()
         cancel_event = ScanCancellationEvent()
@@ -1089,6 +1106,18 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             models=(selected,),
         )
         observed_commands: list[tuple[str, ...]] = []
+        lifecycle: list[str] = []
+
+        async def prepare_access(**_kwargs):
+            lifecycle.append("access")
+            return ScanCodexConfigResult(trusted_paths=("/project",))
+
+        async def prepare_mcp(**_kwargs):
+            lifecycle.append("mcp")
+            return ScanCodexConfigResult()
+
+        self.codex_access.side_effect = prepare_access
+        self.codex_mcp.side_effect = prepare_mcp
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1098,6 +1127,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             index_path.touch()
 
             async def run_analysis(**kwargs):
+                lifecycle.append("analysis")
                 from deephole_client.codex_runtime import (
                     get_codex_runtime_state,
                 )
@@ -1166,6 +1196,26 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(observed_commands, [("/opt/bin/codex",)])
+        self.assertEqual(lifecycle, ["access", "mcp", "analysis"])
+        self.codex_access.assert_awaited_once_with(
+            project_path=project.resolve(),
+            scan_dir=(
+                root
+                / ".opendeephole"
+                / "scans"
+                / "scan-codex-analysis"
+            ).resolve(),
+        )
+        self.codex_mcp.assert_awaited_once_with(
+            project_path=project.resolve(),
+            scan_dir=(
+                root
+                / ".opendeephole"
+                / "scans"
+                / "scan-codex-analysis"
+            ).resolve(),
+            code_graph_mcp=None,
+        )
         analysis.assert_awaited_once()
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
@@ -1342,6 +1392,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             ("codex_goal_threat_analysis", True),
             ("deephole_threat_analysis", False),
         ])
+        self.codex_access.assert_awaited_once()
+        self.codex_mcp.assert_awaited_once()
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
     async def test_resume_runs_only_requested_failed_engine(self) -> None:
@@ -1938,6 +1990,19 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         prepare.assert_awaited_once()
+        self.codex_access.assert_awaited_once_with(
+            project_path=project.resolve(),
+            scan_dir=(
+                root / ".opendeephole" / "scans" / "scan-custom"
+            ).resolve(),
+        )
+        self.codex_mcp.assert_awaited_once_with(
+            project_path=project.resolve(),
+            scan_dir=(
+                root / ".opendeephole" / "scans" / "scan-custom"
+            ).resolve(),
+            code_graph_mcp=graph_config,
+        )
         self.assertEqual(
             task_context.call_args.kwargs["code_graph_mcp"],
             graph_config,

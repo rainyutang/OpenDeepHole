@@ -198,6 +198,22 @@ Provider。没有用户默认模型时，Agent 才按 `model_pool.models` 中已
 或子进程环境。旧版本生成且带所有权标记的 `opendeephole-*.config.toml` 会被清理，用户自建文件、
 默认模型和非托管配置均不会被覆盖。
 
+每次创建或恢复扫描时，Agent 还会把 Codex 本次必须读取的绝对路径加入同一份
+`$CODEX_HOME/config.toml`：项目总路径、Agent 的 `~/.opendeephole` 数据根目录、精确的
+`~/.opendeephole/scans/<scan_id>/threat_analysis` Codex 工作目录，以及随 Agent 发布的 Codex
+威胁分析参考资料和校验器目录。Linux/macOS 使用 `$CODEX_HOME` 或 `~/.codex`，Windows 使用
+`%CODEX_HOME%` 或 `%USERPROFILE%\.codex`；路径按 TOML 字符串安全转义，Windows 大小写路径去重。
+Agent 只维护带 OpenDeepHole 标记的尾部 `projects` 信任区，保留用户已有配置；若用户已经对同一路径
+显式配置为非 trusted、配置文件无效或目标为符号链接，则不强制覆盖，并让依赖 Codex 的阶段按原有
+回退契约处理。
+
+扫描启用 CodeGraph 且本地索引或远端连接准备成功后，Agent 会在精确 Codex 工作目录写入私有的
+`.codex/config.toml`，仅配置固定名称 `codegraph` 的扫描级 MCP；本地命令、参数、工作目录和环境变量，
+或远端 URL、请求头及超时都来自创建扫描时固化的快照。该文件不把 CodeGraph 当作信任路径，也不会
+写入用户全局 MCP；关闭或准备失败时会清理 OpenDeepHole 自有文件，Codex 继续使用文件工具。目录和
+文件在支持权限位的平台分别使用 `0700` 和 `0600`，Windows `.cmd` / `.bat` MCP 通过 `cmd.exe`
+的独立参数启动。Codex 只会在精确工作目录已 trusted 时加载这一项目层配置。
+
 新建扫描默认优先使用 `codex_goal_threat_analysis`。Codex CLI 不可用、没有用户默认模型且没有任何
 模型通过探测、托管配置失败、Codex 方法执行失败或其结果产物无效时，外层扫描编排会自动且仅一次以
 clean 模式执行 `deephole_threat_analysis`；用户取消不会触发回退。用户显式选择 DeepHole 时直接

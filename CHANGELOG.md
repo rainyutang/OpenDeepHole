@@ -2,6 +2,7 @@
 
 ## 2026-08-31
 
+- **修复** Agent 创建或恢复扫描时会把项目总路径、`~/.opendeephole`、精确的扫描 Codex 工作目录及随包参考资料目录，以 OpenDeepHole 自有尾部区安全合并到 `$CODEX_HOME/config.toml` 的 trusted projects；保留用户配置、平台默认模型托管区、文件模式和 Linux/Windows 路径语义，显式非 trusted、非法配置、符号链接及并发改写均不强制覆盖。扫描启用且成功准备 CodeGraph 后，另在 `<scan>/threat_analysis/.codex/config.toml` 写入扫描私有 `codegraph` MCP，本地/远端参数、环境或请求头和超时取自固化快照，关闭或失败时只清理自有配置并回退文件工具；真实 Codex App Server 回归确认父目录信任不会误激活项目层，必须精确信任扫描工作目录后配置才会生效
 - **修复** Agent 上报威胁分析及漏洞挖掘引擎生命周期时，不再把后端路由缺失与扫描记录暂时不可见混成无响应正文的 404：`scan_not_found` 会按 1/2 秒有限重试，路由级 404 会明确输出接口和响应；Agent 同时保留每个扫描的最终阶段快照并通过 v1/v2 完成请求兜底补交，后端原子合并状态并推送现有 SSE，完成请求未落库时不再清理快照或静默返回成功。服务端缺失扫描的日志补充进程、Worker、存储类型及脱敏数据库目标指纹，Codex、模型和扫描流程保持不变
 - **修复** Codex Goal 威胁分析不再通过 `--profile` 启动不支持该参数的 `app-server`：Agent 现在优先原样使用 `$CODEX_HOME/config.toml` 中用户已有的顶层默认模型；没有用户默认模型时才按配置顺序探测 `/v1/responses` 并把首个可用模型写入全局托管默认区，随后以裸 Codex 命令直接启动。旧版 OpenDeepHole 托管 profile 会被清理，所有 Codex 引擎只接收同一个裸命令；Windows 继续支持 `%USERPROFILE%\.codex` 及 `codex.cmd`/Node 启动。用户默认或 Codex 执行失败时直接进行既有的单次 DeepHole 回退，不改写默认模型重试
 - **变更** 新建扫描的默认威胁分析改为 Codex 优先：没有用户 Codex 默认模型时，Agent 在平台配置应用阶段按用户模型顺序向各 Provider 的 `/v1/responses` 发送最小真实请求，并将首个可用模型配置为全局默认；选中地址的主机同时写入 `$CODEX_HOME/.env` 的 OpenDeepHole 托管区并分别追加到 `NO_PROXY`、`no_proxy`，保留用户原内容且不向 Agent 或子进程环境注入。显式选择 DeepHole 时仍直接执行 DeepHole，历史扫描不迁移

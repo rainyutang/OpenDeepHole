@@ -26,6 +26,11 @@ from .codex_profiles import (
     normalize_codex_base_url,
     sync_codex_config,
 )
+from .codex_scan_config import (
+    ScanCodexConfigResult,
+    prepare_scan_codex_access,
+    sync_scan_codex_mcp,
+)
 
 
 CODEX_INSTALL_TIMEOUT_SECONDS = 120.0
@@ -97,6 +102,7 @@ _model_sync_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="opendeephole-codex-model-sync",
 )
+_MODEL_SYNC_POLL_INTERVAL_SECONDS = 0.01
 
 
 def _is_windows() -> bool:
@@ -961,8 +967,49 @@ async def sync_platform_codex_models_async(
         reason=reason,
         cancel_event=cancel_event,
     )
+    return await _run_serial_codex_config_call(call)
+
+
+async def _run_serial_codex_config_call(call: Any) -> Any:
+    """Await a serialized Codex config operation without blocking the loop."""
     future = _model_sync_executor.submit(call)
-    return await asyncio.wrap_future(future)
+    try:
+        while not future.done():
+            await asyncio.sleep(_MODEL_SYNC_POLL_INTERVAL_SECONDS)
+        return future.result()
+    except asyncio.CancelledError:
+        future.cancel()
+        raise
+
+
+async def prepare_scan_codex_access_async(
+    *,
+    project_path: str | Path,
+    scan_dir: str | Path,
+) -> ScanCodexConfigResult:
+    """Serialize scan trust writes with platform model configuration."""
+    call = functools.partial(
+        prepare_scan_codex_access,
+        project_path=project_path,
+        scan_dir=scan_dir,
+    )
+    return await _run_serial_codex_config_call(call)
+
+
+async def sync_scan_codex_mcp_async(
+    *,
+    project_path: str | Path,
+    scan_dir: str | Path,
+    code_graph_mcp: Mapping[str, Any] | None,
+) -> ScanCodexConfigResult:
+    """Write one scan's project MCP config off the event loop."""
+    call = functools.partial(
+        sync_scan_codex_mcp,
+        project_path=project_path,
+        scan_dir=scan_dir,
+        code_graph_mcp=code_graph_mcp,
+    )
+    return await _run_serial_codex_config_call(call)
 
 
 async def initialize_codex_runtime(
@@ -1061,6 +1108,9 @@ __all__ = [
     "configured_codex_model_ids",
     "get_codex_runtime_state",
     "initialize_codex_runtime",
+    "prepare_scan_codex_access_async",
+    "ScanCodexConfigResult",
+    "sync_scan_codex_mcp_async",
     "sync_platform_codex_models",
     "sync_platform_codex_models_async",
 ]

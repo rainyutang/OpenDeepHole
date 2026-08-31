@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +20,7 @@ from deephole_client.codex_profiles import (
     CodexConfigSyncResult,
     CodexModelConfig,
 )
+from deephole_client.codex_scan_config import ScanCodexConfigResult
 
 
 class CodexRuntimeTests(unittest.TestCase):
@@ -194,6 +198,64 @@ class CodexRuntimeTests(unittest.TestCase):
         rendered = "\n".join(str(call) for call in output.call_args_list)
         self.assertIn("z/last", rendered)
         self.assertIn("Codex default model ready", rendered)
+
+    def test_scan_config_writes_share_the_serial_model_config_executor(
+        self,
+    ) -> None:
+        events: list[tuple[str, str]] = []
+
+        def access(**_kwargs):
+            events.append(("access-start", threading.current_thread().name))
+            time.sleep(0.05)
+            events.append(("access-end", threading.current_thread().name))
+            return ScanCodexConfigResult(trusted_paths=("/project",))
+
+        def mcp(**_kwargs):
+            events.append(("mcp-start", threading.current_thread().name))
+            events.append(("mcp-end", threading.current_thread().name))
+            return ScanCodexConfigResult(mcp_configured=True)
+
+        async def run_both():
+            return await asyncio.gather(
+                codex_runtime.prepare_scan_codex_access_async(
+                    project_path="/project",
+                    scan_dir="/scan",
+                ),
+                codex_runtime.sync_scan_codex_mcp_async(
+                    project_path="/project",
+                    scan_dir="/scan",
+                    code_graph_mcp={"enabled": True},
+                ),
+            )
+
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="opendeephole-codex-model-sync-test",
+        )
+        try:
+            with (
+                patch.object(codex_runtime, "_model_sync_executor", executor),
+                patch.object(
+                    codex_runtime,
+                    "prepare_scan_codex_access",
+                    access,
+                ),
+                patch.object(codex_runtime, "sync_scan_codex_mcp", mcp),
+            ):
+                access_result, mcp_result = asyncio.run(run_both())
+        finally:
+            executor.shutdown(wait=True)
+
+        self.assertEqual(access_result.trusted_paths, ("/project",))
+        self.assertTrue(mcp_result.mcp_configured)
+        self.assertEqual(
+            [name for name, _thread in events],
+            ["access-start", "access-end", "mcp-start", "mcp-end"],
+        )
+        self.assertTrue(all(
+            thread.startswith("opendeephole-codex-model-sync")
+            for _name, thread in events
+        ))
 
     def test_platform_sync_polls_in_order_and_selects_first_usable_model(
         self,
