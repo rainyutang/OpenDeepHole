@@ -359,6 +359,11 @@ export interface Candidate {
 
 export interface ScanCandidate extends Candidate {
   idx: number;
+  audit_state: "pending" | "running" | "success" | "failed";
+  audit_result?: Vulnerability | null;
+  vulnerability_idx?: number | null;
+  dedup_decision?: Record<string, unknown>;
+  audit_updated_at?: string;
 }
 
 export interface ScanEvent {
@@ -502,11 +507,22 @@ export interface ScanStatus {
 
 export interface ScanDetailCounts {
   candidates: number;
+  candidate_audit_pending?: number;
+  candidate_audit_running?: number;
+  candidate_audit_success?: number;
+  candidate_audit_failed?: number;
   vulnerabilities: number;
   effective_issue_count?: number;
   validated_issue_count?: number;
   events: number;
   threat_audit_tasks: number;
+  threat_audit_current?: number;
+  threat_audit_pending?: number;
+  threat_audit_running?: number;
+  threat_audit_completed?: number;
+  threat_audit_failed?: number;
+  threat_audit_cancelled?: number;
+  threat_audit_superseded?: number;
   validations: number;
   skill_reports: number;
 }

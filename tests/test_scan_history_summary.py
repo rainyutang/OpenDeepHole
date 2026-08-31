@@ -227,13 +227,25 @@ class ScanHistorySummaryTests(unittest.TestCase):
                     )
                 )
             )
+            page = asyncio.run(
+                list_scans_v2(
+                    limit=50,
+                    cursor=None,
+                    current_user=User(
+                        user_id="admin",
+                        username="admin",
+                        role="admin",
+                    ),
+                )
+            )
 
-        self.assertEqual(response[0].scan_name, "Project One")
-        self.assertEqual(response[0].product, "LTE")
-        self.assertEqual(response[0].vulnerability_count, 2)
-        self.assertEqual(response[0].human_confirmed_count, 2)
-        self.assertEqual(response[0].suspected_issue_count, 0)
-        self.assertEqual(response[0].confirmed_vulnerability_count, 1)
+        for summary in (response[0], page.items[0]):
+            self.assertEqual(summary.scan_name, "Project One")
+            self.assertEqual(summary.product, "LTE")
+            self.assertEqual(summary.vulnerability_count, 2)
+            self.assertEqual(summary.human_confirmed_count, 2)
+            self.assertEqual(summary.suspected_issue_count, 1)
+            self.assertEqual(summary.confirmed_vulnerability_count, 1)
 
     def test_list_scans_keeps_complete_core_scan_running_while_fp_review_runs(self) -> None:
         scan = ScanStatus(

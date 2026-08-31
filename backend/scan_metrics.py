@@ -117,11 +117,10 @@ def calculate_issue_metrics(
         if fp_result is not None:
             if fp_result.verdict == "tp":
                 fp_review_issue_count += 1
+                suspected_issue_count += 1
                 accuracy_basis_count += 1
                 if vuln.user_verdict == "confirmed":
                     human_confirmed_issue_count += 1
-                elif vuln.user_verdict != "false_positive":
-                    suspected_issue_count += 1
             elif fp_result.verdict == "fp":
                 fp_review_false_positive_count += 1
         elif llm_issue:

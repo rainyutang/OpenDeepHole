@@ -136,9 +136,20 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
         assert overview is not None
         assert overview[2] == {
             "candidates": 1,
+            "candidate_audit_pending": 1,
+            "candidate_audit_running": 0,
+            "candidate_audit_success": 0,
+            "candidate_audit_failed": 0,
             "vulnerabilities": 1,
             "events": 1,
             "threat_audit_tasks": 0,
+            "threat_audit_current": 0,
+            "threat_audit_pending": 0,
+            "threat_audit_running": 0,
+            "threat_audit_completed": 0,
+            "threat_audit_failed": 0,
+            "threat_audit_cancelled": 0,
+            "threat_audit_superseded": 0,
             "validations": 1,
             "skill_reports": 0,
         }

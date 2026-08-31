@@ -370,10 +370,6 @@ function mergeDetailPage(previous: ScanStatusType, page: LoadedDetailPage): Scan
   };
 }
 
-function candidateKey(item: Pick<Candidate, "file" | "line" | "function" | "vuln_type">): string {
-  return `${item.file}\u0000${item.line}\u0000${item.function}\u0000${item.vuln_type}`;
-}
-
 function isActiveThreatAuditStatus(status: string | null | undefined): boolean {
   return ACTIVE_THREAT_TASK_STATUSES.has(String(status || "").trim().toLowerCase());
 }
@@ -453,29 +449,30 @@ function engineFlowStatus(run: MiningEngineRunStatus | null): FlowNodeStatus {
   return "unknown";
 }
 
-function terminalThreatTaskStatus(status: string): boolean {
-  return ["completed", "failed", "failure", "error", "timeout", "no_result", "cancelled", "superseded"].includes(
-    String(status || "").trim().toLowerCase(),
-  );
-}
-
 function threatAuditFlowStatus(
   scan: ScanStatusType,
   run: MiningEngineRunStatus | null,
 ): FlowNodeStatus {
   const tasks = currentThreatAuditTasks(scan.threat_audit_tasks ?? []);
+  const counts = scan.detail_counts;
   const runStatus = engineFlowStatus(run);
   if (scan.status === "cancelled" && runStatus !== "done") return "cancelled";
-  if (tasks.some((task) => isActiveThreatAuditStatus(task.status))) return "running";
-  const failed = tasks.filter((task) =>
+  const active = counts?.threat_audit_running
+    ?? tasks.filter((task) => isActiveThreatAuditStatus(task.status)).length;
+  const pending = counts?.threat_audit_pending ?? 0;
+  if (active > 0) return "running";
+  const failed = counts?.threat_audit_failed ?? tasks.filter((task) =>
     ["failed", "failure", "error", "timeout", "no_result"].includes(String(task.status || "").toLowerCase()),
   ).length;
-  const cancelled = tasks.filter(
+  const cancelled = counts?.threat_audit_cancelled ?? tasks.filter(
     (task) => String(task.status || "").toLowerCase() === "cancelled",
   ).length;
-  if (tasks.length > 0 && tasks.every((task) => terminalThreatTaskStatus(task.status))) {
+  const completed = counts?.threat_audit_completed
+    ?? tasks.filter((task) => task.status === "completed").length;
+  const currentTotal = counts?.threat_audit_current ?? tasks.length;
+  if (currentTotal > 0 && pending === 0 && completed + failed + cancelled >= currentTotal) {
     if (runStatus === "error") return "error";
-    if (cancelled === tasks.length) return "cancelled";
+    if (cancelled === currentTotal) return "cancelled";
     return failed > 0 || cancelled > 0 ? "warning" : "done";
   }
   if (scan.threat_analysis && runStatus === "running") return "running";
@@ -1062,6 +1059,29 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           });
         })
         .catch(() => {});
+    },
+    onScanCandidateAudit: (data) => {
+      setScan((prev) => {
+        if (!prev) return prev;
+        const existing = prev.candidates.find((item) => item.idx === data.candidate.idx);
+        const candidates = existing
+          ? prev.candidates.map((item) => item.idx === data.candidate.idx ? data.candidate : item)
+          : prev.candidates;
+        const detailCounts = prev.detail_counts ? { ...prev.detail_counts } : undefined;
+        if (detailCounts && existing && existing.audit_state !== data.candidate.audit_state) {
+          const oldKey = `candidate_audit_${existing.audit_state}` as keyof typeof detailCounts;
+          const newKey = `candidate_audit_${data.candidate.audit_state}` as keyof typeof detailCounts;
+          if (typeof detailCounts[oldKey] === "number") {
+            (detailCounts as Record<string, number>)[oldKey] = Math.max(
+              0,
+              Number(detailCounts[oldKey]) - 1,
+            );
+          }
+          (detailCounts as Record<string, number>)[newKey] = Number(detailCounts[newKey] ?? 0) + 1;
+        }
+        return { ...prev, candidates, detail_counts: detailCounts };
+      });
+      scheduleOverviewSummaryRefresh(0);
     },
     onScanVulnerability: (data) => {
       setScan((prev) => {
@@ -2011,7 +2031,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             indexProgress={indexProgress}
             candidates={scan.candidates ?? []}
             vulnerabilities={scan.vulnerabilities}
-            currentCandidate={scan.current_candidate}
             events={filterEvents(scan.events, ["static_analysis"])}
           />
         )}
@@ -2436,7 +2455,11 @@ function buildProcessFlowModel({
 }): ProcessFlowModel {
   const engines = effectiveMiningEngines(scan);
   const candidates = scan.candidates ?? [];
-  const candidateCount = candidates.length || scan.total_candidates || scan.vulnerabilities.length;
+  const candidateCount = scan.detail_counts?.candidates ?? (
+    scan.total_candidates
+    || candidates.length
+    || scan.vulnerabilities.length
+  );
   const staticSelected = engines.some((engine) => engine.engine_id === STATIC_ENGINE_ID);
   const staticRun = miningEngineRun(scan, STATIC_ENGINE_ID);
   const staticRunning = staticSelected && scan.status === "analyzing" && !scan.static_analysis_done;
@@ -2510,12 +2533,17 @@ function buildProcessFlowModel({
   };
   const allThreatTasks = scan.threat_audit_tasks ?? [];
   const threatTasks = currentThreatAuditTasks(allThreatTasks);
-  const supersededThreatTasks = allThreatTasks.length - threatTasks.length;
-  const completedThreatTasks = threatTasks.filter((task) => task.status === "completed").length;
-  const failedThreatTasks = threatTasks.filter((task) =>
+  const supersededThreatTasks = scan.detail_counts?.threat_audit_superseded
+    ?? allThreatTasks.length - threatTasks.length;
+  const currentThreatTaskCount = scan.detail_counts?.threat_audit_current
+    ?? threatTasks.length;
+  const completedThreatTasks = scan.detail_counts?.threat_audit_completed
+    ?? threatTasks.filter((task) => task.status === "completed").length;
+  const failedThreatTasks = scan.detail_counts?.threat_audit_failed ?? threatTasks.filter((task) =>
     ["failed", "failure", "error", "timeout", "no_result"].includes(String(task.status || "").toLowerCase()),
   ).length;
-  const activeThreatTasks = threatTasks.filter((task) => isActiveThreatAuditStatus(task.status)).length;
+  const activeThreatTasks = scan.detail_counts?.threat_audit_running
+    ?? threatTasks.filter((task) => isActiveThreatAuditStatus(task.status)).length;
   const threatResultsReady = isThreatAnalysisResultReady(scan.threat_analysis);
   const threatResultCounts = getThreatAnalysisResultCounts(scan.threat_analysis);
   let threatAnalysisStatus = threatAnalysisFlowStatus(scan);
@@ -2599,8 +2627,8 @@ function buildProcessFlowModel({
       : null;
     const label = processFlowEngineLabel(engine.engine_id, engine.engine_label);
     const detail = engine.engine_id === THREAT_ENGINE_ID
-      ? threatTasks.length > 0
-        ? `${activeThreatTasks} 运行 · ${completedThreatTasks}/${threatTasks.length} 完成${failedThreatTasks ? ` · ${failedThreatTasks} 未成功` : ""}`
+      ? currentThreatTaskCount > 0
+        ? `${activeThreatTasks} 运行 · ${completedThreatTasks}/${currentThreatTaskCount} 完成${failedThreatTasks ? ` · ${failedThreatTasks} 未成功` : ""}`
         : supersededThreatTasks > 0
           ? `${supersededThreatTasks} 个历史任务已取代 · 当前没有叶子节点审计任务`
         : scan.threat_analysis
@@ -3598,7 +3626,8 @@ function ThreatAuditPanel({
   const [page, setPage] = useState(1);
   const tasks = scan.threat_audit_tasks ?? [];
   const currentTasks = useMemo(() => currentThreatAuditTasks(tasks), [tasks]);
-  const supersededTaskCount = tasks.length - currentTasks.length;
+  const supersededTaskCount = scan.detail_counts?.threat_audit_superseded
+    ?? tasks.length - currentTasks.length;
   const queueTasks = useMemo(
     () => collectScanQueueTasks(scan.opencode_pool ?? null).filter(
       (item) => isThreatAuditPoolTask(item.task),
@@ -3638,6 +3667,24 @@ function ThreatAuditPanel({
   }, [currentTasks, runtimeByTaskId]);
   const run = miningEngineRun(scan, THREAT_ENGINE_ID);
   const processStatus = threatAuditFlowStatus(scan, run);
+  const aggregate = scan.detail_counts;
+  const totalTaskCount = aggregate?.threat_audit_current ?? currentTasks.length;
+  const pendingTaskCount = aggregate?.threat_audit_pending
+    ?? (statusCounts.get("pending") ?? 0) + (statusCounts.get("queued") ?? 0);
+  const runningTaskCount = aggregate?.threat_audit_running
+    ?? ["running", "analyzing", "auditing"].reduce(
+      (sum, status) => sum + (statusCounts.get(status) ?? 0),
+      0,
+    );
+  const completedTaskCount = aggregate?.threat_audit_completed
+    ?? statusCounts.get("completed") ?? 0;
+  const failedTaskCount = aggregate?.threat_audit_failed
+    ?? ["failed", "failure", "error", "timeout", "no_result"].reduce(
+      (sum, status) => sum + (statusCounts.get(status) ?? 0),
+      0,
+    );
+  const cancelledTaskCount = aggregate?.threat_audit_cancelled
+    ?? statusCounts.get("cancelled") ?? 0;
 
   useEffect(() => {
     setPage(1);
@@ -3661,19 +3708,16 @@ function ThreatAuditPanel({
       summary="按威胁分析产生的叶子节点与攻击模式拆分任务，并逐项执行模型审计。"
     >
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
-        <MiniMetric label="任务总数" value={currentTasks.length} />
-        <MiniMetric label="待执行" value={(statusCounts.get("pending") ?? 0) + (statusCounts.get("queued") ?? 0)} tone="amber" />
-        <MiniMetric label="运行中" value={statusCounts.get("running") ?? 0} tone="cyan" />
-        <MiniMetric label="已完成" value={statusCounts.get("completed") ?? 0} tone="green" />
+        <MiniMetric label="任务总数" value={totalTaskCount} />
+        <MiniMetric label="待执行" value={pendingTaskCount} tone="amber" />
+        <MiniMetric label="运行中" value={runningTaskCount} tone="cyan" />
+        <MiniMetric label="已完成" value={completedTaskCount} tone="green" />
         <MiniMetric
           label="未成功"
-          value={["failed", "failure", "error", "timeout", "no_result"].reduce(
-            (sum, status) => sum + (statusCounts.get(status) ?? 0),
-            0,
-          )}
+          value={failedTaskCount}
           tone="red"
         />
-        <MiniMetric label="已取消" value={statusCounts.get("cancelled") ?? 0} />
+        <MiniMetric label="已取消" value={cancelledTaskCount} />
         <MiniMetric label="已取代" value={supersededTaskCount} />
       </div>
 
@@ -4117,16 +4161,20 @@ function ScanOverview({
                 const auditStatus = threatAuditFlowStatus(scan, run);
                 const allThreatTasks = scan.threat_audit_tasks ?? [];
                 const threatTasks = currentThreatAuditTasks(allThreatTasks);
-                const supersededCount = allThreatTasks.length - threatTasks.length;
-                const threatCompleted = threatTasks.filter((task) => task.status === "completed").length;
+                const supersededCount = scan.detail_counts?.threat_audit_superseded
+                  ?? allThreatTasks.length - threatTasks.length;
+                const threatTaskCount = scan.detail_counts?.threat_audit_current
+                  ?? threatTasks.length;
+                const threatCompleted = scan.detail_counts?.threat_audit_completed
+                  ?? threatTasks.filter((task) => task.status === "completed").length;
                 return (
                   <Fragment key={engine.engine_id}>
                     <TaskSummaryRow
                       label={THREAT_AUDIT_ENGINE_LABEL}
                       status={flowStatusLabel(auditStatus)}
                       tone={flowStatusTone(auditStatus, "green")}
-                      detail={threatTasks.length
-                        ? `${threatCompleted}/${threatTasks.length} 任务完成`
+                      detail={threatTaskCount
+                        ? `${threatCompleted}/${threatTaskCount} 任务完成`
                         : supersededCount > 0
                           ? `${supersededCount} 个历史任务已取代`
                           : "等待威胁审计任务"}
@@ -4725,14 +4773,12 @@ function StaticTaskPanel({
   indexProgress,
   candidates,
   vulnerabilities,
-  currentCandidate,
   events,
 }: {
   scan: ScanStatusType;
   indexProgress: ReturnType<typeof formatIndexProgress>;
   candidates: ScanCandidate[];
   vulnerabilities: IndexedVulnerability[];
-  currentCandidate: Candidate | null;
   events: ScanEvent[];
 }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -4746,9 +4792,13 @@ function StaticTaskPanel({
   const displayedCandidates = useMemo<ScanCandidate[]>(() => {
     if (candidates.length > 0) return candidates.filter(isStaticCandidate);
     return vulnerabilities
-      .filter(isStaticCandidateVulnerability)
+      .filter((vuln) => (
+        isStaticCandidateVulnerability(vuln)
+        && vuln.audit_index !== null
+        && vuln.audit_index !== undefined
+      ))
       .map((vuln) => ({
-        idx: vuln.vuln_index,
+        idx: Number(vuln.audit_index),
         file: vuln.file,
         line: vuln.line,
         function: vuln.function,
@@ -4756,29 +4806,22 @@ function StaticTaskPanel({
         vuln_type: vuln.vuln_type,
         related_functions: [],
         metadata: {},
+        audit_state: staticAuditStatus(vuln),
+        audit_result: vuln,
+        vulnerability_idx: vuln.vuln_index,
       }));
   }, [candidates, vulnerabilities]);
-  const vulnerabilityByKey = useMemo(() => {
-    const out = new Map<string, { vuln: Vulnerability; index: number }>();
-    vulnerabilities.forEach((vuln) => {
-      out.set(candidateKey(vuln), { vuln, index: vuln.vuln_index });
-    });
-    return out;
-  }, [vulnerabilities]);
-  const currentKey = currentCandidate ? candidateKey(currentCandidate) : "";
   const annotated = useMemo(
     () =>
       displayedCandidates.map((candidate) => {
-        const key = candidateKey(candidate);
-        const vulnEntry = vulnerabilityByKey.get(key);
         return {
           candidate,
-          vulnerability: vulnEntry?.vuln,
-          vulnerabilityIndex: vulnEntry?.index,
-          auditStatus: staticAuditStatus(vulnEntry?.vuln, Boolean(currentKey && key === currentKey)),
+          vulnerability: candidate.audit_result ?? undefined,
+          vulnerabilityIndex: candidate.vulnerability_idx ?? undefined,
+          auditStatus: candidate.audit_state ?? staticAuditStatus(candidate.audit_result ?? undefined),
         };
       }),
-    [currentKey, displayedCandidates, vulnerabilityByKey],
+    [displayedCandidates],
   );
   const typeOptions = useMemo(
     () => valueOptions(displayedCandidates.map((candidate) => candidate.vuln_type), (value) => value.toUpperCase()),
@@ -4812,6 +4855,15 @@ function StaticTaskPanel({
     });
     return counts;
   }, [annotated]);
+  const completeAuditCounts = scan.detail_counts ? {
+    success: scan.detail_counts.candidate_audit_success ?? auditCounts.success,
+    failed: scan.detail_counts.candidate_audit_failed ?? auditCounts.failed,
+    pending: scan.detail_counts.candidate_audit_pending ?? auditCounts.pending,
+    running: scan.detail_counts.candidate_audit_running ?? auditCounts.running,
+  } : auditCounts;
+  const completeCandidateCount = scan.detail_counts?.candidates
+    ?? scan.total_candidates
+    ?? displayedCandidates.length;
 
   useEffect(() => {
     setCurrentPage(1);
@@ -4837,14 +4889,14 @@ function StaticTaskPanel({
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <MiniMetric label="扫描文件" value={scannedFiles} tone="cyan" />
         <MiniMetric label="总文件" value={totalFiles} />
-        <MiniMetric label="候选点" value={displayedCandidates.length || scan.total_candidates} tone="blue" />
+        <MiniMetric label="候选点" value={completeCandidateCount} tone="blue" />
       </div>
       <ProgressBlock label="候选点生成" current={scannedFiles} total={totalFiles} fallback="等待静态分析进度" />
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-        <MiniMetric label="审计成功" value={auditCounts.success} tone="green" />
-        <MiniMetric label="审计失败" value={auditCounts.failed} tone="red" />
-        <MiniMetric label="待审计" value={auditCounts.pending} />
-        <MiniMetric label="审计中" value={auditCounts.running} tone="blue" />
+        <MiniMetric label="审计成功" value={completeAuditCounts.success} tone="green" />
+        <MiniMetric label="审计失败" value={completeAuditCounts.failed} tone="red" />
+        <MiniMetric label="待审计" value={completeAuditCounts.pending} />
+        <MiniMetric label="审计中" value={completeAuditCounts.running} tone="blue" />
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <StaticFilterSelect label="类型" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />

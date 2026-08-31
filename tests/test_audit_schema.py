@@ -238,13 +238,26 @@ def test_candidate_schema_rejects_non_markdown_call_chain(
         )
 
 
-def test_list_schema_accepts_multiple_confirmed_results() -> None:
+def test_list_schema_rejects_multiple_confirmed_results() -> None:
     value = [_confirmed_item(), _confirmed_item("parse_header")]
 
-    assert parse_llm_json_schema(
-        json.dumps(value, ensure_ascii=False),
+    with pytest.raises(LLMJsonParseError):
+        parse_llm_json_schema(
+            json.dumps(value, ensure_ascii=False),
+            VULNERABILITY_LIST_SCHEMA,
+        )
+
+
+def test_candidate_list_schema_limits_one_result() -> None:
+    instruction = audit_output_instruction(
         VULNERABILITY_LIST_SCHEMA,
-    ) == value
+        list_result=True,
+        severity_basis="具体判定遵循已加载的 Skill。",
+    )
+
+    assert VULNERABILITY_LIST_SCHEMA["maxItems"] == 1
+    assert "仅含一个元素" in instruction
+    assert "风险最高、证据最完整的一个" in instruction
 
 
 def test_list_schema_rejects_mixed_or_multiple_false_results() -> None:

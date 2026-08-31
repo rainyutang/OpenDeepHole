@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.models import (
+    AgentCandidateAuditResult,
     AgentFpReviewStageOutput,
     AgentInfo,
     AgentMcpConfig,
@@ -1053,27 +1054,26 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ),
                 patch("backend.sse.publish"),
             ):
-                asyncio.run(agent_api.agent_report_processed_v2(
-                    "scan-1",
-                    AgentProcessedKeyBatch.model_validate({
-                        "items": [
-                            {
-                                "file": "same.c",
-                                "line": 1,
-                                "function": "same",
-                                "vuln_type": "npd",
-                            },
-                            {
-                                "file": "same.c",
-                                "line": 1,
-                                "function": "same",
-                                "vuln_type": "npd",
-                            },
-                        ],
-                        "processed_candidates": 3,
-                        "total_candidates": 3,
-                    }),
-                ))
+                for index in (0, 1):
+                    asyncio.run(agent_api.agent_report_candidate_audit(
+                        "scan-1",
+                        AgentCandidateAuditResult(
+                            candidate_idx=index,
+                            state="success",
+                            result=Vulnerability(
+                                file="same.c",
+                                line=1,
+                                function="same",
+                                vuln_type="npd",
+                                severity="low",
+                                description=f"candidate {index} result",
+                                confirmed=False,
+                                ai_verdict="not_confirmed",
+                            ),
+                            completed_candidates=3,
+                            total_candidates=3,
+                        ),
+                    ))
                 running = store.load_scan("scan-1")[0]
                 self.assertEqual(running.total_candidates, 3)
                 self.assertEqual(running.processed_candidates, 2)
@@ -1092,6 +1092,30 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 self.assertEqual(
                     store.load_scan("scan-1")[0].processed_candidates,
                     2,
+                )
+
+                asyncio.run(agent_api.agent_report_candidate_audit(
+                    "scan-1",
+                    AgentCandidateAuditResult(
+                        candidate_idx=2,
+                        state="success",
+                        result=Vulnerability(
+                            file="same.c",
+                            line=1,
+                            function="same",
+                            vuln_type="npd",
+                            severity="low",
+                            description="candidate 2 result",
+                            confirmed=False,
+                            ai_verdict="not_confirmed",
+                        ),
+                        completed_candidates=3,
+                        total_candidates=3,
+                    ),
+                ))
+                self.assertEqual(
+                    store.load_scan("scan-1")[0].processed_candidates,
+                    3,
                 )
 
                 asyncio.run(agent_api.agent_report_mining_engine_run(
@@ -1182,6 +1206,18 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     function=f"candidate_{index}",
                     description="candidate",
                     vuln_type="npd",
+                    audit_state="success",
+                    audit_result=Vulnerability(
+                        file=f"candidate-{index}.c",
+                        line=index + 1,
+                        function=f"candidate_{index}",
+                        vuln_type="npd",
+                        severity="low",
+                        description="audited",
+                        confirmed=False,
+                        ai_verdict="not_confirmed",
+                        audit_index=index,
+                    ),
                 )
                 for index in range(3)
             ]
@@ -1253,20 +1289,33 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             store = SqliteScanStore(Path(tmp) / "scans.db")
             scan = _scan("scan-1", ScanItemStatus.COMPLETE, total=1, processed=1)
             store.save_scan(scan, _meta())
-            store.add_vulnerability(
-                "scan-1",
-                Vulnerability(
-                    file="static.c",
-                    line=7,
-                    function="retry_static",
-                    vuln_type="npd",
-                    severity="unknown",
-                    description="static timeout",
-                    ai_analysis="timeout",
-                    confirmed=False,
-                    ai_verdict="timeout",
-                ),
+            static_failure = Vulnerability(
+                file="static.c",
+                line=7,
+                function="retry_static",
+                vuln_type="npd",
+                severity="unknown",
+                description="static timeout",
+                ai_analysis="timeout",
+                confirmed=False,
+                ai_verdict="timeout",
+                audit_index=0,
             )
+            static_vulnerability_idx = store.add_vulnerability(
+                "scan-1",
+                static_failure,
+            )
+            store.replace_scan_candidates("scan-1", [ScanCandidate(
+                idx=0,
+                file=static_failure.file,
+                line=static_failure.line,
+                function=static_failure.function,
+                description=static_failure.description,
+                vuln_type=static_failure.vuln_type,
+                audit_state="failed",
+                audit_result=static_failure,
+                vulnerability_idx=static_vulnerability_idx,
+            )])
             store.add_vulnerability(
                 "scan-1",
                 Vulnerability(
@@ -1476,6 +1525,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
                 ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
+                ),
             ):
                 request = SimpleNamespace(base_url="http://testserver/")
                 asyncio.run(scan_api.resume_scan("scan-1", request=request, current_user=user))
@@ -1564,6 +1617,20 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "scan-1",
                     (vuln.file, vuln.line, vuln.function, vuln.vuln_type),
                 )
+            store.replace_scan_candidates("scan-1", [
+                ScanCandidate(
+                    idx=index,
+                    file=vuln.file,
+                    line=vuln.line,
+                    function=vuln.function,
+                    description=vuln.description,
+                    vuln_type=vuln.vuln_type,
+                    audit_state=("success" if index == 0 else "failed"),
+                    audit_result=vuln.model_copy(update={"audit_index": index}),
+                    vulnerability_idx=index,
+                )
+                for index, vuln in enumerate(vulns)
+            ])
             agent = AgentInfo(
                 agent_id="agent-old",
                 name="agent-1",
@@ -1598,6 +1665,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
                 ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
+                ),
             ):
                 request = SimpleNamespace(base_url="http://testserver/")
                 asyncio.run(scan_api.retry_incomplete_scan("scan-1", request=request, current_user=user))
@@ -1607,6 +1678,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.processed_candidates, 1)
             self.assertEqual(len(store.get_processed_keys("scan-1")), 1)
             self.assertEqual(sent["type"], "resume")
+            self.assertEqual(sent["codex_model_ids"], ["provider/model"])
             self.assertEqual(sent["retry_total_candidates"], 4)
             self.assertEqual(sent["retry_processed_offset"], 1)
             self.assertEqual(
@@ -1616,6 +1688,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 [(c["file"], c["line"], c["function"]) for c in sent["retry_candidates"]],
                 [("timeout.c", 2, "slow"), ("none.c", 3, "missing"), ("failed.c", 4, "broken")],
+            )
+            self.assertEqual(
+                [candidate["idx"] for candidate in sent["retry_candidates"]],
+                [1, 2, 3],
             )
 
     def test_resume_dispatches_unprocessed_failed_and_threat_audit_work_together(self) -> None:
@@ -1635,8 +1711,48 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 ),
             ]
             scan.candidates = [
-                ScanCandidate(idx=0, file="done.c", line=1, function="done", description="done", vuln_type="npd"),
-                ScanCandidate(idx=1, file="failed.c", line=2, function="failed", description="failed", vuln_type="npd"),
+                ScanCandidate(
+                    idx=0,
+                    file="done.c",
+                    line=1,
+                    function="done",
+                    description="done",
+                    vuln_type="npd",
+                    audit_state="success",
+                    audit_result=Vulnerability(
+                        file="done.c",
+                        line=1,
+                        function="done",
+                        vuln_type="npd",
+                        severity="high",
+                        description="done",
+                        confirmed=True,
+                        ai_verdict="confirmed",
+                        audit_index=0,
+                    ),
+                    vulnerability_idx=0,
+                ),
+                ScanCandidate(
+                    idx=1,
+                    file="failed.c",
+                    line=2,
+                    function="failed",
+                    description="failed",
+                    vuln_type="npd",
+                    audit_state="failed",
+                    audit_result=Vulnerability(
+                        file="failed.c",
+                        line=2,
+                        function="failed",
+                        vuln_type="npd",
+                        severity="unknown",
+                        description="failed",
+                        confirmed=False,
+                        ai_verdict="failed",
+                        audit_index=1,
+                    ),
+                    vulnerability_idx=1,
+                ),
                 ScanCandidate(idx=2, file="pending.c", line=3, function="pending", description="pending", vuln_type="npd"),
             ]
             meta = _meta()
@@ -1740,6 +1856,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
                 ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
+                ),
             ):
                 asyncio.run(
                     scan_api.resume_scan(
@@ -1751,7 +1871,11 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
 
             self.assertEqual(
                 [(item["file"], item["line"]) for item in sent["retry_candidates"]],
-                [("pending.c", 3), ("failed.c", 2)],
+                [("failed.c", 2), ("pending.c", 3)],
+            )
+            self.assertEqual(
+                [item["idx"] for item in sent["retry_candidates"]],
+                [1, 2],
             )
             self.assertEqual(sent["retry_processed_offset"], 1)
             self.assertTrue(sent["resume_threat_analysis"])
@@ -1818,6 +1942,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 patch(
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
+                ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
                 ),
             ):
                 asyncio.run(scan_api.resume_scan(
@@ -1931,6 +2059,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 patch(
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
+                ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
                 ),
             ):
                 asyncio.run(

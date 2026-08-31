@@ -151,7 +151,7 @@ class CodexRuntimeTests(unittest.TestCase):
             profile="opendeephole-a-first",
         )
         self.profile_sync.return_value = CodexProfileSyncResult(
-            models=(first, second),
+            models=(first,),
             managed_default_model=first,
         )
         codex_runtime._runtime_state = self._ready_state()
@@ -164,11 +164,22 @@ class CodexRuntimeTests(unittest.TestCase):
                     config_content=json.dumps(effective),
                 ),
             ) as build_runtime,
+            patch.object(
+                codex_runtime,
+                "_probe_responses_model",
+                return_value=(True, ""),
+            ) as probe,
             patch("builtins.print") as output,
         ):
             state = codex_runtime.sync_platform_codex_models(config)
 
-        self.assertEqual(state.models, (first, second))
+        self.assertEqual(state.models, (first,))
+        self.assertEqual(state.selected_model, first)
+        self.assertEqual(
+            state.threat_analysis_command,
+            ("/opt/bin/codex", "--profile", first.profile),
+        )
+        self.assertEqual(probe.call_count, 1)
         build_runtime.assert_called_once_with(
             config.opencode,
             directory=Path.cwd(),
@@ -176,11 +187,235 @@ class CodexRuntimeTests(unittest.TestCase):
         self.profile_sync.assert_called_once_with(
             codex_version="codex-cli 0.149.1",
             opencode_config=effective,
-            selected_model_ids=("z/last", "a/first"),
+            selected_model_ids=("z/last",),
+            no_proxy_hosts=("z.example",),
         )
         rendered = "\n".join(str(call) for call in output.call_args_list)
-        self.assertIn("2 platform model", rendered)
+        self.assertIn("z/last", rendered)
         self.assertIn("Codex default model ready", rendered)
+
+    def test_platform_sync_polls_in_order_and_selects_first_usable_model(
+        self,
+    ) -> None:
+        config = self._agent_config(
+            SimpleNamespace(model="first/model", enabled=True),
+            SimpleNamespace(model="second/model", enabled=True),
+            SimpleNamespace(model="third/model", enabled=True),
+        )
+        effective = {
+            "provider": {
+                provider: {
+                    "options": {
+                        "baseURL": f"https://{provider}.example/v1",
+                        "apiKey": "probe-secret",
+                    },
+                    "models": {"model": {}},
+                }
+                for provider in ("first", "second", "third")
+            },
+        }
+        selected = CodexModelProfile(
+            id="second/model",
+            provider_id="second",
+            model_id="model",
+            profile="opendeephole-second-model",
+        )
+        self.profile_sync.return_value = CodexProfileSyncResult(
+            models=(selected,),
+        )
+        codex_runtime._runtime_state = self._ready_state()
+        probed: list[str] = []
+
+        def probe(candidate):
+            probed.append(candidate.id)
+            return (candidate.id == "second/model", "HTTP 404")
+
+        with (
+            patch(
+                "deephole_client.opencode_integration."
+                "build_opencode_session_runtime",
+                return_value=SimpleNamespace(
+                    config_content=json.dumps(effective),
+                ),
+            ),
+            patch.object(
+                codex_runtime,
+                "_probe_responses_model",
+                side_effect=probe,
+            ),
+            patch("builtins.print"),
+        ):
+            state = codex_runtime.sync_platform_codex_models(
+                config,
+                force=True,
+            )
+
+        self.assertEqual(probed, ["first/model", "second/model"])
+        self.assertEqual(state.selected_model, selected)
+        self.assertEqual(state.models, (selected,))
+        self.assertEqual(
+            state.threat_analysis_command,
+            ("/opt/bin/codex", "--profile", selected.profile),
+        )
+        self.profile_sync.assert_called_once_with(
+            codex_version="codex-cli 0.149.1",
+            opencode_config=effective,
+            selected_model_ids=("second/model",),
+            no_proxy_hosts=("second.example",),
+        )
+
+    def test_all_probe_failures_disable_codex_without_reusing_stale_model(
+        self,
+    ) -> None:
+        stale = CodexModelProfile(
+            id="old/model",
+            provider_id="old",
+            model_id="model",
+            profile="opendeephole-old-model",
+        )
+        config = self._agent_config(
+            SimpleNamespace(model="p/one", enabled=True),
+            SimpleNamespace(model="p/two", enabled=True),
+        )
+        effective = {
+            "provider": {
+                "p": {
+                    "options": {"baseURL": "https://p.example/v1"},
+                    "models": {"one": {}, "two": {}},
+                },
+            },
+        }
+        codex_runtime._runtime_state = self._ready_state(models=(stale,))
+
+        with (
+            patch(
+                "deephole_client.opencode_integration."
+                "build_opencode_session_runtime",
+                return_value=SimpleNamespace(
+                    config_content=json.dumps(effective),
+                ),
+            ),
+            patch.object(
+                codex_runtime,
+                "_probe_responses_model",
+                side_effect=[(False, "HTTP 401"), (False, "request timed out")],
+            ) as probe,
+            patch("builtins.print"),
+        ):
+            state = codex_runtime.sync_platform_codex_models(
+                config,
+                force=True,
+            )
+
+        self.assertEqual(probe.call_count, 2)
+        self.profile_sync.assert_not_called()
+        self.assertEqual(state.models, ())
+        self.assertIsNone(state.selected_model)
+        self.assertEqual(state.threat_analysis_command, ())
+        self.assertIn("usable /v1/responses", state.model_config_error)
+        self.assertNotIn("probe-secret", state.model_config_error)
+
+    def test_probe_uses_real_minimal_request_without_proxy_inheritance(
+        self,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        class Client:
+            def __init__(self, **kwargs):
+                captured["client"] = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def post(self, url, *, headers, json):
+                captured.update({"url": url, "headers": headers, "json": json})
+                return codex_runtime.httpx.Response(
+                    200,
+                    request=codex_runtime.httpx.Request("POST", url),
+                    json={
+                        "id": "resp_probe",
+                        "object": "response",
+                        "status": "completed",
+                        "output": [],
+                    },
+                )
+
+        candidate = codex_runtime._CodexProbeCandidate(
+            id="provider/model",
+            provider_id="provider",
+            model_id="model",
+            base_url="https://models.example/v1",
+            endpoint="https://models.example/v1/responses",
+            no_proxy_host="models.example",
+            api_key="secret-token",
+        )
+        with patch.object(codex_runtime.httpx, "Client", Client):
+            available, error = codex_runtime._probe_responses_model(candidate)
+
+        self.assertTrue(available)
+        self.assertEqual(error, "")
+        self.assertEqual(
+            captured["url"],
+            "https://models.example/v1/responses",
+        )
+        self.assertEqual(
+            captured["headers"],
+            {"Authorization": "Bearer secret-token"},
+        )
+        self.assertEqual(captured["json"], {
+            "model": "model",
+            "input": "Reply with OK.",
+            "max_output_tokens": 16,
+            "store": False,
+            "stream": False,
+        })
+        self.assertFalse(captured["client"]["trust_env"])
+        self.assertFalse(captured["client"]["follow_redirects"])
+
+    def test_probe_candidate_requires_referenced_credential(self) -> None:
+        effective = {
+            "provider": {
+                "p": {
+                    "options": {
+                        "baseURL": "https://p.example/v1",
+                        "apiKey": "{env:MISSING_TOKEN}",
+                    },
+                    "models": {"model": {}},
+                },
+            },
+        }
+
+        candidates, warnings = codex_runtime._probe_candidates(
+            effective,
+            ("p/model",),
+            env={},
+        )
+
+        self.assertEqual(candidates, ())
+        self.assertIn("MISSING_TOKEN", warnings[0])
+
+    def test_runtime_override_is_task_local_and_restored(self) -> None:
+        base = self._ready_state()
+        selected = CodexModelProfile(
+            id="p/model",
+            provider_id="p",
+            model_id="model",
+            profile="opendeephole-p-model",
+        )
+        overridden = codex_runtime.CodexRuntimeState(
+            available=True,
+            command=("/opt/bin/codex", "--profile", selected.profile),
+            selected_model=selected,
+        )
+        codex_runtime._runtime_state = base
+
+        with codex_runtime.codex_runtime_state_override(overridden):
+            self.assertIs(codex_runtime.get_codex_runtime_state(), overridden)
+
+        self.assertIs(codex_runtime.get_codex_runtime_state(), base)
 
     def test_config_fingerprint_tracks_provider_changes_and_scan_force(self) -> None:
         config = self._agent_config(
@@ -196,12 +431,29 @@ class CodexRuntimeTests(unittest.TestCase):
             },
         }))
 
+        def profile_result(**kwargs):
+            canonical_id = kwargs["selected_model_ids"][0]
+            provider_id, model_id = canonical_id.split("/", 1)
+            return CodexProfileSyncResult(models=(CodexModelProfile(
+                id=canonical_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                profile=f"opendeephole-{provider_id}-{model_id}",
+            ),))
+
+        self.profile_sync.side_effect = profile_result
+
         with (
             patch(
                 "deephole_client.opencode_integration."
                 "build_opencode_session_runtime",
                 return_value=runtime,
             ) as build_runtime,
+            patch.object(
+                codex_runtime,
+                "_probe_responses_model",
+                return_value=(True, ""),
+            ),
             patch("builtins.print"),
         ):
             codex_runtime.sync_platform_codex_models(config)
@@ -237,7 +489,7 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertEqual(build_runtime.call_count, 5)
         self.assertEqual(self.profile_sync.call_count, 3)
 
-    def test_model_sync_failure_preserves_last_successful_models(self) -> None:
+    def test_model_sync_failure_disables_stale_runtime_selection(self) -> None:
         previous = CodexModelProfile(
             id="old/model",
             provider_id="old",
@@ -256,7 +508,21 @@ class CodexRuntimeTests(unittest.TestCase):
             patch(
                 "deephole_client.opencode_integration."
                 "build_opencode_session_runtime",
-                return_value=SimpleNamespace(config_content="{}"),
+                return_value=SimpleNamespace(config_content=json.dumps({
+                    "provider": {
+                        "new": {
+                            "options": {
+                                "baseURL": "https://new.example/v1",
+                            },
+                            "models": {"model": {}},
+                        },
+                    },
+                })),
+            ),
+            patch.object(
+                codex_runtime,
+                "_probe_responses_model",
+                return_value=(True, ""),
             ),
             patch("builtins.print") as output,
         ):
@@ -266,10 +532,12 @@ class CodexRuntimeTests(unittest.TestCase):
                 reason="scan creation scan-1",
             )
 
-        self.assertEqual(state.models, (previous,))
-        self.assertEqual(state.model_config_error, "profile directory denied")
+        self.assertEqual(state.models, ())
+        self.assertIsNone(state.selected_model)
+        self.assertEqual(state.threat_analysis_command, ())
+        self.assertIn("profile directory denied", state.model_config_error)
         self.assertTrue(any(
-            "left unchanged" in str(call)
+            "DeepHole threat analysis remains available" in str(call)
             for call in output.call_args_list
         ))
 

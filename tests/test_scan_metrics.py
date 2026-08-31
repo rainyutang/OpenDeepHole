@@ -36,7 +36,7 @@ class ScanMetricsTests(unittest.TestCase):
             reason="reachable",
         )))
 
-    def test_homepage_counts_only_final_tp_and_keeps_pending_suspected(self) -> None:
+    def test_homepage_suspected_count_is_all_final_tp_regardless_of_feedback(self) -> None:
         metrics = calculate_issue_metrics(
             [
                 Vulnerability(
@@ -107,15 +107,15 @@ class ScanMetricsTests(unittest.TestCase):
                     reason="confirmed by fp review",
                     created_at="2026-08-04T00:00:00+00:00",
                 )
-                for index in range(3)
+                for index in (0, 1, 2, 4)
             ]),
         )
 
-        self.assertEqual(metrics.fp_review_issue_count, 3)
+        self.assertEqual(metrics.fp_review_issue_count, 4)
         self.assertEqual(metrics.human_confirmed_issue_count, 1)
         self.assertEqual(metrics.human_confirmed_count, 2)
         self.assertEqual(metrics.human_false_positive_count, 1)
-        self.assertEqual(metrics.suspected_issue_count, 1)
+        self.assertEqual(metrics.suspected_issue_count, 4)
         self.assertEqual(metrics.accuracy_basis_count, 5)
         self.assertEqual(metrics.accuracy, 0.4)
 
