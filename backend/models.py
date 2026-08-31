@@ -17,9 +17,12 @@ STATIC_CANDIDATE_ENGINE_ID = "static_candidate"
 STATIC_CANDIDATE_ENGINE_LABEL = "DeepHole基于代码风险点的漏洞挖掘引擎"
 THREAT_AUDIT_ENGINE_ID = "threat_audit"
 THREAT_AUDIT_ENGINE_LABEL = "DeepHole基于攻击威胁的漏洞挖掘引擎"
+THREAT_PATTERN_AUDIT_ENGINE_ID = "threat_pattern_audit"
+THREAT_PATTERN_AUDIT_ENGINE_LABEL = "DeepHole基于攻击模式的漏洞挖掘引擎"
 BUILTIN_MINING_ENGINE_LABELS = {
     STATIC_CANDIDATE_ENGINE_ID: STATIC_CANDIDATE_ENGINE_LABEL,
     THREAT_AUDIT_ENGINE_ID: THREAT_AUDIT_ENGINE_LABEL,
+    THREAT_PATTERN_AUDIT_ENGINE_ID: THREAT_PATTERN_AUDIT_ENGINE_LABEL,
 }
 
 
@@ -171,7 +174,7 @@ class Vulnerability(BaseModel):
     function_start_line: int | None = None
     audit_index: int | None = None           # Static candidate audit order; DB idx remains the API handle.
     variant_of: str = ""                     # 同类变体排查命中时，来源历史问题模式（根因摘要+出处提交/文件）
-    analysis_source: str = "static_candidate"  # "static_candidate" | "threat_audit"
+    analysis_source: str = "static_candidate"  # Mining-engine ID.
     engine_id: str = STATIC_CANDIDATE_ENGINE_ID
     engine_label: str = STATIC_CANDIDATE_ENGINE_LABEL
     source_task_id: str = ""

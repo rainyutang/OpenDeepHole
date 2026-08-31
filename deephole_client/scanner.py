@@ -29,6 +29,7 @@ from .reporter import Reporter
 from .scan_modes import (
     SCAN_MODE_CUSTOM,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS,
     component_scan_mode,
     normalize_scan_mode,
 )
@@ -560,11 +561,11 @@ async def run_scan(
     for error in registry.errors:
         await emit("mining_engine", f"Engine discovery warning: {error}")
 
-    threat_audit_selected = any(
-        item.engine_id == "threat_audit"
+    threat_dependent_engine_selected = any(
+        item.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS
         for item in enabled_selections
     )
-    if threat_audit_selected and not threat_analysis_selected:
+    if threat_dependent_engine_selected and not threat_analysis_selected:
         await _finish_scan(
             reporter,
             scan_id,
@@ -572,7 +573,7 @@ async def run_scan(
             vulnerabilities=[],
             total=0,
             processed=0,
-            error="Threat audit requires threat analysis",
+            error="Selected vulnerability-mining engine requires threat analysis",
             cancel_event=cancel_event,
         )
         return
@@ -884,7 +885,7 @@ async def run_scan(
             ]
 
         threat_analysis_result: dict[str, Any] | None = None
-        if selection.engine_id == "threat_audit":
+        if selection.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS:
             if threat_analysis_task is None:
                 run.status = "error"
                 run.error_message = "Threat analysis was not started"
@@ -993,7 +994,7 @@ async def run_scan(
             "cancel_event": cancel_event,
             "report_vulnerabilities": report_values,
         }
-        if selection.engine_id == "threat_audit":
+        if selection.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS:
             engine_kwargs["threat_analysis_result"] = (
                 threat_analysis_result
             )

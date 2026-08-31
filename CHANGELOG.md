@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-08-31
+
+- **新增** 新建独立的 `threat_pattern_audit` 漏洞挖掘引擎，不修改原 `threat_audit`：新引擎消费威胁分析产物并按“模块 + 攻击模式”拆分任务，Prompt、输出要求和带字段说明的零或单问题 JSON Schema 集中在同一 `prompt.py`；每个任务读取 `~/.opendeephole/scans/<scan-id>/mining_engines/threat_pattern_audit/` 下该引擎私有的已发现问题文件、把零或一个结果写入独立文件，并由引擎实际执行随 Prompt 提供的 `validate_result.py` 命令后才上报。私有历史只记录本引擎通过校验结果的文件、行号和描述，不从 Reporter 或其它引擎获取。新引擎仅供自定义模式选择，选择时自动要求并等待威胁分析，扫描级去重继续作为最终防线
+
 ## 2026-08-28
 
 - **优化** 漏洞去重模型的比较材料不再包装为包含 `current_report` / `existing_reports` 的 JSON，改为按编号直接传递当前及同函数已接受的完整 Markdown 漏洞报告；Prompt 仅要求判断当前问题是否已经存在，原有 `duplicate` / `reason` 结构化输出、确定性位置去重及模型失败放行行为保持不变

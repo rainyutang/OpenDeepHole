@@ -13,6 +13,10 @@ SCAN_MODE_FULL = "full"
 SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 
 BUILTIN_PROFILE_ENGINE_IDS = ("static_candidate", "threat_audit")
+THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS = frozenset({
+    "threat_audit",
+    "threat_pattern_audit",
+})
 PROFILE_SCAN_MODES = {
     SCAN_MODE_QUICK,
     SCAN_MODE_STANDARD,
