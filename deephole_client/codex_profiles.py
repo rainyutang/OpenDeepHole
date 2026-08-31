@@ -29,9 +29,14 @@ _DEFAULT_CONFIG_BEGIN = (
 _DEFAULT_CONFIG_END = (
     "# END OpenDeepHole managed Codex default model"
 )
+_ENV_BEGIN = "# BEGIN OpenDeepHole managed Codex NO_PROXY"
+_ENV_END = "# END OpenDeepHole managed Codex NO_PROXY"
 _PROFILE_GLOB = "opendeephole-*.config.toml"
 _ENV_REFERENCE_RE = re.compile(
     r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$"
+)
+_ENV_ASSIGNMENT_RE = re.compile(
+    r"^\s*(?:export\s+)?(NO_PROXY|no_proxy)\s*=\s*(.*?)\s*$"
 )
 _VERSION_RE = re.compile(r"\b(\d+)\.(\d+)(?:\.\d+)?\b")
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -634,6 +639,144 @@ def _stage_file(path: Path, content: bytes, *, mode: int) -> Path:
         raise
 
 
+def _split_managed_env(content: str) -> tuple[str, bool, str]:
+    """Remove the one OpenDeepHole-owned trailing dotenv block."""
+    begin_count = content.count(_ENV_BEGIN)
+    end_count = content.count(_ENV_END)
+    if begin_count == 0 and end_count == 0:
+        return content, False, ""
+    if begin_count != 1 or end_count != 1:
+        return content, False, (
+            "OpenDeepHole managed Codex .env markers are incomplete or "
+            "duplicated"
+        )
+
+    start = content.find(_ENV_BEGIN)
+    end = content.find(_ENV_END, start + len(_ENV_BEGIN))
+    if (
+        start < 0
+        or end < 0
+        or (start > 0 and content[start - 1] != "\n")
+        or (
+            start + len(_ENV_BEGIN) < len(content)
+            and content[start + len(_ENV_BEGIN)] != "\n"
+        )
+    ):
+        return content, False, (
+            "OpenDeepHole managed Codex .env markers are misplaced"
+        )
+    after = end + len(_ENV_END)
+    if content[after:] not in {"", "\n"}:
+        return content, False, (
+            "OpenDeepHole managed Codex .env block is not trailing"
+        )
+
+    if start == 0:
+        return "", True, ""
+    # The writer adds exactly one separator newline before its block, so
+    # removing that byte restores user-owned content byte-for-byte.
+    return content[:start - 1], True, ""
+
+
+def _dotenv_value(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        text = text[1:-1]
+    elif " #" in text:
+        text = text.split(" #", 1)[0].rstrip()
+    return text
+
+
+def _user_no_proxy_values(content: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in content.splitlines():
+        match = _ENV_ASSIGNMENT_RE.fullmatch(line)
+        if match is not None:
+            values[match.group(1)] = _dotenv_value(match.group(2))
+    return values
+
+
+def _merge_no_proxy(existing: str, hosts: Sequence[str]) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw in (*existing.split(","), *hosts):
+        value = str(raw or "").strip()
+        if not value or any(marker in value for marker in ("\r", "\n", ",")):
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(value)
+    return ",".join(merged)
+
+
+def _render_managed_env(user_content: str, hosts: Sequence[str]) -> str:
+    normalized_hosts = _merge_no_proxy("", hosts)
+    if not normalized_hosts:
+        return user_content
+    user_values = _user_no_proxy_values(user_content)
+    block = "\n".join((
+        _ENV_BEGIN,
+        "NO_PROXY=" + _merge_no_proxy(
+            user_values.get("NO_PROXY", ""),
+            normalized_hosts.split(","),
+        ),
+        "no_proxy=" + _merge_no_proxy(
+            user_values.get("no_proxy", ""),
+            normalized_hosts.split(","),
+        ),
+        _ENV_END,
+        "",
+    ))
+    return block if not user_content else user_content + "\n" + block
+
+
+def _sync_codex_env(codex_home: Path, hosts: Sequence[str]) -> str:
+    """Reconcile only OpenDeepHole's trailing CODEX_HOME/.env block."""
+    path = codex_home / ".env"
+    try:
+        if path.is_symlink():
+            return f"refused to modify symlinked Codex .env {path}"
+        exists = path.exists()
+        if exists and not path.is_file():
+            return f"refused to modify non-file Codex .env {path}"
+        original = path.read_bytes() if exists else None
+        original_text = original.decode("utf-8") if original is not None else ""
+        mode = stat.S_IMODE(path.stat().st_mode) if exists else 0o600
+    except (OSError, UnicodeError) as exc:
+        return f"could not read Codex .env {path} ({type(exc).__name__})"
+
+    user_text, _owned, marker_error = _split_managed_env(original_text)
+    if marker_error:
+        return f"could not update Codex .env {path}: {marker_error}"
+    desired = _render_managed_env(user_text, hosts).encode("utf-8")
+    if original == desired or (original is None and not desired):
+        return ""
+
+    try:
+        codex_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = _stage_file(path, desired, mode=mode)
+        try:
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise _CodexConfigChangedError(
+                    "Codex .env changed during synchronization"
+                )
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise
+    except Exception as exc:
+        return (
+            "could not atomically write managed Codex .env "
+            f"({type(exc).__name__})"
+        )
+    return ""
+
+
 def _discard_staged(paths: tuple[Path, ...]) -> None:
     for path in paths:
         try:
@@ -813,6 +956,7 @@ def sync_codex_profiles(
     env: Mapping[str, str] | None = None,
     platform: str | None = None,
     codex_home: Path | None = None,
+    no_proxy_hosts: Sequence[str] = (),
 ) -> CodexProfileSyncResult:
     """Synchronize selected client models and fill a missing default safely."""
     if not isinstance(opencode_config, Mapping):
@@ -860,6 +1004,12 @@ def sync_codex_profiles(
         return CodexProfileSyncResult(
             warnings=warnings,
             error=reconciliation.error,
+        )
+    env_error = _sync_codex_env(destination, no_proxy_hosts)
+    if env_error:
+        return CodexProfileSyncResult(
+            warnings=warnings,
+            error=env_error,
         )
     return CodexProfileSyncResult(
         models=tuple(item.model for item in rendered),

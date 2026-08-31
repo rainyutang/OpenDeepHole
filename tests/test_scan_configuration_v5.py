@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -23,6 +23,7 @@ from backend.models import (
     ScanVulnerabilityValidationRequest,
     UpdateScanValidationTargetRequest,
     User,
+    Vulnerability,
 )
 from backend.store.sqlite import SqliteScanStore
 from deephole_client.vulnerability_mining.engines.static_candidate import (
@@ -287,6 +288,8 @@ def test_static_candidate_targeted_resume_preserves_full_candidate_total(
         report_candidates=AsyncMock(),
         send_static_progress=AsyncMock(),
         get_processed_keys=AsyncMock(return_value=set()),
+        get_processed_candidate_indexes=AsyncMock(return_value=set()),
+        report_candidate_audit=AsyncMock(return_value={"ok": True}),
         replace_skill_reports=AsyncMock(),
         report_processed_key=AsyncMock(),
     )
@@ -298,14 +301,20 @@ def test_static_candidate_targeted_resume_preserves_full_candidate_total(
     )
     audit_result = {
         "status": "success",
-        "vulnerabilities": [],
-        "skill_reports": {},
-        "processed_keys": [{
+        "vulnerabilities": [{
             "file": "retry.c",
             "line": 7,
             "function": "retry",
             "vuln_type": "npd",
+            "severity": "unknown",
+            "description": "retry failed",
+            "confirmed": False,
+            "ai_verdict": "failed",
+            "failure_reason": "retry failed",
+            "audit_index": 4,
         }],
+        "skill_reports": {},
+        "processed_candidate_indexes": [4],
         "completed_candidates": 4,
     }
 
@@ -330,6 +339,7 @@ def test_static_candidate_targeted_resume_preserves_full_candidate_total(
             feedback_entries=[],
             is_resume=True,
             retry_candidates=[{
+                "idx": 4,
                 "file": "retry.c",
                 "line": 7,
                 "function": "retry",
@@ -340,16 +350,30 @@ def test_static_candidate_targeted_resume_preserves_full_candidate_total(
             retry_processed_offset=3,
             output=AsyncMock(),
             cancel_event=SimpleNamespace(is_set=lambda: False),
-            report_vulnerabilities=AsyncMock(),
+            report_vulnerabilities=AsyncMock(return_value=[
+                (Vulnerability(
+                    file="retry.c",
+                    line=7,
+                    function="retry",
+                    vuln_type="npd",
+                    severity="unknown",
+                    description="retry failed",
+                    confirmed=False,
+                    ai_verdict="failed",
+                    failure_reason="retry failed",
+                    audit_index=4,
+                ), {"index": 9}),
+            ]),
         ))
 
     reporter.report_candidates.assert_not_awaited()
-    reporter.report_processed_key.assert_awaited_once_with(
+    reporter.report_candidate_audit.assert_awaited_once_with(
         "scan-targeted-resume",
-        "retry.c",
-        7,
-        "retry",
-        "npd",
+        4,
+        state="failed",
+        result=ANY,
+        vulnerability_idx=9,
+        dedup_decision={},
         completed_candidates=4,
         total_candidates=7,
     )

@@ -3,22 +3,39 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextvars
+import functools
 import hashlib
 import json
 import locale
 import os
+import re
 import shutil
 import signal
-from dataclasses import dataclass, replace
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Mapping, Sequence
+from urllib.parse import urlsplit
 
-from .codex_profiles import CodexModelProfile, sync_codex_profiles
+import httpx
+
+from .codex_profiles import (
+    CodexModelProfile,
+    CodexProfileSyncResult,
+    sync_codex_profiles,
+)
 
 
 CODEX_INSTALL_TIMEOUT_SECONDS = 120.0
 CODEX_PROBE_TIMEOUT_SECONDS = 10.0
+CODEX_RESPONSES_CONNECT_TIMEOUT_SECONDS = 10.0
+CODEX_RESPONSES_PROBE_TIMEOUT_SECONDS = 30.0
 _OUTPUT_DETAIL_LIMIT = 2000
+_ENV_REFERENCE_RE = re.compile(
+    r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$"
+)
 _NPM_INSTALL_STEPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("npm set strict-ssl false", ("set", "strict-ssl", "false")),
     (
@@ -48,8 +65,21 @@ class CodexRuntimeState:
     version: str = ""
     error: str = ""
     models: tuple[CodexModelProfile, ...] = ()
+    selected_model: CodexModelProfile | None = None
+    threat_analysis_command: tuple[str, ...] = ()
     model_config_warnings: tuple[str, ...] = ()
     model_config_error: str = ""
+
+
+@dataclass(frozen=True)
+class _CodexProbeCandidate:
+    id: str
+    provider_id: str
+    model_id: str
+    base_url: str
+    endpoint: str
+    no_proxy_host: str
+    api_key: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -65,6 +95,16 @@ class _CodexSetupError(RuntimeError):
 
 _runtime_state: CodexRuntimeState | None = None
 _last_platform_model_fingerprint: str | None = None
+_runtime_state_override: contextvars.ContextVar[
+    CodexRuntimeState | None
+] = contextvars.ContextVar(
+    "opendeephole_codex_runtime_state_override",
+    default=None,
+)
+_model_sync_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="opendeephole-codex-model-sync",
+)
 
 
 def _is_windows() -> bool:
@@ -451,6 +491,178 @@ def _effective_opencode_config(config: Any) -> dict[str, Any]:
     return parsed
 
 
+def _probe_candidates(
+    opencode_config: Mapping[str, Any],
+    selected: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> tuple[tuple[_CodexProbeCandidate, ...], tuple[str, ...]]:
+    """Resolve probe-safe provider/model settings without exposing secrets."""
+    effective_env = os.environ if env is None else env
+    providers = opencode_config.get("provider")
+    if not isinstance(providers, Mapping):
+        return (), (
+            "effective OpenCode provider configuration is missing or invalid",
+        )
+
+    candidates: list[_CodexProbeCandidate] = []
+    warnings: list[str] = []
+    for canonical_id in selected:
+        provider_id, separator, model_id = canonical_id.partition("/")
+        if not separator or not provider_id.strip() or not model_id.strip():
+            warnings.append(
+                f"Skipped Codex model {canonical_id or '<empty>'}: expected "
+                "provider/model"
+            )
+            continue
+        provider_id = provider_id.strip()
+        model_id = model_id.strip()
+        canonical_id = f"{provider_id}/{model_id}"
+        provider = providers.get(provider_id)
+        if not isinstance(provider, Mapping):
+            warnings.append(
+                f"Skipped Codex model {canonical_id}: provider is absent "
+                "from the effective OpenCode configuration"
+            )
+            continue
+        models = provider.get("models")
+        if not isinstance(models, Mapping) or not isinstance(
+            models.get(model_id),
+            Mapping,
+        ):
+            warnings.append(
+                f"Skipped Codex model {canonical_id}: model is absent from "
+                "the effective OpenCode configuration"
+            )
+            continue
+        options = provider.get("options")
+        if not isinstance(options, Mapping):
+            options = {}
+        raw_base_url = options.get("baseURL")
+        base_url = (
+            raw_base_url.strip()
+            if isinstance(raw_base_url, str)
+            else ""
+        )
+        try:
+            parsed = urlsplit(base_url)
+            no_proxy_host = str(parsed.hostname or "").strip()
+        except ValueError:
+            parsed = None
+            no_proxy_host = ""
+        if (
+            parsed is None
+            or parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or not no_proxy_host
+        ):
+            warnings.append(
+                f"Skipped Codex model {canonical_id}: provider baseURL is "
+                "missing or invalid"
+            )
+            continue
+
+        raw_api_key = options.get("apiKey")
+        api_key = ""
+        if isinstance(raw_api_key, str):
+            env_match = _ENV_REFERENCE_RE.fullmatch(raw_api_key.strip())
+            if env_match is not None:
+                env_name = env_match.group(1)
+                api_key = str(effective_env.get(env_name) or "")
+                if not api_key:
+                    warnings.append(
+                        f"Skipped Codex model {canonical_id}: credential "
+                        f"environment variable {env_name} is unavailable"
+                    )
+                    continue
+            else:
+                api_key = raw_api_key
+        elif raw_api_key is not None:
+            warnings.append(
+                f"Skipped Codex model {canonical_id}: provider apiKey is "
+                "not a string"
+            )
+            continue
+
+        candidates.append(_CodexProbeCandidate(
+            id=canonical_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            base_url=base_url,
+            endpoint=base_url.rstrip("/") + "/responses",
+            no_proxy_host=no_proxy_host,
+            api_key=api_key,
+        ))
+    return tuple(candidates), tuple(warnings)
+
+
+def _valid_responses_probe_payload(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    status = str(value.get("status") or "").strip().lower()
+    if status in {"failed", "cancelled"}:
+        return False
+    if value.get("object") == "response":
+        return True
+    response_id = str(value.get("id") or "").strip()
+    return bool(
+        response_id
+        and (
+            isinstance(value.get("output"), list)
+            or status in {"completed", "incomplete", "in_progress"}
+        )
+    )
+
+
+def _probe_responses_model(
+    candidate: _CodexProbeCandidate,
+) -> tuple[bool, str]:
+    """Issue one minimal real Responses request with no proxy inheritance."""
+    headers = (
+        {"Authorization": f"Bearer {candidate.api_key}"}
+        if candidate.api_key
+        else {}
+    )
+    timeout = httpx.Timeout(
+        CODEX_RESPONSES_PROBE_TIMEOUT_SECONDS,
+        connect=CODEX_RESPONSES_CONNECT_TIMEOUT_SECONDS,
+    )
+    try:
+        with httpx.Client(
+            timeout=timeout,
+            trust_env=False,
+            follow_redirects=False,
+        ) as client:
+            response = client.post(
+                candidate.endpoint,
+                headers=headers,
+                json={
+                    "model": candidate.model_id,
+                    "input": "Reply with OK.",
+                    "max_output_tokens": 16,
+                    "store": False,
+                    "stream": False,
+                },
+            )
+        if not 200 <= response.status_code < 300:
+            return False, f"HTTP {response.status_code}"
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            return False, "HTTP 2xx response was not valid JSON"
+        if not _valid_responses_probe_payload(payload):
+            return False, "HTTP 2xx response was not a valid Responses object"
+        return True, ""
+    except httpx.TimeoutException:
+        return False, "request timed out"
+    except httpx.HTTPError as exc:
+        return False, f"request failed ({type(exc).__name__})"
+    except Exception as exc:
+        return False, f"probe failed ({type(exc).__name__})"
+
+
 def _model_config_fingerprint(
     selected: tuple[str, ...],
     opencode_config: dict[str, Any],
@@ -495,8 +707,9 @@ def sync_platform_codex_models(
     model_ids: Sequence[str] | str | None = None,
     force: bool = False,
     reason: str = "platform configuration",
+    cancel_event: Any = None,
 ) -> CodexRuntimeState:
-    """Reconcile Codex with platform-selected models without blocking Agent work."""
+    """Select the first real Responses-compatible model and configure Codex."""
     global _last_platform_model_fingerprint, _runtime_state
 
     selected = (
@@ -509,7 +722,13 @@ def sync_platform_codex_models(
         _runtime_state = state
     if not state.available:
         error = state.error or "Codex CLI is unavailable"
-        _runtime_state = replace(state, model_config_error=error)
+        _runtime_state = replace(
+            state,
+            models=(),
+            selected_model=None,
+            threat_analysis_command=(),
+            model_config_error=error,
+        )
         print(
             "Warning: Codex model synchronization skipped: "
             f"{error}. Trigger: {reason}.",
@@ -521,75 +740,211 @@ def sync_platform_codex_models(
         opencode_config = _effective_opencode_config(config) if selected else {}
         fingerprint = _model_config_fingerprint(selected, opencode_config)
         if not force and fingerprint == _last_platform_model_fingerprint:
-            return get_codex_runtime_state()
-        result = sync_codex_profiles(
-            codex_version=state.version,
-            opencode_config=opencode_config,
-            selected_model_ids=selected,
-        )
+            return _runtime_state or state
     except Exception as exc:
         error = (
-            "unexpected model profile synchronization failure "
+            "unexpected Codex model configuration failure "
             f"({type(exc).__name__})"
         )
-        _runtime_state = replace(state, model_config_error=error)
+        _runtime_state = replace(
+            state,
+            models=(),
+            selected_model=None,
+            threat_analysis_command=(),
+            model_config_error=error,
+        )
         print(
-            "Warning: Codex model synchronization failed: "
+            "Warning: Codex model preparation failed: "
             f"{error}. Existing managed configuration was left unchanged. "
             f"Trigger: {reason}.",
             flush=True,
         )
         return _runtime_state
 
-    for warning in result.warnings:
-        print(f"Warning: {warning}", flush=True)
-    if result.error:
+    if not selected:
+        result = sync_codex_profiles(
+            codex_version=state.version,
+            opencode_config={},
+            selected_model_ids=(),
+            no_proxy_hosts=(),
+        )
+        _last_platform_model_fingerprint = fingerprint
+        if result.error:
+            _runtime_state = replace(
+                state,
+                models=(),
+                selected_model=None,
+                threat_analysis_command=(),
+                model_config_warnings=result.warnings,
+                model_config_error=result.error,
+            )
+            print(
+                "Warning: Codex managed configuration cleanup failed: "
+                f"{result.error}. Trigger: {reason}.",
+                flush=True,
+            )
+            return _runtime_state
         _runtime_state = replace(
             state,
+            models=(),
+            selected_model=None,
+            threat_analysis_command=(),
             model_config_warnings=result.warnings,
-            model_config_error=result.error,
+            model_config_error="No enabled explicit model is configured",
         )
-        print(
-            "Warning: Codex model synchronization failed: "
-            f"{result.error}. Existing managed configuration was left "
-            f"unchanged. Trigger: {reason}.",
-            flush=True,
-        )
-        return _runtime_state
-
-    _last_platform_model_fingerprint = fingerprint
-    _runtime_state = replace(
-        state,
-        models=result.models,
-        model_config_warnings=result.warnings,
-        model_config_error="",
-    )
-    if result.models:
-        print(
-            "Codex model profiles ready: synchronized "
-            f"{len(result.models)} platform model(s). Trigger: {reason}.",
-            flush=True,
-        )
-        if result.managed_default_model is not None:
-            print(
-                "Codex default model ready: "
-                f"{result.managed_default_model.id}.",
-                flush=True,
-            )
-        elif result.user_default_preserved:
-            print(
-                "Codex default model unchanged: existing user configuration "
-                "was preserved; platform models remain available as managed "
-                "profiles.",
-                flush=True,
-            )
-    else:
         print(
             "Codex managed model profiles removed: the platform has no "
             f"enabled explicit model. Trigger: {reason}.",
             flush=True,
         )
+        return _runtime_state
+
+    candidates, resolution_warnings = _probe_candidates(
+        opencode_config,
+        selected,
+    )
+    warnings = list(resolution_warnings)
+    failures: list[str] = []
+    for warning in resolution_warnings:
+        print(f"Warning: {warning}", flush=True)
+
+    selected_result: CodexProfileSyncResult | None = None
+    selected_profile: CodexModelProfile | None = None
+    for candidate in candidates:
+        if cancel_event is not None and bool(cancel_event.is_set()):
+            failures.append("model probing was cancelled")
+            break
+        available, probe_error = _probe_responses_model(candidate)
+        if cancel_event is not None and bool(cancel_event.is_set()):
+            failures.append("model probing was cancelled")
+            break
+        if not available:
+            detail = (
+                f"Codex Responses probe failed for {candidate.id}: "
+                f"{probe_error}"
+            )
+            warnings.append(detail)
+            failures.append(detail)
+            print(f"Warning: {detail}.", flush=True)
+            continue
+        try:
+            result = sync_codex_profiles(
+                codex_version=state.version,
+                opencode_config=opencode_config,
+                selected_model_ids=(candidate.id,),
+                no_proxy_hosts=(candidate.no_proxy_host,),
+            )
+        except Exception as exc:
+            result = CodexProfileSyncResult(
+                error=(
+                    "unexpected model profile synchronization failure "
+                    f"({type(exc).__name__})"
+                ),
+            )
+        warnings.extend(result.warnings)
+        for warning in result.warnings:
+            print(f"Warning: {warning}", flush=True)
+        if result.error:
+            detail = (
+                f"Codex configuration failed for {candidate.id}: "
+                f"{result.error}"
+            )
+            warnings.append(detail)
+            failures.append(detail)
+            print(f"Warning: {detail}.", flush=True)
+            continue
+        selected_profile = next(
+            (item for item in result.models if item.id == candidate.id),
+            None,
+        )
+        if selected_profile is None:
+            detail = (
+                f"Codex configuration failed for {candidate.id}: managed "
+                "profile metadata is missing"
+            )
+            warnings.append(detail)
+            failures.append(detail)
+            print(f"Warning: {detail}.", flush=True)
+            continue
+        selected_result = result
+        print(
+            f"Codex Responses model ready: {candidate.id}. Trigger: {reason}.",
+            flush=True,
+        )
+        break
+
+    _last_platform_model_fingerprint = fingerprint
+    if selected_result is None or selected_profile is None:
+        error = (
+            "No configured model provides a usable /v1/responses API"
+            + (f": {'; '.join(failures)}" if failures else "")
+        )
+        _runtime_state = replace(
+            state,
+            models=(),
+            selected_model=None,
+            threat_analysis_command=(),
+            model_config_warnings=tuple(warnings),
+            model_config_error=error,
+        )
+        print(
+            f"Warning: {error}. DeepHole threat analysis remains available. "
+            f"Trigger: {reason}.",
+            flush=True,
+        )
+        return _runtime_state
+
+    _runtime_state = replace(
+        state,
+        models=selected_result.models,
+        selected_model=selected_profile,
+        threat_analysis_command=(
+            *state.command,
+            "--profile",
+            selected_profile.profile,
+        ),
+        model_config_warnings=tuple(warnings),
+        model_config_error="",
+    )
+    print(
+        "Codex model profile ready: synchronized selected platform model "
+        f"{selected_profile.id}. Trigger: {reason}.",
+        flush=True,
+    )
+    if selected_result.managed_default_model is not None:
+        print(
+            "Codex default model ready: "
+            f"{selected_result.managed_default_model.id}.",
+            flush=True,
+        )
+    elif selected_result.user_default_preserved:
+        print(
+            "Codex default model unchanged: existing user configuration "
+            "was preserved; threat analysis uses the managed profile.",
+            flush=True,
+        )
     return _runtime_state
+
+
+async def sync_platform_codex_models_async(
+    config: Any,
+    *,
+    model_ids: Sequence[str] | str | None = None,
+    force: bool = False,
+    reason: str = "platform configuration",
+    cancel_event: Any = None,
+) -> CodexRuntimeState:
+    """Run serialized network probing/config writes off the event loop."""
+    call = functools.partial(
+        sync_platform_codex_models,
+        config,
+        model_ids=model_ids,
+        force=force,
+        reason=reason,
+        cancel_event=cancel_event,
+    )
+    future = _model_sync_executor.submit(call)
+    return await asyncio.wrap_future(future)
 
 
 async def initialize_codex_runtime(
@@ -658,8 +1013,23 @@ async def initialize_codex_runtime(
     return _runtime_state
 
 
+@contextmanager
+def codex_runtime_state_override(
+    state: CodexRuntimeState,
+) -> Iterator[None]:
+    """Expose one scan's selected profile to unchanged Codex consumers."""
+    token = _runtime_state_override.set(state)
+    try:
+        yield
+    finally:
+        _runtime_state_override.reset(token)
+
+
 def get_codex_runtime_state() -> CodexRuntimeState:
     """Return startup state, with a PATH-only fallback for direct callers."""
+    overridden = _runtime_state_override.get()
+    if overridden is not None:
+        return overridden
     if _runtime_state is not None:
         return _runtime_state
     executable = shutil.which("codex")
@@ -685,8 +1055,10 @@ __all__ = [
     "CODEX_INSTALL_TIMEOUT_SECONDS",
     "CodexModelProfile",
     "CodexRuntimeState",
+    "codex_runtime_state_override",
     "configured_codex_model_ids",
     "get_codex_runtime_state",
     "initialize_codex_runtime",
     "sync_platform_codex_models",
+    "sync_platform_codex_models_async",
 ]

@@ -64,6 +64,10 @@ interface ScanCandidatesChangedEvent {
   final: boolean;
 }
 
+interface ScanCandidateAuditEvent {
+  candidate: ScanCandidate;
+}
+
 interface ScanEventPayload {
   event: ScanEvent;
 }
@@ -147,6 +151,7 @@ export interface ScanSSEHandlers {
   onScanStatus?: (data: ScanStatusEvent) => void;
   onScanCandidates?: (data: ScanCandidatesEvent) => void;
   onScanCandidatesChanged?: (data: ScanCandidatesChangedEvent) => void;
+  onScanCandidateAudit?: (data: ScanCandidateAuditEvent) => void;
   onScanVulnerability?: (data: ScanVulnerabilityEvent) => void;
   onScanVulnerabilitiesChanged?: (data: ScanVulnerabilitiesChangedEvent) => void;
   onScanEvent?: (data: ScanEventPayload) => void;
@@ -299,6 +304,8 @@ function isValidPayload(eventType: string, value: unknown): value is Record<stri
         && isFiniteNumber(value.count)
         && isFiniteNumber(value.total_candidates)
         && typeof value.final === "boolean";
+    case "scan_candidate_audit":
+      return isCandidate(value.candidate);
     case "scan_vulnerability":
       return Number.isInteger(value.index) && Number(value.index) >= 0 && isVulnerability(value.vulnerability);
     case "scan_vulnerabilities_changed":
@@ -484,6 +491,9 @@ export function useScanSSE(
       candidates: d.candidates.map((candidate, index) => normalizeScanCandidate(candidate, index)),
     }));
     handle<ScanCandidatesChangedEvent>("scan_candidates_changed", (d) => handlersRef.current.onScanCandidatesChanged?.(d));
+    handle<ScanCandidateAuditEvent>("scan_candidate_audit", (d) => handlersRef.current.onScanCandidateAudit?.({
+      candidate: normalizeScanCandidate(d.candidate, d.candidate.idx),
+    }));
     handle<ScanVulnerabilityEvent>("scan_vulnerability", (d) => handlersRef.current.onScanVulnerability?.({
       index: d.index,
       vulnerability: normalizeVulnerability(d.vulnerability),

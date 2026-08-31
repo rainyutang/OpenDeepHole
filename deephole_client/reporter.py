@@ -202,6 +202,62 @@ class Reporter:
             print(f"Warning: failed to upload vulnerability result: {e}")
             return None
 
+    async def report_candidate_audit(
+        self,
+        scan_id: str,
+        candidate_idx: int,
+        *,
+        state: str,
+        result: Vulnerability | None,
+        vulnerability_idx: int | None = None,
+        dedup_decision: dict | None = None,
+        completed_candidates: int | None = None,
+        total_candidates: int | None = None,
+    ) -> dict | None:
+        """Replace the authoritative result for one persisted candidate index."""
+        if self.dry_run:
+            return None
+        candidate_result = result.model_copy(deep=True) if result is not None else None
+        if candidate_result is not None:
+            candidate_result.output_source = self._with_agent_source(
+                candidate_result.output_source
+            )
+        payload = {
+            "candidate_idx": int(candidate_idx),
+            "state": state,
+            "result": (
+                candidate_result.model_dump(mode="json")
+                if candidate_result is not None
+                else None
+            ),
+            "vulnerability_idx": vulnerability_idx,
+            "dedup_decision": dict(dedup_decision or {}),
+            "completed_candidates": completed_candidates,
+            "total_candidates": total_candidates,
+        }
+        for attempt in range(3):
+            try:
+                response = await self._client.post(
+                    f"{self.server_url}/api/agent/scan/{scan_id}/candidate-audit",
+                    json=payload,
+                    timeout=10.0,
+                )
+                response.raise_for_status()
+                return response.json()
+            except Exception as exc:
+                if attempt < 2:
+                    await asyncio.sleep(2**attempt)
+                    continue
+                print(
+                    "Warning: failed to upload candidate audit result "
+                    f"scan_id={scan_id} candidate_idx={candidate_idx}: {exc}",
+                    flush=True,
+                )
+        raise RuntimeError(
+            "failed to upload authoritative candidate audit result "
+            f"for scan {scan_id} candidate {candidate_idx}"
+        )
+
     async def reconcile_vulnerabilities(
         self,
         scan_id: str,
@@ -987,6 +1043,20 @@ class Reporter:
                 (item["file"], int(item["line"]), item["function"], item["vuln_type"])
                 for item in resp.json()
             }
+        except Exception:
+            return set()
+
+    async def get_processed_candidate_indexes(self, scan_id: str) -> set[int]:
+        """Fetch terminal candidate indexes for resume."""
+        if self.dry_run:
+            return set()
+        try:
+            response = await self._client.get(
+                f"{self.server_url}/api/agent/scan/{scan_id}/candidate-audits/processed",
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            return {int(item) for item in response.json()}
         except Exception:
             return set()
 

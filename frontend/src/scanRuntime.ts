@@ -73,7 +73,21 @@ function normalizeCandidate(value: unknown, index?: number): Candidate | ScanCan
   };
   return index === undefined
     ? candidate as Candidate
-    : { ...candidate, idx: finiteNumber(raw.idx, index) } as ScanCandidate;
+    : {
+        ...candidate,
+        idx: finiteNumber(raw.idx, index),
+        audit_state: ["pending", "running", "success", "failed"].includes(text(raw.audit_state))
+          ? text(raw.audit_state) as ScanCandidate["audit_state"]
+          : "pending",
+        audit_result: isRecord(raw.audit_result)
+          ? normalizeVulnerability(raw.audit_result)
+          : null,
+        vulnerability_idx: raw.vulnerability_idx == null
+          ? null
+          : finiteNumber(raw.vulnerability_idx),
+        dedup_decision: isRecord(raw.dedup_decision) ? raw.dedup_decision : {},
+        audit_updated_at: text(raw.audit_updated_at),
+      } as ScanCandidate;
 }
 
 export function normalizeScanCandidate(value: unknown, index = 0): ScanCandidate {

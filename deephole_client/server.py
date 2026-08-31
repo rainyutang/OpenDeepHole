@@ -147,6 +147,7 @@ async def _run(task, is_resume: bool) -> None:
             code_graph_mcp=task.code_graph_mcp,
             knowledge_base_mcp=task.knowledge_base_mcp,
             mining_engines=task.mining_engines,
+            codex_model_ids=task.codex_model_ids,
         )
     finally:
         _task_manager.remove(task.scan_id, task)
@@ -169,6 +170,7 @@ async def handle_task(
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
     mining_engines: list[dict] | None = None,
+    codex_model_ids: list[str] | None = None,
 ) -> None:
     """Handle a 'task' command — start a new scan."""
     if _task_manager is None:
@@ -197,6 +199,7 @@ async def handle_task(
         feedback_entries=feedback_entries,
         checker_packages=checker_packages,
         mining_engines=mining_engines,
+        codex_model_ids=codex_model_ids,
     )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=False))
     print(f"Started task {scan_id}")
@@ -236,6 +239,7 @@ async def handle_resume(
     resume_threat_analysis: bool = False,
     retry_mining_engine_ids: Optional[list[str]] = None,
     retry_threat_audit_task_ids: Optional[list[str]] = None,
+    codex_model_ids: Optional[list[str]] = None,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
@@ -311,6 +315,11 @@ async def handle_resume(
         if mining_engines is not None
         else copy.deepcopy(previous_value("mining_engines", None))
     )
+    resolved_codex_model_ids = (
+        codex_model_ids
+        if codex_model_ids is not None
+        else copy.deepcopy(previous_value("codex_model_ids", None))
+    )
 
     if (
         previous is not None
@@ -355,6 +364,7 @@ async def handle_resume(
         resume_threat_analysis=resume_threat_analysis,
         retry_mining_engine_ids=retry_mining_engine_ids,
         retry_threat_audit_task_ids=retry_threat_audit_task_ids,
+        codex_model_ids=resolved_codex_model_ids,
     )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=True))
     print(f"Resumed task {scan_id}")

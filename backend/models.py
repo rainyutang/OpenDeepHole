@@ -124,11 +124,6 @@ class Candidate(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
-class ScanCandidate(Candidate):
-    """A persisted static-analysis candidate for one scan."""
-    idx: int
-
-
 class OutputSource(BaseModel):
     """Metadata describing which runtime produced an AI-visible output."""
     agent_id: str = ""
@@ -172,7 +167,7 @@ class Vulnerability(BaseModel):
     ticket_id: str = ""                      # 问题单号
     function_source: str = ""
     function_start_line: int | None = None
-    audit_index: int | None = None           # Static candidate audit order; DB idx remains the API handle.
+    audit_index: int | None = None           # Legacy projection of ScanCandidate.idx for static results.
     variant_of: str = ""                     # 同类变体排查命中时，来源历史问题模式（根因摘要+出处提交/文件）
     analysis_source: str = "static_candidate"  # Mining-engine ID.
     engine_id: str = STATIC_CANDIDATE_ENGINE_ID
@@ -197,6 +192,25 @@ class Vulnerability(BaseModel):
             self.engine_id,
             self.engine_label,
         )
+        return self
+
+
+class ScanCandidate(Candidate):
+    """One persisted candidate and its authoritative scan-local audit result."""
+
+    idx: int = Field(ge=0)
+    audit_state: Literal["pending", "running", "success", "failed"] = "pending"
+    audit_result: Vulnerability | None = None
+    vulnerability_idx: int | None = None
+    dedup_decision: dict[str, Any] = Field(default_factory=dict)
+    audit_updated_at: str = ""
+
+    @model_validator(mode="after")
+    def _require_terminal_result(self):
+        if self.audit_state in {"success", "failed"} and self.audit_result is None:
+            raise ValueError("terminal scan candidate requires one audit result")
+        if self.audit_state in {"pending", "running"} and self.audit_result is not None:
+            raise ValueError("non-terminal scan candidate cannot hold an audit result")
         return self
 
 
@@ -726,11 +740,22 @@ class ScanStatus(BaseModel):
 
 class ScanDetailCounts(BaseModel):
     candidates: int = 0
+    candidate_audit_pending: int = 0
+    candidate_audit_running: int = 0
+    candidate_audit_success: int = 0
+    candidate_audit_failed: int = 0
     vulnerabilities: int = 0
     effective_issue_count: int = 0
     validated_issue_count: int = 0
     events: int = 0
     threat_audit_tasks: int = 0
+    threat_audit_current: int = 0
+    threat_audit_pending: int = 0
+    threat_audit_running: int = 0
+    threat_audit_completed: int = 0
+    threat_audit_failed: int = 0
+    threat_audit_cancelled: int = 0
+    threat_audit_superseded: int = 0
     validations: int = 0
     skill_reports: int = 0
 
@@ -812,6 +837,26 @@ class AgentScanCandidateBatch(BaseModel):
     reset: bool = False
     final: bool = False
     total: int | None = Field(default=None, ge=0)
+
+
+class AgentCandidateAuditResult(BaseModel):
+    """Authoritative result for exactly one persisted candidate index."""
+
+    candidate_idx: int = Field(ge=0)
+    state: Literal["pending", "running", "success", "failed"]
+    result: Vulnerability | None = None
+    vulnerability_idx: int | None = Field(default=None, ge=0)
+    dedup_decision: dict[str, Any] = Field(default_factory=dict)
+    completed_candidates: int | None = Field(default=None, ge=0)
+    total_candidates: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _require_terminal_result(self):
+        if self.state in {"success", "failed"} and self.result is None:
+            raise ValueError("terminal candidate audit state requires one result")
+        if self.state in {"pending", "running"} and self.result is not None:
+            raise ValueError("non-terminal candidate audit state cannot include a result")
+        return self
 
 
 class AgentScanEventBatch(BaseModel):

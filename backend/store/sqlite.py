@@ -350,6 +350,64 @@ def _vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
     )
 
 
+def _scan_candidate_from_row(row: sqlite3.Row) -> ScanCandidate:
+    keys = row.keys()
+    try:
+        related = json.loads(row["related_functions"] or "[]")
+    except Exception:
+        related = []
+    try:
+        metadata = json.loads(row["metadata"] or "{}")
+    except Exception:
+        metadata = {}
+    try:
+        audit_payload = json.loads(
+            (row["audit_result"] if "audit_result" in keys else None) or "null"
+        )
+        audit_result = (
+            Vulnerability.model_validate(audit_payload)
+            if isinstance(audit_payload, dict)
+            else None
+        )
+    except Exception:
+        audit_result = None
+    try:
+        dedup_decision = json.loads(
+            (row["dedup_decision"] if "dedup_decision" in keys else None) or "{}"
+        )
+    except Exception:
+        dedup_decision = {}
+    return ScanCandidate(
+        idx=int(row["idx"]),
+        file=row["file"],
+        line=int(row["line"]),
+        function=row["function"],
+        description=row["description"],
+        vuln_type=row["vuln_type"],
+        related_functions=(
+            [str(item) for item in related] if isinstance(related, list) else []
+        ),
+        metadata=metadata if isinstance(metadata, dict) else {},
+        audit_state=(
+            str(row["audit_state"] or "pending")
+            if "audit_state" in keys
+            else "pending"
+        ),
+        audit_result=audit_result,
+        vulnerability_idx=(
+            row["vulnerability_idx"] if "vulnerability_idx" in keys else None
+        ),
+        dedup_decision=(
+            dedup_decision if isinstance(dedup_decision, dict) else {}
+        ),
+        audit_updated_at=(
+            str(row["audit_updated_at"] or "")
+            if "audit_updated_at" in keys
+            else ""
+        ),
+    )
+
+
 def _token_usage_rows(usage: OpenCodeTokenUsage) -> list[tuple]:
     models = list(usage.by_model)
     if not models:
@@ -538,6 +596,11 @@ CREATE TABLE IF NOT EXISTS scan_candidates (
     description       TEXT NOT NULL,
     related_functions TEXT NOT NULL DEFAULT '[]',
     metadata          TEXT NOT NULL DEFAULT '{}',
+    audit_state       TEXT NOT NULL DEFAULT 'pending',
+    audit_result      TEXT,
+    vulnerability_idx INTEGER,
+    dedup_decision    TEXT NOT NULL DEFAULT '{}',
+    audit_updated_at  TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(scan_id, idx)
 );
 
@@ -1312,11 +1375,33 @@ class SqliteScanStore(ScanStoreBase):
                 description       TEXT NOT NULL,
                 related_functions TEXT NOT NULL DEFAULT '[]',
                 metadata          TEXT NOT NULL DEFAULT '{}',
+                audit_state       TEXT NOT NULL DEFAULT 'pending',
+                audit_result      TEXT,
+                vulnerability_idx INTEGER,
+                dedup_decision    TEXT NOT NULL DEFAULT '{}',
+                audit_updated_at  TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(scan_id, idx)
             );
             CREATE INDEX IF NOT EXISTS idx_scan_candidates_scan
                 ON scan_candidates(scan_id);
         """)
+        candidate_cur = self._conn.execute("PRAGMA table_info(scan_candidates)")
+        candidate_cols = {r[1] for r in candidate_cur.fetchall()}
+        for column, definition in (
+            ("audit_state", "TEXT NOT NULL DEFAULT 'pending'"),
+            ("audit_result", "TEXT"),
+            ("vulnerability_idx", "INTEGER"),
+            ("dedup_decision", "TEXT NOT NULL DEFAULT '{}'"),
+            ("audit_updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in candidate_cols:
+                self._conn.execute(
+                    f"ALTER TABLE scan_candidates ADD COLUMN {column} {definition}"
+                )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scan_candidates_audit_state "
+            "ON scan_candidates(scan_id, audit_state)"
+        )
 
         report_cur = self._conn.execute("PRAGMA table_info(skill_reports)")
         report_cols = {r[1] for r in report_cur.fetchall()}
@@ -1669,9 +1754,83 @@ class SqliteScanStore(ScanStoreBase):
             """,
             (SCAN_EVENT_RETENTION_LIMIT,),
         )
+        self._backfill_candidate_audits()
         self._conn.commit()
 
     # -- helpers --
+
+    def _backfill_candidate_audits(self) -> None:
+        """Migrate legacy results only through their explicit audit_index."""
+        rows = self._conn.execute(
+            """\
+            SELECT v.*
+            FROM vulnerabilities AS v
+            JOIN scan_candidates AS c
+              ON c.scan_id = v.scan_id AND c.idx = v.audit_index
+            WHERE c.audit_state = 'pending'
+              AND c.audit_result IS NULL
+              AND v.audit_index IS NOT NULL
+              AND COALESCE(v.analysis_source, 'static_candidate') = 'static_candidate'
+              AND COALESCE(v.provisional, 0) = 0
+            ORDER BY v.scan_id, v.audit_index, v.idx
+            """
+        ).fetchall()
+        grouped: dict[tuple[str, int], list] = {}
+        for row in rows:
+            grouped.setdefault(
+                (str(row["scan_id"]), int(row["audit_index"])),
+                [],
+            ).append(row)
+
+        failure_verdicts = {"failed", "timeout", "no_result"}
+        severity_rank = {
+            "critical": 5,
+            "high": 4,
+            "medium": 3,
+            "low": 2,
+            "unknown": 1,
+        }
+        same_pattern_conclusion = (
+            "候选点去重：同模式代表点已被 AI 审计为非问题，"
+            "本候选未再次调用模型。"
+        )
+        for (scan_id, candidate_idx), candidates in grouped.items():
+            def rank(row) -> tuple[int, int, int, int]:
+                verdict = str(row["ai_verdict"] or "").strip().lower()
+                return (
+                    0 if verdict in failure_verdicts else 1,
+                    1 if bool(row["confirmed"]) else 0,
+                    severity_rank.get(str(row["severity"] or "").lower(), 0),
+                    -int(row["idx"]),
+                )
+
+            selected = max(candidates, key=rank)
+            result = _vulnerability_from_row(selected)
+            verdict = str(result.ai_verdict or "").strip().lower()
+            dedup_decision: dict[str, str] = {}
+            if verdict == "filtered_same_pattern":
+                result.ai_analysis = same_pattern_conclusion
+                result.failure_reason = same_pattern_conclusion
+                dedup_decision = {"method": "same_pattern"}
+            state = "failed" if verdict in failure_verdicts else "success"
+            self._conn.execute(
+                """\
+                UPDATE scan_candidates
+                SET audit_state = ?, audit_result = ?, vulnerability_idx = ?,
+                    dedup_decision = ?, audit_updated_at = ?
+                WHERE scan_id = ? AND idx = ?
+                  AND audit_state = 'pending' AND audit_result IS NULL
+                """,
+                (
+                    state,
+                    result.model_dump_json(),
+                    int(selected["idx"]),
+                    json.dumps(dedup_decision, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat(),
+                    scan_id,
+                    candidate_idx,
+                ),
+            )
 
     def _row_to_scan_status(
         self,
@@ -2110,13 +2269,24 @@ class SqliteScanStore(ScanStoreBase):
                 """\
                 SELECT
                   (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ?) AS candidates,
+                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'pending') AS candidate_audit_pending,
+                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'running') AS candidate_audit_running,
+                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'success') AS candidate_audit_success,
+                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'failed') AS candidate_audit_failed,
                   (SELECT COUNT(*) FROM vulnerabilities WHERE scan_id = ?) AS vulnerabilities,
                   (SELECT COUNT(*) FROM events WHERE scan_id = ?) AS events,
                   (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ?) AS threat_audit_tasks,
+                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) <> 'superseded') AS threat_audit_current,
+                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) IN ('pending', 'queued')) AS threat_audit_pending,
+                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) IN ('running', 'analyzing', 'auditing')) AS threat_audit_running,
+                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'completed') AS threat_audit_completed,
+                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) IN ('failed', 'failure', 'error', 'timeout', 'no_result')) AS threat_audit_failed,
+                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'cancelled') AS threat_audit_cancelled,
+                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'superseded') AS threat_audit_superseded,
                   (SELECT COUNT(*) FROM vulnerability_validations WHERE scan_id = ?) AS validations,
                   (SELECT COUNT(*) FROM skill_reports WHERE scan_id = ?) AS skill_reports
                 """,
-                (scan_id, scan_id, scan_id, scan_id, scan_id, scan_id),
+                (scan_id,) * 17,
             ).fetchone()
             scan = self._row_to_scan_status(row, include_details=False)
             meta = self._row_to_meta(row)
@@ -2124,9 +2294,20 @@ class SqliteScanStore(ScanStoreBase):
                 key: int(counts_row[key] or 0)
                 for key in (
                     "candidates",
+                    "candidate_audit_pending",
+                    "candidate_audit_running",
+                    "candidate_audit_success",
+                    "candidate_audit_failed",
                     "vulnerabilities",
                     "events",
                     "threat_audit_tasks",
+                    "threat_audit_current",
+                    "threat_audit_pending",
+                    "threat_audit_running",
+                    "threat_audit_completed",
+                    "threat_audit_failed",
+                    "threat_audit_cancelled",
+                    "threat_audit_superseded",
                     "validations",
                     "skill_reports",
                 )
@@ -2759,9 +2940,22 @@ class SqliteScanStore(ScanStoreBase):
         self._conn.execute("DELETE FROM scan_candidates WHERE scan_id = ?", (scan_id,))
         persisted: list[ScanCandidate] = []
         rows = []
-        for idx, candidate in enumerate(candidates):
+        seen_indexes: set[int] = set()
+        for position, candidate in enumerate(candidates):
+            candidate_idx = (
+                int(candidate.idx)
+                if isinstance(candidate, ScanCandidate)
+                else position
+            )
+            if candidate_idx < 0:
+                raise ValueError("scan candidate index must be non-negative")
+            if candidate_idx in seen_indexes:
+                raise ValueError(
+                    f"duplicate scan candidate index {candidate_idx} for scan {scan_id}"
+                )
+            seen_indexes.add(candidate_idx)
             scan_candidate = ScanCandidate(
-                idx=idx,
+                idx=candidate_idx,
                 file=candidate.file,
                 line=candidate.line,
                 function=candidate.function,
@@ -2769,11 +2963,16 @@ class SqliteScanStore(ScanStoreBase):
                 vuln_type=candidate.vuln_type,
                 related_functions=list(getattr(candidate, "related_functions", []) or []),
                 metadata=dict(getattr(candidate, "metadata", {}) or {}),
+                audit_state=str(getattr(candidate, "audit_state", "pending") or "pending"),
+                audit_result=getattr(candidate, "audit_result", None),
+                vulnerability_idx=getattr(candidate, "vulnerability_idx", None),
+                dedup_decision=dict(getattr(candidate, "dedup_decision", {}) or {}),
+                audit_updated_at=str(getattr(candidate, "audit_updated_at", "") or ""),
             )
             persisted.append(scan_candidate)
             rows.append((
                 scan_id,
-                idx,
+                scan_candidate.idx,
                 scan_candidate.file,
                 scan_candidate.line,
                 scan_candidate.function,
@@ -2781,14 +2980,25 @@ class SqliteScanStore(ScanStoreBase):
                 scan_candidate.description,
                 json.dumps(scan_candidate.related_functions, ensure_ascii=False),
                 json.dumps(scan_candidate.metadata, ensure_ascii=False),
+                (
+                    scan_candidate.audit_result.model_dump_json()
+                    if scan_candidate.audit_result is not None
+                    else None
+                ),
+                scan_candidate.audit_state,
+                scan_candidate.vulnerability_idx,
+                json.dumps(scan_candidate.dedup_decision, ensure_ascii=False),
+                scan_candidate.audit_updated_at,
             ))
         if rows:
             self._conn.executemany(
                 """\
                 INSERT INTO scan_candidates
                     (scan_id, idx, file, line, function, vuln_type,
-                     description, related_functions, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     description, related_functions, metadata, audit_result,
+                     audit_state, vulnerability_idx, dedup_decision,
+                     audit_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -2883,35 +3093,7 @@ class SqliteScanStore(ScanStoreBase):
             (scan_id,),
         )
 
-        def _json_list(value: str | None) -> list[str]:
-            try:
-                raw = json.loads(value or "[]")
-            except Exception:
-                return []
-            if not isinstance(raw, list):
-                return []
-            return [str(item) for item in raw]
-
-        def _json_object(value: str | None) -> dict:
-            try:
-                raw = json.loads(value or "{}")
-            except Exception:
-                return {}
-            return raw if isinstance(raw, dict) else {}
-
-        return [
-            ScanCandidate(
-                idx=r["idx"],
-                file=r["file"],
-                line=r["line"],
-                function=r["function"],
-                description=r["description"],
-                vuln_type=r["vuln_type"],
-                related_functions=_json_list(r["related_functions"]),
-                metadata=_json_object(r["metadata"]),
-            )
-            for r in cur.fetchall()
-        ]
+        return [_scan_candidate_from_row(row) for row in cur.fetchall()]
 
     def list_scan_candidates_page(
         self,
@@ -2931,33 +3113,95 @@ class SqliteScanStore(ScanStoreBase):
                 (scan_id, int(after_index), max(1, int(limit))),
             ).fetchall()
 
-        def json_list(value: str | None) -> list[str]:
-            try:
-                raw = json.loads(value or "[]")
-            except Exception:
-                return []
-            return [str(item) for item in raw] if isinstance(raw, list) else []
+        return [_scan_candidate_from_row(row) for row in rows]
 
-        def json_object(value: str | None) -> dict:
-            try:
-                raw = json.loads(value or "{}")
-            except Exception:
-                return {}
-            return raw if isinstance(raw, dict) else {}
-
-        return [
-            ScanCandidate(
-                idx=row["idx"],
-                file=row["file"],
-                line=row["line"],
-                function=row["function"],
-                description=row["description"],
-                vuln_type=row["vuln_type"],
-                related_functions=json_list(row["related_functions"]),
-                metadata=json_object(row["metadata"]),
+    def update_scan_candidate_audit(
+        self,
+        scan_id: str,
+        candidate_idx: int,
+        *,
+        state: str,
+        result: Vulnerability | None,
+        vulnerability_idx: int | None,
+        dedup_decision: dict,
+    ) -> ScanCandidate | None:
+        updated_at = datetime.now(timezone.utc).isoformat()
+        candidate_idx = int(candidate_idx)
+        if state not in {"pending", "running", "success", "failed"}:
+            raise ValueError(f"invalid candidate audit state: {state}")
+        if state in {"success", "failed"} and result is None:
+            raise ValueError("terminal candidate audit state requires one result")
+        if state in {"pending", "running"} and result is not None:
+            raise ValueError("non-terminal candidate audit state cannot include a result")
+        if result is not None:
+            result = result.model_copy(update={"audit_index": candidate_idx})
+        with self._lock:
+            cursor = self._conn.execute(
+                """\
+                UPDATE scan_candidates
+                SET audit_state = ?, audit_result = ?, vulnerability_idx = ?,
+                    dedup_decision = ?, audit_updated_at = ?
+                WHERE scan_id = ? AND idx = ?
+                """,
+                (
+                    state,
+                    result.model_dump_json() if result is not None else None,
+                    vulnerability_idx,
+                    json.dumps(dedup_decision or {}, ensure_ascii=False),
+                    updated_at,
+                    scan_id,
+                    candidate_idx,
+                ),
             )
-            for row in rows
-        ]
+            if not cursor.rowcount:
+                self._conn.commit()
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM scan_candidates WHERE scan_id = ? AND idx = ?",
+                (scan_id, candidate_idx),
+            ).fetchone()
+            self._conn.commit()
+        return _scan_candidate_from_row(row) if row is not None else None
+
+    def get_processed_candidate_indexes(self, scan_id: str) -> set[int]:
+        rows = self._conn.execute(
+            """\
+            SELECT idx FROM scan_candidates
+            WHERE scan_id = ? AND audit_state IN ('success', 'failed')
+            """,
+            (scan_id,),
+        ).fetchall()
+        return {int(row[0]) for row in rows}
+
+    def count_terminal_candidate_audits(self, scan_id: str) -> int:
+        row = self._conn.execute(
+            """\
+            SELECT COUNT(*) AS count FROM scan_candidates
+            WHERE scan_id = ? AND audit_state IN ('success', 'failed')
+            """,
+            (scan_id,),
+        ).fetchone()
+        return int(row["count"] or 0)
+
+    def reset_scan_candidate_audits(
+        self,
+        scan_id: str,
+        candidate_indexes: list[int],
+    ) -> None:
+        if not candidate_indexes:
+            return
+        with self._lock:
+            self._conn.executemany(
+                """\
+                UPDATE scan_candidates
+                SET audit_state = 'pending', audit_result = NULL,
+                    vulnerability_idx = NULL, dedup_decision = '{}',
+                    audit_updated_at = ''
+                WHERE scan_id = ? AND idx = ?
+                """,
+                [(scan_id, int(index)) for index in candidate_indexes],
+            )
+            self._conn.commit()
 
     def update_scan_feedback_ids(self, scan_id: str, feedback_ids: list[str]) -> None:
         with self._lock:

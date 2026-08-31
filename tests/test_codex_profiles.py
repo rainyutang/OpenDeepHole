@@ -43,6 +43,7 @@ class CodexProfileSyncTests(unittest.TestCase):
         *,
         version: str = "codex-cli 0.149.1",
         platform: str = "linux",
+        no_proxy_hosts: tuple[str, ...] = (),
     ) -> codex_profiles.CodexProfileSyncResult:
         return codex_profiles.sync_codex_profiles(
             codex_version=version,
@@ -50,7 +51,115 @@ class CodexProfileSyncTests(unittest.TestCase):
             selected_model_ids=model_ids,
             env={"CODEX_HOME": str(codex_home)},
             platform=platform,
+            no_proxy_hosts=no_proxy_hosts,
         )
+
+    def test_selected_model_host_is_managed_in_both_dotenv_variables(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            env_path = codex_home / ".env"
+            original = (
+                b"# User-owned values stay unchanged.\n"
+                b"NO_PROXY=localhost,shared.local\n"
+                b"no_proxy=corp.local\n"
+                b"PROVIDER_SECRET=keep-me"
+            )
+            env_path.write_bytes(original)
+
+            first = self._sync(
+                codex_home,
+                _effective_config(),
+                ["literal/beta/model"],
+                no_proxy_hosts=("10.20.30.40", "shared.local"),
+            )
+            first_text = env_path.read_text(encoding="utf-8")
+            second = self._sync(
+                codex_home,
+                _effective_config(),
+                ["env/alpha"],
+                no_proxy_hosts=("env.example",),
+            )
+            second_text = env_path.read_text(encoding="utf-8")
+            empty = self._sync(codex_home, {}, [], no_proxy_hosts=())
+
+            self.assertEqual(first.error, "")
+            self.assertEqual(second.error, "")
+            self.assertEqual(empty.error, "")
+            self.assertTrue(first_text.startswith(original.decode("utf-8")))
+            self.assertIn(
+                "NO_PROXY=localhost,shared.local,10.20.30.40",
+                first_text,
+            )
+            self.assertIn(
+                "no_proxy=corp.local,10.20.30.40,shared.local",
+                first_text,
+            )
+            self.assertTrue(second_text.startswith(original.decode("utf-8")))
+            self.assertIn(
+                "NO_PROXY=localhost,shared.local,env.example",
+                second_text,
+            )
+            self.assertNotIn("10.20.30.40", second_text)
+            self.assertEqual(env_path.read_bytes(), original)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics differ")
+    def test_symlinked_or_malformed_dotenv_is_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            target = root / "personal.env"
+            target.write_text("TOKEN=secret\n", encoding="utf-8")
+            env_path = codex_home / ".env"
+            env_path.symlink_to(target)
+
+            symlink_error = codex_profiles._sync_codex_env(
+                codex_home,
+                ("127.0.0.1",),
+            )
+            env_path.unlink()
+            malformed = (
+                f"{codex_profiles._ENV_BEGIN}\nNO_PROXY=old\n"
+            )
+            env_path.write_text(malformed, encoding="utf-8")
+            marker_error = codex_profiles._sync_codex_env(
+                codex_home,
+                ("127.0.0.1",),
+            )
+
+            self.assertIn("symlinked", symlink_error)
+            self.assertEqual(target.read_text(encoding="utf-8"), "TOKEN=secret\n")
+            self.assertIn("markers", marker_error)
+            self.assertEqual(env_path.read_text(encoding="utf-8"), malformed)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions are unavailable")
+    def test_new_codex_dotenv_is_private_and_does_not_mutate_process_env(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"NO_PROXY": "process-upper", "no_proxy": "process-lower"},
+            clear=False,
+        ):
+            codex_home = Path(tmp) / "codex"
+            result = self._sync(
+                codex_home,
+                _effective_config(),
+                ["literal/beta/model"],
+                no_proxy_hosts=("::1",),
+            )
+
+            self.assertEqual(result.error, "")
+            env_path = codex_home / ".env"
+            self.assertEqual(env_path.stat().st_mode & 0o777, 0o600)
+            text = env_path.read_text(encoding="utf-8")
+            self.assertIn("NO_PROXY=::1", text)
+            self.assertIn("no_proxy=::1", text)
+            self.assertEqual(os.environ["NO_PROXY"], "process-upper")
+            self.assertEqual(os.environ["no_proxy"], "process-lower")
 
     def test_syncs_only_selected_models_in_platform_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

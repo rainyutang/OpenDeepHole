@@ -17,6 +17,11 @@ from backend.models import (
 from backend.store.sqlite import SqliteScanStore
 
 
+async def _direct_store_call(store, operation, *args, **kwargs):
+    function = getattr(store, operation) if isinstance(operation, str) else operation
+    return function(*args, **kwargs)
+
+
 class ScanOverviewCountTests(unittest.IsolatedAsyncioTestCase):
     async def test_overview_counts_are_complete_beyond_first_detail_pages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -91,7 +96,13 @@ class ScanOverviewCountTests(unittest.IsolatedAsyncioTestCase):
                         ),
                     )
 
-                with patch("backend.api.scan.get_scan_store", return_value=store):
+                with (
+                    patch("backend.api.scan.get_scan_store", return_value=store),
+                    patch(
+                        "backend.api.scan.run_store_call",
+                        side_effect=_direct_store_call,
+                    ),
+                ):
                     overview = await get_scan_overview_v2(
                         scan_id,
                         User(user_id="user-1", username="ordinary", role="user"),
