@@ -99,25 +99,6 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             if isinstance(post_update_command, dict):
                 return await _handle_command(post_update_command, config, task_manager, reporter)
             return None
-        try:
-            from deephole_client.codex_runtime import sync_platform_codex_models
-
-            task_model_ids = msg.get("codex_model_ids")
-            sync_platform_codex_models(
-                config,
-                model_ids=(
-                    task_model_ids
-                    if isinstance(task_model_ids, list)
-                    else None
-                ),
-                force=True,
-                reason=f"scan creation {msg.get('scan_id', '')}",
-            )
-        except Exception as exc:
-            print(
-                "Warning: Codex scan-start model synchronization failed "
-                f"({type(exc).__name__}); scan execution will continue."
-            )
         await agent_server.handle_task(
             scan_id=msg["scan_id"],
             project_path=msg["project_path"],
@@ -154,6 +135,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             mining_engines=(
                 msg.get("mining_engines")
                 if isinstance(msg.get("mining_engines"), list)
+                else None
+            ),
+            codex_model_ids=(
+                msg.get("codex_model_ids")
+                if isinstance(msg.get("codex_model_ids"), list)
                 else None
             ),
         )
@@ -221,6 +207,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 else None
             ),
             retry_threat_audit_task_ids=msg.get("retry_threat_audit_task_ids"),
+            codex_model_ids=(
+                msg.get("codex_model_ids")
+                if isinstance(msg.get("codex_model_ids"), list)
+                else None
+            ),
         )
     elif cmd_type == "fp_review":
         from deephole_client.updater import ensure_runtime_updated
@@ -397,8 +388,8 @@ async def _apply_live_config_update(config) -> None:
     )
     configure_opencode_component()
     refresh_global_opencode_config()
-    from deephole_client.codex_runtime import sync_platform_codex_models
-    sync_platform_codex_models(
+    from deephole_client.codex_runtime import sync_platform_codex_models_async
+    await sync_platform_codex_models_async(
         config,
         reason="platform model configuration",
     )

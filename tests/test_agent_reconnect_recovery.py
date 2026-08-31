@@ -1525,6 +1525,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
                 ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
+                ),
             ):
                 request = SimpleNamespace(base_url="http://testserver/")
                 asyncio.run(scan_api.resume_scan("scan-1", request=request, current_user=user))
@@ -1661,6 +1665,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
                 ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
+                ),
             ):
                 request = SimpleNamespace(base_url="http://testserver/")
                 asyncio.run(scan_api.retry_incomplete_scan("scan-1", request=request, current_user=user))
@@ -1670,6 +1678,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.processed_candidates, 1)
             self.assertEqual(len(store.get_processed_keys("scan-1")), 1)
             self.assertEqual(sent["type"], "resume")
+            self.assertEqual(sent["codex_model_ids"], ["provider/model"])
             self.assertEqual(sent["retry_total_candidates"], 4)
             self.assertEqual(sent["retry_processed_offset"], 1)
             self.assertEqual(
@@ -1847,6 +1856,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
                 ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
+                ),
             ):
                 asyncio.run(
                     scan_api.resume_scan(
@@ -1929,6 +1942,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 patch(
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
+                ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
                 ),
             ):
                 asyncio.run(scan_api.resume_scan(
@@ -2042,6 +2059,10 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 patch(
                     "backend.api.agent.agent_config_has_explicit_model",
                     return_value=True,
+                ),
+                patch(
+                    "backend.api.agent.agent_explicit_model_ids",
+                    return_value=["provider/model"],
                 ),
             ):
                 asyncio.run(

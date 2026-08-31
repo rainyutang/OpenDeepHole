@@ -34,6 +34,7 @@ class ScanTask:
     feedback_entries: list[dict] = field(default_factory=list)
     checker_packages: list[dict] = field(default_factory=list)
     mining_engines: list[dict] | None = None
+    codex_model_ids: list[str] | None = None
     retry_candidates: list[dict] | None = None
     retry_total_candidates: int | None = None
     retry_processed_offset: int = 0
@@ -68,6 +69,7 @@ class TaskManager:
         feedback_entries: list[dict] | None = None,
         checker_packages: list[dict] | None = None,
         mining_engines: list[dict] | None = None,
+        codex_model_ids: list[str] | None = None,
         retry_candidates: list[dict] | None = None,
         retry_total_candidates: int | None = None,
         retry_processed_offset: int = 0,
@@ -109,6 +111,11 @@ class TaskManager:
             mining_engines=(
                 copy.deepcopy(mining_engines)
                 if isinstance(mining_engines, list)
+                else None
+            ),
+            codex_model_ids=(
+                list(codex_model_ids)
+                if isinstance(codex_model_ids, list)
                 else None
             ),
             retry_candidates=retry_candidates,
@@ -162,5 +169,6 @@ class TaskManager:
                 "product": task.product,
                 "validation_environment": task.validation_environment,
                 "mining_engines": copy.deepcopy(task.mining_engines),
+                "codex_model_ids": copy.deepcopy(task.codex_model_ids),
             })
         return active

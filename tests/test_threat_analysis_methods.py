@@ -85,9 +85,13 @@ def test_method_catalog_uses_directory_ids_and_minimal_yaml() -> None:
 def test_backend_resolves_default_method_and_rejects_unknown_selection() -> None:
     method_id, selection = _resolve_threat_analysis_method(None)
 
-    assert method_id == DEFAULT_THREAT_ANALYSIS_METHOD_ID
-    assert selection.method_label == "DeepHole威胁分析"
+    assert method_id == "codex_goal_threat_analysis"
+    assert selection.method_label == "威胁分析"
     assert _resolve_threat_analysis_method("  ")[0] == method_id
+    assert (
+        _resolve_threat_analysis_method("deephole_threat_analysis")[0]
+        == "deephole_threat_analysis"
+    )
     with pytest.raises(HTTPException) as raised:
         _resolve_threat_analysis_method("missing")
     assert raised.value.status_code == 400

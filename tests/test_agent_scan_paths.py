@@ -1074,6 +1074,295 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             reporter.finish_scan.await_args.kwargs["error_message"],
         )
 
+    async def test_codex_threat_analysis_uses_verified_task_profile(self) -> None:
+        reporter = _reporter()
+        config = AgentConfig()
+        selected = CodexModelProfile(
+            id="provider/model",
+            provider_id="provider",
+            model_id="model",
+            profile="opendeephole-provider-model",
+        )
+        prepared = CodexRuntimeState(
+            available=True,
+            command=("/opt/bin/codex",),
+            executable="/opt/bin/codex",
+            models=(selected,),
+            selected_model=selected,
+            threat_analysis_command=(
+                "/opt/bin/codex",
+                "--profile",
+                selected.profile,
+            ),
+        )
+        observed_commands: list[tuple[str, ...]] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+
+            async def run_analysis(**kwargs):
+                from deephole_client.codex_runtime import (
+                    get_codex_runtime_state,
+                )
+
+                observed_commands.append(
+                    get_codex_runtime_state().command,
+                )
+                self.assertEqual(
+                    kwargs["method_id"],
+                    "codex_goal_threat_analysis",
+                )
+                return {
+                    "result": True,
+                    "attack_tree_path": str(root / "attack-tree.json"),
+                    "high_risk_modules_path": str(root / "risk.json"),
+                }
+
+            prepare = AsyncMock(return_value=prepared)
+            analysis = AsyncMock(side_effect=run_analysis)
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner."
+                    "sync_platform_codex_models_async",
+                    new=prepare,
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=analysis,
+                ),
+                patch(
+                    "deephole_client.scanner.collect_json_artifacts",
+                    return_value={"artifacts": {}},
+                ),
+            ):
+                await run_scan(
+                    config=config,
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="codex-analysis",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-codex-analysis",
+                    cancel_event=threading.Event(),
+                    threat_analysis_enabled=True,
+                    threat_analysis_method="codex_goal_threat_analysis",
+                    mining_engines=[],
+                    codex_model_ids=["provider/model"],
+                )
+
+        self.assertEqual(observed_commands, [prepared.threat_analysis_command])
+        analysis.assert_awaited_once()
+        prepare.assert_awaited_once()
+        self.assertEqual(
+            prepare.await_args.kwargs["model_ids"],
+            ["provider/model"],
+        )
+        self.assertTrue(prepare.await_args.kwargs["force"])
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
+
+    async def test_unavailable_codex_runs_deephole_without_codex_attempt(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        attempted_methods: list[str] = []
+        unavailable = CodexRuntimeState(
+            available=False,
+            error="Codex CLI is unavailable",
+            model_config_error="No usable Responses model",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+
+            async def run_analysis(**kwargs):
+                attempted_methods.append(kwargs["method_id"])
+                return {
+                    "result": True,
+                    "attack_tree_path": str(root / "attack-tree.json"),
+                    "high_risk_modules_path": str(root / "risk.json"),
+                }
+
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner."
+                    "sync_platform_codex_models_async",
+                    new=AsyncMock(return_value=unavailable),
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=AsyncMock(side_effect=run_analysis),
+                ),
+                patch(
+                    "deephole_client.scanner.collect_json_artifacts",
+                    return_value={"artifacts": {}},
+                ),
+            ):
+                await run_scan(
+                    config=AgentConfig(),
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="codex-unavailable",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-codex-unavailable",
+                    cancel_event=threading.Event(),
+                    threat_analysis_enabled=True,
+                    threat_analysis_method="codex_goal_threat_analysis",
+                    mining_engines=[],
+                    codex_model_ids=["provider/model"],
+                )
+
+        self.assertEqual(attempted_methods, ["deephole_threat_analysis"])
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
+
+    async def test_failed_codex_is_archived_then_deephole_runs_once(self) -> None:
+        reporter = _reporter()
+        selected = CodexModelProfile(
+            id="provider/model",
+            provider_id="provider",
+            model_id="model",
+            profile="opendeephole-provider-model",
+        )
+        prepared = CodexRuntimeState(
+            available=True,
+            command=("/opt/bin/codex",),
+            selected_model=selected,
+            threat_analysis_command=(
+                "/opt/bin/codex",
+                "--profile",
+                selected.profile,
+            ),
+        )
+        attempts: list[tuple[str, bool]] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+
+            async def run_analysis(**kwargs):
+                attempts.append((kwargs["method_id"], kwargs["is_resume"]))
+                output_path = Path(kwargs["output_path"])
+                output_path.mkdir(parents=True, exist_ok=True)
+                if kwargs["method_id"] == "codex_goal_threat_analysis":
+                    (output_path / "partial.json").write_text(
+                        '{"partial": true}',
+                        encoding="utf-8",
+                    )
+                    return {"result": False, "reason": "app-server closed"}
+                return {
+                    "result": True,
+                    "attack_tree_path": str(root / "attack-tree.json"),
+                    "high_risk_modules_path": str(root / "risk.json"),
+                }
+
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner."
+                    "sync_platform_codex_models_async",
+                    new=AsyncMock(return_value=prepared),
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=AsyncMock(side_effect=run_analysis),
+                ),
+                patch(
+                    "deephole_client.scanner.collect_json_artifacts",
+                    return_value={"artifacts": {}},
+                ),
+            ):
+                await run_scan(
+                    config=AgentConfig(),
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="codex-fallback",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-codex-fallback",
+                    cancel_event=threading.Event(),
+                    is_resume=True,
+                    resume_threat_analysis=True,
+                    threat_analysis_enabled=True,
+                    threat_analysis_method="codex_goal_threat_analysis",
+                    mining_engines=[],
+                    codex_model_ids=["provider/model"],
+                )
+
+            failed_root = (
+                root
+                / ".opendeephole"
+                / "scans"
+                / "scan-codex-fallback"
+                / "threat_analysis_failed"
+            )
+            archives = list(failed_root.iterdir())
+            self.assertEqual(len(archives), 1)
+            self.assertTrue((archives[0] / "partial.json").is_file())
+
+        self.assertEqual(attempts, [
+            ("codex_goal_threat_analysis", True),
+            ("deephole_threat_analysis", False),
+        ])
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
+
     async def test_resume_runs_only_requested_failed_engine(self) -> None:
         reporter = _reporter()
         config = AgentConfig()

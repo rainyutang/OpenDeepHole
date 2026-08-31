@@ -773,7 +773,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertEqual(update.await_count, 2)
         handler.assert_awaited_once()
 
-    def test_scan_task_syncs_codex_after_runtime_update_before_start(self) -> None:
+    def test_scan_task_carries_codex_models_after_runtime_update(self) -> None:
         calls: list[str] = []
         config = AgentConfig()
 
@@ -781,25 +781,15 @@ class AgentRuntimePackageTests(unittest.TestCase):
             calls.append("update")
             return False
 
-        def sync(received_config, **kwargs):
-            calls.append("codex")
-            self.assertIs(received_config, config)
-            self.assertEqual(kwargs["model_ids"], ["provider/model"])
-            self.assertTrue(kwargs["force"])
-            self.assertIn("scan-1", kwargs["reason"])
-
         async def handle_task(**kwargs) -> None:
             calls.append("task")
             self.assertEqual(kwargs["scan_id"], "scan-1")
+            self.assertEqual(kwargs["codex_model_ids"], ["provider/model"])
 
         with (
             patch(
                 "deephole_client.updater.ensure_runtime_updated",
                 new=update,
-            ),
-            patch(
-                "deephole_client.codex_runtime.sync_platform_codex_models",
-                new=sync,
             ),
             patch(
                 "deephole_client.server.handle_task",
@@ -819,7 +809,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 None,
             ))
 
-        self.assertEqual(calls, ["update", "codex", "task"])
+        self.assertEqual(calls, ["update", "task"])
 
     def test_live_config_refreshes_opencode_before_codex_sync(self) -> None:
         calls: list[str] = []
@@ -831,7 +821,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
         def refresh_global() -> None:
             calls.append("opencode")
 
-        def sync(received_config, **kwargs) -> None:
+        async def sync(received_config, **kwargs) -> None:
             calls.append("codex")
             self.assertIs(received_config, config)
             self.assertFalse(kwargs.get("force", False))
@@ -846,7 +836,8 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 new=refresh_global,
             ),
             patch(
-                "deephole_client.codex_runtime.sync_platform_codex_models",
+                "deephole_client.codex_runtime."
+                "sync_platform_codex_models_async",
                 new=sync,
             ),
             patch(
@@ -929,6 +920,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
                 ["threat_audit"],
             )
             self.assertTrue(kwargs["resume_threat_analysis"])
+            self.assertEqual(kwargs["codex_model_ids"], ["provider/model"])
             self.assertEqual(kwargs["scan_mode"], "threat_analysis_only")
             self.assertEqual(
                 kwargs["code_graph_mcp"],
@@ -946,6 +938,7 @@ class AgentRuntimePackageTests(unittest.TestCase):
             "resume_threat_analysis": True,
             "retry_mining_engine_ids": ["threat_audit"],
             "retry_threat_audit_task_ids": ["threat-timeout"],
+            "codex_model_ids": ["provider/model"],
             "code_graph_mcp": {"enabled": True, "transport": "remote"},
         }
         command = {

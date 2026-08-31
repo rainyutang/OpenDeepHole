@@ -127,6 +127,7 @@ _FP_REVIEW_ACTIVE_STATUSES = {
     FpReviewStatus.PENDING.value,
     FpReviewStatus.RUNNING.value,
 }
+_PREFERRED_THREAT_ANALYSIS_METHOD_ID = "codex_goal_threat_analysis"
 
 
 def _normalize_scan_mode(value: str | None) -> str:
@@ -212,14 +213,10 @@ async def get_threat_analysis_method_catalog(
 def _resolve_threat_analysis_method(
     requested: str | None,
 ) -> tuple[str, ThreatAnalysisMethodSelection]:
-    from deephole_client.threat_analysis import (
-        DEFAULT_THREAT_ANALYSIS_METHOD_ID,
-    )
-
     catalog = _repository_threat_analysis_method_catalog()
     available = {item.method_id: item for item in catalog.methods}
     requested_id = str(requested or "").strip()
-    method_id = requested_id or DEFAULT_THREAT_ANALYSIS_METHOD_ID
+    method_id = requested_id or _PREFERRED_THREAT_ANALYSIS_METHOD_ID
     selected = available.get(method_id)
     if selected is None:
         status_code = 500 if not requested_id else 400
@@ -2393,6 +2390,7 @@ async def _continue_scan(
     from backend.api.agent import (
         _registered_agents,
         agent_config_has_explicit_model,
+        agent_explicit_model_ids,
         ensure_agent_accepting_tasks_async,
         get_scan_agent_config_async,
         resolve_agent_connection_async,
@@ -2703,6 +2701,7 @@ async def _continue_scan(
         "resume_threat_analysis": resume_threat_analysis,
         "retry_mining_engine_ids": retry_mining_engine_ids,
         "retry_threat_audit_task_ids": threat_task_ids,
+        "codex_model_ids": agent_explicit_model_ids(managed_config),
         "code_graph_mcp": (
             meta.code_graph_mcp.model_dump(mode="json")
             if meta.code_graph_mcp is not None

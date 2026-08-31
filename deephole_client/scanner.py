@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,12 @@ from task_agent import opencode_task_context
 from task_agent.output_format import is_task_output_line
 
 from .code_graph_build import run_code_graph_build
-from .codex_runtime import get_codex_runtime_state
+from .codex_runtime import (
+    CodexRuntimeState,
+    codex_runtime_state_override,
+    get_codex_runtime_state,
+    sync_platform_codex_models_async,
+)
 from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
 from .process_artifacts import collect_json_artifacts
@@ -42,6 +48,10 @@ from .vulnerability_mining.dedup import VulnerabilityDeduplicator
 from .vulnerability_mining.runtime import (
     normalize_mining_engine_vulnerabilities,
 )
+
+
+CODEX_THREAT_ANALYSIS_METHOD_ID = "codex_goal_threat_analysis"
+DEEPHOLE_THREAT_ANALYSIS_METHOD_ID = "deephole_threat_analysis"
 
 
 def _archive_failed_threat_analysis(output_path: Path) -> Path | None:
@@ -403,6 +413,7 @@ async def run_scan(
     code_graph_mcp: dict[str, Any] | None = None,
     knowledge_base_mcp: dict[str, Any] | None = None,
     mining_engines: list[dict[str, Any]] | None = None,
+    codex_model_ids: list[str] | None = None,
 ) -> None:
     """Run the selected directory-discovered mining engines."""
     feedback_entries = list(feedback_entries or [])
@@ -589,6 +600,55 @@ async def run_scan(
         )
         return
 
+    codex_threat_selected = bool(
+        threat_analysis_selected
+        and threat_analysis_method_id == CODEX_THREAT_ANALYSIS_METHOD_ID
+    )
+    codex_engine_selected = any(
+        bool(getattr(loaded.manifest, "requires_codex", False))
+        for selection in enabled_selections
+        if (loaded := registry.get(selection.engine_id)) is not None
+    )
+    scan_codex_state: CodexRuntimeState | None = None
+    if codex_threat_selected or (
+        codex_engine_selected and codex_model_ids is not None
+    ):
+        await emit(
+            "codex",
+            "Checking configured models for a usable Responses API",
+        )
+        try:
+            scan_codex_state = await sync_platform_codex_models_async(
+                config,
+                model_ids=codex_model_ids,
+                force=True,
+                reason=f"scan {scan_id}",
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            scan_codex_state = CodexRuntimeState(
+                available=False,
+                error=(
+                    "Codex scan model preparation failed "
+                    f"({type(exc).__name__})"
+                ),
+            )
+        if (
+            scan_codex_state.selected_model is not None
+            and scan_codex_state.threat_analysis_command
+        ):
+            await emit(
+                "codex",
+                "Using Responses-compatible Codex model: "
+                f"{scan_codex_state.selected_model.id}",
+            )
+        elif codex_threat_selected:
+            await emit(
+                "threat_analysis",
+                "Codex is unavailable for this scan; DeepHole fallback "
+                "will be used",
+            )
+
     if isinstance(code_graph_mcp, dict):
         code_graph_mcp = copy.deepcopy(code_graph_mcp)
         if bool(code_graph_mcp.get("enabled")):
@@ -739,81 +799,197 @@ async def run_scan(
         output_path = scan_dir / "threat_analysis"
         result: dict[str, Any] | None = None
 
-        async def run_native_attempt(*, resume: bool) -> dict[str, Any]:
-            return await run_threat_analysis(
-                scan_mode=runtime_scan_mode,
-                method_id=threat_analysis_method_id,
-                project_path=project,
-                code_path=scan_root,
-                output_path=output_path,
-                is_resume=resume,
-                product_mcp=(
-                    str(knowledge_base_mcp.get("name") or "product-info")
-                    if isinstance(knowledge_base_mcp, dict)
-                    and bool(knowledge_base_mcp.get("enabled"))
-                    else None
-                ),
-                output=process_output,
-                cancel_event=cancel_event,
+        async def run_method_attempt(
+            method_id: str,
+            *,
+            resume: bool,
+        ) -> dict[str, Any]:
+            async def invoke() -> dict[str, Any]:
+                return await run_threat_analysis(
+                    scan_mode=runtime_scan_mode,
+                    method_id=method_id,
+                    project_path=project,
+                    code_path=scan_root,
+                    output_path=output_path,
+                    is_resume=resume,
+                    product_mcp=(
+                        str(
+                            knowledge_base_mcp.get("name")
+                            or "product-info"
+                        )
+                        if isinstance(knowledge_base_mcp, dict)
+                        and bool(knowledge_base_mcp.get("enabled"))
+                        else None
+                    ),
+                    output=process_output,
+                    cancel_event=cancel_event,
+                )
+
+            if method_id != CODEX_THREAT_ANALYSIS_METHOD_ID:
+                return await invoke()
+            if (
+                scan_codex_state is None
+                or not scan_codex_state.threat_analysis_command
+            ):
+                raise RuntimeError(
+                    "Codex has no verified Responses-compatible model"
+                )
+            method_state = replace(
+                scan_codex_state,
+                command=scan_codex_state.threat_analysis_command,
             )
+            with codex_runtime_state_override(method_state):
+                return await invoke()
+
+        def require_success(value: dict[str, Any]) -> None:
+            if value.get("result") is not True:
+                raise RuntimeError(
+                    str(value.get("reason") or "Threat analysis failed")
+                )
+
+        def codex_unavailable_reason() -> str:
+            if scan_codex_state is None:
+                return "Codex model preparation did not complete"
+            if not scan_codex_state.available:
+                return (
+                    scan_codex_state.error
+                    or "Codex CLI is unavailable"
+                )
+            if not scan_codex_state.threat_analysis_command:
+                return (
+                    scan_codex_state.model_config_error
+                    or "No configured model provides a usable Responses API"
+                )
+            return ""
 
         try:
-            result = await run_native_attempt(resume=is_resume)
-            if (
-                is_resume
-                and result.get("result") is not True
-                and not cancel_event.is_set()
-            ):
-                incremental_reason = str(
-                    result.get("reason") or "Threat analysis failed"
-                )
-                try:
-                    archive_path = _archive_failed_threat_analysis(
-                        output_path,
-                    )
-                except Exception as exc:
-                    raise RuntimeError(
-                        "Incremental threat-analysis resume failed: "
-                        f"{incremental_reason}; failed to archive its artifacts: "
-                        f"{type(exc).__name__}: {exc}"
-                    ) from exc
-                print(
-                    _format_process_console_line(
+            artifact_bundle: dict[str, Any]
+            if threat_analysis_method_id == CODEX_THREAT_ANALYSIS_METHOD_ID:
+                primary_reason = codex_unavailable_reason()
+                if not primary_reason:
+                    try:
+                        result = await run_method_attempt(
+                            CODEX_THREAT_ANALYSIS_METHOD_ID,
+                            resume=is_resume,
+                        )
+                        require_success(result)
+                        artifact_bundle = collect_json_artifacts(
+                            result,
+                            output_root=output_path,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        primary_reason = (
+                            str(exc).strip() or type(exc).__name__
+                        )
+                if primary_reason:
+                    if cancel_event.is_set():
+                        raise RuntimeError(primary_reason)
+                    try:
+                        archive_path = (
+                            _archive_failed_threat_analysis(output_path)
+                            if output_path.exists()
+                            else None
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "Codex threat analysis failed: "
+                            f"{primary_reason}; failed to archive its "
+                            f"artifacts: {type(exc).__name__}: {exc}"
+                        ) from exc
+                    await emit(
                         "threat_analysis",
-                        "Incremental resume failed; starting one clean fallback"
+                        "Codex threat analysis unavailable or failed; "
+                        "starting one clean DeepHole fallback"
                         + (
                             f" (archived at {archive_path})"
                             if archive_path is not None
                             else ""
                         ),
-                    ),
-                    flush=True,
-                )
-                clean_result = await run_native_attempt(resume=False)
-                if clean_result.get("result") is not True:
-                    clean_reason = str(
-                        clean_result.get("reason")
-                        or "Threat analysis failed"
                     )
-                    result = {
-                        **clean_result,
-                        "result": False,
-                        "reason": (
-                            "Incremental threat-analysis resume failed: "
-                            f"{incremental_reason}; clean fallback failed: "
-                            f"{clean_reason}"
-                        ),
-                    }
-                else:
-                    result = clean_result
-            if result.get("result") is not True:
-                raise RuntimeError(
-                    str(result.get("reason") or "Threat analysis failed")
+                    try:
+                        result = await run_method_attempt(
+                            DEEPHOLE_THREAT_ANALYSIS_METHOD_ID,
+                            resume=False,
+                        )
+                        require_success(result)
+                        artifact_bundle = collect_json_artifacts(
+                            result,
+                            output_root=output_path,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        fallback_reason = (
+                            str(exc).strip() or type(exc).__name__
+                        )
+                        raise RuntimeError(
+                            "Codex threat analysis failed: "
+                            f"{primary_reason}; DeepHole fallback failed: "
+                            f"{fallback_reason}"
+                        ) from exc
+            else:
+                result = await run_method_attempt(
+                    threat_analysis_method_id,
+                    resume=is_resume,
                 )
-            artifact_bundle = collect_json_artifacts(
-                result,
-                output_root=output_path,
-            )
+                if (
+                    is_resume
+                    and result.get("result") is not True
+                    and not cancel_event.is_set()
+                ):
+                    incremental_reason = str(
+                        result.get("reason") or "Threat analysis failed"
+                    )
+                    try:
+                        archive_path = _archive_failed_threat_analysis(
+                            output_path,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "Incremental threat-analysis resume failed: "
+                            f"{incremental_reason}; failed to archive its "
+                            f"artifacts: {type(exc).__name__}: {exc}"
+                        ) from exc
+                    print(
+                        _format_process_console_line(
+                            "threat_analysis",
+                            "Incremental resume failed; starting one clean "
+                            "fallback"
+                            + (
+                                f" (archived at {archive_path})"
+                                if archive_path is not None
+                                else ""
+                            ),
+                        ),
+                        flush=True,
+                    )
+                    clean_result = await run_method_attempt(
+                        threat_analysis_method_id,
+                        resume=False,
+                    )
+                    if clean_result.get("result") is not True:
+                        clean_reason = str(
+                            clean_result.get("reason")
+                            or "Threat analysis failed"
+                        )
+                        result = {
+                            **clean_result,
+                            "result": False,
+                            "reason": (
+                                "Incremental threat-analysis resume failed: "
+                                f"{incremental_reason}; clean fallback "
+                                f"failed: {clean_reason}"
+                            ),
+                        }
+                    else:
+                        result = clean_result
+                require_success(result)
+                artifact_bundle = collect_json_artifacts(
+                    result,
+                    output_root=output_path,
+                )
             await reporter.push_threat_analysis(scan_id, artifact_bundle)
             run.status = "success"
             return run, result
@@ -861,10 +1037,15 @@ async def run_scan(
         codex_command: list[str] | None = None
         codex_models: list[dict[str, Any]] | None = None
         if bool(getattr(loaded.manifest, "requires_codex", False)):
-            codex_state = get_codex_runtime_state()
-            if not codex_state.available or not codex_state.command:
+            codex_state = scan_codex_state or get_codex_runtime_state()
+            if (
+                not codex_state.available
+                or not codex_state.command
+                or not codex_state.models
+            ):
                 reason = (
-                    codex_state.error
+                    codex_state.model_config_error
+                    or codex_state.error
                     or "Codex CLI has no executable command on this Agent"
                 )
                 run.status = "error"
