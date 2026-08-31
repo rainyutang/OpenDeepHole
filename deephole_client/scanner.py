@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import threading
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,9 +23,7 @@ from task_agent.output_format import is_task_output_line
 from .code_graph_build import run_code_graph_build
 from .codex_runtime import (
     CodexRuntimeState,
-    codex_runtime_state_override,
     get_codex_runtime_state,
-    sync_platform_codex_models_async,
 )
 from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
@@ -611,37 +608,13 @@ async def run_scan(
         if (loaded := registry.get(selection.engine_id)) is not None
     )
     scan_codex_state: CodexRuntimeState | None = None
-    if codex_threat_selected or (
-        codex_engine_selected and codex_model_ids is not None
-    ):
-        await emit(
-            "codex",
-            "Checking configured models for a usable Responses API",
-        )
-        try:
-            scan_codex_state = await sync_platform_codex_models_async(
-                config,
-                model_ids=codex_model_ids,
-                force=True,
-                reason=f"scan {scan_id}",
-                cancel_event=cancel_event,
-            )
-        except Exception as exc:
-            scan_codex_state = CodexRuntimeState(
-                available=False,
-                error=(
-                    "Codex scan model preparation failed "
-                    f"({type(exc).__name__})"
-                ),
-            )
-        if (
-            scan_codex_state.selected_model is not None
-            and scan_codex_state.threat_analysis_command
-        ):
+    if codex_threat_selected or codex_engine_selected:
+        scan_codex_state = get_codex_runtime_state()
+        if scan_codex_state.models:
             await emit(
                 "codex",
-                "Using Responses-compatible Codex model: "
-                f"{scan_codex_state.selected_model.id}",
+                "Using configured Codex default model: "
+                f"{scan_codex_state.models[0].id}",
             )
         elif codex_threat_selected:
             await emit(
@@ -830,17 +803,14 @@ async def run_scan(
                 return await invoke()
             if (
                 scan_codex_state is None
-                or not scan_codex_state.threat_analysis_command
+                or not scan_codex_state.available
+                or not scan_codex_state.command
+                or not scan_codex_state.models
             ):
                 raise RuntimeError(
-                    "Codex has no verified Responses-compatible model"
+                    "Codex has no configured default model"
                 )
-            method_state = replace(
-                scan_codex_state,
-                command=scan_codex_state.threat_analysis_command,
-            )
-            with codex_runtime_state_override(method_state):
-                return await invoke()
+            return await invoke()
 
         def require_success(value: dict[str, Any]) -> None:
             if value.get("result") is not True:
@@ -856,10 +826,10 @@ async def run_scan(
                     scan_codex_state.error
                     or "Codex CLI is unavailable"
                 )
-            if not scan_codex_state.threat_analysis_command:
+            if not scan_codex_state.command or not scan_codex_state.models:
                 return (
                     scan_codex_state.model_config_error
-                    or "No configured model provides a usable Responses API"
+                    or "Codex has no configured default model"
                 )
             return ""
 

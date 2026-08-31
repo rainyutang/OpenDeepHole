@@ -171,7 +171,6 @@ DeepHole 2.0 Agent
   Server  : http://your-server:8000
 
 Codex CLI ready: codex-cli 0.x.y
-Codex model profiles ready: synchronized 4 platform model(s). Trigger: platform model configuration.
 Codex default model ready: corp/threat-model.
 
   Connected via WebSocket, agent_id: a1b2c3d4...
@@ -183,29 +182,30 @@ Agent 在连接服务端前检查一次 Codex CLI。若本机没有可调用的 
 共享 120 秒总超时。缺少 npm、安装失败或超时只会打印告警并继续连接，未声明依赖 Codex 的
 漏洞挖掘引擎不受影响；失败后到下次重启 Agent 才会再次尝试。
 
-Codex CLI 可用后不会在安装或 Agent 启动阶段自行扫描模型。Agent 收到平台客户端配置时，会按
-`model_pool.models` 中已启用的显式 `provider/model` 顺序，向各模型对应 Provider 的
-`/v1/responses` 接口发送一次最小非流式请求；只有 HTTP 成功且响应是合法 Responses 对象才算可用，
-并在第一个可用模型处停止。创建扫描时，平台还会把同一有序模型快照随任务下发；客户端完成运行时
-更新后、真正开始 Codex 优先的威胁分析或依赖 Codex 的漏洞挖掘前会再次探测，因此存量客户端和
-临时服务故障恢复后都能使用当前实际可用的模型。Provider、模型定义、地址和凭据来自客户端启动
-OpenCode Serve 时使用的同一份有效合并配置，不从平台传输密钥。
+Codex CLI 可用后不会在安装阶段自行扫描模型。Agent 收到平台客户端配置时，先读取当前
+`$CODEX_HOME/config.toml`（Windows 未设置 `CODEX_HOME` 时为 `%USERPROFILE%\.codex\config.toml`）：
+只要用户已经配置非空的顶层 `model`，就原样使用该默认模型，不探测平台 API，也不改写用户模型或
+Provider。没有用户默认模型时，Agent 才按 `model_pool.models` 中已启用的显式 `provider/model`
+顺序，向各 Provider 的 `/v1/responses` 发送最小非流式请求，并在第一个返回合法 Responses 对象的
+模型处停止。Provider、模型定义、地址和凭据来自客户端启动 OpenCode Serve 时使用的同一份有效
+合并配置，不从平台传输密钥。该选择在配置应用时固定，扫描期间不再次切换；平台配置更新或 Agent
+重启后重新准备。
 
-第一个探测成功的模型会在当前 `$CODEX_HOME`（默认 `~/.codex`）生成一个独立的 OpenDeepHole
-托管 profile；其它模型不再写入本轮 Codex 配置。如果 Codex 用户配置没有已有默认模型、profile
-或 Provider 选择，Agent 会增加一个带所有权标记的默认模型/Provider 块。选中 Provider 地址的主机
-还会写入 `$CODEX_HOME/.env` 的 OpenDeepHole 托管区，同时追加到 `NO_PROXY` 和 `no_proxy`；
-用户已有内容和值保持不变，更新或失效时只替换或移除托管区。该文件只供 Codex 自行加载，Agent
-不会把这些值注入当前进程或子进程环境。`config.toml`、`.env` 和 profile 均只允许更新或清理
-OpenDeepHole 自己创建的内容；同名非托管文件、配置损坏、探测失败或模型无法映射时不会覆盖用户内容。
+第一个探测成功的模型会写入 `config.toml` 文件开头的 OpenDeepHole 托管默认模型/Provider 区，
+自定义 Provider 固定使用 `wire_api = "responses"`。选中 Provider 地址的主机还会写入
+`$CODEX_HOME/.env` 的托管区，同时追加到 `NO_PROXY` 和 `no_proxy`；用户已有内容和值保持不变，
+更新或失效时只替换或移除托管区。该文件只供 Codex 自行加载，Agent 不会把这两个变量注入当前进程
+或子进程环境。旧版本生成且带所有权标记的 `opendeephole-*.config.toml` 会被清理，用户自建文件、
+默认模型和非托管配置均不会被覆盖。
 
-新建扫描默认优先使用 `codex_goal_threat_analysis`。Codex CLI 不可用、版本低于 0.134、没有任何
+新建扫描默认优先使用 `codex_goal_threat_analysis`。Codex CLI 不可用、没有用户默认模型且没有任何
 模型通过探测、托管配置失败、Codex 方法执行失败或其结果产物无效时，外层扫描编排会自动且仅一次以
 clean 模式执行 `deephole_threat_analysis`；用户取消不会触发回退。用户显式选择 DeepHole 时直接
 执行 DeepHole，不会为了威胁分析探测或调用 Codex（另行选择的 `requires_codex` 漏洞挖掘引擎仍会
 按其契约准备 Codex）。Codex 方法本身及 Codex SDK 均不参与这一回退改动。
-探测和配置成功后，威胁分析以 `codex --profile <name> app-server` 启动 SDK，依赖 Codex 的漏洞
-挖掘引擎也只接收这个已验证模型；直接运行不带 `--profile` 的 `codex` 时，已有用户默认仍保持优先。
+配置成功后，威胁分析直接以 `codex app-server --listen stdio://` 启动 SDK；所有 Codex 调用都依赖
+同一个全局默认模型，不再生成或传递 profile。用户默认模型运行失败时不覆盖配置重试，而是立即执行
+既定的单次 DeepHole 回退。
 
 Agent 通过 WebSocket 保持长连接，等待服务器推送任务。Agent 默认允许接收最大 64 MiB 的单条
 WebSocket 消息，以支持大代码仓续扫时携带较多候选点；如续扫命令仍超过该限制，可设置正整数

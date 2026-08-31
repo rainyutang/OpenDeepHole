@@ -168,7 +168,7 @@ def run_threat_analysis(
 | 目录 | `project_path`、`code_scan_path`、`scan_dir`、`work_dir`、`index_db_path` | 只读源码范围、扫描工作目录、引擎可写目录和代码索引 |
 | 扫描数据 | `checker_names`、`checker_packages`、`product`、`vulnerability_validation`、`feedback_entries` | 本次扫描的规则、产品、漏洞验证配置和历史反馈快照 |
 | 运行状态 | `is_resume`、候选重试参数、威胁审计重试参数 | 续扫和定向重试上下文 |
-| 能力 | `config`、`code_graph_mcp`、`knowledge_base_mcp`、`codex_command`、`codex_models` | Agent 只读配置、本次扫描私有 MCP 配置，以及仅向声明依赖 Codex 的引擎提供的基础 argv 前缀和无密钥模型 profile 元数据 |
+| 能力 | `config`、`code_graph_mcp`、`knowledge_base_mcp`、`codex_command`、`codex_models` | Agent 只读配置、本次扫描私有 MCP 配置，以及仅向声明依赖 Codex 的引擎提供的裸 argv 前缀和无密钥默认模型元数据 |
 | 回调 | `output`、`cancel_event`、`report_vulnerabilities` | 事件输出、取消检查和流式漏洞上报 |
 
 框架还会向内置引擎传入 `reporter`；第三方引擎不应依赖该平台对象，应优先使用
@@ -297,20 +297,17 @@ requires_codex: true
   自动开启平台统一的去误报流程。
 - `requires_codex` 可以省略，缺省为 `false`；设为 YAML 布尔值 `true` 时，Agent 启动会提前
   准备 Codex CLI，并在不可用时只阻止该引擎执行。可用时引擎从 `kwargs["codex_command"]`
-  取得可直接追加参数的无 shell argv 前缀，并从 `kwargs["codex_models"]` 取得本次按顺序探测后
-  第一个通过 `/v1/responses` 最小请求的 OpenCode 模型 profile。模型项包含 `id`、
-  `provider_id`、`model_id`、`profile` 和已追加 `--profile` 的 `command`，不包含 URL 或凭据；
-  没有模型通过探测或托管配置失败时列表为空，依赖 Codex 的引擎不会调用未验证的用户默认配置。
+  取得可直接追加参数的无 shell argv 前缀，并从 `kwargs["codex_models"]` 取得当前有效默认模型。
+  列表最多一项，包含 `id`、`provider_id`、`model_id` 和与 `codex_command` 相同的裸 `command`，
+  不包含 URL 或凭据；没有有效默认模型时列表为空。
 - 未知字段、缺失字段或非法目录只会隔离当前引擎，不影响其它有效引擎发现。
 
-Codex 模型候选来自平台下发的有序显式模型快照，Provider 定义、地址和凭据由 Agent 的有效
-OpenCode 合并配置解析。配置更新以及每次需要 Codex 的扫描开始前，框架会按顺序向候选模型的
-`/v1/responses` 发送最小非流式请求，只把第一个返回成功且合法 Responses 对象的模型写入
-`$CODEX_HOME` 托管 profile。选中地址的主机同时写入 `$CODEX_HOME/.env` 的 OpenDeepHole
-托管区，并分别追加到文件中的 `NO_PROXY` 和 `no_proxy`；框架不会修改当前进程或子进程环境。
-生成文件带托管标记且权限仅限当前用户，用户 `config.toml`、`.env`、默认模型和非托管 profile
-保持原样。Codex 低于 0.134、探测失败、源配置无效或 profile 写入失败只产生脱敏告警，不会阻止
-Agent 或非 Codex 引擎。
+Codex 配置应用时先检查 `$CODEX_HOME/config.toml` 的用户顶层 `model`；存在时直接使用且不探测、
+不覆盖。不存在时，框架才按平台下发的有序显式模型快照向 `/v1/responses` 发送最小非流式请求，
+并把第一个可用模型写入 `config.toml` 文件开头的托管默认区。选中地址的主机同时写入
+`$CODEX_HOME/.env` 的 OpenDeepHole 托管区，并分别追加到文件中的 `NO_PROXY` 和 `no_proxy`；
+框架不会向当前进程或子进程注入这两个变量。旧版托管 profile 会被清理，用户配置与非托管文件保持
+原样。扫描只读取已经固定的默认配置，不再逐扫描探测或切换模型。
 
 内置 Codex 威胁分析方法的实现契约保持不变；新建扫描默认由外层编排优先调用它。Codex CLI、
 模型或配置不可用，以及方法执行或产物校验失败时，编排层只执行一次 clean DeepHole 威胁分析回退；

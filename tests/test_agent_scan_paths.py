@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from deephole_client.config import AgentConfig
 from deephole_client.codex_runtime import (
-    CodexModelProfile,
+    CodexModelConfig,
     CodexRuntimeState,
 )
 from deephole_client.scanner import (
@@ -1074,26 +1074,19 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             reporter.finish_scan.await_args.kwargs["error_message"],
         )
 
-    async def test_codex_threat_analysis_uses_verified_task_profile(self) -> None:
+    async def test_codex_threat_analysis_uses_bare_configured_command(self) -> None:
         reporter = _reporter()
         config = AgentConfig()
-        selected = CodexModelProfile(
+        selected = CodexModelConfig(
             id="provider/model",
             provider_id="provider",
             model_id="model",
-            profile="opendeephole-provider-model",
         )
         prepared = CodexRuntimeState(
             available=True,
             command=("/opt/bin/codex",),
             executable="/opt/bin/codex",
             models=(selected,),
-            selected_model=selected,
-            threat_analysis_command=(
-                "/opt/bin/codex",
-                "--profile",
-                selected.profile,
-            ),
         )
         observed_commands: list[tuple[str, ...]] = []
 
@@ -1122,7 +1115,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     "high_risk_modules_path": str(root / "risk.json"),
                 }
 
-            prepare = AsyncMock(return_value=prepared)
             analysis = AsyncMock(side_effect=run_analysis)
             with (
                 patch("deephole_client.scanner.Path.home", return_value=root),
@@ -1132,9 +1124,12 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     return_value=nullcontext(),
                 ),
                 patch(
-                    "deephole_client.scanner."
-                    "sync_platform_codex_models_async",
-                    new=prepare,
+                    "deephole_client.scanner.get_codex_runtime_state",
+                    return_value=prepared,
+                ),
+                patch(
+                    "deephole_client.codex_runtime.get_codex_runtime_state",
+                    return_value=prepared,
                 ),
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
@@ -1170,14 +1165,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     codex_model_ids=["provider/model"],
                 )
 
-        self.assertEqual(observed_commands, [prepared.threat_analysis_command])
+        self.assertEqual(observed_commands, [("/opt/bin/codex",)])
         analysis.assert_awaited_once()
-        prepare.assert_awaited_once()
-        self.assertEqual(
-            prepare.await_args.kwargs["model_ids"],
-            ["provider/model"],
-        )
-        self.assertTrue(prepare.await_args.kwargs["force"])
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
     async def test_unavailable_codex_runs_deephole_without_codex_attempt(
@@ -1214,9 +1203,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     return_value=nullcontext(),
                 ),
                 patch(
-                    "deephole_client.scanner."
-                    "sync_platform_codex_models_async",
-                    new=AsyncMock(return_value=unavailable),
+                    "deephole_client.scanner.get_codex_runtime_state",
+                    return_value=unavailable,
                 ),
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
@@ -1257,21 +1245,15 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_codex_is_archived_then_deephole_runs_once(self) -> None:
         reporter = _reporter()
-        selected = CodexModelProfile(
+        selected = CodexModelConfig(
             id="provider/model",
             provider_id="provider",
             model_id="model",
-            profile="opendeephole-provider-model",
         )
         prepared = CodexRuntimeState(
             available=True,
             command=("/opt/bin/codex",),
-            selected_model=selected,
-            threat_analysis_command=(
-                "/opt/bin/codex",
-                "--profile",
-                selected.profile,
-            ),
+            models=(selected,),
         )
         attempts: list[tuple[str, bool]] = []
 
@@ -1306,9 +1288,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     return_value=nullcontext(),
                 ),
                 patch(
-                    "deephole_client.scanner."
-                    "sync_platform_codex_models_async",
-                    new=AsyncMock(return_value=prepared),
+                    "deephole_client.scanner.get_codex_runtime_state",
+                    return_value=prepared,
                 ),
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
@@ -2310,11 +2291,10 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                         available=True,
                         command=("/opt/bin/codex",),
                         executable="/opt/bin/codex",
-                        models=(CodexModelProfile(
+                        models=(CodexModelConfig(
                             id="provider/model",
                             provider_id="provider",
                             model_id="model",
-                            profile="opendeephole-provider-model-abcd",
                         ),),
                     ),
                 ),
@@ -2354,12 +2334,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             "id": "provider/model",
             "provider_id": "provider",
             "model_id": "model",
-            "profile": "opendeephole-provider-model-abcd",
-            "command": [
-                "/opt/bin/codex",
-                "--profile",
-                "opendeephole-provider-model-abcd",
-            ],
+            "command": ["/opt/bin/codex"],
         }])
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 

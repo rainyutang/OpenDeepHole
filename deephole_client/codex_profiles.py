@@ -1,4 +1,4 @@
-"""Safely mirror platform-selected OpenCode models into Codex profiles."""
+"""Safely configure one effective Codex default model."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     import tomllib
@@ -38,49 +38,39 @@ _ENV_REFERENCE_RE = re.compile(
 _ENV_ASSIGNMENT_RE = re.compile(
     r"^\s*(?:export\s+)?(NO_PROXY|no_proxy)\s*=\s*(.*?)\s*$"
 )
-_VERSION_RE = re.compile(r"\b(\d+)\.(\d+)(?:\.\d+)?\b")
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
-_MIN_SEPARATE_PROFILE_VERSION = (0, 134)
 
 
 @dataclass(frozen=True)
-class CodexModelProfile:
-    """Secret-free metadata for one generated Codex model profile."""
+class CodexModelConfig:
+    """Secret-free metadata for the effective Codex default model."""
 
     id: str
     provider_id: str
     model_id: str
-    profile: str
 
     def engine_value(self, codex_command: tuple[str, ...]) -> dict[str, Any]:
         return {
             "id": self.id,
             "provider_id": self.provider_id,
             "model_id": self.model_id,
-            "profile": self.profile,
-            "command": [
-                *codex_command,
-                "--profile",
-                self.profile,
-            ],
+            "command": list(codex_command),
         }
 
 
 @dataclass(frozen=True)
-class CodexProfileSyncResult:
-    """Outcome of a best-effort OpenCode-to-Codex profile sync."""
+class CodexConfigSyncResult:
+    """Outcome of a best-effort Codex default-config synchronization."""
 
-    models: tuple[CodexModelProfile, ...] = ()
-    managed_default_model: CodexModelProfile | None = None
+    models: tuple[CodexModelConfig, ...] = ()
+    managed_default_model: CodexModelConfig | None = None
     user_default_preserved: bool = False
     warnings: tuple[str, ...] = ()
     error: str = ""
 
 
 @dataclass(frozen=True)
-class _RenderedProfile:
-    model: CodexModelProfile
-    content: str
+class _RenderedModel:
+    model: CodexModelConfig
     provider_key: str
     provider_name: str
     base_url: str
@@ -96,14 +86,16 @@ class _DefaultConfigPlan:
     original_content: bytes | None = None
     original_mode: int = 0o600
     mode: int = 0o600
-    managed_default_model: CodexModelProfile | None = None
+    effective_model: CodexModelConfig | None = None
+    managed_default_model: CodexModelConfig | None = None
     user_default_preserved: bool = False
     error: str = ""
 
 
 @dataclass(frozen=True)
 class _ReconcileResult:
-    managed_default_model: CodexModelProfile | None = None
+    effective_model: CodexModelConfig | None = None
+    managed_default_model: CodexModelConfig | None = None
     user_default_preserved: bool = False
     warnings: tuple[str, ...] = ()
     error: str = ""
@@ -130,24 +122,8 @@ def _codex_home(
     return Path.home() / ".codex"
 
 
-def _version_support_error(version: str) -> tuple[str, str]:
-    match = _VERSION_RE.search(str(version or ""))
-    if match is None:
-        return "", (
-            "Codex version could not be parsed; using the current separate "
-            "profile format"
-        )
-    current = (int(match.group(1)), int(match.group(2)))
-    if current < _MIN_SEPARATE_PROFILE_VERSION:
-        return (
-            "Codex "
-            f"{match.group(0)} is older than 0.134 and does not support "
-            "separate profile files; existing managed profiles were kept"
-        ), ""
-    return "", ""
-
-
-def _valid_base_url(value: object) -> str:
+def normalize_codex_base_url(value: object) -> str:
+    """Normalize an API root so Codex requests ``/v1/responses``."""
     if not isinstance(value, str):
         return ""
     text = value.strip()
@@ -157,25 +133,19 @@ def _valid_base_url(value: object) -> str:
         parsed = urlsplit(text)
     except ValueError:
         return ""
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+    ):
         return ""
-    return text
-
-
-def _slug(value: str, *, fallback: str, limit: int) -> str:
-    normalized = _SLUG_RE.sub("-", value.strip().lower()).strip("-")
-    return (normalized or fallback)[:limit].rstrip("-") or fallback
-
-
-def _profile_name(provider_id: str, model_id: str) -> str:
-    canonical_id = f"{provider_id}/{model_id}"
-    digest = hashlib.sha256(canonical_id.encode("utf-8")).hexdigest()[:12]
-    return "-".join((
-        "opendeephole",
-        _slug(provider_id, fallback="provider", limit=24),
-        _slug(model_id, fallback="model", limit=36),
-        digest,
-    ))
+    path = parsed.path.rstrip("/")
+    if path.endswith("/responses"):
+        path = path[:-len("/responses")].rstrip("/")
+    if not path.endswith("/v1"):
+        path += "/v1"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _provider_key(provider_id: str) -> str:
@@ -199,18 +169,18 @@ def _context_window(model_config: Mapping[str, Any]) -> int | None:
     return context if context > 0 else None
 
 
-def _render_profile(
+def _render_model(
     *,
     provider_id: str,
     provider_config: Mapping[str, Any],
     model_id: str,
     model_config: Mapping[str, Any],
-) -> tuple[_RenderedProfile | None, tuple[str, ...]]:
+) -> tuple[_RenderedModel | None, tuple[str, ...]]:
     canonical_id = f"{provider_id}/{model_id}"
     options = provider_config.get("options")
     if not isinstance(options, Mapping):
         options = {}
-    base_url = _valid_base_url(options.get("baseURL"))
+    base_url = normalize_codex_base_url(options.get("baseURL"))
     if not base_url:
         return None, (
             f"Skipped OpenCode model {canonical_id}: provider baseURL is "
@@ -232,44 +202,17 @@ def _render_profile(
             "Codex configuration was not changed",
         )
 
-    profile = CodexModelProfile(
+    model = CodexModelConfig(
         id=canonical_id,
         provider_id=provider_id,
         model_id=model_id,
-        profile=_profile_name(provider_id, model_id),
     )
     provider_key = _provider_key(provider_id)
     provider_name = str(provider_config.get("name") or provider_id).strip()
     context_window = _context_window(model_config)
 
-    lines = [
-        _MANAGED_MARKER,
-        f"model = {_toml_string(model_id)}",
-        f"model_provider = {_toml_string(provider_key)}",
-    ]
-    if context_window is not None:
-        lines.append(f"model_context_window = {context_window}")
-    lines.extend((
-        "",
-        f"[model_providers.{provider_key}]",
-        f"name = {_toml_string(provider_name or provider_id)}",
-        f"base_url = {_toml_string(base_url)}",
-        'wire_api = "responses"',
-    ))
-    if env_key:
-        lines.append(f"env_key = {_toml_string(env_key)}")
-    elif bearer_token:
-        lines.append(
-            "experimental_bearer_token = "
-            f"{_toml_string(bearer_token)}"
-        )
-    content = "\n".join(lines) + "\n"
-    # Treat our own serializer as untrusted before any secret-bearing content
-    # reaches the user's Codex directory.
-    tomllib.loads(content)
-    return _RenderedProfile(
-        model=profile,
-        content=content,
+    return _RenderedModel(
+        model=model,
         provider_key=provider_key,
         provider_name=provider_name or provider_id,
         base_url=base_url,
@@ -279,10 +222,10 @@ def _render_profile(
     ), ()
 
 
-def _render_profiles(
+def _render_models(
     config: Mapping[str, Any],
     selected_model_ids: Sequence[str],
-) -> tuple[tuple[_RenderedProfile, ...], tuple[str, ...], str]:
+) -> tuple[tuple[_RenderedModel, ...], tuple[str, ...], str]:
     selected: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for raw_model_id in selected_model_ids:
@@ -313,7 +256,7 @@ def _render_profiles(
             "configuration is missing or invalid"
         )
 
-    rendered: list[_RenderedProfile] = []
+    rendered: list[_RenderedModel] = []
     warnings: list[str] = []
     for canonical_id, provider_id, model_id in selected:
         provider_config = providers.get(provider_id)
@@ -335,7 +278,7 @@ def _render_profiles(
                 "absent from the effective client OpenCode configuration"
             )
         try:
-            item, item_warnings = _render_profile(
+            item, item_warnings = _render_model(
                 provider_id=provider_id,
                 provider_config=provider_config,
                 model_id=model_id,
@@ -343,7 +286,7 @@ def _render_profiles(
             )
         except Exception as exc:
             return (), tuple(warnings), (
-                f"could not map platform model {canonical_id}: profile "
+                f"could not map platform model {canonical_id}: configuration "
                 f"conversion failed ({type(exc).__name__})"
             )
         warnings.extend(item_warnings)
@@ -389,14 +332,40 @@ def _available_provider_key(
     return f"{base_key}_{suffix}"
 
 
-def _managed_default_block(
-    profiles: tuple[_RenderedProfile, ...],
+def _user_default_model(
     user_config: Mapping[str, Any],
-) -> tuple[str, _RenderedProfile | None, str]:
-    if not profiles:
+) -> CodexModelConfig | None:
+    raw_model = user_config.get("model")
+    if not isinstance(raw_model, str) or not raw_model.strip():
+        return None
+    model_id = raw_model.strip()
+    raw_provider = user_config.get("model_provider")
+    provider_id = (
+        raw_provider.strip()
+        if isinstance(raw_provider, str) and raw_provider.strip()
+        else "openai"
+    )
+    return CodexModelConfig(
+        id=f"{provider_id}/{model_id}",
+        provider_id=provider_id,
+        model_id=model_id,
+    )
+
+
+def _managed_default_block(
+    models: tuple[_RenderedModel, ...],
+    user_config: Mapping[str, Any],
+) -> tuple[str, _RenderedModel | None, str]:
+    if not models:
         return "", None, ""
 
-    selected = profiles[0]
+    if "model_provider" in user_config:
+        return "", None, (
+            "existing model_provider cannot be replaced safely without "
+            "rewriting a user-owned value"
+        )
+
+    selected = models[0]
     configured_providers = user_config.get("model_providers")
     if isinstance(configured_providers, Mapping):
         provider_key = _available_provider_key(
@@ -475,7 +444,7 @@ def _split_managed_default(content: str) -> tuple[str, bool, str]:
 
 def _plan_default_config(
     codex_home: Path,
-    profiles: tuple[_RenderedProfile, ...],
+    models: tuple[_RenderedModel, ...],
 ) -> _DefaultConfigPlan:
     config_path = codex_home / "config.toml"
     try:
@@ -484,7 +453,7 @@ def _plan_default_config(
                 path=config_path,
                 error=(
                     f"refused to modify symlinked Codex config {config_path}; "
-                    "existing config and managed profiles were kept"
+                    "existing configuration was kept"
                 ),
             )
         exists = config_path.exists()
@@ -493,7 +462,7 @@ def _plan_default_config(
                 path=config_path,
                 error=(
                     f"refused to modify non-file Codex config {config_path}; "
-                    "existing config and managed profiles were kept"
+                    "existing configuration was kept"
                 ),
             )
         original_bytes = config_path.read_bytes() if exists else None
@@ -512,8 +481,7 @@ def _plan_default_config(
             path=config_path,
             error=(
                 f"could not read existing Codex config {config_path} "
-                f"({type(exc).__name__}); existing config and managed "
-                "profiles were kept"
+                f"({type(exc).__name__}); existing configuration was kept"
             ),
         )
 
@@ -525,8 +493,7 @@ def _plan_default_config(
             path=config_path,
             error=(
                 f"could not update Codex config {config_path}: "
-                f"{marker_error}; existing config and managed profiles "
-                "were kept"
+                f"{marker_error}; existing configuration was kept"
             ),
         )
     try:
@@ -536,28 +503,20 @@ def _plan_default_config(
             path=config_path,
             error=(
                 f"could not parse existing Codex config {config_path} "
-                f"({type(exc).__name__}); existing config and managed "
-                "profiles were kept"
+                f"({type(exc).__name__}); existing configuration was kept"
             ),
         )
 
-    user_default_preserved = any(
-        key in parsed
-        for key in (
-            "model",
-            "profile",
-            "model_provider",
-            "openai_base_url",
-            "oss_provider",
-        )
-    )
-    managed_default_model: CodexModelProfile | None = None
+    user_default_model = _user_default_model(parsed)
+    user_default_preserved = user_default_model is not None
+    effective_model = user_default_model
+    managed_default_model: CodexModelConfig | None = None
     contains_literal_secret = False
     if user_default_preserved:
         desired_text = user_text
-    elif profiles:
+    elif models:
         block, managed_default, block_error = _managed_default_block(
-            profiles,
+            models,
             parsed,
         )
         if block_error:
@@ -565,12 +524,12 @@ def _plan_default_config(
                 path=config_path,
                 error=(
                     f"could not update Codex config {config_path}: "
-                    f"{block_error}; existing config and managed profiles "
-                    "were kept"
+                    f"{block_error}; existing configuration was kept"
                 ),
             )
         assert managed_default is not None
         managed_default_model = managed_default.model
+        effective_model = managed_default.model
         contains_literal_secret = (
             ".experimental_bearer_token = " in block
         )
@@ -585,8 +544,7 @@ def _plan_default_config(
             path=config_path,
             error=(
                 f"could not safely merge Codex config {config_path} "
-                f"({type(exc).__name__}); existing config and managed "
-                "profiles were kept"
+                f"({type(exc).__name__}); existing configuration was kept"
             ),
         )
 
@@ -607,6 +565,7 @@ def _plan_default_config(
         original_content=original_bytes,
         original_mode=mode,
         mode=0o600 if contains_literal_secret else mode,
+        effective_model=effective_model,
         managed_default_model=managed_default_model,
         user_default_preserved=user_default_preserved,
     )
@@ -803,95 +762,35 @@ def _default_config_is_unchanged(plan: _DefaultConfigPlan) -> bool:
 
 def _write_and_reconcile(
     codex_home: Path,
-    profiles: tuple[_RenderedProfile, ...],
+    models: tuple[_RenderedModel, ...],
 ) -> _ReconcileResult:
-    default_plan = _plan_default_config(codex_home, profiles)
+    default_plan = _plan_default_config(codex_home, models)
     if default_plan.error:
         return _ReconcileResult(error=default_plan.error)
 
-    desired = {
-        codex_home / f"{item.model.profile}.config.toml": item.content
-        for item in profiles
-    }
     try:
         existing_owned = set(_owned_profiles(codex_home))
     except Exception as exc:
         return _ReconcileResult(
             error=(
-                f"could not inspect Codex profile directory {codex_home} "
+                f"could not inspect Codex configuration directory {codex_home} "
                 f"({type(exc).__name__})"
             ),
         )
 
-    try:
-        foreign_destination = next(
-            (
-                destination
-                for destination in desired
-                if (
-                    destination.is_symlink()
-                    or (
-                        destination.exists()
-                        and destination not in existing_owned
-                    )
-                )
-            ),
-            None,
-        )
-    except OSError as exc:
-        return _ReconcileResult(
-            error=(
-                "could not inspect a target Codex profile "
-                f"({type(exc).__name__})"
-            ),
-        )
-    if foreign_destination is not None:
-        return _ReconcileResult(
-            error=(
-                "refused to overwrite non-OpenDeepHole Codex profile "
-                f"{foreign_destination}"
-            ),
-        )
-
-    changed_desired: dict[Path, str] = {}
-    try:
-        for destination, content in desired.items():
-            if destination not in existing_owned:
-                changed_desired[destination] = content
-                continue
-            if (
-                destination.read_bytes() != content.encode("utf-8")
-                or stat.S_IMODE(destination.stat().st_mode) != 0o600
-            ):
-                changed_desired[destination] = content
-    except OSError as exc:
-        return _ReconcileResult(
-            error=(
-                "could not inspect an existing managed Codex profile "
-                f"({type(exc).__name__})"
-            ),
-        )
-
-    if changed_desired or default_plan.write_content is not None:
+    if default_plan.write_content is not None:
         try:
             codex_home.mkdir(parents=True, exist_ok=True, mode=0o700)
         except OSError as exc:
             return _ReconcileResult(
                 error=(
-                    f"could not create Codex profile directory {codex_home} "
+                    f"could not create Codex configuration directory {codex_home} "
                     f"({type(exc).__name__})"
                 ),
             )
 
-    staged: dict[Path, Path] = {}
     staged_config: Path | None = None
     try:
-        for destination, content in changed_desired.items():
-            staged[destination] = _stage_file(
-                destination,
-                content.encode("utf-8"),
-                mode=0o600,
-            )
         if default_plan.write_content is not None:
             staged_config = _stage_file(
                 default_plan.path,
@@ -902,12 +801,6 @@ def _write_and_reconcile(
                 raise _CodexConfigChangedError(
                     "Codex config changed during model synchronization"
                 )
-        for destination, temporary in staged.items():
-            if destination.exists() and not _is_owned_profile(destination):
-                raise _CodexConfigChangedError(
-                    "Codex profile ownership changed during synchronization"
-                )
-            os.replace(temporary, destination)
         if staged_config is not None:
             if not _default_config_is_unchanged(default_plan):
                 raise _CodexConfigChangedError(
@@ -915,19 +808,17 @@ def _write_and_reconcile(
                 )
             os.replace(staged_config, default_plan.path)
     except Exception as exc:
-        _discard_staged(tuple(staged.values()) + (
-            (staged_config,) if staged_config is not None else ()
-        ))
+        _discard_staged((staged_config,) if staged_config is not None else ())
         return _ReconcileResult(
             error=(
                 "could not atomically write managed Codex configuration "
-                f"({type(exc).__name__}); existing config and stale profiles "
-                "were kept"
+                f"({type(exc).__name__}); existing configuration and old "
+                "managed profiles were kept"
             ),
         )
 
     warnings: list[str] = []
-    for stale in sorted(existing_owned - set(desired), key=str):
+    for stale in sorted(existing_owned, key=str):
         try:
             if _is_owned_profile(stale):
                 stale.unlink()
@@ -942,13 +833,40 @@ def _write_and_reconcile(
                 f"({type(exc).__name__})"
             )
     return _ReconcileResult(
+        effective_model=default_plan.effective_model,
         managed_default_model=default_plan.managed_default_model,
         user_default_preserved=default_plan.user_default_preserved,
         warnings=tuple(warnings),
     )
 
 
-def sync_codex_profiles(
+def inspect_codex_user_default(
+    *,
+    env: Mapping[str, str] | None = None,
+    platform: str | None = None,
+    codex_home: Path | None = None,
+) -> CodexConfigSyncResult:
+    """Read a user-owned top-level default without changing any files."""
+    effective_env = dict(os.environ) if env is None else dict(env)
+    destination = codex_home or _codex_home(
+        effective_env,
+        platform=platform or sys.platform,
+    )
+    plan = _plan_default_config(destination, ())
+    if plan.error:
+        return CodexConfigSyncResult(error=plan.error)
+    models = (
+        (plan.effective_model,)
+        if plan.user_default_preserved and plan.effective_model is not None
+        else ()
+    )
+    return CodexConfigSyncResult(
+        models=models,
+        user_default_preserved=plan.user_default_preserved,
+    )
+
+
+def sync_codex_config(
     *,
     codex_version: str,
     opencode_config: Mapping[str, Any],
@@ -957,29 +875,23 @@ def sync_codex_profiles(
     platform: str | None = None,
     codex_home: Path | None = None,
     no_proxy_hosts: Sequence[str] = (),
-) -> CodexProfileSyncResult:
-    """Synchronize selected client models and fill a missing default safely."""
+) -> CodexConfigSyncResult:
+    """Synchronize one effective default and remove old managed profiles."""
+    del codex_version  # Kept in the call contract for existing Agent callers.
     if not isinstance(opencode_config, Mapping):
-        return CodexProfileSyncResult(
+        return CodexConfigSyncResult(
             error="effective OpenCode configuration is not an object",
         )
     effective_env = dict(os.environ) if env is None else dict(env)
     active_platform = platform or sys.platform
-    version_error, version_warning = _version_support_error(codex_version)
-    if version_error:
-        return CodexProfileSyncResult(error=version_error)
 
-    rendered, conversion_warnings, conversion_error = _render_profiles(
+    rendered, conversion_warnings, conversion_error = _render_models(
         opencode_config,
         selected_model_ids,
     )
-    warnings = tuple(
-        item
-        for item in (version_warning, *conversion_warnings)
-        if item
-    )
+    warnings = tuple(item for item in conversion_warnings if item)
     if conversion_error:
-        return CodexProfileSyncResult(
+        return CodexConfigSyncResult(
             warnings=warnings,
             error=conversion_error,
         )
@@ -1001,18 +913,23 @@ def sync_codex_profiles(
         if item
     )
     if reconciliation.error:
-        return CodexProfileSyncResult(
+        return CodexConfigSyncResult(
             warnings=warnings,
             error=reconciliation.error,
         )
     env_error = _sync_codex_env(destination, no_proxy_hosts)
     if env_error:
-        return CodexProfileSyncResult(
+        return CodexConfigSyncResult(
             warnings=warnings,
             error=env_error,
         )
-    return CodexProfileSyncResult(
-        models=tuple(item.model for item in rendered),
+    models = (
+        (reconciliation.effective_model,)
+        if reconciliation.effective_model is not None
+        else ()
+    )
+    return CodexConfigSyncResult(
+        models=models,
         managed_default_model=reconciliation.managed_default_model,
         user_default_preserved=reconciliation.user_default_preserved,
         warnings=warnings,
@@ -1020,7 +937,9 @@ def sync_codex_profiles(
 
 
 __all__ = [
-    "CodexModelProfile",
-    "CodexProfileSyncResult",
-    "sync_codex_profiles",
+    "CodexConfigSyncResult",
+    "CodexModelConfig",
+    "inspect_codex_user_default",
+    "normalize_codex_base_url",
+    "sync_codex_config",
 ]

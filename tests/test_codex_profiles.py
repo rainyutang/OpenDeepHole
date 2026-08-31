@@ -34,7 +34,7 @@ def _effective_config() -> dict:
     }
 
 
-class CodexProfileSyncTests(unittest.TestCase):
+class CodexConfigSyncTests(unittest.TestCase):
     def _sync(
         self,
         codex_home: Path,
@@ -44,8 +44,8 @@ class CodexProfileSyncTests(unittest.TestCase):
         version: str = "codex-cli 0.149.1",
         platform: str = "linux",
         no_proxy_hosts: tuple[str, ...] = (),
-    ) -> codex_profiles.CodexProfileSyncResult:
-        return codex_profiles.sync_codex_profiles(
+    ) -> codex_profiles.CodexConfigSyncResult:
+        return codex_profiles.sync_codex_config(
             codex_version=version,
             opencode_config=config,
             selected_model_ids=model_ids,
@@ -53,6 +53,47 @@ class CodexProfileSyncTests(unittest.TestCase):
             platform=platform,
             no_proxy_hosts=no_proxy_hosts,
         )
+
+    def test_base_url_is_normalized_for_v1_responses(self) -> None:
+        self.assertEqual(
+            codex_profiles.normalize_codex_base_url("https://api.example"),
+            "https://api.example/v1",
+        )
+        self.assertEqual(
+            codex_profiles.normalize_codex_base_url(
+                "https://api.example/root/v1/responses"
+            ),
+            "https://api.example/root/v1",
+        )
+        self.assertEqual(
+            codex_profiles.normalize_codex_base_url(
+                "https://api.example/v1?unsafe=true"
+            ),
+            "",
+        )
+
+    def test_user_default_inspection_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            original = (
+                b'model = "personal"\n'
+                b'model_provider = "private"\n'
+                b'[features]\nmemories = true\n'
+            )
+            config_path.write_bytes(original)
+
+            with patch.object(codex_profiles, "_stage_file") as stage:
+                result = codex_profiles.inspect_codex_user_default(
+                    codex_home=codex_home,
+                )
+
+            self.assertEqual(result.error, "")
+            self.assertTrue(result.user_default_preserved)
+            self.assertEqual(result.models[0].id, "private/personal")
+            self.assertEqual(config_path.read_bytes(), original)
+            stage.assert_not_called()
 
     def test_selected_model_host_is_managed_in_both_dotenv_variables(
         self,
@@ -161,13 +202,18 @@ class CodexProfileSyncTests(unittest.TestCase):
             self.assertEqual(os.environ["NO_PROXY"], "process-upper")
             self.assertEqual(os.environ["no_proxy"], "process-lower")
 
-    def test_syncs_only_selected_models_in_platform_order(self) -> None:
+    def test_user_default_wins_and_no_profile_files_are_generated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             codex_home = Path(tmp) / "codex"
             codex_home.mkdir()
             user_config = codex_home / "config.toml"
             original = b'model = "personal-default"\n'
             user_config.write_bytes(original)
+            legacy = codex_home / "opendeephole-old.config.toml"
+            legacy.write_text(
+                f"{codex_profiles._MANAGED_MARKER}\nmodel = \"old\"\n",
+                encoding="utf-8",
+            )
 
             first = self._sync(
                 codex_home,
@@ -185,28 +231,20 @@ class CodexProfileSyncTests(unittest.TestCase):
             self.assertIsNone(first.managed_default_model)
             self.assertEqual(
                 [item.id for item in first.models],
-                ["literal/beta/model", "env/alpha"],
+                ["openai/personal-default"],
             )
             self.assertEqual(first.models, second.models)
             self.assertEqual(user_config.read_bytes(), original)
-
-            by_id = {item.id: item for item in first.models}
-            literal_path = codex_home / (
-                f"{by_id['literal/beta/model'].profile}.config.toml"
+            self.assertFalse(legacy.exists())
+            self.assertEqual(
+                first.models[0].engine_value(("/opt/bin/codex",)),
+                {
+                    "id": "openai/personal-default",
+                    "provider_id": "openai",
+                    "model_id": "personal-default",
+                    "command": ["/opt/bin/codex"],
+                },
             )
-            env_path = codex_home / f"{by_id['env/alpha'].profile}.config.toml"
-            literal_text = literal_path.read_text(encoding="utf-8")
-            env_text = env_path.read_text(encoding="utf-8")
-            self.assertIn('model = "beta/model"', literal_text)
-            self.assertIn("model_context_window = 65536", literal_text)
-            self.assertIn(
-                'experimental_bearer_token = "literal-secret-value"',
-                literal_text,
-            )
-            self.assertIn('env_key = "ENV_PROVIDER_TOKEN"', env_text)
-            self.assertFalse(any("unused" in path.name for path in codex_home.iterdir()))
-            if os.name != "nt":
-                self.assertEqual(literal_path.stat().st_mode & 0o777, 0o600)
 
     def test_missing_default_uses_first_platform_model_and_preserves_user_bytes(
         self,
@@ -266,38 +304,70 @@ class CodexProfileSyncTests(unittest.TestCase):
             if os.name != "nt":
                 self.assertEqual(config_path.stat().st_mode & 0o777, 0o640)
 
-    def test_existing_user_model_profile_and_provider_are_never_overwritten(
-        self,
-    ) -> None:
-        variants = (
-            b'model = "personal"\n# keep me\n',
-            b'profile = "personal-profile"\n# keep me\n',
-            (
-                b'model_provider = "personal"\n'
-                b'[model_providers.personal]\n'
-                b'base_url = "https://personal.example/v1"\n'
-            ),
+    def test_existing_user_default_is_never_overwritten(self) -> None:
+        original = (
+            b'model = "personal"\n'
+            b'model_provider = "personal-provider"\n'
+            b'# keep me\n'
         )
-        for original in variants:
-            with self.subTest(original=original), tempfile.TemporaryDirectory() as tmp:
-                codex_home = Path(tmp) / "codex"
-                codex_home.mkdir()
-                config_path = codex_home / "config.toml"
-                config_path.write_bytes(original)
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            config_path.write_bytes(original)
 
-                result = self._sync(
-                    codex_home,
-                    _effective_config(),
-                    ["env/alpha"],
-                )
+            result = self._sync(
+                codex_home,
+                _effective_config(),
+                ["env/alpha"],
+            )
 
-                self.assertEqual(result.error, "")
-                self.assertTrue(result.user_default_preserved)
-                self.assertIsNone(result.managed_default_model)
-                self.assertEqual(config_path.read_bytes(), original)
-                self.assertTrue(
-                    (codex_home / f"{result.models[0].profile}.config.toml").is_file()
-                )
+            self.assertEqual(result.error, "")
+            self.assertTrue(result.user_default_preserved)
+            self.assertIsNone(result.managed_default_model)
+            self.assertEqual(result.models[0].id, "personal-provider/personal")
+            self.assertEqual(config_path.read_bytes(), original)
+            self.assertEqual(
+                list(codex_home.glob("opendeephole-*.config.toml")),
+                [],
+            )
+
+    def test_profile_only_config_is_not_a_bare_default(self) -> None:
+        original = b'profile = "personal-profile"\n# keep me\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            config_path.write_bytes(original)
+
+            result = self._sync(codex_home, _effective_config(), ["env/alpha"])
+
+            self.assertEqual(result.error, "")
+            self.assertFalse(result.user_default_preserved)
+            self.assertEqual(result.managed_default_model.id, "env/alpha")
+            remainder, owned, error = codex_profiles._split_managed_default(
+                config_path.read_text(encoding="utf-8")
+            )
+            self.assertTrue(owned)
+            self.assertEqual(error, "")
+            self.assertEqual(remainder.encode("utf-8"), original)
+
+    def test_provider_without_model_is_preserved_and_rejected(self) -> None:
+        original = (
+            b'model_provider = "personal"\n'
+            b'[model_providers.personal]\n'
+            b'base_url = "https://personal.example/v1"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            config_path.write_bytes(original)
+
+            result = self._sync(codex_home, _effective_config(), ["env/alpha"])
+
+            self.assertIn("model_provider", result.error)
+            self.assertEqual(config_path.read_bytes(), original)
 
     @unittest.skipIf(os.name == "nt", "POSIX permissions are unavailable")
     def test_literal_default_credential_tightens_only_file_permissions(self) -> None:
@@ -335,13 +405,18 @@ class CodexProfileSyncTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             codex_home = Path(tmp) / "codex"
+            legacy = codex_home / "opendeephole-old.config.toml"
+            codex_home.mkdir()
+            legacy.write_text(
+                f"{codex_profiles._MANAGED_MARKER}\nmodel = \"old\"\n",
+                encoding="utf-8",
+            )
             first = self._sync(codex_home, config, ["p/two"])
-            first_path = codex_home / f"{first.models[0].profile}.config.toml"
             self.assertEqual(first.managed_default_model.id, "p/two")
+            self.assertFalse(legacy.exists())
 
             second = self._sync(codex_home, config, ["p/one"])
             self.assertEqual(second.managed_default_model.id, "p/one")
-            self.assertFalse(first_path.exists())
             config_path = codex_home / "config.toml"
             current = config_path.read_bytes()
             user_addition = b'model = "personal-later"\n'
@@ -367,7 +442,12 @@ class CodexProfileSyncTests(unittest.TestCase):
                 _effective_config(),
                 ["env/alpha"],
             )
-            owned = codex_home / f"{first.models[0].profile}.config.toml"
+            self.assertEqual(first.models[0].id, "env/alpha")
+            owned = codex_home / "opendeephole-old.config.toml"
+            owned.write_text(
+                f"{codex_profiles._MANAGED_MARKER}\nmodel = \"old\"\n",
+                encoding="utf-8",
+            )
             foreign = codex_home / "personal.config.toml"
             foreign.write_text('model = "personal"\n', encoding="utf-8")
 
@@ -416,9 +496,7 @@ class CodexProfileSyncTests(unittest.TestCase):
                     if path.is_file()
                 },
             )
-            self.assertTrue(
-                (codex_home / f"{first.models[0].profile}.config.toml").exists()
-            )
+            self.assertEqual(first.models[0].id, "env/alpha")
 
     def test_invalid_or_symlinked_user_config_keeps_owned_profiles(self) -> None:
         for symlinked in (False, True):
@@ -456,7 +534,9 @@ class CodexProfileSyncTests(unittest.TestCase):
                 else:
                     self.assertEqual(config_path.read_bytes(), original)
 
-    def test_old_codex_and_foreign_collision_preserve_existing_files(self) -> None:
+    def test_old_owned_profiles_are_removed_and_foreign_files_are_preserved(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             codex_home = Path(tmp) / "codex"
             codex_home.mkdir()
@@ -470,21 +550,19 @@ class CodexProfileSyncTests(unittest.TestCase):
                 ["env/alpha"],
                 version="codex-cli 0.133.9",
             )
-            self.assertTrue(old.error)
-            self.assertEqual(stale.read_text(encoding="utf-8"), stale_content)
+            self.assertEqual(old.error, "")
+            self.assertFalse(stale.exists())
 
-            profile = codex_profiles._profile_name("env", "alpha")
-            foreign = codex_home / f"{profile}.config.toml"
+            foreign = codex_home / "opendeephole-foreign.config.toml"
             foreign_content = 'model = "foreign"\n'
             foreign.write_text(foreign_content, encoding="utf-8")
-            collision = self._sync(
+            second = self._sync(
                 codex_home,
                 _effective_config(),
                 ["env/alpha"],
             )
-            self.assertIn("refused to overwrite", collision.error)
+            self.assertEqual(second.error, "")
             self.assertEqual(foreign.read_text(encoding="utf-8"), foreign_content)
-            self.assertEqual(stale.read_text(encoding="utf-8"), stale_content)
 
     def test_write_failure_keeps_stale_profiles_and_cleans_staging_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -508,7 +586,7 @@ class CodexProfileSyncTests(unittest.TestCase):
     def test_windows_codex_home_fallback_is_supported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             userprofile = Path(tmp) / "user"
-            result = codex_profiles.sync_codex_profiles(
+            result = codex_profiles.sync_codex_config(
                 codex_version="codex-cli 0.149.1",
                 opencode_config=_effective_config(),
                 selected_model_ids=["env/alpha"],

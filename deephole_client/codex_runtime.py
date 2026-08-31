@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import contextvars
 import functools
 import hashlib
 import json
@@ -13,18 +12,19 @@ import os
 import re
 import shutil
 import signal
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 import httpx
 
 from .codex_profiles import (
-    CodexModelProfile,
-    CodexProfileSyncResult,
-    sync_codex_profiles,
+    CodexConfigSyncResult,
+    CodexModelConfig,
+    inspect_codex_user_default,
+    normalize_codex_base_url,
+    sync_codex_config,
 )
 
 
@@ -64,9 +64,7 @@ class CodexRuntimeState:
     executable: str = ""
     version: str = ""
     error: str = ""
-    models: tuple[CodexModelProfile, ...] = ()
-    selected_model: CodexModelProfile | None = None
-    threat_analysis_command: tuple[str, ...] = ()
+    models: tuple[CodexModelConfig, ...] = ()
     model_config_warnings: tuple[str, ...] = ()
     model_config_error: str = ""
 
@@ -95,12 +93,6 @@ class _CodexSetupError(RuntimeError):
 
 _runtime_state: CodexRuntimeState | None = None
 _last_platform_model_fingerprint: str | None = None
-_runtime_state_override: contextvars.ContextVar[
-    CodexRuntimeState | None
-] = contextvars.ContextVar(
-    "opendeephole_codex_runtime_state_override",
-    default=None,
-)
 _model_sync_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="opendeephole-codex-model-sync",
@@ -538,12 +530,7 @@ def _probe_candidates(
         options = provider.get("options")
         if not isinstance(options, Mapping):
             options = {}
-        raw_base_url = options.get("baseURL")
-        base_url = (
-            raw_base_url.strip()
-            if isinstance(raw_base_url, str)
-            else ""
-        )
+        base_url = normalize_codex_base_url(options.get("baseURL"))
         try:
             parsed = urlsplit(base_url)
             no_proxy_host = str(parsed.hostname or "").strip()
@@ -591,7 +578,7 @@ def _probe_candidates(
             provider_id=provider_id,
             model_id=model_id,
             base_url=base_url,
-            endpoint=base_url.rstrip("/") + "/responses",
+            endpoint=base_url + "/responses",
             no_proxy_host=no_proxy_host,
             api_key=api_key,
         ))
@@ -709,7 +696,7 @@ def sync_platform_codex_models(
     reason: str = "platform configuration",
     cancel_event: Any = None,
 ) -> CodexRuntimeState:
-    """Select the first real Responses-compatible model and configure Codex."""
+    """Prefer a user default, otherwise configure the first usable model."""
     global _last_platform_model_fingerprint, _runtime_state
 
     selected = (
@@ -725,13 +712,58 @@ def sync_platform_codex_models(
         _runtime_state = replace(
             state,
             models=(),
-            selected_model=None,
-            threat_analysis_command=(),
             model_config_error=error,
         )
         print(
             "Warning: Codex model synchronization skipped: "
             f"{error}. Trigger: {reason}.",
+            flush=True,
+        )
+        return _runtime_state
+
+    inspection = inspect_codex_user_default()
+    if inspection.error:
+        _runtime_state = replace(
+            state,
+            models=(),
+            model_config_warnings=inspection.warnings,
+            model_config_error=inspection.error,
+        )
+        print(
+            "Warning: Codex default configuration could not be read: "
+            f"{inspection.error}. DeepHole threat analysis remains "
+            f"available. Trigger: {reason}.",
+            flush=True,
+        )
+        return _runtime_state
+
+    if inspection.user_default_preserved and inspection.models:
+        # A user-owned top-level model always wins. Reconcile only old
+        # OpenDeepHole-owned default/profile/.env artifacts; never probe or
+        # replace the user's provider/model selection.
+        result = sync_codex_config(
+            codex_version=state.version,
+            opencode_config={},
+            selected_model_ids=(),
+            no_proxy_hosts=(),
+        )
+        warnings = list(result.warnings)
+        if result.error:
+            warnings.append(
+                "Could not fully clean old OpenDeepHole Codex configuration: "
+                f"{result.error}"
+            )
+        _last_platform_model_fingerprint = None
+        _runtime_state = replace(
+            state,
+            models=inspection.models,
+            model_config_warnings=tuple(warnings),
+            model_config_error="",
+        )
+        print(
+            "Codex default model unchanged: using the existing user "
+            f"configuration ({inspection.models[0].model_id}). Trigger: "
+            f"{reason}.",
             flush=True,
         )
         return _runtime_state
@@ -749,8 +781,6 @@ def sync_platform_codex_models(
         _runtime_state = replace(
             state,
             models=(),
-            selected_model=None,
-            threat_analysis_command=(),
             model_config_error=error,
         )
         print(
@@ -762,7 +792,7 @@ def sync_platform_codex_models(
         return _runtime_state
 
     if not selected:
-        result = sync_codex_profiles(
+        result = sync_codex_config(
             codex_version=state.version,
             opencode_config={},
             selected_model_ids=(),
@@ -773,8 +803,6 @@ def sync_platform_codex_models(
             _runtime_state = replace(
                 state,
                 models=(),
-                selected_model=None,
-                threat_analysis_command=(),
                 model_config_warnings=result.warnings,
                 model_config_error=result.error,
             )
@@ -787,13 +815,11 @@ def sync_platform_codex_models(
         _runtime_state = replace(
             state,
             models=(),
-            selected_model=None,
-            threat_analysis_command=(),
             model_config_warnings=result.warnings,
             model_config_error="No enabled explicit model is configured",
         )
         print(
-            "Codex managed model profiles removed: the platform has no "
+            "Codex managed model configuration removed: the platform has no "
             f"enabled explicit model. Trigger: {reason}.",
             flush=True,
         )
@@ -808,8 +834,8 @@ def sync_platform_codex_models(
     for warning in resolution_warnings:
         print(f"Warning: {warning}", flush=True)
 
-    selected_result: CodexProfileSyncResult | None = None
-    selected_profile: CodexModelProfile | None = None
+    selected_result: CodexConfigSyncResult | None = None
+    selected_model: CodexModelConfig | None = None
     for candidate in candidates:
         if cancel_event is not None and bool(cancel_event.is_set()):
             failures.append("model probing was cancelled")
@@ -828,16 +854,16 @@ def sync_platform_codex_models(
             print(f"Warning: {detail}.", flush=True)
             continue
         try:
-            result = sync_codex_profiles(
+            result = sync_codex_config(
                 codex_version=state.version,
                 opencode_config=opencode_config,
                 selected_model_ids=(candidate.id,),
                 no_proxy_hosts=(candidate.no_proxy_host,),
             )
         except Exception as exc:
-            result = CodexProfileSyncResult(
+            result = CodexConfigSyncResult(
                 error=(
-                    "unexpected model profile synchronization failure "
+                    "unexpected model configuration failure "
                     f"({type(exc).__name__})"
                 ),
             )
@@ -853,14 +879,14 @@ def sync_platform_codex_models(
             failures.append(detail)
             print(f"Warning: {detail}.", flush=True)
             continue
-        selected_profile = next(
+        selected_model = next(
             (item for item in result.models if item.id == candidate.id),
             None,
         )
-        if selected_profile is None:
+        if selected_model is None:
             detail = (
                 f"Codex configuration failed for {candidate.id}: managed "
-                "profile metadata is missing"
+                "default-model metadata is missing"
             )
             warnings.append(detail)
             failures.append(detail)
@@ -874,7 +900,19 @@ def sync_platform_codex_models(
         break
 
     _last_platform_model_fingerprint = fingerprint
-    if selected_result is None or selected_profile is None:
+    if selected_result is None or selected_model is None:
+        cleanup = sync_codex_config(
+            codex_version=state.version,
+            opencode_config={},
+            selected_model_ids=(),
+            no_proxy_hosts=(),
+        )
+        warnings.extend(cleanup.warnings)
+        if cleanup.error:
+            warnings.append(
+                "Could not remove stale managed Codex configuration: "
+                f"{cleanup.error}"
+            )
         error = (
             "No configured model provides a usable /v1/responses API"
             + (f": {'; '.join(failures)}" if failures else "")
@@ -882,8 +920,6 @@ def sync_platform_codex_models(
         _runtime_state = replace(
             state,
             models=(),
-            selected_model=None,
-            threat_analysis_command=(),
             model_config_warnings=tuple(warnings),
             model_config_error=error,
         )
@@ -897,32 +933,14 @@ def sync_platform_codex_models(
     _runtime_state = replace(
         state,
         models=selected_result.models,
-        selected_model=selected_profile,
-        threat_analysis_command=(
-            *state.command,
-            "--profile",
-            selected_profile.profile,
-        ),
         model_config_warnings=tuple(warnings),
         model_config_error="",
     )
     print(
-        "Codex model profile ready: synchronized selected platform model "
-        f"{selected_profile.id}. Trigger: {reason}.",
+        "Codex default model ready: configured selected platform model "
+        f"{selected_model.id}. Trigger: {reason}.",
         flush=True,
     )
-    if selected_result.managed_default_model is not None:
-        print(
-            "Codex default model ready: "
-            f"{selected_result.managed_default_model.id}.",
-            flush=True,
-        )
-    elif selected_result.user_default_preserved:
-        print(
-            "Codex default model unchanged: existing user configuration "
-            "was preserved; threat analysis uses the managed profile.",
-            flush=True,
-        )
     return _runtime_state
 
 
@@ -1013,23 +1031,8 @@ async def initialize_codex_runtime(
     return _runtime_state
 
 
-@contextmanager
-def codex_runtime_state_override(
-    state: CodexRuntimeState,
-) -> Iterator[None]:
-    """Expose one scan's selected profile to unchanged Codex consumers."""
-    token = _runtime_state_override.set(state)
-    try:
-        yield
-    finally:
-        _runtime_state_override.reset(token)
-
-
 def get_codex_runtime_state() -> CodexRuntimeState:
     """Return startup state, with a PATH-only fallback for direct callers."""
-    overridden = _runtime_state_override.get()
-    if overridden is not None:
-        return overridden
     if _runtime_state is not None:
         return _runtime_state
     executable = shutil.which("codex")
@@ -1053,9 +1056,8 @@ def _reset_codex_runtime_state_for_tests() -> None:
 
 __all__ = [
     "CODEX_INSTALL_TIMEOUT_SECONDS",
-    "CodexModelProfile",
+    "CodexModelConfig",
     "CodexRuntimeState",
-    "codex_runtime_state_override",
     "configured_codex_model_ids",
     "get_codex_runtime_state",
     "initialize_codex_runtime",
