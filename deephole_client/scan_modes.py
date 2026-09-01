@@ -6,6 +6,7 @@ from __future__ import annotations
 SCAN_MODE_QUICK = "quick"
 SCAN_MODE_STANDARD = "standard"
 SCAN_MODE_CUSTOM = "custom"
+SCAN_MODE_MULTI_VERSION = "multi_version"
 
 # Persisted by releases before scan profiles were introduced.  These values
 # remain valid inputs so historical scans can still be resumed.
@@ -21,6 +22,7 @@ PROFILE_SCAN_MODES = {
     SCAN_MODE_QUICK,
     SCAN_MODE_STANDARD,
     SCAN_MODE_CUSTOM,
+    SCAN_MODE_MULTI_VERSION,
 }
 
 _ALIASES = {
@@ -28,6 +30,9 @@ _ALIASES = {
     SCAN_MODE_QUICK: SCAN_MODE_QUICK,
     SCAN_MODE_STANDARD: SCAN_MODE_STANDARD,
     SCAN_MODE_CUSTOM: SCAN_MODE_CUSTOM,
+    SCAN_MODE_MULTI_VERSION: SCAN_MODE_MULTI_VERSION,
+    "multi-version": SCAN_MODE_MULTI_VERSION,
+    "multiversion": SCAN_MODE_MULTI_VERSION,
     SCAN_MODE_FULL: SCAN_MODE_CUSTOM,
     "normal": SCAN_MODE_CUSTOM,
     "default": SCAN_MODE_CUSTOM,
@@ -53,6 +58,9 @@ def component_scan_mode(value: object) -> str:
     component-facing mode is ``custom``.
     """
     normalized = normalize_scan_mode(value)
-    if normalized == SCAN_MODE_THREAT_ANALYSIS_ONLY:
+    if normalized in {
+        SCAN_MODE_THREAT_ANALYSIS_ONLY,
+        SCAN_MODE_MULTI_VERSION,
+    }:
         return SCAN_MODE_CUSTOM
     return normalized

@@ -103,6 +103,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             scan_id=msg["scan_id"],
             project_path=msg["project_path"],
             code_scan_path=msg.get("code_scan_path"),
+            multi_versions=(
+                msg.get("multi_versions")
+                if isinstance(msg.get("multi_versions"), list)
+                else None
+            ),
             checkers=msg.get("checkers", []),
             scan_name=msg.get("scan_name", ""),
             scan_mode=msg.get("scan_mode", "custom"),
@@ -210,6 +215,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             codex_model_ids=(
                 msg.get("codex_model_ids")
                 if isinstance(msg.get("codex_model_ids"), list)
+                else None
+            ),
+            multi_versions=(
+                msg.get("multi_versions")
+                if isinstance(msg.get("multi_versions"), list)
                 else None
             ),
         )

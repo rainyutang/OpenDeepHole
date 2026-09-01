@@ -148,6 +148,7 @@ async def _run(task, is_resume: bool) -> None:
             knowledge_base_mcp=task.knowledge_base_mcp,
             mining_engines=task.mining_engines,
             codex_model_ids=task.codex_model_ids,
+            multi_versions=task.multi_versions,
         )
     finally:
         _task_manager.remove(task.scan_id, task)
@@ -159,6 +160,7 @@ async def handle_task(
     code_scan_path: str | None,
     checkers: list[str],
     scan_name: str,
+    multi_versions: list[dict] | None = None,
     scan_mode: str = "custom",
     threat_analysis_enabled: bool = False,
     threat_analysis_method: str = "deephole_threat_analysis",
@@ -186,6 +188,7 @@ async def handle_task(
         scan_id=scan_id,
         project_path=project_path,
         code_scan_path=code_scan_path,
+        multi_versions=multi_versions,
         checkers=checkers,
         scan_name=scan_name,
         scan_mode=scan_mode,
@@ -240,6 +243,7 @@ async def handle_resume(
     retry_mining_engine_ids: Optional[list[str]] = None,
     retry_threat_audit_task_ids: Optional[list[str]] = None,
     codex_model_ids: Optional[list[str]] = None,
+    multi_versions: Optional[list[dict]] = None,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
@@ -320,6 +324,11 @@ async def handle_resume(
         if codex_model_ids is not None
         else copy.deepcopy(previous_value("codex_model_ids", None))
     )
+    resolved_multi_versions = (
+        multi_versions
+        if multi_versions is not None
+        else copy.deepcopy(previous_value("multi_versions", []))
+    )
 
     if (
         previous is not None
@@ -365,6 +374,7 @@ async def handle_resume(
         retry_mining_engine_ids=retry_mining_engine_ids,
         retry_threat_audit_task_ids=retry_threat_audit_task_ids,
         codex_model_ids=resolved_codex_model_ids,
+        multi_versions=resolved_multi_versions,
     )
     task.asyncio_task = asyncio.create_task(_run(task, is_resume=True))
     print(f"Resumed task {scan_id}")

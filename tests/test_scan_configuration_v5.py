@@ -53,9 +53,11 @@ def test_scan_mode_normalization_preserves_new_modes_and_maps_legacy_context() -
     assert normalize_scan_mode("quick") == "quick"
     assert normalize_scan_mode("standard") == "standard"
     assert normalize_scan_mode("custom") == "custom"
+    assert normalize_scan_mode("multi-version") == "multi_version"
     assert normalize_scan_mode("full") == "custom"
     assert normalize_scan_mode("threat_only") == "threat_analysis_only"
     assert component_scan_mode("threat_analysis_only") == "custom"
+    assert component_scan_mode("multi_version") == "custom"
     with pytest.raises(ValueError, match="Unknown scan mode"):
         normalize_scan_mode("unexpected")
 

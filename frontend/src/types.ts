@@ -158,8 +158,19 @@ export interface Vulnerability {
   threat_surface_node_id?: string;
   threat_method_node_id?: string;
   threat_code_path?: string;
+  version_labels?: string[];
+  version_locations?: VersionVulnerabilityLocation[];
   provisional?: boolean;
   output_source?: OutputSource;
+}
+
+export interface VersionVulnerabilityLocation {
+  version_name: string;
+  project_path?: string;
+  code_scan_path?: string;
+  file?: string;
+  line?: number;
+  function?: string;
 }
 
 /** Frontend scan-detail record with the stable backend vulnerability index. */
@@ -451,6 +462,7 @@ export interface ScanStatus {
   project_id: string;
   project_path: string;
   code_scan_path: string;
+  multi_versions?: ScanVersionTarget[];
   scan_mode?: string;
   threat_analysis_enabled: boolean;
   threat_analysis_method: string;
@@ -503,6 +515,12 @@ export interface ScanStatus {
 
   detail_counts?: ScanDetailCounts;
   detail_pages?: ScanDetailPages;
+}
+
+export interface ScanVersionTarget {
+  version_name: string;
+  project_path: string;
+  code_scan_path: string;
 }
 
 export interface ScanDetailCounts {

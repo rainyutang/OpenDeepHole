@@ -293,6 +293,11 @@ export async function createScan(body: {
   code_graph_mcp?: AgentMcpConfig | null;
   auto_fp_review?: boolean;
   fp_review_method?: FpReviewMethod;
+  multi_versions?: Array<{
+    version_name: string;
+    project_path: string;
+    code_scan_path: string;
+  }>;
 }): Promise<ScanStartResponse> {
   const { data } = await api.post<ScanStartResponse>("/api/scan", body);
   return data;

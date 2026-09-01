@@ -19,10 +19,13 @@ THREAT_AUDIT_ENGINE_ID = "threat_audit"
 THREAT_AUDIT_ENGINE_LABEL = "DeepHole基于攻击威胁的漏洞挖掘引擎"
 THREAT_PATTERN_AUDIT_ENGINE_ID = "threat_pattern_audit"
 THREAT_PATTERN_AUDIT_ENGINE_LABEL = "DeepHole基于攻击模式的漏洞挖掘引擎"
+MULTI_VERSION_ENGINE_ID = "multi_version"
+MULTI_VERSION_ENGINE_LABEL = "DeepHole多版本代码漏洞挖掘引擎"
 BUILTIN_MINING_ENGINE_LABELS = {
     STATIC_CANDIDATE_ENGINE_ID: STATIC_CANDIDATE_ENGINE_LABEL,
     THREAT_AUDIT_ENGINE_ID: THREAT_AUDIT_ENGINE_LABEL,
     THREAT_PATTERN_AUDIT_ENGINE_ID: THREAT_PATTERN_AUDIT_ENGINE_LABEL,
+    MULTI_VERSION_ENGINE_ID: MULTI_VERSION_ENGINE_LABEL,
 }
 
 
@@ -142,6 +145,17 @@ class OutputSource(BaseModel):
     serve_session_id: str = ""
 
 
+class VersionVulnerabilityLocation(BaseModel):
+    """One version-local location belonging to a multi-version finding."""
+
+    version_name: str
+    project_path: str = ""
+    code_scan_path: str = ""
+    file: str = ""
+    line: int = 0
+    function: str = ""
+
+
 class Vulnerability(BaseModel):
     """A confirmed or assessed vulnerability after AI analysis."""
     file: str
@@ -176,6 +190,10 @@ class Vulnerability(BaseModel):
     threat_surface_node_id: str = ""
     threat_method_node_id: str = ""
     threat_code_path: str = ""
+    version_labels: list[str] = Field(default_factory=list)
+    version_locations: list[VersionVulnerabilityLocation] = Field(
+        default_factory=list,
+    )
     provisional: bool = False                 # Platform-owned live result awaiting run() reconciliation
     output_source: OutputSource = Field(default_factory=OutputSource)
 
@@ -682,11 +700,25 @@ class AgentOpenCodePoolStatus(OpenCodePoolStatus):
     online: bool = False
 
 
+class MultiVersionTarget(BaseModel):
+    """One source tree and scan scope supplied for a project version."""
+
+    version_name: str = Field(min_length=1, max_length=120)
+    project_path: str = Field(min_length=1, max_length=4096)
+    code_scan_path: str = Field(default="", max_length=4096)
+
+    @field_validator("version_name", "project_path", "code_scan_path", mode="before")
+    @classmethod
+    def _strip_text(cls, value):
+        return str(value or "").strip()
+
+
 class ScanStatus(BaseModel):
     scan_id: str
     project_id: str = ""
     project_path: str = ""
     code_scan_path: str = ""
+    multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
     scan_mode: str = "full"
     threat_analysis_enabled: bool = False
     threat_analysis_method: str = "deephole_threat_analysis"
@@ -1490,7 +1522,8 @@ class CreateScanRequest(BaseModel):
     """Request to create a new scan via a registered agent."""
     agent_key: str = ""
     agent_id: str = ""  # compatibility for older callers
-    project_path: str
+    # Multi-version mode derives the legacy primary path from the named baseline.
+    project_path: str = ""
     code_scan_path: str = ""
     scan_name: str = ""
     scan_mode: str = "custom"
@@ -1511,6 +1544,7 @@ class CreateScanRequest(BaseModel):
     code_graph_mcp: AgentMcpConfig | None = None
     auto_fp_review: bool | None = None
     fp_review_method: str | None = None
+    multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
 
 
 class ValidationTarget(BaseModel):
@@ -1544,6 +1578,7 @@ class ScanMeta(BaseModel):
     agent_name: str = ""
     project_path: str = ""
     code_scan_path: str = ""
+    multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
     scan_name: str = ""
     auto_fp_review: bool = True
     fp_review_method: str = FpReviewMethod.ADVERSARIAL.value
