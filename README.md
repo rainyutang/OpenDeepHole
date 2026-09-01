@@ -207,6 +207,24 @@ Agent 只维护带 OpenDeepHole 标记的尾部 `projects` 信任区，保留用
 显式配置为非 trusted、配置文件无效或目标为符号链接，则不强制覆盖，并让依赖 Codex 的阶段按原有
 回退契约处理。
 
+`projects.<path>.trust_level = "trusted"` 只决定 Codex 是否信任并加载该项目配置，不会授予 Windows
+沙箱读取文件的权限。为保证仅有 `exec_command` 文件入口的 Windows Codex 可以执行 PowerShell、
+`cmd` 或 `rg` 读取源码，Agent 在创建或恢复扫描时还会在全局 `config.toml` 文件最前端维护：
+
+```toml
+# BEGIN OpenDeepHole managed Codex sandbox permissions
+sandbox_permissions = ["disk-full-read-access"]
+# END OpenDeepHole managed Codex sandbox permissions
+```
+
+这是机器用户级的广域只读权限，不按扫描隔离；它允许 Codex 沙箱读取本机磁盘，但不会把项目源码变成
+可写目录。扫描产物仍只通过现有 Codex `workspace-write` 配置写入扫描的 `threat_analysis` 工作目录。
+Linux/macOS 不会由 OpenDeepHole 新增该权限键，继续使用原有沙箱行为。若用户已经拥有顶层
+`sandbox_permissions`，Agent 只在其中已包含 `disk-full-read-access` 时复用，绝不改写或扩大用户值；
+缺失该权限或类型不合法时保留原文件并让扫描走既有失败/回退契约。`[windows] sandbox = "elevated"`
+或 `"unelevated"` 属于用户选择的 Windows 沙箱实现方式，OpenDeepHole 不新增或修改它，也不把它当作
+读写路径授权。权限托管区、默认模型托管区、用户原文和尾部 trusted-projects 区会分别合并并保持幂等。
+
 扫描启用 CodeGraph 且本地索引或远端连接准备成功后，Agent 会在精确 Codex 工作目录写入私有的
 `.codex/config.toml`，仅配置固定名称 `codegraph` 的扫描级 MCP；本地命令、参数、工作目录和环境变量，
 或远端 URL、请求头及超时都来自创建扫描时固化的快照。该文件不把 CodeGraph 当作信任路径，也不会

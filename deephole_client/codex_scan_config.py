@@ -1,4 +1,4 @@
-"""Scan-local Codex trust and CodeGraph MCP configuration."""
+"""Codex scan access and scan-local CodeGraph MCP configuration."""
 
 from __future__ import annotations
 
@@ -69,7 +69,8 @@ def prepare_scan_codex_access(
     platform: str | None = None,
     codex_home: Path | None = None,
 ) -> ScanCodexConfigResult:
-    """Trust every absolute path the scan's Codex process must read."""
+    """Prepare every access setting required by the scan's Codex process."""
+    active_platform = platform or sys.platform
     project = Path(project_path).expanduser().resolve()
     scan_root = Path(scan_dir).expanduser().resolve()
     workspace = scan_codex_workspace(scan_root)
@@ -98,8 +99,13 @@ def prepare_scan_codex_access(
     result = sync_codex_trusted_projects(
         required_paths,
         env=env,
-        platform=platform,
+        platform=active_platform,
         codex_home=codex_home,
+        required_sandbox_permissions=(
+            ("disk-full-read-access",)
+            if active_platform == "win32"
+            else ()
+        ),
     )
     return ScanCodexConfigResult(
         trusted_paths=result.trusted_paths,

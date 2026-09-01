@@ -23,6 +23,12 @@ except ModuleNotFoundError:  # Python 3.10 Agent compatibility.
 _MANAGED_MARKER = (
     "# Managed by OpenDeepHole Codex model sync. Do not edit."
 )
+_ACCESS_CONFIG_BEGIN = (
+    "# BEGIN OpenDeepHole managed Codex sandbox permissions"
+)
+_ACCESS_CONFIG_END = (
+    "# END OpenDeepHole managed Codex sandbox permissions"
+)
 _DEFAULT_CONFIG_BEGIN = (
     "# BEGIN OpenDeepHole managed Codex default model"
 )
@@ -38,6 +44,7 @@ _TRUST_CONFIG_END = (
 _ENV_BEGIN = "# BEGIN OpenDeepHole managed Codex NO_PROXY"
 _ENV_END = "# END OpenDeepHole managed Codex NO_PROXY"
 _PROFILE_GLOB = "opendeephole-*.config.toml"
+_SUPPORTED_SANDBOX_PERMISSIONS = frozenset({"disk-full-read-access"})
 _ENV_REFERENCE_RE = re.compile(
     r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$"
 )
@@ -424,6 +431,102 @@ def _managed_default_block(
     return "\n".join(lines), selected, ""
 
 
+def _normalize_sandbox_permissions(
+    permissions: Sequence[str],
+) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for permission in permissions:
+        if not isinstance(permission, str) or not permission:
+            raise ValueError(
+                "Codex sandbox permissions must be non-empty strings"
+            )
+        if permission not in _SUPPORTED_SANDBOX_PERMISSIONS:
+            raise ValueError(
+                f"unsupported Codex sandbox permission: {permission}"
+            )
+        if permission in seen:
+            continue
+        seen.add(permission)
+        normalized.append(permission)
+    return tuple(sorted(normalized))
+
+
+def _render_managed_access(permissions: Sequence[str]) -> str:
+    if not permissions:
+        return ""
+    values = ", ".join(_toml_string(item) for item in permissions)
+    return "\n".join((
+        _ACCESS_CONFIG_BEGIN,
+        f"sandbox_permissions = [{values}]",
+        _ACCESS_CONFIG_END,
+        "",
+    ))
+
+
+def _split_managed_access(
+    content: str,
+) -> tuple[str, tuple[str, ...], bool, str]:
+    """Remove and parse the one OpenDeepHole-owned leading access block."""
+    prefix = f"{_ACCESS_CONFIG_BEGIN}\n"
+    end_token = f"\n{_ACCESS_CONFIG_END}\n"
+    if not content.startswith(prefix):
+        if _ACCESS_CONFIG_BEGIN in content or _ACCESS_CONFIG_END in content:
+            return content, (), False, (
+                "OpenDeepHole managed sandbox permission markers are "
+                "malformed or misplaced"
+            )
+        return content, (), False, ""
+
+    end_index = content.find(end_token, len(prefix))
+    if end_index < 0:
+        return content, (), False, (
+            "OpenDeepHole managed sandbox permission markers are incomplete"
+        )
+    remainder_start = end_index + len(end_token)
+    if content[remainder_start:remainder_start + 1] == "\n":
+        remainder_start += 1
+    remainder = content[remainder_start:]
+    if _ACCESS_CONFIG_BEGIN in remainder or _ACCESS_CONFIG_END in remainder:
+        return content, (), False, (
+            "OpenDeepHole managed sandbox permission markers are duplicated"
+        )
+
+    body = content[len(prefix):end_index]
+    try:
+        parsed = tomllib.loads(body)
+    except Exception as exc:
+        return content, (), False, (
+            "OpenDeepHole managed sandbox permission block is invalid "
+            f"({type(exc).__name__})"
+        )
+    raw_permissions = parsed.get("sandbox_permissions")
+    if set(parsed) != {"sandbox_permissions"} or not isinstance(
+        raw_permissions,
+        list,
+    ):
+        return content, (), False, (
+            "OpenDeepHole managed sandbox permission block has unexpected "
+            "keys or values"
+        )
+    if any(
+        not isinstance(permission, str) or not permission
+        for permission in raw_permissions
+    ):
+        return content, (), False, (
+            "OpenDeepHole managed sandbox permission block has unexpected "
+            "permission values"
+        )
+    try:
+        permissions = _normalize_sandbox_permissions(raw_permissions)
+    except ValueError:
+        return content, (), False, (
+            "OpenDeepHole managed sandbox permission block has unsupported "
+            "permission values"
+        )
+    return remainder, permissions, True, ""
+
+
 def _split_managed_default(content: str) -> tuple[str, bool, str]:
     prefix = f"{_DEFAULT_CONFIG_BEGIN}\n"
     end_token = f"\n{_DEFAULT_CONFIG_END}\n"
@@ -567,8 +670,9 @@ def sync_codex_trusted_projects(
     env: Mapping[str, str] | None = None,
     platform: str | None = None,
     codex_home: Path | None = None,
+    required_sandbox_permissions: Sequence[str] = (),
 ) -> CodexTrustSyncResult:
-    """Add trusted projects without rewriting user-owned Codex settings."""
+    """Add required trust and access without rewriting user-owned settings."""
     effective_env = dict(os.environ) if env is None else dict(env)
     active_platform = platform or sys.platform
     destination = codex_home or _codex_home(
@@ -578,9 +682,12 @@ def sync_codex_trusted_projects(
     config_path = destination / "config.toml"
     try:
         requested = _normalize_trust_paths(paths, platform=active_platform)
+        requested_permissions = _normalize_sandbox_permissions(
+            required_sandbox_permissions,
+        )
     except (TypeError, ValueError) as exc:
         return CodexTrustSyncResult(error=str(exc))
-    if not requested:
+    if not requested and not requested_permissions:
         return CodexTrustSyncResult()
 
     try:
@@ -618,8 +725,18 @@ def sync_codex_trusted_projects(
             ),
         )
 
+    access_remainder, managed_permissions, _had_access, access_error = (
+        _split_managed_access(original_text)
+    )
+    if access_error:
+        return CodexTrustSyncResult(
+            error=(
+                f"could not update Codex config {config_path}: "
+                f"{access_error}; existing configuration was kept"
+            ),
+        )
     remainder, _had_default, default_error = _split_managed_default(
-        original_text,
+        access_remainder,
     )
     if default_error:
         return CodexTrustSyncResult(
@@ -628,8 +745,8 @@ def sync_codex_trusted_projects(
                 f"{default_error}; existing configuration was kept"
             ),
         )
-    default_prefix_length = len(original_text) - len(remainder)
-    default_prefix = original_text[:default_prefix_length]
+    default_prefix_length = len(access_remainder) - len(remainder)
+    default_prefix = access_remainder[:default_prefix_length]
     user_text, managed_paths, _had_trust, trust_error = (
         _split_managed_trust(remainder)
     )
@@ -659,6 +776,50 @@ def sync_codex_trusted_projects(
                 "was kept"
             ),
         )
+
+    user_owns_permissions = "sandbox_permissions" in parsed_user
+    raw_user_permissions = parsed_user.get("sandbox_permissions")
+    if requested_permissions and user_owns_permissions:
+        if not isinstance(raw_user_permissions, list) or any(
+            not isinstance(permission, str)
+            for permission in raw_user_permissions
+        ):
+            return CodexTrustSyncResult(
+                error=(
+                    f"could not update Codex config {config_path}: the "
+                    "user-owned sandbox_permissions setting is not a string "
+                    "array; existing configuration was kept"
+                ),
+            )
+        missing_permissions = tuple(
+            permission
+            for permission in requested_permissions
+            if permission not in raw_user_permissions
+        )
+        if missing_permissions:
+            return CodexTrustSyncResult(
+                error=(
+                    f"could not update Codex config {config_path}: the "
+                    "user-owned sandbox_permissions setting does not include "
+                    f"{', '.join(missing_permissions)}; existing "
+                    "configuration was kept"
+                ),
+            )
+        if managed_permissions:
+            return CodexTrustSyncResult(
+                error=(
+                    f"could not update Codex config {config_path}: both the "
+                    "user and OpenDeepHole define sandbox_permissions; "
+                    "existing configuration was kept"
+                ),
+            )
+
+    desired_managed_permissions = tuple(managed_permissions)
+    if requested_permissions and not user_owns_permissions:
+        desired_managed_permissions = tuple(sorted({
+            *managed_permissions,
+            *requested_permissions,
+        }))
 
     windows = active_platform == "win32"
     user_projects = {
@@ -703,7 +864,11 @@ def sync_codex_trusted_projects(
         user_text,
         managed_desired,
     )
-    desired_text = default_prefix + desired_remainder
+    desired_body = default_prefix + desired_remainder
+    access_prefix = _render_managed_access(desired_managed_permissions)
+    desired_text = access_prefix + (
+        "\n" + desired_body if access_prefix and desired_body else desired_body
+    )
     try:
         tomllib.loads(desired_text)
     except Exception as exc:
@@ -794,8 +959,21 @@ def _plan_default_config(
             ),
         )
 
+    default_content, _managed_permissions, _had_access, access_error = (
+        _split_managed_access(original_text)
+    )
+    if access_error:
+        return _DefaultConfigPlan(
+            path=config_path,
+            error=(
+                f"could not update Codex config {config_path}: "
+                f"{access_error}; existing configuration was kept"
+            ),
+        )
+    access_prefix_length = len(original_text) - len(default_content)
+    access_prefix = original_text[:access_prefix_length]
     user_text, had_managed_default, marker_error = (
-        _split_managed_default(original_text)
+        _split_managed_default(default_content)
     )
     if marker_error:
         return _DefaultConfigPlan(
@@ -822,7 +1000,7 @@ def _plan_default_config(
     managed_default_model: CodexModelConfig | None = None
     contains_literal_secret = False
     if user_default_preserved:
-        desired_text = user_text
+        desired_body = user_text
     elif models:
         block, managed_default, block_error = _managed_default_block(
             models,
@@ -842,9 +1020,11 @@ def _plan_default_config(
         contains_literal_secret = (
             ".experimental_bearer_token = " in block
         )
-        desired_text = block + ("\n" + user_text if user_text else "")
+        desired_body = block + ("\n" + user_text if user_text else "")
     else:
-        desired_text = user_text
+        desired_body = user_text
+
+    desired_text = access_prefix + desired_body
 
     try:
         tomllib.loads(desired_text)

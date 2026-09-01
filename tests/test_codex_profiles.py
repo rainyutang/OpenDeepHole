@@ -653,6 +653,169 @@ class CodexConfigSyncTests(unittest.TestCase):
             self.assertNotIn("model", parsed_without_model)
             self.assertEqual(set(parsed_without_model["projects"]), set(managed))
 
+    def test_managed_sandbox_access_coexists_with_model_trust_and_user_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            user_content = (
+                b"# Personal settings stay byte-for-byte intact.\r\n"
+                b"[features]\r\nmemories = true\r\n"
+            )
+            config_path.write_bytes(user_content)
+
+            access = codex_profiles.sync_codex_trusted_projects(
+                (r"C:\repo",),
+                codex_home=codex_home,
+                platform="win32",
+                required_sandbox_permissions=("disk-full-read-access",),
+            )
+            model = self._sync(
+                codex_home,
+                _effective_config(),
+                ["env/alpha"],
+            )
+            content = config_path.read_bytes().decode("utf-8")
+            default_content, permissions, has_access, access_error = (
+                codex_profiles._split_managed_access(content)
+            )
+            remainder, has_default, default_error = (
+                codex_profiles._split_managed_default(default_content)
+            )
+            restored, managed, has_trust, trust_error = (
+                codex_profiles._split_managed_trust(remainder)
+            )
+
+            self.assertEqual(access.error, "")
+            self.assertEqual(model.error, "")
+            self.assertTrue(has_access)
+            self.assertEqual(permissions, ("disk-full-read-access",))
+            self.assertEqual(access_error, "")
+            self.assertTrue(has_default)
+            self.assertEqual(default_error, "")
+            self.assertTrue(has_trust)
+            self.assertEqual(trust_error, "")
+            self.assertEqual(managed, (r"C:\repo",))
+            self.assertEqual(restored.encode("utf-8"), user_content)
+
+            with patch.object(codex_profiles, "_stage_file") as stage:
+                repeated = codex_profiles.sync_codex_trusted_projects(
+                    (r"C:\repo",),
+                    codex_home=codex_home,
+                    platform="win32",
+                    required_sandbox_permissions=(
+                        "disk-full-read-access",
+                    ),
+                )
+            self.assertEqual(repeated.error, "")
+            stage.assert_not_called()
+
+            removed_model = self._sync(codex_home, {}, [])
+            self.assertEqual(removed_model.error, "")
+            parsed = codex_profiles.tomllib.loads(
+                config_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                parsed["sandbox_permissions"],
+                ["disk-full-read-access"],
+            )
+            self.assertNotIn("model", parsed)
+            self.assertTrue(parsed["features"]["memories"])
+
+    def test_user_owned_sandbox_permission_is_reused_or_rejected_safely(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            accepted_home = root / "accepted"
+            accepted_home.mkdir()
+            accepted_path = accepted_home / "config.toml"
+            accepted_original = (
+                b'sandbox_permissions = ["disk-full-read-access"]\n'
+                b'[features]\nmemories = true\n'
+            )
+            accepted_path.write_bytes(accepted_original)
+
+            accepted = codex_profiles.sync_codex_trusted_projects(
+                (r"C:\repo",),
+                codex_home=accepted_home,
+                platform="win32",
+                required_sandbox_permissions=("disk-full-read-access",),
+            )
+            accepted_text = accepted_path.read_text(encoding="utf-8")
+
+            self.assertEqual(accepted.error, "")
+            self.assertTrue(accepted_text.startswith(
+                accepted_original.decode("utf-8")
+            ))
+            self.assertNotIn(
+                codex_profiles._ACCESS_CONFIG_BEGIN,
+                accepted_text,
+            )
+
+            for name, original in (
+                (
+                    "missing",
+                    b'sandbox_permissions = ["disk-full-write-access"]\n',
+                ),
+                ("wrong-type", b'sandbox_permissions = "read-only"\n'),
+            ):
+                with self.subTest(name=name):
+                    codex_home = root / name
+                    codex_home.mkdir()
+                    config_path = codex_home / "config.toml"
+                    config_path.write_bytes(original)
+
+                    rejected = codex_profiles.sync_codex_trusted_projects(
+                        (r"C:\repo",),
+                        codex_home=codex_home,
+                        platform="win32",
+                        required_sandbox_permissions=(
+                            "disk-full-read-access",
+                        ),
+                    )
+
+                    self.assertIn("sandbox_permissions", rejected.error)
+                    self.assertEqual(config_path.read_bytes(), original)
+
+    def test_model_sync_preserves_managed_access_with_user_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            config_path = codex_home / "config.toml"
+            config_path.write_text(
+                'model = "personal"\nmodel_provider = "private"\n',
+                encoding="utf-8",
+            )
+            access = codex_profiles.sync_codex_trusted_projects(
+                (r"C:\repo",),
+                codex_home=codex_home,
+                platform="win32",
+                required_sandbox_permissions=("disk-full-read-access",),
+            )
+            before_model_sync = config_path.read_bytes()
+
+            model = self._sync(
+                codex_home,
+                _effective_config(),
+                ["env/alpha"],
+            )
+
+            self.assertEqual(access.error, "")
+            self.assertEqual(model.error, "")
+            self.assertTrue(model.user_default_preserved)
+            self.assertEqual(config_path.read_bytes(), before_model_sync)
+            parsed = codex_profiles.tomllib.loads(
+                config_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(parsed["model"], "personal")
+            self.assertEqual(
+                parsed["sandbox_permissions"],
+                ["disk-full-read-access"],
+            )
+
     def test_user_owned_project_trust_is_reused_and_untrusted_is_respected(
         self,
     ) -> None:
@@ -737,6 +900,47 @@ class CodexConfigSyncTests(unittest.TestCase):
                     target.read_text(encoding="utf-8"),
                     'model = "personal"\n',
                 )
+
+    def test_malformed_access_markers_are_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cases = (
+                (
+                    "incomplete",
+                    (
+                        f"{codex_profiles._ACCESS_CONFIG_BEGIN}\n"
+                        'sandbox_permissions = ["disk-full-read-access"]\n'
+                    ).encode("utf-8"),
+                    "markers",
+                ),
+                (
+                    "unsupported",
+                    (
+                        f"{codex_profiles._ACCESS_CONFIG_BEGIN}\n"
+                        'sandbox_permissions = ["disk-full-write-access"]\n'
+                        f"{codex_profiles._ACCESS_CONFIG_END}\n"
+                    ).encode("utf-8"),
+                    "unsupported",
+                ),
+            )
+            for name, malformed, error_text in cases:
+                with self.subTest(name=name):
+                    codex_home = root / name
+                    codex_home.mkdir()
+                    config_path = codex_home / "config.toml"
+                    config_path.write_bytes(malformed)
+
+                    result = codex_profiles.sync_codex_trusted_projects(
+                        (r"C:\repo",),
+                        codex_home=codex_home,
+                        platform="win32",
+                        required_sandbox_permissions=(
+                            "disk-full-read-access",
+                        ),
+                    )
+
+                    self.assertIn(error_text, result.error)
+                    self.assertEqual(config_path.read_bytes(), malformed)
 
     def test_windows_codex_home_fallback_is_supported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from deephole_client import codex_scan_config
+from deephole_client import codex_profiles, codex_scan_config
 from deephole_client.codex_profiles import sync_codex_trusted_projects
 
 
@@ -202,6 +202,48 @@ class ScanCodexConfigTests(unittest.TestCase):
             })
             parsed = codex_scan_config.tomllib.loads(
                 (codex_home / "config.toml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(set(parsed["projects"]), set(result.trusted_paths))
+            self.assertNotIn("sandbox_permissions", parsed)
+
+    def test_windows_access_adds_global_full_read_sandbox_permission(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            app_home = root / "home" / ".opendeephole"
+            scan_dir = app_home / "scans" / "scan-1"
+            scan_dir.mkdir(parents=True)
+            codex_home = root / "codex-home"
+            runtime_references = root / "runtime" / "codex-goal"
+            runtime_references.mkdir(parents=True)
+
+            with patch.object(
+                codex_scan_config,
+                "codex_runtime_reference_root",
+                return_value=runtime_references,
+            ):
+                result = codex_scan_config.prepare_scan_codex_access(
+                    project_path=project,
+                    scan_dir=scan_dir,
+                    codex_home=codex_home,
+                    platform="win32",
+                )
+
+            config_text = (
+                codex_home / "config.toml"
+            ).read_text(encoding="utf-8")
+            parsed = codex_scan_config.tomllib.loads(config_text)
+            self.assertEqual(result.error, "")
+            self.assertEqual(
+                parsed["sandbox_permissions"],
+                ["disk-full-read-access"],
+            )
+            self.assertIn(
+                codex_profiles._ACCESS_CONFIG_BEGIN,
+                config_text,
             )
             self.assertEqual(set(parsed["projects"]), set(result.trusted_paths))
 

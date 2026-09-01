@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-09-01
+
+- **修复** Windows Agent 创建或恢复扫描时，除继续安全合并项目总路径、`.opendeephole`、扫描工作目录和运行时参考目录的 trusted-projects 外，还会在用户全局 `$CODEX_HOME/config.toml` 顶部托管 `sandbox_permissions = ["disk-full-read-access"]`，使只具备 `exec_command` 的 Codex 沙箱能够通过 PowerShell、cmd 或 `rg` 读取源码；该权限全局生效但不授予源码写权限，扫描产物仍沿用现有 workspace-write 工作目录。用户自有权限键满足要求时直接复用，缺失、类型冲突、非法标记、符号链接或并发改写时保持原文件；默认模型区、用户原文、trusted-projects 与文件模式继续安全合并。Linux 不新增该权限键，`[windows].sandbox` 不改动，CodeGraph 仍只写入扫描工作目录的 MCP 配置，Codex SDK 与威胁分析实现均未修改
+
 ## 2026-08-31
 
 - **修复** Agent 创建或恢复扫描时会把项目总路径、`~/.opendeephole`、精确的扫描 Codex 工作目录及随包参考资料目录，以 OpenDeepHole 自有尾部区安全合并到 `$CODEX_HOME/config.toml` 的 trusted projects；保留用户配置、平台默认模型托管区、文件模式和 Linux/Windows 路径语义，显式非 trusted、非法配置、符号链接及并发改写均不强制覆盖。扫描启用且成功准备 CodeGraph 后，另在 `<scan>/threat_analysis/.codex/config.toml` 写入扫描私有 `codegraph` MCP，本地/远端参数、环境或请求头和超时取自固化快照，关闭或失败时只清理自有配置并回退文件工具；真实 Codex App Server 回归确认父目录信任不会误激活项目层，必须精确信任扫描工作目录后配置才会生效
