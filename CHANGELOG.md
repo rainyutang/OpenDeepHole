@@ -2,6 +2,7 @@
 
 ## 2026-09-01
 
+- **优化** 新建扫描的“扫描模块路径”占位提示改为“子目录的绝对路径”，明确该字段应填写目标子目录的绝对路径
 - **修复** Windows Agent 创建或恢复扫描时，除继续安全合并项目总路径、`.opendeephole`、扫描工作目录和运行时参考目录的 trusted-projects 外，还会在用户全局 `$CODEX_HOME/config.toml` 顶部托管 `sandbox_permissions = ["disk-full-read-access"]`，使只具备 `exec_command` 的 Codex 沙箱能够通过 PowerShell、cmd 或 `rg` 读取源码；该权限全局生效但不授予源码写权限，扫描产物仍沿用现有 workspace-write 工作目录。用户自有权限键满足要求时直接复用，缺失、类型冲突、非法标记、符号链接或并发改写时保持原文件；默认模型区、用户原文、trusted-projects 与文件模式继续安全合并。Linux 不新增该权限键，`[windows].sandbox` 不改动，CodeGraph 仍只写入扫描工作目录的 MCP 配置，Codex SDK 与威胁分析实现均未修改
 
 ## 2026-08-31
