@@ -3,6 +3,8 @@
 ## 2026-09-01
 
 - **优化** 新建扫描的“扫描模块路径”占位提示改为“子目录的绝对路径”，明确该字段应填写目标子目录的绝对路径
+- **新增** 新建扫描默认改为“轻量级威胁分析（OpenCode）”：新增 `opencode_lightweight_threat_analysis`，通过一次逻辑上的 `run_opencode_task(task_type="threat_analysis")` 生成价值资产、高风险模块和攻击树，并与“轻量级威胁分析（Codex）”调用同一个 Prompt 构造函数，保证相同路径输入下提示词严格一致；OpenCode 方法复用 Agent 当前威胁分析阶段的超时与 fresh Session 重试，重试耗尽后归档失败产物并仅 clean 回退一次 DeepHole，取消不重试也不回退。现有扫描及方法快照不迁移，Codex 与 OpenCode 标签按运行时明确区分
+- **安全** Task Agent 公共任务接口新增 `readable_paths` 与 `required_bash_commands`：前者只开放任务级只读外部目录，后者在全局 shell 默认拒绝的基础上仅允许无换行、无通配符的精确完整命令；受管 Session Hook 对父子 Session 再次拒绝未绑定或拼接命令，并要求所有必需命令在最后一次受管文件写入后以退出码 0 完成。缺失、失败或校验后改写作为任务质量失败进入现有 fresh Session 重试且不降低模型健康，OpenCode 轻量级方法返回成功前还会在本地重复执行同一产物校验器
 - **修复** Windows Agent 创建或恢复扫描时，除继续安全合并项目总路径、`.opendeephole`、扫描工作目录和运行时参考目录的 trusted-projects 外，还会在用户全局 `$CODEX_HOME/config.toml` 顶部托管 `sandbox_permissions = ["disk-full-read-access"]`，使只具备 `exec_command` 的 Codex 沙箱能够通过 PowerShell、cmd 或 `rg` 读取源码；该权限全局生效但不授予源码写权限，扫描产物仍沿用现有 workspace-write 工作目录。用户自有权限键满足要求时直接复用，缺失、类型冲突、非法标记、符号链接或并发改写时保持原文件；默认模型区、用户原文、trusted-projects 与文件模式继续安全合并。Linux 不新增该权限键，`[windows].sandbox` 不改动，CodeGraph 仍只写入扫描工作目录的 MCP 配置，Codex SDK 与威胁分析实现均未修改
 
 ## 2026-08-31

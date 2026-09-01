@@ -51,7 +51,14 @@ from .vulnerability_mining.runtime import (
 
 
 CODEX_THREAT_ANALYSIS_METHOD_ID = "codex_goal_threat_analysis"
+OPENCODE_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID = (
+    "opencode_lightweight_threat_analysis"
+)
 DEEPHOLE_THREAT_ANALYSIS_METHOD_ID = "deephole_threat_analysis"
+LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_IDS = frozenset({
+    CODEX_THREAT_ANALYSIS_METHOD_ID,
+    OPENCODE_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID,
+})
 
 
 def _archive_failed_threat_analysis(output_path: Path) -> Path | None:
@@ -895,12 +902,21 @@ async def run_scan(
 
         try:
             artifact_bundle: dict[str, Any]
-            if threat_analysis_method_id == CODEX_THREAT_ANALYSIS_METHOD_ID:
-                primary_reason = codex_unavailable_reason()
+            if threat_analysis_method_id in LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_IDS:
+                primary_name = (
+                    "Codex"
+                    if threat_analysis_method_id == CODEX_THREAT_ANALYSIS_METHOD_ID
+                    else "OpenCode"
+                )
+                primary_reason = (
+                    codex_unavailable_reason()
+                    if threat_analysis_method_id == CODEX_THREAT_ANALYSIS_METHOD_ID
+                    else ""
+                )
                 if not primary_reason:
                     try:
                         result = await run_method_attempt(
-                            CODEX_THREAT_ANALYSIS_METHOD_ID,
+                            threat_analysis_method_id,
                             resume=is_resume,
                         )
                         require_success(result)
@@ -925,13 +941,13 @@ async def run_scan(
                         )
                     except Exception as exc:
                         raise RuntimeError(
-                            "Codex threat analysis failed: "
+                            f"{primary_name} lightweight threat analysis failed: "
                             f"{primary_reason}; failed to archive its "
                             f"artifacts: {type(exc).__name__}: {exc}"
                         ) from exc
                     await emit(
                         "threat_analysis",
-                        "Codex threat analysis unavailable or failed; "
+                        f"{primary_name} lightweight threat analysis unavailable or failed; "
                         "starting one clean DeepHole fallback"
                         + (
                             f" (archived at {archive_path})"
@@ -956,7 +972,7 @@ async def run_scan(
                             str(exc).strip() or type(exc).__name__
                         )
                         raise RuntimeError(
-                            "Codex threat analysis failed: "
+                            f"{primary_name} lightweight threat analysis failed: "
                             f"{primary_reason}; DeepHole fallback failed: "
                             f"{fallback_reason}"
                         ) from exc

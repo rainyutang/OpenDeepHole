@@ -5,11 +5,20 @@
 一个方法，扫描创建后会固化方法 ID、名称和说明快照。内置方法 ID 是
 `deephole_threat_analysis`，界面名称是“DeepHole威胁分析”。
 
-仓库还提供 `codex_goal_threat_analysis`：它通过 `codex_sdk` 启动一个可恢复
-Goal，用一段不超过 4000 字符的提示词完成三类产物生成。提示词只携带路径和关键约束，
-完整接口契约与三份字段 Schema 均来自该方法自己的 `references/*.json`。该方法
-显式使用 Agent 启动时从 OpenCode 模型配置生成的 Codex 托管 profile，不会回退到
-需要交互登录的裸 Codex 默认 Provider。
+仓库还提供两个运行时可区分的轻量级方法：
+
+- `codex_goal_threat_analysis`，界面名称“轻量级威胁分析（Codex）”，通过
+  `codex_sdk` 启动可恢复 Goal。
+- `opencode_lightweight_threat_analysis`，界面名称“轻量级威胁分析（OpenCode）”，通过一次
+  逻辑上的 `run_opencode_task(task_type="threat_analysis")` 执行；这是新建扫描的默认选择。
+
+两个方法调用 `lightweight_contract.py` 中同一个 Prompt 构造函数，因此相同源码、上下文、参考资料
+和输出路径会得到字节级一致的用户 Prompt。提示词不超过 4000 字符，只携带路径和关键约束；完整
+接口契约与三份字段 Schema 都来自 Codex 方法目录下的只读 `references/*.json`，校验器也继续位于
+该目录，以保持 Prompt 中的既有路径不变。OpenCode 方法复用 Agent 当前
+`threat_analysis.model_policy` 的超时和全新 Session 重试；Task Agent 只开放 Prompt 内精确的
+校验命令，并要求命令在最后一次文件写入后以退出码 0 完成。标准重试耗尽后，外层扫描编排归档失败
+产物并仅 clean 执行一次 `deephole_threat_analysis`；取消不重试也不回退，历史扫描不迁移方法选择。
 
 ## 目录约定
 
@@ -42,8 +51,9 @@ label: 我的威胁分析
 description: 生成价值资产、高风险模块和攻击树。
 ```
 
-方法 ID 已由目录名唯一确定，因此不需要 `package_name`。默认方法由平台常量
-`deephole_threat_analysis` 确定，因此清单也不需要 `default`。未知字段会使当前方法无效。
+方法 ID 已由目录名唯一确定，因此不需要 `package_name`。清单不需要 `default`：新建扫描由后端与
+前端优先选择 `opencode_lightweight_threat_analysis`，而运行时在调用方没有显式传入方法时仍以
+`deephole_threat_analysis` 作为安全兜底。未知字段会使当前方法无效。
 
 ## 唯一原生入口
 
@@ -126,11 +136,15 @@ return {
 不是 `success`，或依赖它的威胁审计仍有未完成任务时重新启动该过程，并先传入
 `is_resume=True`。方法可以自行验证和复用 `output_path` 中已经完成的阶段产物。
 
-如果这次增量恢复明确返回 `result=False` 且任务没有被取消，外层扫描协调器会把当前
+如果普通方法的这次增量恢复明确返回 `result=False` 且任务没有被取消，外层扫描协调器会把当前
 `threat_analysis` 目录原子移动到同级 `threat_analysis_failed/<UTC-attempt-id>/`，创建新的空
 输出目录，然后只再调用一次原生入口并传入 `is_resume=False`。第二次仍失败时本次续扫立即
 停止威胁分析且不循环重试；扫描整体状态仍按其它独立引擎的结果收敛。取消或外层适配器异常
 也不会触发干净回退。归档只保留在 Agent 本地，便于排查且不会上传原生任务或模型明细。
+
+两个轻量级方法使用更严格的恢复边界：Codex 失败，或 OpenCode 在当前威胁分析阶段策略配置的
+fresh Session 重试全部耗尽后，直接归档并 clean 执行一次 DeepHole 方法，不再先 clean 重跑同一个
+轻量级方法。DeepHole 回退失败时会同时保留轻量级主错误和回退错误。
 
 该恢复策略属于平台协调逻辑，不要求方法感知扫描整体状态，也不修改
 `methods/deephole_threat_analysis/` 内的原生实现。威胁分析失败只会阻塞消费其结果的

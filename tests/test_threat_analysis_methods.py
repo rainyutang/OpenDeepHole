@@ -68,7 +68,12 @@ def test_method_catalog_uses_directory_ids_and_minimal_yaml() -> None:
         },
         {
             "method_id": "codex_goal_threat_analysis",
-            "label": "威胁分析",
+            "label": "轻量级威胁分析（Codex）",
+            "description": "生成价值资产、高风险模块和攻击树。",
+        },
+        {
+            "method_id": "opencode_lightweight_threat_analysis",
+            "label": "轻量级威胁分析（OpenCode）",
             "description": "生成价值资产、高风险模块和攻击树。",
         },
     ]
@@ -85,8 +90,8 @@ def test_method_catalog_uses_directory_ids_and_minimal_yaml() -> None:
 def test_backend_resolves_default_method_and_rejects_unknown_selection() -> None:
     method_id, selection = _resolve_threat_analysis_method(None)
 
-    assert method_id == "codex_goal_threat_analysis"
-    assert selection.method_label == "威胁分析"
+    assert method_id == "opencode_lightweight_threat_analysis"
+    assert selection.method_label == "轻量级威胁分析（OpenCode）"
     assert _resolve_threat_analysis_method("  ")[0] == method_id
     assert (
         _resolve_threat_analysis_method("deephole_threat_analysis")[0]

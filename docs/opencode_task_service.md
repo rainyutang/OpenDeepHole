@@ -33,13 +33,15 @@ result = await run_opencode_task(
     invalid_json_retry_prompt=retry_prompt,
     file_write_allowlist=None,
     writable_paths=None,
+    readable_paths=None,
+    required_bash_commands=None,
     session_id=None,
     output=None,
     cancel_event=None,
 )
 ```
 
-参数只有以下十三个：
+参数只有以下十五个：
 
 | 参数 | 类型 | 默认值 | 含义 |
 | --- | --- | --- | --- |
@@ -52,12 +54,14 @@ result = await run_opencode_task(
 | `invalid_json_retry_prompt` | `str \| None` | `None` | 自定义 JSON 纠正提示词；非空字符串会原样重复发送，`None` 使用内置中文默认值 |
 | `file_write_allowlist` | 单个路径、路径序列或 `None` | `None` | 为本次 Session 额外开放写权限并默认保留的文件或目录；相对路径以 `project_dir` 为基准，绝对路径可位于项目外 |
 | `writable_paths` | 单个路径、路径序列或 `None` | `None` | `file_write_allowlist` 的兼容别名；两者会合并为同一组可写和保留路径 |
+| `readable_paths` | 单个路径、路径序列或 `None` | `None` | 为本次 Session 额外开放只读和外部目录访问；不授予编辑权限，也不改变保留规则 |
+| `required_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许且必须成功执行的完整 shell 命令；拒绝空值、换行与通配符 |
 | `session_id` | `str \| None` | `None` | 为空时创建 Session；非空时续写已有 Session |
 | `config_path` | `str \| PathLike \| None` | `None` | 仅独立模式使用的组件 YAML 路径；后端模式禁止覆盖宿主配置 |
 | `output` | callable 或 `None` | 当前执行上下文 | 覆盖本次任务的流式输出回调；显式 `None` 表示关闭 |
 | `cancel_event` | 提供 `is_set()` 的对象 | 当前执行上下文 | 覆盖本次任务的取消信号 |
 
-不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；两者只生成路径级 `read`、`external_directory` 和 `edit` 放行规则，不能启用 `bash` 或改变其它权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
+不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；`readable_paths` 只增加读取范围。`required_bash_commands` 是唯一的 shell 例外入口，仅允许并要求精确完整命令，不接受调用方自定义原生权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
 
 返回的 `OpenCodeResult.output_source` 是可 JSON 序列化的 dict，用于由客户端协调器原样上报实际模型和 Session 来源。其中 `serve_session_id` 始终回填为生成该结果的最终 OpenCode `session_id`；问题详情页会把它直接显示在对应输出来源中，历史结果缺少该字段时保持兼容。
 
@@ -186,17 +190,17 @@ model_pool:
 | `context.work_dir` | 必填，不存在时创建 | 本次独立组件固定的可写任务目录。模型生成的补丁、PoC、报告等任务产物应写在这里。 |
 | `context.workspace_dir` | 必填，不存在时创建 | Serve 的稳定启动目录和组件 workspace。运行时会在这里生成 `opencode.json`，也适合保存共享 Skill；不要把每次任务的业务产物写在这里。 |
 
-三个路径都支持 `~`。绝对路径直接使用；相对路径以 `task-agent.yaml` 所在目录为基准，而不是以启动 Python 的当前目录为基准。`project_dir` 必须预先存在；`work_dir` 和 `workspace_dir` 会自动递归创建。standalone 的最终 `workspace_dir/opencode.json` 允许读取项目工作目录、`work_dir`、`workspace_dir/.opencode` 和已注册的 Skill 根；文件编辑工具只能写 `work_dir`，`bash` 始终禁用。
+三个路径都支持 `~`。绝对路径直接使用；相对路径以 `task-agent.yaml` 所在目录为基准，而不是以启动 Python 的当前目录为基准。`project_dir` 必须预先存在；`work_dir` 和 `workspace_dir` 会自动递归创建。standalone 的最终 `workspace_dir/opencode.json` 允许读取项目工作目录、`work_dir`、`workspace_dir/.opencode` 和已注册的 Skill 根；文件编辑工具只能写 `work_dir`，`bash` 在未声明精确必需命令时保持禁用。
 
 v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未显式填写 `serve.executable` 时继续使用 `nga`；旧模型行里的 `tool` 和 `executable` 会被忽略。v2 只接受 `serve.tool: opencode`，并拒绝模型行工具或可执行文件覆盖，确保所有模型共用 `serve.executable`。
 
-嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，`bash` 始终禁用。显式传入 `file_write_allowlist` 或兼容参数 `writable_paths` 时，额外动态路径通过 Session 权限覆盖下发，不进入 Serve 配置哈希。
+嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，全局 `bash` 保持拒绝。显式传入 `file_write_allowlist`、兼容参数 `writable_paths`、`readable_paths` 或 `required_bash_commands` 时，动态权限通过 Session 覆盖下发，不进入 Serve 配置哈希。
 
-`workspace_dir` 中生成的 `opencode.json` 包含合并后的实际配置，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Task Agent 还会在该 workspace 的私有目录生成受管文件写入 Hook 和知识库项目 Hook，并在最终配置的 `plugin` 列表末尾追加文件 URI；调用方已有的插件条目保持原顺序且不会被覆盖，Hook 源码哈希也参与 Serve 配置重载判断。知识库项目 Hook 通过 Session ID 哈希定位 `0600` 私有绑定文件，在 `tool.execute.before` 原地强制覆盖查询工具的 `project_id`，并拒绝平台专用的项目列表/切换工具；绑定不写入 Session 消息或系统提示，业务 prompt 返回后即删除。连接、工具发现或绑定失败时，Task Agent 在发出业务 prompt 前断开并禁用该知识库 MCP，任务继续执行。
+`workspace_dir` 中生成的 `opencode.json` 包含合并后的实际配置，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Task Agent 还会在该 workspace 的私有目录生成受管文件写入/精确命令 Hook 和知识库项目 Hook，并在最终配置的 `plugin` 列表末尾追加文件 URI；调用方已有的插件条目保持原顺序且不会被覆盖，Hook 源码哈希也参与 Serve 配置重载判断。知识库项目 Hook 通过 Session ID 哈希定位 `0600` 私有绑定文件，在 `tool.execute.before` 原地强制覆盖查询工具的 `project_id`，并拒绝平台专用的项目列表/切换工具；文件写入 Hook 同时按 Session 私有绑定约束父、子 Session 的精确命令，只记录执行顺序、完整命令和退出码，不写入 Prompt。绑定和命令审计在业务 prompt 返回后即删除。
 
 完整 Agent 与 standalone 共用配置发现与深度合并规则：用户全局目录 < 可执行文件相邻目录 < 项目目录 < 平台 `opencode.config_paths`（standalone 无此层）< `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR`。standalone 随后再合并 `serve.opencode_config`，所以 YAML 中的映射递归覆盖前述来源，标量和列表整体替换。用户全局目录及显式配置目录兼容旧版 `config.json`；自动发现的可执行文件相邻目录与项目目录只接受 `opencode.json` / `opencode.jsonc`，避免误读安装器、启动器或项目自身的通用 `config.json`。使用 `nga` 可执行文件时还会发现对应的全局 `nga` 配置目录。无效外部 JSON/JSONC 记录警告后忽略，不记录配置值；standalone 的配置快照固定到 `shutdown_opencode()`。
 
-最终的 `workspace_dir/opencode.json` 不参与 standalone 的项目配置发现，避免 `workspace_dir == project_dir` 时回灌上次生成物；仍建议将 `workspace_dir` 与源码目录分开，防止覆盖项目自有的同名文件。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该最终配置目录，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再次读取并重复合并用户配置。Task Agent 的文件、Skill 与 `bash` 权限以及受管写入 Hook 始终最后生效，不能被外部配置放宽。
+最终的 `workspace_dir/opencode.json` 不参与 standalone 的项目配置发现，避免 `workspace_dir == project_dir` 时回灌上次生成物；仍建议将 `workspace_dir` 与源码目录分开，防止覆盖项目自有的同名文件。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该最终配置目录，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再次读取并重复合并用户配置。Task Agent 的文件、Skill 与全局 `bash` 拒绝规则以及受管写入和命令 Hook 始终最后生效，不能被外部配置放宽；任务级精确命令只存在于 Session 覆盖和私有绑定中。
 
 ### Serve 参数
 
@@ -345,6 +349,8 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - `project_dir`：真实项目目录，只允许 `read`、`list`、`glob`、`grep`。
 - `work_dir`：当前任务所属的 `.opendeephole` 隔离工作目录，允许文件编辑工具写入。
 - `file_write_allowlist` / `writable_paths`：调用方显式授权的额外文件或目录；两者合并后同时获得写权限和默认保留语义。相对路径以 `project_dir` 为基准，绝对路径允许位于项目外，但不接受 `*`、`?` 或文件系统根目录。
+- `readable_paths`：调用方显式授权的额外只读文件或目录；只获得 `read` 和 `external_directory`，不获得 `edit`，也不参与保留。
+- `required_bash_commands`：调用方声明的精确完整命令；先拒绝 `*`，再按声明顺序逐条放行，命令必须在最后一次受管文件写入后以退出码 0 完成。
 - `scan_id`、任务元数据、输出回调和取消事件：由编排层绑定并在异步任务树中自动继承。
 - `config_path`：独立过程可绑定自己的 Task Agent YAML；standalone 会合并全局、可执行文件相邻、项目、环境显式配置与 YAML 中的 `serve.opencode_config.skills.paths`，任务级 `skill_paths` 再追加到最终列表。
 - `skill_paths`：为确实需要临时 Skill 根的过程提供任务级注册；威胁分析只绑定当前所选方法的 Skill 根，不把方法目录写入全局运行配置。
@@ -355,7 +361,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 - 允许读取项目工作目录、当前工作目录和全局 workspace 的 `.opencode`；最终配置的 `skills.paths` 以及通用过程显式绑定的临时 `skill_paths` 都会获得完整子路径的 `read: allow` 与外部目录规则，使 `references/`、`assets/`、`scripts/` 等资源可读。
 - 先拒绝所有 `edit`，再允许宿主声明的稳定可写根。完整 Agent 允许写四个 `.opendeephole` 任务根，standalone 允许写固定 `work_dir`；通用嵌入宿主若没有声明覆盖当前 `work_dir` 的稳定根，Task Agent 会把该目录加入本次最终配置。
-- 拒绝所有 `bash`，避免通过 shell 绕过项目只读和工作目录写边界。
+- 默认拒绝所有 `bash`；只有当前调用显式声明 `required_bash_commands` 时才放行完全匹配的命令，受管 Hook 会拒绝未绑定、拼接或变形命令，并将缺失、非零退出及校验后再次写文件视为任务质量失败。
 - 允许加载最终配置注册的 SKILL，以及通用过程通过 `skill_paths` 绑定的临时 SKILL；注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
 
 原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。Task Agent 每次都以 `work_dir` 加当前调用显式路径生成 Session 权限；续接已有 Session 时会替换旧覆盖，避免上一次调用的额外写路径残留。新 Session 重试会重新应用相同路径，同 Session JSON 纠正复用当前权限而不重复 PATCH。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。

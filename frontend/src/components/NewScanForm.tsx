@@ -125,7 +125,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       setMiningEngineCatalog(engineCatalog.engines);
       setMiningEngines(Object.fromEntries(engineCatalog.engines.map((engine) => [engine.engine_id, { selected: true }])));
       setThreatMethods(threatCatalog.methods);
-      setThreatAnalysisMethod(threatCatalog.methods.find((method) => method.method_id === "codex_goal_threat_analysis")?.method_id || threatCatalog.methods[0]?.method_id || "");
+      setThreatAnalysisMethod(threatCatalog.methods.find((method) => method.method_id === "opencode_lightweight_threat_analysis")?.method_id || threatCatalog.methods[0]?.method_id || "");
       setFpMethods(fpCatalog.methods);
       setFpReviewMethod(fpCatalog.methods.find((method) => method.default)?.method_id || fpCatalog.methods[0]?.method_id || "");
       const preferred = agentList.find((agent) => agentAcceptsTasks(agent) && agent.has_explicit_model) || agentList.find(agentAcceptsTasks);

@@ -1396,6 +1396,154 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.codex_mcp.assert_awaited_once()
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
+    async def test_failed_opencode_lightweight_is_archived_then_deephole_runs_once(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        attempts: list[tuple[str, bool]] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+
+            async def run_analysis(**kwargs):
+                attempts.append((kwargs["method_id"], kwargs["is_resume"]))
+                output_path = Path(kwargs["output_path"])
+                output_path.mkdir(parents=True, exist_ok=True)
+                if kwargs["method_id"] == "opencode_lightweight_threat_analysis":
+                    (output_path / "partial.json").write_text(
+                        '{"partial": true}',
+                        encoding="utf-8",
+                    )
+                    return {
+                        "result": False,
+                        "reason": "required command failed after configured retries",
+                    }
+                return {
+                    "result": True,
+                    "value_asset_path": str(root / "assets.json"),
+                    "attack_tree_path": str(root / "attack-tree.json"),
+                    "high_risk_modules_path": str(root / "risk.json"),
+                }
+
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=AsyncMock(side_effect=run_analysis),
+                ),
+                patch(
+                    "deephole_client.scanner.collect_json_artifacts",
+                    return_value={"artifacts": {}},
+                ),
+            ):
+                await run_scan(
+                    config=AgentConfig(),
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="opencode-lightweight-fallback",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-opencode-lightweight-fallback",
+                    cancel_event=threading.Event(),
+                    is_resume=True,
+                    resume_threat_analysis=True,
+                    threat_analysis_enabled=True,
+                    threat_analysis_method="opencode_lightweight_threat_analysis",
+                    mining_engines=[],
+                )
+
+            failed_root = (
+                root
+                / ".opendeephole"
+                / "scans"
+                / "scan-opencode-lightweight-fallback"
+                / "threat_analysis_failed"
+            )
+            archives = list(failed_root.iterdir())
+            self.assertEqual(len(archives), 1)
+            self.assertTrue((archives[0] / "partial.json").is_file())
+
+        self.assertEqual(attempts, [
+            ("opencode_lightweight_threat_analysis", True),
+            ("deephole_threat_analysis", False),
+        ])
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
+
+    async def test_cancelled_opencode_lightweight_does_not_fallback(self) -> None:
+        reporter = _reporter()
+        cancel_event = threading.Event()
+        attempts: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            index_path = root / "index.db"
+            index_path.touch()
+
+            async def run_analysis(**kwargs):
+                attempts.append(kwargs["method_id"])
+                cancel_event.set()
+                return {"result": False, "reason": "cancelled"}
+
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.run_code_graph_build",
+                    new=AsyncMock(return_value={
+                        "status": "success",
+                        "index_db_path": str(index_path),
+                        "stats": {"files": 0},
+                    }),
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=AsyncMock(side_effect=run_analysis),
+                ),
+            ):
+                await run_scan(
+                    config=AgentConfig(),
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="opencode-lightweight-cancelled",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-opencode-lightweight-cancelled",
+                    cancel_event=cancel_event,
+                    threat_analysis_enabled=True,
+                    threat_analysis_method="opencode_lightweight_threat_analysis",
+                    mining_engines=[],
+                )
+
+        self.assertEqual(attempts, ["opencode_lightweight_threat_analysis"])
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "cancelled")
+
     async def test_resume_runs_only_requested_failed_engine(self) -> None:
         reporter = _reporter()
         config = AgentConfig()

@@ -232,11 +232,13 @@ Linux/macOS 不会由 OpenDeepHole 新增该权限键，继续使用原有沙箱
 文件在支持权限位的平台分别使用 `0700` 和 `0600`，Windows `.cmd` / `.bat` MCP 通过 `cmd.exe`
 的独立参数启动。Codex 只会在精确工作目录已 trusted 时加载这一项目层配置。
 
-新建扫描默认优先使用 `codex_goal_threat_analysis`。Codex CLI 不可用、没有用户默认模型且没有任何
-模型通过探测、托管配置失败、Codex 方法执行失败或其结果产物无效时，外层扫描编排会自动且仅一次以
-clean 模式执行 `deephole_threat_analysis`；用户取消不会触发回退。用户显式选择 DeepHole 时直接
-执行 DeepHole，不会为了威胁分析探测或调用 Codex（另行选择的 `requires_codex` 漏洞挖掘引擎仍会
-按其契约准备 Codex）。Codex 方法本身及 Codex SDK 均不参与这一回退改动。
+新建扫描默认优先使用 `opencode_lightweight_threat_analysis`。它与
+`codex_goal_threat_analysis` 共用同一个轻量级威胁分析 Prompt；前者通过一次逻辑上的
+`run_opencode_task(task_type="threat_analysis")` 执行，并复用 Agent 当前
+`threat_analysis.model_policy` 的超时与全新 Session 重试。Task Agent 只为该任务开放 Prompt 中
+列出的精确产物校验命令，命令必须在最终写入后以退出码 0 完成。标准重试耗尽、Codex 不可用或任一
+轻量级方法产物无效时，外层扫描编排会自动且仅一次以 clean 模式执行
+`deephole_threat_analysis`；用户取消不会触发回退。用户显式选择 DeepHole 时仍直接执行 DeepHole。
 配置成功后，威胁分析直接以 `codex app-server --listen stdio://` 启动 SDK；所有 Codex 调用都依赖
 同一个全局默认模型，不再生成或传递 profile。用户默认模型运行失败时不覆盖配置重试，而是立即执行
 既定的单次 DeepHole 回退。

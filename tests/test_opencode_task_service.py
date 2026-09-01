@@ -16,6 +16,8 @@ from backend.models import OutputSource
 from task_agent import OpenCodeResult, run_opencode_task
 from task_agent.api import (
     _normalize_file_write_allowlist,
+    _normalize_readable_paths,
+    _normalize_required_bash_commands,
     _normalize_writable_paths,
 )
 from task_agent.model_pool import (
@@ -27,6 +29,7 @@ from task_agent.serve_client import (
     OpenCodeFileWrite,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
+    OpenCodeTaskQualityError,
 )
 from task_agent.task_service import (
     OpenCodeExecutionContext,
@@ -111,6 +114,44 @@ def test_writable_path_permissions_allow_read_external_access_and_edits(
         "pattern": "*",
         "action": "deny",
     }]
+
+
+def test_task_permissions_add_read_only_roots_and_exact_shell_command(
+    tmp_path: Path,
+) -> None:
+    writable_root = tmp_path / "generated"
+    readable_root = tmp_path / "references"
+    command = "python validate.py --input generated/result.json"
+
+    permissions = _writable_path_permissions(
+        (writable_root,),
+        readable_paths=(readable_root,),
+        required_bash_commands=(command,),
+    )
+
+    assert permissions is not None
+    for pattern in _permission_path_patterns(readable_root):
+        assert {
+            "permission": "read",
+            "pattern": pattern,
+            "action": "allow",
+        } in permissions
+        assert {
+            "permission": "external_directory",
+            "pattern": pattern,
+            "action": "allow",
+        } in permissions
+        assert not any(
+            rule["permission"] == "edit" and rule["pattern"] == pattern
+            for rule in permissions
+        )
+    bash_rules = [
+        rule for rule in permissions if rule["permission"] == "bash"
+    ]
+    assert bash_rules == [
+        {"permission": "bash", "pattern": "*", "action": "deny"},
+        {"permission": "bash", "pattern": command, "action": "allow"},
+    ]
 
 
 def test_dynamic_writable_paths_stay_out_of_serve_config(
@@ -388,6 +429,8 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "invalid_json_retry_prompt",
         "file_write_allowlist",
         "writable_paths",
+        "readable_paths",
+        "required_bash_commands",
         "session_id",
         "config_path",
         "output",
@@ -447,6 +490,8 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                     external_dir,
                     "generated",
                 ],
+                readable_paths=["references", external_dir / "schemas"],
+                required_bash_commands="python validate.py",
                 session_id="ses-existing",
             )
 
@@ -473,6 +518,11 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
             external_dir.resolve(),
         )
         assert spec.writable_paths == spec.file_write_allowlist
+        assert spec.readable_paths == (
+            (tmp_path / "references").resolve(),
+            (external_dir / "schemas").resolve(),
+        )
+        assert spec.required_bash_commands == ("python validate.py",)
         assert spec.session_id == "ses-existing"
 
         service.run_task.reset_mock()
@@ -866,6 +916,34 @@ def test_public_interface_validates_writable_paths(tmp_path: Path) -> None:
                 prompt="test",
                 required_capability="low",
                 writable_paths=[Path(tmp_path.anchor)],
+            )
+
+    asyncio.run(run())
+
+
+def test_public_interface_validates_readable_paths_and_required_commands(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        assert _normalize_readable_paths("references") == ("references",)
+        assert _normalize_required_bash_commands("python validate.py") == (
+            "python validate.py",
+        )
+        with pytest.raises(TypeError, match="required_bash_commands entries"):
+            _normalize_required_bash_commands([123])  # type: ignore[list-item]
+        for value in ("", "python validate*.py", "python validate.py\necho bad"):
+            with pytest.raises(ValueError, match="required_bash_commands"):
+                _normalize_required_bash_commands(value)
+        with _task_context(tmp_path), pytest.raises(
+            ValueError,
+            match="readable_paths.*filesystem root",
+        ):
+            await run_opencode_task(
+                task_name="root readable path",
+                task_type="threat_analysis",
+                prompt="test",
+                required_capability="high",
+                readable_paths=Path(tmp_path.anchor),
             )
 
     asyncio.run(run())
@@ -2174,6 +2252,66 @@ def test_execution_error_requeues_with_a_fresh_session(tmp_path: Path) -> None:
         assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
         assert release_mock.await_args_list[1].kwargs["outcome"] == "success"
         assert release_mock.await_args_list[1].kwargs["health_outcome"] == "success"
+
+    asyncio.run(run())
+
+
+def test_required_command_failure_requeues_without_model_health_penalty(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[str | None] = []
+
+        async def run_prompt(**kwargs):
+            calls.append(kwargs["session_id"])
+            session_id = "ses_quality_failed" if len(calls) == 1 else "ses_success"
+            callback = kwargs["on_session_id"](session_id)
+            if hasattr(callback, "__await__"):
+                await callback
+            if len(calls) == 1:
+                raise OpenCodeTaskQualityError(
+                    "required validation command was not executed"
+                )
+            return OpenCodePromptResult(
+                session_id=session_id,
+                message_id="msg_success",
+                lines=["done"],
+                text="done",
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2] as release_mock,
+            patches[3],
+            patches[4],
+            patches[5],
+        ):
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="retry task quality",
+                    prompt="run",
+                    directory=tmp_path,
+                    required_bash_commands=("python validate.py",),
+                    attempt=1,
+                ))
+
+        assert result.status == "success"
+        assert calls == [None, None]
+        assert acquire_mock.await_count == 2
+        first_release = release_mock.await_args_list[0].kwargs
+        assert first_release["record_completion"] is False
+        assert first_release["outcome"] == "failure"
+        assert first_release["health_outcome"] is None
+        identity = {("provider/model-low", False, "opencode", "opencode")}
+        assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
 
     asyncio.run(run())
 

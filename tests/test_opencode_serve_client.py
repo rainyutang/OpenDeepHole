@@ -18,6 +18,7 @@ from task_agent.serve_client import (
     OpenCodeModelListResult,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
+    OpenCodeTaskQualityError,
     OpenCodeServeKey,
     OpenCodeServeManager,
     _ScanMcpLease,
@@ -49,7 +50,9 @@ from task_agent.serve_client import (
     _token_usage_delta,
     _tool_matches_mcp_tool,
     _write_knowledge_binding,
+    _write_command_binding,
     _write_serve_config_file,
+    _validate_required_command_audit,
 )
 
 
@@ -762,6 +765,131 @@ await assert.rejects(
         text=True,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_managed_file_write_plugin_allows_only_bound_command_for_parent_and_child(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    _write_serve_config_file(runtime, "{}")
+    command = "python validate.py --input result.json"
+    _, audit_path = _write_command_binding(
+        runtime,
+        session_id="parent-session",
+        required_commands=(command,),
+    )
+    plugin_path = (
+        runtime
+        / ".opendeephole-plugins"
+        / f"opendeephole-file-write-{_FILE_WRITE_PLUGIN_HASH}.mjs"
+    )
+    script = r'''
+import assert from "node:assert/strict"
+import { pathToFileURL } from "node:url"
+
+const command = process.argv[2]
+const plugin = await import(pathToFileURL(process.argv[1]).href)
+const hooks = await plugin.OpenDeepHoleFileWriteHook({ directory: process.cwd() })
+const before = hooks["tool.execute.before"]
+const after = hooks["tool.execute.after"]
+
+await before(
+  { sessionID: "parent-session", tool: "bash" },
+  { args: { command } },
+)
+await assert.rejects(
+  before(
+    { sessionID: "parent-session", tool: "bash" },
+    { args: { command: `${command} && echo chained` } },
+  ),
+  /not bound/,
+)
+await hooks.event({
+  event: {
+    type: "session.created",
+    properties: { info: { id: "child-session", parentID: "parent-session" } },
+  },
+})
+await before(
+  { sessionID: "child-session", tool: "shell" },
+  { args: { command } },
+)
+await after(
+  {
+    sessionID: "child-session",
+    tool: "write",
+    callID: "write-1",
+    args: { filePath: "result.json" },
+  },
+  { metadata: { filepath: "result.json" } },
+)
+await after(
+  {
+    sessionID: "child-session",
+    tool: "bash",
+    callID: "bash-1",
+    args: { command },
+  },
+  { metadata: { exitCode: 0 } },
+)
+'''
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(plugin_path), command],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    _validate_required_command_audit(audit_path, (command,))
+    events = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["kind"] for event in events] == ["file_write", "command"]
+    assert events[-1]["session_id"] == "child-session"
+
+
+def test_required_command_audit_rejects_failure_and_post_validation_write(
+    tmp_path: Path,
+) -> None:
+    command = "python validate.py"
+    audit_path = tmp_path / "audit.jsonl"
+    audit_path.write_text(
+        json.dumps({
+            "version": 1,
+            "kind": "command",
+            "command": command,
+            "exit_code": 1,
+            "success": False,
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(OpenCodeTaskQualityError, match="exit=1"):
+        _validate_required_command_audit(audit_path, (command,))
+
+    audit_path.write_text(
+        "\n".join((
+            json.dumps({
+                "version": 1,
+                "kind": "command",
+                "command": command,
+                "exit_code": 0,
+                "success": True,
+            }),
+            json.dumps({
+                "version": 1,
+                "kind": "file_write",
+                "path": str(tmp_path / "result.json"),
+            }),
+        ))
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(OpenCodeTaskQualityError, match="modified task files"):
+        _validate_required_command_audit(audit_path, (command,))
 
 
 def test_opencode_mcp_tool_ids_match_official_sanitization_and_legacy_formats() -> None:

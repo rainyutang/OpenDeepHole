@@ -106,6 +106,50 @@ def _normalize_writable_paths(
     return _normalize_path_values(value, parameter="writable_paths")
 
 
+def _normalize_readable_paths(
+    value: _PathValues | None,
+) -> tuple[str, ...]:
+    return _normalize_path_values(value, parameter="readable_paths")
+
+
+def _normalize_required_bash_commands(
+    value: str | Sequence[str] | None,
+) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        entries = (value,)
+    elif isinstance(value, Sequence) and not isinstance(value, bytes):
+        entries = value
+    else:
+        raise TypeError(
+            "OpenCode required_bash_commands must be a string, "
+            "a sequence of strings, or None"
+        )
+    normalized: list[str] = []
+    for item in entries:
+        if not isinstance(item, str):
+            raise TypeError(
+                "OpenCode required_bash_commands entries must be strings"
+            )
+        command = item.strip()
+        if not command:
+            raise ValueError(
+                "OpenCode required_bash_commands entries cannot be empty"
+            )
+        if "\n" in item or "\r" in item:
+            raise ValueError(
+                "OpenCode required_bash_commands entries cannot contain newlines"
+            )
+        if "*" in command or "?" in command:
+            raise ValueError(
+                "OpenCode required_bash_commands entries cannot contain wildcard characters"
+            )
+        if command not in normalized:
+            normalized.append(command)
+    return tuple(normalized)
+
+
 async def run_opencode_task(
     *,
     task_name: str,
@@ -117,6 +161,8 @@ async def run_opencode_task(
     invalid_json_retry_prompt: str | None = None,
     file_write_allowlist: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
     writable_paths: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
+    readable_paths: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
+    required_bash_commands: str | Sequence[str] | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -135,6 +181,8 @@ async def run_opencode_task(
         invalid_json_retry_prompt=invalid_json_retry_prompt,
         file_write_allowlist=file_write_allowlist,
         writable_paths=writable_paths,
+        readable_paths=readable_paths,
+        required_bash_commands=required_bash_commands,
         session_id=session_id,
         config_path=config_path,
         output=output,
@@ -165,6 +213,8 @@ async def _run_opencode_task_local(
     invalid_json_retry_prompt: str | None = None,
     file_write_allowlist: _PathValues | None = None,
     writable_paths: _PathValues | None = None,
+    readable_paths: _PathValues | None = None,
+    required_bash_commands: str | Sequence[str] | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -199,6 +249,10 @@ async def _run_opencode_task_local(
         file_write_allowlist
     )
     normalized_writable_paths = _normalize_writable_paths(writable_paths)
+    normalized_readable_paths = _normalize_readable_paths(readable_paths)
+    normalized_required_bash_commands = _normalize_required_bash_commands(
+        required_bash_commands
+    )
     if output is not _UNSET and output is not None and not callable(output):
         raise TypeError("OpenCode output must be callable or None")
 
@@ -224,6 +278,8 @@ async def _run_opencode_task_local(
             invalid_json_retry_prompt=invalid_json_retry_prompt,
             file_write_allowlist=normalized_file_write_allowlist,
             writable_paths=normalized_writable_paths,
+            readable_paths=normalized_readable_paths,
+            required_bash_commands=normalized_required_bash_commands,
             session_id=str(session_id or "").strip() or None,
         )
 

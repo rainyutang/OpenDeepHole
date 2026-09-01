@@ -48,6 +48,7 @@ from .serve_client import (
     OpenCodeFileWrite,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
+    OpenCodeTaskQualityError,
     get_serve_manager,
 )
 from .token_usage import OpenCodeTokenUsage, merge_token_usages
@@ -295,6 +296,8 @@ class OpenCodeTaskSpec:
     output_retry_prompt: str | None = None
     file_write_allowlist: tuple[Path, ...] = ()
     writable_paths: tuple[Path, ...] | None = None
+    readable_paths: tuple[Path, ...] = ()
+    required_bash_commands: tuple[str, ...] = ()
     session_id: str | None = None
     attempt: int | None = None
 
@@ -495,6 +498,14 @@ class OpenCodeTaskService:
             *allowlisted_roots,
             *legacy_writable_roots,
         )))
+        readable_roots = _normalize_writable_path_values(
+            spec.readable_paths,
+            directory,
+            parameter="readable_paths",
+        )
+        required_bash_commands = _normalize_required_bash_commands(
+            spec.required_bash_commands,
+        )
         attempt = spec.attempt
         if attempt is not None and int(attempt) < 0:
             raise ValueError("OpenCode attempt cannot be negative")
@@ -510,6 +521,8 @@ class OpenCodeTaskService:
             output_retry_prompt=output_retry_prompt,
             file_write_allowlist=configured_write_roots,
             writable_paths=configured_write_roots,
+            readable_paths=readable_roots,
+            required_bash_commands=required_bash_commands,
             attempt=None if attempt is None else int(attempt),
             session_id=str(spec.session_id or "").strip() or None,
         )
@@ -634,6 +647,7 @@ class OpenCodeTaskService:
         spec = record.spec
         context = record.execution_context
         write_roots = _effective_file_write_roots(spec, context)
+        readable_roots = _effective_readable_roots(spec, context)
         validation_debug = self._validation_debug_enabled(record)
         combined_cancel = _CombinedCancelEvent(record.cancel_event, context.cancel_event)
         cli_config_source = lambda: _task_cli_config(record.execution_context)
@@ -801,7 +815,11 @@ class OpenCodeTaskService:
                         )
 
                 system_prompt = _task_system_prompt(record)
-                permissions = _writable_path_permissions(write_roots)
+                permissions = _writable_path_permissions(
+                    write_roots,
+                    readable_paths=readable_roots,
+                    required_bash_commands=spec.required_bash_commands,
+                )
                 timeout_seconds = (
                     (_cfg_value(task_policy, "timeout_seconds") if task_policy is not None else None)
                     or spec.timeout_seconds
@@ -857,6 +875,7 @@ class OpenCodeTaskService:
                                 ),
                                 task_id=record.task_id,
                                 task_attempt=session_attempt,
+                                required_bash_commands=spec.required_bash_commands,
                             )
                             assert isinstance(details, OpenCodePromptResult)
                             session_id = details.session_id
@@ -1030,6 +1049,17 @@ class OpenCodeTaskService:
                 # Invalid JSON should try another model on a fresh Session, but
                 # it is a task-quality failure rather than a request-health
                 # signal and therefore must not lower the model's weight.
+                avoid_model_on_retry = True
+                if message_id:
+                    last_message_id = message_id
+                if text:
+                    last_text = text
+                last_model = source.model or model or last_model
+                last_source = source
+            except OpenCodeTaskQualityError as exc:
+                retry_reason = str(exc) or "OpenCode task completion contract failed"
+                # Required command failures are model-output quality failures,
+                # not Provider health signals.
                 avoid_model_on_retry = True
                 if message_id:
                     last_message_id = message_id
@@ -2139,10 +2169,15 @@ def _permission_path_patterns(path: Path | PurePath) -> list[str]:
 
 def _writable_path_permissions(
     paths: tuple[Path, ...] | None,
+    *,
+    readable_paths: tuple[Path, ...] = (),
+    required_bash_commands: tuple[str, ...] = (),
 ) -> list[dict[str, str]] | None:
-    if paths is None:
+    if paths is None and not readable_paths and not required_bash_commands:
         return None
     rules: list[dict[str, str]] = []
+    write_paths = paths or ()
+    read_paths = tuple(dict.fromkeys((*readable_paths, *write_paths)))
     for permission in ("read", "external_directory", "edit"):
         if permission == "edit":
             rules.append({
@@ -2151,7 +2186,8 @@ def _writable_path_permissions(
                 "action": "deny",
             })
         seen: set[str] = set()
-        for root in paths:
+        roots = write_paths if permission == "edit" else read_paths
+        for root in roots:
             for pattern in _permission_path_patterns(root):
                 if pattern in seen:
                     continue
@@ -2161,6 +2197,17 @@ def _writable_path_permissions(
                     "action": "allow",
                 })
                 seen.add(pattern)
+    if required_bash_commands:
+        rules.append({
+            "permission": "bash",
+            "pattern": "*",
+            "action": "deny",
+        })
+        rules.extend({
+            "permission": "bash",
+            "pattern": command,
+            "action": "allow",
+        } for command in required_bash_commands)
     return rules
 
 
@@ -2260,6 +2307,44 @@ def _effective_file_write_roots(
         *spec.file_write_allowlist,
         *(spec.writable_paths or ()),
     )))
+
+
+def _effective_readable_roots(
+    spec: OpenCodeTaskSpec,
+    context: OpenCodeExecutionContext,
+) -> tuple[Path, ...]:
+    """Return per-call read-only roots plus every writable root."""
+    return tuple(dict.fromkeys((
+        *spec.readable_paths,
+        *_effective_file_write_roots(spec, context),
+    )))
+
+
+def _normalize_required_bash_commands(
+    entries: Iterable[str],
+) -> tuple[str, ...]:
+    commands: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise TypeError(
+                "OpenCode required_bash_commands entries must be strings"
+            )
+        command = entry.strip()
+        if not command:
+            raise ValueError(
+                "OpenCode required_bash_commands entries cannot be empty"
+            )
+        if "\n" in entry or "\r" in entry:
+            raise ValueError(
+                "OpenCode required_bash_commands entries cannot contain newlines"
+            )
+        if "*" in command or "?" in command:
+            raise ValueError(
+                "OpenCode required_bash_commands entries cannot contain wildcard characters"
+            )
+        if command not in commands:
+            commands.append(command)
+    return tuple(commands)
 
 
 def _normalize_writable_path_values(
@@ -2452,6 +2537,8 @@ async def _run_component_task(
     invalid_json_retry_prompt: str | None,
     file_write_allowlist: tuple[str, ...],
     writable_paths: tuple[str, ...] | None,
+    readable_paths: tuple[str, ...],
+    required_bash_commands: tuple[str, ...],
     session_id: str | None,
 ) -> OpenCodeResult:
     """Translate the public contract into the internal scheduling record."""
@@ -2472,6 +2559,11 @@ async def _run_component_task(
             *allowlisted_roots,
             *legacy_writable_roots,
         )))
+        configured_read_roots = _normalize_writable_path_values(
+            readable_paths,
+            project_dir,
+            parameter="readable_paths",
+        )
         result = await _get_opencode_task_service().run_task(
             OpenCodeTaskSpec(
                 task_name=task_name,
@@ -2485,6 +2577,8 @@ async def _run_component_task(
                 output_retry_prompt=invalid_json_retry_prompt,
                 file_write_allowlist=configured_write_roots,
                 writable_paths=configured_write_roots,
+                readable_paths=configured_read_roots,
+                required_bash_commands=required_bash_commands,
                 session_id=session_id,
                 attempt=None,
             )

@@ -131,7 +131,7 @@ _FP_REVIEW_ACTIVE_STATUSES = {
     FpReviewStatus.PENDING.value,
     FpReviewStatus.RUNNING.value,
 }
-_PREFERRED_THREAT_ANALYSIS_METHOD_ID = "codex_goal_threat_analysis"
+_PREFERRED_THREAT_ANALYSIS_METHOD_ID = "opencode_lightweight_threat_analysis"
 
 
 def _normalize_scan_mode(value: str | None) -> str:

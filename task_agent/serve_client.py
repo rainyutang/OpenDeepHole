@@ -72,70 +72,165 @@ _SERVE_BOOTSTRAP_CWD_PREFIX = "opendeephole-opencode-serve-bootstrap"
 _SERVE_ISOLATED_CONFIG_DIRNAME = ".opendeephole-xdg-config"
 _SERVE_MANAGED_PLUGIN_DIRNAME = ".opendeephole-plugins"
 _KNOWLEDGE_BINDING_DIRNAME = "knowledge-bindings"
+_COMMAND_BINDING_DIRNAME = "command-bindings"
+_COMMAND_AUDIT_DIRNAME = "command-audits"
 _FILE_WRITE_PLUGIN_METADATA_KEY = "opendeepholeFileWrites"
-_FILE_WRITE_PLUGIN_SOURCE = r'''import path from "node:path"
+_FILE_WRITE_PLUGIN_SOURCE = r'''import crypto from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
 
+const pluginDirectory = path.dirname(fileURLToPath(import.meta.url))
+const bindingDirectory = path.join(pluginDirectory, "command-bindings")
+const parents = new Map()
+const digest = (value) => crypto.createHash("sha256").update(String(value || "")).digest("hex")
+const bindingPath = (sessionID) => path.join(bindingDirectory, `${digest(sessionID)}.json`)
 const normalizedTool = (value) => String(value || "").trim().toLowerCase().replaceAll("-", "_")
 const pathText = (value) => typeof value === "string" ? value.trim() : ""
 
+const readDirectBinding = async (sessionID) => {
+  try {
+    const value = JSON.parse(await fs.readFile(bindingPath(sessionID), "utf8"))
+    if (!value || value.version !== 1 || !Array.isArray(value.allowed_commands)) return null
+    if (typeof value.audit_path !== "string" || !value.audit_path.trim()) return null
+    return value
+  } catch (error) {
+    if (error?.code === "ENOENT") return null
+    throw error
+  }
+}
+
+const resolveBinding = async (sessionID) => {
+  let current = String(sessionID || "")
+  const visited = new Set()
+  for (let depth = 0; current && depth < 32 && !visited.has(current); depth += 1) {
+    visited.add(current)
+    const binding = await readDirectBinding(current)
+    if (binding) return binding
+    current = String(parents.get(current) || "")
+  }
+  return null
+}
+
+const commandText = (args) => pathText(args?.command) || pathText(args?.cmd)
+const appendAudit = async (binding, event) => {
+  await fs.appendFile(
+    binding.audit_path,
+    `${JSON.stringify({ version: 1, time_ms: Date.now(), ...event })}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  )
+}
+
+const writtenFiles = (tool, args, metadata, directory) => {
+  const files = []
+  const addFile = (rawPath, created = false) => {
+    const value = pathText(rawPath)
+    if (!value) return
+    files.push({
+      path: path.isAbsolute(value) ? path.normalize(value) : path.resolve(directory, value),
+      created: Boolean(created),
+    })
+  }
+  if (tool === "write" || tool === "edit") {
+    const fileDiff = metadata.filediff && typeof metadata.filediff === "object"
+      ? metadata.filediff
+      : {}
+    const rawPath = pathText(metadata.filepath)
+      || pathText(metadata.filePath)
+      || pathText(fileDiff.file)
+      || pathText(args.filePath)
+      || pathText(args.file_path)
+      || pathText(args.path)
+    const created = tool === "write"
+      ? metadata.exists === false
+      : (args.oldString ?? args.old_string) === ""
+    addFile(rawPath, created)
+  } else if (["apply_patch", "patch"].includes(tool)) {
+    const changes = Array.isArray(metadata.files) ? metadata.files : []
+    for (const item of changes) {
+      if (!item || typeof item !== "object") continue
+      const changeType = String(item.type || "").trim().toLowerCase()
+      if (changeType === "delete") continue
+      const rawPath = changeType === "move"
+        ? pathText(item.movePath) || pathText(item.move_path)
+        : pathText(item.filePath) || pathText(item.file_path) || pathText(item.file)
+      addFile(rawPath, changeType === "add")
+    }
+  }
+  return [...new Map(files.map((item) => [item.path, item])).values()]
+}
+
 export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
+  event: async ({ event }) => {
+    const info = event?.properties?.info || event?.properties?.session || {}
+    const sessionID = String(info?.id || info?.sessionID || "")
+    const parentID = String(info?.parentID || info?.parentId || "")
+    if (sessionID && parentID) {
+      parents.set(sessionID, parentID)
+      if (parents.size > 4096) parents.delete(parents.keys().next().value)
+    }
+    if (event?.type === "session.deleted" && sessionID) parents.delete(sessionID)
+  },
+  "tool.execute.before": async (input, output) => {
+    const binding = await resolveBinding(input?.sessionID)
+    if (!binding) return
+    const tool = normalizedTool(input?.tool)
+    if (!["bash", "shell"].includes(tool)) return
+    const command = commandText(output?.args)
+    if (!binding.allowed_commands.includes(command)) {
+      throw new Error("Shell command is not bound to this OpenDeepHole task")
+    }
+  },
   "tool.execute.after": async (input, output) => {
+    const tool = normalizedTool(input?.tool)
+    const args = input?.args && typeof input.args === "object" ? input.args : {}
+    const originalMetadata = output?.metadata && typeof output.metadata === "object"
+      ? output.metadata
+      : {}
+    const binding = await resolveBinding(input?.sessionID)
+    if (["bash", "shell"].includes(tool)) {
+      if (!binding) return
+      const command = commandText(args)
+      if (!binding.allowed_commands.includes(command)) {
+        throw new Error("Shell command is not bound to this OpenDeepHole task")
+      }
+      const rawExitCode = originalMetadata.exitCode ?? originalMetadata.exit_code
+        ?? originalMetadata.exit ?? originalMetadata.code
+      const exitCode = Number.isFinite(Number(rawExitCode)) ? Number(rawExitCode) : null
+      await appendAudit(binding, {
+        kind: "command",
+        session_id: String(input?.sessionID || ""),
+        call_id: String(input?.callID || ""),
+        command,
+        exit_code: exitCode,
+        success: exitCode === 0,
+      })
+      return
+    }
+    if (!["write", "edit", "apply_patch", "patch"].includes(tool)) return
+    const files = writtenFiles(tool, args, originalMetadata, directory)
+    if (!files.length) return
     try {
-      const tool = normalizedTool(input?.tool)
-      if (!["write", "edit", "apply_patch", "patch"].includes(tool)) return
-
-      const args = input?.args && typeof input.args === "object" ? input.args : {}
-      const originalMetadata = output?.metadata && typeof output.metadata === "object"
-        ? output.metadata
-        : {}
-      const metadata = { ...originalMetadata }
-      const files = []
-      const addFile = (rawPath, created = false) => {
-        const value = pathText(rawPath)
-        if (!value) return
-        files.push({
-          path: path.isAbsolute(value) ? path.normalize(value) : path.resolve(directory, value),
-          created: Boolean(created),
-        })
+      output.metadata = {
+        ...originalMetadata,
+        opendeepholeFileWrites: {
+          version: 1,
+          sessionID: String(input?.sessionID || ""),
+          callID: String(input?.callID || ""),
+          files,
+        },
       }
-
-      if (tool === "write" || tool === "edit") {
-        const fileDiff = metadata.filediff && typeof metadata.filediff === "object"
-          ? metadata.filediff
-          : {}
-        const rawPath = pathText(metadata.filepath)
-          || pathText(metadata.filePath)
-          || pathText(fileDiff.file)
-          || pathText(args.filePath)
-          || pathText(args.file_path)
-          || pathText(args.path)
-        const created = tool === "write"
-          ? metadata.exists === false
-          : (args.oldString ?? args.old_string) === ""
-        addFile(rawPath, created)
-      } else {
-        const changes = Array.isArray(metadata.files) ? metadata.files : []
-        for (const item of changes) {
-          if (!item || typeof item !== "object") continue
-          const changeType = String(item.type || "").trim().toLowerCase()
-          if (changeType === "delete") continue
-          const rawPath = changeType === "move"
-            ? pathText(item.movePath) || pathText(item.move_path)
-            : pathText(item.filePath) || pathText(item.file_path) || pathText(item.file)
-          addFile(rawPath, changeType === "add")
-        }
-      }
-
-      if (!files.length) return
-      metadata.opendeepholeFileWrites = {
-        version: 1,
-        sessionID: String(input?.sessionID || ""),
-        callID: String(input?.callID || ""),
-        files,
-      }
-      output.metadata = metadata
     } catch {
       // File-write observability must never change the tool call outcome.
+    }
+    if (!binding) return
+    for (const file of files) {
+      await appendAudit(binding, {
+        kind: "file_write",
+        session_id: String(input?.sessionID || ""),
+        call_id: String(input?.callID || ""),
+        path: file.path,
+      })
     }
   },
 })
@@ -331,6 +426,10 @@ class OpenCodePromptResult:
     model: str = ""
     token_usage: OpenCodeTokenUsage | None = None
     raw: Any = field(default=None, repr=False, compare=False)
+
+
+class OpenCodeTaskQualityError(RuntimeError):
+    """The model response violated a caller-required completion contract."""
 
 
 class OpenCodeProviderQuotaError(RuntimeError):
@@ -634,6 +733,140 @@ def _knowledge_binding_path(cwd: Path, session_id: str) -> Path:
     with contextlib.suppress(OSError):
         os.chmod(directory, 0o700)
     return directory / f"{digest}.json"
+
+
+def _private_session_file(
+    cwd: Path,
+    directory_name: str,
+    session_id: str,
+    suffix: str,
+) -> Path:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        raise ValueError("OpenCode Session ID is required")
+    digest = hashlib.sha256(normalized_session_id.encode("utf-8")).hexdigest()
+    directory = cwd / _SERVE_MANAGED_PLUGIN_DIRNAME / directory_name
+    directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(directory, 0o700)
+    return directory / f"{digest}.{suffix}"
+
+
+def _command_binding_path(cwd: Path, session_id: str) -> Path:
+    return _private_session_file(
+        cwd,
+        _COMMAND_BINDING_DIRNAME,
+        session_id,
+        "json",
+    )
+
+
+def _command_audit_path(cwd: Path, session_id: str) -> Path:
+    return _private_session_file(
+        cwd,
+        _COMMAND_AUDIT_DIRNAME,
+        session_id,
+        "jsonl",
+    )
+
+
+def _write_command_binding(
+    cwd: Path,
+    *,
+    session_id: str,
+    required_commands: tuple[str, ...],
+) -> tuple[Path, Path]:
+    normalized_commands = tuple(dict.fromkeys(
+        str(command or "").strip() for command in required_commands
+    ))
+    if not normalized_commands or any(not command for command in normalized_commands):
+        raise ValueError("Command binding requires non-empty commands")
+    if any("\n" in command or "\r" in command for command in normalized_commands):
+        raise ValueError("Command binding commands cannot contain newlines")
+    binding_path = _command_binding_path(cwd, session_id)
+    audit_path = _command_audit_path(cwd, session_id)
+    _remove_file(audit_path)
+    _write_private_text(
+        binding_path,
+        json.dumps(
+            {
+                "version": 1,
+                "session_id": str(session_id),
+                "allowed_commands": list(normalized_commands),
+                "audit_path": str(audit_path),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n",
+    )
+    return binding_path, audit_path
+
+
+def _validate_required_command_audit(
+    path: Path,
+    required_commands: tuple[str, ...],
+) -> None:
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError as exc:
+        raise OpenCodeTaskQualityError(
+            "OpenCode did not execute the required validation command"
+        ) from exc
+    events: list[dict[str, Any]] = []
+    for line_number, raw in enumerate(raw_lines, start=1):
+        if not raw.strip():
+            continue
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise OpenCodeTaskQualityError(
+                f"OpenCode command audit is invalid at line {line_number}"
+            ) from exc
+        if not isinstance(value, dict) or value.get("version") != 1:
+            raise OpenCodeTaskQualityError(
+                f"OpenCode command audit is invalid at line {line_number}"
+            )
+        events.append(value)
+
+    successful_indexes: dict[str, list[int]] = {
+        command: [] for command in required_commands
+    }
+    last_write_index = -1
+    failures: dict[str, Any] = {}
+    for index, event in enumerate(events):
+        if event.get("kind") == "file_write":
+            last_write_index = index
+            continue
+        if event.get("kind") != "command":
+            continue
+        command = str(event.get("command") or "")
+        if command not in successful_indexes:
+            continue
+        if event.get("success") is True and event.get("exit_code") == 0:
+            successful_indexes[command].append(index)
+        else:
+            failures[command] = event.get("exit_code")
+
+    missing = [
+        command for command, indexes in successful_indexes.items() if not indexes
+    ]
+    if missing:
+        detail = ", ".join(
+            f"{command!r} (exit={failures.get(command)!r})"
+            for command in missing
+        )
+        raise OpenCodeTaskQualityError(
+            "OpenCode required validation command did not complete successfully: "
+            + detail
+        )
+    last_required_index = min(
+        max(indexes) for indexes in successful_indexes.values()
+    )
+    if last_write_index > last_required_index:
+        raise OpenCodeTaskQualityError(
+            "OpenCode modified task files after the required validation command"
+        )
 
 
 def _write_knowledge_binding(
@@ -5649,6 +5882,7 @@ class OpenCodeServeManager:
         log_stage: str = "opencode",
         task_id: str = "",
         task_attempt: int = 0,
+        required_bash_commands: tuple[str, ...] = (),
     ) -> list[str] | OpenCodePromptResult:
         normalized_log_stage = task_output_stage(log_stage)
         active_session_id = str(session_id or "").strip()
@@ -5724,6 +5958,8 @@ class OpenCodeServeManager:
         scan_mcp_lease: _ScanMcpLease | None = None
         knowledge_mcp_lease: _ScanMcpLease | None = None
         knowledge_binding_path: Path | None = None
+        command_binding_path: Path | None = None
+        command_audit_path: Path | None = None
         selected_source_mcp: str | None = None
         knowledge_runtime = (
             knowledge_base_mcp
@@ -5884,6 +6120,29 @@ class OpenCodeServeManager:
                             active_session_id,
                             _one_line_preview(exc),
                         )
+                if required_bash_commands:
+                    if binding_workspace is None:
+                        raise RuntimeError(
+                            "Managed plugin workspace is unavailable for required shell commands"
+                        )
+                    command_binding_path, command_audit_path = (
+                        _write_command_binding(
+                            binding_workspace,
+                            session_id=active_session_id,
+                            required_commands=required_bash_commands,
+                        )
+                    )
+                elif binding_workspace is not None:
+                    with contextlib.suppress(Exception):
+                        _remove_file(_command_binding_path(
+                            binding_workspace,
+                            active_session_id,
+                        ))
+                    with contextlib.suppress(Exception):
+                        _remove_file(_command_audit_path(
+                            binding_workspace,
+                            active_session_id,
+                        ))
                 if session_mode == "continued":
                     token_baseline, token_baseline_complete = (
                         await _session_tree_token_entries(
@@ -6306,6 +6565,15 @@ class OpenCodeServeManager:
                                     event_state.handle_part(part)
                     event_state.reconcile_text("text", "".join(response_text))
                     event_state.flush()
+                if required_bash_commands:
+                    if command_audit_path is None:
+                        raise OpenCodeTaskQualityError(
+                            "OpenCode required command audit was not initialized"
+                        )
+                    _validate_required_command_audit(
+                        command_audit_path,
+                        required_bash_commands,
+                    )
                 details = OpenCodePromptResult(
                     session_id=active_session_id,
                     message_id=_response_message_id(response_data),
@@ -6371,13 +6639,19 @@ class OpenCodeServeManager:
                             _remove_file(knowledge_binding_path)
                     finally:
                         try:
-                            if knowledge_mcp_lease is not None:
-                                await self._release_scan_mcp(directory, knowledge_mcp_lease)
+                            if command_binding_path is not None:
+                                _remove_file(command_binding_path)
+                            if command_audit_path is not None:
+                                _remove_file(command_audit_path)
                         finally:
                             try:
-                                await self._release_scan_mcp(directory, scan_mcp_lease)
+                                if knowledge_mcp_lease is not None:
+                                    await self._release_scan_mcp(directory, knowledge_mcp_lease)
                             finally:
-                                await self._release_active_session()
+                                try:
+                                    await self._release_scan_mcp(directory, scan_mcp_lease)
+                                finally:
+                                    await self._release_active_session()
 
     async def _session_api_request(
         self,

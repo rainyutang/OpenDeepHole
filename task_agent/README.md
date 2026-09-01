@@ -37,6 +37,8 @@ result = await run_opencode_task(
     invalid_json_retry_prompt=retry_prompt,
     file_write_allowlist=None,
     writable_paths=None,
+    readable_paths=None,
+    required_bash_commands=None,
     session_id=None,
     config_path=None,
     output=None,
@@ -57,6 +59,8 @@ result = await run_opencode_task(
 | `invalid_json_retry_prompt` | `str` 或 `None` | `None` | JSON 校验失败后的可选纠正提示词。传入非空字符串时，每次纠错都原样重复发送；`None` 使用组件当前包含完整 Schema 的中文默认提示词。 |
 | `file_write_allowlist` | 单个路径、路径序列或 `None` | `None` | 本次 Session 额外允许写入并默认保留的文件或目录。相对路径以 `project_dir` 为基准，绝对路径可位于项目外；路径自身及所有后代会获得 `read`、`external_directory` 和 `edit` 权限。不允许通配符或文件系统根目录。 |
 | `writable_paths` | 单个路径、路径序列或 `None` | `None` | `file_write_allowlist` 的兼容别名；两者同时传入时合并去重，并使用完全相同的写权限和保留语义。 |
+| `readable_paths` | 单个路径、路径序列或 `None` | `None` | 为本次 Session 额外开放只读及外部目录访问；不会获得编辑权限，也不参与文件保留。 |
+| `required_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许且必须成功执行的命令。拒绝空值、换行和通配符；除明确列出的完整命令外仍拒绝所有 shell。 |
 | `session_id` | `str` 或 `None` | `None` | 传入已有 Serve 会话 ID 以续接会话；省略、传入 `None` 或空字符串时创建新会话。同一组件生命周期内，续接会话不能切换项目目录或可写工作目录。 |
 | `config_path` | `str`、`PathLike[str]` 或 `None` | `None` | 独立运行时使用的 YAML 配置文件路径。未传入时依次读取 `TASK_AGENT_CONFIG` 和当前目录下的 `task-agent.yaml`。宿主配置已注册时不能再传入此参数。 |
 | `output` | callable 或 `None` | 使用当前执行上下文 | 可选的本次调用输出覆盖；传 `None` 可关闭 Task Agent 控制台流。 |
@@ -76,8 +80,12 @@ result = await run_opencode_task(
 `references/`、`assets/`、`scripts/` 等资源可读。standalone 默认仍只允许写 `work_dir`；
 嵌入宿主可通过 `OpenCodeHostBindings.writable_roots` 声明额外稳定可写根。每次调用都会把
 `work_dir` 与 `file_write_allowlist`、兼容参数 `writable_paths` 合并为当前 Session 的窄化
-`permission` 覆盖，因此续接 Session 不会继承上一次调用未再次声明的额外路径。调用方不能传
-原生权限规则，`project_dir` 默认只读，`bash` 始终保持禁用。
+`permission` 覆盖；`readable_paths` 只追加读取权限，因此续接 Session 不会继承上一次调用未再次
+声明的额外路径。调用方不能传原生权限规则，`project_dir` 默认只读，`bash` 默认保持禁用。只有
+显式传入 `required_bash_commands` 时，Task Agent 才会先拒绝所有命令再按完整字符串放行；受管
+Session 绑定 Hook 对父、子 Session 再做一次精确检查，并记录命令退出码和文件写入顺序。每条必需
+命令必须在最后一次受管文件写入后以退出码 0 完成，否则作为任务质量失败进入既有 fresh Session
+重试，不降低模型健康权重。
 
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
 
