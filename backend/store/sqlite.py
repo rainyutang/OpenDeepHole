@@ -34,6 +34,7 @@ from backend.models import (
     HistoryPattern,
     MiningEngineRunStatus,
     MiningEngineSelection,
+    MultiVersionTarget,
     OpenCodePoolModelStats,
     OpenCodePoolStatus,
     OpenCodeModelTokenUsage,
@@ -55,6 +56,7 @@ from backend.models import (
     ThreatCodePath,
     UserInDB,
     Vulnerability,
+    VersionVulnerabilityLocation,
     VulnerabilityValidation,
     canonical_mining_engine_label,
 )
@@ -343,6 +345,17 @@ def _vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
         threat_code_path=(
             row["threat_code_path"] if "threat_code_path" in keys else ""
         ) or "",
+        version_labels=_json_string_list(
+            row["version_labels_json"]
+            if "version_labels_json" in keys
+            else "[]"
+        ),
+        version_locations=_json_model_list(
+            row["version_locations_json"]
+            if "version_locations_json" in keys
+            else "[]",
+            VersionVulnerabilityLocation,
+        ),
         provisional=bool(
             row["provisional"] if "provisional" in keys else 0
         ),
@@ -538,7 +551,8 @@ CREATE TABLE IF NOT EXISTS scans (
     opencode_pool      TEXT NOT NULL DEFAULT '{}',
     code_graph_mcp_json TEXT,
     knowledge_base_mcp_json TEXT,
-    vulnerability_validation_json TEXT
+    vulnerability_validation_json TEXT,
+    multi_versions_json TEXT NOT NULL DEFAULT '[]'
     ,mining_engines_json TEXT NOT NULL DEFAULT '[]'
     ,mining_engine_runs_json TEXT NOT NULL DEFAULT '[]'
 );
@@ -583,6 +597,8 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     provisional        INTEGER NOT NULL DEFAULT 0,
     report_batch_id    TEXT NOT NULL DEFAULT '',
     output_source       TEXT NOT NULL DEFAULT '{}',
+    version_labels_json TEXT NOT NULL DEFAULT '[]',
+    version_locations_json TEXT NOT NULL DEFAULT '[]',
     UNIQUE(scan_id, idx)
 );
 
@@ -1077,6 +1093,10 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE scans ADD COLUMN mining_engine_runs_json TEXT NOT NULL DEFAULT '[]'"
             )
+        if "multi_versions_json" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN multi_versions_json TEXT NOT NULL DEFAULT '[]'"
+            )
         engine_rows = self._conn.execute(
             "SELECT scan_id, mining_engines_json, mining_engine_runs_json FROM scans"
         ).fetchall()
@@ -1347,6 +1367,14 @@ class SqliteScanStore(ScanStoreBase):
         if "report_batch_id" not in vuln_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerabilities ADD COLUMN report_batch_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "version_labels_json" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN version_labels_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "version_locations_json" not in vuln_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerabilities ADD COLUMN version_locations_json TEXT NOT NULL DEFAULT '[]'"
             )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vulnerabilities_report_batch "
@@ -1854,6 +1882,12 @@ class SqliteScanStore(ScanStoreBase):
                 if row["code_scan_path"] is not None
                 else ""
             ),
+            multi_versions=_json_model_list(
+                row["multi_versions_json"]
+                if "multi_versions_json" in row.keys()
+                else "[]",
+                MultiVersionTarget,
+            ),
             scan_mode=row["scan_mode"] if row["scan_mode"] is not None else "full",
             threat_analysis_enabled=bool(row["threat_analysis_enabled"]),
             threat_analysis_method=(
@@ -1965,6 +1999,12 @@ class SqliteScanStore(ScanStoreBase):
             agent_name=row["agent_name"] if row["agent_name"] is not None else "",
             project_path=row["project_path"] if row["project_path"] is not None else "",
             code_scan_path=row["code_scan_path"] if row["code_scan_path"] is not None else "",
+            multi_versions=_json_model_list(
+                row["multi_versions_json"]
+                if "multi_versions_json" in row.keys()
+                else "[]",
+                MultiVersionTarget,
+            ),
             scan_name=row["scan_name"] if row["scan_name"] is not None else "",
             product=row["product"] if row["product"] is not None else "",
             validation_environment=(
@@ -2020,8 +2060,8 @@ class SqliteScanStore(ScanStoreBase):
                      public_access_token, opencode_pool,
                      code_graph_mcp_json, knowledge_base_mcp_json,
                      vulnerability_validation_json, mining_engines_json,
-                     mining_engine_runs_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mining_engine_runs_json, multi_versions_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     scan_items = excluded.scan_items,
@@ -2063,7 +2103,8 @@ class SqliteScanStore(ScanStoreBase):
                     knowledge_base_mcp_json = excluded.knowledge_base_mcp_json,
                     vulnerability_validation_json = excluded.vulnerability_validation_json,
                     mining_engines_json = excluded.mining_engines_json,
-                    mining_engine_runs_json = excluded.mining_engine_runs_json
+                    mining_engine_runs_json = excluded.mining_engine_runs_json,
+                    multi_versions_json = excluded.multi_versions_json
                 """,
                 (
                     scan.scan_id,
@@ -2147,6 +2188,13 @@ class SqliteScanStore(ScanStoreBase):
                         [
                             item.model_dump(mode="json")
                             for item in scan.mining_engine_runs
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        [
+                            item.model_dump(mode="json")
+                            for item in meta.multi_versions
                         ],
                         ensure_ascii=False,
                     ),
@@ -3253,6 +3301,7 @@ class SqliteScanStore(ScanStoreBase):
             "analysis_source, engine_id, engine_label, fp_review_eligible, "
             "source_task_id, threat_surface_node_id, threat_method_node_id, "
             "threat_code_path, provisional, report_batch_id, output_source"
+            ", version_labels_json, version_locations_json"
         )
         values = (
             scan_id,
@@ -3293,6 +3342,11 @@ class SqliteScanStore(ScanStoreBase):
             1 if provisional else 0,
             report_batch_id,
             vuln.output_source.model_dump_json(),
+            json.dumps(vuln.version_labels, ensure_ascii=False),
+            json.dumps(
+                [item.model_dump(mode="json") for item in vuln.version_locations],
+                ensure_ascii=False,
+            ),
         )
         placeholders = ", ".join("?" for _ in values)
         self._conn.execute(
@@ -3321,7 +3375,8 @@ class SqliteScanStore(ScanStoreBase):
             "engine_id = ?, engine_label = ?, fp_review_eligible = ?, "
             "source_task_id = ?, threat_surface_node_id = ?, "
             "threat_method_node_id = ?, threat_code_path = ?, provisional = ?, "
-            "report_batch_id = ?, output_source = ?"
+            "report_batch_id = ?, output_source = ?, version_labels_json = ?, "
+            "version_locations_json = ?"
         )
         self._conn.execute(
             f"UPDATE vulnerabilities SET {assignments} "
@@ -3363,6 +3418,11 @@ class SqliteScanStore(ScanStoreBase):
                 1 if provisional else 0,
                 report_batch_id,
                 vuln.output_source.model_dump_json(),
+                json.dumps(vuln.version_labels, ensure_ascii=False),
+                json.dumps(
+                    [item.model_dump(mode="json") for item in vuln.version_locations],
+                    ensure_ascii=False,
+                ),
                 scan_id,
                 index,
             ),
@@ -3453,7 +3513,9 @@ class SqliteScanStore(ScanStoreBase):
                         threat_surface_node_id = ?,
                         threat_method_node_id = ?,
                         threat_code_path = ?,
-                        output_source = ?
+                        output_source = ?,
+                        version_labels_json = ?,
+                        version_locations_json = ?
                     WHERE scan_id = ? AND idx = ?
                     """,
                     (
@@ -3483,6 +3545,11 @@ class SqliteScanStore(ScanStoreBase):
                         vuln.threat_method_node_id,
                         vuln.threat_code_path,
                         vuln.output_source.model_dump_json(),
+                        json.dumps(vuln.version_labels, ensure_ascii=False),
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in vuln.version_locations],
+                            ensure_ascii=False,
+                        ),
                         scan_id,
                         idx,
                     ),
@@ -3506,8 +3573,9 @@ class SqliteScanStore(ScanStoreBase):
                      function_source, function_start_line, variant_of,
                      analysis_source, engine_id, engine_label,
                      fp_review_eligible, source_task_id, threat_surface_node_id,
-                     threat_method_node_id, threat_code_path, output_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     threat_method_node_id, threat_code_path, output_source,
+                     version_labels_json, version_locations_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scan_id,
@@ -3546,6 +3614,11 @@ class SqliteScanStore(ScanStoreBase):
                     vuln.threat_method_node_id,
                     vuln.threat_code_path,
                     vuln.output_source.model_dump_json(),
+                    json.dumps(vuln.version_labels, ensure_ascii=False),
+                    json.dumps(
+                        [item.model_dump(mode="json") for item in vuln.version_locations],
+                        ensure_ascii=False,
+                    ),
                 ),
             )
             self._conn.commit()

@@ -23,6 +23,7 @@ class ScanTask:
     code_scan_path: Path
     checkers: list[str]
     scan_name: str
+    multi_versions: list[dict] = field(default_factory=list)
     scan_mode: str = "custom"
     threat_analysis_enabled: bool = False
     threat_analysis_method: str = "deephole_threat_analysis"
@@ -58,6 +59,7 @@ class TaskManager:
         code_scan_path: str | None,
         checkers: list[str],
         scan_name: str,
+        multi_versions: list[dict] | None = None,
         scan_mode: str = "custom",
         threat_analysis_enabled: bool = False,
         threat_analysis_method: str = "deephole_threat_analysis",
@@ -81,6 +83,11 @@ class TaskManager:
             scan_id=scan_id,
             project_path=Path(project_path),
             code_scan_path=Path(code_scan_path or project_path),
+            multi_versions=(
+                copy.deepcopy(multi_versions)
+                if isinstance(multi_versions, list)
+                else []
+            ),
             checkers=checkers,
             scan_name=scan_name,
             scan_mode=scan_mode or "custom",
@@ -161,6 +168,7 @@ class TaskManager:
                 "scan_id": task.scan_id,
                 "project_path": str(task.project_path),
                 "code_scan_path": str(task.code_scan_path),
+                "multi_versions": copy.deepcopy(task.multi_versions),
                 "checkers": task.checkers,
                 "scan_name": task.scan_name,
                 "scan_mode": task.scan_mode,

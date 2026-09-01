@@ -51,6 +51,7 @@ from backend.models import (
     MiningEngineRequest,
     MiningEngineRunStatus,
     MiningEngineSelection,
+    MultiVersionTarget,
     ScanItemStatus,
     ScanCandidate,
     ScanCandidatePage,
@@ -67,6 +68,7 @@ from backend.models import (
     ScanVulnerabilityValidationRequest,
     SkillReport,
     THREAT_AUDIT_ENGINE_LABEL,
+    MULTI_VERSION_ENGINE_LABEL,
     ThreatAuditTask,
     ThreatAuditTaskPage,
     ThreatAnalysisMethodCatalog,
@@ -101,6 +103,7 @@ from deephole_client.scan_modes import (
     SCAN_MODE_CUSTOM,
     SCAN_MODE_QUICK,
     SCAN_MODE_STANDARD,
+    SCAN_MODE_MULTI_VERSION,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
     THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS,
     component_scan_mode,
@@ -140,6 +143,41 @@ def _normalize_scan_mode(value: str | None) -> str:
 
 def _is_threat_analysis_only_mode(value: str | None) -> bool:
     return _normalize_scan_mode(value) == SCAN_MODE_THREAT_ANALYSIS_ONLY
+
+
+def _validated_multi_versions(
+    values: list[MultiVersionTarget],
+) -> list[MultiVersionTarget]:
+    """Validate scan-local version targets without probing agent-local paths."""
+    if not 2 <= len(values) <= 5:
+        raise HTTPException(
+            status_code=422,
+            detail="多版本测试模式需要配置 2 到 5 个版本",
+        )
+    normalized: list[MultiVersionTarget] = []
+    seen_names: set[str] = set()
+    for value in values:
+        name = value.version_name.strip()
+        project_path = value.project_path.strip()
+        code_scan_path = value.code_scan_path.strip() or project_path
+        if not name or not project_path:
+            raise HTTPException(
+                status_code=422,
+                detail="每个版本都必须填写版本名称和项目总路径",
+            )
+        key = name.casefold()
+        if key in seen_names:
+            raise HTTPException(
+                status_code=422,
+                detail=f"版本名称不能重复：{name}",
+            )
+        seen_names.add(key)
+        normalized.append(MultiVersionTarget(
+            version_name=name,
+            project_path=project_path,
+            code_scan_path=code_scan_path,
+        ))
+    return normalized
 
 
 def _default_scan_name_base(project_path: str) -> str:
@@ -333,6 +371,25 @@ def _resolve_scan_mining_engines(
             ),
         )
 
+    if scan_mode == SCAN_MODE_MULTI_VERSION:
+        engine = available.get("multi_version")
+        if engine is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{MULTI_VERSION_ENGINE_LABEL}不可用",
+            )
+        requested_ids = [item.engine_id.strip() for item in requested or []]
+        if requested is not None and requested_ids != ["multi_version"]:
+            raise HTTPException(
+                status_code=422,
+                detail="多版本测试模式固定使用多版本代码漏洞挖掘引擎",
+            )
+        return [MiningEngineSelection(
+            engine_id=engine.engine_id,
+            engine_label=engine.label,
+            enabled=True,
+        )]
+
     if scan_mode in {SCAN_MODE_QUICK, SCAN_MODE_STANDARD}:
         missing = [
             engine_id
@@ -427,6 +484,8 @@ def _resolve_threat_analysis_enabled(
     scan_mode: str,
     selections: list[MiningEngineSelection],
 ) -> bool:
+    if scan_mode == SCAN_MODE_MULTI_VERSION:
+        return False
     if scan_mode in {SCAN_MODE_QUICK, SCAN_MODE_STANDARD}:
         return True
     if requested is not None:
@@ -1372,6 +1431,11 @@ async def create_agent_scan(
         )
 
     requested_scan_mode = _normalize_scan_mode(body.scan_mode)
+    multi_versions = (
+        _validated_multi_versions(body.multi_versions)
+        if requested_scan_mode == SCAN_MODE_MULTI_VERSION
+        else []
+    )
     fixed_profile = requested_scan_mode in {
         SCAN_MODE_QUICK,
         SCAN_MODE_STANDARD,
@@ -1385,6 +1449,15 @@ async def create_agent_scan(
         raise HTTPException(
             status_code=422,
             detail="快速模式和标准模式固定启用自动去误报",
+        )
+    if (
+        requested_scan_mode == SCAN_MODE_MULTI_VERSION
+        and body.threat_analysis_enabled is True
+    ):
+        baseline_name = multi_versions[0].version_name if multi_versions else "基准版本"
+        raise HTTPException(
+            status_code=422,
+            detail=f"多版本测试模式由多版本引擎自行执行版本 {baseline_name} 的威胁分析",
         )
     if fixed_profile and (
         body.checkers is not None or checker_names is not None
@@ -1406,7 +1479,9 @@ async def create_agent_scan(
     scan_mode = requested_scan_mode
     threat_analysis_method, threat_analysis_method_selection = (
         _resolve_threat_analysis_method(
-            None if fixed_profile else body.threat_analysis_method
+            "deephole_threat_analysis"
+            if requested_scan_mode == SCAN_MODE_MULTI_VERSION
+            else None if fixed_profile else body.threat_analysis_method
         )
     )
     if (
@@ -1447,7 +1522,7 @@ async def create_agent_scan(
     )
     requested_checkers = checker_names if checker_names is not None else body.checkers
     static_engine_enabled = any(
-        item.enabled and item.engine_id == "static_candidate"
+        item.enabled and item.engine_id in {"static_candidate", "multi_version"}
         for item in mining_engine_selections
     )
     if not static_engine_enabled:
@@ -1473,10 +1548,18 @@ async def create_agent_scan(
         checker_packages = _checker_packages_for(validated_checker_names)
     scan_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
-    project_path = body.project_path.strip()
+    project_path = (
+        multi_versions[0].project_path
+        if multi_versions
+        else body.project_path.strip()
+    )
     if not project_path:
         raise HTTPException(status_code=400, detail="project_path is required")
-    code_scan_path = body.code_scan_path.strip() or project_path
+    code_scan_path = (
+        multi_versions[0].code_scan_path
+        if multi_versions
+        else body.code_scan_path.strip() or project_path
+    )
     requested_scan_name = str(body.scan_name or "").strip()
     generated_name_base = _default_scan_name_base(project_path)
     generated_name_seed = secrets.randbelow(0x10000)
@@ -1508,6 +1591,7 @@ async def create_agent_scan(
         project_id=scan_name,
         project_path=project_path,
         code_scan_path=code_scan_path,
+        multi_versions=multi_versions,
         scan_mode=scan_mode,
         threat_analysis_enabled=threat_analysis_enabled,
         threat_analysis_method=threat_analysis_method,
@@ -1563,6 +1647,7 @@ async def create_agent_scan(
         agent_name=agent.name,
         project_path=project_path,
         code_scan_path=code_scan_path,
+        multi_versions=multi_versions,
         scan_name=scan_name,
         product=product,
         validation_environment="",
@@ -1620,6 +1705,9 @@ async def create_agent_scan(
         "scan_id": scan_id,
         "project_path": project_path,
         "code_scan_path": code_scan_path,
+        "multi_versions": [
+            item.model_dump(mode="json") for item in multi_versions
+        ],
         "checkers": validated_checker_names,
         "scan_mode": scan_mode,
         "threat_analysis_enabled": threat_analysis_enabled,
@@ -2656,6 +2744,9 @@ async def _continue_scan(
         "scan_id": scan_id,
         "project_path": meta.project_path,
         "code_scan_path": meta.code_scan_path or meta.project_path,
+        "multi_versions": [
+            item.model_dump(mode="json") for item in meta.multi_versions
+        ],
         "checkers": meta.scan_items,
         "scan_mode": meta.scan_mode,
         "threat_analysis_enabled": meta.threat_analysis_enabled,
@@ -2677,7 +2768,7 @@ async def _continue_scan(
                     bool(meta.mining_engines)
                     and not any(
                         item.enabled
-                        and item.engine_id == "static_candidate"
+                        and item.engine_id in {"static_candidate", "multi_version"}
                         for item in meta.mining_engines
                     )
                 )

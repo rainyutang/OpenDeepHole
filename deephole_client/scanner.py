@@ -78,7 +78,12 @@ def _resolve_scan_paths(
     code_scan_path: Path | None,
 ) -> tuple[Path, Path]:
     project = Path(project_path).expanduser().resolve()
-    scan_root = Path(code_scan_path or project).expanduser().resolve()
+    raw_scan_root = Path(code_scan_path).expanduser() if code_scan_path else project
+    scan_root = (
+        raw_scan_root.resolve()
+        if raw_scan_root.is_absolute()
+        else (project / raw_scan_root).resolve()
+    )
     if not project.is_dir():
         raise FileNotFoundError(f"Project directory does not exist: {project}")
     if not scan_root.is_dir():
@@ -414,10 +419,14 @@ async def run_scan(
     knowledge_base_mcp: dict[str, Any] | None = None,
     mining_engines: list[dict[str, Any]] | None = None,
     codex_model_ids: list[str] | None = None,
+    multi_versions: list[dict[str, Any]] | None = None,
 ) -> None:
     """Run the selected directory-discovered mining engines."""
     feedback_entries = list(feedback_entries or [])
     checker_packages = list(checker_packages or [])
+    multi_versions = [
+        dict(item) for item in (multi_versions or []) if isinstance(item, dict)
+    ]
     scan_dir = (
         Path.home() / ".opendeephole" / "scans" / str(scan_id)
     ).expanduser().resolve()
@@ -755,7 +764,7 @@ async def run_scan(
     )
 
     if not any(
-        item.engine_id == "static_candidate"
+        item.engine_id in {"static_candidate", "multi_version"}
         for item in configured_enabled_selections
     ):
         await reporter.send_static_progress(scan_id, 0, 0, done=True)
@@ -1156,6 +1165,7 @@ async def run_scan(
             if selection.engine_id in {
                 "static_candidate",
                 "threat_audit",
+                "multi_version",
             }
             else scan_dir / "mining_engines" / selection.engine_id
         )
@@ -1198,6 +1208,8 @@ async def run_scan(
             "cancel_event": cancel_event,
             "report_vulnerabilities": report_values,
         }
+        if selection.engine_id == "multi_version":
+            engine_kwargs["multi_versions"] = copy.deepcopy(multi_versions)
         if selection.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS:
             engine_kwargs["threat_analysis_result"] = (
                 threat_analysis_result
