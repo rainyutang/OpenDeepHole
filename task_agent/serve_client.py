@@ -76,6 +76,7 @@ _SERVE_MANAGED_PLUGIN_DIRNAME = ".opendeephole-plugins"
 _KNOWLEDGE_BINDING_DIRNAME = "knowledge-bindings"
 _COMMAND_BINDING_DIRNAME = "command-bindings"
 _COMMAND_AUDIT_DIRNAME = "command-audits"
+_COMMAND_OUTPUT_TAIL_BYTES = 16 * 1024
 _FILE_WRITE_PLUGIN_METADATA_KEY = "opendeepholeFileWrites"
 _FILE_WRITE_PLUGIN_SOURCE = r'''import crypto from "node:crypto"
 import fs from "node:fs/promises"
@@ -93,7 +94,7 @@ const pathText = (value) => typeof value === "string" ? value.trim() : ""
 const readDirectBinding = async (sessionID) => {
   try {
     const value = JSON.parse(await fs.readFile(bindingPath(sessionID), "utf8"))
-    if (!value || value.version !== 1 || !Array.isArray(value.allowed_commands)) return null
+    if (!value || ![1, 2].includes(value.version) || !Array.isArray(value.allowed_commands)) return null
     if (typeof value.audit_path !== "string" || !value.audit_path.trim()) return null
     return value
   } catch (error) {
@@ -115,6 +116,29 @@ const resolveBinding = async (sessionID) => {
 }
 
 const commandText = (args) => pathText(args?.command) || pathText(args?.cmd)
+const objectValue = (value) => value && typeof value === "object" ? value : {}
+const commandOutputText = (output, metadata) => {
+  const values = [
+    output?.output,
+    metadata.output,
+    metadata.stdout,
+    metadata.stderr,
+  ].filter((value) => typeof value === "string" && value.length)
+  return [...new Set(values)].join("\n")
+}
+const outputTail = (value, limit) => {
+  const raw = Buffer.from(String(value || ""), "utf8")
+  const size = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Number(limit) : 0
+  const truncated = size > 0 && raw.length > size
+  return {
+    output_tail: (truncated ? raw.subarray(raw.length - size) : raw).toString("utf8"),
+    output_bytes: raw.length,
+    output_truncated: truncated,
+  }
+}
+const hasExactLine = (value, marker) => Boolean(marker) && String(value || "")
+  .split(/\r?\n/)
+  .some((line) => line.trim() === marker)
 const appendAudit = async (binding, event) => {
   await fs.appendFile(
     binding.audit_path,
@@ -173,6 +197,17 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
     }
     if (event?.type === "session.deleted" && sessionID) parents.delete(sessionID)
   },
+  "shell.env": async (input, output) => {
+    const binding = await resolveBinding(input?.sessionID)
+    if (!binding || !Array.isArray(binding.path_prepend) || !binding.path_prepend.length) return
+    const env = objectValue(output?.env)
+    const current = pathText(env.PATH) || pathText(env.Path) || pathText(process.env.PATH)
+    const currentEntries = current ? current.split(path.delimiter) : []
+    const prepended = binding.path_prepend.filter((value) => typeof value === "string" && value.trim())
+    const normalized = new Set(prepended.map((value) => process.platform === "win32" ? value.toLowerCase() : value))
+    const retained = currentEntries.filter((value) => !normalized.has(process.platform === "win32" ? value.toLowerCase() : value))
+    output.env = { ...env, PATH: [...prepended, ...retained].join(path.delimiter) }
+  },
   "tool.execute.before": async (input, output) => {
     const binding = await resolveBinding(input?.sessionID)
     if (!binding) return
@@ -196,16 +231,30 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
       if (!binding.allowed_commands.includes(command)) {
         throw new Error("Shell command is not bound to this OpenDeepHole task")
       }
+      const outputMetadata = objectValue(output?.structured)
+      const nestedMetadata = objectValue(originalMetadata.structured)
       const rawExitCode = originalMetadata.exitCode ?? originalMetadata.exit_code
-        ?? originalMetadata.exit ?? originalMetadata.code
+        ?? originalMetadata.exit ?? originalMetadata.code ?? nestedMetadata.exit
+        ?? outputMetadata.exit ?? output?.exit
       const exitCode = Number.isFinite(Number(rawExitCode)) ? Number(rawExitCode) : null
+      const commandOutput = commandOutputText(output, originalMetadata)
+      const marker = objectValue(binding.success_markers)[command]
+      const timedOut = Boolean(
+        originalMetadata.timeout ?? originalMetadata.timed_out ?? nestedMetadata.timeout
+        ?? outputMetadata.timeout ?? output?.timeout
+      )
+      const markerMatched = exitCode === null && !timedOut && hasExactLine(commandOutput, marker)
+      const success = !timedOut && (exitCode === 0 || markerMatched)
       await appendAudit(binding, {
         kind: "command",
         session_id: String(input?.sessionID || ""),
         call_id: String(input?.callID || ""),
         command,
         exit_code: exitCode,
-        success: exitCode === 0,
+        timed_out: timedOut,
+        success,
+        success_source: exitCode === 0 ? "exit_code" : markerMatched ? "output_marker" : "",
+        ...outputTail(commandOutput, binding.output_tail_bytes),
       })
       return
     }
@@ -435,8 +484,31 @@ class OpenCodePromptResult:
     raw: Any = field(default=None, repr=False, compare=False)
 
 
+@dataclass(frozen=True)
+class OpenCodeCommandFailure:
+    failure_kind: str
+    command: str = ""
+    exit_code: int | None = None
+    output_tail: str = ""
+    output_bytes: int = 0
+    output_truncated: bool = False
+    timed_out: bool = False
+
+
 class OpenCodeTaskQualityError(RuntimeError):
     """The model response violated a caller-required completion contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: str = "quality_error",
+        command_failures: tuple[OpenCodeCommandFailure, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = str(failure_kind or "quality_error")
+        self.command_failures = command_failures
+        self.prompt_result: OpenCodePromptResult | None = None
 
 
 class OpenCodeProviderQuotaError(RuntimeError):
@@ -940,6 +1012,8 @@ def _write_command_binding(
     *,
     session_id: str,
     required_commands: tuple[str, ...],
+    success_markers: tuple[tuple[str, str], ...] = (),
+    path_prepend: tuple[str, ...] = (),
 ) -> tuple[Path, Path]:
     normalized_commands = tuple(dict.fromkeys(
         str(command or "").strip() for command in required_commands
@@ -955,10 +1029,13 @@ def _write_command_binding(
         binding_path,
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "session_id": str(session_id),
                 "allowed_commands": list(normalized_commands),
                 "audit_path": str(audit_path),
+                "success_markers": dict(success_markers),
+                "path_prepend": list(path_prepend),
+                "output_tail_bytes": _COMMAND_OUTPUT_TAIL_BYTES,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -976,7 +1053,15 @@ def _validate_required_command_audit(
         raw_lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError as exc:
         raise OpenCodeTaskQualityError(
-            "OpenCode did not execute the required validation command"
+            "OpenCode did not execute the required validation command",
+            failure_kind="command_not_executed",
+            command_failures=tuple(
+                OpenCodeCommandFailure(
+                    failure_kind="command_not_executed",
+                    command=command,
+                )
+                for command in required_commands
+            ),
         ) from exc
     events: list[dict[str, Any]] = []
     for line_number, raw in enumerate(raw_lines, start=1):
@@ -986,11 +1071,13 @@ def _validate_required_command_audit(
             value = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise OpenCodeTaskQualityError(
-                f"OpenCode command audit is invalid at line {line_number}"
+                f"OpenCode command audit is invalid at line {line_number}",
+                failure_kind="command_audit_invalid",
             ) from exc
         if not isinstance(value, dict) or value.get("version") != 1:
             raise OpenCodeTaskQualityError(
-                f"OpenCode command audit is invalid at line {line_number}"
+                f"OpenCode command audit is invalid at line {line_number}",
+                failure_kind="command_audit_invalid",
             )
         events.append(value)
 
@@ -998,7 +1085,8 @@ def _validate_required_command_audit(
         command: [] for command in required_commands
     }
     last_write_index = -1
-    failures: dict[str, Any] = {}
+    failures: dict[str, dict[str, Any]] = {}
+    successes: dict[str, dict[str, Any]] = {}
     for index, event in enumerate(events):
         if event.get("kind") == "file_write":
             last_write_index = index
@@ -1008,29 +1096,83 @@ def _validate_required_command_audit(
         command = str(event.get("command") or "")
         if command not in successful_indexes:
             continue
-        if event.get("success") is True and event.get("exit_code") == 0:
+        if event.get("success") is True and (
+            event.get("exit_code") == 0
+            or event.get("success_source") == "output_marker"
+        ):
             successful_indexes[command].append(index)
+            successes[command] = event
         else:
-            failures[command] = event.get("exit_code")
+            failures[command] = event
 
     missing = [
         command for command, indexes in successful_indexes.items() if not indexes
     ]
     if missing:
+        command_failures: list[OpenCodeCommandFailure] = []
+        for command in missing:
+            event = failures.get(command, {})
+            exit_code = event.get("exit_code")
+            timed_out = event.get("timed_out") is True
+            if not event:
+                failure_kind = "command_not_executed"
+            elif timed_out:
+                failure_kind = "command_timeout"
+            elif exit_code is None:
+                failure_kind = "command_exit_unknown"
+            else:
+                failure_kind = "command_exit_failure"
+            command_failures.append(OpenCodeCommandFailure(
+                failure_kind=failure_kind,
+                command=command,
+                exit_code=(
+                    int(exit_code)
+                    if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+                    else None
+                ),
+                output_tail=str(event.get("output_tail") or ""),
+                output_bytes=max(0, int(event.get("output_bytes") or 0)),
+                output_truncated=event.get("output_truncated") is True,
+                timed_out=timed_out,
+            ))
         detail = ", ".join(
-            f"{command!r} (exit={failures.get(command)!r})"
+            f"{command!r} (exit={failures.get(command, {}).get('exit_code')!r})"
             for command in missing
         )
         raise OpenCodeTaskQualityError(
             "OpenCode required validation command did not complete successfully: "
-            + detail
+            + detail,
+            failure_kind=command_failures[0].failure_kind,
+            command_failures=tuple(command_failures),
         )
     last_required_index = min(
         max(indexes) for indexes in successful_indexes.values()
     )
     if last_write_index > last_required_index:
+        command_failures = tuple(
+            OpenCodeCommandFailure(
+                failure_kind="files_modified_after_validation",
+                command=command,
+                exit_code=(
+                    int(successes[command].get("exit_code"))
+                    if isinstance(successes.get(command, {}).get("exit_code"), int)
+                    else None
+                ),
+                output_tail=str(successes.get(command, {}).get("output_tail") or ""),
+                output_bytes=max(
+                    0,
+                    int(successes.get(command, {}).get("output_bytes") or 0),
+                ),
+                output_truncated=(
+                    successes.get(command, {}).get("output_truncated") is True
+                ),
+            )
+            for command in required_commands
+        )
         raise OpenCodeTaskQualityError(
-            "OpenCode modified task files after the required validation command"
+            "OpenCode modified task files after the required validation command",
+            failure_kind="files_modified_after_validation",
+            command_failures=command_failures,
         )
 
 
@@ -6062,6 +6204,8 @@ class OpenCodeServeManager:
         task_id: str = "",
         task_attempt: int = 0,
         required_bash_commands: tuple[str, ...] = (),
+        required_bash_success_markers: tuple[tuple[str, str], ...] = (),
+        required_bash_path_prepend: tuple[str, ...] = (),
     ) -> list[str] | OpenCodePromptResult:
         normalized_log_stage = task_output_stage(log_stage)
         active_session_id = str(session_id or "").strip()
@@ -6309,6 +6453,8 @@ class OpenCodeServeManager:
                             binding_workspace,
                             session_id=active_session_id,
                             required_commands=required_bash_commands,
+                            success_markers=required_bash_success_markers,
+                            path_prepend=required_bash_path_prepend,
                         )
                     )
                 elif binding_workspace is not None:
@@ -6744,15 +6890,6 @@ class OpenCodeServeManager:
                                     event_state.handle_part(part)
                     event_state.reconcile_text("text", "".join(response_text))
                     event_state.flush()
-                if required_bash_commands:
-                    if command_audit_path is None:
-                        raise OpenCodeTaskQualityError(
-                            "OpenCode required command audit was not initialized"
-                        )
-                    _validate_required_command_audit(
-                        command_audit_path,
-                        required_bash_commands,
-                    )
                 details = OpenCodePromptResult(
                     session_id=active_session_id,
                     message_id=_response_message_id(response_data),
@@ -6762,6 +6899,19 @@ class OpenCodeServeManager:
                     token_usage=captured_token_usage,
                     raw=response_data,
                 )
+                if required_bash_commands:
+                    if command_audit_path is None:
+                        raise OpenCodeTaskQualityError(
+                            "OpenCode required command audit was not initialized"
+                        )
+                    try:
+                        _validate_required_command_audit(
+                            command_audit_path,
+                            required_bash_commands,
+                        )
+                    except OpenCodeTaskQualityError as exc:
+                        exc.prompt_result = details
+                        raise
                 session_outcome = "success"
                 return details if return_details else lines
         except asyncio.TimeoutError as exc:

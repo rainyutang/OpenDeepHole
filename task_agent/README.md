@@ -39,6 +39,8 @@ result = await run_opencode_task(
     writable_paths=None,
     readable_paths=None,
     required_bash_commands=None,
+    required_bash_retry_count=0,
+    required_bash_success_markers=None,
     session_id=None,
     config_path=None,
     output=None,
@@ -61,6 +63,8 @@ result = await run_opencode_task(
 | `writable_paths` | 单个路径、路径序列或 `None` | `None` | `file_write_allowlist` 的兼容别名；两者同时传入时合并去重，并使用完全相同的写权限和保留语义。 |
 | `readable_paths` | 单个路径、路径序列或 `None` | `None` | 为本次 Session 额外开放只读及外部目录访问；不会获得编辑权限，也不参与文件保留。 |
 | `required_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许且必须成功执行的命令。拒绝空值、换行和通配符；除明确列出的完整命令外仍拒绝所有 shell。 |
+| `required_bash_retry_count` | `int` | `0` | 必需命令校验失败后，在同一个 Session 追加诊断和纠正消息的次数；耗尽后才进入既有 fresh Session 重试。大于 `0` 时必须同时声明 `required_bash_commands`。 |
+| `required_bash_success_markers` | `Mapping[str, str]` 或 `None` | `None` | 可选的“完整命令 → 单行成功标记”。仅在 OpenCode Hook 无法取得退出码时，以命令输出中完全匹配的一整行作为成功依据；键必须属于 `required_bash_commands`。 |
 | `session_id` | `str` 或 `None` | `None` | 传入已有 Serve 会话 ID 以续接会话；省略、传入 `None` 或空字符串时创建新会话。同一组件生命周期内，续接会话不能切换项目目录或可写工作目录。 |
 | `config_path` | `str`、`PathLike[str]` 或 `None` | `None` | 独立运行时使用的 YAML 配置文件路径。未传入时依次读取 `TASK_AGENT_CONFIG` 和当前目录下的 `task-agent.yaml`。宿主配置已注册时不能再传入此参数。 |
 | `output` | callable 或 `None` | 使用当前执行上下文 | 可选的本次调用输出覆盖；传 `None` 可关闭 Task Agent 控制台流。 |
@@ -84,8 +88,12 @@ result = await run_opencode_task(
 声明的额外路径。调用方不能传原生权限规则，`project_dir` 默认只读，`bash` 默认保持禁用。只有
 显式传入 `required_bash_commands` 时，Task Agent 才会先拒绝所有命令再按完整字符串放行；受管
 Session 绑定 Hook 对父、子 Session 再做一次精确检查，并记录命令退出码和文件写入顺序。每条必需
-命令必须在最后一次受管文件写入后以退出码 0 完成，否则作为任务质量失败进入既有 fresh Session
-重试，不降低模型健康权重。
+命令必须在最后一次受管文件写入后完成：正常以退出码 0 判定；调用方显式配置成功标记时，若
+OpenCode 没有暴露退出码，也可由输出中的完全匹配行判定。失败审计会保留至多末尾 16 KiB 命令输出。
+`required_bash_retry_count > 0` 时，Task Agent 先把失败类型、退出码、超时状态和该输出追加到原
+Session，要求模型修复产物并再次执行同一命令；再次失败并耗尽此预算后才进入既有 fresh Session
+重试，整个过程不降低模型健康权重。Windows 任务会给该 Session 的 `PATH` 临时前置当前 Python
+目录，轻量级校验命令使用裸 `python.exe` 和双引号参数，避免把 POSIX 单引号交给 `cmd.exe`。
 
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
 
@@ -118,11 +126,11 @@ standalone 与完整 Agent 共用受控的 OpenCode 配置发现：依次合并�
 
 OpenCode 的 YAML 内覆盖配置放在 `serve.opencode_config` 下，其中 MCP 配置使用 `serve.opencode_config.mcp`。示例文件同时给出了 `type: remote` 的 HTTP MCP 和 `type: local` 的进程 MCP；两项默认关闭，配置好 URL、请求头或启动命令后再将对应的 `enabled` 改为 `true`。MCP 的 `timeout` 单位为毫秒。外部配置无效时记录文件路径和警告后忽略；YAML 内配置无效时直接拒绝启动。配置在单例生命周期内固定，执行 `await shutdown_opencode()` 后才会重新发现磁盘配置。
 
-独立运行时，组件按 `[<stage>][<session_id>][task|session|tool|skill]` 打印结构化进度并立即刷新。`vulnerability_validation` 的 stage 固定为 `validation`，其它任务使用原始 `task_type`；Session 创建前使用 `pending`。`task` 记录排队、模型选择、Serve 和最终状态，`session` 明确标记当前消息执行的 `START`/`STOP`、Provider 重试、新 Session `RETRY`、格式匹配 `JSON_FORMAT_RETRY`/`JSON_FORMAT_RECOVERED`/`JSON_FORMAT_FAILED`、同 Session `JSON_RETRY` 及错误；由 Task Agent 发起的 `START`/`STOP` 会在既有头部后追加逻辑 `task`、`attempt` 和可用时的 `message`，便于把一次失败与后续 fresh Session 对齐。`STOP status=success` 同时表示本次消息结束且执行成功。OpenCode 内部 step 不打印；Tool 和 SKILL 调用分别使用 `tool`、`skill`，每次调用只打印一行。常用内置 Tool 会追加定制摘要：`read` 打印路径及可选 offset/limit，`write` 打印路径和写入字符数，`edit` 打印路径、替换前后字符数及 replace-all 标志，`bash`/`shell` 完整打印经过单行 JSON 转义但不截断、不脱敏的命令及可选工作目录、超时和描述，`grep`/`glob`/`list` 打印各自的模式和目录；当前扫描实际选中的代码图谱 MCP 会打印实际工具名及完整、无截断、无脱敏的单行 `input` JSON，其它未识别的 Tool 与 MCP Tool 仍只打印名称。成功不追加完成行，失败才追加脱敏 `ERROR`。模型 text、reasoning、write/edit 正文及工具返回正文不写入控制台，但最终 text 仍正常返回并参与 JSON 解析。Bash 命令和代码图谱 MCP 输入中的 Token、密码、请求头或其它敏感值会原样进入日志，调用方应避免在这些参数中嵌入不应留存的凭据。一次消息执行结束的 `STOP ... retained=true` 不会删除可续写的 Session。宿主模式继承宿主绑定的输出回调，不会额外重复打印；嵌套 `opencode_task_context(...)` 只有显式传入 `output=None` 才会关闭该回调。
+独立运行时，组件按 `[<stage>][<session_id>][task|session|tool|skill]` 打印结构化进度并立即刷新。`vulnerability_validation` 的 stage 固定为 `validation`，其它任务使用原始 `task_type`；Session 创建前使用 `pending`。`task` 记录排队、模型选择、Serve 和最终状态，`session` 明确标记当前消息执行的 `START`/`STOP`、Provider 重试、新 Session `RETRY`、格式匹配 `JSON_FORMAT_RETRY`/`JSON_FORMAT_RECOVERED`/`JSON_FORMAT_FAILED`、同 Session `JSON_RETRY`、必需命令 `VALIDATION_RETRY` 及错误；由 Task Agent 发起的 `START`/`STOP` 会在既有头部后追加逻辑 `task`、`attempt` 和可用时的 `message`，便于把一次失败与后续 fresh Session 对齐。`STOP status=success` 同时表示本次消息结束且执行成功。OpenCode 内部 step 不打印；Tool 和 SKILL 调用分别使用 `tool`、`skill`，每次调用只打印一行。常用内置 Tool 会追加定制摘要：`read` 打印路径及可选 offset/limit，`write` 打印路径和写入字符数，`edit` 打印路径、替换前后字符数及 replace-all 标志，`bash`/`shell` 完整打印经过单行 JSON 转义但不截断、不脱敏的命令及可选工作目录、超时和描述，`grep`/`glob`/`list` 打印各自的模式和目录；当前扫描实际选中的代码图谱 MCP 会打印实际工具名及完整、无截断、无脱敏的单行 `input` JSON，其它未识别的 Tool 与 MCP Tool 仍只打印名称。成功不追加完成行，失败才追加脱敏 `ERROR`。模型 text、reasoning、write/edit 正文及工具返回正文不写入控制台，但最终 text 仍正常返回并参与 JSON 解析。Bash 命令和代码图谱 MCP 输入中的 Token、密码、请求头或其它敏感值会原样进入日志，调用方应避免在这些参数中嵌入不应留存的凭据。一次消息执行结束的 `STOP ... retained=true` 不会删除可续写的 Session。宿主模式继承宿主绑定的输出回调，不会额外重复打印；嵌套 `opencode_task_context(...)` 只有显式传入 `output=None` 才会关闭该回调。
 
 `serve.timeout` 是一次模型请求的总超时，默认 `3600` 秒。模型 Provider 无法连接时，OpenCode 自身的 `busy`、`retry` 和 `error` 会出现在上述实时输出中；达到总超时后，组件会 abort 当前 Session 请求、回收请求与事件任务，并按 `serve.max_retries` 重新排队到全新 Session，预算耗尽后才返回 `timeout`。fresh Session 重试会记住本次逻辑任务已经尝试过的模型：只要还有满足能力与时间窗的未尝试模型，就排除已经尝试的模型；即使替代模型的并发容量暂满也会等待，而不会立即回到原模型。只有单模型可用或所有合格模型都已尝试后，才允许按当前有效权重回退选择。结构化失败先尝试独立低能力格式匹配，再在原业务 Session 纠正；两者都失败后创建 fresh Session 时也遵循相同的换模规则。主动取消仍会立即停止当前请求及后续重试。Serve 子进程不会继承或接受 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式；`serve.environment` 的其它 Provider 环境变量保持不变，代理相关变量仅允许 `NO_PROXY`/`no_proxy` 绕过列表。
 
-模型池完成历史继续以一个逻辑任务为一项，但会在 `session_events` 中按顺序保留业务 Session、独立 JSON 格式匹配 Session和同 Session JSON 纠正；每项包含 Session ID、尝试序号、模型、结果、耗时及失败类别，最终成功也保留之前的超时或不合规事件。JSON 不合规仅区分空输出、无 JSON、JSON 语法错误、Schema 不匹配和无法无损格式化，不保存模型原始回复或字段级校验内容；`serve_session_id` 仍是最终权威业务 Session，旧历史缺少事件数组时保持兼容。
+模型池完成历史继续以一个逻辑任务为一项，但会在 `session_events` 中按顺序保留业务 Session、独立 JSON 格式匹配 Session、同 Session JSON 纠正和同 Session 必需命令纠正；每项包含 Session ID、尝试序号、模型、结果、耗时及失败类别，最终成功也保留之前的超时或不合规事件。JSON 不合规仅区分空输出、无 JSON、JSON 语法错误、Schema 不匹配和无法无损格式化；命令纠正只持久化规范化失败类别和摘要，不持久化校验输出正文。`serve_session_id` 仍是最终权威业务 Session，旧历史缺少事件数组时保持兼容。
 
 OpenCode 即使返回 HTTP 成功，也可能在 assistant `info.error` 的校验包装中携带 Provider 限流。Task Agent 会递归解析其中允许公开的 `error_code`、`type` 和 `retry_after`；`*.429` 且语义为 RPM/TPM 配额不足时不再作为永久模型故障，而是按实际模型身份打开进程内临时熔断。冷却默认依次为 30、60、120、240、300 秒，正数 `retry_after` 优先采用并限制到 300 秒；若有其它合格模型，fresh Session 立即换模，若全部模型都在冷却则当前逻辑任务最多等待 5 分钟且可被取消。冷却到期时同一实际身份只允许一个半开探测，成功即关闭熔断，重复配额错误重新打开并延长冷却；Session 重试次数仍由既有 `max_retries` 控制，进程重启会清空该临时状态。
 

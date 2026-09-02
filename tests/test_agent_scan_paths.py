@@ -1387,7 +1387,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             archives = list(failed_root.iterdir())
             self.assertEqual(len(archives), 1)
             self.assertTrue((archives[0] / "partial.json").is_file())
-
         self.assertEqual(attempts, [
             ("codex_goal_threat_analysis", True),
             ("deephole_threat_analysis", False),
@@ -1449,6 +1448,14 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     new=AsyncMock(side_effect=run_analysis),
                 ),
                 patch(
+                    "deephole_client.scanner._archive_failed_threat_analysis",
+                    side_effect=PermissionError(
+                        5,
+                        "Access is denied",
+                        str(root / "locked-threat-analysis"),
+                    ),
+                ),
+                patch(
                     "deephole_client.scanner.collect_json_artifacts",
                     return_value={"artifacts": {}},
                 ),
@@ -1481,6 +1488,15 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             archives = list(failed_root.iterdir())
             self.assertEqual(len(archives), 1)
             self.assertTrue((archives[0] / "partial.json").is_file())
+            event_messages = [
+                str(call.args[1].message)
+                for call in reporter.send_event.await_args_list
+                if len(call.args) > 1
+            ]
+            self.assertTrue(any(
+                "archive warning" in message and "PermissionError" in message
+                for message in event_messages
+            ))
 
         self.assertEqual(attempts, [
             ("opencode_lightweight_threat_analysis", True),

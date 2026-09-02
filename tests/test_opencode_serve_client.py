@@ -785,11 +785,19 @@ def test_managed_file_write_plugin_allows_only_bound_command_for_parent_and_chil
     runtime.mkdir()
     _write_serve_config_file(runtime, "{}")
     command = "python validate.py --input result.json"
-    _, audit_path = _write_command_binding(
+    marker = "VALID: artifacts passed"
+    python_bin = str(tmp_path / "python-bin")
+    binding_path, audit_path = _write_command_binding(
         runtime,
         session_id="parent-session",
         required_commands=(command,),
+        success_markers=((command, marker),),
+        path_prepend=(python_bin,),
     )
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    assert binding["version"] == 2
+    assert binding["success_markers"] == {command: marker}
+    assert binding["path_prepend"] == [python_bin]
     plugin_path = (
         runtime
         / ".opendeephole-plugins"
@@ -800,10 +808,17 @@ import assert from "node:assert/strict"
 import { pathToFileURL } from "node:url"
 
 const command = process.argv[2]
+const marker = process.argv[3]
+const pythonBin = process.argv[4]
 const plugin = await import(pathToFileURL(process.argv[1]).href)
 const hooks = await plugin.OpenDeepHoleFileWriteHook({ directory: process.cwd() })
 const before = hooks["tool.execute.before"]
 const after = hooks["tool.execute.after"]
+const shellEnv = hooks["shell.env"]
+
+const envOutput = { env: { PATH: "/usr/bin" } }
+await shellEnv({ sessionID: "parent-session" }, envOutput)
+assert.equal(envOutput.env.PATH.split(process.platform === "win32" ? ";" : ":")[0], pythonBin)
 
 await before(
   { sessionID: "parent-session", tool: "bash" },
@@ -842,11 +857,20 @@ await after(
     callID: "bash-1",
     args: { command },
   },
-  { metadata: { exitCode: 0 } },
+  { output: `validator diagnostics\n${marker}\n`, metadata: {} },
 )
 '''
     completed = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(plugin_path), command],
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            script,
+            str(plugin_path),
+            command,
+            marker,
+            python_bin,
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -860,6 +884,9 @@ await after(
     ]
     assert [event["kind"] for event in events] == ["file_write", "command"]
     assert events[-1]["session_id"] == "child-session"
+    assert events[-1]["exit_code"] is None
+    assert events[-1]["success_source"] == "output_marker"
+    assert marker in events[-1]["output_tail"]
 
 
 def test_required_command_audit_rejects_failure_and_post_validation_write(
@@ -874,12 +901,22 @@ def test_required_command_audit_rejects_failure_and_post_validation_write(
             "command": command,
             "exit_code": 1,
             "success": False,
+            "output_tail": "schema mismatch in value-assets.json",
+            "output_bytes": 36,
+            "output_truncated": True,
         })
         + "\n",
         encoding="utf-8",
     )
-    with pytest.raises(OpenCodeTaskQualityError, match="exit=1"):
+    with pytest.raises(OpenCodeTaskQualityError, match="exit=1") as exc_info:
         _validate_required_command_audit(audit_path, (command,))
+    assert exc_info.value.failure_kind == "command_exit_failure"
+    assert exc_info.value.command_failures[0].command == command
+    assert exc_info.value.command_failures[0].exit_code == 1
+    assert exc_info.value.command_failures[0].output_tail == (
+        "schema mismatch in value-assets.json"
+    )
+    assert exc_info.value.command_failures[0].output_truncated is True
 
     audit_path.write_text(
         "\n".join((

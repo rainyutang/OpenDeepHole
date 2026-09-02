@@ -6,7 +6,7 @@ import asyncio
 import concurrent.futures
 import inspect
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
@@ -150,6 +150,38 @@ def _normalize_required_bash_commands(
     return tuple(normalized)
 
 
+def _normalize_required_bash_success_markers(
+    value: Mapping[str, str] | None,
+    *,
+    required_commands: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            "OpenCode required_bash_success_markers must be a mapping or None"
+        )
+    normalized: list[tuple[str, str]] = []
+    for raw_command, raw_marker in value.items():
+        if not isinstance(raw_command, str) or not isinstance(raw_marker, str):
+            raise TypeError(
+                "OpenCode required_bash_success_markers keys and values must be strings"
+            )
+        command = raw_command.strip()
+        marker = raw_marker.strip()
+        if command not in required_commands:
+            raise ValueError(
+                "OpenCode required_bash_success_markers keys must match "
+                "required_bash_commands"
+            )
+        if not marker or "\n" in raw_marker or "\r" in raw_marker:
+            raise ValueError(
+                "OpenCode required_bash_success_markers values must be non-empty lines"
+            )
+        normalized.append((command, marker))
+    return tuple(normalized)
+
+
 async def run_opencode_task(
     *,
     task_name: str,
@@ -163,6 +195,8 @@ async def run_opencode_task(
     writable_paths: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
     readable_paths: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
     required_bash_commands: str | Sequence[str] | None = None,
+    required_bash_retry_count: int = 0,
+    required_bash_success_markers: Mapping[str, str] | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -183,6 +217,8 @@ async def run_opencode_task(
         writable_paths=writable_paths,
         readable_paths=readable_paths,
         required_bash_commands=required_bash_commands,
+        required_bash_retry_count=required_bash_retry_count,
+        required_bash_success_markers=required_bash_success_markers,
         session_id=session_id,
         config_path=config_path,
         output=output,
@@ -215,6 +251,8 @@ async def _run_opencode_task_local(
     writable_paths: _PathValues | None = None,
     readable_paths: _PathValues | None = None,
     required_bash_commands: str | Sequence[str] | None = None,
+    required_bash_retry_count: int = 0,
+    required_bash_success_markers: Mapping[str, str] | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -253,6 +291,19 @@ async def _run_opencode_task_local(
     normalized_required_bash_commands = _normalize_required_bash_commands(
         required_bash_commands
     )
+    bash_retry_count = int(required_bash_retry_count)
+    if bash_retry_count < 0:
+        raise ValueError("OpenCode required_bash_retry_count cannot be negative")
+    if bash_retry_count and not normalized_required_bash_commands:
+        raise ValueError(
+            "OpenCode required_bash_retry_count requires required_bash_commands"
+        )
+    normalized_required_bash_success_markers = (
+        _normalize_required_bash_success_markers(
+            required_bash_success_markers,
+            required_commands=normalized_required_bash_commands,
+        )
+    )
     if output is not _UNSET and output is not None and not callable(output):
         raise TypeError("OpenCode output must be callable or None")
 
@@ -280,6 +331,10 @@ async def _run_opencode_task_local(
             writable_paths=normalized_writable_paths,
             readable_paths=normalized_readable_paths,
             required_bash_commands=normalized_required_bash_commands,
+            required_bash_retry_count=bash_retry_count,
+            required_bash_success_markers=(
+                normalized_required_bash_success_markers
+            ),
             session_id=str(session_id or "").strip() or None,
         )
 

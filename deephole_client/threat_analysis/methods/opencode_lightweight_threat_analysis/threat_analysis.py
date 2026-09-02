@@ -16,6 +16,7 @@ reference_paths = _lightweight_contract.reference_paths
 reference_root = _lightweight_contract.reference_root
 validate_artifacts_locally = _lightweight_contract.validate_artifacts_locally
 validation_command = _lightweight_contract.validation_command
+VALIDATION_SUCCESS_MARKER = _lightweight_contract.VALIDATION_SUCCESS_MARKER
 
 
 _FINAL_DIR = "final"
@@ -155,6 +156,10 @@ async def _run_task(
         output_schema=None,
         readable_paths=(reference_root,),
         required_bash_commands=(validation_command_value,),
+        required_bash_retry_count=1,
+        required_bash_success_markers={
+            validation_command_value: VALIDATION_SUCCESS_MARKER,
+        },
         session_id=session_id,
     )
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Mapping
 
 from ..codex_scan_config import codex_runtime_reference_root
@@ -13,6 +13,9 @@ from ..codex_scan_config import codex_runtime_reference_root
 
 MAX_LIGHTWEIGHT_PROMPT_CHARS = 4000
 ATTACK_MODE_FILE = "attack_mode.json"
+VALIDATION_SUCCESS_MARKER = (
+    "VALID: threat-analysis artifacts passed schema and relationship checks"
+)
 
 
 def reference_root() -> Path:
@@ -36,30 +39,60 @@ def reference_paths() -> tuple[Path, dict[str, Path]]:
     return guidance_path, schema_paths
 
 
-def validation_command(
+def validation_argv(
     *,
     guidance_path: Path,
     paths: Mapping[str, Path],
-) -> str:
+) -> tuple[str, ...]:
     validator_path = reference_root() / "schema_validation.py"
     if not validator_path.is_file():
         raise FileNotFoundError(
             f"threat-analysis validator is missing: {validator_path}"
         )
-    return shlex.join(
-        (
-            sys.executable,
-            str(validator_path),
-            "--value-assets",
-            str(paths["value_asset_path"]),
-            "--high-risk-modules",
-            str(paths["high_risk_modules_path"]),
-            "--attack-trees",
-            str(paths["attack_tree_path"]),
-            "--references-root",
-            str(guidance_path.parent),
-        )
+    return (
+        sys.executable,
+        str(validator_path),
+        "--value-assets",
+        str(paths["value_asset_path"]),
+        "--high-risk-modules",
+        str(paths["high_risk_modules_path"]),
+        "--attack-trees",
+        str(paths["attack_tree_path"]),
+        "--references-root",
+        str(guidance_path.parent),
     )
+
+
+def _windows_command_argument(value: str) -> str:
+    """Quote one validator argument for cmd, PowerShell, and Git Bash."""
+
+    if '"' in value:
+        raise ValueError("Windows validation command arguments cannot contain quotes")
+    return f'"{value}"'
+
+
+def validation_command(
+    *,
+    guidance_path: Path,
+    paths: Mapping[str, Path],
+) -> str:
+    argv = validation_argv(guidance_path=guidance_path, paths=paths)
+    if sys.platform != "win32":
+        return shlex.join(argv)
+    # A quoted executable is only a string expression in PowerShell, while
+    # POSIX single quotes are literal characters in cmd.exe. Keep the
+    # interpreter token bare and quote every following token with double
+    # quotes. Task Agent prepends this interpreter's directory to PATH for the
+    # bound Session, and the Codex method does the same for its app-server.
+    executable = PureWindowsPath(argv[0]).name
+    if not executable or any(character.isspace() for character in executable):
+        raise ValueError(
+            "Windows Python executable name must be a non-empty token without spaces"
+        )
+    return " ".join((
+        executable,
+        *(_windows_command_argument(value) for value in argv[1:]),
+    ))
 
 
 def build_lightweight_prompt(
@@ -115,9 +148,8 @@ def validate_artifacts_locally(
 ) -> None:
     """Run the same validator once more outside the model Session."""
 
-    command = validation_command(guidance_path=guidance_path, paths=paths)
     completed = subprocess.run(
-        shlex.split(command),
+        validation_argv(guidance_path=guidance_path, paths=paths),
         check=False,
         capture_output=True,
         text=True,
@@ -134,9 +166,11 @@ def validate_artifacts_locally(
 __all__ = [
     "ATTACK_MODE_FILE",
     "MAX_LIGHTWEIGHT_PROMPT_CHARS",
+    "VALIDATION_SUCCESS_MARKER",
     "build_lightweight_prompt",
     "reference_paths",
     "reference_root",
     "validate_artifacts_locally",
+    "validation_argv",
     "validation_command",
 ]
