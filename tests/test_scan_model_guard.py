@@ -11,8 +11,12 @@ from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.models import (
     AgentInfo,
+    AgentMcpConfig,
+    AgentMcpRemoteConfig,
     AgentRemoteConfig,
     CreateScanRequest,
+    MultiVersionTarget,
+    ScanKnowledgeBaseRequest,
     User,
 )
 
@@ -88,6 +92,103 @@ def test_create_scan_rejects_client_without_model_before_persisting() -> None:
     resolve.assert_awaited_once_with("stable-client")
     readiness.assert_awaited_once_with("stable-client")
     config.assert_awaited_once_with(client, "stable-client")
+
+
+def test_multi_version_scan_discards_code_graph_and_knowledge_mcp() -> None:
+    user = User(user_id="user-1", username="alice", role="user")
+    client = AgentInfo(
+        agent_id="session-1",
+        agent_key="stable-client",
+        name="client-1",
+        ip="127.0.0.1",
+        last_seen="2026-01-01T00:00:00+00:00",
+        user_id=user.user_id,
+    )
+    ready = AgentRemoteConfig(model_pool={"models": [{
+        "id": "ready",
+        "model": "provider/model",
+        "enabled": True,
+    }]})
+    captured: dict[str, object] = {}
+
+    async def store_call(_store, operation, *args, **_kwargs):
+        if operation == "get_agent_record":
+            return None
+        if operation == "save_scan":
+            captured["scan"] = args[0]
+            captured["meta"] = args[1]
+            return None
+        if operation in {"get_scan_config_memory", "upsert_scan_config_memory"}:
+            return {} if operation == "get_scan_config_memory" else None
+        if callable(operation):
+            return []
+        raise AssertionError(f"unexpected store operation: {operation}")
+
+    send = AsyncMock(return_value=True)
+    with (
+        patch("backend.api.scan.get_scan_store", return_value=object()),
+        patch("backend.api.scan.run_store_call", new=store_call),
+        patch(
+            "backend.api.scan._globally_enabled_checker_names",
+            return_value=[],
+        ),
+        patch(
+            "backend.api.agent.resolve_agent_connection_async",
+            new=AsyncMock(return_value=(client.agent_id, client)),
+        ),
+        patch(
+            "backend.api.agent.ensure_agent_accepting_tasks_async",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "backend.api.agent.get_scan_agent_config_async",
+            new=AsyncMock(return_value=ready),
+        ),
+        patch(
+            "backend.api.agent.create_agent_task_runtime_update_payload_async",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("backend.api.agent.send_agent_command", new=send),
+    ):
+        asyncio.run(scan_api.create_agent_scan(
+            CreateScanRequest(
+                agent_key=client.agent_key,
+                scan_mode="multi_version",
+                multi_versions=[
+                    MultiVersionTarget(
+                        version_name="v1",
+                        project_path="/repo/v1",
+                    ),
+                    MultiVersionTarget(
+                        version_name="v2",
+                        project_path="/repo/v2",
+                    ),
+                ],
+                code_graph_mcp=AgentMcpConfig(
+                    enabled=True,
+                    name="scan-graph",
+                    transport="remote",
+                    remote=AgentMcpRemoteConfig(url="http://graph.example/mcp"),
+                ),
+                knowledge_base=ScanKnowledgeBaseRequest(
+                    enabled=True,
+                    project_id="project-1",
+                    project_name="Knowledge Project",
+                ),
+            ),
+            SimpleNamespace(base_url="http://testserver/"),
+            user,
+        ))
+
+    scan = captured["scan"]
+    meta = captured["meta"]
+    command = send.await_args.args[1]
+    assert scan.code_graph_mcp_enabled is False
+    assert scan.knowledge_base_enabled is False
+    assert meta.code_graph_mcp is None
+    assert meta.knowledge_base_mcp is None
+    assert command["code_graph_mcp"] is None
+    assert command["knowledge_base_mcp"] is None
 
 
 @pytest.mark.parametrize(

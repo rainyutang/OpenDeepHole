@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from backend.api.scan import _resolve_scan_mining_engines, _validated_multi_versions
 from backend.models import MultiVersionTarget
+from task_agent import opencode_task_context
+from task_agent.task_service import get_opencode_execution_context
 from deephole_client.vulnerability_mining.engines.multi_version.engine import (
     THREAT_ANALYSIS_METHOD_ID,
     _audit_static_groups,
@@ -335,12 +337,14 @@ def test_threat_audit_uses_lightweight_analysis_and_submits_jobs_concurrently(
         attack_tree_path.write_text("{}", encoding="utf-8")
         high_risk_modules_path.write_text("[]", encoding="utf-8")
         method_ids: list[str] = []
+        product_mcps: list[object] = []
         task_names: list[str] = []
         active = 0
         maximum_active = 0
 
         async def analyze(**kwargs):
             method_ids.append(kwargs["method_id"])
+            product_mcps.append(kwargs["product_mcp"])
             return {
                 "result": True,
                 "attack_tree_path": str(attack_tree_path),
@@ -400,6 +404,7 @@ def test_threat_audit_uses_lightweight_analysis_and_submits_jobs_concurrently(
 
         assert confirmed == 0
         assert method_ids == [THREAT_ANALYSIS_METHOD_ID]
+        assert product_mcps == [None]
         assert THREAT_ANALYSIS_METHOD_ID == "opencode_lightweight_threat_analysis"
         assert maximum_active == 2
         assert set(task_names) == {
@@ -423,9 +428,13 @@ def test_static_scan_and_threat_flow_start_together_and_share_audit_capacity(
         active = 0
         maximum_active = 0
         runners: list[object] = []
+        task_calls: list[dict[str, object]] = []
+        task_contexts: list[object] = []
 
         async def run_task(**kwargs):
             nonlocal active, maximum_active
+            task_calls.append(dict(kwargs))
+            task_contexts.append(get_opencode_execution_context())
             active += 1
             maximum_active = max(maximum_active, active)
             if kwargs["task_name"] == "threat-audit":
@@ -507,28 +516,35 @@ def test_static_scan_and_threat_flow_start_together_and_share_audit_capacity(
             "cancel_event": asyncio.Event(),
         }
 
-        with (
-            patch(
-                "deephole_client.vulnerability_mining.engines.multi_version.engine._scan_versions",
-                new=scan_versions,
-            ),
-            patch(
-                "deephole_client.vulnerability_mining.engines.multi_version.engine._audit_threats",
-                new=audit_threats,
-            ),
-            patch(
-                "deephole_client.vulnerability_mining.engines.multi_version.engine._audit_static_groups",
-                new=audit_static_groups,
-            ),
-            patch(
-                "deephole_client.vulnerability_mining.engines.multi_version.engine.run_opencode_task",
-                new=run_task,
-            ),
+        with opencode_task_context(
+            project_dir=tmp_path,
+            work_dir=tmp_path / "outer-work",
+            scan_id="scan-parallel",
+            code_graph_mcp={"enabled": True, "name": "wrong-graph"},
+            knowledge_base_mcp={"enabled": True, "name": "wrong-knowledge"},
         ):
-            result = await asyncio.wait_for(
-                run_multi_version(**kwargs),
-                timeout=1,
-            )
+            with (
+                patch(
+                    "deephole_client.vulnerability_mining.engines.multi_version.engine._scan_versions",
+                    new=scan_versions,
+                ),
+                patch(
+                    "deephole_client.vulnerability_mining.engines.multi_version.engine._audit_threats",
+                    new=audit_threats,
+                ),
+                patch(
+                    "deephole_client.vulnerability_mining.engines.multi_version.engine._audit_static_groups",
+                    new=audit_static_groups,
+                ),
+                patch(
+                    "deephole_client.vulnerability_mining.engines.multi_version.engine.run_opencode_task",
+                    new=run_task,
+                ),
+            ):
+                result = await asyncio.wait_for(
+                    run_multi_version(**kwargs),
+                    timeout=1,
+                )
 
         assert result["status"] == "success"
         assert result["total_candidates"] == 1
@@ -536,5 +552,13 @@ def test_static_scan_and_threat_flow_start_together_and_share_audit_capacity(
         assert len(runners) == 2
         assert runners[0] is runners[1]
         assert maximum_active == 1
+        assert len(task_calls) == 2
+        expected_readable_paths = tuple(root.resolve() for root in version_roots)
+        assert all(
+            call["readable_paths"] == expected_readable_paths
+            for call in task_calls
+        )
+        assert all(context.code_graph_mcp is None for context in task_contexts)
+        assert all(context.knowledge_base_mcp is None for context in task_contexts)
 
     asyncio.run(scenario())

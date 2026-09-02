@@ -1417,8 +1417,15 @@ async def create_agent_scan(
             status_code=400,
             detail="所选客户端尚未配置启用的显式模型，请先在客户端配置页面手动添加模型",
         )
-    code_graph_mcp = _scan_code_graph_mcp(body.code_graph_mcp)
-    knowledge_base_mcp = _knowledge_base_mcp(body.knowledge_base)
+    requested_scan_mode = _normalize_scan_mode(body.scan_mode)
+    if requested_scan_mode == SCAN_MODE_MULTI_VERSION:
+        # Both scan MCP bindings are single-project scoped. Multi-version
+        # tasks use explicit read-only repository roots and file tools instead.
+        code_graph_mcp = None
+        knowledge_base_mcp = None
+    else:
+        code_graph_mcp = _scan_code_graph_mcp(body.code_graph_mcp)
+        knowledge_base_mcp = _knowledge_base_mcp(body.knowledge_base)
     if (
         code_graph_mcp is not None
         and knowledge_base_mcp is not None
@@ -1430,7 +1437,6 @@ async def create_agent_scan(
             detail="代码图谱 MCP 与知识库 MCP 名称不能相同",
         )
 
-    requested_scan_mode = _normalize_scan_mode(body.scan_mode)
     multi_versions = (
         _validated_multi_versions(body.multi_versions)
         if requested_scan_mode == SCAN_MODE_MULTI_VERSION
