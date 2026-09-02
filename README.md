@@ -192,11 +192,21 @@ Provider。没有用户默认模型时，Agent 才按 `model_pool.models` 中已
 重启后重新准备。
 
 第一个探测成功的模型会写入 `config.toml` 文件开头的 OpenDeepHole 托管默认模型/Provider 区，
-自定义 Provider 固定使用 `wire_api = "responses"`。选中 Provider 地址的主机还会写入
+自定义 Provider 固定使用 `wire_api = "responses"`。Agent 同时在 `$CODEX_HOME` 生成带所有权标记、
+内容寻址且权限为 `0600` 的 `opendeephole-model-catalog-*.json`，并通过托管的
+`model_catalog_json` 让 Codex 读取选中模型的能力信息。目录中的模型名使用 OpenCode Provider 下的
+原始模型 ID；`models.<id>.limit.context` 为正整数时同时写入目录的 `context_window` /
+`max_context_window` 和顶层 `model_context_window`，否则统一按 `128000` 回退；
+`model_auto_compact_token_limit` 以 128K 对应 100K 的比例计算。用户已有的
+`model_catalog_json`、`model_context_window` 或 `model_auto_compact_token_limit` 均保持不变；
+其中用户自有目录指针存在时只跳过托管目录安装，不影响默认模型和 Provider 同步。
+
+选中 Provider 地址的主机还会写入
 `$CODEX_HOME/.env` 的托管区，同时追加到 `NO_PROXY` 和 `no_proxy`；用户已有内容和值保持不变，
 更新或失效时只替换或移除托管区。该文件只供 Codex 自行加载，Agent 不会把这两个变量注入当前进程
 或子进程环境。旧版本生成且带所有权标记的 `opendeephole-*.config.toml` 会被清理，用户自建文件、
-默认模型和非托管配置均不会被覆盖。
+默认模型和非托管配置均不会被覆盖；模型切换或托管默认模型移除后，仅清理所有权标记仍有效且未被
+用户目录指针引用的旧托管模型目录。
 
 每次创建或恢复扫描时，Agent 还会把 Codex 本次必须读取的绝对路径加入同一份
 `$CODEX_HOME/config.toml`：项目总路径、Agent 的 `~/.opendeephole` 数据根目录、精确的

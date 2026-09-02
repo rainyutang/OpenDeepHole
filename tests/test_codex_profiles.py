@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -32,6 +33,17 @@ def _effective_config() -> dict:
             },
         },
     }
+
+
+def _managed_catalog_paths(codex_home: Path) -> list[Path]:
+    return sorted(codex_home.glob("opendeephole-model-catalog-*.json"))
+
+
+def _read_only_managed_catalog(codex_home: Path) -> tuple[Path, dict]:
+    paths = _managed_catalog_paths(codex_home)
+    if len(paths) != 1:
+        raise AssertionError(f"expected one managed catalog, found {paths}")
+    return paths[0], json.loads(paths[0].read_text(encoding="utf-8"))
 
 
 class CodexConfigSyncTests(unittest.TestCase):
@@ -304,6 +316,166 @@ class CodexConfigSyncTests(unittest.TestCase):
             if os.name != "nt":
                 self.assertEqual(config_path.stat().st_mode & 0o777, 0o640)
 
+    def test_managed_catalog_uses_opencode_context_and_codex_metadata(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+
+            result = self._sync(
+                codex_home,
+                _effective_config(),
+                ["literal/beta/model"],
+            )
+
+            self.assertEqual(result.error, "")
+            parsed = codex_profiles.tomllib.loads(
+                (codex_home / "config.toml").read_text(encoding="utf-8")
+            )
+            catalog_path, catalog = _read_only_managed_catalog(codex_home)
+            self.assertEqual(Path(parsed["model_catalog_json"]), catalog_path)
+            self.assertEqual(parsed["model_context_window"], 65536)
+            self.assertEqual(
+                parsed["model_auto_compact_token_limit"],
+                51200,
+            )
+            self.assertTrue(catalog["_opendeephole_managed"])
+            self.assertEqual(
+                catalog["models"],
+                [{
+                    "slug": "beta/model",
+                    "display_name": "beta/model",
+                    "description": "beta/model",
+                    "tool_mode": "direct",
+                    "multi_agent_version": "v2",
+                    "default_reasoning_level": None,
+                    "supported_reasoning_levels": [],
+                    "shell_type": "shell_command",
+                    "visibility": "list",
+                    "supported_in_api": True,
+                    "priority": 1,
+                    "availability_nux": None,
+                    "upgrade": None,
+                    "base_instructions": (
+                        "You are a coding agent. Analyze the repository, use "
+                        "tools when needed, make focused changes, and verify "
+                        "the result."
+                    ),
+                    "supports_reasoning_summaries": False,
+                    "supports_reasoning_summary_parameter": False,
+                    "default_reasoning_summary": "none",
+                    "support_verbosity": False,
+                    "default_verbosity": None,
+                    "apply_patch_tool_type": "freeform",
+                    "web_search_tool_type": "text",
+                    "truncation_policy": {
+                        "mode": "bytes",
+                        "limit": 10000,
+                    },
+                    "supports_parallel_tool_calls": False,
+                    "context_window": 65536,
+                    "max_context_window": 65536,
+                    "auto_compact_token_limit": 51200,
+                    "effective_context_window_percent": 95,
+                    "experimental_supported_tools": [],
+                    "input_modalities": ["text"],
+                    "supports_search_tool": False,
+                    "use_responses_lite": False,
+                }],
+            )
+            if os.name != "nt":
+                self.assertEqual(catalog_path.stat().st_mode & 0o777, 0o600)
+
+    def test_missing_or_invalid_opencode_context_falls_back_to_128k(
+        self,
+    ) -> None:
+        cases = (
+            ("missing", {}),
+            ("zero", {"limit": {"context": 0}}),
+            ("negative", {"limit": {"context": -1}}),
+            ("boolean", {"limit": {"context": True}}),
+            ("string", {"limit": {"context": "65536"}}),
+        )
+        for name, model_config in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                codex_home = Path(tmp) / "codex"
+                config = {
+                    "provider": {
+                        "p": {
+                            "options": {
+                                "baseURL": "https://models.example/v1",
+                            },
+                            "models": {"model": model_config},
+                        },
+                    },
+                }
+
+                result = self._sync(codex_home, config, ["p/model"])
+
+                self.assertEqual(result.error, "")
+                parsed = codex_profiles.tomllib.loads(
+                    (codex_home / "config.toml").read_text(encoding="utf-8")
+                )
+                _path, catalog = _read_only_managed_catalog(codex_home)
+                entry = catalog["models"][0]
+                self.assertEqual(parsed["model_context_window"], 128000)
+                self.assertEqual(
+                    parsed["model_auto_compact_token_limit"],
+                    100000,
+                )
+                self.assertEqual(entry["context_window"], 128000)
+                self.assertEqual(entry["max_context_window"], 128000)
+                self.assertEqual(entry["auto_compact_token_limit"], 100000)
+
+    def test_user_catalog_and_context_settings_are_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            codex_home.mkdir()
+            personal_catalog = (
+                codex_home / "opendeephole-model-catalog-personal.json"
+            )
+            personal_catalog.write_text(
+                json.dumps({
+                    "_opendeephole_managed": True,
+                    "models": [],
+                }),
+                encoding="utf-8",
+            )
+            config_path = codex_home / "config.toml"
+            config_path.write_text(
+                'model_catalog_json = "opendeephole-model-catalog-personal.json"\n'
+                "model_context_window = 32000\n"
+                "model_auto_compact_token_limit = 25000\n"
+                "[features]\nmemories = true\n",
+                encoding="utf-8",
+            )
+
+            result = self._sync(codex_home, _effective_config(), ["env/alpha"])
+
+            self.assertEqual(result.error, "")
+            self.assertTrue(any(
+                "model_catalog_json" in warning
+                for warning in result.warnings
+            ))
+            parsed = codex_profiles.tomllib.loads(
+                config_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                parsed["model_catalog_json"],
+                personal_catalog.name,
+            )
+            self.assertEqual(parsed["model_context_window"], 32000)
+            self.assertEqual(
+                parsed["model_auto_compact_token_limit"],
+                25000,
+            )
+            self.assertTrue(parsed["features"]["memories"])
+            self.assertTrue(personal_catalog.exists())
+            self.assertEqual(
+                _managed_catalog_paths(codex_home),
+                [personal_catalog],
+            )
+
     def test_existing_user_default_is_never_overwritten(self) -> None:
         original = (
             b'model = "personal"\n'
@@ -414,9 +586,19 @@ class CodexConfigSyncTests(unittest.TestCase):
             first = self._sync(codex_home, config, ["p/two"])
             self.assertEqual(first.managed_default_model.id, "p/two")
             self.assertFalse(legacy.exists())
+            first_catalog, first_catalog_data = _read_only_managed_catalog(
+                codex_home
+            )
+            self.assertEqual(first_catalog_data["models"][0]["slug"], "two")
 
             second = self._sync(codex_home, config, ["p/one"])
             self.assertEqual(second.managed_default_model.id, "p/one")
+            second_catalog, second_catalog_data = _read_only_managed_catalog(
+                codex_home
+            )
+            self.assertNotEqual(second_catalog, first_catalog)
+            self.assertFalse(first_catalog.exists())
+            self.assertEqual(second_catalog_data["models"][0]["slug"], "one")
             config_path = codex_home / "config.toml"
             current = config_path.read_bytes()
             user_addition = b'model = "personal-later"\n'
@@ -433,6 +615,8 @@ class CodexConfigSyncTests(unittest.TestCase):
                 )["model"],
                 "personal-later",
             )
+            self.assertFalse(second_catalog.exists())
+            self.assertEqual(_managed_catalog_paths(codex_home), [])
 
     def test_empty_selection_removes_only_owned_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -443,6 +627,9 @@ class CodexConfigSyncTests(unittest.TestCase):
                 ["env/alpha"],
             )
             self.assertEqual(first.models[0].id, "env/alpha")
+            managed_catalog, _catalog_data = _read_only_managed_catalog(
+                codex_home
+            )
             owned = codex_home / "opendeephole-old.config.toml"
             owned.write_text(
                 f"{codex_profiles._MANAGED_MARKER}\nmodel = \"old\"\n",
@@ -450,12 +637,24 @@ class CodexConfigSyncTests(unittest.TestCase):
             )
             foreign = codex_home / "personal.config.toml"
             foreign.write_text('model = "personal"\n', encoding="utf-8")
+            foreign_catalog = (
+                codex_home / "opendeephole-model-catalog-foreign.json"
+            )
+            foreign_catalog.write_text(
+                json.dumps({
+                    "_opendeephole_managed": False,
+                    "models": [],
+                }),
+                encoding="utf-8",
+            )
 
             empty = self._sync(codex_home, {}, [])
 
             self.assertEqual(empty.error, "")
             self.assertEqual(empty.models, ())
             self.assertFalse(owned.exists())
+            self.assertFalse(managed_catalog.exists())
+            self.assertTrue(foreign_catalog.exists())
             self.assertEqual((codex_home / "config.toml").read_bytes(), b"")
             self.assertEqual(foreign.read_text(encoding="utf-8"), 'model = "personal"\n')
 
@@ -581,6 +780,48 @@ class CodexConfigSyncTests(unittest.TestCase):
 
             self.assertTrue(result.error)
             self.assertEqual(stale.read_text(encoding="utf-8"), stale_content)
+            self.assertEqual(list(codex_home.glob(".*.tmp")), [])
+
+    def test_config_write_failure_rolls_back_new_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / "codex"
+            first = self._sync(
+                codex_home,
+                _effective_config(),
+                ["env/alpha"],
+            )
+            self.assertEqual(first.error, "")
+            config_path = codex_home / "config.toml"
+            original_config = config_path.read_bytes()
+            old_catalog, old_catalog_data = _read_only_managed_catalog(
+                codex_home
+            )
+            real_replace = os.replace
+
+            def fail_config_replace(source: object, destination: object) -> None:
+                if Path(destination) == config_path:
+                    raise PermissionError("test config replacement failure")
+                real_replace(source, destination)
+
+            with patch.object(
+                codex_profiles.os,
+                "replace",
+                side_effect=fail_config_replace,
+            ):
+                result = self._sync(
+                    codex_home,
+                    _effective_config(),
+                    ["literal/beta/model"],
+                )
+
+            self.assertTrue(result.error)
+            self.assertEqual(config_path.read_bytes(), original_config)
+            self.assertTrue(old_catalog.exists())
+            self.assertEqual(
+                json.loads(old_catalog.read_text(encoding="utf-8")),
+                old_catalog_data,
+            )
+            self.assertEqual(_managed_catalog_paths(codex_home), [old_catalog])
             self.assertEqual(list(codex_home.glob(".*.tmp")), [])
 
     def test_trusted_projects_are_cumulative_and_preserve_model_and_user_bytes(
