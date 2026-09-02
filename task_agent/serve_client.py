@@ -309,6 +309,11 @@ export const OpenDeepHoleKnowledgeProjectHook = async () => ({
 _KNOWLEDGE_PROJECT_PLUGIN_HASH = hashlib.sha256(
     _KNOWLEDGE_PROJECT_PLUGIN_SOURCE.encode("utf-8")
 ).hexdigest()[:16]
+_MANAGED_COMPACTION_CONFIG = {
+    "auto": True,
+    "prune": True,
+    "reserved": 20_000,
+}
 _FORMATTER_DISABLED_TOOL_IDS = frozenset({
     "apply_patch",
     "bash",
@@ -902,8 +907,18 @@ def _write_knowledge_binding(
     return binding_path
 
 
+def _with_managed_compaction(data: dict[str, Any]) -> dict[str, Any]:
+    """Return the effective config with DeepHole's compaction policy applied."""
+    resolved = dict(data)
+    configured = resolved.get("compaction")
+    compaction = dict(configured) if isinstance(configured, dict) else {}
+    compaction.update(_MANAGED_COMPACTION_CONFIG)
+    resolved["compaction"] = compaction
+    return resolved
+
+
 def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
-    """Atomically publish the resolved config and managed observability plugin."""
+    """Atomically publish the resolved config and managed runtime fields."""
     raw = config_content or "{}"
     try:
         data = json.loads(raw)
@@ -911,6 +926,7 @@ def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
         raise ValueError(f"Resolved OpenCode config is invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError("Resolved OpenCode config must be a JSON object")
+    data = _with_managed_compaction(data)
     configured_plugins = data.get("plugin")
     if isinstance(configured_plugins, str):
         plugins = [configured_plugins]
@@ -2813,8 +2829,11 @@ def _session_id(data: Any) -> str:
 def _config_hash(config_content: str | None) -> str:
     content = (config_content or "").strip()
     try:
+        parsed = json.loads(content or "{}")
+        if isinstance(parsed, dict):
+            parsed = _with_managed_compaction(parsed)
         content = json.dumps(
-            json.loads(content or "{}"),
+            parsed,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

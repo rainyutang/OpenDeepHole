@@ -200,7 +200,7 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 
 完整 Agent 与 standalone 共用配置发现与深度合并规则：用户全局目录 < 可执行文件相邻目录 < 项目目录 < 平台 `opencode.config_paths`（standalone 无此层）< `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR`。standalone 随后再合并 `serve.opencode_config`，所以 YAML 中的映射递归覆盖前述来源，标量和列表整体替换。用户全局目录及显式配置目录兼容旧版 `config.json`；自动发现的可执行文件相邻目录与项目目录只接受 `opencode.json` / `opencode.jsonc`，避免误读安装器、启动器或项目自身的通用 `config.json`。使用 `nga` 可执行文件时还会发现对应的全局 `nga` 配置目录。无效外部 JSON/JSONC 记录警告后忽略，不记录配置值；standalone 的配置快照固定到 `shutdown_opencode()`。
 
-最终的 `workspace_dir/opencode.json` 不参与 standalone 的项目配置发现，避免 `workspace_dir == project_dir` 时回灌上次生成物；仍建议将 `workspace_dir` 与源码目录分开，防止覆盖项目自有的同名文件。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该最终配置目录，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再次读取并重复合并用户配置。Task Agent 的文件、Skill 与全局 `bash` 拒绝规则以及受管写入和命令 Hook 始终最后生效，不能被外部配置放宽；任务级精确命令只存在于 Session 覆盖和私有绑定中。
+最终的 `workspace_dir/opencode.json` 不参与 standalone 的项目配置发现，避免 `workspace_dir == project_dir` 时回灌上次生成物；仍建议将 `workspace_dir` 与源码目录分开，防止覆盖项目自有的同名文件。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该最终配置目录，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再次读取并重复合并用户配置。Task Agent 的文件、Skill 与全局 `bash` 拒绝规则、受管写入和命令 Hook，以及固定的 `compaction.auto: true`、`compaction.prune: true`、`compaction.reserved: 20000` 始终最后生效，不能被外部配置放宽；`compaction` 的其它合法子项继续保留，任务级精确命令只存在于 Session 覆盖和私有绑定中。
 
 ### Serve 参数
 
