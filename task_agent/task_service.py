@@ -2105,7 +2105,12 @@ def _task_system_prompt(record: _TaskRecord) -> str:
     from .feedback_format import format_feedback_experience
 
     sections: list[str] = []
-    if record.execution_context.scan_id:
+    graph_runtime = record.execution_context.code_graph_mcp
+    if (
+        record.execution_context.scan_id
+        and isinstance(graph_runtime, dict)
+        and bool(graph_runtime.get("enabled"))
+    ):
         sections.append(
             "## 扫描代码图谱\n\n"
             "当前任务已绑定本次扫描专属的代码图谱 MCP。需要跨文件定位、调用关系或结构化"

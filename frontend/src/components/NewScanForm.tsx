@@ -225,7 +225,7 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
       if (new Set(names).size !== names.length) return setError("版本名称不能重复");
     } else if (!projectPath.trim()) return setError("请输入项目总路径");
     if (!product.trim()) return setError("请输入产品名称");
-    if (knowledgeEnabled && !selectedKnowledgeProject) return setError("启用知识库后请先拉取并选择项目");
+    if (scanMode !== "multi_version" && knowledgeEnabled && !selectedKnowledgeProject) return setError("启用知识库后请先拉取并选择项目");
     if (validationEnabled) {
       if (!selectedValidationMethod) return setError("当前产品没有可用的验证方法，请检查客户端 validator.yaml");
       const missing = selectedValidationMethod.fields.find((field) => field.required && (validationValues[field.key] === "" || validationValues[field.key] == null));
@@ -254,12 +254,12 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
           })),
         } : {}),
         knowledge_base: {
-          enabled: knowledgeEnabled,
-          project_id: selectedKnowledgeProject?.id || "",
-          project_name: selectedKnowledgeProject?.name || "",
+          enabled: scanMode !== "multi_version" && knowledgeEnabled,
+          project_id: scanMode !== "multi_version" ? selectedKnowledgeProject?.id || "" : "",
+          project_name: scanMode !== "multi_version" ? selectedKnowledgeProject?.name || "" : "",
         },
         vulnerability_validation: { enabled: validationEnabled, method_id: validationMethodId, values: validationValues },
-        code_graph_mcp: codeGraphMcp.enabled ? codeGraphMcp : null,
+        code_graph_mcp: scanMode !== "multi_version" && codeGraphMcp.enabled ? codeGraphMcp : null,
         ...(scanMode === "custom" ? {
           threat_analysis_enabled: threatAnalysisEnabled,
           threat_analysis_method: threatAnalysisMethod,
@@ -289,9 +289,13 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
           { id: "multi_version", label: "多版本测试模式", selectable: true },
         ] as ScanModeOption[]).map((mode) => <label key={mode.id} aria-disabled={!mode.selectable} className={`rounded-lg border p-4 ${mode.selectable ? "cursor-pointer" : "cursor-not-allowed opacity-50"} ${mode.selectable && scanMode === mode.id ? "border-blue-500 bg-blue-500/10" : "border-slate-600"}`}><input className="mr-3" type="radio" disabled={!mode.selectable} checked={mode.selectable && scanMode === mode.id} onChange={() => { if (mode.selectable) setScanMode(mode.id); }} /><span className="text-sm font-medium text-slate-100">{mode.label}</span></label>)}</div></Card>
 
-        <ScanCodeGraphMcpEditor value={codeGraphMcp} onChange={setCodeGraphMcp} />
+        {scanMode === "multi_version" ? <Card>
+          <h2 className="text-sm font-medium text-slate-200">MCP 路由</h2>
+          <p className="mt-1 text-xs leading-5 text-slate-500">多版本模式固定关闭代码图谱和知识库 MCP，改用文件工具只读访问各版本代码仓。</p>
+        </Card> : <>
+          <ScanCodeGraphMcpEditor value={codeGraphMcp} onChange={setCodeGraphMcp} />
 
-        <Card>
+          <Card>
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="text-sm font-medium text-slate-200">启用知识库</h2>
@@ -312,7 +316,8 @@ export default function NewScanForm({ onScanStarted, onBack, onConfigureAgent }:
               </select>
             </Field>}
           </div>}
-        </Card>
+          </Card>
+        </>}
 
         <Card><div className="flex items-start justify-between gap-3"><div><h2 className="text-sm font-medium text-slate-200">漏洞验证</h2><p className="mt-1 text-xs leading-5 text-slate-500">实现中...</p></div><Toggle checked={validationEnabled} onChange={toggleValidation} label="启用漏洞验证" disabled /></div>{validatorErrors.length > 0 && <div className="mt-4 rounded border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">{validatorErrors.join("；")}</div>}{validationEnabled && <div className="mt-5 space-y-4">{!product.trim() ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">请先在上方填写产品。</div> : compatibleMethods.length === 0 ? <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">当前产品没有可用的验证方法。</div> : <><Field label="验证方法"><select className={input} value={validationMethodId} onChange={(event) => chooseValidationMethod(event.target.value)}>{compatibleMethods.map((method) => <option key={method.method_id} value={method.method_id}>{method.method_label}</option>)}</select></Field>{selectedValidationMethod && <><div className="rounded-lg border border-slate-700 bg-slate-900/50 p-3 text-xs text-slate-400">{selectedValidationMethod.description}</div>{selectedValidationMethod.fields.length > 0 ? <div className="grid gap-4 md:grid-cols-2">{selectedValidationMethod.fields.map((field) => <DynamicValidationField key={field.key} schema={field} value={validationValues[field.key]} onChange={(value) => setValidationValues((current) => ({ ...current, [field.key]: value }))} />)}</div> : <p className="text-sm text-slate-500">该验证方法没有额外参数。</p>}</>}</>}</div>}</Card>
 
