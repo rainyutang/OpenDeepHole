@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import shutil
-import socket
 import sys
 import threading
 from dataclasses import dataclass
@@ -44,10 +43,6 @@ _LEGACY_MANAGED_THREAT_ANALYSIS_SKILLS = (
 )
 _workspace_locks: dict[str, threading.RLock] = {}
 _workspace_locks_guard = threading.Lock()
-_auto_serve_port: int | None = None
-_auto_serve_port_guard = threading.Lock()
-
-
 @dataclass(frozen=True)
 class _ResolvedServePort:
     port: int
@@ -80,7 +75,12 @@ def _build_session_runtime(cli_config, model_option, directory: Path):
     workspace = get_global_opencode_workspace()
     serve_env = _runtime_environment(effective)
     resolved_port = _resolve_serve_port(effective.get("serve_port"))
-    serve_env["OPENCODE_SERVE_PORT"] = str(resolved_port.port)
+    # Automatic ports are allocated by OpenCodeServeManager immediately before
+    # it launches Serve.  Publishing a sampled-and-released ephemeral port here
+    # leaves a much larger window in which Windows or another process can claim
+    # it before Popen reaches the actual listener bind.
+    if not resolved_port.auto_selected:
+        serve_env["OPENCODE_SERVE_PORT"] = str(resolved_port.port)
     config_content = _runtime_config_content(
         workspace,
         effective,
@@ -142,7 +142,7 @@ def _effective_model_config(cli_config, model_option) -> dict:
 
 
 def _resolve_serve_port(configured_port: object = None) -> _ResolvedServePort:
-    """Resolve the Agent-wide port and retain whether its value was automatic."""
+    """Resolve a fixed port or return the sentinel for launch-time allocation."""
     raw = configured_port
     if raw in (None, ""):
         raw = os.environ.get("OPENCODE_SERVE_PORT", "")
@@ -159,17 +159,11 @@ def _resolve_serve_port(configured_port: object = None) -> _ResolvedServePort:
             )
         return _ResolvedServePort(port=port, auto_selected=False)
 
-    global _auto_serve_port
-    with _auto_serve_port_guard:
-        if _auto_serve_port is None:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind(("127.0.0.1", 0))
-                _auto_serve_port = int(sock.getsockname()[1])
-        return _ResolvedServePort(port=_auto_serve_port, auto_selected=True)
+    return _ResolvedServePort(port=0, auto_selected=True)
 
 
 def _resolved_serve_port(configured_port: object = None) -> int:
-    """Compatibility helper returning only the resolved Serve port."""
+    """Compatibility helper; zero means allocate automatically at launch."""
     return _resolve_serve_port(configured_port).port
 
 

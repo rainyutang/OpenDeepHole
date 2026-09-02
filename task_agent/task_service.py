@@ -48,6 +48,7 @@ from .serve_client import (
     OpenCodeFileWrite,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
+    OpenCodeServeStartupError,
     OpenCodeTaskQualityError,
     get_serve_manager,
 )
@@ -716,6 +717,7 @@ class OpenCodeTaskService:
             attempt_failure_reason = ""
             formatter_source_text = ""
             recovery_required = False
+            fresh_retry_allowed = True
             timeout_seconds = 0
             system_prompt = ""
             try:
@@ -1004,6 +1006,17 @@ class OpenCodeTaskService:
                 last_text = text
                 last_model = source.model or model or last_model
                 last_source = source
+            except OpenCodeServeStartupError as exc:
+                # Serve startup has its own bounded process/port recovery.  It
+                # happens before Session creation and must not consume the LLM
+                # fresh-Session retry budget or be counted as a model timeout.
+                attempt_outcome = "failure"
+                attempt_event_outcome = "failure"
+                retry_reason = str(exc) or "OpenCode Serve startup failed"
+                attempt_failure_kind = "serve_startup"
+                attempt_failure_reason = retry_reason
+                fresh_retry_allowed = False
+                last_source = source
             except asyncio.TimeoutError as exc:
                 attempt_outcome = "timeout"
                 attempt_event_outcome = "timeout"
@@ -1181,7 +1194,11 @@ class OpenCodeTaskService:
                     )
                 # A fresh-session retry is one logical task. Release its model
                 # slot now, but append terminal history/outcome only once.
-                if retry_reason and session_attempt < total_session_attempts:
+                if (
+                    retry_reason
+                    and fresh_retry_allowed
+                    and session_attempt < total_session_attempts
+                ):
                     terminal_release = False
                     if avoid_model_on_retry and lease is not None:
                         avoid_model_identities.add(lease.health_identity)
@@ -1305,7 +1322,11 @@ class OpenCodeTaskService:
                 attempt_failure_reason = recovery.error
                 avoid_model_identities.update(recovery.avoid_model_identities)
 
-            if retry_reason and session_attempt < total_session_attempts:
+            if (
+                retry_reason
+                and fresh_retry_allowed
+                and session_attempt < total_session_attempts
+            ):
                 record.status = "queued"
                 self._emit_task_progress(
                     record,

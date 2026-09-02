@@ -114,30 +114,21 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             "no_proxy": "system-lower,127.0.0.1,localhost",
         })
 
-    def test_agent_serve_port_precedence_and_auto_port_reuse(self) -> None:
+    def test_agent_serve_port_precedence_and_auto_port_is_deferred(self) -> None:
         with patch.dict(os.environ, {"OPENCODE_SERVE_PORT": "4100"}, clear=False):
             self.assertEqual(_resolved_serve_port(4200), 4200)
             self.assertEqual(_resolved_serve_port(None), 4100)
             self.assertFalse(_resolve_serve_port(4200).auto_selected)
             self.assertFalse(_resolve_serve_port(None).auto_selected)
 
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("deephole_client.opencode_integration._auto_serve_port", None),
-            patch("deephole_client.opencode_integration.socket.socket") as socket_factory,
-        ):
-            socket_factory.return_value.__enter__.return_value.getsockname.return_value = (
-                "127.0.0.1",
-                43123,
-            )
+        with patch.dict(os.environ, {}, clear=True):
             first = _resolved_serve_port(None)
             second = _resolved_serve_port(None)
             resolved = _resolve_serve_port(None)
 
-        self.assertGreaterEqual(first, 1)
-        self.assertLessEqual(first, 65535)
-        self.assertEqual(second, first)
-        self.assertEqual(resolved.port, first)
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 0)
+        self.assertEqual(resolved.port, 0)
         self.assertTrue(resolved.auto_selected)
 
     def test_runtime_config_discovery_is_controlled_and_managed_fields_win(

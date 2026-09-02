@@ -18,6 +18,7 @@ from task_agent.serve_client import (
     OpenCodeModelListResult,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
+    OpenCodeServeStartupError,
     OpenCodeTaskQualityError,
     OpenCodeServeKey,
     OpenCodeServeManager,
@@ -5761,13 +5762,15 @@ def test_wait_health_timeout_reports_startup_output(monkeypatch, tmp_path: Path)
         manager._port = 4096
         manager._startup_cwd = tmp_path / "runtime"
 
-        with pytest.raises(TimeoutError) as excinfo:
+        with pytest.raises(OpenCodeServeStartupError) as excinfo:
             await manager._wait_health_locked(startup_log)
 
         message = str(excinfo.value)
         assert "OpenCode serve did not become healthy" in message
         assert f"startup_cwd={tmp_path / 'runtime'}" in message
         assert "provider failed to load" in message
+        assert excinfo.value.retry_kind == "health"
+        assert not isinstance(excinfo.value, TimeoutError)
 
     asyncio.run(run())
 
@@ -6833,6 +6836,71 @@ def test_start_locked_auto_port_skips_foreign_listener(
     asyncio.run(run())
 
 
+def test_start_locked_allocates_automatic_port_at_launch_boundary(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        events: list[str] = []
+        startup_cwd = tmp_path / "workspace"
+        startup_cwd.mkdir()
+
+        monkeypatch.setenv(
+            "OPENCODE_SERVE_MARKER",
+            str(tmp_path / "missing-marker.json"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._run_command_text",
+            lambda _cmd: "opencode test",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._write_serve_config_file",
+            lambda _cwd, _content: (
+                events.append("config") or startup_cwd / "opencode.json"
+            ),
+        )
+
+        def allocate(excluded: set[int]) -> int:
+            assert excluded == set()
+            events.append("allocate")
+            return 43123
+
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            allocate,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda _port: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda _port: None,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock()
+        await manager._start_locked(
+            OpenCodeServeKey(
+                tool="opencode",
+                executable="opencode",
+                serve_port_auto=True,
+                config_content="{}",
+            ),
+            startup_cwd=startup_cwd,
+        )
+
+        assert events == ["config", "allocate"]
+        assert manager._start_once_locked.await_args.kwargs["port"] == 43123
+        assert manager._auto_port == 43123
+
+    asyncio.run(run())
+
+
 def test_start_locked_auto_port_tries_distinct_candidates_until_free(
     monkeypatch,
     tmp_path: Path,
@@ -6887,6 +6955,71 @@ def test_start_locked_auto_port_tries_distinct_candidates_until_free(
         manager._start_once_locked.assert_awaited_once()
         assert manager._start_once_locked.await_args.kwargs["port"] == 43124
         assert manager._start_once_locked.await_args.kwargs["attempt"] == 3
+        assert manager._auto_port == 43124
+
+    asyncio.run(run())
+
+
+def test_start_locked_auto_port_retries_health_timeout_on_new_port(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        startup_cwd = tmp_path / "workspace"
+        (startup_cwd / ".git").mkdir(parents=True)
+        allocated: list[set[int]] = []
+
+        monkeypatch.setenv(
+            "OPENCODE_SERVE_MARKER",
+            str(tmp_path / "missing-marker.json"),
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._resolve_executable",
+            lambda _name: "/bin/opencode",
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_is_in_use",
+            lambda _port: False,
+        )
+        monkeypatch.setattr(
+            "task_agent.serve_client._port_bind_error",
+            lambda _port: None,
+        )
+
+        def allocate(excluded: set[int]) -> int:
+            allocated.append(set(excluded))
+            return 43124
+
+        monkeypatch.setattr(
+            "task_agent.serve_client._allocate_loopback_port",
+            allocate,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._start_once_locked = AsyncMock(side_effect=[
+            OpenCodeServeStartupError(
+                "OpenCode serve did not become healthy; "
+                "last_health=ConnectTimeout",
+                retry_kind="health",
+            ),
+            None,
+        ])
+        await manager._start_locked(
+            OpenCodeServeKey(
+                tool="opencode",
+                executable="opencode",
+                serve_port_auto=True,
+                config_content="{}",
+                env_overrides=(("OPENCODE_SERVE_PORT", "4096"),),
+            ),
+            startup_cwd=startup_cwd,
+        )
+
+        assert allocated == [{4096}]
+        assert [
+            call.kwargs["port"]
+            for call in manager._start_once_locked.await_args_list
+        ] == [4096, 43124]
         assert manager._auto_port == 43124
 
     asyncio.run(run())
