@@ -44,6 +44,13 @@ _TRUST_CONFIG_END = (
 _ENV_BEGIN = "# BEGIN OpenDeepHole managed Codex NO_PROXY"
 _ENV_END = "# END OpenDeepHole managed Codex NO_PROXY"
 _PROFILE_GLOB = "opendeephole-*.config.toml"
+_MODEL_CATALOG_GLOB = "opendeephole-model-catalog-*.json"
+_MODEL_CATALOG_MANAGED_KEY = "_opendeephole_managed"
+_DEFAULT_CONTEXT_WINDOW = 128000
+_MODEL_CATALOG_BASE_INSTRUCTIONS = (
+    "You are a coding agent. Analyze the repository, use tools when needed, "
+    "make focused changes, and verify the result."
+)
 _SUPPORTED_SANDBOX_PERMISSIONS = frozenset({"disk-full-read-access"})
 _ENV_REFERENCE_RE = re.compile(
     r"^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$"
@@ -98,12 +105,15 @@ class _RenderedModel:
     base_url: str
     env_key: str = ""
     bearer_token: str = ""
-    context_window: int | None = None
+    context_window: int = _DEFAULT_CONTEXT_WINDOW
 
 
 @dataclass(frozen=True)
 class _DefaultConfigPlan:
     path: Path
+    catalog_path: Path | None = None
+    catalog_content: bytes | None = None
+    protected_catalog_path: Path | None = None
     write_content: bytes | None = None
     original_content: bytes | None = None
     original_mode: int = 0o600
@@ -111,6 +121,7 @@ class _DefaultConfigPlan:
     effective_model: CodexModelConfig | None = None
     managed_default_model: CodexModelConfig | None = None
     user_default_preserved: bool = False
+    warnings: tuple[str, ...] = ()
     error: str = ""
 
 
@@ -181,14 +192,115 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
 
-def _context_window(model_config: Mapping[str, Any]) -> int | None:
+def _context_window(model_config: Mapping[str, Any]) -> int:
     limit = model_config.get("limit")
     if not isinstance(limit, Mapping):
-        return None
+        return _DEFAULT_CONTEXT_WINDOW
     context = limit.get("context")
     if isinstance(context, bool) or not isinstance(context, int):
+        return _DEFAULT_CONTEXT_WINDOW
+    return context if context > 0 else _DEFAULT_CONTEXT_WINDOW
+
+
+def _auto_compact_token_limit(context_window: int) -> int:
+    return max(
+        1,
+        context_window * 100000 // _DEFAULT_CONTEXT_WINDOW,
+    )
+
+
+def _render_model_catalog(model: _RenderedModel) -> bytes:
+    context_window = model.context_window
+    entry = {
+        "slug": model.model.model_id,
+        "display_name": model.model.model_id,
+        "description": model.model.model_id,
+        "tool_mode": "direct",
+        "multi_agent_version": "v2",
+        "default_reasoning_level": None,
+        "supported_reasoning_levels": [],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": True,
+        "priority": 1,
+        "availability_nux": None,
+        "upgrade": None,
+        "base_instructions": _MODEL_CATALOG_BASE_INSTRUCTIONS,
+        "supports_reasoning_summaries": False,
+        "supports_reasoning_summary_parameter": False,
+        "default_reasoning_summary": "none",
+        "support_verbosity": False,
+        "default_verbosity": None,
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text",
+        "truncation_policy": {
+            "mode": "bytes",
+            "limit": 10000,
+        },
+        "supports_parallel_tool_calls": False,
+        "context_window": context_window,
+        "max_context_window": context_window,
+        "auto_compact_token_limit": _auto_compact_token_limit(
+            context_window
+        ),
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": [],
+        "input_modalities": ["text"],
+        "supports_search_tool": False,
+        "use_responses_lite": False,
+    }
+    catalog = {
+        _MODEL_CATALOG_MANAGED_KEY: True,
+        "models": [entry],
+    }
+    return (
+        json.dumps(catalog, ensure_ascii=True, indent=2) + "\n"
+    ).encode("utf-8")
+
+
+def _model_catalog_path(codex_home: Path, content: bytes) -> Path:
+    digest = hashlib.sha256(content).hexdigest()[:16]
+    absolute_home = Path(os.path.abspath(os.fspath(codex_home)))
+    return absolute_home / f"opendeephole-model-catalog-{digest}.json"
+
+
+def _is_owned_model_catalog(path: Path) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(parsed, Mapping)
+        and parsed.get(_MODEL_CATALOG_MANAGED_KEY) is True
+        and isinstance(parsed.get("models"), list)
+    )
+
+
+def _owned_model_catalogs(codex_home: Path) -> tuple[Path, ...]:
+    if not codex_home.is_dir():
+        return ()
+    return tuple(
+        path
+        for path in codex_home.glob(_MODEL_CATALOG_GLOB)
+        if _is_owned_model_catalog(path)
+    )
+
+
+def _referenced_catalog_path(
+    codex_home: Path,
+    raw_path: object,
+) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
         return None
-    return context if context > 0 else None
+    try:
+        candidate = Path(raw_path.strip())
+        if not candidate.is_absolute():
+            candidate = codex_home / candidate
+        return Path(os.path.abspath(os.fspath(candidate)))
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def _render_model(
@@ -377,6 +489,8 @@ def _user_default_model(
 def _managed_default_block(
     models: tuple[_RenderedModel, ...],
     user_config: Mapping[str, Any],
+    *,
+    catalog_path: Path | None,
 ) -> tuple[str, _RenderedModel | None, str]:
     if not models:
         return "", None, ""
@@ -407,11 +521,17 @@ def _managed_default_block(
         f"model = {_toml_string(selected.model.model_id)}",
         f"model_provider = {_toml_string(provider_key)}",
     ]
-    if (
-        selected.context_window is not None
-        and "model_context_window" not in user_config
-    ):
+    if catalog_path is not None:
+        lines.append(
+            f"model_catalog_json = {_toml_string(str(catalog_path))}"
+        )
+    if "model_context_window" not in user_config:
         lines.append(f"model_context_window = {selected.context_window}")
+    if "model_auto_compact_token_limit" not in user_config:
+        lines.append(
+            "model_auto_compact_token_limit = "
+            f"{_auto_compact_token_limit(selected.context_window)}"
+        )
     prefix = f"model_providers.{provider_key}"
     lines.extend((
         f"{prefix}.name = {_toml_string(selected.provider_name)}",
@@ -998,13 +1118,32 @@ def _plan_default_config(
     user_default_preserved = user_default_model is not None
     effective_model = user_default_model
     managed_default_model: CodexModelConfig | None = None
+    catalog_path: Path | None = None
+    catalog_content: bytes | None = None
+    protected_catalog_path = _referenced_catalog_path(
+        codex_home,
+        parsed.get("model_catalog_json"),
+    )
+    warnings: list[str] = []
     contains_literal_secret = False
     if user_default_preserved:
         desired_body = user_text
     elif models:
+        if "model_catalog_json" in parsed:
+            warnings.append(
+                "Existing user-owned model_catalog_json was preserved; "
+                "OpenDeepHole model catalog metadata was not installed"
+            )
+        else:
+            catalog_content = _render_model_catalog(models[0])
+            catalog_path = _model_catalog_path(
+                codex_home,
+                catalog_content,
+            )
         block, managed_default, block_error = _managed_default_block(
             models,
             parsed,
+            catalog_path=catalog_path,
         )
         if block_error:
             return _DefaultConfigPlan(
@@ -1050,6 +1189,9 @@ def _plan_default_config(
 
     return _DefaultConfigPlan(
         path=config_path,
+        catalog_path=catalog_path,
+        catalog_content=catalog_content,
+        protected_catalog_path=protected_catalog_path,
         write_content=write_content,
         original_content=original_bytes,
         original_mode=mode,
@@ -1057,6 +1199,7 @@ def _plan_default_config(
         effective_model=effective_model,
         managed_default_model=managed_default_model,
         user_default_preserved=user_default_preserved,
+        warnings=tuple(warnings),
     )
 
 
@@ -1258,7 +1401,8 @@ def _write_and_reconcile(
         return _ReconcileResult(error=default_plan.error)
 
     try:
-        existing_owned = set(_owned_profiles(codex_home))
+        existing_owned_profiles = set(_owned_profiles(codex_home))
+        existing_owned_catalogs = set(_owned_model_catalogs(codex_home))
     except Exception as exc:
         return _ReconcileResult(
             error=(
@@ -1267,7 +1411,52 @@ def _write_and_reconcile(
             ),
         )
 
-    if default_plan.write_content is not None:
+    catalog_needs_write = False
+    if (
+        default_plan.catalog_path is not None
+        and default_plan.catalog_content is not None
+    ):
+        try:
+            if default_plan.catalog_path.is_symlink():
+                return _ReconcileResult(
+                    error=(
+                        "refused to replace symlinked managed Codex model "
+                        f"catalog {default_plan.catalog_path}; existing "
+                        "configuration was kept"
+                    ),
+                )
+            if default_plan.catalog_path.exists():
+                if not default_plan.catalog_path.is_file():
+                    return _ReconcileResult(
+                        error=(
+                            "refused to replace non-file managed Codex model "
+                            f"catalog {default_plan.catalog_path}; existing "
+                            "configuration was kept"
+                        ),
+                    )
+                if (
+                    default_plan.catalog_path.read_bytes()
+                    != default_plan.catalog_content
+                ):
+                    return _ReconcileResult(
+                        error=(
+                            "refused to replace conflicting managed Codex "
+                            f"model catalog {default_plan.catalog_path}; "
+                            "existing configuration was kept"
+                        ),
+                    )
+            else:
+                catalog_needs_write = True
+        except OSError as exc:
+            return _ReconcileResult(
+                error=(
+                    "could not inspect managed Codex model catalog "
+                    f"{default_plan.catalog_path} "
+                    f"({type(exc).__name__}); existing configuration was kept"
+                ),
+            )
+
+    if default_plan.write_content is not None or catalog_needs_write:
         try:
             codex_home.mkdir(parents=True, exist_ok=True, mode=0o700)
         except OSError as exc:
@@ -1279,7 +1468,17 @@ def _write_and_reconcile(
             )
 
     staged_config: Path | None = None
+    staged_catalog: Path | None = None
+    catalog_created = False
     try:
+        if catalog_needs_write:
+            assert default_plan.catalog_path is not None
+            assert default_plan.catalog_content is not None
+            staged_catalog = _stage_file(
+                default_plan.catalog_path,
+                default_plan.catalog_content,
+                mode=0o600,
+            )
         if default_plan.write_content is not None:
             staged_config = _stage_file(
                 default_plan.path,
@@ -1290,24 +1489,55 @@ def _write_and_reconcile(
                 raise _CodexConfigChangedError(
                     "Codex config changed during model synchronization"
                 )
+        if staged_catalog is not None:
+            assert default_plan.catalog_path is not None
+            if (
+                default_plan.catalog_path.is_symlink()
+                or default_plan.catalog_path.exists()
+            ):
+                raise _CodexConfigChangedError(
+                    "Codex model catalog changed during synchronization"
+                )
+            os.replace(staged_catalog, default_plan.catalog_path)
+            staged_catalog = None
+            catalog_created = True
         if staged_config is not None:
             if not _default_config_is_unchanged(default_plan):
                 raise _CodexConfigChangedError(
                     "Codex config changed during model synchronization"
                 )
             os.replace(staged_config, default_plan.path)
+            staged_config = None
     except Exception as exc:
-        _discard_staged((staged_config,) if staged_config is not None else ())
+        _discard_staged(tuple(
+            path
+            for path in (staged_catalog, staged_config)
+            if path is not None
+        ))
+        if (
+            catalog_created
+            and default_plan.catalog_path is not None
+            and default_plan.catalog_content is not None
+        ):
+            try:
+                if (
+                    _is_owned_model_catalog(default_plan.catalog_path)
+                    and default_plan.catalog_path.read_bytes()
+                    == default_plan.catalog_content
+                ):
+                    default_plan.catalog_path.unlink()
+            except OSError:
+                pass
         return _ReconcileResult(
             error=(
                 "could not atomically write managed Codex configuration "
                 f"({type(exc).__name__}); existing configuration and old "
-                "managed profiles were kept"
+                "managed catalogs and profiles were kept"
             ),
         )
 
-    warnings: list[str] = []
-    for stale in sorted(existing_owned, key=str):
+    warnings = list(default_plan.warnings)
+    for stale in sorted(existing_owned_profiles, key=str):
         try:
             if _is_owned_profile(stale):
                 stale.unlink()
@@ -1319,6 +1549,29 @@ def _write_and_reconcile(
         except OSError as exc:
             warnings.append(
                 f"Could not remove stale managed Codex profile {stale} "
+                f"({type(exc).__name__})"
+            )
+
+    protected_catalog_path = default_plan.protected_catalog_path
+    desired_catalog_path = default_plan.catalog_path
+    for stale in sorted(existing_owned_catalogs, key=str):
+        normalized_stale = Path(os.path.abspath(os.fspath(stale)))
+        if normalized_stale == desired_catalog_path or (
+            protected_catalog_path is not None
+            and normalized_stale == protected_catalog_path
+        ):
+            continue
+        try:
+            if _is_owned_model_catalog(stale):
+                stale.unlink()
+            elif stale.exists():
+                warnings.append(
+                    "Could not remove stale Codex model catalog because its "
+                    f"ownership marker changed: {stale}"
+                )
+        except OSError as exc:
+            warnings.append(
+                f"Could not remove stale managed Codex model catalog {stale} "
                 f"({type(exc).__name__})"
             )
     return _ReconcileResult(

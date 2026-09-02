@@ -1737,11 +1737,37 @@ def _merge_completed_opencode_tasks(
             task.get("task_type"),
         )
 
+    def task_revision(task: dict) -> int:
+        try:
+            return max(1, int(task.get("revision") or 1))
+        except (TypeError, ValueError):
+            return 1
+
     previous_tasks = previous.completed_tasks if previous is not None else []
     for task in [*previous_tasks, *merged.completed_tasks]:
         key = task_key(task)
         item = dict(task)
         if key in index_by_key:
+            previous_item = ordered[index_by_key[key]]
+            previous_revision = task_revision(previous_item)
+            current_revision = task_revision(item)
+            if current_revision == previous_revision:
+                previous_events = previous_item.get("session_events")
+                current_events = item.get("session_events")
+                if (
+                    isinstance(previous_events, list)
+                    and (
+                        not isinstance(current_events, list)
+                        or len(previous_events) > len(current_events)
+                    )
+                ):
+                    item["session_events"] = previous_events
+                preserved_fields = ["serve_session_id"]
+                if item.get("outcome") != "success":
+                    preserved_fields.extend(("failure_kind", "failure_reason"))
+                for field in preserved_fields:
+                    if not item.get(field) and previous_item.get(field):
+                        item[field] = previous_item[field]
             ordered[index_by_key[key]] = item
         else:
             index_by_key[key] = len(ordered)

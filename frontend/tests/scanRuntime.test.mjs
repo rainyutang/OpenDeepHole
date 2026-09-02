@@ -82,3 +82,44 @@ test("normalizes candidate-owned audit state by stable idx", () => {
   assert.equal(candidate.vulnerability_idx, 12);
   assert.deepEqual(candidate.dedup_decision, { method: "semantic" });
 });
+
+test("preserves completed task session traces during pool normalization", () => {
+  const sessionEvents = [
+    {
+      sequence: 1,
+      phase: "business",
+      session_id: "ses_timeout",
+      session_attempt: 1,
+      outcome: "timeout",
+      failure_kind: "timeout",
+    },
+    {
+      sequence: 2,
+      phase: "business",
+      session_id: "ses_success",
+      session_attempt: 2,
+      outcome: "success",
+    },
+  ];
+
+  const pool = runtime.normalizeOpenCodePool({
+    scope_id: "scan-1",
+    global_running: 0,
+    global_queued: 0,
+    total_tasks: 1,
+    completed_task_count: 1,
+    queued_tasks: [],
+    completed_tasks: [{
+      task_id: "logical-task",
+      outcome: "success",
+      serve_session_id: "ses_success",
+      session_events: sessionEvents,
+    }],
+    models: [],
+    updated_at: "2026-09-02T00:00:00Z",
+  });
+
+  assert.ok(pool);
+  assert.deepEqual(pool.completed_tasks[0].session_events, sessionEvents);
+  assert.equal(pool.completed_tasks.length, 1);
+});

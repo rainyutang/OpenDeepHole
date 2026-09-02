@@ -1609,6 +1609,49 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(pool.completed_task_count, 2)
             self.assertEqual(pool.total_tasks, 3)
 
+    def test_opencode_pool_merge_keeps_richer_session_trace_for_same_revision(self) -> None:
+        previous = OpenCodePoolStatus(
+            scope_id="scan-1",
+            total_tasks=1,
+            completed_task_count=1,
+            completed_tasks=[{
+                "task_id": "logical-task",
+                "revision": 1,
+                "outcome": "timeout",
+                "serve_session_id": "ses_2",
+                "failure_kind": "timeout",
+                "failure_reason": "slow",
+                "session_events": [
+                    {"sequence": 1, "phase": "business", "session_id": "ses_1"},
+                    {"sequence": 2, "phase": "business", "session_id": "ses_2"},
+                ],
+            }],
+        )
+        stale = OpenCodePoolStatus(
+            scope_id="scan-1",
+            total_tasks=1,
+            completed_task_count=1,
+            completed_tasks=[{
+                "task_id": "logical-task",
+                "revision": 1,
+                "outcome": "timeout",
+                "session_events": [
+                    {"sequence": 1, "phase": "business", "session_id": "ses_1"},
+                ],
+            }],
+        )
+
+        merged = agent_api._merge_completed_opencode_tasks(previous, stale)
+
+        task = merged.completed_tasks[0]
+        self.assertEqual(
+            [event["session_id"] for event in task["session_events"]],
+            ["ses_1", "ses_2"],
+        )
+        self.assertEqual(task["serve_session_id"], "ses_2")
+        self.assertEqual(task["failure_kind"], "timeout")
+        self.assertEqual(task["failure_reason"], "slow")
+
     def test_resume_preserves_total_candidate_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")

@@ -1813,7 +1813,7 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
         manager = SimpleNamespace(run_prompt=run_prompt)
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
-        with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
+        with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3] as update_mock, patches[4], patches[5]:
             with _task_context(
                 tmp_path,
                 task_metadata={"standalone_console": True},
@@ -1905,6 +1905,35 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
             and "status=success" in line
             for line in output
         )
+        traced = max(
+            (
+                call.args[1]["session_events"]
+                for call in update_mock.await_args_list
+                if len(call.args) > 1 and "session_events" in call.args[1]
+            ),
+            key=len,
+        )
+        assert [event["phase"] for event in traced] == [
+            "business",
+            "json_format",
+            "json_retry",
+            "json_retry",
+        ]
+        assert [event["session_id"] for event in traced] == [
+            "ses_same",
+            "ses_formatter",
+            "ses_same",
+            "ses_same",
+        ]
+        assert [event["outcome"] for event in traced] == [
+            "invalid_output",
+            "invalid_output",
+            "invalid_output",
+            "success",
+        ]
+        assert traced[0]["failure_kind"] == "no_json"
+        assert traced[1]["failure_kind"] == "source_unrelated"
+        assert traced[2]["failure_kind"] == "schema_mismatch"
 
     asyncio.run(run())
 
@@ -2109,7 +2138,7 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
 
         service._runtime_for_task = AsyncMock(side_effect=runtime_for_task)
         patches = _service_patches(manager)
-        with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
+        with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3] as update_mock, patches[4], patches[5]:
             with _task_context(
                 tmp_path,
                 task_metadata={"standalone_console": True},
@@ -2165,14 +2194,26 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
         assert acquire_mock.await_args_list[0].kwargs["avoid_model_identities"] == set()
         assert acquire_mock.await_args_list[1].kwargs["required_capability"] == "low"
         assert acquire_mock.await_args_list[3].kwargs["avoid_model_identities"] == identity
-        assert acquire_mock.await_args_list[1].kwargs["task_context"] == {
-            **acquire_mock.await_args_list[0].kwargs["task_context"],
-            "task_phase": "json_format",
-        }
-        assert acquire_mock.await_args_list[2].kwargs["task_context"] == {
-            **acquire_mock.await_args_list[0].kwargs["task_context"],
-            "task_phase": "json_correction",
-        }
+        base_context = acquire_mock.await_args_list[0].kwargs["task_context"]
+        formatter_context = acquire_mock.await_args_list[1].kwargs["task_context"]
+        correction_context = acquire_mock.await_args_list[2].kwargs["task_context"]
+        assert {
+            key: value
+            for key, value in formatter_context.items()
+            if key != "session_events"
+        } == {**base_context, "task_phase": "json_format"}
+        assert {
+            key: value
+            for key, value in correction_context.items()
+            if key not in {"session_events", "serve_session_id"}
+        } == {**base_context, "task_phase": "json_correction"}
+        assert correction_context["serve_session_id"] == "ses_first"
+        assert [
+            event["phase"] for event in formatter_context["session_events"]
+        ] == ["business"]
+        assert [
+            event["phase"] for event in correction_context["session_events"]
+        ] == ["business", "json_format"]
         assert (
             "[opencode][ses_first][session] "
             "JSON_RETRY 1/1 reason=invalid_json next_session=same"
@@ -2188,6 +2229,32 @@ def test_json_correction_exhaustion_requeues_with_new_session_and_same_task_id(t
             and "status=success" in line
             for line in output
         )
+        traced = max(
+            (
+                call.args[1]["session_events"]
+                for call in update_mock.await_args_list
+                if len(call.args) > 1 and "session_events" in call.args[1]
+            ),
+            key=len,
+        )
+        assert [event["phase"] for event in traced] == [
+            "business",
+            "json_format",
+            "json_retry",
+            "business",
+        ]
+        assert [event["session_id"] for event in traced] == [
+            "ses_first",
+            "ses_formatter",
+            "ses_first",
+            "ses_final",
+        ]
+        assert [event["outcome"] for event in traced] == [
+            "invalid_output",
+            "invalid_output",
+            "invalid_output",
+            "success",
+        ]
 
     asyncio.run(run())
 
@@ -2437,6 +2504,18 @@ def test_failed_fresh_retry_keeps_last_created_session_in_pool_context(tmp_path:
         final_context_update = update_context_mock.await_args_list[-1].args[1]
         assert final_context_update["serve_session_id"] == "ses_first"
         assert final_context_update["session_attempt"] == 2
+        assert final_context_update["failure_kind"] == "execution_error"
+        assert final_context_update["failure_reason"] == (
+            "final retry failed before session creation"
+        )
+        assert [
+            event["session_id"]
+            for event in final_context_update["session_events"]
+        ] == ["ses_first", ""]
+        assert [
+            event["outcome"]
+            for event in final_context_update["session_events"]
+        ] == ["failure", "failure"]
 
     asyncio.run(run())
 
@@ -2464,7 +2543,7 @@ def test_exhausted_json_retries_fail_and_keep_last_text(tmp_path: Path) -> None:
         manager = SimpleNamespace(run_prompt=run_prompt)
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3] as update_mock, patches[4], patches[5]:
             with _task_context(tmp_path):
                 result = await service.run_task(OpenCodeTaskSpec(
                     task_name="bad forever",
@@ -2480,6 +2559,12 @@ def test_exhausted_json_retries_fail_and_keep_last_text(tmp_path: Path) -> None:
         assert result.text == "invalid-2"
         assert result.structured is None
         assert "same-session JSON corrections" in result.error
+        final_updates = update_mock.await_args_list[-1].args[1]
+        assert final_updates["failure_kind"] == "no_json"
+        assert [
+            (event["session_id"], event["failure_kind"])
+            for event in final_updates["session_events"]
+        ] == [("ses_1", "no_json"), ("ses_2", "no_json")]
         with pytest.raises(OpenCodeTaskError):
             result.raise_for_status()
 
@@ -2502,7 +2587,7 @@ def test_timeout_uses_fresh_session_retry_budget_for_unclassified_tasks(tmp_path
         manager = SimpleNamespace(run_prompt=AsyncMock(side_effect=run_prompt))
         service._runtime_for_task = AsyncMock(return_value=(_runtime(tmp_path), "provider/model-low", _source()))
         patches = _service_patches(manager)
-        with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3], patches[4], patches[5]:
+        with patches[0], patches[1] as acquire_mock, patches[2] as release_mock, patches[3] as update_mock, patches[4], patches[5]:
             with _task_context(tmp_path):
                 result = await service.run_task(OpenCodeTaskSpec(
                     task_name="timeout",
@@ -2537,6 +2622,15 @@ def test_timeout_uses_fresh_session_retry_budget_for_unclassified_tasks(tmp_path
             {("provider/model-low", False, "opencode", "opencode")},
         ]
         assert release_mock.await_args.kwargs["outcome"] == "timeout"
+        final_updates = update_mock.await_args_list[-1].args[1]
+        assert final_updates["failure_kind"] == "timeout"
+        assert final_updates["failure_reason"] == "slow"
+        assert [
+            event["session_id"] for event in final_updates["session_events"]
+        ] == ["ses_timeout_1", "ses_timeout_2", "ses_timeout_3"]
+        assert {
+            event["failure_kind"] for event in final_updates["session_events"]
+        } == {"timeout"}
 
     asyncio.run(run())
 
