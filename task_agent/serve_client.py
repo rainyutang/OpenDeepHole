@@ -47,6 +47,8 @@ logger = logging.getLogger(f"opendeephole.{__name__}")
 
 _SERVE_START_TIMEOUT_SECONDS = 60.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
+_SERVE_VERSION_PROBE_TIMEOUT_SECONDS = 3.0
+_COMMAND_PROBE_STOP_TIMEOUT_SECONDS = 2.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS = 5.0
 _SERVE_HEALTH_POLL_INTERVAL_SECONDS = 1.0
@@ -623,6 +625,164 @@ def _executable_argv(executable: str, *arguments: str) -> list[str]:
         "/c",
         subprocess.list2cmdline(direct),
     ]
+
+
+async def _stop_command_probe_process(
+    proc: asyncio.subprocess.Process,
+) -> bool:
+    """Stop only the process tree created for one diagnostic command."""
+    if proc.returncode is not None:
+        return True
+    if sys.platform == "win32":
+        try:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(proc.pid),
+                "/T",
+                "/F",
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                taskkill_returncode = await asyncio.wait_for(
+                    killer.wait(),
+                    timeout=_COMMAND_PROBE_STOP_TIMEOUT_SECONDS,
+                )
+                if taskkill_returncode != 0:
+                    logger.warning(
+                        "taskkill failed for command probe pid=%s exit_code=%s",
+                        proc.pid,
+                        taskkill_returncode,
+                    )
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    killer.kill()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(killer.wait(), timeout=0.5)
+        except FileNotFoundError:
+            logger.warning(
+                "taskkill is unavailable while stopping command probe pid=%s",
+                proc.pid,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to stop command probe process tree pid=%s",
+                proc.pid,
+                exc_info=True,
+            )
+    else:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(int(proc.pid), signal.SIGTERM)
+
+    try:
+        await asyncio.wait_for(
+            proc.wait(),
+            timeout=_COMMAND_PROBE_STOP_TIMEOUT_SECONDS / 2,
+        )
+    except asyncio.TimeoutError:
+        if sys.platform == "win32":
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        else:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(
+                    int(proc.pid),
+                    signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM,
+                )
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=0.5)
+    return proc.returncode is not None
+
+
+async def _run_command_text_async(
+    cmd: list[str],
+    timeout: float = _SERVE_VERSION_PROBE_TIMEOUT_SECONDS,
+) -> str:
+    """Run a probe without pipe-EOF hangs or event-loop starvation.
+
+    A timed-out Windows ``cmd.exe`` can leave its child holding inherited pipe
+    handles, which makes ``subprocess.run`` wait indefinitely after killing the
+    wrapper. A regular output file removes that EOF dependency, while an owned
+    process group/tree gives timeout cleanup an exact target.
+    """
+    if not cmd:
+        return ""
+    fd, raw_output_path = tempfile.mkstemp(
+        prefix="opendeephole-command-probe-",
+        suffix=".log",
+    )
+    os.close(fd)
+    output_path = Path(raw_output_path)
+    proc: asyncio.subprocess.Process | None = None
+    timed_out = False
+    try:
+        popen_kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            creation_flag = int(
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) or 0
+            )
+            if creation_flag:
+                popen_kwargs["creationflags"] = creation_flag
+        else:
+            popen_kwargs["start_new_session"] = True
+        with output_path.open("wb") as output_handle:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=output_handle,
+                stderr=subprocess.STDOUT,
+                **popen_kwargs,
+            )
+            try:
+                await asyncio.wait_for(
+                    proc.wait(),
+                    timeout=max(0.0, float(timeout)),
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                logger.warning(
+                    "Command probe timed out executable=%s pid=%s timeout_seconds=%s; "
+                    "stopping its process tree",
+                    cmd[0],
+                    proc.pid,
+                    timeout,
+                )
+                stopped = await _stop_command_probe_process(proc)
+                if not stopped:
+                    logger.warning(
+                        "Timed-out command probe process tree may still be running pid=%s",
+                        proc.pid,
+                    )
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            await _stop_command_probe_process(proc)
+        raise
+    except FileNotFoundError:
+        return ""
+    except Exception as exc:
+        logger.debug("Failed to run %s: %s", cmd[0], exc)
+        if proc is not None and proc.returncode is None:
+            await _stop_command_probe_process(proc)
+        return ""
+    finally:
+        try:
+            output = output_path.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            output = ""
+        _remove_file(output_path)
+
+    if timed_out:
+        return ""
+    if proc is not None and proc.returncode != 0:
+        logger.debug(
+            "Command probe failed executable=%s exit_code=%s output=%s",
+            cmd[0],
+            proc.returncode,
+            _one_line_preview(output, 500),
+        )
+    return output
 
 
 def _new_serve_startup_log_path(tool: str, port: int) -> Path:
@@ -7797,11 +7957,18 @@ class OpenCodeServeManager:
         key: OpenCodeServeKey,
         startup_cwd: Path | None = None,
     ) -> None:
+        resolve_started_at = time.monotonic()
+        logger.info(
+            "OpenCode serve startup preparation step=resolve_executable status=start "
+            "executable_config=%s",
+            key.executable,
+        )
         executable = _resolve_executable(key.executable)
-        version_argv = _executable_argv(executable, "--version")
-        executable_version = _one_line_preview(
-            _run_command_text(version_argv),
-            200,
+        logger.info(
+            "OpenCode serve startup preparation step=resolve_executable status=complete "
+            "executable_resolved=%s elapsed_ms=%s",
+            executable,
+            round((time.monotonic() - resolve_started_at) * 1000),
         )
         requested_port = _serve_port(key.env_overrides)
         port = (
@@ -7809,10 +7976,55 @@ class OpenCodeServeManager:
             if key.serve_port_auto and self._auto_port is not None
             else requested_port
         )
+        cleanup_started_at = time.monotonic()
+        logger.info(
+            "OpenCode serve startup preparation step=previous_serve_cleanup status=start "
+            "port=%s port_mode=%s",
+            port,
+            "auto" if key.serve_port_auto else "fixed",
+        )
         cleanup_result = await self._stop_owned_serve_on_port(port)
+        logger.info(
+            "OpenCode serve startup preparation step=previous_serve_cleanup "
+            "status=complete port=%s elapsed_ms=%s",
+            port,
+            round((time.monotonic() - cleanup_started_at) * 1000),
+        )
         excluded_ports = set(cleanup_result.avoided_ports)
+        config_started_at = time.monotonic()
+        logger.info(
+            "OpenCode serve startup preparation step=publish_config status=start "
+            "workspace=%s",
+            startup_cwd or "(bootstrap)",
+        )
         prepared_cwd = _prepare_serve_startup_cwd(key.tool, startup_cwd)
         config_path = _write_serve_config_file(prepared_cwd, key.config_content)
+        logger.info(
+            "OpenCode serve startup preparation step=publish_config status=complete "
+            "config_file_path=%s elapsed_ms=%s",
+            config_path,
+            round((time.monotonic() - config_started_at) * 1000),
+        )
+
+        version_argv = _executable_argv(executable, "--version")
+        version_started_at = time.monotonic()
+        logger.info(
+            "OpenCode serve startup preparation step=version_probe status=start "
+            "timeout_seconds=%s",
+            _SERVE_VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+        version_output = await _run_command_text_async(
+            version_argv,
+            _SERVE_VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+        executable_version = _one_line_preview(version_output, 200)
+        logger.info(
+            "OpenCode serve startup preparation step=version_probe status=%s "
+            "executable_version=%s elapsed_ms=%s",
+            "complete" if executable_version else "unavailable",
+            executable_version or "(unknown)",
+            round((time.monotonic() - version_started_at) * 1000),
+        )
         attempted_ports: list[int] = []
         generic_retry_used = False
 
