@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from backend.api.scan import _resolve_scan_mining_engines, _validated_multi_versions
 from backend.models import MultiVersionTarget
 from deephole_client.vulnerability_mining.engines.multi_version.engine import (
+    _audit_static_groups,
     _candidate_prompt,
     _candidate_similarity,
     _group_candidates,
@@ -242,3 +246,78 @@ def test_confirmed_report_keeps_version_labels_and_locations() -> None:
     assert report is not None
     assert report["version_labels"] == ["v1", "v2"]
     assert "受影响版本" in report["vulnerability_report"]
+
+
+def test_static_group_audit_honors_configured_concurrency() -> None:
+    async def scenario() -> None:
+        active = 0
+        maximum_active = 0
+        task_names: list[str] = []
+
+        async def run_task(**kwargs):
+            nonlocal active, maximum_active
+            task_names.append(kwargs["task_name"])
+            active += 1
+            maximum_active = max(maximum_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return SimpleNamespace(
+                status="success",
+                structured={"confirmed": False},
+                output_source={},
+            )
+
+        groups = [
+            [
+                _candidate(
+                    "v1",
+                    file=f"src/{index}.c",
+                    line=index,
+                    function="parse",
+                    code="read();",
+                )
+            ]
+            for index in range(1, 5)
+        ]
+        versions = [
+            {
+                "version_name": "v1",
+                "project_path": Path("/repo/v1"),
+                "code_scan_path": Path("/repo/v1"),
+            },
+            {
+                "version_name": "v2",
+                "project_path": Path("/repo/v2"),
+                "code_scan_path": Path("/repo/v2"),
+            },
+        ]
+        kwargs = {
+            "scan_id": "scan-concurrent",
+            "config": SimpleNamespace(
+                opencode_concurrency=2,
+                vulnerability_mining=SimpleNamespace(required_capability="high"),
+            ),
+            "output": None,
+            "cancel_event": asyncio.Event(),
+            "report_vulnerabilities": lambda values: None,
+        }
+
+        with patch(
+            "deephole_client.vulnerability_mining.engines.multi_version.engine.run_opencode_task",
+            new=run_task,
+        ):
+            processed, confirmed = await _audit_static_groups(
+                groups=groups,
+                versions=versions,
+                kwargs=kwargs,
+            )
+
+        assert processed == 4
+        assert confirmed == 0
+        assert maximum_active == 2
+        assert set(task_names) == {
+            f"multi-version-codepoint-scan-concurrent-{index}"
+            for index in range(1, 5)
+        }
+
+    asyncio.run(scenario())
