@@ -4955,6 +4955,11 @@ def test_managed_file_write_plugin_preserves_user_plugins(tmp_path: Path) -> Non
     )
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["compaction"] == {
+        "auto": True,
+        "prune": True,
+        "reserved": 20_000,
+    }
     assert config["plugin"][:2] == ["user-plugin", "file:///custom/plugin.mjs"]
     assert len(config["plugin"]) == 4
     managed_path = (
@@ -4973,6 +4978,76 @@ def test_managed_file_write_plugin_preserves_user_plugins(tmp_path: Path) -> Non
     assert knowledge_plugin_path.read_text(encoding="utf-8") == (
         _KNOWLEDGE_PROJECT_PLUGIN_SOURCE
     )
+
+
+@pytest.mark.parametrize("configured", [None, False, []])
+def test_managed_compaction_replaces_missing_or_non_object_config(
+    tmp_path: Path,
+    configured,
+) -> None:
+    workspace = tmp_path / "runtime"
+    workspace.mkdir()
+    source = {} if configured is None else {"compaction": configured}
+
+    config_path = _write_serve_config_file(workspace, json.dumps(source))
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["compaction"] == {
+        "auto": True,
+        "prune": True,
+        "reserved": 20_000,
+    }
+
+
+def test_managed_compaction_overrides_conflicts_and_preserves_other_fields(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "runtime"
+    workspace.mkdir()
+
+    config_path = _write_serve_config_file(
+        workspace,
+        json.dumps({
+            "compaction": {
+                "auto": False,
+                "prune": False,
+                "reserved": 1,
+                "tail_turns": 4,
+                "preserve_recent_tokens": 8_000,
+            },
+        }),
+    )
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["compaction"] == {
+        "auto": True,
+        "prune": True,
+        "reserved": 20_000,
+        "tail_turns": 4,
+        "preserve_recent_tokens": 8_000,
+    }
+
+
+def test_config_hash_uses_managed_compaction_values() -> None:
+    base_hash = _config_hash("{}")
+    conflicting_hash = _config_hash(json.dumps({
+        "compaction": {
+            "auto": False,
+            "prune": False,
+            "reserved": 1,
+        },
+    }))
+    extended_hash = _config_hash(json.dumps({
+        "compaction": {
+            "auto": False,
+            "prune": False,
+            "reserved": 1,
+            "tail_turns": 4,
+        },
+    }))
+
+    assert conflicting_hash == base_hash
+    assert extended_hash != base_hash
 
 
 def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: Path) -> None:
@@ -5087,6 +5162,11 @@ def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: P
         assert envs[0]["OPENCODE_SERVE_PORT"] == "4096"
         runtime_config_path = startup_cwd / "opencode.json"
         runtime_config = json.loads(runtime_config_path.read_text(encoding="utf-8"))
+        assert runtime_config["compaction"] == {
+            "auto": True,
+            "prune": True,
+            "reserved": 20_000,
+        }
         assert runtime_config["mcp"] == {}
         assert len(runtime_config["plugin"]) == 2
         plugin_path = (

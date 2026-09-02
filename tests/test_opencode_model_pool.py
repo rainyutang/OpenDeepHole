@@ -343,6 +343,19 @@ def test_acquire_without_models_fails_fast_and_clears_planned_task() -> None:
         assert completed["model_id"] == ""
         assert completed["model"] == ""
         assert completed["failure_reason"] == str(exc_info.value)
+        assert completed["failure_kind"] == "no_available_model"
+        assert completed["session_events"] == [{
+            "sequence": 1,
+            "phase": "business",
+            "session_id": "",
+            "session_attempt": 1,
+            "outcome": "failure",
+            "failure_kind": "no_available_model",
+            "failure_reason": str(exc_info.value),
+            "started_at": completed["started_at"],
+            "finished_at": completed["finished_at"],
+            "duration_seconds": completed["duration_seconds"],
+        }]
         assert completed["task_type"] == "vulnerability_mining"
         assert completed["file"] == "src/no-model.c"
         assert completed["prompt"] == "audit without a configured model"
@@ -631,6 +644,58 @@ def test_model_pool_snapshot_persists_completed_task_prompt_for_all_outcomes() -
     asyncio.run(run())
 
 
+def test_model_pool_snapshot_persists_terminal_session_trace() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "deep",
+            "model": "provider/deep",
+            "capability": "high",
+            "max_concurrency": 1,
+        }])
+        scope = "scan-session-trace"
+        lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            stats_scope_id=scope,
+            task_id="logical-task",
+            task_context={"task_type": "vulnerability_mining"},
+        )
+        session_events = [
+            {
+                "sequence": 1,
+                "phase": "business",
+                "session_id": "ses_timeout",
+                "session_attempt": 1,
+                "outcome": "timeout",
+                "failure_kind": "timeout",
+            },
+            {
+                "sequence": 2,
+                "phase": "business",
+                "session_id": "ses_failed",
+                "session_attempt": 2,
+                "outcome": "failure",
+                "failure_kind": "schema_mismatch",
+            },
+        ]
+        await update_model_lease_context(lease, {
+            "serve_session_id": "ses_failed",
+            "failure_kind": "schema_mismatch",
+            "failure_reason": "JSON retries exhausted",
+            "session_events": session_events,
+        })
+        await release_model_lease(lease, outcome="failure", duration_seconds=2.0)
+
+        completed = model_pool_snapshot(scope)["completed_tasks"]
+        assert len(completed) == 1
+        assert completed[0]["serve_session_id"] == "ses_failed"
+        assert completed[0]["failure_kind"] == "schema_mismatch"
+        assert completed[0]["failure_reason"] == "JSON retries exhausted"
+        assert completed[0]["session_events"] == session_events
+
+    asyncio.run(run())
+
+
 def test_fresh_session_retry_records_only_one_terminal_completion() -> None:
     async def run() -> None:
         cfg = SimpleNamespace(
@@ -677,6 +742,39 @@ def test_fresh_session_retry_records_only_one_terminal_completion() -> None:
         assert final["completed_tasks"][0]["task_id"] == task_id
         assert final["completed_tasks"][0]["session_attempt"] == 2
         assert final["completed_tasks"][0]["outcome"] == "success"
+
+    asyncio.run(run())
+
+
+def test_non_terminal_scheduling_failure_does_not_append_completed_task() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(model="legacy-claude-model", models=[])
+        scope = "scope-recovery-no-model"
+
+        with pytest.raises(NoAvailableModelError):
+            await acquire_model_lease(
+                cfg,
+                global_concurrency=1,
+                stats_scope_id=scope,
+                task_id="logical-task",
+                task_context={
+                    "task_type": "vulnerability_mining",
+                    "task_phase": "json_format",
+                    "session_attempt": 1,
+                    "session_events": [{
+                        "sequence": 1,
+                        "phase": "business",
+                        "session_id": "ses-business",
+                        "session_attempt": 1,
+                        "outcome": "invalid_output",
+                    }],
+                },
+                record_completion_on_failure=False,
+            )
+
+        snapshot = model_pool_snapshot(scope)
+        assert snapshot["completed_task_count"] == 0
+        assert snapshot["completed_tasks"] == []
 
     asyncio.run(run())
 

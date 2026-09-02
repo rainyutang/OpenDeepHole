@@ -65,6 +65,14 @@ _TASK_TYPE_PRIORITIES = {
     "vulnerability_mining": 50,
 }
 _JSON_FORMAT_UNRELATED_SENTINEL = "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__"
+_JSON_FAILURE_MESSAGES = {
+    "empty_output": "Session 未返回内容",
+    "no_json": "Session 输出中未找到 JSON 对象或数组",
+    "invalid_json": "Session 输出包含 JSON 外形内容，但语法无法解析",
+    "schema_mismatch": "Session 输出是合法 JSON，但不符合目标 JSON Schema",
+    "source_unrelated": "原始输出无法无损转换为目标 JSON Schema",
+}
+_MAX_FAILURE_REASON_CHARS = 2000
 
 
 def get_config() -> Any:
@@ -356,8 +364,17 @@ class _StructuredRecoveryOutcome:
     source: OutputSource = field(default_factory=OutputSource)
     token_usage: OpenCodeTokenUsage | None = None
     error: str = ""
+    failure_kind: str = ""
     duration_seconds: float = 0.0
     avoid_model_identities: frozenset[tuple[str, bool, str, str]] = frozenset()
+
+
+@dataclass(frozen=True)
+class _JsonParseResult:
+    matched: bool
+    structured: Any = None
+    failure_kind: str = ""
+    failure_reason: str = ""
 
 
 class _CombinedCancelEvent:
@@ -673,6 +690,7 @@ class OpenCodeTaskService:
         task_token_usage: OpenCodeTokenUsage | None = None
         avoid_model_identities: set[tuple[str, bool, str, str]] = set()
         quota_wait_budget = ModelQuotaWaitBudget()
+        session_events: list[dict[str, Any]] = []
 
         session_attempt = 1
         while session_attempt <= total_session_attempts:
@@ -693,6 +711,9 @@ class OpenCodeTaskService:
             avoid_model_on_retry = False
             model_request_failed = False
             model_request_failure = ""
+            attempt_event_outcome = "failure"
+            attempt_failure_kind = ""
+            attempt_failure_reason = ""
             formatter_source_text = ""
             recovery_required = False
             timeout_seconds = 0
@@ -702,6 +723,7 @@ class OpenCodeTaskService:
                     record,
                     session_attempt=session_attempt,
                     total_session_attempts=total_session_attempts,
+                    session_events=session_events,
                 )
                 lease = await acquire_model_lease(
                     cli_config_source,
@@ -882,7 +904,8 @@ class OpenCodeTaskService:
                             final_session_id = session_id
                             message_id = details.message_id
                             text = details.text or "\n".join(details.lines)
-                            structured = _parse_text_json(text, spec.output_schema)
+                            parsed_text = _parse_text_json_result(text, spec.output_schema)
+                            structured = parsed_text.structured if parsed_text.matched else None
                             snapshots: tuple[_WrittenFileSnapshot, ...] = ()
                             if spec.output_schema is not None:
                                 snapshots = _read_written_file_snapshots(
@@ -909,6 +932,18 @@ class OpenCodeTaskService:
                                     ),
                                     text,
                                 )
+                                invalid_output = _parse_text_json_result(
+                                    formatter_source_text,
+                                    spec.output_schema,
+                                )
+                                attempt_event_outcome = "invalid_output"
+                                attempt_failure_kind = (
+                                    invalid_output.failure_kind or "schema_mismatch"
+                                )
+                                attempt_failure_reason = (
+                                    invalid_output.failure_reason
+                                    or _json_failure_reason(attempt_failure_kind)
+                                )
                                 if spec.output_retry_count <= 0:
                                     raise _InvalidStructuredOutput(
                                         "OpenCode exhausted same-session JSON corrections "
@@ -932,6 +967,7 @@ class OpenCodeTaskService:
                         self._session_locks.pop(lock_key, None)
 
                 attempt_outcome = "success"
+                attempt_event_outcome = "success"
                 health_outcome = "success"
                 last_message_id = message_id
                 last_text = text
@@ -970,7 +1006,10 @@ class OpenCodeTaskService:
                 last_source = source
             except asyncio.TimeoutError as exc:
                 attempt_outcome = "timeout"
+                attempt_event_outcome = "timeout"
                 retry_reason = str(exc) or "OpenCode task timed out"
+                attempt_failure_kind = "timeout"
+                attempt_failure_reason = retry_reason
                 if model_request_failed:
                     avoid_model_on_retry = True
                 if model_request_failure:
@@ -985,6 +1024,9 @@ class OpenCodeTaskService:
                 if record.requeue_requested:
                     return
                 attempt_outcome = "cancelled"
+                attempt_event_outcome = "cancelled"
+                attempt_failure_kind = "cancelled"
+                attempt_failure_reason = "OpenCode task cancelled"
                 last_source = source
                 self._finish_record(
                     record,
@@ -1003,6 +1045,13 @@ class OpenCodeTaskService:
                 return
             except (NoAvailableModelError, ModelQuotaCircuitOpenError) as exc:
                 attempt_outcome = "failure"
+                attempt_event_outcome = "failure"
+                attempt_failure_kind = (
+                    "no_available_model"
+                    if isinstance(exc, NoAvailableModelError)
+                    else "quota"
+                )
+                attempt_failure_reason = str(exc)
                 last_source = source
                 self._finish_record(
                     record,
@@ -1021,7 +1070,10 @@ class OpenCodeTaskService:
                 return
             except OpenCodeProviderQuotaError as exc:
                 attempt_outcome = "failure"
+                attempt_event_outcome = "failure"
                 retry_reason = str(exc)
+                attempt_failure_kind = "quota"
+                attempt_failure_reason = retry_reason
                 avoid_model_on_retry = True
                 health_outcome = "quota"
                 quota_retry_after_seconds = exc.retry_after_seconds
@@ -1046,6 +1098,11 @@ class OpenCodeTaskService:
                 )
             except _InvalidStructuredOutput as exc:
                 retry_reason = str(exc)
+                attempt_event_outcome = "invalid_output"
+                attempt_failure_kind = attempt_failure_kind or "schema_mismatch"
+                attempt_failure_reason = (
+                    attempt_failure_reason or _json_failure_reason(attempt_failure_kind)
+                )
                 # Invalid JSON should try another model on a fresh Session, but
                 # it is a task-quality failure rather than a request-health
                 # signal and therefore must not lower the model's weight.
@@ -1058,6 +1115,9 @@ class OpenCodeTaskService:
                 last_source = source
             except OpenCodeTaskQualityError as exc:
                 retry_reason = str(exc) or "OpenCode task completion contract failed"
+                attempt_event_outcome = "failure"
+                attempt_failure_kind = "quality_error"
+                attempt_failure_reason = retry_reason
                 # Required command failures are model-output quality failures,
                 # not Provider health signals.
                 avoid_model_on_retry = True
@@ -1069,6 +1129,17 @@ class OpenCodeTaskService:
                 last_source = source
             except Exception as exc:
                 retry_reason = str(exc) or type(exc).__name__
+                attempt_event_outcome = "failure"
+                attempt_failure_kind = (
+                    "timeout"
+                    if model_request_failure == "timeout"
+                    else "quota"
+                    if model_request_failure == "quota"
+                    else "provider_error"
+                    if model_request_failed
+                    else "execution_error"
+                )
+                attempt_failure_reason = retry_reason
                 if model_request_failed:
                     avoid_model_on_retry = True
                 if model_request_failure:
@@ -1094,6 +1165,20 @@ class OpenCodeTaskService:
                     self._active_session_tasks.pop(session_id, None)
                 attempt_duration = _elapsed(attempt_started)
                 accumulated_duration += attempt_duration
+                if lease is not None:
+                    _append_session_event(
+                        session_events,
+                        phase="business",
+                        session_id=session_id,
+                        session_attempt=session_attempt,
+                        outcome=attempt_event_outcome,
+                        model_id=lease.option.id,
+                        model=source.model or model or lease.option.model,
+                        failure_kind=attempt_failure_kind,
+                        failure_reason=attempt_failure_reason,
+                        started_at=lease.started_at_iso,
+                        duration_seconds=attempt_duration,
+                    )
                 # A fresh-session retry is one logical task. Release its model
                 # slot now, but append terminal history/outcome only once.
                 if retry_reason and session_attempt < total_session_attempts:
@@ -1104,13 +1189,27 @@ class OpenCodeTaskService:
                 # terminal model-pool history. A later retry can fail before it
                 # creates a replacement session, in which case final_session_id
                 # still identifies the most recent usable OpenCode session.
-                await update_model_lease_context(lease, {
+                context_updates = {
                     "serve_session_id": final_session_id or session_id,
                     "session_attempt": session_attempt,
                     "token_usage": (
                         task_token_usage.as_dict() if task_token_usage is not None else None
                     ),
-                })
+                }
+                context_updates.update(_session_trace_updates(
+                    session_events,
+                    failure_kind=(
+                        attempt_failure_kind
+                        if terminal_release and attempt_event_outcome != "success"
+                        else ""
+                    ),
+                    failure_reason=(
+                        retry_reason or attempt_failure_reason
+                        if terminal_release and attempt_event_outcome != "success"
+                        else ""
+                    ),
+                ))
+                await update_model_lease_context(lease, context_updates)
                 await release_model_lease(
                     lease,
                     outcome=attempt_outcome,
@@ -1142,6 +1241,7 @@ class OpenCodeTaskService:
                         validation_debug=validation_debug,
                         token_usage=task_token_usage,
                         quota_wait_budget=quota_wait_budget,
+                        session_events=session_events,
                     )
                 except asyncio.CancelledError:
                     if record.requeue_requested:
@@ -1199,6 +1299,10 @@ class OpenCodeTaskService:
                     return
                 retry_reason = recovery.error
                 attempt_outcome = recovery.status
+                attempt_failure_kind = recovery.failure_kind or (
+                    "timeout" if recovery.status == "timeout" else "execution_error"
+                )
+                attempt_failure_reason = recovery.error
                 avoid_model_identities.update(recovery.avoid_model_identities)
 
             if retry_reason and session_attempt < total_session_attempts:
@@ -1287,6 +1391,7 @@ class OpenCodeTaskService:
         validation_debug: bool,
         token_usage: OpenCodeTokenUsage | None,
         quota_wait_budget: ModelQuotaWaitBudget,
+        session_events: list[dict[str, Any]],
     ) -> _StructuredRecoveryOutcome:
         """Run one low-capability formatter Session, then original-Session retries."""
         started_at = time.monotonic()
@@ -1323,8 +1428,11 @@ class OpenCodeTaskService:
                 record,
                 session_attempt=session_attempt,
                 total_session_attempts=total_session_attempts,
+                session_events=session_events,
             )
             value["task_phase"] = phase
+            if phase == "json_correction" and session_id:
+                value["serve_session_id"] = session_id
             value.pop("planned_task_id", None)
             return value
 
@@ -1341,9 +1449,43 @@ class OpenCodeTaskService:
         )
         formatter_lease: ModelLease | None = None
         formatter_session_id = ""
+        formatter_model = ""
         formatter_model_failure = ""
         formatter_quota_retry_after_seconds: float | None = None
         formatter_started_at = time.monotonic()
+        formatter_event_recorded = False
+
+        def record_formatter_event(
+            outcome: str,
+            *,
+            failure_kind: str = "",
+            failure_reason: str = "",
+        ) -> None:
+            nonlocal formatter_event_recorded
+            if formatter_event_recorded:
+                return
+            formatter_event_recorded = True
+            _append_session_event(
+                session_events,
+                phase="json_format",
+                session_id=formatter_session_id,
+                session_attempt=session_attempt,
+                outcome=outcome,
+                model_id=(formatter_lease.option.id if formatter_lease is not None else ""),
+                model=(
+                    formatter_model
+                    if formatter_model
+                    else formatter_lease.option.model
+                    if formatter_lease is not None
+                    else ""
+                ),
+                failure_kind=failure_kind,
+                failure_reason=failure_reason,
+                started_at=(
+                    formatter_lease.started_at_iso if formatter_lease is not None else ""
+                ),
+                duration_seconds=max(0.0, time.monotonic() - formatter_started_at),
+            )
         try:
             formatter_lease = await acquire_model_lease(
                 cli_config_source,
@@ -1359,6 +1501,7 @@ class OpenCodeTaskService:
                 strict_capability=True,
                 prefer_lowest_capability=True,
                 wait_when_unavailable=False,
+                record_completion_on_failure=False,
             )
             if formatter_lease is None:
                 raise asyncio.CancelledError()
@@ -1421,6 +1564,7 @@ class OpenCodeTaskService:
                 task_attempt=session_attempt,
             )
             assert isinstance(details, OpenCodePromptResult)
+            formatter_model = details.model or formatter_model
             formatter_text = details.text or "\n".join(details.lines)
             if formatter_text.strip() in {
                 _JSON_FORMAT_UNRELATED_SENTINEL,
@@ -1428,13 +1572,20 @@ class OpenCodeTaskService:
             }:
                 formatter_error = "source_unrelated"
                 formatted = None
+                formatter_failure_kind = "source_unrelated"
+                formatter_failure_reason = _json_failure_reason("source_unrelated")
             else:
-                formatted = _parse_text_json(formatter_text, spec.output_schema)
-                formatter_error = "invalid_json" if formatted is None else ""
+                formatter_parse = _parse_text_json_result(formatter_text, spec.output_schema)
+                formatted = formatter_parse.structured if formatter_parse.matched else None
+                formatter_error = formatter_parse.failure_kind if formatted is None else ""
+                formatter_failure_kind = formatter_parse.failure_kind
+                formatter_failure_reason = formatter_parse.failure_reason
             if formatted is not None:
+                record_formatter_event("success")
                 await update_model_lease_context(formatter_lease, {
                     "serve_session_id": session_id,
                     "json_format_session_id": formatter_session_id,
+                    "session_events": copy.deepcopy(session_events),
                     "token_usage": (
                         accumulated_usage.as_dict()
                         if accumulated_usage is not None
@@ -1469,6 +1620,14 @@ class OpenCodeTaskService:
                     token_usage=accumulated_usage,
                     duration_seconds=max(0.0, time.monotonic() - started_at),
                 )
+            record_formatter_event(
+                "invalid_output",
+                failure_kind=formatter_failure_kind or "invalid_json",
+                failure_reason=(
+                    formatter_failure_reason
+                    or _json_failure_reason(formatter_failure_kind or "invalid_json")
+                ),
+            )
             self._emit_task_progress(
                 record,
                 "JSON_FORMAT_FAILED "
@@ -1476,6 +1635,10 @@ class OpenCodeTaskService:
                 f"reason={formatter_error} fallback=original_session",
                 session_id=session_id,
                 category="session",
+            )
+            await update_model_lease_context(
+                formatter_lease,
+                {"session_events": copy.deepcopy(session_events)},
             )
             await release_model_lease(
                 formatter_lease,
@@ -1487,6 +1650,22 @@ class OpenCodeTaskService:
             formatter_lease = None
         except asyncio.CancelledError:
             if formatter_lease is not None:
+                record_formatter_event(
+                    "cancelled",
+                    failure_kind="cancelled",
+                    failure_reason="OpenCode task cancelled",
+                )
+                await update_model_lease_context(
+                    formatter_lease,
+                    {
+                        **_session_trace_updates(
+                            session_events,
+                            failure_kind="cancelled",
+                            failure_reason="OpenCode task cancelled",
+                        ),
+                        "serve_session_id": session_id,
+                    },
+                )
                 await release_model_lease(
                     formatter_lease,
                     outcome="cancelled",
@@ -1500,6 +1679,25 @@ class OpenCodeTaskService:
                 formatter_model_failure = "quota"
                 formatter_quota_retry_after_seconds = exc.retry_after_seconds
             if formatter_lease is not None:
+                formatter_failure_kind = (
+                    "timeout"
+                    if isinstance(exc, asyncio.TimeoutError)
+                    else "quota"
+                    if isinstance(exc, OpenCodeProviderQuotaError)
+                    else "provider_error"
+                    if formatter_model_failure
+                    else "execution_error"
+                )
+                formatter_failure_reason = str(exc) or type(exc).__name__
+                record_formatter_event(
+                    "timeout" if isinstance(exc, asyncio.TimeoutError) else "failure",
+                    failure_kind=formatter_failure_kind,
+                    failure_reason=formatter_failure_reason,
+                )
+                await update_model_lease_context(
+                    formatter_lease,
+                    {"session_events": copy.deepcopy(session_events)},
+                )
                 await release_model_lease(
                     formatter_lease,
                     outcome=("timeout" if isinstance(exc, asyncio.TimeoutError) else "failure"),
@@ -1532,10 +1730,54 @@ class OpenCodeTaskService:
         correction_message_id = message_id
         correction_text = text
         correction_error = ""
+        correction_failure_kind = ""
+        correction_failure_reason = ""
         correction_outcome = "failure"
         correction_identity: tuple[str, bool, str, str] = ()
         correction_lock: asyncio.Lock | None = None
         correction_lock_acquired = False
+        correction_retry_started_at = 0.0
+        correction_retry_started_at_iso = ""
+        correction_retry_ordinal = 0
+        correction_retry_recorded = False
+
+        def record_correction_event(
+            outcome: str,
+            *,
+            failure_kind: str = "",
+            failure_reason: str = "",
+        ) -> None:
+            nonlocal correction_retry_recorded
+            if correction_retry_recorded:
+                return
+            correction_retry_recorded = True
+            _append_session_event(
+                session_events,
+                phase="json_retry",
+                session_id=session_id,
+                session_attempt=session_attempt,
+                outcome=outcome,
+                model_id=(correction_lease.option.id if correction_lease is not None else ""),
+                model=(
+                    correction_source.model
+                    or correction_model
+                    or (
+                        correction_lease.option.model
+                        if correction_lease is not None
+                        else ""
+                    )
+                ),
+                failure_kind=failure_kind,
+                failure_reason=failure_reason,
+                retry_ordinal=correction_retry_ordinal or None,
+                retry_total=spec.output_retry_count,
+                started_at=correction_retry_started_at_iso,
+                duration_seconds=(
+                    max(0.0, time.monotonic() - correction_retry_started_at)
+                    if correction_retry_started_at
+                    else None
+                ),
+            )
         correction_prompt = (
             spec.output_retry_prompt
             if spec.output_retry_prompt is not None
@@ -1556,6 +1798,7 @@ class OpenCodeTaskService:
                 strict_capability=True,
                 prefer_lowest_capability=True,
                 wait_when_unavailable=not validation_debug,
+                record_completion_on_failure=not has_fresh_retry,
                 quota_wait_budget=quota_wait_budget,
             )
             if correction_lease is None:
@@ -1608,6 +1851,10 @@ class OpenCodeTaskService:
                 await record_usage(correction_lease, value)
 
             for output_attempt in range(1, spec.output_retry_count + 1):
+                correction_retry_started_at = time.monotonic()
+                correction_retry_started_at_iso = _now_iso()
+                correction_retry_ordinal = output_attempt
+                correction_retry_recorded = False
                 self._emit_task_progress(
                     record,
                     f"JSON_RETRY {output_attempt}/{spec.output_retry_count} "
@@ -1658,11 +1905,15 @@ class OpenCodeTaskService:
                         task_attempt=session_attempt,
                     )
                     assert isinstance(details, OpenCodePromptResult)
+                    correction_model = details.model or correction_model
                     correction_message_id = details.message_id
                     correction_text = details.text or "\n".join(details.lines)
-                    structured = _parse_text_json(
+                    correction_parse = _parse_text_json_result(
                         correction_text,
                         spec.output_schema,
+                    )
+                    structured = (
+                        correction_parse.structured if correction_parse.matched else None
                     )
                     snapshots = _read_written_file_snapshots(
                         message_writes.values(),
@@ -1678,9 +1929,13 @@ class OpenCodeTaskService:
                             structured = parsed_written_json.structured
                     if structured is not None:
                         correction_outcome = "success"
+                        correction_failure_kind = ""
+                        correction_failure_reason = ""
+                        record_correction_event("success")
                         await update_model_lease_context(correction_lease, {
                             "serve_session_id": session_id,
                             "session_attempt": session_attempt,
+                            "session_events": copy.deepcopy(session_events),
                             "token_usage": (
                                 accumulated_usage.as_dict()
                                 if accumulated_usage is not None
@@ -1717,6 +1972,22 @@ class OpenCodeTaskService:
                                 time.monotonic() - started_at,
                             ),
                         )
+                    correction_failure_kind = (
+                        correction_parse.failure_kind or "schema_mismatch"
+                    )
+                    correction_failure_reason = (
+                        correction_parse.failure_reason
+                        or _json_failure_reason(correction_failure_kind)
+                    )
+                    record_correction_event(
+                        "invalid_output",
+                        failure_kind=correction_failure_kind,
+                        failure_reason=correction_failure_reason,
+                    )
+                    await update_model_lease_context(
+                        correction_lease,
+                        {"session_events": copy.deepcopy(session_events)},
+                    )
                 finally:
                     _cleanup_written_files(
                         message_writes.values(),
@@ -1735,6 +2006,22 @@ class OpenCodeTaskService:
         except asyncio.CancelledError:
             correction_outcome = "cancelled"
             if correction_lease is not None:
+                record_correction_event(
+                    "cancelled",
+                    failure_kind="cancelled",
+                    failure_reason="OpenCode task cancelled",
+                )
+                await update_model_lease_context(
+                    correction_lease,
+                    {
+                        **_session_trace_updates(
+                            session_events,
+                            failure_kind="cancelled",
+                            failure_reason="OpenCode task cancelled",
+                        ),
+                        "serve_session_id": session_id,
+                    },
+                )
                 await release_model_lease(
                     correction_lease,
                     outcome="cancelled",
@@ -1752,6 +2039,21 @@ class OpenCodeTaskService:
                 "timeout" if isinstance(exc, asyncio.TimeoutError) else "failure"
             )
             correction_error = str(exc) or type(exc).__name__
+            correction_failure_kind = (
+                "timeout"
+                if isinstance(exc, asyncio.TimeoutError)
+                else "quota"
+                if isinstance(exc, OpenCodeProviderQuotaError)
+                else "provider_error"
+                if correction_model_failure
+                else "execution_error"
+            )
+            correction_failure_reason = correction_error
+            record_correction_event(
+                correction_outcome,
+                failure_kind=correction_failure_kind,
+                failure_reason=correction_failure_reason,
+            )
         finally:
             if correction_lock_acquired and correction_lock is not None:
                 correction_lock.release()
@@ -1761,6 +2063,33 @@ class OpenCodeTaskService:
             ):
                 self._active_session_tasks.pop(session_id, None)
             if correction_lease is not None:
+                terminal_failure_kind = (
+                    correction_failure_kind
+                    if not has_fresh_retry and correction_outcome != "success"
+                    else ""
+                )
+                terminal_failure_reason = (
+                    correction_error or correction_failure_reason
+                    if terminal_failure_kind
+                    else ""
+                )
+                await update_model_lease_context(
+                    correction_lease,
+                    {
+                        **_session_trace_updates(
+                            session_events,
+                            failure_kind=terminal_failure_kind,
+                            failure_reason=terminal_failure_reason,
+                        ),
+                        "serve_session_id": session_id,
+                        "session_attempt": session_attempt,
+                        "token_usage": (
+                            accumulated_usage.as_dict()
+                            if accumulated_usage is not None
+                            else None
+                        ),
+                    },
+                )
                 await release_model_lease(
                     correction_lease,
                     outcome=correction_outcome,
@@ -1787,6 +2116,7 @@ class OpenCodeTaskService:
             source=correction_source,
             token_usage=accumulated_usage,
             error=correction_error or "OpenCode structured-output recovery failed",
+            failure_kind=correction_failure_kind or "schema_mismatch",
             duration_seconds=max(0.0, time.monotonic() - started_at),
             avoid_model_identities=frozenset(avoid_identities),
         )
@@ -2049,6 +2379,7 @@ def _model_pool_task_context(
     *,
     session_attempt: int,
     total_session_attempts: int,
+    session_events: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     spec = record.spec
     prompt = spec.prompt
@@ -2063,11 +2394,87 @@ def _model_pool_task_context(
         "retry_ordinal": session_attempt - 1,
         "session_attempts": total_session_attempts,
     }
+    if session_events:
+        context["session_events"] = copy.deepcopy(session_events)
     # A planned task is consumed once. A fresh-session retry is still the same
     # logical task and must not consume the plan entry again.
     if session_attempt > 1:
         context.pop("planned_task_id", None)
     return context
+
+
+def _normalize_failure_reason(value: object, fallback: str = "") -> str:
+    reason = re.sub(r"\s+", " ", str(value or fallback)).strip()
+    if len(reason) <= _MAX_FAILURE_REASON_CHARS:
+        return reason
+    return reason[: _MAX_FAILURE_REASON_CHARS - 1].rstrip() + "…"
+
+
+def _json_failure_reason(kind: str) -> str:
+    return _JSON_FAILURE_MESSAGES.get(
+        str(kind or ""),
+        "Session 输出未通过 JSON 校验",
+    )
+
+
+def _append_session_event(
+    events: list[dict[str, Any]],
+    *,
+    phase: str,
+    session_id: str,
+    session_attempt: int,
+    outcome: str,
+    model_id: str = "",
+    model: str = "",
+    failure_kind: str = "",
+    failure_reason: str = "",
+    retry_ordinal: int | None = None,
+    retry_total: int | None = None,
+    started_at: str = "",
+    duration_seconds: float | None = None,
+) -> None:
+    event: dict[str, Any] = {
+        "sequence": len(events) + 1,
+        "phase": phase,
+        "session_id": str(session_id or "").strip(),
+        "session_attempt": max(1, int(session_attempt or 1)),
+        "outcome": outcome,
+        "started_at": started_at,
+        "finished_at": _now_iso(),
+    }
+    if model_id:
+        event["model_id"] = str(model_id)
+    if model:
+        event["model"] = str(model)
+    if failure_kind:
+        event["failure_kind"] = str(failure_kind)
+    if failure_reason:
+        event["failure_reason"] = _normalize_failure_reason(failure_reason)
+    if retry_ordinal is not None:
+        event["retry_ordinal"] = max(1, int(retry_ordinal))
+    if retry_total is not None:
+        event["retry_total"] = max(0, int(retry_total))
+    if duration_seconds is not None:
+        event["duration_seconds"] = max(0.0, float(duration_seconds))
+    events.append(event)
+
+
+def _session_trace_updates(
+    events: list[dict[str, Any]],
+    *,
+    failure_kind: str = "",
+    failure_reason: str = "",
+) -> dict[str, Any]:
+    updates: dict[str, Any] = {"session_events": copy.deepcopy(events)}
+    if failure_kind:
+        updates["failure_kind"] = failure_kind
+    if failure_reason:
+        updates["failure_reason"] = (
+            _json_failure_reason(failure_kind)
+            if failure_kind in _JSON_FAILURE_MESSAGES
+            else _normalize_failure_reason(failure_reason)
+        )
+    return updates
 
 
 def _json_correction_prompt(schema: dict[str, Any]) -> str:
@@ -2290,12 +2697,34 @@ def _runtime_with_permissions(
 
 def _parse_text_json(text: str, schema: dict[str, Any] | None = None) -> Any:
     """Best-effort local JSON extraction; invalid model text stays a normal result."""
+    result = _parse_text_json_result(text, schema)
+    return result.structured if result.matched else None
+
+
+def _parse_text_json_result(
+    text: str,
+    schema: dict[str, Any] | None = None,
+) -> _JsonParseResult:
+    """Return a schema match or a stable, non-content JSON failure category."""
     try:
         if schema is not None:
-            return parse_llm_json_schema(text, schema)
-        return parse_llm_json(text, None)
-    except (LLMJsonParseError, TypeError, ValueError):
-        return None
+            structured = parse_llm_json_schema(text, schema)
+        else:
+            structured = parse_llm_json(text, None)
+        return _JsonParseResult(matched=True, structured=structured)
+    except LLMJsonParseError as exc:
+        kind = str(getattr(exc, "reason", "invalid_json") or "invalid_json")
+        return _JsonParseResult(
+            matched=False,
+            failure_kind=kind,
+            failure_reason=_json_failure_reason(kind),
+        )
+    except (TypeError, ValueError):
+        return _JsonParseResult(
+            matched=False,
+            failure_kind="invalid_json",
+            failure_reason=_json_failure_reason("invalid_json"),
+        )
 
 
 def _path_is_within(path: Path, root: Path) -> bool:

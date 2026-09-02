@@ -192,11 +192,21 @@ Provider。没有用户默认模型时，Agent 才按 `model_pool.models` 中已
 重启后重新准备。
 
 第一个探测成功的模型会写入 `config.toml` 文件开头的 OpenDeepHole 托管默认模型/Provider 区，
-自定义 Provider 固定使用 `wire_api = "responses"`。选中 Provider 地址的主机还会写入
+自定义 Provider 固定使用 `wire_api = "responses"`。Agent 同时在 `$CODEX_HOME` 生成带所有权标记、
+内容寻址且权限为 `0600` 的 `opendeephole-model-catalog-*.json`，并通过托管的
+`model_catalog_json` 让 Codex 读取选中模型的能力信息。目录中的模型名使用 OpenCode Provider 下的
+原始模型 ID；`models.<id>.limit.context` 为正整数时同时写入目录的 `context_window` /
+`max_context_window` 和顶层 `model_context_window`，否则统一按 `128000` 回退；
+`model_auto_compact_token_limit` 以 128K 对应 100K 的比例计算。用户已有的
+`model_catalog_json`、`model_context_window` 或 `model_auto_compact_token_limit` 均保持不变；
+其中用户自有目录指针存在时只跳过托管目录安装，不影响默认模型和 Provider 同步。
+
+选中 Provider 地址的主机还会写入
 `$CODEX_HOME/.env` 的托管区，同时追加到 `NO_PROXY` 和 `no_proxy`；用户已有内容和值保持不变，
 更新或失效时只替换或移除托管区。该文件只供 Codex 自行加载，Agent 不会把这两个变量注入当前进程
 或子进程环境。旧版本生成且带所有权标记的 `opendeephole-*.config.toml` 会被清理，用户自建文件、
-默认模型和非托管配置均不会被覆盖。
+默认模型和非托管配置均不会被覆盖；模型切换或托管默认模型移除后，仅清理所有权标记仍有效且未被
+用户目录指针引用的旧托管模型目录。
 
 每次创建或恢复扫描时，Agent 还会把 Codex 本次必须读取的绝对路径加入同一份
 `$CODEX_HOME/config.toml`：项目总路径、Agent 的 `~/.opendeephole` 数据根目录、精确的
@@ -654,7 +664,7 @@ checker_selection:
 
 模型的 `time_windows` 可配置多段，每段用 ISO 星期 `1..7` 表示周一至周日，并按 Agent 本地时间判断；各段取并集，未配置任何时间段表示全天可用。跨夜时间按当前星期判断，例如周一至周六 `22:00-06:00` 表示这些日期的 `00:00-06:00` 与 `22:00-24:00` 可用，周日不可用。旧配置未填写 `weekdays` 时继续按每天处理。
 
-OpenCode 最终配置按“用户全局目录 < 可执行文件相邻目录 < 项目目录 < `opencode.config_paths` < `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` < DeepHole 2.0 受管字段”受控合并；standalone 使用相同发现规则，但没有平台专属的 `opencode.config_paths` 层，并在环境显式配置之后合并 `task-agent.yaml` 的 `serve.opencode_config`。当配置的可执行文件 basename 为 `nga` 时，同时兼容发现用户的 `~/.config/nga` 配置目录。用户全局目录和显式指定的配置目录继续兼容旧版 `config.json`；自动发现的可执行文件相邻目录与项目目录只识别明确命名的 `opencode.json` / `opencode.jsonc`，避免把安装器、启动器或项目自身的通用 `config.json`（例如顶层 `env`、`version`）误合并进 OpenCode 配置。无效 JSON/JSONC 只记录警告并忽略，不再接受 Web 自定义 JSONC 层。全局受管字段只包含 `$schema`、公共技能路径、运行权限和平台 Hook；代码图谱与知识库 MCP 都按扫描快照通过带目录上下文的 `/mcp` 接口临时连接，并在任务结束后分别释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。知识库 MCP 请求头中的 API Key、Token 等敏感值只由服务端全局配置维护，并随扫描私有快照内部保存，不再进入创建表单或表单记忆。
+OpenCode 最终配置按“用户全局目录 < 可执行文件相邻目录 < 项目目录 < `opencode.config_paths` < `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` < DeepHole 2.0 受管字段”受控合并；standalone 使用相同发现规则，但没有平台专属的 `opencode.config_paths` 层，并在环境显式配置之后合并 `task-agent.yaml` 的 `serve.opencode_config`。当配置的可执行文件 basename 为 `nga` 时，同时兼容发现用户的 `~/.config/nga` 配置目录。用户全局目录和显式指定的配置目录继续兼容旧版 `config.json`；自动发现的可执行文件相邻目录与项目目录只识别明确命名的 `opencode.json` / `opencode.jsonc`，避免把安装器、启动器或项目自身的通用 `config.json`（例如顶层 `env`、`version`）误合并进 OpenCode 配置。无效 JSON/JSONC 只记录警告并忽略，不再接受 Web 自定义 JSONC 层。全局受管字段包含 `$schema`、公共技能路径、运行权限、平台 Hook，以及固定的 OpenCode 自动压缩策略（`auto: true`、`prune: true`、`reserved: 20000`）；代码图谱与知识库 MCP 都按扫描快照通过带目录上下文的 `/mcp` 接口临时连接，并在任务结束后分别释放。威胁分析方法的 Skill 不写入全局 workspace：平台只在运行时给当前所选方法绑定相邻 Skill 根，并在升级时清理旧版曾全局注入的四个受管 Skill，其它 workspace Skill 保持不变。知识库 MCP 请求头中的 API Key、Token 等敏感值只由服务端全局配置维护，并随扫描私有快照内部保存，不再进入创建表单或表单记忆。
 
 配置更新只会刷新独立的受管源并把 OpenCode serve 标记为待重载，不会提前改写正在运行的最终文件。serve 空闲后的下一次启动会原子写入 `~/.opendeephole/opencode_workspace/opencode.json`（POSIX 权限 `0600`），并在私有目录生成受管文件写入 Hook、追加到已有 `plugin` 列表而不覆盖用户插件；用专用的 `XDG_CONFIG_HOME` 隔离 OpenCode 对用户全局配置的二次发现，把 `OPENCODE_CONFIG_DIR` 指向已解析的配置目录，并显式清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`。存在活动 Session 时延迟到空闲边界，因此无需重启 Agent，也不会强制终止正在运行的 Session。创建或更新 Session 返回 HTTP 5xx 时同样会把当前共享 Serve 标记为异常；下一次 Session 重试先等待其它在途任务退出，再安全重启一次并重新生成最终配置，并发重试不会各自重复重启。
 
@@ -721,7 +731,7 @@ OpenCode 模型池统计：
 - `model_pool.global_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 配置页的每个模型可添加多段使用时间，每段独立选择周一至周日及起止时间；时间窗口只限制新取得的模型 Lease，不会中断已经运行的任务。
 - 任务能力只分 `low`、`high`，各内置阶段默认并实际配置为 `high`；公开模型任务按类型自动使用固定优先级：漏洞验证 `90`、去误报复核 `60`、威胁分析与漏洞挖掘 `50`，同优先级按 FIFO 调度。v3/v4 中手工配置为低能力的阶段仍会优先使用最低足够能力模型。模型行本身仍可标记低/中/高能力。
-- 模型调用默认超时为 `3600` 秒，只计算每条模型消息的执行阶段，不包含排队时间。超时、普通执行错误和同 Session JSON 纠正耗尽都会消费统一的新 Session 重试预算；默认重试 2 次，即最多 3 个 Session。新 Session 重试会释放并重新申请模型 Lease，最终超时保留最后 Session ID，模型池 completed-task 历史只记录一次最终状态。
+- 模型调用默认超时为 `3600` 秒，只计算每条模型消息的执行阶段，不包含排队时间。超时、普通执行错误和同 Session JSON 纠正耗尽都会消费统一的新 Session 重试预算；默认重试 2 次，即最多 3 个 Session。新 Session 重试会释放并重新申请模型 Lease，最终超时保留最后 Session ID，模型池 completed-task 历史仍只记录一个逻辑任务，但会保留业务、格式修复和 JSON 纠正的完整 Session 事件轨迹及稳定失败分类；扫描详情首页在同一任务行的展开区展示全部关联 Session，最终成功也保留此前异常尝试。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。
 

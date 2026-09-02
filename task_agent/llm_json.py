@@ -9,6 +9,10 @@ from typing import Any, Callable
 class LLMJsonParseError(ValueError):
     """Raised when no JSON value in LLM output matches the expected schema."""
 
+    def __init__(self, message: str, *, reason: str = "invalid_json") -> None:
+        super().__init__(message)
+        self.reason = str(reason or "invalid_json")
+
 
 def parse_llm_json(
     text: str,
@@ -32,7 +36,7 @@ def parse_llm_json(
 
     normalized = text.strip().lstrip("\ufeff")
     if not normalized:
-        raise LLMJsonParseError("LLM output is empty")
+        raise LLMJsonParseError("LLM output is empty", reason="empty_output")
 
     return _select_json_candidate(
         normalized,
@@ -53,7 +57,7 @@ def parse_llm_json_schema(text: str, schema: dict[str, Any]) -> Any:
 
     normalized = text.strip().lstrip("\ufeff")
     if not normalized:
-        raise LLMJsonParseError("LLM output is empty")
+        raise LLMJsonParseError("LLM output is empty", reason="empty_output")
     return _select_json_candidate(
         normalized,
         lambda value: _matches_json_schema(value, schema),
@@ -84,9 +88,20 @@ def _select_json_candidate(
         ]
     matched = [candidate for candidate in candidates if matches(candidate["value"])]
     if not matched:
+        if not candidates:
+            if any(char in text for char in "{["):
+                raise LLMJsonParseError(
+                    "LLM output contains JSON-like content, but it is not valid JSON",
+                    reason="invalid_json",
+                )
+            raise LLMJsonParseError(
+                "LLM output does not contain a JSON object or array",
+                reason="no_json",
+            )
         raise LLMJsonParseError(
             f"found {len(candidates)} valid JSON value(s), "
-            "but none matched the expected schema"
+            "but none matched the expected schema",
+            reason="schema_mismatch",
         )
     matched.sort(
         key=lambda item: (item["length"], item["position"]),

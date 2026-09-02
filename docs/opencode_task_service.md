@@ -200,7 +200,7 @@ v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未�
 
 完整 Agent 与 standalone 共用配置发现与深度合并规则：用户全局目录 < 可执行文件相邻目录 < 项目目录 < 平台 `opencode.config_paths`（standalone 无此层）< `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR`。standalone 随后再合并 `serve.opencode_config`，所以 YAML 中的映射递归覆盖前述来源，标量和列表整体替换。用户全局目录及显式配置目录兼容旧版 `config.json`；自动发现的可执行文件相邻目录与项目目录只接受 `opencode.json` / `opencode.jsonc`，避免误读安装器、启动器或项目自身的通用 `config.json`。使用 `nga` 可执行文件时还会发现对应的全局 `nga` 配置目录。无效外部 JSON/JSONC 记录警告后忽略，不记录配置值；standalone 的配置快照固定到 `shutdown_opencode()`。
 
-最终的 `workspace_dir/opencode.json` 不参与 standalone 的项目配置发现，避免 `workspace_dir == project_dir` 时回灌上次生成物；仍建议将 `workspace_dir` 与源码目录分开，防止覆盖项目自有的同名文件。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该最终配置目录，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再次读取并重复合并用户配置。Task Agent 的文件、Skill 与全局 `bash` 拒绝规则以及受管写入和命令 Hook 始终最后生效，不能被外部配置放宽；任务级精确命令只存在于 Session 覆盖和私有绑定中。
+最终的 `workspace_dir/opencode.json` 不参与 standalone 的项目配置发现，避免 `workspace_dir == project_dir` 时回灌上次生成物；仍建议将 `workspace_dir` 与源码目录分开，防止覆盖项目自有的同名文件。Serve 子进程使用 `workspace_dir` 下的独立 `XDG_CONFIG_HOME`，把 `OPENCODE_CONFIG_DIR` 指向该最终配置目录，并清除继承的 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_PATH` 和 `OPENCODE_CONFIG_CONTENT`，避免 OpenCode 再次读取并重复合并用户配置。Task Agent 的文件、Skill 与全局 `bash` 拒绝规则、受管写入和命令 Hook，以及固定的 `compaction.auto: true`、`compaction.prune: true`、`compaction.reserved: 20000` 始终最后生效，不能被外部配置放宽；`compaction` 的其它合法子项继续保留，任务级精确命令只存在于 Session 覆盖和私有绑定中。
 
 ### Serve 参数
 
@@ -387,6 +387,10 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 原 Session 纠正使用 `invalid_json_retry_prompt`：值为 `None` 时使用当前包含完整 Schema 的中文默认提示词；传入非空字符串时，每次都原样发送该字符串，不追加 Schema、重试序号或其它内容。空字符串、纯空白和非字符串会在提交任务前报错。未传 `output_schema` 时不启用文件 JSON 回退，但仍跟踪并清理非白名单新文件；`invalid_json_retry_count=0` 时同时关闭独立格式匹配与原 Session 纠正，但既有 fresh Session 重试策略保持不变。
 
 若同 Session 纠正耗尽，内部服务会按对应任务策略的 `max_retries` 释放 Lease、重新排队并创建全新 Session。模型消息超时和其它可重试执行错误也使用同一预算；`max_retries=2` 表示首次 Session 之外最多再创建 2 个 Session，即最多执行 3 次。业务方不再传 `attempt`。
+
+模型池完成历史仍以逻辑任务为粒度，只追加一个 `completed_tasks` 项，不把 fresh Session、独立格式匹配或同 Session JSON 纠正计为新任务。该项通过 `session_events` 按时间顺序保留 `business`、`json_format` 和 `json_retry` 事件，包括 Session ID（创建前失败时为空）、业务尝试/JSON 重试序号、模型、结果、时间、耗时和失败原因；`serve_session_id` 继续表示最终权威业务 Session。任务最终成功时，之前的超时或输出不合规事件仍会保留。页面在同一任务行的展开详情中展示全部事件，不改变队列计数和分页。
+
+JSON 输出不合规只记录稳定大类：`empty_output`、`no_json`、`invalid_json`、`schema_mismatch`，独立格式匹配判定无法无损转换时另记 `source_unrelated`。诊断不会持久化模型原始回复、目标 Schema 或字段路径；普通终态错误会保存 Task Agent 已规范化且长度受限的安全错误说明。旧模型池历史没有 `session_events` 时继续使用最终 `serve_session_id` 兼容展示，无法反推已丢失的中间 Session。
 
 创建新 Session 或更新续写 Session 的权限返回 HTTP 5xx 时，Task Agent 会把共享 Serve 标记为异常，而不让后续重试继续复用同一个进程。发生并发任务时，下一次 Session 获取会等待所有已获取 Session 释放，在空闲边界停止并重启 Serve、重新生成最终 `opencode.json`；等待中的其它重试随后复用这个新进程，因此同一轮异常只触发一次安全重启。HTTP 4xx 仍按请求或配置错误直接上报，不触发 Serve 重启。
 

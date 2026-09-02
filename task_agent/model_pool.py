@@ -169,6 +169,7 @@ class _PendingLeaseRequest:
     strict_capability: bool = False
     prefer_lowest_capability: bool = False
     wait_when_unavailable: bool = False
+    record_completion_on_failure: bool = True
     avoid_model_ids: frozenset[str] = frozenset()
     avoid_model_identities: frozenset[tuple[str, bool, str, str]] = frozenset()
     quota_wait_deadline: float | None = None
@@ -866,6 +867,8 @@ def _consume_planned_task_locked(request: _PendingLeaseRequest) -> None:
 def _fail_pending_request_locked(
     request: _PendingLeaseRequest,
     failure_reason: str,
+    *,
+    failure_kind: str = "execution_error",
 ) -> None:
     """Remove a lease request and persist its terminal scheduling failure."""
     if request.quota_wait_budget is not None:
@@ -873,13 +876,47 @@ def _fail_pending_request_locked(
     _consume_planned_task_locked(request)
     _remove_pending_request_locked(request)
     finished_at = _now_iso()
-    if request.stats_scope_id:
+    duration_seconds = max(0.0, time.monotonic() - request.queued_at)
+    if request.stats_scope_id and request.record_completion_on_failure:
         context = dict(request.task_context or {})
         prompt = context.get("prompt")
         if isinstance(prompt, str) and "prompt_length" not in context:
             context["prompt_length"] = len(prompt)
         elif not isinstance(prompt, str):
             context.pop("prompt", None)
+        raw_events = context.get("session_events")
+        session_events = [
+            dict(item)
+            for item in raw_events
+            if isinstance(item, dict)
+        ] if isinstance(raw_events, list) else []
+        task_phase = str(context.get("task_phase") or "").strip()
+        phase = (
+            "json_format"
+            if task_phase == "json_format"
+            else "json_retry"
+            if task_phase == "json_correction"
+            else "business"
+        )
+        session_events.append({
+            "sequence": len(session_events) + 1,
+            "phase": phase,
+            "session_id": (
+                str(context.get("serve_session_id") or "").strip()
+                if phase == "json_retry"
+                else ""
+            ),
+            "session_attempt": max(1, int(context.get("session_attempt") or 1)),
+            "outcome": "failure",
+            "failure_kind": failure_kind,
+            "failure_reason": failure_reason,
+            "started_at": request.queued_at_iso,
+            "finished_at": finished_at,
+            "duration_seconds": duration_seconds,
+        })
+        context["session_events"] = session_events
+        context["failure_kind"] = failure_kind
+        context["failure_reason"] = failure_reason
         _completed_tasks_by_scope.setdefault(request.stats_scope_id, []).append(
             {
                 **context,
@@ -889,7 +926,7 @@ def _fail_pending_request_locked(
                 "model": "",
                 "started_at": request.queued_at_iso,
                 "finished_at": finished_at,
-                "duration_seconds": max(0.0, time.monotonic() - request.queued_at),
+                "duration_seconds": duration_seconds,
                 "outcome": "failure",
                 "failure_reason": failure_reason,
             }
@@ -899,7 +936,11 @@ def _fail_pending_request_locked(
 
 
 def _fail_no_available_model_locked(request: _PendingLeaseRequest) -> None:
-    _fail_pending_request_locked(request, NO_AVAILABLE_MODEL_MESSAGE)
+    _fail_pending_request_locked(
+        request,
+        NO_AVAILABLE_MODEL_MESSAGE,
+        failure_kind="no_available_model",
+    )
 
 
 async def register_planned_task(
@@ -1137,6 +1178,7 @@ async def acquire_model_lease(
     strict_capability: bool = False,
     prefer_lowest_capability: bool = False,
     wait_when_unavailable: bool = False,
+    record_completion_on_failure: bool = True,
     avoid_model_ids: set[str] | frozenset[str] | None = None,
     avoid_model_identities: (
         set[tuple[str, bool, str, str]]
@@ -1186,6 +1228,7 @@ async def acquire_model_lease(
                     strict_capability=bool(strict_capability),
                     prefer_lowest_capability=bool(prefer_lowest_capability),
                     wait_when_unavailable=bool(wait_when_unavailable),
+                    record_completion_on_failure=bool(record_completion_on_failure),
                     avoid_model_ids=frozenset(
                         str(model_id).strip()
                         for model_id in (avoid_model_ids or ())
@@ -1249,7 +1292,11 @@ async def acquire_model_lease(
                             or request.quota_wait_deadline is not None
                         ),
                     )
-                    _fail_pending_request_locked(request, str(error))
+                    _fail_pending_request_locked(
+                        request,
+                        str(error),
+                        failure_kind="quota",
+                    )
                     raise error
                 if not request.quota_wait_logged:
                     remaining = (
