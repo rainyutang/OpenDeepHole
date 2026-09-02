@@ -89,6 +89,34 @@ def test_parse_llm_json_schema_rejects_invalid_shape() -> None:
         parse_llm_json_schema('{"line":"7","extra":true}', schema)
 
 
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("   ", "empty_output"),
+        ("模型没有返回结构化结果", "no_json"),
+        ('{"line":', "invalid_json"),
+        ('{"line":"wrong"}', "schema_mismatch"),
+    ],
+)
+def test_parse_llm_json_schema_reports_coarse_non_content_reason(
+    text: str,
+    reason: str,
+) -> None:
+    schema = {
+        "type": "object",
+        "properties": {"line": {"type": "integer"}},
+        "required": ["line"],
+        "additionalProperties": False,
+    }
+
+    with pytest.raises(LLMJsonParseError) as exc_info:
+        parse_llm_json_schema(text, schema)
+
+    assert exc_info.value.reason == reason
+    if text.strip():
+        assert text.strip() not in str(exc_info.value)
+
+
 def test_parse_llm_json_schema_does_not_promote_nested_empty_array() -> None:
     schema = {
         "type": "array",

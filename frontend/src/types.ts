@@ -436,6 +436,30 @@ export interface OpenCodeTokenUsage extends OpenCodeTokenCounters {
   by_model: OpenCodeModelTokenUsage[];
 }
 
+export interface OpenCodeSessionEvent {
+  sequence: number;
+  phase: "business" | "json_format" | "json_retry";
+  session_id: string;
+  session_attempt: number;
+  retry_ordinal?: number;
+  retry_total?: number;
+  outcome: "success" | "failure" | "timeout" | "cancelled" | "invalid_output";
+  model_id?: string;
+  model?: string;
+  failure_kind?: string;
+  failure_reason?: string;
+  started_at?: string;
+  finished_at?: string;
+  duration_seconds?: number;
+}
+
+export interface OpenCodeCompletedTask extends Record<string, unknown> {
+  failure_kind?: string;
+  failure_reason?: string;
+  serve_session_id?: string;
+  session_events?: OpenCodeSessionEvent[];
+}
+
 export interface OpenCodePoolStatus {
   scope_id: string;
   agent_name?: string;
@@ -446,7 +470,7 @@ export interface OpenCodePoolStatus {
   completed_task_count: number;
   queued_tasks: Record<string, unknown>[];
   planned_tasks?: Record<string, unknown>[];
-  completed_tasks?: Record<string, unknown>[];
+  completed_tasks?: OpenCodeCompletedTask[];
   token_usage?: OpenCodeTokenUsage | null;
   models: OpenCodePoolModelStats[];
   updated_at: string;

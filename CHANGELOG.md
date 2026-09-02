@@ -2,6 +2,7 @@
 
 ## 2026-09-02
 
+- **新增** 扫描详情首页任务队列为每个逻辑任务持久保存完整 OpenCode Session 执行轨迹：任务仍只占一行，展开后按顺序展示业务 Session、fresh Session 超时/失败重试、独立 JSON 格式修复 Session及同 Session JSON 纠正，并保留每个 Session ID、模型、状态、耗时和失败原因；最终成功也不会隐藏之前的异常尝试。任务终态新增超时、无可用模型、Provider/执行错误及 JSON 空输出、无 JSON、语法错误、Schema 不匹配等稳定分类，不保存模型原始回复或字段级校验内容；旧历史继续回退显示最终 Session，Agent 重连与终态快照保留较完整的同版本轨迹
 - **变更** Task Agent 在平台 Agent、standalone、模型列表和任务启动共用的最终配置发布边界，强制把 OpenCode 自动压缩设置为 `auto: true`、`prune: true`、`reserved: 20000`；外部配置中的冲突值会被覆盖，其它合法 `compaction` 子项继续保留，Serve 配置哈希也基于相同的受管结果，避免最终文件相同却触发无效重启
 
 ## 2026-09-01

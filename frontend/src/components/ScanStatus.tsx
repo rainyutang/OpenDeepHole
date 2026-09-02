@@ -74,6 +74,23 @@ interface ScanQueueTask {
   timestamp: string;
 }
 
+interface ScanQueueSessionEvent {
+  sequence: number;
+  phase: "business" | "json_format" | "json_retry";
+  sessionId: string;
+  sessionAttempt: number;
+  retryOrdinal: number;
+  retryTotal: number;
+  outcome: ScanQueueTaskStatus | "invalid_output";
+  modelId: string;
+  model: string;
+  failureKind: string;
+  failureReason: string;
+  startedAt: string;
+  finishedAt: string;
+  durationSeconds: number | null;
+}
+
 function hasOutputSource(source?: OutputSource | null): boolean {
   return Boolean(source && (source.agent_name || source.agent_id || source.model || source.model_id || source.tool));
 }
@@ -4403,12 +4420,26 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                   const failureReason = typeof task.task.failure_reason === "string"
                     ? task.task.failure_reason.trim()
                     : "";
+                  const failureKind = typeof task.task.failure_kind === "string"
+                    ? task.task.failure_kind.trim()
+                    : "";
                   const blockedReason = typeof task.task.blocked_reason === "string"
                     ? task.task.blocked_reason.trim()
                     : "";
                   const sessionId = scanQueueTaskSessionId(task.task);
                   const tokenUsage = taskTokenUsage(task.task);
                   const isTerminal = !["planned", "queued", "running"].includes(task.status);
+                  const terminalFailureReason = scanQueueTaskFailureReason(
+                    task.status,
+                    failureKind,
+                    failureReason,
+                  );
+                  const sessionEvents = scanQueueTaskSessionEvents(
+                    task.task,
+                    task.status,
+                    task.modelId,
+                    task.timestamp,
+                  );
                   return (
                     <Fragment key={taskKey}>
                       <tr
@@ -4460,11 +4491,16 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                         <tr className="border-t border-slate-800/70 bg-slate-950/60">
                           <td colSpan={5} className="px-3 pb-4 pt-0">
                             <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
-                              {failureReason && (
+                              {terminalFailureReason && (
                                 <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2">
                                   <div className="text-xs font-semibold text-red-200">失败原因</div>
                                   <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-red-300">
-                                    {failureReason}
+                                    {failureKind && (
+                                      <span className="mr-2 rounded border border-red-400/30 bg-red-950/50 px-1.5 py-0.5 font-medium text-red-200">
+                                        {scanQueueFailureKindLabel(failureKind)}
+                                      </span>
+                                    )}
+                                    {terminalFailureReason}
                                   </div>
                                 </div>
                               )}
@@ -4500,20 +4536,63 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                                 </div>
                               )}
                               <div>
-                                <div className="mb-2 text-xs font-semibold text-slate-300">
-                                  OpenCode Session ID
+                                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold text-slate-300">OpenCode Session 执行轨迹</span>
+                                  {sessionEvents.length > 0 && (
+                                    <span className="text-[11px] text-slate-600">{sessionEvents.length} 个执行事件</span>
+                                  )}
                                 </div>
-                                {sessionId ? (
-                                  <div
-                                    className="select-text break-all rounded-md border border-slate-800 bg-slate-900/80 px-3 py-2 font-mono text-xs text-cyan-300"
-                                    title={sessionId}
-                                  >
-                                    {sessionId}
+                                {sessionEvents.length > 0 ? (
+                                  <div className="space-y-2">
+                                    {sessionEvents.map((event) => {
+                                      const eventTime = event.finishedAt || event.startedAt;
+                                      const eventModel = event.model || event.modelId;
+                                      return (
+                                        <div
+                                          key={`${event.sequence}-${event.phase}-${event.sessionId}-${event.retryOrdinal}`}
+                                          className="rounded-md border border-slate-800 bg-slate-900/80 px-3 py-2.5"
+                                        >
+                                          <div className="flex flex-wrap items-start justify-between gap-2">
+                                            <div className="text-xs font-medium text-slate-200">
+                                              {scanQueueSessionEventLabel(event)}
+                                            </div>
+                                            <StatusPill
+                                              label={scanQueueSessionOutcomeLabel(event.outcome)}
+                                              tone={scanQueueSessionOutcomeTone(event.outcome)}
+                                            />
+                                          </div>
+                                          <div className="mt-2 select-text break-all font-mono text-xs text-cyan-300" title={event.sessionId || undefined}>
+                                            {event.sessionId || "Session 未创建"}
+                                          </div>
+                                          {(eventModel || eventTime || event.durationSeconds != null) && (
+                                            <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                                              {eventModel && <span>模型：{eventModel}</span>}
+                                              {eventTime && <span>结束：{formatDateTime(eventTime)}</span>}
+                                              {event.durationSeconds != null && (
+                                                <span>耗时：{formatDuration(event.durationSeconds)}</span>
+                                              )}
+                                            </div>
+                                          )}
+                                          {(event.failureKind || event.failureReason) && (
+                                            <div className="mt-2 rounded border border-amber-500/20 bg-amber-500/5 px-2.5 py-2 text-xs leading-relaxed text-amber-200">
+                                              {event.failureKind && (
+                                                <span className="mr-2 font-semibold">
+                                                  {scanQueueFailureKindLabel(event.failureKind)}
+                                                </span>
+                                              )}
+                                              {event.failureReason}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
                                   </div>
                                 ) : (
                                   <div className="rounded-md border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-500">
-                                    {isTerminal
-                                      ? "该任务在 OpenCode Session 创建前结束，或历史记录未保存 Session ID。"
+                                    {sessionId
+                                      ? `历史任务仅保存最终 Session：${sessionId}`
+                                      : isTerminal
+                                      ? "该任务在 OpenCode Session 创建前结束，或历史记录未保存完整 Session 轨迹。"
                                       : "OpenCode Session 尚未创建，创建后会在此显示。"}
                                   </div>
                                 )}
@@ -4710,6 +4789,136 @@ function scanQueueTaskSessionId(task: Record<string, unknown>): string {
   if (typeof task.serve_session_id === "string") return task.serve_session_id.trim();
   if (task.serve_session_id == null) return "";
   return String(task.serve_session_id).trim();
+}
+
+function scanQueueTaskSessionEvents(
+  task: Record<string, unknown>,
+  taskStatus: ScanQueueTaskStatus,
+  fallbackModelId: string,
+  fallbackTimestamp: string,
+): ScanQueueSessionEvent[] {
+  const rawEvents = Array.isArray(task.session_events) ? task.session_events : [];
+  const events = rawEvents.flatMap((value, index): ScanQueueSessionEvent[] => {
+    if (typeof value !== "object" || value == null || Array.isArray(value)) return [];
+    const event = value as Record<string, unknown>;
+    const phaseValue = String(event.phase || "business");
+    const phase = ["business", "json_format", "json_retry"].includes(phaseValue)
+      ? phaseValue as ScanQueueSessionEvent["phase"]
+      : "business";
+    const outcomeValue = String(event.outcome || "unknown");
+    const outcome = ["success", "failure", "timeout", "cancelled", "invalid_output", "running"].includes(outcomeValue)
+      ? outcomeValue as ScanQueueSessionEvent["outcome"]
+      : "unknown";
+    const duration = Number(event.duration_seconds);
+    return [{
+      sequence: Number.isFinite(Number(event.sequence)) ? Number(event.sequence) : index + 1,
+      phase,
+      sessionId: String(event.session_id || "").trim(),
+      sessionAttempt: Math.max(1, Number(event.session_attempt) || 1),
+      retryOrdinal: Math.max(0, Number(event.retry_ordinal) || 0),
+      retryTotal: Math.max(0, Number(event.retry_total) || 0),
+      outcome,
+      modelId: String(event.model_id || "").trim(),
+      model: String(event.model || "").trim(),
+      failureKind: String(event.failure_kind || "").trim(),
+      failureReason: String(event.failure_reason || "").trim(),
+      startedAt: String(event.started_at || "").trim(),
+      finishedAt: String(event.finished_at || "").trim(),
+      durationSeconds: Number.isFinite(duration) && duration >= 0 ? duration : null,
+    }];
+  }).sort((a, b) => a.sequence - b.sequence);
+
+  const sessionId = scanQueueTaskSessionId(task);
+  if (
+    taskStatus === "running"
+    && sessionId
+    && !events.some((event) => event.sessionId === sessionId && event.outcome === "running")
+  ) {
+    events.push({
+      sequence: events.length + 1,
+      phase: "business",
+      sessionId,
+      sessionAttempt: Math.max(1, Number(task.session_attempt) || 1),
+      retryOrdinal: 0,
+      retryTotal: 0,
+      outcome: "running",
+      modelId: fallbackModelId,
+      model: String(task.model || "").trim(),
+      failureKind: "",
+      failureReason: "",
+      startedAt: String(task.started_at || fallbackTimestamp || ""),
+      finishedAt: "",
+      durationSeconds: null,
+    });
+  }
+  if (events.length === 0 && sessionId) {
+    const duration = Number(task.duration_seconds);
+    events.push({
+      sequence: 1,
+      phase: "business",
+      sessionId,
+      sessionAttempt: Math.max(1, Number(task.session_attempt) || 1),
+      retryOrdinal: 0,
+      retryTotal: 0,
+      outcome: taskStatus,
+      modelId: fallbackModelId,
+      model: String(task.model || "").trim(),
+      failureKind: String(task.failure_kind || "").trim(),
+      failureReason: String(task.failure_reason || "").trim(),
+      startedAt: String(task.started_at || fallbackTimestamp || ""),
+      finishedAt: String(task.finished_at || ""),
+      durationSeconds: Number.isFinite(duration) && duration >= 0 ? duration : null,
+    });
+  }
+  return events;
+}
+
+function scanQueueSessionEventLabel(event: ScanQueueSessionEvent): string {
+  if (event.phase === "json_format") return "JSON 格式修复 Session";
+  if (event.phase === "json_retry") {
+    const total = event.retryTotal > 0 ? `/${event.retryTotal}` : "";
+    return `同 Session JSON 重试 ${event.retryOrdinal || 1}${total}`;
+  }
+  return event.sessionAttempt > 1
+    ? `Fresh Session 重试 #${event.sessionAttempt}`
+    : "业务 Session #1";
+}
+
+function scanQueueSessionOutcomeLabel(outcome: ScanQueueSessionEvent["outcome"]): string {
+  if (outcome === "invalid_output") return "输出不合规";
+  return scanQueueStatusLabel(outcome);
+}
+
+function scanQueueSessionOutcomeTone(outcome: ScanQueueSessionEvent["outcome"]): TaskTone {
+  if (outcome === "invalid_output") return "amber";
+  return scanQueueStatusTone(outcome);
+}
+
+function scanQueueFailureKindLabel(kind: string): string {
+  if (kind === "empty_output") return "空输出";
+  if (kind === "no_json") return "未找到 JSON";
+  if (kind === "invalid_json") return "JSON 语法错误";
+  if (kind === "schema_mismatch") return "Schema 不匹配";
+  if (kind === "source_unrelated") return "无法无损格式化";
+  if (kind === "timeout") return "执行超时";
+  if (kind === "quota") return "Provider 配额限制";
+  if (kind === "no_available_model") return "没有可用模型";
+  if (kind === "quality_error") return "任务质量校验失败";
+  if (kind === "provider_error") return "Provider 请求失败";
+  if (kind === "cancelled") return "任务已停止";
+  return "执行失败";
+}
+
+function scanQueueTaskFailureReason(
+  status: ScanQueueTaskStatus,
+  failureKind: string,
+  failureReason: string,
+): string {
+  if (!["failure", "timeout", "unknown"].includes(status)) return "";
+  if (failureReason) return failureReason;
+  if (failureKind) return scanQueueFailureKindLabel(failureKind);
+  if (status === "timeout") return "任务在重试预算耗尽后仍然超时。";
+  return "任务执行失败，但该历史记录未保存具体原因。";
 }
 
 function scanQueueTaskPromptLength(task: Record<string, unknown>, prompt: string): number {
