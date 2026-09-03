@@ -2,6 +2,7 @@
 
 from .api import (
     OpenCodeResult,
+    cancel_opencode_execution,
     opencode_task_context,
     run_opencode_task,
     run_sync_component,
@@ -24,6 +25,7 @@ __all__ = [
     "OpenCodeHostBindings",
     "OpenCodeResult",
     "OpenCodeSessionRuntime",
+    "cancel_opencode_execution",
     "configure_opencode",
     "opencode_task_context",
     "run_opencode_task",

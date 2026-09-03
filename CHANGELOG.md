@@ -2,6 +2,7 @@
 
 ## 2026-09-03
 
+- **修复** 新建扫描使用 OpenCode 轻量级威胁分析时，模型任务现在会在调用 `run_opencode_task()` 前登记为扫描级计划任务，并沿用同一身份进入排队、运行和终态，首页及扫描详情不再在准备阶段显示空队列；前端按 execution revision 与更新时间单调合并首次 GET、SSE 和重连快照，避免较旧响应覆盖正在运行的任务。手动停止扫描改为按业务执行标识取消该扫描精确归属的 Task Agent 任务和 Session，Agent 在有 request ID 时回传停止确认，未确认状态会在界面提示且重连后继续补发停止；同步组件桥接取消不再遗留后台工作，迟到完成报告也不会把“用户手动停止”恢复为完成。模型池上报失败会限频记录关联信息并在恢复时记录恢复日志
 - **变更** Task Agent 在平台 Agent、standalone、模型列表和任务启动共用的最终 `opencode.json` 发布边界，为已有 `provider.*.models.*` 模型补全缺失的上下文限制：模型未显式写 `limit.context` 时统一补为 `131072`，并在同时缺少 `limit.output` 时补为 `32768`；已有 `limit.input`、`limit.output` 和显式 context 保持原值，也不会根据模型池反向创建 Provider 或模型。Serve 配置哈希使用相同补全结果，现有 `compaction.auto: true`、`prune: true`、`reserved: 20000` 自动压缩策略保持不变
 - **修复** OpenCode 轻量级威胁分析虽然在 Session 上声明了只读参考路径，但最终 Serve 权限只保留宿主可写根，导致 OpenCode 1.18.27 的主 Agent 无法读取 Agent 安装目录中的 `analysis-guidance.json`、攻击模式及三份 Schema：Task Agent 新增独立的宿主稳定只读根，完整 Agent 只把精确的 `codex_goal_threat_analysis` 方法目录写入 `read` 与 `external_directory`，继续拒绝该目录的 `edit`，并在旧受管配置缺失这些规则时自动刷新；现有 Session 窄化权限、扫描目录写权限和其它 Agent 目录边界保持不变
 - **修复** 标准审计在单模型单并发下可能长期同时显示“威胁审计/候选点审计正在执行”，但模型池既无运行任务也无排队任务，且后端或 Agent 进程重启后任务不再启动：候选审计和威胁审计现在只在真实进入共享模型租约队列后标记“排队中”，取得租约后才标记“运行中”，扫描详情分别聚合待执行、排队中和运行中，并在首次租约前展示已配置模型的零值容量行；模型池上报会校验 HTTP 状态，失败持续重试最新快照，413 自动去除 Prompt 等大字段后重发

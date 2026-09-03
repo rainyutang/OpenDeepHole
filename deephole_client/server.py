@@ -232,15 +232,61 @@ async def handle_task(
     print(f"Started task {scan_id}")
 
 
-async def handle_stop(scan_id: str) -> None:
-    """Handle a 'stop' command — cancel a running scan."""
-    if _task_manager is None:
-        return
-    stopped = _task_manager.stop(scan_id)
+async def handle_stop(scan_id: str) -> dict[str, Any]:
+    """Stop one scan's Task Agent work and report whether it has quiesced."""
+    from task_agent import cancel_opencode_execution
+
+    task = _task_manager.get(scan_id) if _task_manager is not None else None
+    stopped = bool(_task_manager is not None and _task_manager.stop(scan_id))
     if stopped:
         print(f"Stopping task {scan_id}")
     else:
         print(f"Warning: task {scan_id} not found for stop")
+
+    cancellation: dict[str, Any] = {
+        "matched_tasks": 0,
+        "cancelled_tasks": 0,
+        "active_tasks": 0,
+    }
+    cancellation_error = ""
+    try:
+        cancellation = await cancel_opencode_execution(
+            "scan",
+            scan_id,
+            timeout_seconds=5.0,
+        )
+    except Exception as exc:
+        cancellation_error = f"{type(exc).__name__}: {exc}"
+        print(
+            f"Warning: failed to cancel Task Agent work for scan {scan_id}: "
+            f"{cancellation_error}"
+        )
+
+    if task is not None and task.asyncio_task is not None and not task.asyncio_task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task.asyncio_task), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            if not task.asyncio_task.cancelled():
+                raise
+        except Exception:
+            # The scanner owns terminal reporting; a completed error still
+            # means that no local work remains for this stop request.
+            pass
+
+    scan_active = bool(
+        task is not None
+        and task.asyncio_task is not None
+        and not task.asyncio_task.done()
+    )
+    still_active = scan_active or int(cancellation.get("active_tasks") or 0) > 0
+    return {
+        "found": stopped or int(cancellation.get("matched_tasks") or 0) > 0,
+        "cancelled_opencode_tasks": int(cancellation.get("cancelled_tasks") or 0),
+        "still_active": still_active,
+        "error": cancellation_error,
+    }
 
 
 async def handle_resume(
@@ -911,6 +957,8 @@ async def _run_single_fp_review_item(
 
     with opencode_task_context(
         scan_id=item.scan_id,
+        execution_kind="fp_review",
+        execution_id=item.review_id,
         project_dir=project,
         work_dir=review_dir,
         feedback_entries=item.feedback_entries,
@@ -1301,6 +1349,8 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
         validation_work_dir = work_root / "validation" / f"vuln-{item.vuln_index}"
         with opencode_task_context(
             scan_id=item.scan_id,
+            execution_kind="vulnerability_validation",
+            execution_id=f"{item.scan_id}:{item.vuln_index}",
             project_dir=project,
             work_dir=validation_work_dir,
             code_graph_mcp=item.code_graph_mcp,

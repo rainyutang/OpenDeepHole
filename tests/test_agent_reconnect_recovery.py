@@ -102,6 +102,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         agent_api._agent_ws_locks.clear()
         agent_api._agent_disconnect_tasks.clear()
         agent_api._scan_index_statuses.clear()
+        agent_api._scan_stop_waiters.clear()
 
     def tearDown(self) -> None:
         agent_api._running_scans.clear()
@@ -111,6 +112,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         agent_api._agent_ws_locks.clear()
         agent_api._agent_disconnect_tasks.clear()
         agent_api._scan_index_statuses.clear()
+        agent_api._scan_stop_waiters.clear()
 
     def test_execution_recovery_claims_are_monotonic_and_single_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -769,18 +771,67 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 last_seen="2026-01-01T00:01:00+00:00",
                 user_id="user-1",
             )
+            pending_stops: list[dict] = []
 
-            with patch("backend.api.agent.get_scan_store", return_value=store):
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+            ):
                 agent_api._reattach_active_agent_scans(
                     "agent-new",
                     info,
                     [{"scan_id": "scan-1"}],
+                    pending_stops,
                 )
 
             scan, meta = store.load_scan("scan-1")
             self.assertEqual(meta.agent_id, "agent-old")
             self.assertEqual(scan.status, ScanItemStatus.CANCELLED)
             self.assertNotIn("scan-1", agent_api._running_scans)
+            self.assertEqual(
+                pending_stops,
+                [{"type": "stop", "scan_id": "scan-1"}],
+            )
+
+    def test_scan_stop_request_waits_for_matching_agent_ack(self) -> None:
+        sent: list[dict] = []
+
+        async def send(agent_id: str, command: dict) -> bool:
+            self.assertEqual(agent_id, "agent-live")
+            sent.append(command)
+            await agent_api._complete_agent_response(
+                {
+                    "type": "scan_stop_result",
+                    "request_id": command["request_id"],
+                    "scan_id": command["scan_id"],
+                    "still_active": False,
+                    "error": "",
+                },
+                agent_api._scan_stop_waiters,
+            )
+            return True
+
+        with (
+            patch("backend.api.agent.send_agent_command", new=send),
+            patch(
+                "backend.api.agent.get_scan_store",
+                side_effect=AssertionError(
+                    "same-worker acknowledgement must not consult the store"
+                ),
+            ),
+        ):
+            response = asyncio.run(
+                agent_api.request_agent_scan_stop("agent-live", "scan-1")
+            )
+
+        self.assertIsNotNone(response)
+        self.assertFalse(response["still_active"])
+        self.assertEqual(sent[0]["type"], "stop")
+        self.assertEqual(sent[0]["scan_id"], "scan-1")
+        self.assertEqual(agent_api._scan_stop_waiters, {})
 
     def test_upgraded_agent_promotes_existing_callback_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1507,6 +1558,41 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 "scan_not_found",
             )
             self.assertEqual(raised.exception.detail["endpoint"], "finish")
+
+    def test_late_agent_finish_cannot_revive_manually_stopped_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            stopped = _scan(
+                "scan-1",
+                ScanItemStatus.CANCELLED,
+                total=1,
+                processed=0,
+                error="用户手动停止",
+            )
+            store.save_scan(stopped, _meta())
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+            ):
+                asyncio.run(agent_api.agent_finish_scan(
+                    "scan-1",
+                    AgentScanFinish(
+                        vulnerabilities=[],
+                        status="complete",
+                        total_candidates=1,
+                        processed_candidates=1,
+                    ),
+                    SimpleNamespace(base_url="http://testserver/"),
+                ))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.status, ScanItemStatus.CANCELLED)
+            self.assertEqual(stored.error_message, "用户手动停止")
 
     def test_finalized_candidate_list_cannot_be_replaced_by_retry_subset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

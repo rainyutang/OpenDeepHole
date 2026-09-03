@@ -108,6 +108,11 @@ Session，要求模型修复产物并再次执行同一命令；再次失败并�
 不要求模型自行执行校验命令，预算耗尽后沿用 fresh Session 重试。Windows 任务会给绑定了任一精确
 命令的 Session 临时前置当前 Python 目录到 `PATH`；面向模型的便携命令可直接使用 `python`。
 
+宿主编排层还可以在 `opencode_task_context()` 中绑定稳定的 `execution_kind` 与
+`execution_id`。停止一个业务执行时调用
+`await cancel_opencode_execution(execution_kind, execution_id)`，只会取消该身份下仍未终结的
+Task Agent 任务及其 Session，不会停止由其它扫描共享的 Serve 或无关任务。
+
 `output_schema` 只定义本地解析和校验规则。需要模型首次就按 Schema 输出时，调用方必须像上例一样把要求和 Schema 明确写入 `prompt`。自定义 `invalid_json_retry_prompt` 也不会被组件追加 Schema、重试序号或其它文字；若省略该参数，组件才会使用当前内置的中文纠错提示词。显式传入空字符串、纯空白或非字符串会在提交任务前报错。
 
 传入 `output_schema` 后，每条消息仍以最终文本中的合法 JSON 为第一选择。文本不匹配时，组件会按实际成功写入顺序倒序检查当前消息的内置 `write`、`edit`、`apply_patch`/`patch` 文件，最后一个匹配 Schema 的文件作为 `structured`。Task Agent 会向受管 `opencode.json` 追加文件写入 Hook，并在消息结束后重新读取本轮新增的完整 assistant 历史，因此即使最终响应只返回文本、文件工具发生在中间 assistant 消息中，也能恢复写入记录。相对写入路径以 `project_dir` 为基准；只读取 `project_dir`、`work_dir` 或显式白名单路径内的文件。

@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
+import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanStopResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 import {
   isRecord,
   mergeIndexedVulnerabilities,
@@ -474,12 +474,17 @@ export async function getScanValidationsPage(
   };
 }
 
-export async function stopScan(scanId: string): Promise<void> {
+export async function stopScan(scanId: string): Promise<ScanStopResponse> {
   if (isPublicScan(scanId)) {
-    await api.post(publicScanPath("/stop"), null, { params: publicParams() });
-    return;
+    const { data } = await api.post<ScanStopResponse>(
+      publicScanPath("/stop"),
+      null,
+      { params: publicParams() },
+    );
+    return data;
   }
-  await api.post(`/api/scan/${scanId}/stop`);
+  const { data } = await api.post<ScanStopResponse>(`/api/scan/${scanId}/stop`);
+  return data;
 }
 
 export type ReportFpReviewState = "no_conclusion" | "tp" | "fp";

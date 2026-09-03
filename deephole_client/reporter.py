@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -33,6 +34,9 @@ OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 60.0
 AGENT_BATCH_SIZE = 100
 AGENT_BATCH_FLUSH_SECONDS = 0.25
 STAGE_RUN_RETRY_DELAYS = (1.0, 2.0)
+OPENCODE_POOL_FAILURE_LOG_INTERVAL_SECONDS = 30.0
+
+logger = logging.getLogger(__name__)
 
 
 def _compact_pool_task(value: object) -> dict:
@@ -181,6 +185,57 @@ class Reporter:
         self._scan_execution_revisions: dict[str, int] = {}
         self._fp_execution_revisions: dict[str, int] = {}
         self._validation_execution_revisions: dict[tuple[str, int], int] = {}
+        self._opencode_pool_push_failures: dict[str, tuple[int, float]] = {}
+
+    def _record_opencode_pool_push_failure(
+        self,
+        key: str,
+        *,
+        scope_id: str,
+        snapshot: dict,
+        error: Exception,
+    ) -> None:
+        now = time.monotonic()
+        previous_count, previous_logged_at = self._opencode_pool_push_failures.get(
+            key,
+            (0, 0.0),
+        )
+        count = previous_count + 1
+        should_log = previous_count == 0 or (
+            now - previous_logged_at >= OPENCODE_POOL_FAILURE_LOG_INTERVAL_SECONDS
+        )
+        self._opencode_pool_push_failures[key] = (
+            count,
+            now if should_log else previous_logged_at,
+        )
+        if not should_log:
+            return
+        response_context = (
+            _response_context(error.response)
+            if isinstance(error, httpx.HTTPStatusError)
+            else ""
+        )
+        logger.warning(
+            "OPENCODE_POOL_PUSH_FAILED scope=%s session=%s revision=%s "
+            "updated_at=%s failures=%d error=%s%s",
+            scope_id or "<agent>",
+            self.agent_session_id,
+            snapshot.get("execution_revision", ""),
+            snapshot.get("updated_at", ""),
+            count,
+            f"{type(error).__name__}: {error}",
+            response_context,
+        )
+
+    def _record_opencode_pool_push_success(self, key: str, *, scope_id: str) -> None:
+        previous = self._opencode_pool_push_failures.pop(key, None)
+        if previous is not None:
+            logger.info(
+                "OPENCODE_POOL_PUSH_RECOVERED scope=%s session=%s failures=%d",
+                scope_id or "<agent>",
+                self.agent_session_id,
+                previous[0],
+            )
 
     def set_scan_execution(self, scan_id: str, revision: int) -> None:
         self._scan_execution_revisions[str(scan_id)] = max(0, int(revision or 0))
@@ -1527,6 +1582,7 @@ class Reporter:
         payload = dict(snapshot)
         payload["agent_session_id"] = self.agent_session_id
         payload["execution_revision"] = self._scan_execution_revisions.get(scan_id, 0)
+        failure_key = f"scan:{scan_id}"
         if self._model_pool_sink_bound:
             payload.pop("completed_tasks", None)
         try:
@@ -1542,8 +1598,18 @@ class Reporter:
                     timeout=5.0,
                 )
             response.raise_for_status()
+            self._record_opencode_pool_push_success(
+                failure_key,
+                scope_id=scan_id,
+            )
             return True
-        except Exception:
+        except Exception as exc:
+            self._record_opencode_pool_push_failure(
+                failure_key,
+                scope_id=scan_id,
+                snapshot=payload,
+                error=exc,
+            )
             return False
 
     async def publish_opencode_pool_until(
@@ -1570,6 +1636,7 @@ class Reporter:
             return True
         payload = dict(snapshot)
         payload["agent_session_id"] = self.agent_session_id
+        failure_key = f"agent:{self.agent_id}"
         if self._model_pool_sink_bound:
             payload.pop("completed_tasks", None)
         try:
@@ -1585,8 +1652,18 @@ class Reporter:
                     timeout=5.0,
                 )
             response.raise_for_status()
+            self._record_opencode_pool_push_success(
+                failure_key,
+                scope_id="",
+            )
             return True
-        except Exception:
+        except Exception as exc:
+            self._record_opencode_pool_push_failure(
+                failure_key,
+                scope_id="",
+                snapshot=payload,
+                error=exc,
+            )
             return False
 
     async def publish_agent_opencode_pool_until(

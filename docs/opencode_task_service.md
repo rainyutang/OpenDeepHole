@@ -365,7 +365,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - `required_bash_commands`：调用方声明的必需精确命令；与可选命令使用同一条精确绑定路径，但命令必须在最后一次受管文件写入后完成，通常要求退出码 0；若调用方为该命令配置 `required_bash_success_markers`，且 OpenCode Hook 无法读取退出码，则允许以输出中完全匹配的一整行标记成功。
 - `required_bash_retry_count`：命令校验失败后在原 Session 追加诊断和纠正消息的次数；纠正消息携带失败类型、命令、退出码、超时状态和末尾最多 16 KiB 输出，并要求修复产物后重新运行完全相同的命令。耗尽后才释放 Lease 并进入 fresh Session 重试。
 - `post_session_validator` / `post_session_validation_retry_count`：每次完整消息返回后调用宿主校验器；`None` 或空白结果表示通过，非空字符串作为诊断回传原 Session，且明确该内容不是新任务指令、无需模型执行校验命令。预算耗尽后沿用现有 fresh Session 重试；同步回调在当前执行点调用，返回 awaitable 时等待完成。
-- `scan_id`、任务元数据、输出回调和取消事件：由编排层绑定并在异步任务树中自动继承。
+- `scan_id`、`execution_kind` / `execution_id`、任务元数据、输出回调和取消事件：由编排层绑定并在异步任务树中自动继承。执行身份只用于精确取消一个扫描、去误报或验证作业；共享同一 Serve 的其它任务不会被终止。
 - `config_path`：独立过程可绑定自己的 Task Agent YAML；standalone 会合并全局、可执行文件相邻、项目、环境显式配置与 YAML 中的 `serve.opencode_config.skills.paths`，任务级 `skill_paths` 再追加到最终列表。
 - `skill_paths`：为确实需要临时 Skill 根的过程提供任务级注册；威胁分析只绑定当前所选方法的 Skill 根，不把方法目录写入全局运行配置。
 
@@ -419,6 +419,8 @@ Provider 的 RPM/TPM `*.429` 配额错误也使用同一 fresh Session 预算，
 - 最后一次仍超时时返回 `status="timeout"`，原因位于 `text`，并保留最后创建的 Session ID。
 - 最终失败返回 `status="failure"`，原因位于 `text`。
 - 主动取消传播 `asyncio.CancelledError`，并停止排队、当前请求、JSON 纠正及后续新 Session 重试。
+
+同步组件通过 `run_sync_component()` 在工作线程中调用公共接口时，桥接层会跟踪其投递到 Agent 主事件循环的精确任务；外层扫描被取消后，桥接任务先取消对应 Task Agent 调用并短暂等待工作线程退栈，不会只丢弃调用方而让 OpenCode Session 在后台继续运行。Agent 的扫描停止命令还会按 `execution_kind="scan"` 与扫描 ID 主动取消所有匹配记录并返回是否仍有活动任务；该路径不会停止共享 Serve。
 
 ## Session 续写
 

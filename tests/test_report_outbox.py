@@ -314,12 +314,19 @@ def test_pool_snapshot_retries_http_413_with_compact_details(tmp_path: Path) -> 
     asyncio.run(exercise())
 
 
-def test_pool_snapshot_http_error_is_reported_as_failed_push(tmp_path: Path) -> None:
+def test_pool_snapshot_http_error_is_logged_once_then_recovery_is_logged(
+    tmp_path: Path,
+    caplog,
+) -> None:
     class FailedClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def post(self, url, json=None, params=None, timeout=None):
             del json, params, timeout
+            self.calls += 1
             return httpx.Response(
-                500,
+                500 if self.calls <= 2 else 200,
                 request=httpx.Request("POST", url),
             )
 
@@ -327,19 +334,27 @@ def test_pool_snapshot_http_error_is_reported_as_failed_push(tmp_path: Path) -> 
             return None
 
     async def exercise() -> None:
+        caplog.set_level("INFO", logger="deephole_client.reporter")
         reporter = Reporter(
             "http://server",
             outbox_path=tmp_path / "pool-outbox.sqlite3",
         )
         reporter._client = FailedClient()  # type: ignore[assignment]
-        assert await reporter.push_opencode_pool_status("scan-1", {
+        snapshot = {
             "scope_id": "scan-1",
             "queued_tasks": [],
             "models": [],
-        }) is False
+            "updated_at": "2026-09-03T00:00:00+00:00",
+        }
+        assert await reporter.push_opencode_pool_status("scan-1", snapshot) is False
+        assert await reporter.push_opencode_pool_status("scan-1", snapshot) is False
+        assert await reporter.push_opencode_pool_status("scan-1", snapshot) is True
         await reporter.close()
 
     asyncio.run(exercise())
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("OPENCODE_POOL_PUSH_FAILED" in message for message in messages) == 1
+    assert sum("OPENCODE_POOL_PUSH_RECOVERED" in message for message in messages) == 1
 
 
 def test_distinct_findings_from_one_task_are_not_coalesced(tmp_path: Path) -> None:

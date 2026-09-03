@@ -105,6 +105,13 @@ export interface ScanStartResponse {
   scan_id: string;
 }
 
+export interface ScanStopResponse {
+  ok: boolean;
+  main_scan_stopped: boolean;
+  agent_stop_state: "not_required" | "confirmed" | "pending";
+  fp_review_ids: string[];
+}
+
 export type UserFeedbackVerdict = "confirmed" | "false_positive" | "pending_analysis";
 export type FeedbackEntryVerdict = "confirmed" | "false_positive";
 

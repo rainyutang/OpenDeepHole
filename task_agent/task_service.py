@@ -104,6 +104,8 @@ class OpenCodeExecutionContext:
     """
 
     scan_id: str = ""
+    execution_kind: str = ""
+    execution_id: str = ""
     project_dir: Path | None = None
     work_dir: Path | None = None
     config_path: Path | None = None
@@ -148,6 +150,8 @@ def _feedback_snapshot(entries: Any) -> tuple[dict[str, Any], ...]:
 def set_opencode_execution_context(
     *,
     scan_id: str | None = None,
+    execution_kind: str | None = None,
+    execution_id: str | None = None,
     project_dir: Path | None | object = _INHERIT_CONTEXT_VALUE,
     work_dir: Path | None | object = _INHERIT_CONTEXT_VALUE,
     config_path: Path | None | object = _INHERIT_CONTEXT_VALUE,
@@ -167,6 +171,16 @@ def set_opencode_execution_context(
     """
     current = _execution_context.get()
     next_scan_id = current.scan_id if scan_id is None else str(scan_id or "").strip()
+    next_execution_kind = (
+        current.execution_kind
+        if execution_kind is None
+        else str(execution_kind or "").strip()
+    )
+    next_execution_id = (
+        current.execution_id
+        if execution_id is None
+        else str(execution_id or "").strip()
+    )
     def resolved_path(value: Path | None | object, current_value: Path | None) -> Path | None:
         if value is _INHERIT_CONTEXT_VALUE:
             return current_value
@@ -211,6 +225,8 @@ def set_opencode_execution_context(
         next_knowledge_base_mcp = None
     return _execution_context.set(OpenCodeExecutionContext(
         scan_id=next_scan_id,
+        execution_kind=next_execution_kind,
+        execution_id=next_execution_id,
         project_dir=next_project_dir,
         work_dir=next_work_dir,
         config_path=next_config_path,
@@ -264,6 +280,8 @@ def _snapshot_execution_context() -> OpenCodeExecutionContext:
     feedback = _scan_feedback_entries.get(current.scan_id, current.feedback_entries)
     return OpenCodeExecutionContext(
         scan_id=current.scan_id,
+        execution_kind=current.execution_kind,
+        execution_id=current.execution_id,
         project_dir=current.project_dir,
         work_dir=current.work_dir,
         config_path=current.config_path,
@@ -739,6 +757,62 @@ class OpenCodeTaskService:
         record.cancel_event.set()
         if record.worker is not None:
             await record.worker
+
+    async def cancel_execution(
+        self,
+        execution_kind: str,
+        execution_id: str,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Cancel only tasks owned by one business execution and wait briefly.
+
+        A Serve process can be shared by multiple scans and review jobs.  The
+        execution identity captured at submission time lets callers stop the
+        requested scan without terminating unrelated sessions in that Serve.
+        """
+        kind = str(execution_kind or "").strip()
+        identity = str(execution_id or "").strip()
+        if not kind or not identity:
+            raise ValueError("OpenCode execution_kind and execution_id are required")
+
+        matched = [
+            record
+            for record in self._records.values()
+            if record.execution_context.execution_kind == kind
+            and record.execution_context.execution_id == identity
+            and record.status not in TERMINAL_TASK_STATUSES
+        ]
+        for record in matched:
+            record.cancel_event.set()
+
+        workers = [
+            record.worker
+            for record in matched
+            if record.worker is not None and not record.worker.done()
+        ]
+        if workers:
+            await asyncio.wait(
+                workers,
+                timeout=max(0.0, float(timeout_seconds)),
+            )
+
+        active = [
+            record.task_id
+            for record in matched
+            if record.status not in TERMINAL_TASK_STATUSES
+        ]
+        cancelled = [
+            record.task_id
+            for record in matched
+            if record.status == "cancelled"
+        ]
+        return {
+            "matched_tasks": len(matched),
+            "cancelled_tasks": len(cancelled),
+            "active_tasks": len(active),
+            "active_task_ids": active,
+        }
 
     async def _run_record(self, record: _TaskRecord) -> None:
         spec = record.spec

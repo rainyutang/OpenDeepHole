@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from deephole_client import main as agent_main
 from deephole_client import server
 from deephole_client.task_manager import TaskManager
 
@@ -88,6 +89,89 @@ class AgentServerResumeTests(unittest.IsolatedAsyncioTestCase):
             release_resumed.set()
             await resumed.asyncio_task
             manager.remove("scan-race", resumed)
+
+    async def test_stop_keeps_task_visible_until_it_finishes_and_acknowledges(self) -> None:
+        manager = server._task_manager
+        task = manager.create(
+            scan_id="scan-stop",
+            project_path="/repo/project",
+            code_scan_path="/repo/project/src",
+            checkers=[],
+            scan_name="stop",
+        )
+
+        async def running() -> None:
+            while not task.cancel_event.is_set():
+                await asyncio.sleep(0)
+
+        task.asyncio_task = asyncio.create_task(running())
+        await asyncio.sleep(0)
+        cancellation = AsyncMock(return_value={
+            "matched_tasks": 1,
+            "cancelled_tasks": 1,
+            "active_tasks": 0,
+        })
+
+        with patch("task_agent.cancel_opencode_execution", new=cancellation):
+            response = await server.handle_stop("scan-stop")
+
+        self.assertTrue(task.cancel_event.is_set())
+        self.assertFalse(response["still_active"])
+        self.assertEqual(response["cancelled_opencode_tasks"], 1)
+        cancellation.assert_awaited_once_with(
+            "scan",
+            "scan-stop",
+            timeout_seconds=5.0,
+        )
+        self.assertEqual(manager.active_snapshots(), [])
+
+    async def test_stop_requested_scan_stays_in_hello_snapshot_until_done(self) -> None:
+        manager = server._task_manager
+        release = asyncio.Event()
+        task = manager.create(
+            scan_id="scan-stopping",
+            project_path="/repo/project",
+            code_scan_path="/repo/project/src",
+            checkers=[],
+            scan_name="stopping",
+        )
+        task.asyncio_task = asyncio.create_task(release.wait())
+
+        manager.stop("scan-stopping")
+        snapshots = manager.active_snapshots()
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertTrue(snapshots[0]["cancel_requested"])
+        release.set()
+        await task.asyncio_task
+
+    async def test_stop_command_with_request_id_returns_agent_ack(self) -> None:
+        result = {
+            "found": True,
+            "cancelled_opencode_tasks": 1,
+            "still_active": False,
+            "error": "",
+        }
+        handler = AsyncMock(return_value=result)
+
+        with patch("deephole_client.server.handle_stop", new=handler):
+            response = await agent_main._handle_command(
+                {
+                    "type": "stop",
+                    "scan_id": "scan-ack",
+                    "request_id": "request-1",
+                },
+                None,
+                None,
+                None,
+            )
+
+        self.assertEqual(response, {
+            "type": "scan_stop_result",
+            "request_id": "request-1",
+            "scan_id": "scan-ack",
+            **result,
+        })
 
 
 if __name__ == "__main__":

@@ -409,7 +409,10 @@ export default function ScanHistory({ onViewScan, onDownloadAgent, onAgentConfig
   const handleStop = async (scanId: string) => {
     setActionLoading(scanId);
     try {
-      await stopScan(scanId);
+      const result = await stopScan(scanId);
+      if (result.agent_stop_state === "pending") {
+        alert("已记录停止请求，但 Agent 暂未确认；重连后将继续停止。");
+      }
       await fetchScans();
     } catch {
       // silently fail

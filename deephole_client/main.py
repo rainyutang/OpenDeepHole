@@ -185,7 +185,15 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             execution_revision=execution_revision,
         )
     elif cmd_type == "stop":
-        await agent_server.handle_stop(msg["scan_id"])
+        result = await agent_server.handle_stop(msg["scan_id"])
+        request_id = str(msg.get("request_id") or "")
+        if request_id:
+            return {
+                "type": "scan_stop_result",
+                "request_id": request_id,
+                "scan_id": msg["scan_id"],
+                **result,
+            }
     elif cmd_type == "resume":
         await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
         manifest_url = str(msg.get("resume_manifest_url") or "").strip()

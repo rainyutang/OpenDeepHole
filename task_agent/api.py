@@ -32,6 +32,37 @@ _COMPONENT_OWNER_LOOP: ContextVar[asyncio.AbstractEventLoop | None] = ContextVar
     "task_agent_component_owner_loop",
     default=None,
 )
+_COMPONENT_BRIDGE_STATE: ContextVar["_ComponentBridgeState | None"] = ContextVar(
+    "task_agent_component_bridge_state",
+    default=None,
+)
+
+
+@dataclass
+class _ComponentBridgeState:
+    """Shared state used to cancel owner-loop work started by a sync component."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    futures: set[concurrent.futures.Future[Any]] = field(default_factory=set)
+    cancelled: bool = False
+
+    def register(self, future: concurrent.futures.Future[Any]) -> None:
+        with self.lock:
+            self.futures.add(future)
+            cancelled = self.cancelled
+        if cancelled:
+            future.cancel()
+
+    def unregister(self, future: concurrent.futures.Future[Any]) -> None:
+        with self.lock:
+            self.futures.discard(future)
+
+    def cancel(self) -> None:
+        with self.lock:
+            self.cancelled = True
+            futures = tuple(self.futures)
+        for future in futures:
+            future.cancel()
 
 
 def _standalone_console_output() -> Callable[[str], None]:
@@ -249,6 +280,9 @@ async def run_opencode_task(
     if owner_loop is None or owner_loop is current_loop:
         return await coroutine
     concurrent_future = asyncio.run_coroutine_threadsafe(coroutine, owner_loop)
+    bridge_state = _COMPONENT_BRIDGE_STATE.get()
+    if bridge_state is not None:
+        bridge_state.register(concurrent_future)
     try:
         while not concurrent_future.done():
             await asyncio.sleep(0.01)
@@ -258,6 +292,9 @@ async def run_opencode_task(
     except BaseException:
         concurrent_future.cancel()
         raise
+    finally:
+        if bridge_state is not None:
+            bridge_state.unregister(concurrent_future)
 
 
 async def _run_opencode_task_local(
@@ -420,7 +457,9 @@ async def run_sync_component(
     if inspect.iscoroutinefunction(function):
         return await function(*args, **kwargs)
     owner_loop = asyncio.get_running_loop()
-    token = _COMPONENT_OWNER_LOOP.set(owner_loop)
+    owner_token = _COMPONENT_OWNER_LOOP.set(owner_loop)
+    bridge_state = _ComponentBridgeState()
+    bridge_token = _COMPONENT_BRIDGE_STATE.set(bridge_state)
     outcome: concurrent.futures.Future[Any] = concurrent.futures.Future()
     context = copy_context()
 
@@ -443,8 +482,35 @@ async def run_sync_component(
         if inspect.isawaitable(result):
             return await result
         return result
+    except asyncio.CancelledError:
+        bridge_state.cancel()
+        # Give the worker's nested event loop a short chance to unwind after
+        # its owner-loop OpenCode coroutine has been cancelled.  The worker is
+        # daemonized, so a non-cooperative synchronous component cannot block
+        # the Agent command loop indefinitely.
+        deadline = owner_loop.time() + 2.0
+        while not outcome.done() and owner_loop.time() < deadline:
+            await asyncio.sleep(0.01)
+        raise
     finally:
-        _COMPONENT_OWNER_LOOP.reset(token)
+        _COMPONENT_BRIDGE_STATE.reset(bridge_token)
+        _COMPONENT_OWNER_LOOP.reset(owner_token)
+
+
+async def cancel_opencode_execution(
+    execution_kind: str,
+    execution_id: str,
+    *,
+    timeout_seconds: float = 5.0,
+) -> dict[str, Any]:
+    """Cancel Task Agent work belonging to one business execution."""
+    from .task_service import _get_opencode_task_service
+
+    return await _get_opencode_task_service().cancel_execution(
+        execution_kind,
+        execution_id,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 @contextmanager
@@ -453,6 +519,8 @@ def opencode_task_context(
     project_dir: str | PathLike[str],
     work_dir: str | PathLike[str],
     scan_id: str | None = None,
+    execution_kind: str | None = None,
+    execution_id: str | None = None,
     feedback_entries: list[dict[str, Any]] | None = None,
     code_graph_mcp: dict[str, Any] | None | object = _UNSET,
     knowledge_base_mcp: dict[str, Any] | None | object = _UNSET,
@@ -475,6 +543,8 @@ def opencode_task_context(
         ),
         "skill_paths": list(skill_paths or []),
         "scan_id": None if scan_id is None else str(scan_id or ""),
+        "execution_kind": execution_kind,
+        "execution_id": execution_id,
         "feedback_entries": list(feedback_entries or []),
         "task_metadata": dict(task_metadata or {}),
         "cancel_event": cancel_event,

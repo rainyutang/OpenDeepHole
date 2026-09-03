@@ -29,6 +29,7 @@ import {
   findIndexedVulnerability,
   mergeIndexedVulnerabilities,
   normalizeOpenCodePool,
+  selectOpenCodePoolSnapshot,
   sameOpenCodePoolSnapshot,
 } from "../scanRuntime";
 import {
@@ -694,6 +695,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const vulnerabilityListGenerationRef = useRef(0);
   const summaryRefreshTimerRef = useRef<number | null>(null);
   const summaryRefreshInFlightRef = useRef(false);
+  const pendingInitialOpenCodePoolRef = useRef<OpenCodePoolStatus | null | undefined>(
+    undefined,
+  );
 
   // Feedback panel state
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -953,6 +957,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   useEffect(() => {
     let cancelled = false;
     let loadedThreatAnalysis: ThreatAnalysis | null = null;
+    pendingInitialOpenCodePoolRef.current = undefined;
     setScan((previous) => previous?.scan_id === scanId ? previous : null);
     setSelectedFeedbackIds(null);
     setFpReview(null);
@@ -962,12 +967,29 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     getScanStatus(scanId)
       .then((data) => {
         if (cancelled || data.scan_id !== scanId) return;
-        setScan((previous) => ({
-          ...data,
-          threat_analysis: loadedThreatAnalysis
-            ?? (previous?.scan_id === scanId ? previous.threat_analysis : null)
-            ?? data.threat_analysis,
-        }));
+        setScan((previous) => {
+          const previousPool = previous?.scan_id === scanId
+            ? previous.opencode_pool
+            : undefined;
+          let opencodePool = selectOpenCodePoolSnapshot(
+            data.opencode_pool,
+            previousPool,
+          );
+          const pendingPool = pendingInitialOpenCodePoolRef.current;
+          pendingInitialOpenCodePoolRef.current = undefined;
+          opencodePool = selectOpenCodePoolSnapshot(
+            opencodePool,
+            pendingPool,
+            { allowClear: pendingPool === null },
+          );
+          return {
+            ...data,
+            opencode_pool: opencodePool,
+            threat_analysis: loadedThreatAnalysis
+              ?? (previous?.scan_id === scanId ? previous.threat_analysis : null)
+              ?? data.threat_analysis,
+          };
+        });
         setSelectedFeedbackIds(new Set(data.feedback_ids ?? []));
       })
       .catch(() => {});
@@ -1009,7 +1031,21 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const sseHandlers = useMemo<ScanSSEHandlers>(() => ({
     onScanStatus: (data) => {
       setScan((prev) => {
-        if (!prev) return prev;
+        if (!prev) {
+          if (data.opencode_pool !== undefined) {
+            const incomingPool = data.opencode_pool === null
+              ? null
+              : normalizeOpenCodePool(data.opencode_pool);
+            if (data.opencode_pool === null || incomingPool !== null) {
+              pendingInitialOpenCodePoolRef.current = selectOpenCodePoolSnapshot(
+                pendingInitialOpenCodePoolRef.current,
+                incomingPool,
+                { allowClear: data.opencode_pool === null },
+              );
+            }
+          }
+          return prev;
+        }
         const patch: Partial<ScanStatusType> = {};
         if (data.status != null && data.status !== prev.status) patch.status = data.status as ScanItemStatus;
         if (data.progress != null && data.progress !== prev.progress) patch.progress = data.progress;
@@ -1023,21 +1059,30 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         if (data.static_total_files != null && data.static_total_files !== prev.static_total_files) patch.static_total_files = data.static_total_files;
         if (data.static_scanned_files != null && data.static_scanned_files !== prev.static_scanned_files) patch.static_scanned_files = data.static_scanned_files;
         if (data.static_analysis_done != null && data.static_analysis_done !== prev.static_analysis_done) patch.static_analysis_done = data.static_analysis_done;
-        if (data.opencode_pool === null && prev.opencode_pool != null) {
-          patch.opencode_pool = null;
-        } else if (data.opencode_pool !== undefined && data.opencode_pool !== null) {
+        if (data.opencode_pool !== undefined) {
           const incomingPool = Object.prototype.hasOwnProperty.call(
-            data.opencode_pool,
+            data.opencode_pool ?? {},
             "completed_tasks",
           )
             ? data.opencode_pool
+            : data.opencode_pool === null
+              ? null
             : {
                 ...data.opencode_pool,
                 completed_tasks: prev.opencode_pool?.completed_tasks ?? [],
               };
-          const pool = normalizeOpenCodePool(incomingPool);
-          if (pool && !sameOpenCodePoolSnapshot(prev.opencode_pool, pool)) {
-            patch.opencode_pool = pool;
+          const normalizedPool = incomingPool === null
+            ? null
+            : normalizeOpenCodePool(incomingPool);
+          if (data.opencode_pool === null || normalizedPool !== null) {
+            const pool = selectOpenCodePoolSnapshot(
+              prev.opencode_pool,
+              normalizedPool,
+              { allowClear: data.opencode_pool === null },
+            );
+            if (!sameOpenCodePoolSnapshot(prev.opencode_pool, pool)) {
+              patch.opencode_pool = pool;
+            }
           }
         }
         return Object.keys(patch).length > 0 ? { ...prev, ...patch } : prev;
@@ -1567,7 +1612,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const handleStop = async () => {
     setStopping(true);
     try {
-      await stopScan(scanId);
+      const result = await stopScan(scanId);
+      if (result.agent_stop_state === "pending") {
+        alert("已记录停止请求，但 Agent 暂未确认；重连后将继续停止。");
+      }
       const next = await getScanStatus(scanId);
       setScan(next);
     } catch {

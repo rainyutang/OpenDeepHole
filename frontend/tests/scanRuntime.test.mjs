@@ -27,6 +27,23 @@ function vulnerability(file, variantOf = "") {
   };
 }
 
+function pool(updatedAt, overrides = {}) {
+  return runtime.normalizeOpenCodePool({
+    scope_id: "scan-1",
+    execution_revision: 1,
+    global_running: 0,
+    global_queued: 0,
+    total_tasks: 0,
+    completed_task_count: 0,
+    planned_tasks: [],
+    queued_tasks: [],
+    completed_tasks: [],
+    models: [],
+    updated_at: updatedAt,
+    ...overrides,
+  });
+}
+
 test("normalizes legacy arrays without materializing invalid entries", () => {
   const normalized = runtime.normalizeIndexedVulnerabilities([
     null,
@@ -122,4 +139,65 @@ test("preserves completed task session traces during pool normalization", () => 
   assert.ok(pool);
   assert.deepEqual(pool.completed_tasks[0].session_events, sessionEvents);
   assert.equal(pool.completed_tasks.length, 1);
+});
+
+test("keeps a newer SSE pool snapshot when an older GET resolves later", () => {
+  const live = pool("2026-09-03T00:00:02Z", {
+    global_running: 1,
+    total_tasks: 1,
+    planned_tasks: [{ task_id: "threat" }],
+  });
+  const staleGet = pool("2026-09-03T00:00:01Z");
+
+  const selected = runtime.selectOpenCodePoolSnapshot(live, staleGet);
+
+  assert.equal(selected.global_running, 1);
+  assert.equal(selected.planned_tasks[0].task_id, "threat");
+});
+
+test("prefers a higher execution revision even when its timestamp is older", () => {
+  const previous = pool("2026-09-03T00:01:00Z", { execution_revision: 2 });
+  const replacement = pool("2026-09-03T00:00:00Z", {
+    execution_revision: 3,
+    global_queued: 1,
+  });
+
+  const selected = runtime.selectOpenCodePoolSnapshot(previous, replacement);
+
+  assert.equal(selected.execution_revision, 3);
+  assert.equal(selected.global_queued, 1);
+});
+
+test("merges incremental completed-task history without accepting stale live state", () => {
+  const live = pool("2026-09-03T00:00:03Z", {
+    global_running: 1,
+    total_tasks: 2,
+    completed_task_count: 1,
+    completed_tasks: [{ task_id: "first", revision: 1, outcome: "success" }],
+  });
+  const stale = pool("2026-09-03T00:00:02Z", {
+    global_running: 0,
+    total_tasks: 2,
+    completed_task_count: 2,
+    completed_tasks: [{ task_id: "second", revision: 1, outcome: "success" }],
+  });
+
+  const selected = runtime.selectOpenCodePoolSnapshot(live, stale);
+
+  assert.equal(selected.global_running, 1);
+  assert.equal(selected.completed_task_count, 2);
+  assert.deepEqual(
+    selected.completed_tasks.map((task) => task.task_id).sort(),
+    ["first", "second"],
+  );
+});
+
+test("only clears a pool snapshot when the caller marks null as authoritative", () => {
+  const live = pool("2026-09-03T00:00:03Z", { global_running: 1 });
+
+  assert.equal(runtime.selectOpenCodePoolSnapshot(live, null), live);
+  assert.equal(
+    runtime.selectOpenCodePoolSnapshot(live, null, { allowClear: true }),
+    null,
+  );
 });

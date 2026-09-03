@@ -5,6 +5,7 @@ import {
   isRecord,
   normalizeScanCandidate,
   normalizeScanEvent,
+  selectOpenCodePoolSnapshot,
   normalizeThreatTask,
   normalizeValidation,
   normalizeVulnerability,
@@ -209,7 +210,11 @@ async function refreshFullState(
         validations: previous.validations,
         events: previous.events,
         detail_pages: previous.detail_pages,
-        opencode_pool: data.opencode_pool ?? previous.opencode_pool,
+        opencode_pool: selectOpenCodePoolSnapshot(
+          previous.opencode_pool,
+          data.opencode_pool,
+          { allowClear: ["complete", "error", "cancelled"].includes(data.status) },
+        ),
       };
     });
   } catch {
@@ -543,19 +548,11 @@ export function useScanSSE(
 
     es.onopen = () => {
       setConnected(true);
+      refreshState();
     };
 
     es.onerror = () => {
       setConnected(false);
-      // EventSource auto-reconnects. On reconnect (next onopen) we do a full
-      // state refresh to catch events missed during the gap.
-      const origOnOpen = es.onopen;
-      es.onopen = (evt) => {
-        setConnected(true);
-        refreshState();
-        es.onopen = origOnOpen;
-        origOnOpen?.call(es, evt);
-      };
     };
 
     // Fallback poll every 30s as safety net

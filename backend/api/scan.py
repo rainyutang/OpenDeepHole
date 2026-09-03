@@ -2447,20 +2447,31 @@ async def stop_scan(
             ),
         })
 
+    agent_stop_state = "not_required"
     agent_id = await _resolve_scan_agent_id(meta)
+    if core_running:
+        agent_stop_state = "pending"
+        if agent_id:
+            from backend.api.agent import request_agent_scan_stop
+
+            acknowledgement = await request_agent_scan_stop(agent_id, scan_id)
+            if (
+                isinstance(acknowledgement, dict)
+                and acknowledgement.get("still_active") is False
+                and not str(acknowledgement.get("error") or "").strip()
+            ):
+                agent_stop_state = "confirmed"
+
     if agent_id:
         from backend.api.agent import send_agent_command
-        commands: list[dict] = []
-        if core_running:
-            commands.append({"type": "stop", "scan_id": scan_id})
-        commands.extend(
+        commands = [
             {
                 "type": "fp_review_stop",
                 "scan_id": scan_id,
                 "review_id": review_id,
             }
             for review_id in cancelled_review_ids
-        )
+        ]
         for command in commands:
             try:
                 await send_agent_command(
@@ -2485,6 +2496,7 @@ async def stop_scan(
     return {
         "ok": True,
         "main_scan_stopped": core_running,
+        "agent_stop_state": agent_stop_state,
         "fp_review_ids": cancelled_review_ids,
     }
 

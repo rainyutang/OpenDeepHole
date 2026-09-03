@@ -137,6 +137,11 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             store.update_fp_review_job("review-running", status="running")
             scan_api._running_scans["scan-1"] = scan
             send = AsyncMock(return_value=True)
+            request_stop = AsyncMock(return_value={
+                "scan_id": "scan-1",
+                "still_active": False,
+                "error": "",
+            })
 
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
@@ -144,6 +149,10 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
                 patch(
                     "backend.api.scan._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-live"),
+                ),
+                patch(
+                    "backend.api.agent.request_agent_scan_stop",
+                    new=request_stop,
                 ),
                 patch("backend.api.agent.send_agent_command", new=send),
             ):
@@ -155,6 +164,7 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
                 )
 
             self.assertTrue(response["main_scan_stopped"])
+            self.assertEqual(response["agent_stop_state"], "confirmed")
             self.assertEqual(
                 response["fp_review_ids"],
                 ["review-pending", "review-running"],
@@ -178,8 +188,38 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
             payloads = [call.args[1] for call in send.await_args_list]
             self.assertEqual(
                 [payload["type"] for payload in payloads],
-                ["stop", "fp_review_stop", "fp_review_stop"],
+                ["fp_review_stop", "fp_review_stop"],
             )
+            request_stop.assert_awaited_once_with("agent-live", "scan-1")
+
+    def test_stop_reports_pending_when_agent_does_not_acknowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            scan = _scan(ScanItemStatus.ANALYZING)
+            store.save_scan(scan, _meta())
+            scan_api._running_scans["scan-1"] = scan
+            request_stop = AsyncMock(return_value=None)
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    new=AsyncMock(return_value="agent-live"),
+                ),
+                patch(
+                    "backend.api.agent.request_agent_scan_stop",
+                    new=request_stop,
+                ),
+            ):
+                response = asyncio.run(scan_api.stop_scan(
+                    "scan-1",
+                    User(user_id="user-1", username="alice", role="user"),
+                ))
+
+            self.assertEqual(response["agent_stop_state"], "pending")
+            self.assertEqual(store.load_scan("scan-1")[0].status, ScanItemStatus.CANCELLED)
+            request_stop.assert_awaited_once_with("agent-live", "scan-1")
 
     def test_resume_complete_scan_dispatches_only_unresolved_stopped_fp_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

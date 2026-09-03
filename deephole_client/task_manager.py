@@ -163,12 +163,11 @@ class TaskManager:
         """Return serializable metadata for scans still running locally."""
         active: list[dict] = []
         for task in self._tasks.values():
-            if task.cancel_event.is_set():
-                continue
             if task.asyncio_task is None or task.asyncio_task.done():
                 continue
             active.append({
                 "scan_id": task.scan_id,
+                "cancel_requested": task.cancel_event.is_set(),
                 "execution_revision": task.execution_revision,
                 "project_path": str(task.project_path),
                 "code_scan_path": str(task.code_scan_path),

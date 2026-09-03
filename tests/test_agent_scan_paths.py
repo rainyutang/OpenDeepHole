@@ -1432,10 +1432,6 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 patch("deephole_client.scanner.Path.home", return_value=root),
                 patch("deephole_client.scanner.configure_platform_runtime"),
                 patch(
-                    "deephole_client.scanner.opencode_task_context",
-                    return_value=nullcontext(),
-                ),
-                patch(
                     "deephole_client.scanner.run_code_graph_build",
                     new=AsyncMock(return_value={
                         "status": "success",
@@ -1447,6 +1443,18 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     "deephole_client.scanner.run_threat_analysis",
                     new=AsyncMock(side_effect=run_analysis),
                 ),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ) as context_mock,
+                patch(
+                    "deephole_client.scanner.register_planned_task",
+                    new=AsyncMock(return_value="planned-threat-analysis"),
+                ) as register_planned,
+                patch(
+                    "deephole_client.scanner.clear_planned_task",
+                    new=AsyncMock(),
+                ) as clear_planned,
                 patch(
                     "deephole_client.scanner._archive_failed_threat_analysis",
                     side_effect=PermissionError(
@@ -1502,6 +1510,27 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             ("opencode_lightweight_threat_analysis", True),
             ("deephole_threat_analysis", False),
         ])
+        register_planned.assert_awaited_once_with(
+            "scan-opencode-lightweight-fallback",
+            {
+                "task_type": "threat_analysis",
+                "task_name": "opencode-lightweight-threat-analysis",
+                "required_capability": "high",
+            },
+            task_key="threat-analysis:opencode-lightweight",
+        )
+        clear_planned.assert_awaited_once_with("planned-threat-analysis")
+        self.assertTrue(any(
+            call.kwargs.get("task_metadata", {}).get("planned_task_id")
+            == "planned-threat-analysis"
+            for call in context_mock.call_args_list
+        ))
+        self.assertTrue(any(
+            call.kwargs.get("execution_kind") == "scan"
+            and call.kwargs.get("execution_id")
+            == "scan-opencode-lightweight-fallback"
+            for call in context_mock.call_args_list
+        ))
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
     async def test_cancelled_opencode_lightweight_does_not_fallback(self) -> None:

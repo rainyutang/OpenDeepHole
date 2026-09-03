@@ -685,12 +685,14 @@ _opencode_model_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_waiters: dict[str, asyncio.Future] = {}
 _mcp_status_waiters: dict[str, asyncio.Future] = {}
 _mcp_reload_waiters: dict[str, asyncio.Future] = {}
+_scan_stop_waiters: dict[str, asyncio.Future] = {}
 _mcp_probe_persist_locks: dict[str, asyncio.Lock] = {}
 _AGENT_RESPONSE_WAITERS = {
     "opencode_models_result": _opencode_model_waiters,
     "mcp_probe_result": _mcp_probe_waiters,
     "mcp_status_result": _mcp_status_waiters,
     "mcp_reload_result": _mcp_reload_waiters,
+    "scan_stop_result": _scan_stop_waiters,
 }
 
 # In-memory index progress store: scan_id → {status, parsed_files, total_files}
@@ -713,6 +715,7 @@ _RUNTIME_UPDATE_ACTIVE_STATUSES = {
 _RUNTIME_UPDATE_POLL_SECONDS = 2
 _RUNTIME_UPDATE_TIMEOUT_SECONDS = 15 * 60
 _OPENCODE_MODEL_RPC_TIMEOUT_SECONDS = 120.0
+_SCAN_STOP_RPC_TIMEOUT_SECONDS = 10.0
 _FINAL_VULNERABILITY_CALLBACKS_CAPABILITY = "final_vulnerability_callbacks"
 _INCREMENTAL_OPENCODE_TASK_REPORTS_CAPABILITY = "incremental_opencode_task_reports"
 
@@ -742,6 +745,12 @@ async def _wait_agent_response(
     *,
     timeout: float,
 ) -> dict:
+    # The response can arrive on the same websocket while send_agent_command()
+    # is still unwinding.  Honor that in-process result before consulting the
+    # distributed mailbox, which also keeps the acknowledgement path working
+    # during an unrelated store hiccup.
+    if waiter.done():
+        return waiter.result()
     store = get_scan_store()
     if not getattr(store, "distributed", False):
         return await asyncio.wait_for(waiter, timeout=timeout)
@@ -1219,6 +1228,7 @@ async def _reattach_active_agent_scans_async(
     agent_id: str,
     agent: AgentInfo,
     active_scans: list,
+    pending_stops: list[dict] | None = None,
 ) -> list[str]:
     """Restore server-side running state for scans still running in this agent."""
     if not active_scans:
@@ -1252,6 +1262,18 @@ async def _reattach_active_agent_scans_async(
                 "Ignoring active scan %s from agent %s: owner mismatch",
                 scan_id,
                 agent.name,
+            )
+            continue
+        if (
+            scan.status == ScanItemStatus.CANCELLED
+            and scan.error_message == "用户手动停止"
+        ):
+            if pending_stops is not None:
+                pending_stops.append({"type": "stop", "scan_id": scan_id})
+            logger.warning(
+                "Agent %s still reports manually stopped scan %s; resending stop",
+                agent_id,
+                scan_id,
             )
             continue
         if not _is_infrastructure_interruption(scan.status, scan.error_message):
@@ -1688,9 +1710,15 @@ def _reattach_active_agent_scans(
     agent_id: str,
     agent: AgentInfo,
     active_scans: list,
+    pending_stops: list[dict] | None = None,
 ) -> list[str]:
     return _run_reconnect_helper(
-        _reattach_active_agent_scans_async(agent_id, agent, active_scans)
+        _reattach_active_agent_scans_async(
+            agent_id,
+            agent,
+            active_scans,
+            pending_stops,
+        )
     )
 
 
@@ -2237,10 +2265,12 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 WORKER_ID,
             )
 
+        pending_scan_stops: list[dict] = []
         reattached_scan_ids = await _reattach_active_agent_scans_async(
             agent_id,
             agent_info,
             msg.get("active_scans") or [],
+            pending_scan_stops,
         )
         await _reattach_active_fp_reviews_async(
             agent_id,
@@ -2279,6 +2309,8 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 ),
             },
         })
+        for command in pending_scan_stops:
+            await send_agent_command(agent_id, command)
         for command in pending_validation_stops:
             await send_agent_command(agent_id, command)
         await _recover_missing_agent_work(
@@ -2378,6 +2410,60 @@ async def send_agent_command(agent_id: str, command: dict) -> bool:
         _agent_ws_locks.pop(agent_id, None)
         _registered_agents.pop(agent_id, None)
         return False
+
+
+async def request_agent_scan_stop(agent_id: str, scan_id: str) -> dict | None:
+    """Request a scan stop and wait briefly for the Agent to confirm quiescence."""
+    request_id = uuid.uuid4().hex
+    waiter = asyncio.get_running_loop().create_future()
+    _scan_stop_waiters[request_id] = waiter
+    try:
+        sent = await send_agent_command(agent_id, {
+            "type": "stop",
+            "request_id": request_id,
+            "scan_id": scan_id,
+        })
+        if not sent:
+            logger.warning(
+                "Unable to deliver scan stop request %s to agent %s for scan %s",
+                request_id,
+                agent_id,
+                scan_id,
+            )
+            return None
+        incoming = await _wait_agent_response(
+            request_id,
+            waiter,
+            timeout=_SCAN_STOP_RPC_TIMEOUT_SECONDS,
+        )
+        if not isinstance(incoming, dict):
+            return None
+        if str(incoming.get("scan_id") or "") != str(scan_id):
+            logger.warning(
+                "Agent %s returned mismatched scan stop response %s for scan %s",
+                agent_id,
+                request_id,
+                scan_id,
+            )
+            return None
+        return incoming
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Timed out waiting for scan stop response from agent %s for scan %s",
+            agent_id,
+            scan_id,
+        )
+        return None
+    except Exception as exc:
+        logger.warning(
+            "Failed waiting for scan stop response from agent %s for scan %s: %s",
+            agent_id,
+            scan_id,
+            exc,
+        )
+        return None
+    finally:
+        _scan_stop_waiters.pop(request_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -4902,6 +4988,17 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
             store=store,
         )
     existing_scan, meta, counts = loaded
+    manually_stopped = (
+        existing_scan.status == ScanItemStatus.CANCELLED
+        and existing_scan.error_message == "用户手动停止"
+    )
+    if manually_stopped:
+        # The stop endpoint records user intent before contacting the Agent.
+        # A completion racing with that command must not revive the scan.
+        final_status = ScanItemStatus.CANCELLED
+    final_error_message = (
+        "用户手动停止" if manually_stopped else body.error_message
+    )
     await _merge_finish_stage_runs(
         scan_id,
         body,
@@ -5017,7 +5114,7 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         progress=1.0 if final_status == ScanItemStatus.COMPLETE else None,
         total_candidates=final_total,
         processed_candidates=final_processed,
-        error_message=body.error_message,
+        error_message=final_error_message,
         clear_current_candidate=True,
     )
 
@@ -5063,8 +5160,8 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         scan.total_candidates = final_total
         scan.processed_candidates = final_processed
         scan.opencode_pool = final_pool
-        if body.error_message:
-            scan.error_message = body.error_message
+        if final_error_message:
+            scan.error_message = final_error_message
         if final_status == ScanItemStatus.COMPLETE:
             scan.progress = 1.0
         _running_scans.pop(scan_id, None)
@@ -5087,14 +5184,14 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
         "opencode_pool": final_pool.model_dump() if final_pool is not None else None,
     })
     publish(scan_id, "scan_finish", {
-        "status": body.status,
-        "error_message": body.error_message,
+        "status": final_status.value,
+        "error_message": final_error_message,
     })
 
     confirmed = sum(1 for vuln in final_vulnerabilities if vuln.confirmed)
     logger.info(
         "Agent finished scan %s: %s — %d confirmed / %d candidates",
-        scan_id, body.status, confirmed, final_total,
+        scan_id, final_status.value, confirmed, final_total,
     )
 
     from backend.api.scan import (

@@ -3,6 +3,7 @@ import type {
   FpReviewJob,
   FpReviewResult,
   IndexedVulnerability,
+  OpenCodeCompletedTask,
   OpenCodeModelTokenUsage,
   OpenCodePoolModelStats,
   OpenCodePoolStatus,
@@ -446,4 +447,80 @@ export function sameOpenCodePoolSnapshot(
     && left.global_queued === right.global_queued
     && left.completed_task_count === right.completed_task_count
     && left.total_tasks === right.total_tasks;
+}
+
+function poolTimestamp(value: OpenCodePoolStatus): number | null {
+  if (!value.updated_at) return null;
+  const timestamp = Date.parse(value.updated_at);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function completedTaskIdentity(
+  task: OpenCodeCompletedTask,
+  index: number,
+): string {
+  const record = task as Record<string, unknown>;
+  const taskId = text(record.task_id) || text(record.planned_task_id);
+  const revision = finiteNumber(record.revision, 1);
+  return taskId ? `${taskId}:${revision}` : `anonymous:${index}`;
+}
+
+function mergePoolHistory(
+  winner: OpenCodePoolStatus,
+  other: OpenCodePoolStatus,
+): OpenCodePoolStatus {
+  const completed = new Map<string, OpenCodeCompletedTask>();
+  (other.completed_tasks ?? []).forEach((task, index) => {
+    completed.set(completedTaskIdentity(task, index), task);
+  });
+  (winner.completed_tasks ?? []).forEach((task, index) => {
+    const key = completedTaskIdentity(task, index);
+    const previous = completed.get(key);
+    completed.set(key, previous ? { ...previous, ...task } : task);
+  });
+  const completedTasks = [...completed.values()];
+  return {
+    ...winner,
+    completed_tasks: completedTasks,
+    completed_task_count: Math.max(
+      winner.completed_task_count,
+      other.completed_task_count,
+      completedTasks.length,
+    ),
+    total_tasks: Math.max(winner.total_tasks, other.total_tasks),
+  };
+}
+
+export function selectOpenCodePoolSnapshot(
+  current: OpenCodePoolStatus | null | undefined,
+  incoming: OpenCodePoolStatus | null | undefined,
+  options: { allowClear?: boolean } = {},
+): OpenCodePoolStatus | null {
+  // Keep GET hydration and SSE updates monotonic for one scan execution.
+  if (incoming === undefined) return current ?? null;
+  if (incoming === null) return options.allowClear ? null : current ?? null;
+  if (!current) return incoming;
+
+  const currentRevision = current.execution_revision ?? 0;
+  const incomingRevision = incoming.execution_revision ?? 0;
+  if (incomingRevision !== currentRevision) {
+    return incomingRevision > currentRevision ? incoming : current;
+  }
+
+  const currentTimestamp = poolTimestamp(current);
+  const incomingTimestamp = poolTimestamp(incoming);
+  let winner = current;
+  let other = incoming;
+  if (
+    (incomingTimestamp !== null && currentTimestamp === null)
+    || (
+      incomingTimestamp !== null
+      && currentTimestamp !== null
+      && incomingTimestamp > currentTimestamp
+    )
+  ) {
+    winner = incoming;
+    other = current;
+  }
+  return mergePoolHistory(winner, other);
 }

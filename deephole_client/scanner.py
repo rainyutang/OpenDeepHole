@@ -19,6 +19,7 @@ from backend.models import (
 from backend.scan_event_log import is_agent_local_task_output
 from backend.vulnerability_identity import vulnerability_report_identity
 from task_agent import opencode_task_context
+from task_agent.model_pool import clear_planned_task, register_planned_task
 from task_agent.output_format import is_task_output_line
 
 from .code_graph_build import run_code_graph_build
@@ -933,6 +934,29 @@ async def run_scan(
                     cancel_event=cancel_event,
                 )
 
+            if method_id == OPENCODE_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID:
+                planned_task_id = await register_planned_task(
+                    scan_id,
+                    {
+                        "task_type": "threat_analysis",
+                        "task_name": "opencode-lightweight-threat-analysis",
+                        "required_capability": "high",
+                    },
+                    task_key="threat-analysis:opencode-lightweight",
+                )
+                try:
+                    # The threat-analysis runner narrows the paths again while
+                    # inheriting this planned-task identity.  Its first model
+                    # lease therefore consumes the visible planned row instead
+                    # of appearing as an unrelated task.
+                    with opencode_task_context(
+                        project_dir=project,
+                        work_dir=scan_dir,
+                        task_metadata={"planned_task_id": planned_task_id},
+                    ):
+                        return await invoke()
+                finally:
+                    await clear_planned_task(planned_task_id)
             if method_id != CODEX_THREAT_ANALYSIS_METHOD_ID:
                 return await invoke()
             if (
@@ -1377,6 +1401,8 @@ async def run_scan(
 
         with opencode_task_context(
             scan_id=scan_id,
+            execution_kind="scan",
+            execution_id=scan_id,
             project_dir=project,
             work_dir=scan_dir,
             feedback_entries=feedback_entries,

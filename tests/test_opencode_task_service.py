@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from backend.models import OutputSource
-from task_agent import OpenCodeResult, run_opencode_task
+from task_agent import OpenCodeResult, run_opencode_task, run_sync_component
 from task_agent.api import (
     _normalize_allowed_bash_commands,
     _normalize_file_write_allowlist,
@@ -3357,5 +3357,93 @@ def test_run_task_cancellation_cancels_queued_service_task(tmp_path: Path) -> No
 
         assert captured_task_id
         assert service.get_task(captured_task_id).status == "cancelled"
+
+    asyncio.run(run())
+
+
+def test_cancel_execution_only_stops_matching_business_owner(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        queued: dict[str, asyncio.Event] = {
+            "scan-a": asyncio.Event(),
+            "scan-b": asyncio.Event(),
+        }
+
+        async def acquire(*_args, **kwargs):
+            record = service._records[kwargs["task_id"]]
+            execution_id = record.execution_context.execution_id
+            queued[execution_id].set()
+            while not kwargs["cancel_event"].is_set():
+                await asyncio.sleep(0.005)
+            return None
+
+        with (
+            patch("task_agent.task_service.get_config", return_value=_config()),
+            patch("task_agent.task_service.acquire_model_lease", side_effect=acquire),
+            patch("task_agent.task_service.release_model_lease", new=AsyncMock()),
+        ):
+            with _task_context(
+                tmp_path,
+                execution_kind="scan",
+                execution_id="scan-a",
+            ):
+                first = service.submit_task(OpenCodeTaskSpec(
+                    task_name="scan a",
+                    prompt="wait",
+                    directory=tmp_path,
+                ))
+            with _task_context(
+                tmp_path,
+                execution_kind="scan",
+                execution_id="scan-b",
+            ):
+                second = service.submit_task(OpenCodeTaskSpec(
+                    task_name="scan b",
+                    prompt="wait",
+                    directory=tmp_path,
+                ))
+
+            await asyncio.gather(queued["scan-a"].wait(), queued["scan-b"].wait())
+            result = await service.cancel_execution("scan", "scan-a", timeout_seconds=1)
+
+            assert result["matched_tasks"] == 1
+            assert result["cancelled_tasks"] == 1
+            assert result["active_tasks"] == 0
+            assert first.status == "cancelled"
+            assert second.status == "queued"
+
+            await service.cancel_execution("scan", "scan-b", timeout_seconds=1)
+
+    asyncio.run(run())
+
+
+def test_run_sync_component_cancellation_unwinds_owner_loop_task() -> None:
+    async def run() -> None:
+        owner_started = asyncio.Event()
+        owner_cancelled = asyncio.Event()
+
+        async def fake_local(**_kwargs):
+            owner_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                owner_cancelled.set()
+                raise
+
+        def component() -> OpenCodeResult:
+            return asyncio.run(run_opencode_task(
+                task_name="bridge cancellation",
+                task_type="threat_analysis",
+                prompt="wait",
+                required_capability="high",
+            ))
+
+        with patch("task_agent.api._run_opencode_task_local", new=fake_local):
+            caller = asyncio.create_task(run_sync_component(component))
+            await asyncio.wait_for(owner_started.wait(), timeout=1)
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            await asyncio.wait_for(owner_cancelled.wait(), timeout=1)
 
     asyncio.run(run())
