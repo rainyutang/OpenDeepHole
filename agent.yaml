@@ -1,5 +1,5 @@
 # DeepHole 2.0 Agent bootstrap and managed configuration.
-# server_url / agent_name / owner_token are local-only; the remaining v7
+# server_url / agent_name / owner_token are local-only; the remaining v8
 # sections are managed by the Web "客户端配置" page after first connection.
 
 server_url: "http://your-server:8000"
@@ -7,7 +7,7 @@ agent_name: ""
 owner_token: ""
 checkers: []
 
-schema_version: 7
+schema_version: 8
 base:
   # OpenCode is the fixed implementation; executable may be opencode, nga, or a full path.
   tool: "opencode"
@@ -26,7 +26,7 @@ threat_analysis:
   enabled: true
   model_policy:
     required_capability: "high"
-    timeout_seconds: 3600
+    timeout_seconds: 7200
     max_retries: 5
 
 vulnerability_mining:

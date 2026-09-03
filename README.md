@@ -245,7 +245,7 @@ Linux/macOS 不会由 OpenDeepHole 新增该权限键，继续使用原有沙箱
 新建扫描默认优先使用 `opencode_lightweight_threat_analysis`。它与
 `codex_goal_threat_analysis` 共用同一个轻量级威胁分析 Prompt；前者通过一次逻辑上的
 `run_opencode_task(task_type="threat_analysis")` 执行，并复用 Agent 当前
-`threat_analysis.model_policy` 的超时与全新 Session 重试。Task Agent 只为该任务开放 Prompt 中
+`threat_analysis.model_policy` 的超时（默认 `7200` 秒）与全新 Session 重试。Task Agent 只为该任务开放 Prompt 中
 列出的精确产物校验命令，命令必须在最终写入后以退出码 0 完成。标准重试耗尽、Codex 不可用或任一
 轻量级方法产物无效时，外层扫描编排会自动且仅一次以 clean 模式执行
 `deephole_threat_analysis`；用户取消不会触发回退。用户显式选择 DeepHole 时仍直接执行 DeepHole。
@@ -636,7 +636,7 @@ server_url: "http://your-server:8000"
 agent_name: ""
 owner_token: ""
 checkers: []
-schema_version: 7
+schema_version: 8
 base:
   # 实现固定为 OpenCode；启动文件可填写名称或完整路径。
   tool: "opencode"
@@ -657,7 +657,7 @@ checker_selection:
     disabled_checkers: []
 ```
 
-`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v7 字段由 Web **「客户端配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定客户端身份，客户端离线或重连后仍使用同一份服务端配置。新客户端注册时服务端不会采用本地模板上报的模型，模型池保持为空，直到用户在 Web 中明确配置。高级配置分别维护快速、标准、自定义模式的 Checker 排除列表；未被排除且当前可用、对用户可见的新增 Checker 会自动启用。v6 升级到 v7 时，旧全局排除列表迁移到自定义模式，快速和标准模式初始化为新的默认规则集。v5 升级到 v6 时，`base.tool` 统一迁移为 `opencode`，但保留原 `base.executable`；旧模型行的 `tool`、`executable` 覆盖会被移除。历史 `full` 与 `threat_analysis_only` 扫描不批量改写，读取和续扫时按自定义模式向组件暴露上下文。
+`server_url`、`agent_name`、`owner_token` 和 `checkers` 是本机启动字段；其余 v8 字段由 Web **「客户端配置」** 页面管理并写回。完整模板见仓库根目录的 `agent.yaml`。配置以 `IP + machine_name` 形成稳定客户端身份，客户端离线或重连后仍使用同一份服务端配置。新客户端注册时服务端不会采用本地模板上报的模型，模型池保持为空，直到用户在 Web 中明确配置。v7 升级到 v8 时，威胁分析策略中旧默认超时 `3600` 秒会一次性迁移为 `7200` 秒，其它自定义值保持不变；完成升级后仍可手工改回 `3600` 秒。高级配置分别维护快速、标准、自定义模式的 Checker 排除列表；未被排除且当前可用、对用户可见的新增 Checker 会自动启用。v6 升级到 v7 时，旧全局排除列表迁移到自定义模式，快速和标准模式初始化为新的默认规则集。v5 升级到 v6 时，`base.tool` 统一迁移为 `opencode`，但保留原 `base.executable`；旧模型行的 `tool`、`executable` 覆盖会被移除。历史 `full` 与 `threat_analysis_only` 扫描不批量改写，读取和续扫时按自定义模式向组件暴露上下文。
 
 新增威胁分析方法只需创建方法目录并实现固定五参数入口，详见 [威胁分析方法扩展](deephole_client/threat_analysis/README.md)。
 新增漏洞挖掘引擎只需创建独立目录并实现固定适配契约，详见 [漏洞挖掘引擎扩展](deephole_client/vulnerability_mining/README.md)。
@@ -731,7 +731,7 @@ OpenCode 模型池统计：
 - `model_pool.global_concurrency` 是所有模型合计运行数的硬上限；每个模型还会受自己的 `max_concurrency` 和 `time_windows` 限制。
 - 配置页的每个模型可添加多段使用时间，每段独立选择周一至周日及起止时间；时间窗口只限制新取得的模型 Lease，不会中断已经运行的任务。
 - 任务能力只分 `low`、`high`，各内置阶段默认并实际配置为 `high`；公开模型任务按类型自动使用固定优先级：漏洞验证 `90`、去误报复核 `60`、威胁分析与漏洞挖掘 `50`，同优先级按 FIFO 调度。v3/v4 中手工配置为低能力的阶段仍会优先使用最低足够能力模型。模型行本身仍可标记低/中/高能力。
-- 模型调用默认超时为 `3600` 秒，只计算每条模型消息的执行阶段，不包含排队时间。超时、普通执行错误和同 Session JSON 纠正耗尽都会消费统一的新 Session 重试预算；默认重试 2 次，即最多 3 个 Session。新 Session 重试会释放并重新申请模型 Lease，最终超时保留最后 Session ID，模型池 completed-task 历史仍只记录一个逻辑任务，但会保留业务、格式修复和 JSON 纠正的完整 Session 事件轨迹及稳定失败分类；扫描详情首页在同一任务行的展开区展示全部关联 Session，最终成功也保留此前异常尝试。
+- OpenCode 轻量级威胁分析的模型调用默认超时为 `7200` 秒，其它模型任务仍默认为 `3600` 秒；超时只计算每条模型消息的执行阶段，不包含排队时间。超时、普通执行错误和同 Session JSON 纠正耗尽都会消费统一的新 Session 重试预算；默认重试 2 次，即最多 3 个 Session。新 Session 重试会释放并重新申请模型 Lease，最终超时保留最后 Session ID，模型池 completed-task 历史仍只记录一个逻辑任务，但会保留业务、格式修复和 JSON 纠正的完整 Session 事件轨迹及稳定失败分类；扫描详情首页在同一任务行的展开区展示全部关联 Session，最终成功也保留此前异常尝试。
 - 扫描详情页点击「模型看板」可以查看每个模型的累计任务、成功/失败/超时/取消计数、平均耗时、当前运行数和当前排队数。
 - Agent 会在模型池状态变化时上报快照，无变化时只保留低频心跳；服务端会保存到扫描记录中，页面刷新或重新进入扫描详情后会显示最近一次快照。
 

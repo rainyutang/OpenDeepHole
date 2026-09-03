@@ -877,7 +877,7 @@ export interface MiningEngineCatalog {
 }
 
 export interface AgentRemoteConfig {
-  schema_version: 7;
+  schema_version: 8;
   base: AgentBaseConfig;
   model_pool: AgentModelPoolConfig;
   threat_analysis: AgentThreatAnalysisConfig;

@@ -47,10 +47,13 @@ const policy = (
   required_capability, timeout_seconds: 3600, max_retries,
 });
 const defaultConfig = (): AgentRemoteConfig => ({
-  schema_version: 7,
+  schema_version: 8,
   base: { tool: "opencode", executable: "opencode", no_proxy: "10.0.0.0/8", opencode_serve_port: null },
   model_pool: { global_concurrency: 4, models: [] },
-  threat_analysis: { enabled: true, model_policy: policy("high", 2) },
+  threat_analysis: {
+    enabled: true,
+    model_policy: { ...policy("high", 2), timeout_seconds: 7200 },
+  },
   vulnerability_mining: policy("high"),
   false_positive: policy("high"),
   vulnerability_validation: {

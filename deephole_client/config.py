@@ -111,7 +111,7 @@ class ThreatAnalysisConfig:
     enabled: bool = True
     model_policy: ModelTaskPolicyConfig = field(default_factory=lambda: ModelTaskPolicyConfig(
         required_capability="high",
-        timeout_seconds=3600,
+        timeout_seconds=7200,
         max_retries=2,
     ))
 
@@ -165,7 +165,7 @@ class VulnerabilityValidationConfig:
     concurrency: int = 1
     validation_max_retries: int = 0
     model_policy: ModelTaskPolicyConfig = field(default_factory=ModelTaskPolicyConfig)
-    # Legacy local-config input only. Web-managed v7 scans do not consult it.
+    # Legacy local-config input only. Web-managed v8 scans do not consult it.
     environments: dict[str, ValidationEnvironmentConfig] = field(default_factory=dict)
 
 
@@ -433,26 +433,58 @@ def _upgrade_managed_v7(remote: dict) -> dict:
     return migrated
 
 
+def _upgrade_managed_v8(
+    remote: dict,
+    *,
+    migrate_threat_timeout_default: bool = False,
+) -> dict:
+    """Raise the lightweight threat-analysis default without pinning later edits."""
+    migrated = copy.deepcopy(remote)
+    migrated["schema_version"] = 8
+    if migrate_threat_timeout_default:
+        threat = migrated.get("threat_analysis")
+        policy = threat.get("model_policy") if isinstance(threat, dict) else None
+        if (
+            isinstance(policy, dict)
+            and str(policy.get("timeout_seconds") or "").strip() == "3600"
+        ):
+            policy["timeout_seconds"] = 7200
+    return migrated
+
+
 def _upgrade_managed_remote(remote: dict) -> dict:
-    """Upgrade managed payloads to the Agent v7 contract."""
+    """Upgrade managed payloads to the Agent v8 contract."""
     remote = copy.deepcopy(remote)
     remote.pop("opencode_config", None)
     try:
         schema_version = int(remote.get("schema_version", 0) or 0)
     except (TypeError, ValueError):
         schema_version = 0
-    if schema_version >= 7:
+    if schema_version >= 8:
         migrated = remote
         migrated.pop("mining_engines", None)
-        return _upgrade_managed_v7(migrated)
+        return _upgrade_managed_v8(migrated)
+    if schema_version == 7:
+        migrated = remote
+        migrated.pop("mining_engines", None)
+        return _upgrade_managed_v8(
+            _upgrade_managed_v7(migrated),
+            migrate_threat_timeout_default=True,
+        )
     if schema_version == 6:
         migrated = remote
         migrated.pop("mining_engines", None)
-        return _upgrade_managed_v7(migrated)
+        return _upgrade_managed_v8(
+            _upgrade_managed_v7(migrated),
+            migrate_threat_timeout_default=True,
+        )
     if schema_version == 5:
         migrated = remote
         migrated.pop("mining_engines", None)
-        return _upgrade_managed_v7(_upgrade_managed_v6(migrated))
+        return _upgrade_managed_v8(
+            _upgrade_managed_v7(_upgrade_managed_v6(migrated)),
+            migrate_threat_timeout_default=True,
+        )
     if schema_version >= 4:
         migrated = remote
         migrated["schema_version"] = 5
@@ -460,7 +492,10 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         migrated.pop("product_info", None)
         migrated["vulnerability_validation"] = {}
         migrated.setdefault("checker_selection", {"disabled_checkers": []})
-        return _upgrade_managed_v7(_upgrade_managed_v6(migrated))
+        return _upgrade_managed_v8(
+            _upgrade_managed_v7(_upgrade_managed_v6(migrated)),
+            migrate_threat_timeout_default=True,
+        )
     if schema_version == 3:
         migrated = remote
         migrated["schema_version"] = 5
@@ -469,7 +504,10 @@ def _upgrade_managed_remote(remote: dict) -> dict:
         migrated.pop("product_info", None)
         migrated["vulnerability_validation"] = {}
         migrated.setdefault("checker_selection", {"disabled_checkers": []})
-        return _upgrade_managed_v7(_upgrade_managed_v6(migrated))
+        return _upgrade_managed_v8(
+            _upgrade_managed_v7(_upgrade_managed_v6(migrated)),
+            migrate_threat_timeout_default=True,
+        )
     if not (
         schema_version == 2
         or isinstance(remote.get("base"), dict)
@@ -513,7 +551,10 @@ def _upgrade_managed_remote(remote: dict) -> dict:
     migrated.pop("product_info", None)
     migrated["vulnerability_validation"] = {}
     migrated.setdefault("checker_selection", {"disabled_checkers": []})
-    return _upgrade_managed_v7(_upgrade_managed_v6(migrated))
+    return _upgrade_managed_v8(
+        _upgrade_managed_v7(_upgrade_managed_v6(migrated)),
+        migrate_threat_timeout_default=True,
+    )
 
 
 def _mcp_config(raw: object, default: McpConfig) -> McpConfig:
@@ -769,7 +810,7 @@ def remote_config_dict(config: AgentConfig) -> dict:
             seen_ids.add(model_id)
             seen_runtime_models.add(signature)
     return {
-        "schema_version": 7,
+        "schema_version": 8,
         "base": {
             "tool": "opencode",
             "executable": config.opencode.executable,
@@ -938,7 +979,7 @@ def load_config(path: Optional[Path] = None) -> AgentConfig:
 
 
 def save_config(config: AgentConfig) -> None:
-    """Persist v7 remotely-managed fields while preserving local bootstrap fields."""
+    """Persist v8 remotely-managed fields while preserving local bootstrap fields."""
     path = config.config_file
     if not path or not Path(path).is_file():
         return

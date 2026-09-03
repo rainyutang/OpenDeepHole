@@ -99,7 +99,7 @@ class ThreatAnalysisConfig(BaseModel):
     enabled: bool = True
     model_policy: ModelTaskPolicyConfig = ModelTaskPolicyConfig(
         required_capability="high",
-        timeout_seconds=3600,
+        timeout_seconds=7200,
         max_retries=2,
     )
 

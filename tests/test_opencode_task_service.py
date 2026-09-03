@@ -3124,7 +3124,7 @@ def test_threat_analysis_policy_defaults_apply_without_caller_timeout(tmp_path: 
         runtime_config.threat_analysis = SimpleNamespace(
             model_policy=SimpleNamespace(
                 required_capability="high",
-                timeout_seconds=3600,
+                timeout_seconds=7200,
                 max_retries=2,
             )
         )
@@ -3153,7 +3153,7 @@ def test_threat_analysis_policy_defaults_apply_without_caller_timeout(tmp_path: 
                 ))
 
         assert result.status == "timeout"
-        assert timeouts == [3600, 3600, 3600]
+        assert timeouts == [7200, 7200, 7200]
         assert acquire_mock.await_count == 3
         assert all(
             call.kwargs["required_capability"] == "high"

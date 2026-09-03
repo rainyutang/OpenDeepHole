@@ -344,7 +344,11 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertIn('server_url: "http://server.example"', agent_yaml)
         self.assertIn('owner_token: "owner-token"', agent_yaml)
         parsed = yaml.safe_load(agent_yaml)
-        self.assertEqual(parsed["schema_version"], 7)
+        self.assertEqual(parsed["schema_version"], 8)
+        self.assertEqual(
+            parsed["threat_analysis"]["model_policy"]["timeout_seconds"],
+            7200,
+        )
         self.assertEqual(
             parsed["checker_selection"]["quick"]["disabled_checkers"],
             ["sensitive_clear", "skill_only_project_audit"],

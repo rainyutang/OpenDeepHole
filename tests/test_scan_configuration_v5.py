@@ -85,7 +85,7 @@ def test_v4_migration_resets_only_old_validation_shape() -> None:
         },
     })
 
-    assert config.schema_version == 7
+    assert config.schema_version == 8
     assert config.vulnerability_mining.required_capability == "low"
     assert config.vulnerability_mining.timeout_seconds == 901
     assert config.vulnerability_mining.max_retries == 7

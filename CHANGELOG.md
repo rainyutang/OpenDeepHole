@@ -2,6 +2,7 @@
 
 ## 2026-09-03
 
+- **变更** OpenCode 轻量级威胁分析的默认模型调用超时从 1 小时调整为 2 小时；Agent 受管配置升级为 v8，v7 威胁分析策略中的旧默认值 `3600` 秒会一次性迁移为 `7200` 秒，其它自定义超时与漏洞挖掘、去误报、漏洞验证策略保持不变，升级后仍可手工改回 1 小时
 - **修复** 新建扫描使用 OpenCode 轻量级威胁分析时，模型任务现在会在调用 `run_opencode_task()` 前登记为扫描级计划任务，并沿用同一身份进入排队、运行和终态，首页及扫描详情不再在准备阶段显示空队列；前端按 execution revision 与更新时间单调合并首次 GET、SSE 和重连快照，避免较旧响应覆盖正在运行的任务。手动停止扫描改为按业务执行标识取消该扫描精确归属的 Task Agent 任务和 Session，Agent 在有 request ID 时回传停止确认，未确认状态会在界面提示且重连后继续补发停止；同步组件桥接取消不再遗留后台工作，迟到完成报告也不会把“用户手动停止”恢复为完成。模型池上报失败会限频记录关联信息并在恢复时记录恢复日志
 - **变更** Task Agent 在平台 Agent、standalone、模型列表和任务启动共用的最终 `opencode.json` 发布边界，为已有 `provider.*.models.*` 模型补全缺失的上下文限制：模型未显式写 `limit.context` 时统一补为 `131072`，并在同时缺少 `limit.output` 时补为 `32768`；已有 `limit.input`、`limit.output` 和显式 context 保持原值，也不会根据模型池反向创建 Provider 或模型。Serve 配置哈希使用相同补全结果，现有 `compaction.auto: true`、`prune: true`、`reserved: 20000` 自动压缩策略保持不变
 - **修复** OpenCode 轻量级威胁分析虽然在 Session 上声明了只读参考路径，但最终 Serve 权限只保留宿主可写根，导致 OpenCode 1.18.27 的主 Agent 无法读取 Agent 安装目录中的 `analysis-guidance.json`、攻击模式及三份 Schema：Task Agent 新增独立的宿主稳定只读根，完整 Agent 只把精确的 `codex_goal_threat_analysis` 方法目录写入 `read` 与 `external_directory`，继续拒绝该目录的 `edit`，并在旧受管配置缺失这些规则时自动刷新；现有 Session 窄化权限、扫描目录写权限和其它 Agent 目录边界保持不变

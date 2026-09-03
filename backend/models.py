@@ -1323,6 +1323,25 @@ def _upgrade_agent_v7_config(value: dict) -> dict:
     return migrated
 
 
+def _upgrade_agent_v8_config(
+    value: dict,
+    *,
+    migrate_threat_timeout_default: bool = False,
+) -> dict:
+    """Raise the lightweight threat-analysis default without pinning later edits."""
+    migrated = copy.deepcopy(value)
+    migrated["schema_version"] = 8
+    if migrate_threat_timeout_default:
+        threat = migrated.get("threat_analysis")
+        policy = threat.get("model_policy") if isinstance(threat, dict) else None
+        if (
+            isinstance(policy, dict)
+            and str(policy.get("timeout_seconds") or "").strip() == "3600"
+        ):
+            policy["timeout_seconds"] = 7200
+    return migrated
+
+
 class AgentMemoryApiDiscoveryConfig(BaseModel):
     enabled: bool = True
     batch_size: int = 8
@@ -1342,7 +1361,7 @@ class AgentThreatAnalysisConfig(BaseModel):
     enabled: bool = True
     model_policy: AgentModelTaskPolicy = AgentModelTaskPolicy(
         required_capability="high",
-        timeout_seconds=3600,
+        timeout_seconds=7200,
         max_retries=2,
     )
 
@@ -1354,7 +1373,7 @@ class AgentPatternFilterConfig(BaseModel):
 
 class AgentRemoteConfig(BaseModel):
     """Agent configuration managed from the server Web UI."""
-    schema_version: Literal[7] = 7
+    schema_version: Literal[8] = 8
     base: AgentBaseConfig = AgentBaseConfig()
     model_pool: AgentModelPoolConfig = AgentModelPoolConfig()
     threat_analysis: AgentThreatAnalysisConfig = AgentThreatAnalysisConfig()
@@ -1388,7 +1407,7 @@ class AgentRemoteConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _upgrade_legacy(cls, value):
-        """Accept older/transient Agent payloads and emit the v7 contract."""
+        """Accept older/transient Agent payloads and emit the v8 contract."""
         if not isinstance(value, dict):
             return value
         if not value:
@@ -1401,39 +1420,61 @@ class AgentRemoteConfig(BaseModel):
             schema_version = int(value.get("schema_version", 0) or 0)
         except (TypeError, ValueError):
             schema_version = 0
-        if schema_version >= 7:
+        if schema_version >= 8:
             migrated = value
             migrated.pop("mining_engines", None)
-            return _upgrade_agent_v7_config(migrated)
+            return _upgrade_agent_v8_config(migrated)
+        if schema_version == 7:
+            migrated = value
+            migrated.pop("mining_engines", None)
+            return _upgrade_agent_v8_config(
+                _upgrade_agent_v7_config(migrated),
+                migrate_threat_timeout_default=True,
+            )
         if schema_version == 6:
             migrated = value
             migrated.pop("mining_engines", None)
-            return _upgrade_agent_v7_config(migrated)
+            return _upgrade_agent_v8_config(
+                _upgrade_agent_v7_config(migrated),
+                migrate_threat_timeout_default=True,
+            )
         if schema_version == 5:
             migrated = value
             migrated.pop("mining_engines", None)
-            return _upgrade_agent_v7_config(_upgrade_agent_v6_config(migrated))
+            return _upgrade_agent_v8_config(
+                _upgrade_agent_v7_config(_upgrade_agent_v6_config(migrated)),
+                migrate_threat_timeout_default=True,
+            )
         if schema_version >= 4:
-            return _upgrade_agent_v7_config(
-                _upgrade_agent_v6_config(
-                    _upgrade_agent_v3_or_v4_config(
-                        value,
-                        drop_code_graph=False,
+            return _upgrade_agent_v8_config(
+                _upgrade_agent_v7_config(
+                    _upgrade_agent_v6_config(
+                        _upgrade_agent_v3_or_v4_config(
+                            value,
+                            drop_code_graph=False,
+                        )
                     )
-                )
+                ),
+                migrate_threat_timeout_default=True,
             )
         if schema_version == 3:
-            return _upgrade_agent_v7_config(
-                _upgrade_agent_v6_config(
-                    _upgrade_agent_v3_or_v4_config(
-                        value,
-                        drop_code_graph=True,
+            return _upgrade_agent_v8_config(
+                _upgrade_agent_v7_config(
+                    _upgrade_agent_v6_config(
+                        _upgrade_agent_v3_or_v4_config(
+                            value,
+                            drop_code_graph=True,
+                        )
                     )
-                )
+                ),
+                migrate_threat_timeout_default=True,
             )
         if schema_version == 2 or "base" in value or "model_pool" in value:
-            return _upgrade_agent_v7_config(
-                _upgrade_agent_v6_config(_upgrade_agent_v2_config(value))
+            return _upgrade_agent_v8_config(
+                _upgrade_agent_v7_config(
+                    _upgrade_agent_v6_config(_upgrade_agent_v2_config(value))
+                ),
+                migrate_threat_timeout_default=True,
             )
         legacy = dict(value)
         opencode = legacy.get("opencode") if isinstance(legacy.get("opencode"), dict) else {}
@@ -1508,8 +1549,11 @@ class AgentRemoteConfig(BaseModel):
             "vulnerability_validation": {},
             "checker_selection": {"disabled_checkers": []},
         }
-        return _upgrade_agent_v7_config(
-            _upgrade_agent_v6_config(_upgrade_agent_v2_config(migrated))
+        return _upgrade_agent_v8_config(
+            _upgrade_agent_v7_config(
+                _upgrade_agent_v6_config(_upgrade_agent_v2_config(migrated))
+            ),
+            migrate_threat_timeout_default=True,
         )
 
     @property
