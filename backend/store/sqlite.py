@@ -918,6 +918,21 @@ CREATE TABLE IF NOT EXISTS agent_opencode_token_usage (
 
 CREATE INDEX IF NOT EXISTS idx_agent_opencode_token_usage
 ON agent_opencode_token_usage(agent_key, user_id);
+
+CREATE TABLE IF NOT EXISTS opencode_task_reports (
+    sequence         INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_key        TEXT NOT NULL REFERENCES agents(agent_key) ON DELETE CASCADE,
+    scan_id          TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+    agent_session_id TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    revision         INTEGER NOT NULL DEFAULT 1,
+    task_json        TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    UNIQUE(agent_key, scan_id, task_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS idx_opencode_task_reports_scan
+ON opencode_task_reports(scan_id, sequence);
 """
 
 
@@ -2555,6 +2570,139 @@ class SqliteScanStore(ScanStoreBase):
             (scan_id,),
         )
         return _token_usage_from_rows(cur.fetchall())
+
+    def upsert_opencode_task_report(
+        self,
+        *,
+        agent_key: str,
+        scan_id: str,
+        agent_session_id: str,
+        task_id: str,
+        revision: int,
+        task: dict,
+    ) -> bool:
+        """Insert one immutable terminal task report; return False for a duplicate."""
+        serialized = json.dumps(
+            task,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._lock:
+            existing = self._conn.execute(
+                """
+                SELECT task_json FROM opencode_task_reports
+                WHERE agent_key = ? AND scan_id = ? AND task_id = ? AND revision = ?
+                """,
+                (agent_key, scan_id, task_id, max(1, int(revision))),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["task_json"]) != serialized:
+                    raise ValueError("OpenCode task report idempotency conflict")
+                return False
+            self._conn.execute(
+                """
+                INSERT INTO opencode_task_reports (
+                    agent_key, scan_id, agent_session_id, task_id, revision,
+                    task_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    agent_key,
+                    scan_id,
+                    agent_session_id,
+                    task_id,
+                    max(1, int(revision)),
+                    serialized,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
+        return True
+
+    def list_opencode_task_reports(self, scan_id: str) -> list[dict]:
+        cur = self._conn.execute(
+            """
+            SELECT task_json FROM opencode_task_reports
+            WHERE scan_id = ? ORDER BY sequence
+            """,
+            (scan_id,),
+        )
+        reports: list[dict] = []
+        for row in cur.fetchall():
+            try:
+                value = json.loads(row["task_json"] or "{}")
+            except Exception:
+                continue
+            if isinstance(value, dict):
+                reports.append(value)
+        return reports
+
+    def get_vulnerability_indexes_by_source_task(
+        self,
+        scan_id: str,
+        task_id: str,
+    ) -> list[int]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT idx FROM vulnerabilities
+                WHERE scan_id = ? AND source_task_id = ?
+                ORDER BY idx
+                """,
+                (scan_id, task_id),
+            ).fetchall()
+        return [int(row["idx"]) for row in rows]
+
+    def link_threat_audit_task_vulnerability(
+        self,
+        scan_id: str,
+        task_id: str,
+        vulnerability_idx: int,
+    ) -> bool:
+        """Append a task/result link once, regardless of report arrival order."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT result_vuln_indexes FROM threat_audit_tasks
+                WHERE scan_id = ? AND task_id = ?
+                """,
+                (scan_id, task_id),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                raw_indexes = json.loads(row["result_vuln_indexes"] or "[]")
+            except Exception:
+                raw_indexes = []
+            indexes = []
+            for value in raw_indexes if isinstance(raw_indexes, list) else []:
+                try:
+                    index = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if index not in indexes:
+                    indexes.append(index)
+            normalized_index = int(vulnerability_idx)
+            if normalized_index in indexes:
+                return False
+            indexes.append(normalized_index)
+            indexes.sort()
+            self._conn.execute(
+                """
+                UPDATE threat_audit_tasks
+                SET result_vuln_indexes = ?, updated_at = ?
+                WHERE scan_id = ? AND task_id = ?
+                """,
+                (
+                    json.dumps(indexes, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat(),
+                    scan_id,
+                    task_id,
+                ),
+            )
+            self._conn.commit()
+        return True
 
     def upsert_agent_opencode_token_usage(
         self,

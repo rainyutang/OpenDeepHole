@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
+from pathlib import Path
 from uuid import uuid4
 from typing import Awaitable, Callable, Optional
 
 import httpx
+
+from deephole_client.report_outbox import PendingReport, ReportOutbox
 
 from backend.models import (
     Candidate,
@@ -73,14 +77,31 @@ def _response_context(response: httpx.Response) -> str:
 class Reporter:
     """Sends scan events and final results to the web server via HTTP."""
 
-    def __init__(self, server_url: str, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        server_url: str,
+        dry_run: bool = False,
+        *,
+        outbox_path: Path | str | None = None,
+    ) -> None:
         self.server_url = server_url.rstrip("/")
         self.dry_run = dry_run
         self.agent_id = ""
         self.agent_name = ""
         self.agent_session_id = uuid4().hex
         self.protocol_version = 1
+        self.capabilities: dict[str, bool] = {}
         self._client = httpx.AsyncClient(timeout=30.0)
+        self._outbox = (
+            ReportOutbox(outbox_path)
+            if outbox_path is not None and not dry_run
+            else None
+        )
+        self._outbox_task: asyncio.Task | None = None
+        self._outbox_stop = asyncio.Event()
+        self._outbox_wakeup = asyncio.Event()
+        self._outbox_loop: asyncio.AbstractEventLoop | None = None
+        self._model_pool_sink_bound = False
         self._static_progress_warning_at: dict[str, float] = {}
         self._batch_lock = asyncio.Lock()
         self._event_buffers: dict[str, list[ScanEvent]] = {}
@@ -100,12 +121,193 @@ class Reporter:
 
     def set_agent_id(self, agent_id: str) -> None:
         self.agent_id = agent_id
+        self._wake_outbox()
 
     def set_agent_name(self, agent_name: str) -> None:
         self.agent_name = agent_name
 
     def set_protocol_version(self, version: int) -> None:
         self.protocol_version = 2 if int(version or 1) >= 2 else 1
+
+    def set_capabilities(self, capabilities: object) -> None:
+        self.capabilities = {
+            str(key): value is True
+            for key, value in capabilities.items()
+        } if isinstance(capabilities, dict) else {}
+        if self.capabilities.get("incremental_opencode_task_reports"):
+            self.bind_model_pool_reporting()
+        else:
+            self._unbind_model_pool_reporting()
+        self._wake_outbox()
+
+    def start_outbox_worker(self) -> None:
+        if self._outbox is None or self._outbox_task is not None:
+            return
+        self._outbox_loop = asyncio.get_running_loop()
+        self._outbox_task = asyncio.create_task(self._run_outbox_worker())
+
+    def bind_model_pool_reporting(self) -> None:
+        if self._outbox is None or self._model_pool_sink_bound:
+            return
+        from task_agent.model_pool import set_completed_task_sink
+
+        set_completed_task_sink(self._capture_opencode_task_report)
+        self._model_pool_sink_bound = True
+
+    def _unbind_model_pool_reporting(self) -> None:
+        if not self._model_pool_sink_bound:
+            return
+        from task_agent.model_pool import set_completed_task_sink
+
+        set_completed_task_sink(None)
+        self._model_pool_sink_bound = False
+
+    def _capture_opencode_task_report(self, task: dict) -> None:
+        if self._outbox is None:
+            raise RuntimeError("OpenCode task reporting requires a durable outbox")
+        scope_id = str(task.get("scope_id") or "").strip()
+        task_id = str(task.get("task_id") or "").strip()
+        revision = max(1, int(task.get("revision") or 1))
+        if not scope_id or not task_id:
+            raise ValueError("OpenCode task report requires scope_id and task_id")
+        self._outbox.enqueue(
+            target_url=self.server_url,
+            stream_key=f"scan:{scope_id}",
+            dedupe_key=(
+                f"scan:{scope_id}:opencode-task:{task_id}:revision:{revision}"
+            ),
+            path="/api/agent/{agent_id}/opencode-task-report",
+            payload={
+                "agent_session_id": self.agent_session_id,
+                "scope_id": scope_id,
+                "task_id": task_id,
+                "revision": revision,
+                "task": task,
+            },
+            timeout_seconds=30.0,
+        )
+        self._wake_outbox()
+
+    def _wake_outbox(self) -> None:
+        loop = self._outbox_loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._outbox_wakeup.set)
+
+    @staticmethod
+    def _report_hash(value: object) -> str:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def _queue_post(
+        self,
+        *,
+        stream_key: str,
+        dedupe_key: str,
+        path: str,
+        payload: dict,
+        query: dict[str, str] | None = None,
+        timeout: float = 30.0,
+    ) -> httpx.Response | None:
+        if self._outbox is None:
+            response = await self._client.post(
+                f"{self.server_url}{path}",
+                json=payload,
+                params=query,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return response
+        report = self._outbox.enqueue(
+            target_url=self.server_url,
+            stream_key=stream_key,
+            dedupe_key=dedupe_key,
+            path=path,
+            payload=payload,
+            query=query,
+            timeout_seconds=timeout,
+        )
+        self._wake_outbox()
+        if not self._outbox.claim(report):
+            return None
+        return await self._deliver_outbox_report(report)
+
+    @staticmethod
+    def _retryable_response(response: httpx.Response) -> bool:
+        if response.status_code in {408, 425, 429} or response.status_code >= 500:
+            return True
+        if response.status_code != 404:
+            return False
+        detail = _response_detail(response)
+        if isinstance(detail, dict):
+            return str(detail.get("code") or "") in {
+                "scan_not_found",
+                "candidate_not_found",
+                "fp_review_not_found",
+                "agent_not_found",
+            }
+        return False
+
+    async def _deliver_outbox_report(
+        self,
+        report: PendingReport,
+    ) -> httpx.Response | None:
+        if self._outbox is None:
+            return None
+        if "{agent_id}" in report.path and not self.agent_id:
+            self._outbox.defer(report, "Agent is not connected", retry_after=2.0)
+            return None
+        path = report.path.replace("{agent_id}", self.agent_id)
+        try:
+            response = await self._client.post(
+                f"{report.target_url}{path}",
+                json=report.payload,
+                params=report.query or None,
+                timeout=report.timeout_seconds,
+            )
+            if 200 <= response.status_code < 300:
+                self._outbox.acknowledge(report)
+                return response
+            error = f"HTTP {response.status_code}: {(response.text or '')[:500]}"
+            if self._retryable_response(response):
+                delay = min(60.0, 2.0 ** min(report.attempts, 6))
+                self._outbox.defer(report, error, retry_after=delay)
+            else:
+                self._outbox.block(report, error)
+                print(
+                    "Warning: authoritative report is blocked in local outbox "
+                    f"key={report.dedupe_key} {error}",
+                    flush=True,
+                )
+            return None
+        except Exception as exc:
+            delay = min(60.0, 2.0 ** min(report.attempts, 6))
+            self._outbox.defer(
+                report,
+                f"{type(exc).__name__}: {exc}",
+                retry_after=delay,
+            )
+            return None
+
+    async def _run_outbox_worker(self) -> None:
+        assert self._outbox is not None
+        while not self._outbox_stop.is_set():
+            ready = self._outbox.claim_ready(self.server_url, limit=16)
+            if ready:
+                await asyncio.gather(*(
+                    self._deliver_outbox_report(report)
+                    for report in ready
+                ))
+                continue
+            self._outbox_wakeup.clear()
+            try:
+                await asyncio.wait_for(self._outbox_wakeup.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
 
     def _with_agent_source(self, source: OutputSource | None) -> OutputSource:
         next_source = source.model_copy() if source is not None else OutputSource()
@@ -151,6 +353,38 @@ class Reporter:
         """Push the final static-analysis candidate list for the scan."""
         if self.dry_run:
             print(f"  [CANDIDATES] {len(candidates)} static candidate(s)")
+            return
+        if self._outbox is not None:
+            if self.protocol_version >= 2:
+                chunks = [
+                    candidates[index:index + AGENT_BATCH_SIZE]
+                    for index in range(0, len(candidates), AGENT_BATCH_SIZE)
+                ] or [[]]
+                for chunk_index, chunk in enumerate(chunks):
+                    offset = chunk_index * AGENT_BATCH_SIZE
+                    await self._queue_post(
+                        stream_key=f"scan:{scan_id}",
+                        dedupe_key=f"scan:{scan_id}:candidates:{offset}",
+                        path=f"/api/agent/v2/scan/{scan_id}/candidates",
+                        payload={
+                            "offset": offset,
+                            "candidates": [candidate.model_dump() for candidate in chunk],
+                            "reset": chunk_index == 0,
+                            "final": chunk_index == len(chunks) - 1,
+                            "total": len(candidates),
+                        },
+                        timeout=30.0,
+                    )
+            else:
+                await self._queue_post(
+                    stream_key=f"scan:{scan_id}",
+                    dedupe_key=f"scan:{scan_id}:candidates:final",
+                    path=f"/api/agent/scan/{scan_id}/candidates",
+                    payload={
+                        "candidates": [candidate.model_dump() for candidate in candidates],
+                    },
+                    timeout=30.0,
+                )
             return
         if self.protocol_version >= 2:
             chunks = [
@@ -218,6 +452,38 @@ class Reporter:
             print(f"  {marker} {vuln.vuln_type.upper()} {vuln.file}:{vuln.line} ({vuln.function})")
             return None
         vuln.output_source = self._with_agent_source(vuln.output_source)
+        if self._outbox is not None:
+            identity = (
+                f"audit-{vuln.audit_index}"
+                if vuln.audit_index is not None
+                else self._report_hash({
+                    "source_task_id": vuln.source_task_id,
+                    "engine_id": vuln.engine_id,
+                    "file": vuln.file,
+                    "line": vuln.line,
+                    "function": vuln.function,
+                    "vuln_type": vuln.vuln_type,
+                    "vulnerability_report": vuln.vulnerability_report,
+                })
+            )
+            response = await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=(
+                    f"scan:{scan_id}:vulnerability:{report_batch_id or 'final'}:{identity}"
+                ),
+                path=f"/api/agent/scan/{scan_id}/vulnerability",
+                payload=vuln.model_dump(),
+                query=(
+                    {"provisional": "true", "report_batch_id": report_batch_id}
+                    if provisional
+                    else None
+                ),
+                timeout=10.0,
+            )
+            if response is None:
+                return None
+            value = response.json()
+            return value if isinstance(value, dict) else None
         try:
             if provisional:
                 resp = await self._client.post(
@@ -279,6 +545,30 @@ class Reporter:
             "completed_candidates": completed_candidates,
             "total_candidates": total_candidates,
         }
+        if self._outbox is not None and state in {"success", "failed"}:
+            response = await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:candidate-audit:{candidate_idx}",
+                path=f"/api/agent/scan/{scan_id}/candidate-audit",
+                payload=payload,
+                timeout=10.0,
+            )
+            if response is None:
+                return None
+            value = response.json()
+            return value if isinstance(value, dict) else None
+        if self._outbox is not None:
+            try:
+                response = await self._client.post(
+                    f"{self.server_url}/api/agent/scan/{scan_id}/candidate-audit",
+                    json=payload,
+                    timeout=10.0,
+                )
+                response.raise_for_status()
+                value = response.json()
+                return value if isinstance(value, dict) else None
+            except Exception:
+                return None
         for attempt in range(3):
             try:
                 response = await self._client.post(
@@ -318,6 +608,21 @@ class Reporter:
             "report_batch_ids": report_batch_ids,
             "vulnerabilities": [vuln.model_dump() for vuln in vulnerabilities],
         }
+        if self._outbox is not None:
+            response = await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=(
+                    f"scan:{scan_id}:vulnerability-reconcile:"
+                    f"{self._report_hash(sorted(report_batch_ids))}"
+                ),
+                path=f"/api/agent/scan/{scan_id}/vulnerabilities/reconcile",
+                payload=payload,
+                timeout=60.0,
+            )
+            if response is None:
+                return None
+            value = response.json()
+            return value if isinstance(value, dict) else None
         for attempt in range(3):
             try:
                 response = await self._client.post(
@@ -389,6 +694,19 @@ class Reporter:
         payload: dict,
         label: str,
     ) -> None:
+        status = str(payload.get("status") or "").lower()
+        if self._outbox is not None and status in (
+            THREAT_ANALYSIS_TERMINAL_STATUSES | MINING_ENGINE_TERMINAL_STATUSES
+        ):
+            resource = str(payload.get("engine_id") or label)
+            await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:{label}:{resource}",
+                path=endpoint,
+                payload=payload,
+                timeout=10.0,
+            )
+            return
         target = f"{self.server_url}{endpoint}"
         attempts = len(STAGE_RUN_RETRY_DELAYS) + 1
         for attempt in range(attempts):
@@ -442,10 +760,22 @@ class Reporter:
         """Push local validation script progress/results."""
         if self.dry_run:
             return
+        payload = validation.model_dump(exclude={"scan_id"})
+        if self._outbox is not None and validation.status in {
+            "verified", "failed", "error", "timeout", "skipped", "cancelled"
+        }:
+            await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:validation:{validation.vuln_index}",
+                path=f"/api/agent/scan/{scan_id}/validation",
+                payload=payload,
+                timeout=10.0,
+            )
+            return
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/validation",
-                json=validation.model_dump(exclude={"scan_id"}),
+                json=payload,
                 timeout=10.0,
             )
         except Exception as e:
@@ -456,14 +786,23 @@ class Reporter:
         if self.dry_run:
             print(f"  [REPORT] {checker_name}: {len(reports)} markdown report(s)")
             return
+        payload_reports = []
+        for report in reports:
+            item = dict(report)
+            raw_source = item.get("output_source")
+            source = raw_source if isinstance(raw_source, OutputSource) else OutputSource(**raw_source) if isinstance(raw_source, dict) else OutputSource()
+            item["output_source"] = self._with_agent_source(source).model_dump()
+            payload_reports.append(item)
+        if self._outbox is not None:
+            await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:skill-report:{checker_name}",
+                path=f"/api/agent/scan/{scan_id}/skill-report",
+                payload={"checker_name": checker_name, "reports": payload_reports},
+                timeout=30.0,
+            )
+            return
         try:
-            payload_reports = []
-            for report in reports:
-                item = dict(report)
-                raw_source = item.get("output_source")
-                source = raw_source if isinstance(raw_source, OutputSource) else OutputSource(**raw_source) if isinstance(raw_source, dict) else OutputSource()
-                item["output_source"] = self._with_agent_source(source).model_dump()
-                payload_reports.append(item)
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/skill-report",
                 json={"checker_name": checker_name, "reports": payload_reports},
@@ -479,6 +818,15 @@ class Reporter:
             print(
                 "  [THREAT] "
                 f"{len(artifacts) if isinstance(artifacts, dict) else 0} artifact(s)"
+            )
+            return
+        if self._outbox is not None:
+            await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:threat-analysis:result",
+                path=f"/api/agent/scan/{scan_id}/threat-analysis",
+                payload=analysis,
+                timeout=30.0,
             )
             return
         try:
@@ -517,6 +865,26 @@ class Reporter:
             )
             return task
         task.output_source = self._with_agent_source(task.output_source)
+        if self._outbox is not None and task.status in {
+            "completed",
+            "failed",
+            "timeout",
+            "no_result",
+            "cancelled",
+            "superseded",
+        }:
+            response = await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:threat-audit-task:{task.task_id}",
+                path=f"/api/agent/scan/{scan_id}/threat-audit-task",
+                payload=task.model_dump(),
+                timeout=10.0,
+            )
+            if response is None:
+                return None
+            data = response.json()
+            value = data.get("task") if isinstance(data, dict) else None
+            return ThreatAuditTask(**value) if isinstance(value, dict) else None
         try:
             resp = await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/threat-audit-task",
@@ -714,6 +1082,13 @@ class Reporter:
             "error_message": error_message,
             "replace_report_batch_ids": list(replace_report_batch_ids or []),
         }
+        if self._model_pool_sink_bound:
+            from task_agent.model_pool import model_pool_snapshot
+
+            final_pool = dict(model_pool_snapshot(scan_id))
+            final_pool["agent_session_id"] = self.agent_session_id
+            final_pool["completed_tasks"] = []
+            payload["opencode_pool"] = final_pool
         threat_analysis_run = self._threat_analysis_run_snapshots.get(scan_id)
         if (
             threat_analysis_run is not None
@@ -753,6 +1128,19 @@ class Reporter:
             finish_path = f"/api/agent/v2/scan/{scan_id}/finish"
         else:
             finish_path = f"/api/agent/scan/{scan_id}/finish"
+        if self._outbox is not None:
+            await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:finish",
+                path=finish_path,
+                payload=payload,
+                timeout=60.0,
+            )
+            async with self._batch_lock:
+                self._undelivered_vulnerabilities.pop(scan_id, None)
+            self._threat_analysis_run_snapshots.pop(scan_id, None)
+            self._mining_engine_run_snapshots.pop(scan_id, None)
+            return
         for attempt in range(3):
             try:
                 resp = await self._client.post(
@@ -1013,6 +1401,8 @@ class Reporter:
             return True
         payload = dict(snapshot)
         payload["agent_session_id"] = self.agent_session_id
+        if self._model_pool_sink_bound:
+            payload.pop("completed_tasks", None)
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/opencode-pool",
@@ -1047,6 +1437,8 @@ class Reporter:
             return True
         payload = dict(snapshot)
         payload["agent_session_id"] = self.agent_session_id
+        if self._model_pool_sink_bound:
+            payload.pop("completed_tasks", None)
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/{self.agent_id}/opencode-pool",
@@ -1192,6 +1584,15 @@ class Reporter:
         if self.dry_run:
             print(f"  [git_history] {len(patterns)} pattern(s) mined")
             return
+        if self._outbox is not None:
+            await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:git-history",
+                path=f"/api/agent/scan/{scan_id}/git_history",
+                payload={"patterns": [p.model_dump() for p in patterns]},
+                timeout=30.0,
+            )
+            return
         try:
             await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/git_history",
@@ -1255,22 +1656,32 @@ class Reporter:
             key: self._with_agent_source(value).model_dump()
             for key, value in (stage_output_sources or {}).items()
         }
+        payload = {
+            "review_id": review_id,
+            "vuln_index": vuln_index,
+            "verdict": verdict,
+            "severity": severity,
+            "reason": reason,
+            "vulnerability_report": vulnerability_report,
+            "stage_outputs": stage_outputs or {},
+            "match_reference": match_reference,
+            "match_type": match_type,
+            "stage_output_sources": result_stage_sources,
+            "output_source": result_source.model_dump(),
+        }
+        if self._outbox is not None:
+            await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:fp:{review_id}:result:{vuln_index}",
+                path=f"/api/scan/{scan_id}/fp_review/result",
+                payload=payload,
+                timeout=10.0,
+            )
+            return
         try:
             await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/result",
-                json={
-                    "review_id": review_id,
-                    "vuln_index": vuln_index,
-                    "verdict": verdict,
-                    "severity": severity,
-                    "reason": reason,
-                    "vulnerability_report": vulnerability_report,
-                    "stage_outputs": stage_outputs or {},
-                    "match_reference": match_reference,
-                    "match_type": match_type,
-                    "stage_output_sources": result_stage_sources,
-                    "output_source": result_source.model_dump(),
-                },
+                json=payload,
                 timeout=10.0,
             )
         except Exception as e:
@@ -1290,16 +1701,28 @@ class Reporter:
             print(f"  [fp_review] [{stage}] vuln[{vuln_index}] markdown ready ({len(markdown)} chars)")
             return
         source = self._with_agent_source(output_source)
+        payload = {
+            "review_id": review_id,
+            "vuln_index": vuln_index,
+            "stage": stage,
+            "markdown": markdown,
+            "output_source": source.model_dump(),
+        }
+        if self._outbox is not None:
+            await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=(
+                    f"scan:{scan_id}:fp:{review_id}:stage:{vuln_index}:{stage}"
+                ),
+                path=f"/api/scan/{scan_id}/fp_review/stage-output",
+                payload=payload,
+                timeout=10.0,
+            )
+            return
         try:
             await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/stage-output",
-                json={
-                    "review_id": review_id,
-                    "vuln_index": vuln_index,
-                    "stage": stage,
-                    "markdown": markdown,
-                    "output_source": source.model_dump(),
-                },
+                json=payload,
                 timeout=10.0,
             )
         except Exception as e:
@@ -1345,20 +1768,36 @@ class Reporter:
         if self.dry_run:
             print(f"  [fp_review] Finished with status: {status}")
             return
+        payload = {
+            "review_id": review_id,
+            "status": status,
+            "error_message": error_message,
+        }
+        if self._outbox is not None:
+            await self._queue_post(
+                stream_key=f"scan:{scan_id}",
+                dedupe_key=f"scan:{scan_id}:fp:{review_id}:finish",
+                path=f"/api/scan/{scan_id}/fp_review/finish",
+                payload=payload,
+                timeout=10.0,
+            )
+            return
         try:
             await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/finish",
-                json={
-                    "review_id": review_id,
-                    "status": status,
-                    "error_message": error_message,
-                },
+                json=payload,
                 timeout=10.0,
             )
         except Exception as e:
             print(f"Warning: failed to signal FP review finish: {e}")
 
     async def close(self) -> None:
+        self._unbind_model_pool_reporting()
+        self._outbox_stop.set()
+        self._outbox_wakeup.set()
+        if self._outbox_task is not None:
+            self._outbox_task.cancel()
+            await asyncio.gather(self._outbox_task, return_exceptions=True)
         tasks = [
             *self._event_flush_tasks.values(),
             *self._processed_flush_tasks.values(),
@@ -1369,3 +1808,5 @@ class Reporter:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._client.aclose()
+        if self._outbox is not None:
+            self._outbox.close()

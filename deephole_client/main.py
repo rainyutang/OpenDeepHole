@@ -459,6 +459,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "protocol_versions": [2, 1],
                     "capabilities": {
                         "final_vulnerability_callbacks": True,
+                        "incremental_opencode_task_reports": True,
                     },
                     "name": name,
                     "machine_name": socket.gethostname(),
@@ -485,6 +486,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                 agent_server._agent_id = agent_id
                 reporter.set_agent_id(agent_id)
                 reporter.set_protocol_version(int(welcome.get("protocol_version") or 1))
+                reporter.set_capabilities(welcome.get("capabilities"))
 
                 if welcome.get("config"):
                     from deephole_client.config import save_config
@@ -640,11 +642,13 @@ async def _main() -> None:
     print()
 
     from deephole_client.reporter import Reporter
+    from deephole_client.report_outbox import DEFAULT_OUTBOX_PATH
     from deephole_client.task_manager import TaskManager
     import deephole_client.server as agent_server
 
-    reporter = Reporter(config.server_url)
+    reporter = Reporter(config.server_url, outbox_path=DEFAULT_OUTBOX_PATH)
     reporter.set_agent_name(name)
+    reporter.start_outbox_worker()
     task_manager = TaskManager()
 
     # Inject runtime globals into the deephole_client.server coordinator.

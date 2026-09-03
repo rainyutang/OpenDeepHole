@@ -695,6 +695,31 @@ class OpenCodePoolStatus(BaseModel):
     updated_at: str = ""
 
 
+class OpenCodeTaskReport(BaseModel):
+    """One terminal logical task report uploaded independently from pool snapshots."""
+
+    agent_session_id: str = ""
+    scope_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1)
+    revision: int = Field(default=1, ge=1)
+    task: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _validate_task_identity(self):
+        task_scope = str(self.task.get("scope_id") or "")
+        task_id = str(self.task.get("task_id") or "")
+        task_revision = max(1, int(self.task.get("revision") or 1))
+        if task_scope != self.scope_id or task_id != self.task_id:
+            raise ValueError("OpenCode task report identity does not match task payload")
+        if task_revision != self.revision:
+            raise ValueError("OpenCode task report revision does not match task payload")
+        if str(self.task.get("outcome") or "") not in {
+            "success", "failure", "timeout", "cancelled", "unknown"
+        }:
+            raise ValueError("OpenCode task report requires a terminal outcome")
+        return self
+
+
 class AgentOpenCodePoolStatus(OpenCodePoolStatus):
     agent_id: str = ""
     online: bool = False
@@ -851,6 +876,7 @@ class AgentScanFinish(BaseModel):
     replace_report_batch_ids: list[str] = Field(default_factory=list)
     threat_analysis_run: ThreatAnalysisRunStatus | None = None
     mining_engine_runs: list[MiningEngineRunStatus] = Field(default_factory=list)
+    opencode_pool: OpenCodePoolStatus | None = None
 
 
 class AgentVulnerabilityReconcile(BaseModel):
@@ -918,6 +944,7 @@ class AgentScanFinishV2(BaseModel):
     error_message: str | None = None
     threat_analysis_run: ThreatAnalysisRunStatus | None = None
     mining_engine_runs: list[MiningEngineRunStatus] = Field(default_factory=list)
+    opencode_pool: OpenCodePoolStatus | None = None
 
 
 class AgentVulnerabilityValidationUpdate(BaseModel):

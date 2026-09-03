@@ -4506,7 +4506,14 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
     store = get_scan_store()
     job = await run_store_call(store, "get_fp_review_job", body.review_id)
     if job is None or job.scan_id != scan_id:
-        raise HTTPException(status_code=404, detail="FP review not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "fp_review_not_found",
+                "scan_id": scan_id,
+                "review_id": body.review_id,
+            },
+        )
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
     # Progress is authoritative for a non-cancelled task. This also closes the
@@ -4546,7 +4553,14 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
     store = get_scan_store()
     job = await run_store_call(store, "get_fp_review_job", body.review_id)
     if job is None or job.scan_id != scan_id:
-        raise HTTPException(status_code=404, detail="FP review not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "fp_review_not_found",
+                "scan_id": scan_id,
+                "review_id": body.review_id,
+            },
+        )
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
     if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
@@ -4604,7 +4618,14 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
     store = get_scan_store()
     job = await run_store_call(store, "get_fp_review_job", body.review_id)
     if job is None or job.scan_id != scan_id:
-        raise HTTPException(status_code=404, detail="FP review not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "fp_review_not_found",
+                "scan_id": scan_id,
+                "review_id": body.review_id,
+            },
+        )
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
     if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:

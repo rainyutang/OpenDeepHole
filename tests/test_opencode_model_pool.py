@@ -41,6 +41,8 @@ def _reset_model_pool():
     model_pool_module._global_updated_at = ""
     model_pool_module._active_tasks.clear()
     model_pool_module._completed_tasks_by_scope.clear()
+    model_pool_module._completed_task_count_by_scope.clear()
+    model_pool_module._completed_task_sink = None
     model_pool_module._token_usage_by_scope.clear()
     model_pool_module._global_token_usage = None
     model_pool_module._peak_total_tasks_by_scope.clear()
@@ -1951,3 +1953,62 @@ def test_intermediate_attempt_records_stats_without_terminal_completion() -> Non
         assert snapshot["completed_tasks"] == []
 
     asyncio.run(run())
+
+
+def test_completed_task_sink_receives_history_once_and_snapshot_stays_bounded() -> None:
+    async def run() -> None:
+        captured: list[dict] = []
+        model_pool_module.set_completed_task_sink(captured.append)
+        cfg = SimpleNamespace(models=[{
+            "id": "primary",
+            "model": "provider/primary",
+            "max_concurrency": 1,
+        }])
+        lease = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            stats_scope_id="scan-incremental",
+            task_id="logical-task",
+            task_context={"task_type": "candidate_audit"},
+        )
+        await update_model_lease_context(lease, {
+            "serve_session_id": "ses-1",
+            "session_events": [{
+                "sequence": 1,
+                "phase": "business",
+                "session_id": "ses-1",
+                "outcome": "success",
+            }],
+        })
+        await release_model_lease(lease, outcome="success", duration_seconds=1.0)
+
+        snapshot = model_pool_snapshot("scan-incremental")
+        assert snapshot["completed_task_count"] == 1
+        assert snapshot["completed_tasks"] == []
+        assert len(captured) == 1
+        assert captured[0]["task_id"] == "logical-task"
+        assert captured[0]["serve_session_id"] == "ses-1"
+        assert captured[0]["session_events"][0]["session_id"] == "ses-1"
+
+    asyncio.run(run())
+
+
+def test_binding_completed_task_sink_migrates_legacy_in_memory_history() -> None:
+    legacy = {
+        "scope_id": "scan-upgrade",
+        "task_id": "legacy-task",
+        "revision": 1,
+        "outcome": "failure",
+        "serve_session_id": "ses-before-upgrade",
+    }
+    model_pool_module._completed_tasks_by_scope["scan-upgrade"] = [legacy]
+    model_pool_module._completed_task_count_by_scope["scan-upgrade"] = 1
+    captured: list[dict] = []
+
+    model_pool_module.set_completed_task_sink(captured.append)
+
+    assert captured == [legacy]
+    assert model_pool_module._completed_tasks_by_scope == {}
+    snapshot = model_pool_snapshot("scan-upgrade")
+    assert snapshot["completed_task_count"] == 1
+    assert snapshot["completed_tasks"] == []

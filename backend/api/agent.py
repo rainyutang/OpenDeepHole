@@ -85,6 +85,7 @@ from backend.models import (
     MiningEngineRunStatus,
     MiningEngineSelection,
     OpenCodePoolStatus,
+    OpenCodeTaskReport,
     OpenCodeTokenUsage,
     ScanEvent,
     ScanItemStatus,
@@ -713,6 +714,7 @@ _RUNTIME_UPDATE_POLL_SECONDS = 2
 _RUNTIME_UPDATE_TIMEOUT_SECONDS = 15 * 60
 _OPENCODE_MODEL_RPC_TIMEOUT_SECONDS = 120.0
 _FINAL_VULNERABILITY_CALLBACKS_CAPABILITY = "final_vulnerability_callbacks"
+_INCREMENTAL_OPENCODE_TASK_REPORTS_CAPABILITY = "incremental_opencode_task_reports"
 
 
 async def _complete_agent_response(
@@ -1773,11 +1775,16 @@ def _merge_completed_opencode_tasks(
             index_by_key[key] = len(ordered)
             ordered.append(item)
     merged.completed_tasks = ordered
-    merged.completed_task_count = len(ordered)
-    current_outstanding = max(current.total_tasks - current.completed_task_count, 0)
+    reported_completed_count = current.completed_task_count
+    merged.completed_task_count = max(
+        len(ordered),
+        reported_completed_count,
+        previous.completed_task_count if previous is not None else 0,
+    )
+    current_outstanding = max(current.total_tasks - reported_completed_count, 0)
     merged.total_tasks = max(
         previous.total_tasks if previous is not None else 0,
-        len(ordered) + current_outstanding,
+        merged.completed_task_count + current_outstanding,
     )
     return merged
 
@@ -1891,6 +1898,12 @@ async def agent_websocket(websocket: WebSocket) -> None:
         final_vulnerability_callbacks = (
             reported_capabilities.get(
                 _FINAL_VULNERABILITY_CALLBACKS_CAPABILITY,
+            )
+            is True
+        )
+        incremental_opencode_task_reports = (
+            reported_capabilities.get(
+                _INCREMENTAL_OPENCODE_TASK_REPORTS_CAPABILITY,
             )
             is True
         )
@@ -2052,6 +2065,9 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 "event_batches": protocol_version >= 2,
                 "lightweight_finish": protocol_version >= 2,
                 "resume_manifest": protocol_version >= 2,
+                "incremental_opencode_task_reports": (
+                    incremental_opencode_task_reports
+                ),
             },
         })
         for command in pending_validation_stops:
@@ -2232,6 +2248,76 @@ async def update_agent_opencode_pool(agent_id: str, status: OpenCodePoolStatus) 
             status=status,
         )
     return {"ok": True}
+
+
+@router.post("/{agent_id}/opencode-task-report")
+async def report_agent_opencode_task(
+    agent_id: str,
+    body: OpenCodeTaskReport,
+) -> dict:
+    """Persist one terminal logical task without resending prior Session history."""
+    resolved = await resolve_agent_id_connection_async(agent_id)
+    agent = resolved[1] if resolved is not None else None
+    if agent is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "agent_not_found", "agent_id": agent_id},
+        )
+    store = get_scan_store()
+    loaded = await run_store_call(store, "load_scan_overview", body.scope_id)
+    if loaded is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "scan_not_found",
+                "scan_id": body.scope_id,
+                "endpoint": "opencode-task-report",
+            },
+        )
+    try:
+        inserted = await run_store_call(
+            store,
+            "upsert_opencode_task_report",
+            agent_key=agent.agent_key or agent.name,
+            scan_id=body.scope_id,
+            agent_session_id=body.agent_session_id or agent.agent_session_id,
+            task_id=body.task_id,
+            revision=body.revision,
+            task=body.task,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    previous_pool = loaded[0].opencode_pool
+    incoming = (
+        previous_pool.model_copy(deep=True)
+        if previous_pool is not None
+        else OpenCodePoolStatus(scope_id=body.scope_id)
+    )
+    incoming.completed_tasks = [dict(body.task)]
+    incoming.completed_task_count = max(
+        incoming.completed_task_count,
+        1,
+    )
+    status = _merge_completed_opencode_tasks(previous_pool, incoming)
+    await run_store_call(
+        store,
+        "update_opencode_pool_status",
+        body.scope_id,
+        status,
+    )
+    scan = await _ensure_running_scan(body.scope_id)
+    if scan is not None:
+        scan.opencode_pool = status
+    if inserted:
+        from backend.sse import publish
+
+        publish(body.scope_id, "opencode_task_report", {
+            "task": body.task,
+            "completed_task_count": status.completed_task_count,
+            "total_tasks": status.total_tasks,
+        })
+    return {"ok": True, "duplicate": not inserted}
 
 
 @router.get("/{agent_id}/opencode-pool", response_model=AgentOpenCodePoolStatus)
@@ -3780,6 +3866,28 @@ async def agent_report_vulnerability(
             "index": vuln_index,
             "vulnerability": vuln.model_dump(),
         })
+    source_task_id = str(vuln.source_task_id or "").strip()
+    if source_task_id and str(vuln.analysis_source or "") == "threat_audit":
+        linked = await run_store_call(
+            store,
+            "link_threat_audit_task_vulnerability",
+            scan_id,
+            source_task_id,
+            vuln_index,
+        )
+        if linked and scan is not None:
+            for stored_task in scan.threat_audit_tasks:
+                if stored_task.task_id != source_task_id:
+                    continue
+                if vuln_index not in stored_task.result_vuln_indexes:
+                    stored_task.result_vuln_indexes = sorted([
+                        *stored_task.result_vuln_indexes,
+                        vuln_index,
+                    ])
+                    publish(scan_id, "threat_audit_task", {
+                        "task": stored_task.model_dump(mode="json"),
+                    })
+                break
 
     logger.debug(
         "Vulnerability %s for scan %s: %s %s:%d confirmed=%s",
@@ -4109,18 +4217,47 @@ async def agent_report_candidate_audit(
         result = _same_pattern_candidate_result(
             result.model_copy(update={"audit_index": body.candidate_idx})
         )
+    store = get_scan_store()
+    vulnerability_idx = body.vulnerability_idx
+    dedup_decision = dict(body.dedup_decision)
+    if body.state in {"success", "failed"} and (
+        vulnerability_idx is None or not dedup_decision
+    ):
+        candidates = await run_store_call(
+            store,
+            "list_scan_candidates_page",
+            scan_id,
+            after_index=body.candidate_idx - 1,
+            limit=1,
+        )
+        existing_candidate = next(
+            (item for item in candidates if item.idx == body.candidate_idx),
+            None,
+        )
+        if existing_candidate is not None:
+            if vulnerability_idx is None:
+                vulnerability_idx = existing_candidate.vulnerability_idx
+            if not dedup_decision:
+                dedup_decision = dict(existing_candidate.dedup_decision)
     stored = await run_store_call(
-        get_scan_store(),
+        store,
         "update_scan_candidate_audit",
         scan_id,
         body.candidate_idx,
         state=body.state,
         result=result,
-        vulnerability_idx=body.vulnerability_idx,
-        dedup_decision=body.dedup_decision,
+        vulnerability_idx=vulnerability_idx,
+        dedup_decision=dedup_decision,
     )
     if stored is None:
-        raise HTTPException(status_code=404, detail="Candidate index not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "candidate_not_found",
+                "scan_id": scan_id,
+                "candidate_idx": body.candidate_idx,
+            },
+        )
 
     scan = _running_scans.get(scan_id)
     if scan is not None:
@@ -4299,6 +4436,17 @@ async def agent_upsert_threat_audit_task(scan_id: str, body: dict) -> dict:
         raise HTTPException(status_code=400, detail=f"Invalid threat audit task: {exc}") from exc
 
     store = get_scan_store()
+    if task.status == "completed" and not task.result_vuln_indexes:
+        result_indexes = await run_store_call(
+            store,
+            "get_vulnerability_indexes_by_source_task",
+            scan_id,
+            task.task_id,
+        )
+        if result_indexes:
+            task = task.model_copy(update={
+                "result_vuln_indexes": result_indexes,
+            })
     task = await run_store_call(
         store,
         "upsert_threat_audit_task",
@@ -4617,8 +4765,33 @@ async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Reques
     )
 
     scan = _running_scans.get(scan_id)
+    previous_pool = (
+        scan.opencode_pool
+        if scan is not None
+        else existing_scan.opencode_pool
+    )
+    if body.opencode_pool is not None:
+        reported_pool = _merge_completed_opencode_tasks(
+            previous_pool,
+            body.opencode_pool,
+        )
+        if hasattr(store, "upsert_scan_opencode_token_usage"):
+            await run_store_call(
+                store,
+                "upsert_scan_opencode_token_usage",
+                scan_id=scan_id,
+                agent_session_id=reported_pool.agent_session_id,
+                status=reported_pool,
+            )
+        if hasattr(store, "get_scan_opencode_token_usage"):
+            reported_pool.token_usage = await run_store_call(
+                store,
+                "get_scan_opencode_token_usage",
+                scan_id,
+            )
+        previous_pool = reported_pool
     final_pool = _terminal_opencode_pool_status(
-        scan.opencode_pool if scan is not None else (existing_scan.opencode_pool if existing_scan is not None else None)
+        previous_pool
     )
     if final_pool is not None:
         await run_store_call(
@@ -4711,6 +4884,7 @@ async def agent_finish_scan_v2(
             error_message=body.error_message,
             threat_analysis_run=body.threat_analysis_run,
             mining_engine_runs=body.mining_engine_runs,
+            opencode_pool=body.opencode_pool,
         ),
         request,
     )
@@ -5005,6 +5179,9 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
         scan.opencode_pool = status
 
     from backend.sse import publish
+    live_pool = status.model_dump()
+    if not body.completed_tasks:
+        live_pool.pop("completed_tasks", None)
     publish(scan_id, "scan_status", {
         "status": scan.status if scan else None,
         "progress": scan.progress if scan else None,
@@ -5013,7 +5190,7 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
         "static_total_files": scan.static_total_files if scan else None,
         "static_scanned_files": scan.static_scanned_files if scan else None,
         "static_analysis_done": scan.static_analysis_done if scan else None,
-        "opencode_pool": status.model_dump(),
+        "opencode_pool": live_pool,
     })
     return {"ok": True}
 

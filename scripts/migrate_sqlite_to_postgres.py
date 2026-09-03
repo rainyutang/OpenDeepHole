@@ -46,6 +46,7 @@ _ROOT_TABLES = {
 _SERIAL_TABLES = {
     "events",
     "fp_review_results",
+    "opencode_task_reports",
     "skill_reports",
     "vulnerabilities",
 }
@@ -140,12 +141,13 @@ def _copy_table(
 
 def _reset_sequence(target: PostgresScanStore, table: str) -> None:
     table = _identifier(table)
+    column = "sequence" if table == "opencode_task_reports" else "id"
     target._conn.execute(
         f"""\
         SELECT setval(
-            pg_get_serial_sequence('{table}', 'id'),
-            COALESCE(MAX(id), 1),
-            MAX(id) IS NOT NULL
+            pg_get_serial_sequence('{table}', '{column}'),
+            COALESCE(MAX({column}), 1),
+            MAX({column}) IS NOT NULL
         )
         FROM {table}
         """

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from .token_usage import OpenCodeTokenUsage, merge_token_usages
@@ -199,6 +200,8 @@ _scope_updated_at: dict[str, str] = {}
 _global_updated_at: str = ""
 _active_tasks: dict[str, dict[str, Any]] = {}
 _completed_tasks_by_scope: dict[str, list[dict[str, Any]]] = {}
+_completed_task_count_by_scope: dict[str, int] = {}
+_completed_task_sink: Callable[[dict[str, Any]], None] | None = None
 _token_usage_by_scope: dict[str, OpenCodeTokenUsage] = {}
 _global_token_usage: OpenCodeTokenUsage | None = None
 _peak_total_tasks_by_scope: dict[str, int] = {}
@@ -211,6 +214,37 @@ _planned_sequence = 0
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def set_completed_task_sink(
+    sink: Callable[[dict[str, Any]], None] | None,
+) -> None:
+    """Route terminal task history to a durable host sink when one is available."""
+    global _completed_task_sink
+    if sink is _completed_task_sink:
+        return
+    if sink is not None:
+        # A backend may gain incremental-report support after an Agent has
+        # already accumulated legacy in-memory history.  Persist those rows
+        # before hiding them from subsequent bounded pool snapshots.
+        for tasks in _completed_tasks_by_scope.values():
+            for task in tasks:
+                sink(copy.deepcopy(task))
+        _completed_tasks_by_scope.clear()
+    _completed_task_sink = sink
+
+
+def _record_completed_task_locked(scope_id: str, task: dict[str, Any]) -> None:
+    if not scope_id:
+        return
+    snapshot = copy.deepcopy(task)
+    if _completed_task_sink is None:
+        _completed_tasks_by_scope.setdefault(scope_id, []).append(snapshot)
+    else:
+        _completed_task_sink(snapshot)
+    _completed_task_count_by_scope[scope_id] = (
+        _completed_task_count_by_scope.get(scope_id, 0) + 1
+    )
 
 
 def _cfg_value(config_obj: Any, key: str, default=None):
@@ -917,7 +951,8 @@ def _fail_pending_request_locked(
         context["session_events"] = session_events
         context["failure_kind"] = failure_kind
         context["failure_reason"] = failure_reason
-        _completed_tasks_by_scope.setdefault(request.stats_scope_id, []).append(
+        _record_completed_task_locked(
+            request.stats_scope_id,
             {
                 **context,
                 "task_id": request.request_id,
@@ -929,7 +964,7 @@ def _fail_pending_request_locked(
                 "duration_seconds": duration_seconds,
                 "outcome": "failure",
                 "failure_reason": failure_reason,
-            }
+            },
         )
     _touch_queue_locked(request.stats_scope_id)
     _condition.notify_all()
@@ -1406,7 +1441,7 @@ async def release_model_lease(
                 "duration_seconds": duration_seconds,
                 "outcome": normalized_outcome or "unknown",
             }
-            _completed_tasks_by_scope.setdefault(lease.stats_scope_id, []).append(completed)
+            _record_completed_task_locked(lease.stats_scope_id, completed)
         _active_tasks.pop(lease.task_id, None)
         if lease.stats_scope_id:
             stats = _ensure_scope_models_locked(lease.stats_scope_id, [lease.option])
@@ -1430,6 +1465,7 @@ async def clear_completed_tasks(scope_id: str) -> None:
         return
     async with _condition:
         _completed_tasks_by_scope.pop(scope_id, None)
+        _completed_task_count_by_scope.pop(scope_id, None)
         _token_usage_by_scope.pop(scope_id, None)
         _peak_total_tasks_by_scope.pop(scope_id, None)
 
@@ -1646,9 +1682,13 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
         queued_tasks = _pending_requests_snapshot(scope_id)
         planned_tasks = _planned_tasks_snapshot(scope_id)
         completed_tasks = list(_completed_tasks_by_scope.get(scope_id, []))
+        completed_task_count = _completed_task_count_by_scope.get(
+            scope_id,
+            len(completed_tasks),
+        )
         active_task_count = sum(len(model.get("active_tasks", [])) for model in models)
         observed_total = (
-            len(completed_tasks)
+            completed_task_count
             + active_task_count
             + len(queued_tasks)
             + len(planned_tasks)
@@ -1660,10 +1700,12 @@ def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
             "global_running": sum(item.running for item in stats.values()),
             "global_queued": len(queued_tasks),
             "total_tasks": total_tasks,
-            "completed_task_count": len(completed_tasks),
+            "completed_task_count": completed_task_count,
             "queued_tasks": queued_tasks,
             "planned_tasks": planned_tasks,
-            "completed_tasks": completed_tasks,
+            "completed_tasks": (
+                completed_tasks if _completed_task_sink is None else []
+            ),
             "token_usage": (
                 _token_usage_by_scope[scope_id].as_dict()
                 if scope_id in _token_usage_by_scope

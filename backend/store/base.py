@@ -115,6 +115,31 @@ class ScanStoreBase(ABC):
     def get_scan_opencode_token_usage(self, scan_id: str) -> OpenCodeTokenUsage | None:
         """Return cumulative token usage for a scan."""
 
+    def upsert_opencode_task_report(self, **kwargs) -> bool:
+        """Persist one immutable terminal OpenCode task report."""
+        raise NotImplementedError
+
+    def list_opencode_task_reports(self, scan_id: str) -> list[dict]:
+        """Return terminal OpenCode task reports in arrival order."""
+        raise NotImplementedError
+
+    def get_vulnerability_indexes_by_source_task(
+        self,
+        scan_id: str,
+        task_id: str,
+    ) -> list[int]:
+        """Return finding indexes produced by one logical audit task."""
+        raise NotImplementedError
+
+    def link_threat_audit_task_vulnerability(
+        self,
+        scan_id: str,
+        task_id: str,
+        vulnerability_idx: int,
+    ) -> bool:
+        """Idempotently link one finding to an already stored threat-audit task."""
+        raise NotImplementedError
+
     @abstractmethod
     def list_scans(self) -> list[ScanSummary]:
         """List all scans as summaries, ordered by *created_at* descending."""

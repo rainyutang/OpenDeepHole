@@ -1021,7 +1021,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         if (data.opencode_pool === null && prev.opencode_pool != null) {
           patch.opencode_pool = null;
         } else if (data.opencode_pool !== undefined && data.opencode_pool !== null) {
-          const pool = normalizeOpenCodePool(data.opencode_pool);
+          const incomingPool = Object.prototype.hasOwnProperty.call(
+            data.opencode_pool,
+            "completed_tasks",
+          )
+            ? data.opencode_pool
+            : {
+                ...data.opencode_pool,
+                completed_tasks: prev.opencode_pool?.completed_tasks ?? [],
+              };
+          const pool = normalizeOpenCodePool(incomingPool);
           if (pool && !sameOpenCodePoolSnapshot(prev.opencode_pool, pool)) {
             patch.opencode_pool = pool;
           }
@@ -1029,6 +1038,47 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         return Object.keys(patch).length > 0 ? { ...prev, ...patch } : prev;
       });
       scheduleOverviewSummaryRefresh();
+    },
+    onOpenCodeTaskReport: (data) => {
+      setScan((prev) => {
+        if (!prev) return prev;
+        const pool = prev.opencode_pool ?? {
+          scope_id: scanId,
+          global_running: 0,
+          global_queued: 0,
+          total_tasks: 0,
+          completed_task_count: 0,
+          queued_tasks: [],
+          planned_tasks: [],
+          completed_tasks: [],
+          models: [],
+          updated_at: "",
+        };
+        const taskId = String(data.task.task_id || "");
+        if (!taskId) return prev;
+        const completedTasks = [...(pool.completed_tasks ?? [])];
+        const existingIndex = completedTasks.findIndex(
+          (task) => String(task.task_id || "") === taskId,
+        );
+        if (existingIndex >= 0) {
+          completedTasks[existingIndex] = data.task;
+        } else {
+          completedTasks.push(data.task);
+        }
+        return {
+          ...prev,
+          opencode_pool: {
+            ...pool,
+            completed_tasks: completedTasks,
+            completed_task_count: Math.max(
+              pool.completed_task_count,
+              data.completed_task_count,
+              completedTasks.length,
+            ),
+            total_tasks: Math.max(pool.total_tasks, data.total_tasks),
+          },
+        };
+      });
     },
     onScanCandidates: (data) => {
       setScan((prev) => prev ? {

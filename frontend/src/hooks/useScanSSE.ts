@@ -15,6 +15,7 @@ import type {
   FpReviewStatus,
   IndexStatus,
   MiningEngineRunStatus,
+  OpenCodeCompletedTask,
   OutputSource,
   ScanCandidate,
   ScanEvent,
@@ -42,6 +43,12 @@ interface ScanStatusEvent {
   static_scanned_files?: number | null;
   static_analysis_done?: boolean | null;
   opencode_pool?: ScanStatus["opencode_pool"];
+}
+
+interface OpenCodeTaskReportEvent {
+  task: OpenCodeCompletedTask;
+  completed_task_count: number;
+  total_tasks: number;
 }
 
 interface ScanVulnerabilityEvent {
@@ -149,6 +156,7 @@ interface MiningEngineRunEvent {
 
 export interface ScanSSEHandlers {
   onScanStatus?: (data: ScanStatusEvent) => void;
+  onOpenCodeTaskReport?: (data: OpenCodeTaskReportEvent) => void;
   onScanCandidates?: (data: ScanCandidatesEvent) => void;
   onScanCandidatesChanged?: (data: ScanCandidatesChangedEvent) => void;
   onScanCandidateAudit?: (data: ScanCandidateAuditEvent) => void;
@@ -297,6 +305,11 @@ function isValidPayload(eventType: string, value: unknown): value is Record<stri
         && (value.static_scanned_files == null || isFiniteNumber(value.static_scanned_files))
         && (value.static_analysis_done == null || typeof value.static_analysis_done === "boolean")
         && (value.opencode_pool === undefined || value.opencode_pool === null || isRecord(value.opencode_pool));
+    case "opencode_task_report":
+      return isRecord(value.task)
+        && isString(value.task.task_id)
+        && isFiniteNumber(value.completed_task_count)
+        && isFiniteNumber(value.total_tasks);
     case "scan_candidates":
       return Array.isArray(value.candidates) && value.candidates.every(isCandidate);
     case "scan_candidates_changed":
@@ -487,6 +500,9 @@ export function useScanSSE(
 
     // Register typed event listeners
     handle<ScanStatusEvent>("scan_status", queueScanStatus);
+    handle<OpenCodeTaskReportEvent>("opencode_task_report", (d) => (
+      handlersRef.current.onOpenCodeTaskReport?.(d)
+    ));
     handle<ScanCandidatesEvent>("scan_candidates", (d) => handlersRef.current.onScanCandidates?.({
       candidates: d.candidates.map((candidate, index) => normalizeScanCandidate(candidate, index)),
     }));
