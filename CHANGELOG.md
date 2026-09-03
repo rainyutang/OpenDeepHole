@@ -2,6 +2,7 @@
 
 ## 2026-09-03
 
+- **修复** 合并 OpenCode 运行框架修复后遗漏的旧 Serve 清理阶段起止日志，并清理 Task Agent 生命周期文档中重复的新旧说明，确保启动诊断与最终合并语义一致
 - **修复** OpenCode 轻量级威胁分析不再把 Prompt 中的产物校验命令作为 Session 完成条件，因此模型未执行命令时不会再报“未执行校验命令”；命令仍被精确允许用于可选自检。Task Agent 会在每次完整消息结束后由宿主校验三份产物，首次失败将诊断回传同一 Session 请求修正，第二次仍失败才进入既有 fresh Session 与 DeepHole fallback。Codex Goal 的命令完成要求保持不变
 - **变更** 轻量威胁分析 Prompt 中的校验命令在各平台统一直接以 `python` 开头，不再暴露当前解释器绝对路径或 Windows 的 `python.exe`；宿主侧校验仍以实际 `sys.executable` argv 执行且不经过 shell
 

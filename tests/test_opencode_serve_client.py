@@ -5684,12 +5684,14 @@ def test_stop_command_probe_process_uses_windows_taskkill_tree(
 
 
 def test_start_locked_publishes_config_before_optional_version_probe(
+    caplog,
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
         from task_agent import serve_client
 
+        caplog.set_level("INFO", logger=serve_client.logger.name)
         workspace = tmp_path / "runtime"
         (workspace / ".git").mkdir(parents=True)
         version_calls: list[tuple[list[str], float]] = []
@@ -5732,6 +5734,15 @@ def test_start_locked_publishes_config_before_optional_version_probe(
         assert manager._start_once_locked.await_args.kwargs["executable_version"] == ""
         published = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
         assert published["provider"] == {"corp": {}}
+        log_messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "step=previous_serve_cleanup status=start" in message
+            for message in log_messages
+        )
+        assert any(
+            "step=previous_serve_cleanup status=complete" in message
+            for message in log_messages
+        )
 
     asyncio.run(run())
 

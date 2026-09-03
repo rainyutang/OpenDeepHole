@@ -8154,8 +8154,22 @@ class OpenCodeServeManager:
             if explicit_auto_port
             else None
         )
+        cleanup_port = preferred_auto_port or requested_port
+        cleanup_started_at = time.monotonic()
+        logger.info(
+            "OpenCode serve startup preparation step=previous_serve_cleanup status=start "
+            "port=%s port_mode=%s",
+            cleanup_port,
+            "auto" if key.serve_port_auto else "fixed",
+        )
         cleanup_result = await self._stop_owned_serve_on_port(
-            preferred_auto_port or requested_port,
+            cleanup_port,
+        )
+        logger.info(
+            "OpenCode serve startup preparation step=previous_serve_cleanup "
+            "status=complete port=%s elapsed_ms=%s",
+            cleanup_port,
+            round((time.monotonic() - cleanup_started_at) * 1000),
         )
         excluded_ports = set(cleanup_result.avoided_ports)
         config_started_at = time.monotonic()
