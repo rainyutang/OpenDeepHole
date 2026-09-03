@@ -18,6 +18,7 @@ from backend.models import (
     AgentProcessedKeyBatch,
     AgentScanCandidateBatch,
     AgentScanCandidates,
+    AgentScanEventBatch,
     AgentScanFinish,
     AgentScanFinishV2,
     AgentVulnerabilityReconcile,
@@ -1094,6 +1095,108 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.status, ScanItemStatus.PENDING)
             self.assertEqual(store.get_events("scan-1"), [])
             self.assertEqual(published, [])
+
+    def test_missing_single_event_returns_structured_scan_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch.object(agent_api.logger, "warning") as warning,
+                patch("backend.sse.publish") as publish,
+            ):
+                with self.assertRaises(agent_api.HTTPException) as raised:
+                    asyncio.run(agent_api.agent_scan_event(
+                        "missing-scan",
+                        ScanEvent.create("auditing", "late event"),
+                    ))
+
+            self.assertEqual(raised.exception.status_code, 404)
+            self.assertEqual(
+                raised.exception.detail,
+                {
+                    "code": "scan_not_found",
+                    "scan_id": "missing-scan",
+                    "endpoint": "event",
+                },
+            )
+            warning.assert_called_once()
+            publish.assert_not_called()
+            self.assertEqual(store.get_events("missing-scan"), [])
+
+    def test_missing_event_batch_returns_structured_scan_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch.object(agent_api.logger, "warning") as warning,
+                patch("backend.sse.publish") as publish,
+            ):
+                with self.assertRaises(agent_api.HTTPException) as raised:
+                    asyncio.run(agent_api.agent_scan_events_v2(
+                        "missing-scan",
+                        AgentScanEventBatch(events=[
+                            ScanEvent.create("auditing", "late event"),
+                        ]),
+                    ))
+
+            self.assertEqual(raised.exception.status_code, 404)
+            self.assertEqual(
+                raised.exception.detail,
+                {
+                    "code": "scan_not_found",
+                    "scan_id": "missing-scan",
+                    "endpoint": "events",
+                },
+            )
+            warning.assert_called_once()
+            publish.assert_not_called()
+            self.assertEqual(store.get_events("missing-scan"), [])
+
+    def test_event_batch_for_terminal_scan_is_persisted_without_reviving_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(
+                _scan("scan-1", ScanItemStatus.COMPLETE),
+                _meta(),
+            )
+            events = [
+                ScanEvent.create("auditing", "late event one"),
+                ScanEvent.create("auditing", "late event two"),
+            ]
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch("backend.sse.publish") as publish,
+            ):
+                result = asyncio.run(agent_api.agent_scan_events_v2(
+                    "scan-1",
+                    AgentScanEventBatch(events=events),
+                ))
+
+            self.assertEqual(result, {"ok": True, "count": 2})
+            self.assertEqual(
+                [event.message for event in store.get_events("scan-1")],
+                ["late event one", "late event two"],
+            )
+            self.assertEqual(
+                store.load_scan("scan-1")[0].status,
+                ScanItemStatus.COMPLETE,
+            )
+            self.assertNotIn("scan-1", agent_api._running_scans)
+            publish.assert_not_called()
 
     def test_auditing_event_marks_static_analysis_done_if_done_push_was_missed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

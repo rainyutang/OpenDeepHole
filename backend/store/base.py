@@ -390,10 +390,11 @@ class ScanStoreBase(ABC):
     # -- Events --
 
     @abstractmethod
-    def add_event(self, scan_id: str, event: ScanEvent) -> None:
-        """Append a scan event."""
+    def add_event(self, scan_id: str, event: ScanEvent) -> bool:
+        """Append a scan event when its parent scan still exists."""
 
     def add_events_batch(self, scan_id: str, events: list[ScanEvent]) -> int:
+        """Append scan events and return the number actually persisted."""
         raise NotImplementedError
 
     @abstractmethod

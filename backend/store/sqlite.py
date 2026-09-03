@@ -70,6 +70,15 @@ from .base import DuplicateScanNameError, ScanStoreBase
 _LEGACY_FP_REVIEW_ELIGIBLE = 1
 
 
+def _is_foreign_key_violation(error: BaseException) -> bool:
+    """Recognize missing-parent errors without importing optional psycopg."""
+    return bool(
+        getattr(error, "sqlite_errorname", "")
+        == "SQLITE_CONSTRAINT_FOREIGNKEY"
+        or getattr(error, "sqlstate", "") == "23503"
+    )
+
+
 def _project_path_basename(project_path: str) -> str:
     """Return the last component for POSIX or Windows-style project paths."""
     normalized = str(project_path or "").strip().rstrip("/\\")
@@ -4707,39 +4716,57 @@ class SqliteScanStore(ScanStoreBase):
 
     # -- Events --
 
-    def add_event(self, scan_id: str, event: ScanEvent) -> None:
+    def add_event(self, scan_id: str, event: ScanEvent) -> bool:
         if is_agent_local_task_output(event.message):
-            return
+            return False
         with self._lock:
-            self._conn.execute(
-                """\
-                INSERT INTO events
-                    (scan_id, timestamp, phase, message, candidate_index)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    scan_id,
-                    event.timestamp,
-                    event.phase,
-                    event.message,
-                    event.candidate_index,
-                ),
-            )
-            self._conn.execute(
-                """\
-                DELETE FROM events
-                WHERE scan_id = ?
-                  AND id NOT IN (
-                      SELECT id
-                      FROM events
-                      WHERE scan_id = ?
-                      ORDER BY id DESC
-                      LIMIT ?
-                  )
-                """,
-                (scan_id, scan_id, SCAN_EVENT_RETENTION_LIMIT),
-            )
-            self._conn.commit()
+            try:
+                inserted = self._conn.execute(
+                    """\
+                    INSERT INTO events
+                        (scan_id, timestamp, phase, message, candidate_index)
+                    SELECT ?, ?, ?, ?, ?
+                    WHERE EXISTS (
+                        SELECT 1 FROM scans WHERE scan_id = ?
+                    )
+                    """,
+                    (
+                        scan_id,
+                        event.timestamp,
+                        event.phase,
+                        event.message,
+                        event.candidate_index,
+                        scan_id,
+                    ),
+                ).rowcount
+                if inserted != 1:
+                    self._conn.rollback()
+                    return False
+                self._conn.execute(
+                    """\
+                    DELETE FROM events
+                    WHERE scan_id = ?
+                      AND id NOT IN (
+                          SELECT id
+                          FROM events
+                          WHERE scan_id = ?
+                          ORDER BY id DESC
+                          LIMIT ?
+                      )
+                    """,
+                    (scan_id, scan_id, SCAN_EVENT_RETENTION_LIMIT),
+                )
+                self._conn.commit()
+            except BaseException as exc:
+                self._conn.rollback()
+                if _is_foreign_key_violation(exc):
+                    try:
+                        if self.get_scan_meta(scan_id) is None:
+                            return False
+                    except BaseException:
+                        pass
+                raise
+        return True
 
     def add_events_batch(self, scan_id: str, events: list[ScanEvent]) -> int:
         retained = [
@@ -4749,38 +4776,55 @@ class SqliteScanStore(ScanStoreBase):
         if not retained:
             return 0
         with self._lock:
-            self._conn.executemany(
-                """\
-                INSERT INTO events
-                    (scan_id, timestamp, phase, message, candidate_index)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        scan_id,
-                        event.timestamp,
-                        event.phase,
-                        event.message,
-                        event.candidate_index,
+            try:
+                inserted = self._conn.executemany(
+                    """\
+                    INSERT INTO events
+                        (scan_id, timestamp, phase, message, candidate_index)
+                    SELECT ?, ?, ?, ?, ?
+                    WHERE EXISTS (
+                        SELECT 1 FROM scans WHERE scan_id = ?
                     )
-                    for event in retained
-                ],
-            )
-            self._conn.execute(
-                """\
-                DELETE FROM events
-                WHERE scan_id = ?
-                  AND id NOT IN (
-                      SELECT id FROM events
-                      WHERE scan_id = ?
-                      ORDER BY id DESC
-                      LIMIT ?
-                  )
-                """,
-                (scan_id, scan_id, SCAN_EVENT_RETENTION_LIMIT),
-            )
-            self._conn.commit()
-        return len(retained)
+                    """,
+                    [
+                        (
+                            scan_id,
+                            event.timestamp,
+                            event.phase,
+                            event.message,
+                            event.candidate_index,
+                            scan_id,
+                        )
+                        for event in retained
+                    ],
+                ).rowcount
+                if inserted != len(retained):
+                    self._conn.rollback()
+                    return 0
+                self._conn.execute(
+                    """\
+                    DELETE FROM events
+                    WHERE scan_id = ?
+                      AND id NOT IN (
+                          SELECT id FROM events
+                          WHERE scan_id = ?
+                          ORDER BY id DESC
+                          LIMIT ?
+                      )
+                    """,
+                    (scan_id, scan_id, SCAN_EVENT_RETENTION_LIMIT),
+                )
+                self._conn.commit()
+            except BaseException as exc:
+                self._conn.rollback()
+                if _is_foreign_key_violation(exc):
+                    try:
+                        if self.get_scan_meta(scan_id) is None:
+                            return 0
+                    except BaseException:
+                        pass
+                raise
+        return inserted
 
     def get_events(self, scan_id: str) -> list[ScanEvent]:
         cur = self._conn.execute(

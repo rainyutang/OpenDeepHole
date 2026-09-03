@@ -180,6 +180,21 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
             before_id=None,
             limit=10,
         )) == 1
+        assert store.add_event(
+            "postgres-missing-scan",
+            ScanEvent.create("auditing", "late event"),
+        ) is False
+        assert store.add_events_batch(
+            "postgres-missing-scan",
+            [ScanEvent.create("auditing", "late batch event")],
+        ) == 0
+        assert store.add_events_batch(
+            "postgres-integration-scan",
+            [
+                ScanEvent.create("auditing", "batch event one"),
+                ScanEvent.create("auditing", "batch event two"),
+            ],
+        ) == 2
 
         tied_at = "2026-08-03T13:00:00+00:00"
         store.create_fp_review_job("older-job", "postgres-integration-scan", 1, tied_at)

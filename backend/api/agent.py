@@ -3653,7 +3653,10 @@ async def agent_scan_event(scan_id: str, event: ScanEvent) -> dict:
         return {"ok": True, "discarded": True}
 
     store = get_scan_store()
-    await run_store_call(store, "add_event", scan_id, event)
+    if await run_store_call(store, "get_scan_meta", scan_id) is None:
+        _scan_not_found(scan_id, endpoint="event", store=store)
+    if not await run_store_call(store, "add_event", scan_id, event):
+        _scan_not_found(scan_id, endpoint="event", store=store)
 
     scan = await _ensure_running_scan(scan_id)
     if scan is None:
@@ -3682,17 +3685,26 @@ async def agent_scan_events_v2(
     if not events:
         return {"ok": True, "count": 0}
     store = get_scan_store()
-    await run_store_call(store, "add_events_batch", scan_id, events)
+    if await run_store_call(store, "get_scan_meta", scan_id) is None:
+        _scan_not_found(scan_id, endpoint="events", store=store)
+    stored_count = await run_store_call(
+        store,
+        "add_events_batch",
+        scan_id,
+        events,
+    )
+    if stored_count != len(events):
+        _scan_not_found(scan_id, endpoint="events", store=store)
     scan = await _ensure_running_scan(scan_id)
     if scan is None:
-        return {"ok": True, "count": len(events)}
+        return {"ok": True, "count": stored_count}
     progress_kwargs: dict = {}
     for event in events:
         progress_kwargs.update(_apply_agent_event_to_scan(scan, event))
     if progress_kwargs:
         await run_store_call(store, "update_scan_progress", scan_id, **progress_kwargs)
     _publish_agent_event_state(scan_id, scan, events)
-    return {"ok": True, "count": len(events)}
+    return {"ok": True, "count": stored_count}
 
 
 def _existing_reported_vulnerability(

@@ -77,19 +77,61 @@ class ScanEventStoreTests(unittest.TestCase):
                 "[2026-08-03 12:00:00] "
                 "[candidate_audit][session-2][task] START",
             ):
+                self.assertFalse(
+                    store.add_event(
+                        "scan-events",
+                        ScanEvent.create("auditing", message),
+                    )
+                )
+            self.assertTrue(
                 store.add_event(
                     "scan-events",
-                    ScanEvent.create("auditing", message),
+                    ScanEvent.create("auditing", "[1/3] NPD a.c:1 — f"),
                 )
-            store.add_event(
-                "scan-events",
-                ScanEvent.create("auditing", "[1/3] NPD a.c:1 — f"),
             )
 
             events = store.get_events("scan-events")
             self.assertEqual(
                 [event.message for event in events],
                 ["[1/3] NPD a.c:1 — f"],
+            )
+
+    def test_event_writes_report_missing_parent_and_actual_batch_count(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            self.assertFalse(
+                store.add_event(
+                    "missing-scan",
+                    ScanEvent.create("auditing", "late event"),
+                )
+            )
+            self.assertEqual(
+                store.add_events_batch(
+                    "missing-scan",
+                    [ScanEvent.create("auditing", "late batch event")],
+                ),
+                0,
+            )
+            self.assertEqual(store.get_events("missing-scan"), [])
+
+            store.save_scan(*_make_scan("scan-events"))
+            stored = store.add_events_batch(
+                "scan-events",
+                [
+                    ScanEvent.create("auditing", "business event one"),
+                    ScanEvent.create(
+                        "auditing",
+                        "[threat_analysis][session-1][tool] name=read path=a.c",
+                    ),
+                    ScanEvent.create("auditing", "business event two"),
+                ],
+            )
+            self.assertEqual(stored, 2)
+            self.assertEqual(
+                [event.message for event in store.get_events("scan-events")],
+                ["business event one", "business event two"],
             )
 
     def test_add_event_keeps_only_latest_events_in_chronological_order(
