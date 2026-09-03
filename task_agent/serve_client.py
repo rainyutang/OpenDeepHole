@@ -513,6 +513,14 @@ class OpenCodeTaskQualityError(RuntimeError):
         self.prompt_result: OpenCodePromptResult | None = None
 
 
+class OpenCodeServeStartupError(RuntimeError):
+    """Serve failed before a model Session or message request could start."""
+
+    def __init__(self, message: str, *, retry_kind: str = "") -> None:
+        super().__init__(message)
+        self.retry_kind = str(retry_kind or "").strip().lower()
+
+
 class OpenCodeProviderQuotaError(RuntimeError):
     """Recoverable Provider-side quota exhaustion reported by OpenCode."""
 
@@ -1384,6 +1392,8 @@ def _log_serve_startup_output_updates(
 
 def _serve_startup_retry_kind(error: BaseException) -> str:
     text = str(error).lower()
+    if isinstance(error, OpenCodeServeStartupError) and error.retry_kind:
+        return error.retry_kind
     if any(marker in text for marker in _SERVE_NON_PORT_FAILURE_MARKERS):
         return ""
     if any(marker in text for marker in _SERVE_BIND_FAILURE_MARKERS):
@@ -6254,10 +6264,15 @@ class OpenCodeServeManager:
             env_overrides=normalized_env_overrides,
         )
         if show_serve_status and on_line:
+            port_label = (
+                "auto"
+                if serve_port_auto
+                else str(_serve_port(normalized_env_overrides))
+            )
             emit(
                 "task",
                 f"SERVE PREPARING executable={executable} "
-                f"port={_serve_port(normalized_env_overrides)} "
+                f"port={port_label} "
                 f"port_mode={'auto' if serve_port_auto else 'fixed'}"
             )
         try:
@@ -8128,24 +8143,19 @@ class OpenCodeServeManager:
             round((time.monotonic() - resolve_started_at) * 1000),
         )
         requested_port = _serve_port(key.env_overrides)
-        port = (
+        explicit_auto_port = (
+            key.serve_port_auto
+            and _SERVE_PORT_ENV in dict(key.env_overrides)
+        )
+        preferred_auto_port = (
             self._auto_port
             if key.serve_port_auto and self._auto_port is not None
             else requested_port
+            if explicit_auto_port
+            else None
         )
-        cleanup_started_at = time.monotonic()
-        logger.info(
-            "OpenCode serve startup preparation step=previous_serve_cleanup status=start "
-            "port=%s port_mode=%s",
-            port,
-            "auto" if key.serve_port_auto else "fixed",
-        )
-        cleanup_result = await self._stop_owned_serve_on_port(port)
-        logger.info(
-            "OpenCode serve startup preparation step=previous_serve_cleanup "
-            "status=complete port=%s elapsed_ms=%s",
-            port,
-            round((time.monotonic() - cleanup_started_at) * 1000),
+        cleanup_result = await self._stop_owned_serve_on_port(
+            preferred_auto_port or requested_port,
         )
         excluded_ports = set(cleanup_result.avoided_ports)
         config_started_at = time.monotonic()
@@ -8184,6 +8194,13 @@ class OpenCodeServeManager:
         )
         attempted_ports: list[int] = []
         generic_retry_used = False
+        port = (
+            preferred_auto_port
+            if key.serve_port_auto and preferred_auto_port is not None
+            else _allocate_loopback_port(excluded_ports)
+            if key.serve_port_auto
+            else requested_port
+        )
 
         if key.serve_port_auto and port in excluded_ports:
             attempted_ports.append(port)
@@ -8256,6 +8273,7 @@ class OpenCodeServeManager:
                     and len(attempted_ports) < _SERVE_AUTO_PORT_MAX_ATTEMPTS
                     and (
                         retry_kind == "bind"
+                        or retry_kind == "health"
                         or (retry_kind == "generic" and not generic_retry_used)
                     )
                 )
@@ -8274,12 +8292,22 @@ class OpenCodeServeManager:
                     )
                     port = next_port
                     continue
-                raise RuntimeError(_serve_startup_context_message(
+                if key.serve_port_auto:
+                    # Do not pin a later task to the endpoint whose replacement
+                    # never passed the health gate.
+                    self._auto_port = None
+                context_message = _serve_startup_context_message(
                     exc,
                     auto_port=key.serve_port_auto,
                     attempted_ports=attempted_ports,
                     executable_version=executable_version,
-                )) from exc
+                )
+                if isinstance(exc, OpenCodeServeStartupError):
+                    raise OpenCodeServeStartupError(
+                        context_message,
+                        retry_kind=exc.retry_kind,
+                    ) from exc
+                raise RuntimeError(context_message) from exc
 
             if key.serve_port_auto:
                 self._auto_port = port
@@ -8655,12 +8683,12 @@ class OpenCodeServeManager:
                     next_progress_at = now + _SERVE_HEALTH_PROGRESS_INTERVAL_SECONDS
                 await asyncio.sleep(_SERVE_HEALTH_POLL_INTERVAL_SECONDS)
             cwd_note = f" startup_cwd={self._startup_cwd}" if self._startup_cwd else ""
-            raise TimeoutError(_with_serve_startup_log(
+            raise OpenCodeServeStartupError(_with_serve_startup_log(
                 f"OpenCode serve did not become healthy{cwd_note}; "
                 f"last_health={last_health_detail}",
                 startup_log_path,
                 config_content=config_content,
-            ))
+            ), retry_kind="health")
         finally:
             forward_startup_output(final=True)
 

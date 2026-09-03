@@ -32,6 +32,7 @@ from task_agent.serve_client import (
     OpenCodeFileWrite,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
+    OpenCodeServeStartupError,
     OpenCodeTaskQualityError,
 )
 from task_agent.task_service import (
@@ -3030,6 +3031,56 @@ def test_timeout_uses_fresh_session_retry_budget_for_unclassified_tasks(tmp_path
         assert {
             event["failure_kind"] for event in final_updates["session_events"]
         } == {"timeout"}
+
+    asyncio.run(run())
+
+
+def test_serve_startup_timeout_is_not_a_model_timeout_or_fresh_session_retry(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        startup_error = OpenCodeServeStartupError(
+            "OpenCode serve did not become healthy; "
+            "last_health=ConnectTimeout",
+            retry_kind="health",
+        )
+        manager = SimpleNamespace(
+            run_prompt=AsyncMock(side_effect=startup_error),
+        )
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2] as release_mock,
+            patches[3] as update_mock,
+            patches[4],
+            patches[5],
+            _task_context(tmp_path),
+        ):
+            result = await service.run_task(OpenCodeTaskSpec(
+                task_name="serve startup",
+                prompt="never sent",
+                directory=tmp_path,
+                attempt=2,
+            ))
+
+        assert result.status == "failure"
+        assert manager.run_prompt.await_count == 1
+        assert acquire_mock.await_count == 1
+        assert release_mock.await_count == 1
+        assert release_mock.await_args.kwargs["outcome"] == "failure"
+        assert release_mock.await_args.kwargs["health_outcome"] is None
+        assert release_mock.await_args.kwargs["record_completion"] is True
+        final_updates = update_mock.await_args_list[-1].args[1]
+        assert final_updates["failure_kind"] == "serve_startup"
+        assert "ConnectTimeout" in final_updates["failure_reason"]
+        assert len(final_updates["session_events"]) == 1
+        assert final_updates["session_events"][0]["failure_kind"] == "serve_startup"
+        assert final_updates["session_events"][0]["session_id"] == ""
 
     asyncio.run(run())
 

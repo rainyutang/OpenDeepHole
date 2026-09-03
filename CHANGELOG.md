@@ -7,6 +7,7 @@
 
 ## 2026-09-02
 
+- **修复** Agent 自动 OpenCode Serve 端口不再在构建任务运行时阶段提前抽取并释放后长期缓存，而是在完成启动配置准备后由 Serve 管理器即时分配；自动模式启动后若 `/global/health` 持续连接超时，会清理精确归属的失败进程并在不同端口最多尝试三次，耗尽后丢弃失败端口。Serve 健康门超时同时改用独立启动异常，不再被任务服务误记为模型消息超时或消耗 fresh Session 重试次数
 - **修复** OpenCode 轻量级威胁分析的必需校验命令失败后，不再立即丢弃 Session：Task Agent 会采集失败类型、退出状态及末尾最多 16 KiB 输出，先在原 Session 追加一次纠正消息并重新执行完全相同的命令，再失败才进入既有 fresh Session 重试；扫描详情同步展示同 Session 校验重试。Windows 校验命令改用 PATH 中的裸 `python.exe` 与双引号参数，并在 Hook 未暴露退出码时用校验器固定成功行兜底，避免 `cmd.exe` 把 POSIX 单引号当作路径字符以及 `exit=None` 被误判。轻量级失败目录遇到 `WinError 5` 时先短暂重试原子归档，再降级复制诊断并尽力清空原目录；归档警告不再阻止唯一一次 DeepHole clean fallback
 - **修复** Windows 客户端从 OpenCode 兼容 Serve 读取模型时，启动前同步执行的 `nga.CMD --version` 若留下仍持有输出管道的子进程，Python 即使触发命令超时也可能继续等待管道 EOF，阻塞 Agent 事件循环并在受管 `opencode.json` 写入前静默停住，最终由控制端在 120 秒后报超时；版本探测现在改用异步子进程和普通临时文件承接输出，3 秒超时后只通过 `taskkill /T /F` 清理本次探测进程树，版本不可用仍继续启动 Serve。旧 Serve 安全清理完成后会先原子发布运行配置再进行该非关键探测，Agent 终端同时记录可执行文件解析、旧进程清理、配置发布及版本探测的阶段和耗时
 - **新增** Agent 将平台选中且探测成功的 OpenCode 模型同步为 Codex 内容寻址模型目录，并在全局托管默认区配置 `model_catalog_json`、`model_context_window` 和 `model_auto_compact_token_limit`：优先读取正整数 `models.<id>.limit.context`，无法读取时按 `128000` 上下文和 `100000` 自动压缩阈值回退；目录模型名使用 Provider 下的原始模型 ID，能力字段与 Codex 直接工具模式契约对齐。用户自有目录指针、上下文和压缩设置继续优先，目录与配置按事务顺序原子替换，失败回滚新目录；模型切换或托管默认移除时只清理根所有权标记有效、未被用户引用的旧托管目录
