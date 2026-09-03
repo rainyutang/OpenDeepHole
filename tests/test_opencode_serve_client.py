@@ -5134,6 +5134,102 @@ def test_managed_compaction_overrides_conflicts_and_preserves_other_fields(
     }
 
 
+def test_managed_model_limits_fill_models_without_context(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "runtime"
+    workspace.mkdir()
+
+    config_path = _write_serve_config_file(
+        workspace,
+        json.dumps({
+            "model": "custom/empty",
+            "provider": {
+                "custom": {
+                    "name": "Custom Provider",
+                    "models": {
+                        "empty": {"name": "Empty Model"},
+                        "output-only": {
+                            "limit": {"output": 8_192},
+                            "options": {"reasoningEffort": "high"},
+                        },
+                        "invalid-limit": {"limit": False},
+                        "with-input": {
+                            "limit": {"input": 100_000, "output": 16_384},
+                        },
+                        "input-only": {
+                            "limit": {"input": 100_000},
+                        },
+                        "with-context": {
+                            "limit": {"context": 200_000},
+                        },
+                    },
+                },
+                "without-models": {"name": "No Models"},
+            },
+        }),
+    )
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    custom = config["provider"]["custom"]
+    assert custom["name"] == "Custom Provider"
+    assert custom["models"]["empty"] == {
+        "name": "Empty Model",
+        "limit": {"context": 131_072, "output": 32_768},
+    }
+    assert custom["models"]["output-only"] == {
+        "limit": {"context": 131_072, "output": 8_192},
+        "options": {"reasoningEffort": "high"},
+    }
+    assert custom["models"]["invalid-limit"] == {
+        "limit": {"context": 131_072, "output": 32_768},
+    }
+    assert custom["models"]["with-input"] == {
+        "limit": {
+            "context": 131_072,
+            "input": 100_000,
+            "output": 16_384,
+        },
+    }
+    assert custom["models"]["input-only"] == {
+        "limit": {
+            "context": 131_072,
+            "input": 100_000,
+            "output": 32_768,
+        },
+    }
+    assert custom["models"]["with-context"] == {
+        "limit": {"context": 200_000},
+    }
+    assert config["provider"]["without-models"] == {"name": "No Models"}
+    assert config["model"] == "custom/empty"
+    assert config["compaction"] == {
+        "auto": True,
+        "prune": True,
+        "reserved": 20_000,
+    }
+
+
+def test_managed_model_limits_do_not_create_provider_or_model_entries(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "runtime"
+    workspace.mkdir()
+
+    config_path = _write_serve_config_file(
+        workspace,
+        json.dumps({
+            "model": "builtin/catalog-model",
+            "provider": {"builtin": {"options": {"timeout": 30_000}}},
+        }),
+    )
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["provider"] == {
+        "builtin": {"options": {"timeout": 30_000}},
+    }
+
+
 def test_config_hash_uses_managed_compaction_values() -> None:
     base_hash = _config_hash("{}")
     conflicting_hash = _config_hash(json.dumps({
@@ -5154,6 +5250,43 @@ def test_config_hash_uses_managed_compaction_values() -> None:
 
     assert conflicting_hash == base_hash
     assert extended_hash != base_hash
+
+
+def test_config_hash_uses_managed_model_limit_values() -> None:
+    implicit_hash = _config_hash(json.dumps({
+        "provider": {
+            "custom": {
+                "models": {"model": {"name": "Model"}},
+            },
+        },
+    }))
+    explicit_hash = _config_hash(json.dumps({
+        "provider": {
+            "custom": {
+                "models": {
+                    "model": {
+                        "name": "Model",
+                        "limit": {"context": 131_072, "output": 32_768},
+                    },
+                },
+            },
+        },
+    }))
+    custom_hash = _config_hash(json.dumps({
+        "provider": {
+            "custom": {
+                "models": {
+                    "model": {
+                        "name": "Model",
+                        "limit": {"context": 200_000, "output": 32_768},
+                    },
+                },
+            },
+        },
+    }))
+
+    assert implicit_hash == explicit_hash
+    assert custom_hash != implicit_hash
 
 
 def test_start_locked_uses_fixed_port_and_writes_marker(monkeypatch, tmp_path: Path) -> None:

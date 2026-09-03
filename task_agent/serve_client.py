@@ -365,6 +365,8 @@ _MANAGED_COMPACTION_CONFIG = {
     "prune": True,
     "reserved": 20_000,
 }
+_MANAGED_MODEL_DEFAULT_CONTEXT = 131_072
+_MANAGED_MODEL_DEFAULT_OUTPUT = 32_768
 _FORMATTER_DISABLED_TOOL_IDS = frozenset({
     "apply_patch",
     "bash",
@@ -1229,6 +1231,56 @@ def _with_managed_compaction(data: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+def _with_managed_model_limits(data: dict[str, Any]) -> dict[str, Any]:
+    """Fill safe limits for configured models without a context limit."""
+    resolved = dict(data)
+    configured_providers = resolved.get("provider")
+    if not isinstance(configured_providers, dict):
+        return resolved
+
+    providers = dict(configured_providers)
+    providers_changed = False
+    for provider_id, configured_provider in configured_providers.items():
+        if not isinstance(configured_provider, dict):
+            continue
+        configured_models = configured_provider.get("models")
+        if not isinstance(configured_models, dict):
+            continue
+
+        models = dict(configured_models)
+        models_changed = False
+        for model_id, configured_model in configured_models.items():
+            if not isinstance(configured_model, dict):
+                continue
+            configured_limit = configured_model.get("limit")
+            limit = dict(configured_limit) if isinstance(configured_limit, dict) else {}
+            if "context" in limit:
+                continue
+
+            limit["context"] = _MANAGED_MODEL_DEFAULT_CONTEXT
+            limit.setdefault("output", _MANAGED_MODEL_DEFAULT_OUTPUT)
+            model = dict(configured_model)
+            model["limit"] = limit
+            models[model_id] = model
+            models_changed = True
+
+        if not models_changed:
+            continue
+        provider = dict(configured_provider)
+        provider["models"] = models
+        providers[provider_id] = provider
+        providers_changed = True
+
+    if providers_changed:
+        resolved["provider"] = providers
+    return resolved
+
+
+def _with_managed_runtime_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Return the effective config after applying all managed runtime fields."""
+    return _with_managed_compaction(_with_managed_model_limits(data))
+
+
 def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
     """Atomically publish the resolved config and managed runtime fields."""
     raw = config_content or "{}"
@@ -1238,7 +1290,7 @@ def _write_serve_config_file(cwd: Path, config_content: str) -> Path:
         raise ValueError(f"Resolved OpenCode config is invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError("Resolved OpenCode config must be a JSON object")
-    data = _with_managed_compaction(data)
+    data = _with_managed_runtime_fields(data)
     configured_plugins = data.get("plugin")
     if isinstance(configured_plugins, str):
         plugins = [configured_plugins]
@@ -3145,7 +3197,7 @@ def _config_hash(config_content: str | None) -> str:
     try:
         parsed = json.loads(content or "{}")
         if isinstance(parsed, dict):
-            parsed = _with_managed_compaction(parsed)
+            parsed = _with_managed_runtime_fields(parsed)
         content = json.dumps(
             parsed,
             ensure_ascii=False,
