@@ -66,6 +66,14 @@ export OPENDEEPHOLE_SERVER_WS_PING_TIMEOUT=120
 
 仓库的 `docker-compose.yml` 已提供 PostgreSQL 16、健康检查和 4 Worker 默认值。生产部署必须在 `.env` 或密钥系统中同时覆盖 `OPENDEEPHOLE_POSTGRES_PASSWORD` 和与其一致的 `OPENDEEPHOLE_DATABASE_URL`；URL 中的密码需要正确编码 URI 保留字符。不要把密码提交到仓库。
 
+## PostgreSQL 重启恢复
+
+连接池会在每次借出连接前验证连接是否仍然可用，并在执行、取数、提交或回滚失败后解除 Worker 线程与该连接的绑定。失效连接交回连接池后会被丢弃并补建，因此 PostgreSQL 完成重启并重新接受连接后，下一次请求会自动使用新连接，不需要重启后端 Worker。
+
+数据库实际不可用期间，请求仍可能失败或等待到连接池超时。后端不会自动重放失败的 SQL 或结果未知的写事务，避免数据库已经提交但响应丢失时产生重复写入。跨 Worker Agent 命令、通知监听和 SSE 补读循环会在后台持续退避重连；恢复后重新注册 Worker，并从中断前的事件游标继续补读持久化记录。
+
+发布后可执行一次维护窗口冒烟验证：先确认扫描历史和详情可读，只重启 PostgreSQL 并保持所有后端 Worker PID 不变，等待数据库健康检查通过，再确认历史、详情、Agent 命令和 SSE 更新恢复。重启窗口内出现请求错误或超时属于预期，数据库恢复后仍持续报错才属于故障。
+
 ## SQLite 迁移到 PostgreSQL
 
 迁移需要短维护窗口。工具只读取 SQLite 的在线快照，包含 WAL 中已提交数据；目标 PostgreSQL 必须为空，工具不会合并或删除目标数据。

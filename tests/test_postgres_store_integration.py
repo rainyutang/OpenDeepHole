@@ -92,6 +92,8 @@ def _vulnerability() -> Vulnerability:
 
 
 def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> None:
+    from psycopg import Error as PsycopgError
+
     sqlite_path = tmp_path / "source.db"
     source = SqliteScanStore(sqlite_path)
     try:
@@ -128,6 +130,11 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
 
     store = PostgresScanStore(POSTGRES_DSN, pool_min_size=1, pool_max_size=4)
     peer = PostgresScanStore(POSTGRES_DSN, pool_min_size=1, pool_max_size=2)
+    recovery_store = PostgresScanStore(
+        POSTGRES_DSN,
+        pool_min_size=1,
+        pool_max_size=1,
+    )
     try:
         page = store.list_scans_page(limit=10, user_id="postgres-integration-user")
         assert [item.scan_id for item in page] == ["postgres-integration-scan"]
@@ -194,6 +201,28 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
         # Two overlapping sleeps must use two pool connections.  This catches
         # accidental process-wide locks that silently serialize PostgreSQL.
         assert len(set(asyncio.run(concurrent_backend_pids()))) == 2
+
+        # Simulate a server restart invalidating an idle pooled connection.
+        # The health check must discard it before handing a connection to the
+        # store, so the first request after recovery succeeds transparently.
+        stale_connection = recovery_store._pool.getconn()
+        recovery_store._pool.putconn(stale_connection)
+        stale_connection.close()
+        assert recovery_store._conn.execute(
+            "SELECT 1 AS value"
+        ).fetchone()["value"] == 1
+
+        # Also cover a disconnect after checkout.  The interrupted operation
+        # is not replayed, but it must release the broken thread-local handle
+        # so the following request can acquire a replacement connection.
+        checked_out_connection = recovery_store._conn._acquire()
+        checked_out_connection.close()
+        with pytest.raises(PsycopgError):
+            recovery_store._conn.execute("SELECT 1 AS value")
+        assert recovery_store._conn._state()["conn"] is None
+        assert recovery_store._conn.execute(
+            "SELECT 1 AS value"
+        ).fetchone()["value"] == 1
 
         now = datetime.now(timezone.utc).isoformat()
         agent = AgentInfo(
@@ -296,5 +325,6 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
             progress=0.0,
         ) is False
     finally:
+        recovery_store.close()
         peer.close()
         store.close()

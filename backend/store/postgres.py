@@ -65,18 +65,26 @@ class _Cursor:
         return _CompatRow(value) if isinstance(value, dict) else value
 
     def fetchone(self):
+        error: BaseException | None = None
         try:
             return self._row(self._cursor.fetchone())
+        except BaseException as exc:
+            error = exc
+            raise
         finally:
             if self._release_on_fetch:
-                self._owner.release_read()
+                self._owner.release_read(suppress_errors=error is not None)
 
     def fetchall(self):
+        error: BaseException | None = None
         try:
             return [self._row(row) for row in self._cursor.fetchall()]
+        except BaseException as exc:
+            error = exc
+            raise
         finally:
             if self._release_on_fetch:
-                self._owner.release_read()
+                self._owner.release_read(suppress_errors=error is not None)
 
 
 class _Connection:
@@ -96,6 +104,48 @@ class _Connection:
         if state["conn"] is None:
             state["conn"] = self._pool.getconn()
         return state["conn"]
+
+    @staticmethod
+    def _unusable(conn: Any) -> bool:
+        return bool(
+            getattr(conn, "closed", False)
+            or getattr(conn, "broken", False)
+        )
+
+    def _release(
+        self,
+        *,
+        action: str | None = None,
+        suppress_errors: bool = False,
+    ) -> None:
+        """Detach and return this thread's connection without leaking it.
+
+        PostgreSQL disconnects can make rollback itself fail.  Clear the
+        thread-local reference before cleanup and always return the connection
+        to psycopg_pool, which discards broken connections and replenishes the
+        pool.  When another database error is already in flight, callers can
+        suppress cleanup failures so the original exception is preserved.
+        """
+        state = self._state()
+        conn = state["conn"]
+        if conn is None:
+            return
+        state["conn"] = None
+        state["dirty"] = False
+
+        cleanup_error: BaseException | None = None
+        if action is not None:
+            try:
+                getattr(conn, action)()
+            except BaseException as exc:
+                cleanup_error = exc
+        try:
+            self._pool.putconn(conn)
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        if cleanup_error is not None and not suppress_errors:
+            raise cleanup_error
 
     @staticmethod
     def _sql(sql: str) -> str:
@@ -135,7 +185,12 @@ class _Connection:
         write = self._is_write(sql)
         if write:
             state["dirty"] = True
-        cursor = conn.execute(self._sql(sql), tuple(params or ()))
+        try:
+            cursor = conn.execute(self._sql(sql), tuple(params or ()))
+        except BaseException:
+            if state["scope"] == 0 or self._unusable(conn):
+                self._release(action="rollback", suppress_errors=True)
+            raise
         return _Cursor(
             self,
             cursor,
@@ -146,8 +201,16 @@ class _Connection:
         state = self._state()
         conn = self._acquire()
         state["dirty"] = True
-        cursor = conn.cursor()
-        cursor.executemany(self._sql(sql), [tuple(values) for values in params])
+        try:
+            cursor = conn.cursor()
+            cursor.executemany(
+                self._sql(sql),
+                [tuple(values) for values in params],
+            )
+        except BaseException:
+            if state["scope"] == 0 or self._unusable(conn):
+                self._release(action="rollback", suppress_errors=True)
+            raise
         return _Cursor(self, cursor, release_on_fetch=False)
 
     def commit(self) -> None:
@@ -155,30 +218,26 @@ class _Connection:
         conn = state["conn"]
         if conn is None:
             return
-        conn.commit()
+        try:
+            conn.commit()
+        except BaseException:
+            self._release(action="rollback", suppress_errors=True)
+            raise
         state["dirty"] = False
         if state["scope"] == 0:
-            self._pool.putconn(conn)
-            state["conn"] = None
+            self._release()
 
     def rollback(self) -> None:
-        state = self._state()
-        conn = state["conn"]
-        if conn is None:
-            return
-        conn.rollback()
-        state["dirty"] = False
-        self._pool.putconn(conn)
-        state["conn"] = None
+        self._release(action="rollback", suppress_errors=True)
 
-    def release_read(self) -> None:
+    def release_read(self, *, suppress_errors: bool = False) -> None:
         state = self._state()
-        conn = state["conn"]
-        if conn is None or state["dirty"] or state["scope"]:
+        if state["conn"] is None or state["dirty"] or state["scope"]:
             return
-        conn.rollback()
-        self._pool.putconn(conn)
-        state["conn"] = None
+        self._release(
+            action="rollback",
+            suppress_errors=suppress_errors,
+        )
 
     def enter_scope(self) -> None:
         state = self._state()
@@ -189,18 +248,12 @@ class _Connection:
         state["scope"] = max(0, state["scope"] - 1)
         if state["scope"]:
             return
-        conn = state["conn"]
-        if conn is None:
+        if state["conn"] is None:
             return
-        if error is not None:
-            conn.rollback()
-        elif state["dirty"]:
-            conn.commit()
-        else:
-            conn.rollback()
-        state["dirty"] = False
-        self._pool.putconn(conn)
-        state["conn"] = None
+        self._release(
+            action="rollback" if error is not None or not state["dirty"] else "commit",
+            suppress_errors=error is not None,
+        )
 
     def close(self) -> None:
         self.rollback()
@@ -378,6 +431,7 @@ class PostgresScanStore(SqliteScanStore):
             min_size=max(1, int(pool_min_size)),
             max_size=max(int(pool_min_size), int(pool_max_size)),
             kwargs={"row_factory": dict_row},
+            check=ConnectionPool.check_connection,
             open=True,
         )
         self._conn = _Connection(self._pool)
