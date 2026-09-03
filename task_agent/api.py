@@ -112,8 +112,10 @@ def _normalize_readable_paths(
     return _normalize_path_values(value, parameter="readable_paths")
 
 
-def _normalize_required_bash_commands(
+def _normalize_bash_commands(
     value: str | Sequence[str] | None,
+    *,
+    parameter: str,
 ) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -123,31 +125,43 @@ def _normalize_required_bash_commands(
         entries = value
     else:
         raise TypeError(
-            "OpenCode required_bash_commands must be a string, "
+            f"OpenCode {parameter} must be a string, "
             "a sequence of strings, or None"
         )
     normalized: list[str] = []
     for item in entries:
         if not isinstance(item, str):
             raise TypeError(
-                "OpenCode required_bash_commands entries must be strings"
+                f"OpenCode {parameter} entries must be strings"
             )
         command = item.strip()
         if not command:
             raise ValueError(
-                "OpenCode required_bash_commands entries cannot be empty"
+                f"OpenCode {parameter} entries cannot be empty"
             )
         if "\n" in item or "\r" in item:
             raise ValueError(
-                "OpenCode required_bash_commands entries cannot contain newlines"
+                f"OpenCode {parameter} entries cannot contain newlines"
             )
         if "*" in command or "?" in command:
             raise ValueError(
-                "OpenCode required_bash_commands entries cannot contain wildcard characters"
+                f"OpenCode {parameter} entries cannot contain wildcard characters"
             )
         if command not in normalized:
             normalized.append(command)
     return tuple(normalized)
+
+
+def _normalize_allowed_bash_commands(
+    value: str | Sequence[str] | None,
+) -> tuple[str, ...]:
+    return _normalize_bash_commands(value, parameter="allowed_bash_commands")
+
+
+def _normalize_required_bash_commands(
+    value: str | Sequence[str] | None,
+) -> tuple[str, ...]:
+    return _normalize_bash_commands(value, parameter="required_bash_commands")
 
 
 def _normalize_required_bash_success_markers(
@@ -194,9 +208,12 @@ async def run_opencode_task(
     file_write_allowlist: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
     writable_paths: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
     readable_paths: str | PathLike[str] | Sequence[str | PathLike[str]] | None = None,
+    allowed_bash_commands: str | Sequence[str] | None = None,
     required_bash_commands: str | Sequence[str] | None = None,
     required_bash_retry_count: int = 0,
     required_bash_success_markers: Mapping[str, str] | None = None,
+    post_session_validator: Callable[[], Any] | None = None,
+    post_session_validation_retry_count: int = 0,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -216,9 +233,12 @@ async def run_opencode_task(
         file_write_allowlist=file_write_allowlist,
         writable_paths=writable_paths,
         readable_paths=readable_paths,
+        allowed_bash_commands=allowed_bash_commands,
         required_bash_commands=required_bash_commands,
         required_bash_retry_count=required_bash_retry_count,
         required_bash_success_markers=required_bash_success_markers,
+        post_session_validator=post_session_validator,
+        post_session_validation_retry_count=post_session_validation_retry_count,
         session_id=session_id,
         config_path=config_path,
         output=output,
@@ -250,9 +270,12 @@ async def _run_opencode_task_local(
     file_write_allowlist: _PathValues | None = None,
     writable_paths: _PathValues | None = None,
     readable_paths: _PathValues | None = None,
+    allowed_bash_commands: str | Sequence[str] | None = None,
     required_bash_commands: str | Sequence[str] | None = None,
     required_bash_retry_count: int = 0,
     required_bash_success_markers: Mapping[str, str] | None = None,
+    post_session_validator: Callable[[], Any] | None = None,
+    post_session_validation_retry_count: int = 0,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -288,6 +311,9 @@ async def _run_opencode_task_local(
     )
     normalized_writable_paths = _normalize_writable_paths(writable_paths)
     normalized_readable_paths = _normalize_readable_paths(readable_paths)
+    normalized_allowed_bash_commands = _normalize_allowed_bash_commands(
+        allowed_bash_commands
+    )
     normalized_required_bash_commands = _normalize_required_bash_commands(
         required_bash_commands
     )
@@ -304,6 +330,18 @@ async def _run_opencode_task_local(
             required_commands=normalized_required_bash_commands,
         )
     )
+    if post_session_validator is not None and not callable(post_session_validator):
+        raise TypeError("OpenCode post_session_validator must be callable or None")
+    post_validation_retry_count = int(post_session_validation_retry_count)
+    if post_validation_retry_count < 0:
+        raise ValueError(
+            "OpenCode post_session_validation_retry_count cannot be negative"
+        )
+    if post_validation_retry_count and post_session_validator is None:
+        raise ValueError(
+            "OpenCode post_session_validation_retry_count requires "
+            "post_session_validator"
+        )
     if output is not _UNSET and output is not None and not callable(output):
         raise TypeError("OpenCode output must be callable or None")
 
@@ -330,11 +368,14 @@ async def _run_opencode_task_local(
             file_write_allowlist=normalized_file_write_allowlist,
             writable_paths=normalized_writable_paths,
             readable_paths=normalized_readable_paths,
+            allowed_bash_commands=normalized_allowed_bash_commands,
             required_bash_commands=normalized_required_bash_commands,
             required_bash_retry_count=bash_retry_count,
             required_bash_success_markers=(
                 normalized_required_bash_success_markers
             ),
+            post_session_validator=post_session_validator,
+            post_session_validation_retry_count=post_validation_retry_count,
             session_id=str(session_id or "").strip() or None,
         )
 

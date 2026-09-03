@@ -504,10 +504,12 @@ class OpenCodeTaskQualityError(RuntimeError):
         *,
         failure_kind: str = "quality_error",
         command_failures: tuple[OpenCodeCommandFailure, ...] = (),
+        validation_feedback: str = "",
     ) -> None:
         super().__init__(message)
         self.failure_kind = str(failure_kind or "quality_error")
         self.command_failures = command_failures
+        self.validation_feedback = str(validation_feedback or "")
         self.prompt_result: OpenCodePromptResult | None = None
 
 
@@ -6203,6 +6205,7 @@ class OpenCodeServeManager:
         log_stage: str = "opencode",
         task_id: str = "",
         task_attempt: int = 0,
+        allowed_bash_commands: tuple[str, ...] = (),
         required_bash_commands: tuple[str, ...] = (),
         required_bash_success_markers: tuple[tuple[str, str], ...] = (),
         required_bash_path_prepend: tuple[str, ...] = (),
@@ -6443,16 +6446,20 @@ class OpenCodeServeManager:
                             active_session_id,
                             _one_line_preview(exc),
                         )
-                if required_bash_commands:
+                bound_bash_commands = tuple(dict.fromkeys((
+                    *allowed_bash_commands,
+                    *required_bash_commands,
+                )))
+                if bound_bash_commands:
                     if binding_workspace is None:
                         raise RuntimeError(
-                            "Managed plugin workspace is unavailable for required shell commands"
+                            "Managed plugin workspace is unavailable for bound shell commands"
                         )
                     command_binding_path, command_audit_path = (
                         _write_command_binding(
                             binding_workspace,
                             session_id=active_session_id,
-                            required_commands=required_bash_commands,
+                            required_commands=bound_bash_commands,
                             success_markers=required_bash_success_markers,
                             path_prepend=required_bash_path_prepend,
                         )

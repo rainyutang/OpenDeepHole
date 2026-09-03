@@ -5,8 +5,8 @@ from __future__ import annotations
 import shlex
 import subprocess
 import sys
-from pathlib import Path, PureWindowsPath
-from typing import Mapping
+from pathlib import Path
+from typing import Literal, Mapping
 
 from ..codex_scan_config import codex_runtime_reference_root
 
@@ -77,21 +77,15 @@ def validation_command(
     paths: Mapping[str, Path],
 ) -> str:
     argv = validation_argv(guidance_path=guidance_path, paths=paths)
+    prompt_argv = ("python", *argv[1:])
     if sys.platform != "win32":
-        return shlex.join(argv)
-    # A quoted executable is only a string expression in PowerShell, while
-    # POSIX single quotes are literal characters in cmd.exe. Keep the
-    # interpreter token bare and quote every following token with double
-    # quotes. Task Agent prepends this interpreter's directory to PATH for the
-    # bound Session, and the Codex method does the same for its app-server.
-    executable = PureWindowsPath(argv[0]).name
-    if not executable or any(character.isspace() for character in executable):
-        raise ValueError(
-            "Windows Python executable name must be a non-empty token without spaces"
-        )
+        return shlex.join(prompt_argv)
+    # Keep the prompt portable: both OpenCode and Codex prepend the current
+    # interpreter directory to PATH on Windows, while the host-side validator
+    # continues to execute the exact sys.executable argv directly.
     return " ".join((
-        executable,
-        *(_windows_command_argument(value) for value in argv[1:]),
+        "python",
+        *(_windows_command_argument(value) for value in prompt_argv[1:]),
     ))
 
 
@@ -102,11 +96,22 @@ def build_lightweight_prompt(
     guidance_path: Path,
     schema_paths: Mapping[str, Path],
     paths: Mapping[str, Path],
+    validation_owner: Literal["session", "host"] = "session",
 ) -> str:
-    """Build the byte-identical user prompt used by both lightweight methods."""
+    """Build the shared prompt with method-specific validation ownership."""
 
     attack_mode_path = guidance_path.parent / ATTACK_MODE_FILE
     command = validation_command(guidance_path=guidance_path, paths=paths)
+    if validation_owner == "session":
+        validation_completion = f"""1. 三份文件写完后，必须在本 Goal 内执行以下校验命令：
+{command}
+命令退出码为0才允许结束 Goal；如果失败，必须根据错误修正产物并反复执行，直至通过。不得跳过命令或只做人工目测；"""
+    elif validation_owner == "host":
+        validation_completion = f"""1. 三份文件写完后可执行以下命令辅助自检：
+{command}
+是否执行该命令不作为 Session 完成条件。宿主会在本次回复结束后独立校验产物；如果校验失败，宿主会把校验结果发回当前 Session，请根据错误修正产物；"""
+    else:
+        raise ValueError(f"Unknown lightweight validation owner: {validation_owner}")
     prompt = f"""你是威胁分析工程师。请使用攻击树威胁分析方法分析真实源码，生成可供后续威胁审计直接消费的最终产物。
 
 开始前依次读取并遵守：
@@ -129,9 +134,7 @@ def build_lightweight_prompt(
 不得修改源码，只能写指定产物。不得编造接口、调用关系或攻击路径，不得输出 Schema 之外的字段。
 
 ##完成条件:
-1. 三份文件写完后，必须在本 Goal 内执行以下校验命令：
-{command}
-命令退出码为0才允许结束 Goal；如果失败，必须根据错误修正产物并反复执行，直至通过。不得跳过命令或只做人工目测；
+{validation_completion}
 2. 分析必须完整，没有遗漏价值资产、高风险模块和威胁；针对每条攻击路径分析适用攻击模式并按可能性从高到低排列，有足够适用模式时至少输出10个，确实不足10个时输出全部实际适用模式"""
     if len(prompt) > MAX_LIGHTWEIGHT_PROMPT_CHARS:
         raise ValueError(
@@ -146,7 +149,7 @@ def validate_artifacts_locally(
     guidance_path: Path,
     paths: Mapping[str, Path],
 ) -> None:
-    """Run the same validator once more outside the model Session."""
+    """Validate lightweight artifacts outside the model Session."""
 
     completed = subprocess.run(
         validation_argv(guidance_path=guidance_path, paths=paths),

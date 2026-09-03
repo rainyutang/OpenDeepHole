@@ -4908,6 +4908,7 @@ function scanQueueFailureKindLabel(kind: string): string {
   if (kind === "quota") return "Provider 配额限制";
   if (kind === "no_available_model") return "没有可用模型";
   if (kind === "quality_error") return "任务质量校验失败";
+  if (kind === "post_session_validation_failed") return "产物校验失败";
   if (kind === "provider_error") return "Provider 请求失败";
   if (kind === "cancelled") return "任务已停止";
   return "执行失败";

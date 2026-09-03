@@ -16,7 +16,6 @@ reference_paths = _lightweight_contract.reference_paths
 reference_root = _lightweight_contract.reference_root
 validate_artifacts_locally = _lightweight_contract.validate_artifacts_locally
 validation_command = _lightweight_contract.validation_command
-VALIDATION_SUCCESS_MARKER = _lightweight_contract.VALIDATION_SUCCESS_MARKER
 
 
 _FINAL_DIR = "final"
@@ -86,6 +85,8 @@ def run_threat_analysis(
             prompt=prompt,
             reference_root=reference_root(),
             validation_command_value=command,
+            guidance_path=guidance_path,
+            paths=paths,
             session_id=saved_session_id,
         ))
         (artifact_root / _LOG_FILE).write_text(
@@ -108,7 +109,6 @@ def run_threat_analysis(
                 ),
             }
 
-        validate_artifacts_locally(guidance_path=guidance_path, paths=paths)
         _write_state(
             artifact_root / _STATE_FILE,
             session_id=session_id,
@@ -136,6 +136,7 @@ def build_task_prompt(
         guidance_path=guidance_path,
         schema_paths=schema_paths,
         paths=paths,
+        validation_owner="host",
     )
 
 
@@ -144,6 +145,8 @@ async def _run_task(
     prompt: str,
     reference_root: Path,
     validation_command_value: str,
+    guidance_path: Path,
+    paths: Mapping[str, Path],
     session_id: str | None,
 ) -> Any:
     from task_agent import run_opencode_task
@@ -155,13 +158,27 @@ async def _run_task(
         required_capability="high",
         output_schema=None,
         readable_paths=(reference_root,),
-        required_bash_commands=(validation_command_value,),
-        required_bash_retry_count=1,
-        required_bash_success_markers={
-            validation_command_value: VALIDATION_SUCCESS_MARKER,
-        },
+        allowed_bash_commands=(validation_command_value,),
+        post_session_validator=lambda: _artifact_validation_feedback(
+            guidance_path=guidance_path,
+            paths=paths,
+        ),
+        post_session_validation_retry_count=1,
         session_id=session_id,
     )
+
+
+def _artifact_validation_feedback(
+    *,
+    guidance_path: Path,
+    paths: Mapping[str, Path],
+) -> str | None:
+    try:
+        validate_artifacts_locally(guidance_path=guidance_path, paths=paths)
+    except Exception as exc:
+        detail = " ".join(str(exc).split())
+        return detail or type(exc).__name__
+    return None
 
 
 def _run_sync(awaitable: Awaitable[Any]) -> Any:

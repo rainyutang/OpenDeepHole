@@ -1,5 +1,10 @@
 # 更新日志
 
+## 2026-09-03
+
+- **修复** OpenCode 轻量级威胁分析不再把 Prompt 中的产物校验命令作为 Session 完成条件，因此模型未执行命令时不会再报“未执行校验命令”；命令仍被精确允许用于可选自检。Task Agent 会在每次完整消息结束后由宿主校验三份产物，首次失败将诊断回传同一 Session 请求修正，第二次仍失败才进入既有 fresh Session 与 DeepHole fallback。Codex Goal 的命令完成要求保持不变
+- **变更** 轻量威胁分析 Prompt 中的校验命令在各平台统一直接以 `python` 开头，不再暴露当前解释器绝对路径或 Windows 的 `python.exe`；宿主侧校验仍以实际 `sys.executable` argv 执行且不经过 shell
+
 ## 2026-09-02
 
 - **修复** OpenCode 轻量级威胁分析的必需校验命令失败后，不再立即丢弃 Session：Task Agent 会采集失败类型、退出状态及末尾最多 16 KiB 输出，先在原 Session 追加一次纠正消息并重新执行完全相同的命令，再失败才进入既有 fresh Session 重试；扫描详情同步展示同 Session 校验重试。Windows 校验命令改用 PATH 中的裸 `python.exe` 与双引号参数，并在 Hook 未暴露退出码时用校验器固定成功行兜底，避免 `cmd.exe` 把 POSIX 单引号当作路径字符以及 `exit=None` 被误判。轻量级失败目录遇到 `WinError 5` 时先短暂重试原子归档，再降级复制诊断并尽力清空原目录；归档警告不再阻止唯一一次 DeepHole clean fallback

@@ -7,7 +7,7 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -473,6 +473,63 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
             "providerID": "anthropic",
             "modelID": "claude-sonnet",
         }
+
+    asyncio.run(run())
+
+
+def test_run_prompt_allows_optional_command_without_completion_audit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.init_options = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["read", "bash"]
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        project = tmp_path / "project"
+        runtime = tmp_path / "runtime"
+        project.mkdir()
+        runtime.mkdir()
+        command = "python validate.py"
+
+        with (
+            patch(
+                "task_agent.serve_client._write_command_binding",
+                wraps=_write_command_binding,
+            ) as binding_mock,
+            patch(
+                "task_agent.serve_client._validate_required_command_audit"
+            ) as audit_mock,
+        ):
+            lines = await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=project,
+                config_workspace=runtime,
+                prompt="write artifacts",
+                model="provider/model",
+                timeout=30,
+                allowed_bash_commands=(command,),
+            )
+
+        assert lines == ["done"]
+        assert binding_mock.call_args.kwargs["required_commands"] == (command,)
+        audit_mock.assert_not_called()
+        assert not list(
+            (runtime / ".opendeephole-plugins" / "command-bindings").glob("*")
+        )
+        assert not list(
+            (runtime / ".opendeephole-plugins" / "command-audits").glob("*")
+        )
 
     asyncio.run(run())
 
