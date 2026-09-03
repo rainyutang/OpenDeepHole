@@ -833,6 +833,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 label="Threat audit",
                 fp_review=False,
             ),
+            SimpleNamespace(
+                engine_id="threat_pattern_audit",
+                label="Threat pattern audit",
+                fp_review=False,
+            ),
         ]
         loaded = {
             item.engine_id: SimpleNamespace(manifest=item)
@@ -918,11 +923,13 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(started, ["independent"])
         self.assertEqual(final_runs["independent"]["status"], "success")
-        self.assertEqual(final_runs["threat_audit"]["status"], "skipped")
-        self.assertIn(
-            "Blocked because threat analysis failed",
-            final_runs["threat_audit"]["error_message"],
-        )
+        for engine_id in ("threat_audit", "threat_pattern_audit"):
+            with self.subTest(engine_id=engine_id):
+                self.assertEqual(final_runs[engine_id]["status"], "skipped")
+                self.assertIn(
+                    "Blocked because threat analysis failed",
+                    final_runs[engine_id]["error_message"],
+                )
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
         self.assertIn(
             "Threat model service unavailable",

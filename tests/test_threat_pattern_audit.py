@@ -103,7 +103,7 @@ def test_prompt_is_concentrated_and_schema_carries_field_guidance() -> None:
     )
 
 
-def test_selection_requires_threat_analysis_without_changing_fixed_modes() -> None:
+def test_selection_requires_threat_analysis_and_fixed_modes_use_pattern_audit() -> None:
     with pytest.raises(HTTPException) as raised:
         _resolve_scan_mining_engines(
             scan_overrides=[
@@ -129,7 +129,7 @@ def test_selection_requires_threat_analysis_without_changing_fixed_modes() -> No
     )
     assert [item.engine_id for item in fixed] == [
         "static_candidate",
-        "threat_audit",
+        "threat_pattern_audit",
     ]
 
 

@@ -347,7 +347,7 @@ def test_fixed_modes_snapshot_pipeline_defaults(scan_mode: str) -> None:
     assert scan.auto_fp_review is True
     assert [item.engine_id for item in scan.mining_engines] == [
         "static_candidate",
-        "threat_audit",
+        "threat_pattern_audit",
     ]
     assert scan.scan_items == meta.scan_items == ["normal"]
     assert command["checkers"] == ["normal"]

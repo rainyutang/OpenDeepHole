@@ -13,7 +13,9 @@ SCAN_MODE_MULTI_VERSION = "multi_version"
 SCAN_MODE_FULL = "full"
 SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 
-BUILTIN_PROFILE_ENGINE_IDS = ("static_candidate", "threat_audit")
+# Used only when resolving newly created quick/standard scans. Resumes keep the
+# engine selections persisted with the original scan.
+BUILTIN_PROFILE_ENGINE_IDS = ("static_candidate", "threat_pattern_audit")
 THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS = frozenset({
     "threat_audit",
     "threat_pattern_audit",

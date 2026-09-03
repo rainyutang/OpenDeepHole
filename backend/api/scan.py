@@ -1266,7 +1266,10 @@ def _retryable_stage_count(
             else _normalized_run_status(run.status)
             not in _COMPLETED_ENGINE_RUN_STATUSES
         )
-        if selection.engine_id == "threat_audit" and threat_analysis_retry:
+        if (
+            selection.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS
+            and threat_analysis_retry
+        ):
             retryable = True
         if not retryable:
             continue
@@ -1288,6 +1291,7 @@ def _resume_mining_engine_ids(
     resume_threat_analysis: bool,
 ) -> list[str]:
     """Return enabled engines that have unfinished work for this continuation."""
+    threat_analysis_retry = _threat_analysis_run_needs_retry(scan)
     interrupted = scan.status in {ScanItemStatus.CANCELLED, ScanItemStatus.ERROR}
     runs_by_id = {item.engine_id: item for item in scan.mining_engine_runs}
     retry_ids: list[str] = []
@@ -1304,12 +1308,14 @@ def _resume_mining_engine_ids(
         has_work = lifecycle_retry
         if selection.engine_id == "static_candidate":
             has_work = has_work or full_pipeline_resume or bool(continue_candidates)
-        elif selection.engine_id == "threat_audit":
-            has_work = (
-                has_work
-                or bool(incomplete_threat_tasks)
-                or resume_threat_analysis
-            )
+        elif selection.engine_id in THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS:
+            has_work = has_work or threat_analysis_retry
+            if selection.engine_id == "threat_audit":
+                has_work = (
+                    has_work
+                    or bool(incomplete_threat_tasks)
+                    or resume_threat_analysis
+                )
         if has_work:
             retry_ids.append(selection.engine_id)
     return retry_ids

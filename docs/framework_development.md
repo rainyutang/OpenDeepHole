@@ -50,7 +50,7 @@ flowchart TD
     SA --> CA[候选点审计]
 
     ME --> EXT[其它独立引擎]
-    ME --> TH[threat_audit]
+    ME --> TH[threat_pattern_audit / threat_audit]
     TA -->|成功产物| TH
 
     CA --> R[规范化并流式上报漏洞]
@@ -67,14 +67,14 @@ flowchart TD
 
 实际调度遵循以下规则：
 
-1. `quick` 与 `standard` 固定启用威胁分析、`static_candidate`、`threat_audit` 和自动去误报；
+1. `quick` 与 `standard` 固定启用威胁分析、`static_candidate`、`threat_pattern_audit` 和自动去误报；
    `custom` 使用创建请求中的原有开关与引擎选择。三个模式分别读取 Agent 高级配置中的
    Checker 排除列表，并在创建时固化实际规则快照。
 2. 代码图谱构建是扫描的前置基础过程。构建失败时，不启动后续分析。
 3. 代码图谱成功后，独立威胁分析和已选漏洞挖掘引擎可以并发执行。
 4. `static_candidate` 引擎内部先执行静态分析，再把候选点交给候选点审计。
-5. `threat_audit` 是漏洞挖掘引擎，不是威胁分析的一部分；它必须等待威胁分析成功，
-   再读取攻击树和高风险模块产物。
+5. `threat_pattern_audit` 与 `threat_audit` 都是漏洞挖掘引擎，不是威胁分析的一部分；
+   它们必须等待威胁分析成功，再读取攻击树和高风险模块产物。
 6. 不依赖威胁分析产物的其它引擎无需等待威胁分析。
 7. 每条漏洞可以在引擎仍运行时流式上报；确认问题会按扫描配置继续排队验证和去误报。
    这两类任务有独立生命周期，不是扫描完成的一般前置条件。单个去误报项目失败或意外取消
@@ -100,6 +100,7 @@ flowchart TD
 | 静态分析 | `run_static_analysis(**kwargs)` | 代码索引、规则目录、Checker 选择 | `status`、`candidates`、`stats` |
 | 候选点审计 | `run_candidate_audit(**kwargs)` | 带扫描内 `idx` 的候选点、规则 Skill、代码索引 | `status`、单候选唯一 `vulnerabilities`、`processed_candidate_indexes` |
 | 威胁审计 | `run_threat_audit(**kwargs)` | 攻击树、高风险模块、扫描上下文 | `status`、`tasks`、`vulnerabilities` |
+| 攻击模式审计 | `threat_pattern_audit.run(**kwargs)` | 攻击树、高风险模块、扫描上下文 | `status`、`vulnerabilities` |
 | 去误报方法 | `run_fp_review(**kwargs)` | 方法 ID、代码路径、单个漏洞、历史反馈 | 单项 `status`、二元 `verdict`、`reason` 和阶段证据 |
 | 漏洞验证 | `run_vulnerability_validation(**kwargs)` | 产品、方法 ID、漏洞批次、全局策略快照和方法 field 值 | `status`、`validations`，或验证方法目录 `catalog` |
 
@@ -117,6 +118,7 @@ flowchart TD
 - [静态分析](../deephole_client/vulnerability_mining/engines/static_candidate/static_analysis/README.md)
 - [候选点审计](../deephole_client/vulnerability_mining/engines/static_candidate/candidate_audit/README.md)
 - [威胁审计](../deephole_client/vulnerability_mining/engines/threat_audit/README.md)
+- [攻击模式审计](../deephole_client/vulnerability_mining/engines/threat_pattern_audit/README.md)
 - [去误报方法](../deephole_client/fp_review/README.md)
 - [漏洞验证过程](../deephole_client/vulnerability_validation/README.md)
 
@@ -172,8 +174,8 @@ def run_threat_analysis(
 | 回调 | `output`、`cancel_event`、`report_vulnerabilities` | 事件输出、取消检查和流式漏洞上报 |
 
 框架还会向内置引擎传入 `reporter`；第三方引擎不应依赖该平台对象，应优先使用
-`output` 和 `report_vulnerabilities`。`threat_analysis_result` 只传给内置
-`threat_audit`，普通扩展引擎不应假设该 key 存在。
+`output` 和 `report_vulnerabilities`。`threat_analysis_result` 只传给内置的
+`threat_audit` 与 `threat_pattern_audit`，普通扩展引擎不应假设该 key 存在。
 
 服务端续扫命令中的 `retry_mining_engine_ids` 由 Agent 扫描协调器消费，用来筛选本轮实际启动
 的引擎，不属于单个引擎的 `kwargs`。因此第三方引擎仍只需通过 `is_resume` 和自己的细粒度

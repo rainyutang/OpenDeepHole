@@ -2571,7 +2571,7 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(sent["mining_engines"], [])
             self.assertEqual(sent["retry_mining_engine_ids"], [])
 
-    def test_complete_scan_can_retry_failed_threat_analysis_without_rerunning_successful_engine(
+    def test_failed_threat_analysis_retries_pattern_engine_without_rerunning_successful_engine(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2588,8 +2588,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     engine_label="静态规则扫描 + 候选点审计",
                 ),
                 MiningEngineSelection(
-                    engine_id="threat_audit",
-                    engine_label="威胁审计",
+                    engine_id="threat_pattern_audit",
+                    engine_label="DeepHole基于攻击模式的漏洞挖掘引擎",
                 ),
             ]
             scan.mining_engine_runs = [
@@ -2599,8 +2599,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                     status="success",
                 ),
                 MiningEngineRunStatus(
-                    engine_id="threat_audit",
-                    engine_label="威胁审计",
+                    engine_id="threat_pattern_audit",
+                    engine_label="DeepHole基于攻击模式的漏洞挖掘引擎",
                     status="skipped",
                     error_message="Blocked because threat analysis failed",
                 ),
@@ -2682,12 +2682,15 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 )
 
             self.assertTrue(sent["resume_threat_analysis"])
-            self.assertEqual(sent["retry_mining_engine_ids"], ["threat_audit"])
+            self.assertEqual(
+                sent["retry_mining_engine_ids"],
+                ["threat_pattern_audit"],
+            )
             stored = store.load_scan("scan-threat-retry")[0]
             self.assertEqual(stored.threat_analysis_run.status, "pending")
             runs = {item.engine_id: item for item in stored.mining_engine_runs}
             self.assertEqual(runs["static_candidate"].status, "success")
-            self.assertEqual(runs["threat_audit"].status, "pending")
+            self.assertEqual(runs["threat_pattern_audit"].status, "pending")
 
     def test_provisional_agent_report_is_visible_then_reconciled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
