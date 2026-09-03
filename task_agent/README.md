@@ -90,7 +90,9 @@ result = await run_opencode_task(
 任务的 Serve 配置，不会修改宿主的持久受管 Skill 注册；Task Agent 会在最终
 `opencode.json` 中从 `skills.paths` 和临时 `skill_paths` 推导显式 `read: allow` 与外部目录规则，使
 `references/`、`assets/`、`scripts/` 等资源可读。standalone 默认仍只允许写 `work_dir`；
-嵌入宿主可通过 `OpenCodeHostBindings.writable_roots` 声明额外稳定可写根。每次调用都会把
+嵌入宿主可通过 `OpenCodeHostBindings.readable_roots` 声明额外稳定只读根，通过
+`OpenCodeHostBindings.writable_roots` 声明额外稳定可写根；只读根只获得 `read` 和
+`external_directory`，不会获得 `edit`。每次调用都会把
 `work_dir` 与 `file_write_allowlist`、兼容参数 `writable_paths` 合并为当前 Session 的窄化
 `permission` 覆盖；`readable_paths` 只追加读取权限，因此续接 Session 不会继承上一次调用未再次
 声明的额外路径。调用方不能传原生权限规则，`project_dir` 默认只读，`bash` 默认保持禁用。显式

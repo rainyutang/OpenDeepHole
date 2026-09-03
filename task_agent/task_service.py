@@ -2696,6 +2696,24 @@ def _host_writable_roots() -> tuple[Path | PurePath, ...]:
     return tuple(roots)
 
 
+def _host_readable_roots() -> tuple[Path | PurePath, ...]:
+    """Resolve optional stable read-only roots declared by the embedding host."""
+    callback = getattr(get_host_bindings(), "readable_roots", None)
+    if not callable(callback):
+        return ()
+    roots: list[Path | PurePath] = []
+    for raw_root in callback() or ():
+        if isinstance(raw_root, Path):
+            root: Path | PurePath = raw_root.expanduser().resolve()
+        elif isinstance(raw_root, PurePath):
+            root = raw_root
+        else:
+            root = Path(raw_root).expanduser().resolve()
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
 def _model_pool_task_context(
     record: _TaskRecord,
     *,
@@ -3060,6 +3078,7 @@ def _runtime_with_permissions(
     existing = config.get("permission")
     permission = dict(existing) if isinstance(existing, dict) else {}
 
+    host_readable_roots = _host_readable_roots()
     host_writable_roots = _host_writable_roots()
     work_dir = _required_work_dir(context)
     work_is_covered = any(
@@ -3077,6 +3096,7 @@ def _runtime_with_permissions(
             Path(runtime.config_workspace).resolve() / ".opencode"
         )
     readable_roots.extend(_runtime_skill_paths(runtime))
+    readable_roots.extend(host_readable_roots)
     readable_roots.extend(writable_roots)
 
     def path_rules(

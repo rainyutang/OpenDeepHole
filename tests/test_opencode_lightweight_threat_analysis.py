@@ -77,6 +77,29 @@ def test_codex_and_opencode_share_core_prompt_but_assign_validation_differently(
     assert "\npython " in codex_prompt
 
 
+def test_all_prompt_references_are_inside_the_agent_readable_root() -> None:
+    reference_root = codex_runtime_reference_root().resolve()
+    guidance_path, schema_paths = lightweight_contract.reference_paths()
+    reference_paths = (
+        guidance_path,
+        guidance_path.parent / lightweight_contract.ATTACK_MODE_FILE,
+        *schema_paths.values(),
+        reference_root / "schema_validation.py",
+    )
+
+    assert {path.name for path in reference_paths} == {
+        "analysis-guidance.json",
+        "attack_mode.json",
+        "value-assets.schema.json",
+        "high-risk-modules.schema.json",
+        "attack-trees.schema.json",
+        "schema_validation.py",
+    }
+    for path in reference_paths:
+        assert path.is_file()
+        assert path.resolve().is_relative_to(reference_root)
+
+
 def test_method_runs_one_task_with_read_only_references_and_exact_command(
     tmp_path: Path,
     monkeypatch,

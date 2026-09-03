@@ -264,6 +264,7 @@ def configure_opencode_component() -> None:
         build_session_runtime=_build_session_runtime,
         disabled_source_mcp_tools=_disabled_source_mcp_tools,
         writable_roots=_agent_writable_roots,
+        readable_roots=_agent_readable_roots,
     ))
 
 
@@ -279,6 +280,13 @@ def _agent_writable_roots() -> tuple[Path, ...]:
             "skill_create",
         )
     )
+
+
+def _agent_readable_roots() -> tuple[Path, ...]:
+    """Return packaged Agent resources that every Serve may read, never edit."""
+    from .codex_scan_config import codex_runtime_reference_root
+
+    return (codex_runtime_reference_root().resolve(),)
 
 
 def get_workspace_lock(workspace: Path) -> threading.RLock:
@@ -427,6 +435,7 @@ def build_opencode_config(
     stable_readable_paths: list[str | os.PathLike[str]] = [
         _GLOBAL_OPENCODE_EXTERNAL_ROOT,
         _GLOBAL_WORKSPACE / ".opencode",
+        *_agent_readable_roots(),
         *(skills_paths or []),
         *(readable_paths or []),
     ]
@@ -468,6 +477,7 @@ def _has_managed_permissions(config_path: Path, workspace: Path) -> bool:
             _GLOBAL_OPENCODE_EXTERNAL_ROOT,
             workspace / ".opencode",
             workspace / ".opencode" / "skills",
+            *_agent_readable_roots(),
         ):
             readable_patterns.extend(writable_edit_patterns(path))
             readable_patterns.extend(writable_edit_patterns(

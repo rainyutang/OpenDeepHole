@@ -212,6 +212,38 @@ def test_host_writable_root_is_written_to_windows_runtime_config(
         assert permission["edit"][pattern] == "allow"
 
 
+def test_host_readable_root_is_read_only_in_windows_runtime_config(
+    tmp_path: Path,
+) -> None:
+    reference_root = PureWindowsPath(
+        r"C:\Users\demo\OpenDeepHole\deephole_client\threat_analysis\methods"
+        r"\codex_goal_threat_analysis"
+    )
+    context = OpenCodeExecutionContext(
+        project_dir=tmp_path,
+        work_dir=tmp_path / "work",
+    )
+    bindings = SimpleNamespace(
+        readable_roots=lambda: (reference_root,),
+        writable_roots=lambda: (),
+    )
+
+    with patch(
+        "task_agent.task_service.get_host_bindings",
+        return_value=bindings,
+    ):
+        runtime = _runtime_with_permissions(
+            _runtime(tmp_path),
+            context,
+        )
+
+    permission = json.loads(runtime.config_content)["permission"]
+    for pattern in _permission_path_patterns(reference_root):
+        assert permission["read"][pattern] == "allow"
+        assert permission["external_directory"][pattern] == "allow"
+        assert pattern not in permission["edit"]
+
+
 @pytest.fixture(autouse=True)
 def _configured_host_boundary():
     """Task-service unit tests provide their own config/runtime patches."""

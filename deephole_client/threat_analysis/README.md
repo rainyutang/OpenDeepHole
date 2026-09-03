@@ -16,7 +16,10 @@
 和输出路径共享字节级一致的分析主体；只有完成条件按校验责任方区分。提示词不超过 4000 字符，
 只携带路径和关键约束；完整
 接口契约与三份字段 Schema 都来自 Codex 方法目录下的只读 `references/*.json`，校验器也继续位于
-该目录，以保持 Prompt 中的既有路径不变。OpenCode 方法复用 Agent 当前
+该目录，以保持 Prompt 中的既有路径不变。完整 Agent 会把这个精确方法目录作为稳定只读根写入
+OpenCode 的受管 Serve 配置，同时保留当前 Session 的窄化只读授权；因此主 Agent 可以读取
+`analysis-guidance.json`、攻击模式和三份 Schema，但不能编辑该目录，也不会连带开放整个 Agent。
+缺少该规则的旧受管配置会在下次准备 workspace 时自动重写。OpenCode 方法复用 Agent 当前
 `threat_analysis.model_policy` 的超时和全新 Session 重试；Task Agent 只开放 Prompt 内精确的
 校验命令，但不要求 OpenCode 执行它，也不会产生“未执行校验命令”的完成失败。每次 Session 消息
 完整结束后，宿主使用实际 `sys.executable` argv 校验三份产物；首次失败会把校验诊断追加到原

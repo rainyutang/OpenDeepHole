@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from deephole_client import codegraph as codegraph_runtime
+from deephole_client.codex_scan_config import codex_runtime_reference_root
 from deephole_client.opencode_integration import (
     _config_home_candidates,
     _opencode_executable_alias,
@@ -47,6 +48,7 @@ def assert_opencode_read_permissions(
         "~/.opendeephole/opencode_workspace/.opencode",
         workspace / ".opencode",
         workspace / ".opencode" / "skills",
+        codex_runtime_reference_root().resolve(),
     ):
         for pattern in writable_edit_patterns(root):
             testcase.assertEqual(read.get(pattern), "allow")
@@ -71,7 +73,7 @@ def assert_opencode_read_permissions(
 
 
 class OpencodeWorkspaceTests(unittest.TestCase):
-    def test_agent_host_binding_exposes_entire_scans_root_as_writable(
+    def test_agent_host_binding_exposes_stable_readable_and_writable_roots(
         self,
     ) -> None:
         with patch("task_agent.configure_opencode") as configure:
@@ -89,6 +91,10 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                     "skill_create",
                 )
             ),
+        )
+        self.assertEqual(
+            bindings.readable_roots(),
+            (codex_runtime_reference_root().resolve(),),
         )
 
     def test_runtime_environment_only_adds_no_proxy(self) -> None:
@@ -590,6 +596,40 @@ class OpencodeWorkspaceTests(unittest.TestCase):
             )
             self.assertNotIn("deephole-code", config["mcp"])
             assert_opencode_read_permissions(self, config, workspace)
+
+    def test_missing_agent_reference_permissions_trigger_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "opencode_workspace"
+            fake_config = SimpleNamespace(
+                code_graph=SimpleNamespace(enabled=False, name="codegraph"),
+                product_info=SimpleNamespace(
+                    enabled=False,
+                    name="product-info",
+                ),
+            )
+            with (
+                patch(
+                    "deephole_client.opencode_integration._GLOBAL_WORKSPACE",
+                    workspace_path,
+                ),
+                patch(
+                    "deephole_client.opencode_integration.get_config",
+                    return_value=fake_config,
+                ),
+            ):
+                workspace = get_global_opencode_workspace()
+                config_path = managed_opencode_config_path(workspace)
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                reference_root = codex_runtime_reference_root().resolve()
+                for pattern in writable_edit_patterns(reference_root):
+                    config["permission"]["read"].pop(pattern, None)
+                    config["permission"]["external_directory"].pop(pattern, None)
+                config_path.write_text(json.dumps(config), encoding="utf-8")
+
+                get_global_opencode_workspace()
+
+            refreshed = json.loads(config_path.read_text(encoding="utf-8"))
+            assert_opencode_read_permissions(self, refreshed, workspace)
 
     def test_obsolete_builtin_mcp_alone_triggers_managed_config_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

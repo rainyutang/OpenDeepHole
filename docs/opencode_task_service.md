@@ -205,7 +205,7 @@ model_pool:
 
 v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未显式填写 `serve.executable` 时继续使用 `nga`；旧模型行里的 `tool` 和 `executable` 会被忽略。v2 只接受 `serve.tool: opencode`，并拒绝模型行工具或可执行文件覆盖，确保所有模型共用 `serve.executable`。
 
-嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，全局 `bash` 保持拒绝。显式传入 `file_write_allowlist`、兼容参数 `writable_paths`、`readable_paths`、`allowed_bash_commands` 或 `required_bash_commands` 时，动态权限通过 Session 覆盖下发，不进入 Serve 配置哈希。
+嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。宿主还可通过 `OpenCodeHostBindings.readable_roots` 把稳定的外部资源根写入同一配置，仅授予 `read` 与 `external_directory`；完整 Agent 用它开放轻量级威胁分析共享参考目录，不开放整个 Agent，也不授予编辑权限。Windows 下同时生成原生反斜杠和正斜杠兼容规则，全局 `bash` 保持拒绝。显式传入 `file_write_allowlist`、兼容参数 `writable_paths`、`readable_paths`、`allowed_bash_commands` 或 `required_bash_commands` 时，动态权限通过 Session 覆盖下发，不进入 Serve 配置哈希。
 
 `workspace_dir` 中生成的 `opencode.json` 包含合并后的实际配置，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Task Agent 还会在该 workspace 的私有目录生成受管文件写入/精确命令 Hook 和知识库项目 Hook，并在最终配置的 `plugin` 列表末尾追加文件 URI；调用方已有的插件条目保持原顺序且不会被覆盖，Hook 源码哈希也参与 Serve 配置重载判断。知识库项目 Hook 通过 Session ID 哈希定位 `0600` 私有绑定文件，在 `tool.execute.before` 原地强制覆盖查询工具的 `project_id`，并拒绝平台专用的项目列表/切换工具；文件写入 Hook 同时按 Session 私有绑定约束父、子 Session 的精确命令，记录执行顺序、完整命令、退出状态及末尾最多 16 KiB 输出。这些诊断通常不写入 Prompt；只有调用方启用必需命令同 Session 纠正且校验失败时，才会追加到同一 Session。绑定和命令审计在每次消息返回后即删除。
 
@@ -373,7 +373,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 内部服务会在 Serve 启动前把受管边界写入最终全局 `opencode.json`：
 
-- 允许读取项目工作目录、当前工作目录和全局 workspace 的 `.opencode`；最终配置的 `skills.paths` 以及通用过程显式绑定的临时 `skill_paths` 都会获得完整子路径的 `read: allow` 与外部目录规则，使 `references/`、`assets/`、`scripts/` 等资源可读。
+- 允许读取项目工作目录、当前工作目录、全局 workspace 的 `.opencode` 以及宿主声明的稳定只读根；后者只获得 `read` 与外部目录权限。最终配置的 `skills.paths` 以及通用过程显式绑定的临时 `skill_paths` 也会获得完整子路径的读取与外部目录规则，使 `references/`、`assets/`、`scripts/` 等资源可读。
 - 先拒绝所有 `edit`，再允许宿主声明的稳定可写根。完整 Agent 允许写四个 `.opendeephole` 任务根，standalone 允许写固定 `work_dir`；通用嵌入宿主若没有声明覆盖当前 `work_dir` 的稳定根，Task Agent 会把该目录加入本次最终配置。
 - 默认拒绝所有 `bash`；只有当前调用显式声明 `allowed_bash_commands` 或 `required_bash_commands` 时才放行完全匹配的命令，受管 Hook 会拒绝未绑定、拼接或变形命令。只有后者会把缺失、超时、非零/未知退出及校验后再次写文件视为任务质量失败。Windows 上只对绑定 Session 的 shell 环境临时前置当前 Python 目录；不会授予其它命令权限。
 - 允许加载最终配置注册的 SKILL，以及通用过程通过 `skill_paths` 绑定的临时 SKILL；注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
