@@ -42,6 +42,7 @@ class ScanTask:
     resume_threat_analysis: bool = False
     retry_mining_engine_ids: list[str] | None = None
     retry_threat_audit_task_ids: list[str] | None = None
+    execution_revision: int = 0
     cancel_event: ScanCancellationEvent = field(
         default_factory=ScanCancellationEvent,
     )
@@ -78,6 +79,7 @@ class TaskManager:
         resume_threat_analysis: bool = False,
         retry_mining_engine_ids: list[str] | None = None,
         retry_threat_audit_task_ids: list[str] | None = None,
+        execution_revision: int = 0,
     ) -> ScanTask:
         task = ScanTask(
             scan_id=scan_id,
@@ -135,6 +137,7 @@ class TaskManager:
                 else None
             ),
             retry_threat_audit_task_ids=retry_threat_audit_task_ids,
+            execution_revision=max(0, int(execution_revision or 0)),
         )
         self._tasks[scan_id] = task
         return task
@@ -166,6 +169,7 @@ class TaskManager:
                 continue
             active.append({
                 "scan_id": task.scan_id,
+                "execution_revision": task.execution_revision,
                 "project_path": str(task.project_path),
                 "code_scan_path": str(task.code_scan_path),
                 "multi_versions": copy.deepcopy(task.multi_versions),

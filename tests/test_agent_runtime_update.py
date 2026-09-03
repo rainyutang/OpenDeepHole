@@ -773,6 +773,26 @@ class AgentRuntimePackageTests(unittest.TestCase):
         self.assertEqual(update.await_count, 2)
         handler.assert_awaited_once()
 
+    def test_runtime_update_is_deferred_while_local_work_is_active(self) -> None:
+        update = AsyncMock(return_value=True)
+        with (
+            patch(
+                "deephole_client.server.has_active_local_work",
+                return_value=True,
+            ),
+            patch(
+                "deephole_client.updater.ensure_runtime_updated",
+                new=update,
+            ),
+        ):
+            restarted = asyncio.run(agent_main._ensure_runtime_updated_safely(
+                {"hash": "new-runtime"},
+                {"type": "task", "scan_id": "scan-1"},
+            ))
+
+        self.assertFalse(restarted)
+        update.assert_not_awaited()
+
     def test_scan_task_carries_codex_models_after_runtime_update(self) -> None:
         calls: list[str] = []
         config = AgentConfig()
@@ -1007,6 +1027,50 @@ class AgentRuntimePackageTests(unittest.TestCase):
         expected_command = dict(command)
         expected_command.pop("agent_runtime_update")
         self.assertEqual(pending_commands, [expected_command])
+
+    def test_pending_runtime_commands_cover_all_recoverable_work_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            updater,
+            "PENDING_COMMANDS_FILE",
+            Path(tmp) / "pending_commands.json",
+        ):
+            updater.save_pending_command({
+                "type": "resume",
+                "scan_id": "scan-main",
+                "execution_revision": 2,
+            })
+            updater.save_pending_command({
+                "type": "fp_review",
+                "scan_id": "scan-fp",
+                "review_id": "review-1",
+                "execution_revision": 3,
+            })
+            updater.save_pending_command({
+                "type": "vulnerability_validation",
+                "scan_id": "scan-validation",
+                "vuln_index": 7,
+                "execution_revision": 4,
+            })
+
+            self.assertEqual(updater.pending_scan_snapshots(), [{
+                "scan_id": "scan-main",
+                "execution_revision": 2,
+                "project_path": "",
+                "code_scan_path": "",
+                "checkers": [],
+                "scan_name": "",
+            }])
+            self.assertEqual(updater.pending_fp_review_snapshots(), [{
+                "scan_id": "scan-fp",
+                "review_id": "review-1",
+                "item_running": True,
+                "execution_revision": 3,
+            }])
+            self.assertEqual(updater.pending_validation_snapshots(), [{
+                "scan_id": "scan-validation",
+                "vuln_index": 7,
+                "execution_revision": 4,
+            }])
 
     def test_vulnerability_validation_command_checks_runtime_update_before_validation(self) -> None:
         update = AsyncMock(return_value=False)

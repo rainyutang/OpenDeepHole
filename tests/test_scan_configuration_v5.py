@@ -131,6 +131,10 @@ def test_agent_validation_progress_preserves_method_snapshot() -> None:
 
     async def direct_store_call(_store, operation, *args, **_kwargs):
         nonlocal captured
+        if operation == "get_scan_meta":
+            return SimpleNamespace()
+        if operation == "execution_matches":
+            return True
         assert operation == "upsert_vulnerability_validation"
         captured = args[1]
         return captured

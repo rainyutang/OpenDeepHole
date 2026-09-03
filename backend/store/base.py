@@ -488,6 +488,95 @@ class ScanStoreBase(ABC):
         Returns the number of scans affected.
         """
 
+    def begin_scan_execution(
+        self,
+        scan_id: str,
+        *,
+        agent_id: str,
+        agent_session_id: str,
+    ) -> int:
+        """Bind a new Agent-process execution and return its monotonic revision."""
+        raise NotImplementedError
+
+    def begin_fp_review_execution(
+        self,
+        review_id: str,
+        *,
+        agent_session_id: str,
+    ) -> int:
+        raise NotImplementedError
+
+    def begin_validation_execution(
+        self,
+        scan_id: str,
+        vuln_index: int,
+        *,
+        agent_session_id: str,
+    ) -> int:
+        raise NotImplementedError
+
+    def list_agent_inflight_executions(
+        self,
+        agent_key: str,
+        agent_id: str,
+    ) -> dict[str, list[dict]]:
+        """Return bounded identities for non-terminal Agent-owned work."""
+        raise NotImplementedError
+
+    def adopt_active_execution(
+        self,
+        kind: str,
+        work_id: str,
+        sub_id: int | None,
+        *,
+        previous_session_id: str,
+        agent_session_id: str,
+    ) -> bool:
+        """Rebind an Agent-reported active execution without changing revision."""
+        raise NotImplementedError
+
+    def claim_scan_for_agent_recovery(
+        self,
+        scan_id: str,
+        *,
+        previous_session_id: str,
+        agent_id: str,
+        agent_session_id: str,
+        error_message: str,
+    ) -> int | None:
+        raise NotImplementedError
+
+    def claim_fp_review_for_agent_recovery(
+        self,
+        review_id: str,
+        *,
+        previous_session_id: str,
+        agent_session_id: str,
+    ) -> int | None:
+        raise NotImplementedError
+
+    def claim_validation_for_agent_recovery(
+        self,
+        scan_id: str,
+        vuln_index: int,
+        *,
+        previous_session_id: str,
+        agent_session_id: str,
+    ) -> int | None:
+        raise NotImplementedError
+
+    def execution_matches(
+        self,
+        kind: str,
+        work_id: str,
+        sub_id: int | None,
+        *,
+        agent_session_id: str,
+        execution_revision: int,
+    ) -> bool:
+        """Return whether an Agent report belongs to the current execution."""
+        raise NotImplementedError
+
     @abstractmethod
     def mark_agent_scans_cancelled(self, agent_id: str, error_message: str) -> list[str]:
         """Mark running scans owned by *agent_id* as cancelled.

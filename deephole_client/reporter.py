@@ -33,6 +33,56 @@ OPENCODE_POOL_UNCHANGED_HEARTBEAT_SECONDS = 60.0
 AGENT_BATCH_SIZE = 100
 AGENT_BATCH_FLUSH_SECONDS = 0.25
 STAGE_RUN_RETRY_DELAYS = (1.0, 2.0)
+
+
+def _compact_pool_task(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "task_id",
+        "planned_task_id",
+        "scope_id",
+        "task_type",
+        "task_name",
+        "candidate_idx",
+        "audit_index",
+        "revision",
+        "priority",
+        "required_capability",
+        "model_id",
+        "model",
+        "queued_at",
+        "started_at",
+        "finished_at",
+        "duration_seconds",
+        "outcome",
+        "blocked_reason",
+        "prompt_length",
+    }
+    compact = {key: item for key, item in value.items() if key in allowed}
+    prompt = value.get("prompt")
+    if isinstance(prompt, str):
+        compact["prompt_length"] = len(prompt)
+    return compact
+
+
+def _compact_pool_snapshot(snapshot: dict) -> dict:
+    compact = dict(snapshot)
+    for key in ("queued_tasks", "planned_tasks", "completed_tasks"):
+        compact[key] = [_compact_pool_task(item) for item in snapshot.get(key, [])]
+    models = []
+    for raw_model in snapshot.get("models", []):
+        if not isinstance(raw_model, dict):
+            continue
+        model = dict(raw_model)
+        model["active_tasks"] = [
+            _compact_pool_task(item)
+            for item in raw_model.get("active_tasks", [])
+        ]
+        models.append(model)
+    compact["models"] = models
+    compact["details_truncated"] = True
+    return compact
 THREAT_ANALYSIS_TERMINAL_STATUSES = {"success", "error", "cancelled"}
 MINING_ENGINE_TERMINAL_STATUSES = {
     "success",
@@ -64,6 +114,16 @@ def _is_scan_not_found_response(response: httpx.Response) -> bool:
     if isinstance(detail, dict):
         return str(detail.get("code") or "").strip() == "scan_not_found"
     return str(detail or "").strip().lower() == "scan not found"
+
+
+def _is_stale_execution_response(response: httpx.Response) -> bool:
+    """A superseded authoritative report is terminal and safe to discard."""
+    if response.status_code != 409:
+        return False
+    detail = str(_response_detail(response) or "").strip().lower()
+    return detail.startswith("stale ") and (
+        detail.endswith(" execution") or detail.endswith(" session")
+    )
 
 
 def _response_context(response: httpx.Response) -> str:
@@ -118,6 +178,55 @@ class Reporter:
             str,
             dict[str, MiningEngineRunStatus],
         ] = {}
+        self._scan_execution_revisions: dict[str, int] = {}
+        self._fp_execution_revisions: dict[str, int] = {}
+        self._validation_execution_revisions: dict[tuple[str, int], int] = {}
+
+    def set_scan_execution(self, scan_id: str, revision: int) -> None:
+        self._scan_execution_revisions[str(scan_id)] = max(0, int(revision or 0))
+
+    def set_fp_review_execution(self, review_id: str, revision: int) -> None:
+        self._fp_execution_revisions[str(review_id)] = max(0, int(revision or 0))
+
+    def set_validation_execution(self, scan_id: str, vuln_index: int, revision: int) -> None:
+        self._validation_execution_revisions[(str(scan_id), int(vuln_index))] = max(
+            0,
+            int(revision or 0),
+        )
+
+    def pending_terminal_work(self) -> dict[str, list]:
+        """Describe pending terminal outbox rows without adding recovery storage."""
+        result: dict[str, list] = {
+            "scans": [],
+            "fp_reviews": [],
+            "validations": [],
+        }
+        if self._outbox is None:
+            return result
+        for key in self._outbox.pending_dedupe_keys(self.server_url):
+            parts = key.split(":")
+            if len(parts) == 3 and parts[0] == "scan" and parts[2] == "finish":
+                result["scans"].append(parts[1])
+            elif (
+                len(parts) == 5
+                and parts[0] == "scan"
+                and parts[2] == "fp"
+                and parts[4] == "finish"
+            ):
+                result["fp_reviews"].append({
+                    "scan_id": parts[1],
+                    "review_id": parts[3],
+                })
+            elif len(parts) == 4 and parts[0] == "scan" and parts[2] == "validation":
+                try:
+                    vuln_index = int(parts[3])
+                except ValueError:
+                    continue
+                result["validations"].append({
+                    "scan_id": parts[1],
+                    "vuln_index": vuln_index,
+                })
+        return result
 
     def set_agent_id(self, agent_id: str) -> None:
         self.agent_id = agent_id
@@ -270,6 +379,12 @@ class Reporter:
                 timeout=report.timeout_seconds,
             )
             if 200 <= response.status_code < 300:
+                self._outbox.acknowledge(report)
+                return response
+            if _is_stale_execution_response(response):
+                # The server has already advanced this work to a newer
+                # execution. Keeping the old payload would only add permanent
+                # client-side storage and can never become valid again.
                 self._outbox.acknowledge(report)
                 return response
             error = f"HTTP {response.status_code}: {(response.text or '')[:500]}"
@@ -544,6 +659,8 @@ class Reporter:
             "dedup_decision": dict(dedup_decision or {}),
             "completed_candidates": completed_candidates,
             "total_candidates": total_candidates,
+            "agent_session_id": self.agent_session_id,
+            "execution_revision": self._scan_execution_revisions.get(scan_id, 0),
         }
         if self._outbox is not None and state in {"success", "failed"}:
             response = await self._queue_post(
@@ -761,6 +878,11 @@ class Reporter:
         if self.dry_run:
             return
         payload = validation.model_dump(exclude={"scan_id"})
+        payload["agent_session_id"] = self.agent_session_id
+        payload["execution_revision"] = self._validation_execution_revisions.get(
+            (scan_id, validation.vuln_index),
+            validation.execution_revision,
+        )
         if self._outbox is not None and validation.status in {
             "verified", "failed", "error", "timeout", "skipped", "cancelled"
         }:
@@ -1081,12 +1203,15 @@ class Reporter:
             "processed_candidates": processed_candidates,
             "error_message": error_message,
             "replace_report_batch_ids": list(replace_report_batch_ids or []),
+            "agent_session_id": self.agent_session_id,
+            "execution_revision": self._scan_execution_revisions.get(scan_id, 0),
         }
         if self._model_pool_sink_bound:
             from task_agent.model_pool import model_pool_snapshot
 
             final_pool = dict(model_pool_snapshot(scan_id))
             final_pool["agent_session_id"] = self.agent_session_id
+            final_pool["execution_revision"] = self._scan_execution_revisions.get(scan_id, 0)
             final_pool["completed_tasks"] = []
             payload["opencode_pool"] = final_pool
         threat_analysis_run = self._threat_analysis_run_snapshots.get(scan_id)
@@ -1401,14 +1526,22 @@ class Reporter:
             return True
         payload = dict(snapshot)
         payload["agent_session_id"] = self.agent_session_id
+        payload["execution_revision"] = self._scan_execution_revisions.get(scan_id, 0)
         if self._model_pool_sink_bound:
             payload.pop("completed_tasks", None)
         try:
-            await self._client.post(
+            response = await self._client.post(
                 f"{self.server_url}/api/agent/scan/{scan_id}/opencode-pool",
                 json=payload,
                 timeout=5.0,
             )
+            if response.status_code == 413:
+                response = await self._client.post(
+                    f"{self.server_url}/api/agent/scan/{scan_id}/opencode-pool",
+                    json=_compact_pool_snapshot(payload),
+                    timeout=5.0,
+                )
+            response.raise_for_status()
             return True
         except Exception:
             return False
@@ -1440,11 +1573,18 @@ class Reporter:
         if self._model_pool_sink_bound:
             payload.pop("completed_tasks", None)
         try:
-            await self._client.post(
+            response = await self._client.post(
                 f"{self.server_url}/api/agent/{self.agent_id}/opencode-pool",
                 json=payload,
                 timeout=5.0,
             )
+            if response.status_code == 413:
+                response = await self._client.post(
+                    f"{self.server_url}/api/agent/{self.agent_id}/opencode-pool",
+                    json=_compact_pool_snapshot(payload),
+                    timeout=5.0,
+                )
+            response.raise_for_status()
             return True
         except Exception:
             return False
@@ -1483,6 +1623,7 @@ class Reporter:
         last_signature: str | None = None
         last_seen_updated_at = ""
         last_sent_at = 0.0
+        last_send_succeeded = True
         heartbeat_seconds = (
             interval_seconds if interval_seconds is not None else unchanged_heartbeat_seconds
         )
@@ -1490,7 +1631,7 @@ class Reporter:
         debounce_seconds = max(0.0, debounce_seconds)
 
         async def publish_if_needed(*, force: bool = False) -> None:
-            nonlocal last_seen_updated_at, last_signature, last_sent_at
+            nonlocal last_seen_updated_at, last_signature, last_sent_at, last_send_succeeded
             snapshot = model_pool_snapshot(scope_id)
             last_seen_updated_at = str(snapshot.get("updated_at") or "")
             signature = _snapshot_signature(snapshot)
@@ -1500,6 +1641,9 @@ class Reporter:
             if await push_snapshot(snapshot):
                 last_signature = signature
                 last_sent_at = now
+                last_send_succeeded = True
+            else:
+                last_send_succeeded = False
 
         async def wait_for_update_or_stop(timeout: float | None) -> tuple[str, bool]:
             update_task = asyncio.create_task(
@@ -1532,6 +1676,8 @@ class Reporter:
                     )
                 else:
                     wait_timeout = heartbeat_seconds
+                if not last_send_succeeded:
+                    wait_timeout = min(wait_timeout, 2.0)
                 next_updated_at, stopped = await wait_for_update_or_stop(wait_timeout)
                 if stopped:
                     break
@@ -1668,6 +1814,8 @@ class Reporter:
             "match_type": match_type,
             "stage_output_sources": result_stage_sources,
             "output_source": result_source.model_dump(),
+            "agent_session_id": self.agent_session_id,
+            "execution_revision": self._fp_execution_revisions.get(review_id, 0),
         }
         if self._outbox is not None:
             await self._queue_post(
@@ -1707,6 +1855,8 @@ class Reporter:
             "stage": stage,
             "markdown": markdown,
             "output_source": source.model_dump(),
+            "agent_session_id": self.agent_session_id,
+            "execution_revision": self._fp_execution_revisions.get(review_id, 0),
         }
         if self._outbox is not None:
             await self._queue_post(
@@ -1744,6 +1894,8 @@ class Reporter:
             payload = {
                 "review_id": review_id,
                 "vuln_index": vuln_index,
+                "agent_session_id": self.agent_session_id,
+                "execution_revision": self._fp_execution_revisions.get(review_id, 0),
             }
             if processed is not None:
                 payload["processed"] = processed
@@ -1772,6 +1924,8 @@ class Reporter:
             "review_id": review_id,
             "status": status,
             "error_message": error_message,
+            "agent_session_id": self.agent_session_id,
+            "execution_revision": self._fp_execution_revisions.get(review_id, 0),
         }
         if self._outbox is not None:
             await self._queue_post(

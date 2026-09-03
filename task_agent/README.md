@@ -44,6 +44,7 @@ result = await run_opencode_task(
     required_bash_success_markers=None,
     post_session_validator=None,
     post_session_validation_retry_count=0,
+    lease_state_callback=None,
     session_id=None,
     config_path=None,
     output=None,
@@ -71,6 +72,7 @@ result = await run_opencode_task(
 | `required_bash_success_markers` | `Mapping[str, str]` 或 `None` | `None` | 可选的“完整命令 → 单行成功标记”。仅在 OpenCode Hook 无法取得退出码时，以命令输出中完全匹配的一整行作为成功依据；键必须属于 `required_bash_commands`。 |
 | `post_session_validator` | 无参数 callable 或 `None` | `None` | 每次 Session 消息完整结束后由宿主调用。返回 `None`/空白表示通过，返回非空字符串表示失败诊断；同步回调直接调用，返回 awaitable 时等待完成。 |
 | `post_session_validation_retry_count` | `int` | `0` | 宿主校验失败后，在同一 Session 回传诊断并请求修正的次数；耗尽后进入既有 fresh Session 重试。大于 `0` 时必须同时声明 `post_session_validator`。 |
+| `lease_state_callback` | 接收 `"queued"` 或 `"running"` 的 callable，或 `None` | `None` | 可选的模型租约生命周期回调。请求确实登记到共享模型池等待队列时调用 `queued`，取得租约后、模型消息执行前调用 `running`；立即取得租约不会先产生虚假的 `queued`。回调仅用于宿主状态同步，回调异常会记录日志但不改变任务结果。 |
 | `session_id` | `str` 或 `None` | `None` | 传入已有 Serve 会话 ID 以续接会话；省略、传入 `None` 或空字符串时创建新会话。同一组件生命周期内，续接会话不能切换项目目录或可写工作目录。 |
 | `config_path` | `str`、`PathLike[str]` 或 `None` | `None` | 独立运行时使用的 YAML 配置文件路径。未传入时依次读取 `TASK_AGENT_CONFIG` 和当前目录下的 `task-agent.yaml`。宿主配置已注册时不能再传入此参数。 |
 | `output` | callable 或 `None` | 使用当前执行上下文 | 可选的本次调用输出覆盖；传 `None` 可关闭 Task Agent 控制台流。 |

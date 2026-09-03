@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from task_agent.output_format import with_local_timestamp
+
 
 RUNTIME_DIRS = (
     "deephole_client",
@@ -113,10 +115,60 @@ def pending_scan_snapshots() -> list[dict[str, Any]]:
             continue
         snapshots.append({
             "scan_id": scan_id,
+            "execution_revision": max(
+                0,
+                int(command.get("execution_revision") or 0),
+            ),
             "project_path": command.get("project_path") or "",
             "code_scan_path": command.get("code_scan_path") or command.get("project_path") or "",
             "checkers": command.get("checkers") or [],
             "scan_name": command.get("scan_name") or "",
+        })
+    return snapshots
+
+
+def pending_fp_review_snapshots() -> list[dict[str, Any]]:
+    """Expose runtime-update commands as not-yet-started reconnect inventory."""
+    snapshots: list[dict[str, Any]] = []
+    for command in load_pending_commands(clear=False):
+        if command.get("type") != "fp_review":
+            continue
+        scan_id = str(command.get("scan_id") or "")
+        review_id = str(command.get("review_id") or "")
+        if not scan_id or not review_id:
+            continue
+        snapshots.append({
+            "scan_id": scan_id,
+            "review_id": review_id,
+            "item_running": True,
+            "execution_revision": max(
+                0,
+                int(command.get("execution_revision") or 0),
+            ),
+        })
+    return snapshots
+
+
+def pending_validation_snapshots() -> list[dict[str, Any]]:
+    """Expose pending validation commands across the runtime-update exec."""
+    snapshots: list[dict[str, Any]] = []
+    for command in load_pending_commands(clear=False):
+        if command.get("type") != "vulnerability_validation":
+            continue
+        scan_id = str(command.get("scan_id") or "")
+        if not scan_id:
+            continue
+        try:
+            vuln_index = int(command["vuln_index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        snapshots.append({
+            "scan_id": scan_id,
+            "vuln_index": vuln_index,
+            "execution_revision": max(
+                0,
+                int(command.get("execution_revision") or 0),
+            ),
         })
     return snapshots
 
@@ -424,6 +476,11 @@ def _install_requirements_if_needed() -> None:
     )
 
 
-def _restart_process() -> None:
+def _restart_process(reason: str = "runtime_update") -> None:
+    print(with_local_timestamp(
+        f"RESTART_REQUESTED reason={reason}",
+        prefix="[agent_restart]",
+    ), flush=True)
+    os.environ["OPENDEEPHOLE_AGENT_RESTART_REASON"] = str(reason or "unspecified")
     args = [sys.executable, "-m", "deephole_client.main", *sys.argv[1:]]
     os.execv(sys.executable, args)

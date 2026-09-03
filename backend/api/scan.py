@@ -1706,9 +1706,17 @@ async def create_agent_scan(
         body.feedback_ids,
     )
     feedback_entries = [entry.model_dump() for entry in selected_feedback]
+    execution_revision = await run_store_call(
+        store,
+        "begin_scan_execution",
+        scan_id,
+        agent_id=agent_id,
+        agent_session_id=agent.agent_session_id,
+    )
     ok = await send_agent_command(agent_id, {
         "type": "task",
         "scan_id": scan_id,
+        "execution_revision": execution_revision,
         "project_path": project_path,
         "code_scan_path": code_scan_path,
         "multi_versions": [
@@ -2483,11 +2491,21 @@ async def stop_scan(
 
 async def _continue_scan(
     scan_id: str,
-    request: Request,
+    request: Request | None,
     current_user: User,
+    *,
+    server_url_override: str = "",
+    skip_owner_check: bool = False,
+    claimed_execution_revision: int | None = None,
 ) -> ScanStartResponse:
     """Continue all unfinished and retryable work for one scan."""
-    await _check_scan_owner_v2(scan_id, current_user)
+    if not skip_owner_check:
+        await _check_scan_owner_v2(scan_id, current_user)
+    server_url = server_url_override or (
+        _server_url_from_request(request) if request is not None else ""
+    )
+    if not server_url:
+        raise RuntimeError("scan continuation requires server_url")
     from backend.api.agent import (
         _registered_agents,
         agent_config_has_explicit_model,
@@ -2541,7 +2559,7 @@ async def _continue_scan(
     if not resume_main_scan:
         await _start_fp_review(
             scan_id,
-            _server_url_from_request(request),
+            server_url,
             raise_on_error=True,
             require_unresolved=True,
             allow_cancelled=True,
@@ -2742,7 +2760,7 @@ async def _continue_scan(
     )
     feedback_entries = [entry.model_dump() for entry in selected_feedback]
     runtime_update = await create_agent_task_runtime_update_payload_async(
-        _server_url_from_request(request),
+        server_url,
         meta.agent_key,
     )
     resume_payload = {
@@ -2822,6 +2840,26 @@ async def _continue_scan(
         ),
         "agent_runtime_update": runtime_update,
     }
+    claimed = await run_store_call(
+        store,
+        "claim_scan_for_resume",
+        scan_id,
+        processed_candidates=processed_offset,
+        progress=progress,
+    )
+    if not claimed:
+        raise HTTPException(status_code=400, detail="Scan is already running")
+
+    execution_revision = claimed_execution_revision
+    if execution_revision is None:
+        execution_revision = await run_store_call(
+            store,
+            "begin_scan_execution",
+            scan_id,
+            agent_id=agent_id,
+            agent_session_id=agent.agent_session_id,
+        )
+    resume_payload["execution_revision"] = execution_revision
     if agent.protocol_version >= 2:
         manifest_token = secrets.token_urlsafe(32)
         payload_json = await run_store_call(
@@ -2843,24 +2881,15 @@ async def _continue_scan(
         command = {
             "type": "resume",
             "scan_id": scan_id,
+            "execution_revision": execution_revision,
             "resume_manifest_url": (
-                f"{_server_url_from_request(request)}"
+                f"{server_url}"
                 f"/api/agent/v2/resume-manifests/{manifest_token}"
             ),
             "agent_runtime_update": runtime_update,
         }
     else:
         command = resume_payload
-
-    claimed = await run_store_call(
-        store,
-        "claim_scan_for_resume",
-        scan_id,
-        processed_candidates=processed_offset,
-        progress=progress,
-    )
-    if not claimed:
-        raise HTTPException(status_code=400, detail="Scan is already running")
 
     scan.opencode_pool = terminal_opencode_pool_status(scan.opencode_pool)
     if resume_threat_analysis or retry_mining_engine_ids:
@@ -2990,7 +3019,7 @@ async def _continue_scan(
     if fp_resume_count:
         fp_resume = await _start_fp_review(
             scan_id,
-            _server_url_from_request(request),
+            server_url,
             raise_on_error=False,
             require_unresolved=True,
             allow_cancelled=True,
@@ -3540,11 +3569,14 @@ async def _trigger_vulnerability_validation(
     scan_id: str,
     idx: int,
     _server_url: str,
+    *,
+    claimed_execution_revision: int | None = None,
 ) -> dict:
     """Start Agent-side local validation for one AI-confirmed vulnerability."""
     from backend.api.agent import (
         create_agent_task_runtime_update_payload_async,
         ensure_agent_accepting_tasks_async,
+        resolve_agent_id_connection_async,
         send_agent_command,
     )
 
@@ -3587,7 +3619,11 @@ async def _trigger_vulnerability_validation(
         )
 
     existing = next((item for item in scan.validations if item.vuln_index == idx), None)
-    if existing is not None and existing.running:
+    if (
+        existing is not None
+        and existing.running
+        and claimed_execution_revision is None
+    ):
         raise HTTPException(status_code=409, detail="Validation already running")
 
     if not meta.agent_id and not meta.agent_name:
@@ -3609,6 +3645,16 @@ async def _trigger_vulnerability_validation(
             meta.agent_key,
         )
 
+    resolved_agent = await resolve_agent_id_connection_async(agent_id)
+    if resolved_agent is None:
+        raise HTTPException(status_code=502, detail="Agent connection disappeared")
+    execution_revision = claimed_execution_revision
+    persisted_execution_revision = (
+        int(existing.execution_revision or 0)
+        if existing is not None
+        else 0
+    )
+
     now = _now_iso()
     validation = await run_store_call(
         store,
@@ -3624,10 +3670,25 @@ async def _trigger_vulnerability_validation(
             validation_method_label=validation_config.method_label,
             started_at=now,
             updated_at=now,
+            execution_agent_session_id=resolved_agent[1].agent_session_id,
+            execution_revision=(
+                max(0, int(execution_revision))
+                if execution_revision is not None
+                else persisted_execution_revision
+            ),
         ),
     )
     _publish_validation(scan_id, validation)
     _update_running_validation(scan_id, validation)
+
+    if execution_revision is None:
+        execution_revision = await run_store_call(
+            store,
+            "begin_validation_execution",
+            scan_id,
+            idx,
+            agent_session_id=resolved_agent[1].agent_session_id,
+        )
 
     fp_map = await run_store_call(store, _scan_fp_result_map, scan_id)
     ok = await send_agent_command(agent_id, {
@@ -3635,6 +3696,7 @@ async def _trigger_vulnerability_validation(
         "scan_id": scan_id,
         "scan_mode": component_scan_mode(meta.scan_mode),
         "vuln_index": idx,
+        "execution_revision": execution_revision,
         "project_path": meta.project_path,
         "code_scan_path": meta.code_scan_path or meta.project_path,
         "product": product,
@@ -4126,6 +4188,7 @@ async def _start_fp_review(
     raise_on_error: bool = True,
     require_unresolved: bool = False,
     allow_cancelled: bool = False,
+    claimed_execution_revision: int | None = None,
 ) -> dict | None:
     """Start an AI false-positive review for eligible vulnerabilities in a scan.
 
@@ -4140,6 +4203,7 @@ async def _start_fp_review(
     from backend.api.agent import (
         create_agent_task_runtime_update_payload_async,
         ensure_agent_accepting_tasks_async,
+        resolve_agent_id_connection_async,
         send_agent_command,
     )
 
@@ -4215,9 +4279,21 @@ async def _start_fp_review(
 
     dispatched_items = not fp_job_info.get("no_unresolved")
     if dispatched_items:
+        resolved_agent = await resolve_agent_id_connection_async(agent_id)
+        if resolved_agent is None:
+            return _fail(400, "Agent connection disappeared before FP review dispatch")
+        execution_revision = claimed_execution_revision
+        if execution_revision is None:
+            execution_revision = await run_store_call(
+                store,
+                "begin_fp_review_execution",
+                review_id,
+                agent_session_id=resolved_agent[1].agent_session_id,
+            )
         from backend.sse import publish
         publish(scan_id, "fp_review_started", {
             "review_id": review_id,
+            "execution_revision": execution_revision,
             "method": method,
             "status": "running",
             "total": int(fp_job_info.get("total") or len(confirmed)),
@@ -4226,6 +4302,7 @@ async def _start_fp_review(
         ok = await send_agent_command(agent_id, {
             "type": "fp_review",
             "scan_id": scan_id,
+            "execution_revision": execution_revision,
             "scan_mode": component_scan_mode(meta.scan_mode),
             "review_id": review_id,
             "method": method,
@@ -4264,19 +4341,29 @@ async def _start_fp_review(
                 "error_message": "Agent not connected",
             })
             return _fail(502, "Agent not connected")
-
-        logger.info(
-            "FP review %s triggered for scan %s (%d candidates)",
+    elif claimed_execution_revision is not None:
+        await run_store_call(
+            store,
+            "update_fp_review_job",
             review_id,
-            scan_id,
-            len(confirmed),
+            status=FpReviewStatus.COMPLETE.value,
+            processed=int(fp_job_info.get("processed") or fp_job_info.get("total") or 0),
+            clear_current_vuln_index=True,
+            error_message="",
         )
+
+    logger.info(
+        "FP review %s triggered for scan %s (%d candidates)",
+        review_id,
+        scan_id,
+        len(confirmed),
+    )
 
     return {
         "ok": True,
         "review_id": review_id,
         "method": method,
-        "status": "running" if dispatched_items else fp_job_info.get("status", "complete"),
+        "status": "running" if dispatched_items else "complete",
         "total": int(fp_job_info.get("total") or len(confirmed)),
         "processed": int(fp_job_info.get("processed") or 0),
         "items_dispatched": dispatched_items,
@@ -4514,6 +4601,16 @@ async def agent_fp_review_progress(scan_id: str, body: AgentFpReviewProgress) ->
                 "review_id": body.review_id,
             },
         )
+    if not await run_store_call(
+        store,
+        "execution_matches",
+        "fp_review",
+        body.review_id,
+        None,
+        agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
+    ):
+        raise HTTPException(status_code=409, detail="stale FP review execution")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
     # Progress is authoritative for a non-cancelled task. This also closes the
@@ -4561,6 +4658,16 @@ async def agent_fp_review_result(scan_id: str, body: AgentFpReviewResult) -> dic
                 "review_id": body.review_id,
             },
         )
+    if not await run_store_call(
+        store,
+        "execution_matches",
+        "fp_review",
+        body.review_id,
+        None,
+        agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
+    ):
+        raise HTTPException(status_code=409, detail="stale FP review execution")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
     if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
@@ -4626,6 +4733,16 @@ async def agent_fp_review_stage_output(scan_id: str, body: AgentFpReviewStageOut
                 "review_id": body.review_id,
             },
         )
+    if not await run_store_call(
+        store,
+        "execution_matches",
+        "fp_review",
+        body.review_id,
+        None,
+        agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
+    ):
+        raise HTTPException(status_code=409, detail="stale FP review execution")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
     if job.status not in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING}:
@@ -4670,6 +4787,16 @@ async def agent_fp_review_finish(scan_id: str, body: AgentFpReviewFinish) -> dic
     job = await run_store_call(store, "get_fp_review_job", body.review_id)
     if job is None or job.scan_id != scan_id:
         raise HTTPException(status_code=404, detail="FP review not found")
+    if not await run_store_call(
+        store,
+        "execution_matches",
+        "fp_review",
+        body.review_id,
+        None,
+        agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
+    ):
+        raise HTTPException(status_code=409, detail="stale FP review execution")
     if job.status == FpReviewStatus.CANCELLED:
         return {"ok": True}
     status = body.status

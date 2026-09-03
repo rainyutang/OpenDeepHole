@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import inspect
 import json
 import logging
 import re
@@ -320,6 +321,11 @@ class OpenCodeTaskSpec:
         repr=False,
     )
     post_session_validation_retry_count: int = 0
+    lease_state_callback: Callable[[str], Any] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
     session_id: str | None = None
     attempt: int | None = None
 
@@ -489,6 +495,22 @@ class OpenCodeTaskService:
         except Exception:
             logger.exception(
                 "Failed to emit progress output for OpenCode task %s",
+                record.task_id,
+            )
+
+    @staticmethod
+    async def _notify_lease_state(record: _TaskRecord, state: str) -> None:
+        callback = record.spec.lease_state_callback
+        if callback is None:
+            return
+        try:
+            outcome = callback(state)
+            if inspect.isawaitable(outcome):
+                await outcome
+        except Exception:
+            logger.exception(
+                "Failed to report lease state %s for OpenCode task %s",
+                state,
                 record.task_id,
             )
 
@@ -801,6 +823,7 @@ class OpenCodeTaskService:
                     wait_when_unavailable=not validation_debug,
                     avoid_model_identities=set(avoid_model_identities),
                     quota_wait_budget=quota_wait_budget,
+                    on_queued=lambda: self._notify_lease_state(record, "queued"),
                 )
                 if lease is None:
                     if record.requeue_requested:
@@ -823,6 +846,8 @@ class OpenCodeTaskService:
                         lease,
                         {"token_usage": task_token_usage.as_dict()},
                     )
+
+                await self._notify_lease_state(record, "running")
 
                 if (
                     session_attempt == 1
@@ -3422,6 +3447,7 @@ async def _run_component_task(
     required_bash_success_markers: tuple[tuple[str, str], ...],
     post_session_validator: Callable[[], Any] | None,
     post_session_validation_retry_count: int,
+    lease_state_callback: Callable[[str], Any] | None,
     session_id: str | None,
 ) -> OpenCodeResult:
     """Translate the public contract into the internal scheduling record."""
@@ -3475,6 +3501,7 @@ async def _run_component_task(
                 post_session_validation_retry_count=(
                     post_session_validation_retry_count
                 ),
+                lease_state_callback=lease_state_callback,
                 session_id=session_id,
                 attempt=None,
             )

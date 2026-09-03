@@ -118,6 +118,8 @@ def test_multi_version_scan_discards_code_graph_and_knowledge_mcp() -> None:
             captured["scan"] = args[0]
             captured["meta"] = args[1]
             return None
+        if operation == "begin_scan_execution":
+            return 1
         if operation in {"get_scan_config_memory", "upsert_scan_config_memory"}:
             return {} if operation == "get_scan_config_memory" else None
         if callable(operation):
@@ -276,6 +278,8 @@ def test_fixed_modes_snapshot_pipeline_defaults(scan_mode: str) -> None:
             captured["scan"] = args[0]
             captured["meta"] = args[1]
             return None
+        if operation == "begin_scan_execution":
+            return 1
         if operation == "get_scan_config_memory":
             return {}
         if operation == "upsert_scan_config_memory":

@@ -370,7 +370,7 @@ export interface Candidate {
 
 export interface ScanCandidate extends Candidate {
   idx: number;
-  audit_state: "pending" | "running" | "success" | "failed";
+  audit_state: "pending" | "queued" | "running" | "success" | "failed";
   audit_result?: Vulnerability | null;
   vulnerability_idx?: number | null;
   dedup_decision?: Record<string, unknown>;
@@ -464,6 +464,7 @@ export interface OpenCodePoolStatus {
   scope_id: string;
   agent_name?: string;
   agent_session_id?: string;
+  execution_revision?: number;
   global_running: number;
   global_queued: number;
   total_tasks: number;
@@ -474,6 +475,7 @@ export interface OpenCodePoolStatus {
   token_usage?: OpenCodeTokenUsage | null;
   models: OpenCodePoolModelStats[];
   updated_at: string;
+  details_truncated?: boolean;
 }
 
 export interface AgentOpenCodePoolStatus extends OpenCodePoolStatus {
@@ -550,6 +552,7 @@ export interface ScanVersionTarget {
 export interface ScanDetailCounts {
   candidates: number;
   candidate_audit_pending?: number;
+  candidate_audit_queued?: number;
   candidate_audit_running?: number;
   candidate_audit_success?: number;
   candidate_audit_failed?: number;
@@ -560,6 +563,7 @@ export interface ScanDetailCounts {
   threat_audit_tasks: number;
   threat_audit_current?: number;
   threat_audit_pending?: number;
+  threat_audit_queued?: number;
   threat_audit_running?: number;
   threat_audit_completed?: number;
   threat_audit_failed?: number;

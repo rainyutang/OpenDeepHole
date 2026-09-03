@@ -33,10 +33,12 @@ _fp_review_queues: dict[str, deque["_FpReviewQueueItem"]] = {}
 _fp_review_queue_events: dict[str, asyncio.Event] = {}
 _fp_review_active_items: set[tuple[str, int]] = set()
 _fp_review_running_indices: dict[str, set[int]] = {}
+_fp_review_execution_revisions: dict[str, int] = {}
 _validation_tasks: dict[tuple[str, int], asyncio.Future] = {}
 _validation_cancel_events: dict[tuple[str, int], threading.Event] = {}
 _validation_queues: dict[str, deque["_ValidationQueueItem"]] = {}
 _validation_workers: dict[str, set[asyncio.Task]] = {}
+_validation_execution_revisions: dict[tuple[str, int], int] = {}
 
 
 @dataclass
@@ -58,6 +60,7 @@ class _ValidationQueueItem:
     scan_mode: str = "custom"
     code_graph_mcp: dict | None = None
     knowledge_base_mcp: dict | None = None
+    execution_revision: int = 0
 
 
 @dataclass
@@ -77,6 +80,7 @@ class _FpReviewQueueItem:
     knowledge_base_mcp: dict | None = None
     processed_offset: int = 0
     planned_task_id: str = ""
+    execution_revision: int = 0
 
 
 def active_fp_review_snapshots() -> list[dict]:
@@ -92,6 +96,7 @@ def active_fp_review_snapshots() -> list[dict]:
                 "scan_id": scan_id,
                 "review_id": review_id,
                 "item_running": item_running,
+                "execution_revision": _fp_review_execution_revisions.get(review_id, 0),
             })
     return snapshots
 
@@ -99,11 +104,28 @@ def active_fp_review_snapshots() -> list[dict]:
 def active_validation_snapshots() -> list[dict]:
     """Snapshot of vulnerability validations still queued or running in this agent."""
     return [
-        {"scan_id": scan_id, "vuln_index": vuln_index}
+        {
+            "scan_id": scan_id,
+            "vuln_index": vuln_index,
+            "execution_revision": _validation_execution_revisions.get(
+                (scan_id, vuln_index),
+                0,
+            ),
+        }
         for (scan_id, vuln_index), task in _validation_tasks.items()
         if not task.done()
     ]
 _SKILL_CREATOR_NAME = "deephole-skill-creator"
+
+
+def has_active_local_work() -> bool:
+    """Return whether replacing this process would discard in-memory work."""
+    scan_active = bool(
+        _task_manager is not None and _task_manager.active_snapshots()
+    )
+    fp_active = any(not task.done() for task in _fp_review_tasks.values())
+    validation_active = any(not task.done() for task in _validation_tasks.values())
+    return scan_active or fp_active or validation_active
 
 
 async def _run(task, is_resume: bool) -> None:
@@ -169,6 +191,7 @@ async def handle_task(
     vulnerability_validation: dict | None = None,
     code_graph_mcp: dict | None = None,
     knowledge_base_mcp: dict | None = None,
+    execution_revision: int = 0,
     feedback_entries: list[dict] | None = None,
     checker_packages: list[dict] | None = None,
     mining_engines: list[dict] | None = None,
@@ -199,6 +222,7 @@ async def handle_task(
         vulnerability_validation=vulnerability_validation,
         code_graph_mcp=code_graph_mcp,
         knowledge_base_mcp=knowledge_base_mcp,
+        execution_revision=execution_revision,
         feedback_entries=feedback_entries,
         checker_packages=checker_packages,
         mining_engines=mining_engines,
@@ -244,6 +268,7 @@ async def handle_resume(
     retry_threat_audit_task_ids: Optional[list[str]] = None,
     codex_model_ids: Optional[list[str]] = None,
     multi_versions: Optional[list[dict]] = None,
+    execution_revision: int = 0,
 ) -> None:
     """Handle a 'resume' command — resume a stopped scan."""
     if _task_manager is None:
@@ -373,6 +398,7 @@ async def handle_resume(
         resume_threat_analysis=resume_threat_analysis,
         retry_mining_engine_ids=retry_mining_engine_ids,
         retry_threat_audit_task_ids=retry_threat_audit_task_ids,
+        execution_revision=execution_revision,
         codex_model_ids=resolved_codex_model_ids,
         multi_versions=resolved_multi_versions,
     )
@@ -392,6 +418,7 @@ async def handle_fp_review(
     code_graph_mcp: dict | None = None,
     knowledge_base_mcp: dict | None = None,
     scan_mode: str = "custom",
+    execution_revision: int = 0,
 ) -> None:
     """Handle an 'fp_review' command — queue AI false-positive review items."""
     if _config is None or _reporter is None:
@@ -420,6 +447,7 @@ async def handle_fp_review(
             processed_offset=processed_offset + offset,
             code_graph_mcp=code_graph_mcp,
             knowledge_base_mcp=knowledge_base_mcp,
+            execution_revision=execution_revision,
         )
     print(
         f"Queued {len(vulnerabilities)} {method} FP review item(s) "
@@ -442,6 +470,7 @@ async def enqueue_fp_review(
     knowledge_base_mcp: dict | None = None,
     config: Any | None = None,
     reporter: Any | None = None,
+    execution_revision: int = 0,
 ) -> bool:
     """Queue one vulnerability for an existing scan-level FP review job."""
     effective_config = config or _config
@@ -474,6 +503,12 @@ async def enqueue_fp_review(
         cancel_event = threading.Event()
         _fp_review_cancel_events[review_id] = cancel_event
     _fp_review_scan_ids[review_id] = scan_id
+    _fp_review_execution_revisions[review_id] = max(
+        0,
+        int(execution_revision or 0),
+    )
+    if hasattr(effective_reporter, "set_fp_review_execution"):
+        effective_reporter.set_fp_review_execution(review_id, execution_revision)
     _fp_review_active_items.add(item_key)
     queue = _fp_review_queues.setdefault(review_id, deque())
     queue.append(_FpReviewQueueItem(
@@ -500,6 +535,7 @@ async def enqueue_fp_review(
         cancel_event=cancel_event,
         processed_offset=max(0, int(processed_offset or 0)),
         planned_task_id="",
+        execution_revision=max(0, int(execution_revision or 0)),
     ))
     _fp_review_queue_events.setdefault(review_id, asyncio.Event()).set()
     worker = _fp_review_tasks.get(review_id)
@@ -815,6 +851,7 @@ async def _run_fp_review_worker(review_id: str) -> None:
             _fp_review_queue_events.pop(review_id, None)
             _fp_review_cancel_events.pop(review_id, None)
             _fp_review_scan_ids.pop(review_id, None)
+            _fp_review_execution_revisions.pop(review_id, None)
 
 
 async def _run_single_fp_review_item(
@@ -962,6 +999,7 @@ async def handle_vulnerability_validation(
     code_graph_mcp: dict | None = None,
     knowledge_base_mcp: dict | None = None,
     scan_mode: str = "custom",
+    execution_revision: int = 0,
 ) -> None:
     """Handle a validation command using the Agent-wide shared queue."""
     await enqueue_vulnerability_validation(
@@ -979,6 +1017,7 @@ async def handle_vulnerability_validation(
         report_markdown=report_markdown,
         code_graph_mcp=code_graph_mcp,
         knowledge_base_mcp=knowledge_base_mcp,
+        execution_revision=execution_revision,
     )
 
 
@@ -1001,6 +1040,7 @@ async def enqueue_vulnerability_validation(
     config: Any | None = None,
     reporter: Any | None = None,
     report_queued: bool = False,
+    execution_revision: int = 0,
 ) -> bool:
     """Queue local vulnerability validation independently from scan tasks."""
     effective_config = config or _config
@@ -1041,6 +1081,7 @@ async def enqueue_vulnerability_validation(
             else None
         ),
         cancel_event=cancel_event,
+        execution_revision=max(0, int(execution_revision or 0)),
     )
 
     if report_queued:
@@ -1051,6 +1092,16 @@ async def enqueue_vulnerability_validation(
     queue.append(item)
     marker = asyncio.get_running_loop().create_future()
     _validation_tasks[task_key] = marker
+    _validation_execution_revisions[task_key] = max(
+        0,
+        int(execution_revision or 0),
+    )
+    if hasattr(effective_reporter, "set_validation_execution"):
+        effective_reporter.set_validation_execution(
+            scan_id,
+            vuln_index,
+            execution_revision,
+        )
     _validation_cancel_events[task_key] = cancel_event
     _pump_validation_environment(queue_key)
 
@@ -1143,6 +1194,7 @@ async def _finish_validation_item(
     task_key = (item.scan_id, item.vuln_index)
     _validation_tasks.pop(task_key, None)
     _validation_cancel_events.pop(task_key, None)
+    _validation_execution_revisions.pop(task_key, None)
     try:
         task.result()
     except asyncio.CancelledError:

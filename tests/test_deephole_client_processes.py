@@ -581,7 +581,7 @@ def test_threat_processes_run_with_task_agent_only() -> None:
             event["data"]["task"]["status"]
             for event in failed_events
             if event["kind"] == "task_status"
-        ] == ["pending", "running", "failed"]
+        ] == ["pending", "failed"]
 
         cancelled = threading.Event()
         cancelled.set()

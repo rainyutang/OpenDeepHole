@@ -287,6 +287,20 @@ class ReportOutbox:
                 ).fetchone()
         return int(row[0] if row else 0)
 
+    def pending_dedupe_keys(self, target_url: str) -> list[str]:
+        """Return unblocked report identities for reconnect reconciliation."""
+        with self._lock:
+            rows = self._conn.execute(
+                """\
+                SELECT dedupe_key
+                FROM pending_reports
+                WHERE target_url = ? AND blocked = 0
+                ORDER BY id
+                """,
+                (target_url.rstrip("/"),),
+            ).fetchall()
+        return [str(row["dedupe_key"] or "") for row in rows]
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

@@ -76,7 +76,7 @@ function normalizeCandidate(value: unknown, index?: number): Candidate | ScanCan
     : {
         ...candidate,
         idx: finiteNumber(raw.idx, index),
-        audit_state: ["pending", "running", "success", "failed"].includes(text(raw.audit_state))
+        audit_state: ["pending", "queued", "running", "success", "failed"].includes(text(raw.audit_state))
           ? text(raw.audit_state) as ScanCandidate["audit_state"]
           : "pending",
         audit_result: isRecord(raw.audit_result)
@@ -336,6 +336,7 @@ export function normalizeOpenCodePool(value: unknown): OpenCodePoolStatus | null
     scope_id: text(value.scope_id),
     agent_name: text(value.agent_name) || undefined,
     agent_session_id: text(value.agent_session_id) || undefined,
+    execution_revision: finiteNumber(value.execution_revision),
     global_running: finiteNumber(value.global_running),
     global_queued: finiteNumber(value.global_queued),
     total_tasks: finiteNumber(value.total_tasks),
@@ -346,6 +347,7 @@ export function normalizeOpenCodePool(value: unknown): OpenCodePoolStatus | null
     token_usage: normalizeTokenUsage(value.token_usage),
     models: recordArray(value.models).map(normalizePoolModel),
     updated_at: text(value.updated_at),
+    details_truncated: value.details_truncated === true,
   } as OpenCodePoolStatus;
 }
 

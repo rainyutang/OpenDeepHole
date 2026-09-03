@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 import socket
@@ -72,6 +73,37 @@ async def _send_ws_json(ws, lock: asyncio.Lock, payload: dict) -> None:
         await ws.send(message)
 
 
+async def _ensure_runtime_updated_safely(update: dict | None, command: dict) -> bool:
+    """Never replace the Agent process while local business work is in flight."""
+    import deephole_client.server as agent_server
+
+    if update and agent_server.has_active_local_work():
+        print(with_local_timestamp(
+            "RUNTIME_UPDATE_DEFERRED reason=local_work_active",
+            prefix="[agent_restart]",
+        ), flush=True)
+        return False
+    from deephole_client.updater import ensure_runtime_updated
+
+    return await ensure_runtime_updated(update, command)
+
+
+async def _set_reporter_execution(reporter, method: str, *args) -> None:
+    """Bind a command revision when a Reporter is present.
+
+    ``reporter`` is optional in the lightweight command-dispatch unit tests.
+    Awaiting an async test double also keeps this compatibility shim warning-free.
+    """
+    if reporter is None:
+        return
+    setter = getattr(reporter, method, None)
+    if setter is None:
+        return
+    result = setter(*args)
+    if inspect.isawaitable(result):
+        await result
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="agent",
@@ -92,13 +124,16 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
     cmd_type = msg.get("type")
 
     if cmd_type == "task":
-        from deephole_client.updater import ensure_runtime_updated
-        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
         if msg.get("runtime_update_only"):
             post_update_command = msg.get("post_update_command")
             if isinstance(post_update_command, dict):
                 return await _handle_command(post_update_command, config, task_manager, reporter)
             return None
+        execution_revision = int(msg.get("execution_revision") or 0)
+        await _set_reporter_execution(
+            reporter, "set_scan_execution", msg["scan_id"], execution_revision
+        )
         await agent_server.handle_task(
             scan_id=msg["scan_id"],
             project_path=msg["project_path"],
@@ -147,12 +182,12 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 if isinstance(msg.get("codex_model_ids"), list)
                 else None
             ),
+            execution_revision=execution_revision,
         )
     elif cmd_type == "stop":
         await agent_server.handle_stop(msg["scan_id"])
     elif cmd_type == "resume":
-        from deephole_client.updater import ensure_runtime_updated
-        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
         manifest_url = str(msg.get("resume_manifest_url") or "").strip()
         if manifest_url:
             manifest = await reporter.fetch_resume_manifest(manifest_url)
@@ -161,6 +196,10 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 "type": "resume",
                 "scan_id": msg["scan_id"],
             }
+        execution_revision = int(msg.get("execution_revision") or 0)
+        await _set_reporter_execution(
+            reporter, "set_scan_execution", msg["scan_id"], execution_revision
+        )
         await agent_server.handle_resume(
             scan_id=msg["scan_id"],
             project_path=msg.get("project_path"),
@@ -222,10 +261,17 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 if isinstance(msg.get("multi_versions"), list)
                 else None
             ),
+            execution_revision=execution_revision,
         )
     elif cmd_type == "fp_review":
-        from deephole_client.updater import ensure_runtime_updated
-        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
+        execution_revision = int(msg.get("execution_revision") or 0)
+        await _set_reporter_execution(
+            reporter,
+            "set_fp_review_execution",
+            msg["review_id"],
+            execution_revision,
+        )
         await agent_server.handle_fp_review(
             scan_id=msg["scan_id"],
             review_id=msg["review_id"],
@@ -246,11 +292,11 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 else None
             ),
             scan_mode=msg.get("scan_mode", "custom"),
+            execution_revision=execution_revision,
         )
     elif cmd_type == "vulnerability_validation":
-        from deephole_client.updater import ensure_runtime_updated
         try:
-            await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+            await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
         except Exception as exc:
             from backend.models import VulnerabilityValidation
             from datetime import datetime, timezone
@@ -275,6 +321,14 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 ),
             )
             return None
+        execution_revision = int(msg.get("execution_revision") or 0)
+        await _set_reporter_execution(
+            reporter,
+            "set_validation_execution",
+            msg["scan_id"],
+            int(msg["vuln_index"]),
+            execution_revision,
+        )
         await agent_server.handle_vulnerability_validation(
             scan_id=msg["scan_id"],
             vuln_index=int(msg["vuln_index"]),
@@ -306,6 +360,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
                 else None
             ),
             scan_mode=msg.get("scan_mode", "custom"),
+            execution_revision=execution_revision,
         )
     elif cmd_type == "vulnerability_validation_stop":
         await agent_server.handle_vulnerability_validation_stop(
@@ -361,8 +416,7 @@ async def _handle_command(msg: dict, config, task_manager, reporter) -> dict | N
             target=str(msg.get("target") or ""),
         )
     elif cmd_type == "skill_create":
-        from deephole_client.updater import ensure_runtime_updated
-        await ensure_runtime_updated(msg.get("agent_runtime_update"), msg)
+        await _ensure_runtime_updated_safely(msg.get("agent_runtime_update"), msg)
         return await agent_server.handle_skill_create(
             request_id=msg.get("request_id", ""),
             name=msg.get("name", ""),
@@ -426,7 +480,13 @@ async def _ws_loop(config, task_manager, reporter) -> None:
     from deephole_client.vulnerability_validation import (
         run_vulnerability_validation,
     )
-    from deephole_client.updater import compute_runtime_hash, load_pending_commands, pending_scan_snapshots
+    from deephole_client.updater import (
+        compute_runtime_hash,
+        load_pending_commands,
+        pending_fp_review_snapshots,
+        pending_scan_snapshots,
+        pending_validation_snapshots,
+    )
 
     name = config.agent_name or socket.gethostname()
     ws_url = config.server_url.replace("http://", "ws://").replace("https://", "wss://")
@@ -468,8 +528,15 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "runtime_hash": compute_runtime_hash(),
                     "agent_session_id": reporter.agent_session_id,
                     "active_scans": task_manager.active_snapshots() + pending_scan_snapshots(),
-                    "active_fp_reviews": agent_server.active_fp_review_snapshots(),
-                    "active_validations": agent_server.active_validation_snapshots(),
+                    "active_fp_reviews": (
+                        agent_server.active_fp_review_snapshots()
+                        + pending_fp_review_snapshots()
+                    ),
+                    "active_validations": (
+                        agent_server.active_validation_snapshots()
+                        + pending_validation_snapshots()
+                    ),
+                    "pending_terminal_reports": reporter.pending_terminal_work(),
                 }
                 if config.owner_token:
                     hello_msg["owner_token"] = config.owner_token
@@ -610,6 +677,13 @@ async def _ws_loop(config, task_manager, reporter) -> None:
 
 async def _main() -> None:
     args = _parse_args()
+    restart_reason = os.environ.pop("OPENDEEPHOLE_AGENT_RESTART_REASON", "")
+    process_event = "PROCESS_RESTARTED" if restart_reason else "PROCESS_STARTED"
+    process_reason = restart_reason or "initial_or_external_supervisor"
+    print(with_local_timestamp(
+        f"{process_event} reason={process_reason} pid={os.getpid()}",
+        prefix="[agent_restart]",
+    ), flush=True)
 
     # Load config
     from deephole_client.config import apply_network_env, load_config

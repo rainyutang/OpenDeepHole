@@ -555,6 +555,8 @@ CREATE TABLE IF NOT EXISTS scans (
     multi_versions_json TEXT NOT NULL DEFAULT '[]'
     ,mining_engines_json TEXT NOT NULL DEFAULT '[]'
     ,mining_engine_runs_json TEXT NOT NULL DEFAULT '[]'
+    ,execution_agent_session_id TEXT NOT NULL DEFAULT ''
+    ,execution_revision INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -642,6 +644,8 @@ CREATE TABLE IF NOT EXISTS vulnerability_validations (
     started_at          TEXT NOT NULL DEFAULT '',
     finished_at         TEXT NOT NULL DEFAULT '',
     updated_at          TEXT NOT NULL DEFAULT '',
+    execution_agent_session_id TEXT NOT NULL DEFAULT '',
+    execution_revision  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(scan_id, vuln_index)
 );
 
@@ -763,7 +767,9 @@ CREATE TABLE IF NOT EXISTS fp_review_jobs (
     summary_output_source TEXT NOT NULL DEFAULT '{}',
     summary_status TEXT,
     summary_error_message TEXT,
-    error_message TEXT
+    error_message TEXT,
+    execution_agent_session_id TEXT NOT NULL DEFAULT '',
+    execution_revision INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS fp_review_results (
@@ -1111,6 +1117,14 @@ class SqliteScanStore(ScanStoreBase):
         if "multi_versions_json" not in cols:
             self._conn.execute(
                 "ALTER TABLE scans ADD COLUMN multi_versions_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "execution_agent_session_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN execution_agent_session_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "execution_revision" not in cols:
+            self._conn.execute(
+                "ALTER TABLE scans ADD COLUMN execution_revision INTEGER NOT NULL DEFAULT 0"
             )
         engine_rows = self._conn.execute(
             "SELECT scan_id, mining_engines_json, mining_engine_runs_json FROM scans"
@@ -1624,6 +1638,14 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.execute(
                 "ALTER TABLE fp_review_jobs ADD COLUMN summary_error_message TEXT"
             )
+        if "execution_agent_session_id" not in fp_job_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_jobs ADD COLUMN execution_agent_session_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "execution_revision" not in fp_job_cols:
+            self._conn.execute(
+                "ALTER TABLE fp_review_jobs ADD COLUMN execution_revision INTEGER NOT NULL DEFAULT 0"
+            )
         fp_cur = self._conn.execute("PRAGMA table_info(fp_review_results)")
         fp_cols = {r[1] for r in fp_cur.fetchall()}
         if "severity" not in fp_cols:
@@ -1703,6 +1725,14 @@ class SqliteScanStore(ScanStoreBase):
         if "validation_method_label" not in validation_cols:
             self._conn.execute(
                 "ALTER TABLE vulnerability_validations ADD COLUMN validation_method_label TEXT NOT NULL DEFAULT ''"
+            )
+        if "execution_agent_session_id" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN execution_agent_session_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "execution_revision" not in validation_cols:
+            self._conn.execute(
+                "ALTER TABLE vulnerability_validations ADD COLUMN execution_revision INTEGER NOT NULL DEFAULT 0"
             )
         if "validator_name" not in validation_cols:
             self._conn.execute(
@@ -2012,6 +2042,16 @@ class SqliteScanStore(ScanStoreBase):
             agent_id=row["agent_id"] if row["agent_id"] is not None else "",
             agent_key=row["agent_key"] if row["agent_key"] is not None else "",
             agent_name=row["agent_name"] if row["agent_name"] is not None else "",
+            execution_agent_session_id=(
+                row["execution_agent_session_id"]
+                if "execution_agent_session_id" in row.keys()
+                else ""
+            ) or "",
+            execution_revision=int(
+                row["execution_revision"]
+                if "execution_revision" in row.keys()
+                else 0
+            ),
             project_path=row["project_path"] if row["project_path"] is not None else "",
             code_scan_path=row["code_scan_path"] if row["code_scan_path"] is not None else "",
             multi_versions=_json_model_list(
@@ -2333,6 +2373,7 @@ class SqliteScanStore(ScanStoreBase):
                 SELECT
                   (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ?) AS candidates,
                   (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'pending') AS candidate_audit_pending,
+                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'queued') AS candidate_audit_queued,
                   (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'running') AS candidate_audit_running,
                   (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'success') AS candidate_audit_success,
                   (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'failed') AS candidate_audit_failed,
@@ -2340,7 +2381,8 @@ class SqliteScanStore(ScanStoreBase):
                   (SELECT COUNT(*) FROM events WHERE scan_id = ?) AS events,
                   (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ?) AS threat_audit_tasks,
                   (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) <> 'superseded') AS threat_audit_current,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) IN ('pending', 'queued')) AS threat_audit_pending,
+                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'pending') AS threat_audit_pending,
+                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'queued') AS threat_audit_queued,
                   (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) IN ('running', 'analyzing', 'auditing')) AS threat_audit_running,
                   (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'completed') AS threat_audit_completed,
                   (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) IN ('failed', 'failure', 'error', 'timeout', 'no_result')) AS threat_audit_failed,
@@ -2349,7 +2391,7 @@ class SqliteScanStore(ScanStoreBase):
                   (SELECT COUNT(*) FROM vulnerability_validations WHERE scan_id = ?) AS validations,
                   (SELECT COUNT(*) FROM skill_reports WHERE scan_id = ?) AS skill_reports
                 """,
-                (scan_id,) * 17,
+                (scan_id,) * 19,
             ).fetchone()
             scan = self._row_to_scan_status(row, include_details=False)
             meta = self._row_to_meta(row)
@@ -2358,6 +2400,7 @@ class SqliteScanStore(ScanStoreBase):
                 for key in (
                     "candidates",
                     "candidate_audit_pending",
+                    "candidate_audit_queued",
                     "candidate_audit_running",
                     "candidate_audit_success",
                     "candidate_audit_failed",
@@ -2366,6 +2409,7 @@ class SqliteScanStore(ScanStoreBase):
                     "threat_audit_tasks",
                     "threat_audit_current",
                     "threat_audit_pending",
+                    "threat_audit_queued",
                     "threat_audit_running",
                     "threat_audit_completed",
                     "threat_audit_failed",
@@ -4188,8 +4232,9 @@ class SqliteScanStore(ScanStoreBase):
                      validation_method_id, validation_method_label, validator_name,
                      validation_success, is_problem, requires_human_intervention, validation_code,
                      validation_output, intermediate_output, output_sections, final_output, artifacts,
-                     started_at, finished_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     started_at, finished_at, updated_at,
+                     execution_agent_session_id, execution_revision)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id, vuln_index) DO UPDATE SET
                     status = excluded.status,
                     running = excluded.running,
@@ -4209,7 +4254,9 @@ class SqliteScanStore(ScanStoreBase):
                     artifacts = excluded.artifacts,
                     started_at = excluded.started_at,
                     finished_at = excluded.finished_at,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    execution_agent_session_id = excluded.execution_agent_session_id,
+                    execution_revision = excluded.execution_revision
                 """,
                 (
                     scan_id,
@@ -4233,6 +4280,8 @@ class SqliteScanStore(ScanStoreBase):
                     validation.started_at,
                     validation.finished_at,
                     validation.updated_at,
+                    validation.execution_agent_session_id,
+                    validation.execution_revision,
                 ),
             )
             self._conn.commit()
@@ -4297,6 +4346,16 @@ class SqliteScanStore(ScanStoreBase):
                 started_at=r["started_at"] or "",
                 finished_at=r["finished_at"] or "",
                 updated_at=r["updated_at"] or "",
+                execution_agent_session_id=(
+                    r["execution_agent_session_id"]
+                    if "execution_agent_session_id" in r.keys()
+                    else ""
+                ) or "",
+                execution_revision=int(
+                    r["execution_revision"]
+                    if "execution_revision" in r.keys()
+                    else 0
+                ),
             )
             for r in cur.fetchall()
         ]
@@ -5121,6 +5180,317 @@ class SqliteScanStore(ScanStoreBase):
 
     # -- Crash recovery --
 
+    def begin_scan_execution(
+        self,
+        scan_id: str,
+        *,
+        agent_id: str,
+        agent_session_id: str,
+    ) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """\
+                UPDATE scans
+                SET agent_id = ?, execution_agent_session_id = ?,
+                    execution_revision = execution_revision + 1
+                WHERE scan_id = ?
+                RETURNING execution_revision
+                """,
+                (agent_id, agent_session_id, scan_id),
+            ).fetchone()
+            self._conn.commit()
+        if row is None:
+            raise KeyError(scan_id)
+        return int(row["execution_revision"])
+
+    def begin_fp_review_execution(
+        self,
+        review_id: str,
+        *,
+        agent_session_id: str,
+    ) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """\
+                UPDATE fp_review_jobs
+                SET execution_agent_session_id = ?,
+                    execution_revision = execution_revision + 1
+                WHERE review_id = ?
+                RETURNING execution_revision
+                """,
+                (agent_session_id, review_id),
+            ).fetchone()
+            self._conn.commit()
+        if row is None:
+            raise KeyError(review_id)
+        return int(row["execution_revision"])
+
+    def begin_validation_execution(
+        self,
+        scan_id: str,
+        vuln_index: int,
+        *,
+        agent_session_id: str,
+    ) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """\
+                UPDATE vulnerability_validations
+                SET execution_agent_session_id = ?,
+                    execution_revision = execution_revision + 1
+                WHERE scan_id = ? AND vuln_index = ?
+                RETURNING execution_revision
+                """,
+                (agent_session_id, scan_id, vuln_index),
+            ).fetchone()
+            self._conn.commit()
+        if row is None:
+            raise KeyError(f"{scan_id}#{vuln_index}")
+        return int(row["execution_revision"])
+
+    @staticmethod
+    def _agent_execution_identity_clause(agent_key: str, agent_id: str) -> tuple[str, tuple]:
+        if agent_key and agent_id:
+            return (
+                "(s.agent_key = ? OR ((s.agent_key IS NULL OR s.agent_key = '') AND s.agent_id = ?))",
+                (agent_key, agent_id),
+            )
+        if agent_key:
+            return "s.agent_key = ?", (agent_key,)
+        if agent_id:
+            return "s.agent_id = ?", (agent_id,)
+        return "0 = 1", ()
+
+    def list_agent_inflight_executions(
+        self,
+        agent_key: str,
+        agent_id: str,
+    ) -> dict[str, list[dict]]:
+        disconnect_error = "Agent 断开连接"
+        clause, params = self._agent_execution_identity_clause(agent_key, agent_id)
+        with self._lock:
+            scans = self._conn.execute(
+                f"""\
+                SELECT s.scan_id, s.execution_agent_session_id, s.execution_revision
+                FROM scans AS s
+                WHERE {clause}
+                  AND (
+                      s.status IN ('pending', 'analyzing', 'auditing')
+                      OR (s.status = 'cancelled' AND s.error_message = ?)
+                  )
+                ORDER BY s.created_at, s.scan_id
+                """,
+                (*params, disconnect_error),
+            ).fetchall()
+            fp_reviews = self._conn.execute(
+                f"""\
+                SELECT job.scan_id, job.review_id,
+                       job.execution_agent_session_id, job.execution_revision
+                FROM fp_review_jobs AS job
+                JOIN scans AS s ON s.scan_id = job.scan_id
+                WHERE {clause}
+                  AND (
+                      job.status IN ('pending', 'running')
+                      OR (job.status = 'error' AND job.error_message = ?)
+                  )
+                ORDER BY job.created_at, job.review_id
+                """,
+                (*params, disconnect_error),
+            ).fetchall()
+            validations = self._conn.execute(
+                f"""\
+                SELECT validation.scan_id, validation.vuln_index,
+                       validation.execution_agent_session_id,
+                       validation.execution_revision
+                FROM vulnerability_validations AS validation
+                JOIN scans AS s ON s.scan_id = validation.scan_id
+                WHERE {clause}
+                  AND (
+                      validation.running = 1
+                      OR validation.status IN ('pending', 'queued', 'running')
+                  )
+                ORDER BY validation.scan_id, validation.vuln_index
+                """,
+                params,
+            ).fetchall()
+        return {
+            "scans": [dict(row) for row in scans],
+            "fp_reviews": [dict(row) for row in fp_reviews],
+            "validations": [dict(row) for row in validations],
+        }
+
+    def claim_scan_for_agent_recovery(
+        self,
+        scan_id: str,
+        *,
+        previous_session_id: str,
+        agent_id: str,
+        agent_session_id: str,
+        error_message: str,
+    ) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                """\
+                UPDATE scans
+                SET status = 'cancelled', error_message = ?, current_candidate = NULL,
+                    agent_id = ?, execution_agent_session_id = ?,
+                    execution_revision = execution_revision + 1
+                WHERE scan_id = ?
+                  AND (
+                      status IN ('pending', 'analyzing', 'auditing')
+                      OR (status = 'cancelled' AND error_message = 'Agent 断开连接')
+                  )
+                  AND COALESCE(execution_agent_session_id, '') = ?
+                RETURNING execution_revision
+                """,
+                (
+                    error_message,
+                    agent_id,
+                    agent_session_id,
+                    scan_id,
+                    previous_session_id,
+                ),
+            ).fetchone()
+            self._conn.commit()
+        return int(row["execution_revision"]) if row is not None else None
+
+    def adopt_active_execution(
+        self,
+        kind: str,
+        work_id: str,
+        sub_id: int | None,
+        *,
+        previous_session_id: str,
+        agent_session_id: str,
+    ) -> bool:
+        if kind == "scan":
+            sql = """\
+                UPDATE scans SET execution_agent_session_id = ?
+                WHERE scan_id = ?
+                  AND status IN ('pending', 'analyzing', 'auditing')
+                  AND COALESCE(execution_agent_session_id, '') = ?
+            """
+            params = (agent_session_id, work_id, previous_session_id)
+        elif kind == "fp_review":
+            sql = """\
+                UPDATE fp_review_jobs SET execution_agent_session_id = ?
+                WHERE review_id = ? AND status IN ('pending', 'running')
+                  AND COALESCE(execution_agent_session_id, '') = ?
+            """
+            params = (agent_session_id, work_id, previous_session_id)
+        elif kind == "validation":
+            sql = """\
+                UPDATE vulnerability_validations SET execution_agent_session_id = ?
+                WHERE scan_id = ? AND vuln_index = ?
+                  AND (running = 1 OR status IN ('pending', 'queued', 'running'))
+                  AND COALESCE(execution_agent_session_id, '') = ?
+            """
+            params = (
+                agent_session_id,
+                work_id,
+                int(sub_id if sub_id is not None else -1),
+                previous_session_id,
+            )
+        else:
+            return False
+        with self._lock:
+            cursor = self._conn.execute(sql, params)
+            self._conn.commit()
+            return bool(cursor.rowcount)
+
+    def claim_fp_review_for_agent_recovery(
+        self,
+        review_id: str,
+        *,
+        previous_session_id: str,
+        agent_session_id: str,
+    ) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                """\
+                UPDATE fp_review_jobs
+                SET status = 'running', current_vuln_index = NULL,
+                    current_vuln_indices = '[]', error_message = '',
+                    execution_agent_session_id = ?,
+                    execution_revision = execution_revision + 1
+                WHERE review_id = ?
+                  AND (
+                      status IN ('pending', 'running')
+                      OR (status = 'error' AND error_message = 'Agent 断开连接')
+                  )
+                  AND COALESCE(execution_agent_session_id, '') = ?
+                RETURNING execution_revision
+                """,
+                (agent_session_id, review_id, previous_session_id),
+            ).fetchone()
+            self._conn.commit()
+        return int(row["execution_revision"]) if row is not None else None
+
+    def claim_validation_for_agent_recovery(
+        self,
+        scan_id: str,
+        vuln_index: int,
+        *,
+        previous_session_id: str,
+        agent_session_id: str,
+    ) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                """\
+                UPDATE vulnerability_validations
+                SET status = 'queued', running = 1,
+                    execution_agent_session_id = ?,
+                    execution_revision = execution_revision + 1
+                WHERE scan_id = ? AND vuln_index = ?
+                  AND (running = 1 OR status IN ('pending', 'queued', 'running'))
+                  AND COALESCE(execution_agent_session_id, '') = ?
+                RETURNING execution_revision
+                """,
+                (agent_session_id, scan_id, vuln_index, previous_session_id),
+            ).fetchone()
+            self._conn.commit()
+        return int(row["execution_revision"]) if row is not None else None
+
+    def execution_matches(
+        self,
+        kind: str,
+        work_id: str,
+        sub_id: int | None,
+        *,
+        agent_session_id: str,
+        execution_revision: int,
+    ) -> bool:
+        if kind == "scan":
+            sql = (
+                "SELECT execution_agent_session_id, execution_revision "
+                "FROM scans WHERE scan_id = ?"
+            )
+            params = (work_id,)
+        elif kind == "fp_review":
+            sql = (
+                "SELECT execution_agent_session_id, execution_revision "
+                "FROM fp_review_jobs WHERE review_id = ?"
+            )
+            params = (work_id,)
+        elif kind == "validation":
+            sql = (
+                "SELECT execution_agent_session_id, execution_revision "
+                "FROM vulnerability_validations WHERE scan_id = ? AND vuln_index = ?"
+            )
+            params = (work_id, int(sub_id if sub_id is not None else -1))
+        else:
+            return False
+        row = self._conn.execute(sql, params).fetchone()
+        if row is None:
+            return False
+        current_revision = int(row["execution_revision"] or 0)
+        if current_revision <= 0:
+            return True
+        return (
+            str(row["execution_agent_session_id"] or "") == str(agent_session_id or "")
+            and current_revision == int(execution_revision or 0)
+        )
+
     def mark_running_as_error(self) -> int:
         with self._lock:
             rows = self._conn.execute(
@@ -5203,10 +5573,17 @@ class SqliteScanStore(ScanStoreBase):
             WHERE {identity_clause}
               AND (
                   s.status IN ('pending', 'analyzing', 'auditing')
+                  OR (s.status = 'cancelled' AND s.error_message = 'Agent 断开连接')
                   OR EXISTS (
                       SELECT 1 FROM fp_review_jobs AS job
                       WHERE job.scan_id = s.scan_id
-                        AND job.status IN ('pending', 'running')
+                        AND (
+                            job.status IN ('pending', 'running')
+                            OR (
+                                job.status = 'error'
+                                AND job.error_message = 'Agent 断开连接'
+                            )
+                        )
                   )
                   OR EXISTS (
                       SELECT 1 FROM vulnerability_validations AS validation
@@ -5504,6 +5881,16 @@ class SqliteScanStore(ScanStoreBase):
             current_vuln_indices=current_vuln_indices,
             results=results,
             error_message=row["error_message"],
+            execution_agent_session_id=(
+                row["execution_agent_session_id"]
+                if "execution_agent_session_id" in row.keys()
+                else ""
+            ) or "",
+            execution_revision=int(
+                row["execution_revision"]
+                if "execution_revision" in row.keys()
+                else 0
+            ),
         )
 
     def _row_to_fp_review_result(self, row: sqlite3.Row) -> FpReviewResult:

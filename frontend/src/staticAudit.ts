@@ -4,6 +4,7 @@ export const STATIC_AUDIT_STATUS_ORDER = [
   "success",
   "failed",
   "pending",
+  "queued",
   "running",
 ] as const;
 
@@ -13,6 +14,7 @@ export const STATIC_AUDIT_STATUS_LABELS: Record<StaticAuditStatus, string> = {
   success: "审计成功",
   failed: "审计失败",
   pending: "待审计",
+  queued: "排队中",
   running: "审计中",
 };
 

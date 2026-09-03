@@ -61,7 +61,7 @@ type DetailResource = "candidates" | "vulnerabilities" | "events" | "threat_task
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failure" | "timeout" | "cancelled" | "unknown";
 type FlowNodeId = "index" | "static" | "threat" | "fp_review" | "validation" | "issues" | `engine:${string}` | `threat_result:${ThreatAnalysisResultTab}`;
-type FlowNodeStatus = "pending" | "running" | "done" | "warning" | "error" | "cancelled" | "disabled" | "skipped" | "unknown";
+type FlowNodeStatus = "pending" | "queued" | "running" | "done" | "warning" | "error" | "cancelled" | "disabled" | "skipped" | "unknown";
 type ReportExportFormat = "zip" | "csv";
 type CheckerDisplayMetadata = Pick<CheckerInfo, "name" | "label">;
 
@@ -476,9 +476,14 @@ function threatAuditFlowStatus(
   const runStatus = engineFlowStatus(run);
   if (scan.status === "cancelled" && runStatus !== "done") return "cancelled";
   const active = counts?.threat_audit_running
-    ?? tasks.filter((task) => isActiveThreatAuditStatus(task.status)).length;
+    ?? tasks.filter((task) => ["running", "analyzing", "auditing"].includes(
+      String(task.status || "").toLowerCase(),
+    )).length;
   const pending = counts?.threat_audit_pending ?? 0;
+  const queued = counts?.threat_audit_queued
+    ?? tasks.filter((task) => String(task.status || "").toLowerCase() === "queued").length;
   if (active > 0) return "running";
+  if (queued > 0) return "queued";
   const failed = counts?.threat_audit_failed ?? tasks.filter((task) =>
     ["failed", "failure", "error", "timeout", "no_result"].includes(String(task.status || "").toLowerCase()),
   ).length;
@@ -3579,6 +3584,7 @@ function ScanInformationToggle({
 
 function sidebarStatusDotClass(status: FlowNodeStatus): string {
   if (status === "running") return "bg-blue-400 animate-pulse motion-reduce:animate-none";
+  if (status === "queued") return "bg-amber-400";
   if (status === "done") return "bg-emerald-400";
   if (status === "warning") return "bg-amber-400";
   if (status === "error") return "bg-red-400";
@@ -3591,6 +3597,7 @@ function sidebarStatusDotClass(status: FlowNodeStatus): string {
 
 function flowStatusLabel(status: FlowNodeStatus): string {
   if (status === "running") return "正在执行";
+  if (status === "queued") return "排队中";
   if (status === "done") return "执行完毕";
   if (status === "warning") return "完成但有失败";
   if (status === "error") return "执行失败";
@@ -3603,6 +3610,7 @@ function flowStatusLabel(status: FlowNodeStatus): string {
 
 function flowStatusTone(status: FlowNodeStatus, doneTone: TaskTone): TaskTone {
   if (status === "running") return "blue";
+  if (status === "queued") return "amber";
   if (status === "done") return doneTone;
   if (status === "warning") return "amber";
   if (status === "error" || status === "cancelled") return "red";
@@ -3744,7 +3752,9 @@ function ThreatAuditPanel({
   const aggregate = scan.detail_counts;
   const totalTaskCount = aggregate?.threat_audit_current ?? currentTasks.length;
   const pendingTaskCount = aggregate?.threat_audit_pending
-    ?? (statusCounts.get("pending") ?? 0) + (statusCounts.get("queued") ?? 0);
+    ?? statusCounts.get("pending") ?? 0;
+  const queuedTaskCount = aggregate?.threat_audit_queued
+    ?? statusCounts.get("queued") ?? 0;
   const runningTaskCount = aggregate?.threat_audit_running
     ?? ["running", "analyzing", "auditing"].reduce(
       (sum, status) => sum + (statusCounts.get(status) ?? 0),
@@ -3781,9 +3791,10 @@ function ThreatAuditPanel({
       tone={flowStatusTone(processStatus, "green")}
       summary="按威胁分析产生的叶子节点与攻击模式拆分任务，并逐项执行模型审计。"
     >
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
         <MiniMetric label="任务总数" value={totalTaskCount} />
         <MiniMetric label="待执行" value={pendingTaskCount} tone="amber" />
+        <MiniMetric label="排队中" value={queuedTaskCount} tone="amber" />
         <MiniMetric label="运行中" value={runningTaskCount} tone="cyan" />
         <MiniMetric label="已完成" value={completedTaskCount} tone="green" />
         <MiniMetric
@@ -5120,6 +5131,7 @@ function StaticTaskPanel({
       success: 0,
       failed: 0,
       pending: 0,
+      queued: 0,
       running: 0,
     };
     annotated.forEach((item) => {
@@ -5131,6 +5143,7 @@ function StaticTaskPanel({
     success: scan.detail_counts.candidate_audit_success ?? auditCounts.success,
     failed: scan.detail_counts.candidate_audit_failed ?? auditCounts.failed,
     pending: scan.detail_counts.candidate_audit_pending ?? auditCounts.pending,
+    queued: scan.detail_counts.candidate_audit_queued ?? auditCounts.queued,
     running: scan.detail_counts.candidate_audit_running ?? auditCounts.running,
   } : auditCounts;
   const completeCandidateCount = scan.detail_counts?.candidates
@@ -5164,10 +5177,11 @@ function StaticTaskPanel({
         <MiniMetric label="候选点" value={completeCandidateCount} tone="blue" />
       </div>
       <ProgressBlock label="候选点生成" current={scannedFiles} total={totalFiles} fallback="等待静态分析进度" />
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
         <MiniMetric label="审计成功" value={completeAuditCounts.success} tone="green" />
         <MiniMetric label="审计失败" value={completeAuditCounts.failed} tone="red" />
         <MiniMetric label="待审计" value={completeAuditCounts.pending} />
+        <MiniMetric label="排队中" value={completeAuditCounts.queued} tone="amber" />
         <MiniMetric label="审计中" value={completeAuditCounts.running} tone="blue" />
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -5324,6 +5338,7 @@ function staticAuditTone(status: StaticAuditStatus): TaskTone {
   if (status === "success") return "green";
   if (status === "failed") return "red";
   if (status === "running") return "blue";
+  if (status === "queued") return "amber";
   return "slate";
 }
 
@@ -6482,7 +6497,7 @@ function ModelPoolDashboard({ pool }: { pool: OpenCodePoolStatus | null }) {
   const unassignedCompletedTasks = completedTasks.filter(
     (task) => !String(task.model_id || task.model || "").trim(),
   );
-  const hasEnabledModel = models.some((model) => model.enabled);
+  const hasEnabledModel = models.length === 0 || models.some((model) => model.enabled);
   const total = models.reduce((sum, item) => sum + item.total, 0) + unassignedCompletedTasks.length;
   const success = models.reduce((sum, item) => sum + item.success, 0)
     + unassignedCompletedTasks.filter((task) => task.outcome === "success").length;

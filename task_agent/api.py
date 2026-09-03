@@ -214,6 +214,7 @@ async def run_opencode_task(
     required_bash_success_markers: Mapping[str, str] | None = None,
     post_session_validator: Callable[[], Any] | None = None,
     post_session_validation_retry_count: int = 0,
+    lease_state_callback: Callable[[str], Any] | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -239,6 +240,7 @@ async def run_opencode_task(
         required_bash_success_markers=required_bash_success_markers,
         post_session_validator=post_session_validator,
         post_session_validation_retry_count=post_session_validation_retry_count,
+        lease_state_callback=lease_state_callback,
         session_id=session_id,
         config_path=config_path,
         output=output,
@@ -276,6 +278,7 @@ async def _run_opencode_task_local(
     required_bash_success_markers: Mapping[str, str] | None = None,
     post_session_validator: Callable[[], Any] | None = None,
     post_session_validation_retry_count: int = 0,
+    lease_state_callback: Callable[[str], Any] | None = None,
     session_id: str | None = None,
     config_path: str | PathLike[str] | None = None,
     output: Callable[[str], Any] | None | object = _UNSET,
@@ -342,6 +345,8 @@ async def _run_opencode_task_local(
             "OpenCode post_session_validation_retry_count requires "
             "post_session_validator"
         )
+    if lease_state_callback is not None and not callable(lease_state_callback):
+        raise TypeError("OpenCode lease_state_callback must be callable or None")
     if output is not _UNSET and output is not None and not callable(output):
         raise TypeError("OpenCode output must be callable or None")
 
@@ -376,6 +381,7 @@ async def _run_opencode_task_local(
             ),
             post_session_validator=post_session_validator,
             post_session_validation_retry_count=post_validation_retry_count,
+            lease_state_callback=lease_state_callback,
             session_id=str(session_id or "").strip() or None,
         )
 

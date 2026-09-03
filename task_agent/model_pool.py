@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import logging
 import time
 from dataclasses import dataclass
@@ -1222,6 +1223,7 @@ async def acquire_model_lease(
     ) = None,
     quota_wait_deadline: float | None = None,
     quota_wait_budget: ModelQuotaWaitBudget | None = None,
+    on_queued: Callable[[], Any] | None = None,
 ) -> ModelLease | None:
     required = normalize_requirement(required_capability)
     request: _PendingLeaseRequest | None = None
@@ -1231,6 +1233,7 @@ async def acquire_model_lease(
     context.setdefault("revision", max(1, int(revision or 1)))
 
     while True:
+        notify_queued = False
         if cancel_event is not None and cancel_event.is_set():
             if request is not None:
                 async with _condition:
@@ -1295,74 +1298,84 @@ async def acquire_model_lease(
                 _pending_requests.append(request)
                 _touch_queue_locked(stats_scope_id)
                 _condition.notify_all()
+                notify_queued = True
             else:
                 _, _, all_options, _, _ = _request_options_locked(request)
                 if not all_options and not request.wait_when_unavailable:
                     _fail_no_available_model_locked(request)
                     raise NoAvailableModelError()
 
-            blocked_by_quota = _request_blocked_by_quota_circuits_locked(request)
-            if blocked_by_quota:
-                now = time.monotonic()
-                if request.quota_wait_budget is not None:
-                    request.quota_wait_budget.start(now)
-                budget_expired = bool(
-                    request.quota_wait_budget is not None
-                    and request.quota_wait_budget.remaining(now) <= 0
-                )
-                if (
-                    budget_expired
-                    or (
-                        request.quota_wait_deadline is not None
-                        and now >= request.quota_wait_deadline
-                    )
-                    or (
-                        request.quota_wait_deadline is None
-                        and not request.wait_when_unavailable
-                    )
-                ):
-                    error = ModelQuotaCircuitOpenError(
-                        wait_limit_reached=(
-                            budget_expired
-                            or request.quota_wait_deadline is not None
-                        ),
-                    )
-                    _fail_pending_request_locked(
-                        request,
-                        str(error),
-                        failure_kind="quota",
-                    )
-                    raise error
-                if not request.quota_wait_logged:
-                    remaining = (
-                        request.quota_wait_budget.remaining(now)
-                        if request.quota_wait_budget is not None
-                        else (
-                            max(0.0, request.quota_wait_deadline - now)
-                            if request.quota_wait_deadline is not None
-                            else None
-                        )
-                    )
-                    logger.info(
-                        "Waiting for model Provider quota circuit cooldown task_id=%s "
-                        "remaining_limit_seconds=%s",
-                        request.request_id,
-                        f"{remaining:.1f}" if remaining is not None else "unbounded",
-                    )
-                    request.quota_wait_logged = True
-            elif request.quota_wait_budget is not None:
-                request.quota_wait_budget.pause(time.monotonic())
-
-            next_runnable = _next_runnable_pending_locked()
-            if next_runnable is not None:
-                selected, option, all_options = next_runnable
-                if selected is request:
-                    _remove_pending_request_locked(request)
-                    return _grant_lease_locked(request, option, all_options)
-            try:
-                await asyncio.wait_for(_condition.wait(), timeout=0.2)
-            except asyncio.TimeoutError:
+            if notify_queued:
+                # This request can only grant itself on its next loop, so it is
+                # safe to notify outside the pool lock before execution starts.
                 pass
+            else:
+                blocked_by_quota = _request_blocked_by_quota_circuits_locked(request)
+                if blocked_by_quota:
+                    now = time.monotonic()
+                    if request.quota_wait_budget is not None:
+                        request.quota_wait_budget.start(now)
+                    budget_expired = bool(
+                        request.quota_wait_budget is not None
+                        and request.quota_wait_budget.remaining(now) <= 0
+                    )
+                    if (
+                        budget_expired
+                        or (
+                            request.quota_wait_deadline is not None
+                            and now >= request.quota_wait_deadline
+                        )
+                        or (
+                            request.quota_wait_deadline is None
+                            and not request.wait_when_unavailable
+                        )
+                    ):
+                        error = ModelQuotaCircuitOpenError(
+                            wait_limit_reached=(
+                                budget_expired
+                                or request.quota_wait_deadline is not None
+                            ),
+                        )
+                        _fail_pending_request_locked(
+                            request,
+                            str(error),
+                            failure_kind="quota",
+                        )
+                        raise error
+                    if not request.quota_wait_logged:
+                        remaining = (
+                            request.quota_wait_budget.remaining(now)
+                            if request.quota_wait_budget is not None
+                            else (
+                                max(0.0, request.quota_wait_deadline - now)
+                                if request.quota_wait_deadline is not None
+                                else None
+                            )
+                        )
+                        logger.info(
+                            "Waiting for model Provider quota circuit cooldown task_id=%s "
+                            "remaining_limit_seconds=%s",
+                            request.request_id,
+                            f"{remaining:.1f}" if remaining is not None else "unbounded",
+                        )
+                        request.quota_wait_logged = True
+                elif request.quota_wait_budget is not None:
+                    request.quota_wait_budget.pause(time.monotonic())
+
+                next_runnable = _next_runnable_pending_locked()
+                if next_runnable is not None:
+                    selected, option, all_options = next_runnable
+                    if selected is request:
+                        _remove_pending_request_locked(request)
+                        return _grant_lease_locked(request, option, all_options)
+                try:
+                    await asyncio.wait_for(_condition.wait(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    pass
+        if notify_queued and on_queued is not None:
+            notified = on_queued()
+            if inspect.isawaitable(notified):
+                await notified
 
 
 async def release_model_lease(
@@ -1675,9 +1688,21 @@ def _planned_tasks_snapshot(scope_id: str = "") -> list[dict[str, Any]]:
 def model_pool_snapshot(scope_id: str = "") -> dict[str, Any]:
     if scope_id:
         stats = _stats_by_scope.get(scope_id, {})
+        visible_stats = dict(stats)
+        for option in _options_by_id.values():
+            visible_stats.setdefault(
+                option.id,
+                ModelRuntimeStats(
+                    id=option.id,
+                    model=option.model,
+                    capability=option.capability,
+                    weight=option.weight,
+                    max_concurrency=option.max_concurrency,
+                ),
+            )
         models = [
             _stats_item_snapshot(item, option=_options_by_id.get(item.id), scope_id=scope_id)
-            for item in stats.values()
+            for item in visible_stats.values()
         ]
         queued_tasks = _pending_requests_snapshot(scope_id)
         planned_tasks = _planned_tasks_snapshot(scope_id)

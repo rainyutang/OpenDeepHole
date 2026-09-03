@@ -224,7 +224,13 @@ def test_overview_aggregates_are_not_limited_to_first_detail_page() -> None:
                 function=f"candidate_{index}",
                 description="candidate",
                 vuln_type="npd",
-                audit_state="success" if index < 101 else "pending",
+                audit_state=(
+                    "success"
+                    if index < 101
+                    else "queued"
+                    if index < 111
+                    else "pending"
+                ),
                 audit_result=(
                     _vulnerability(audit_index=index, verdict="not_confirmed")
                     if index < 101
@@ -239,7 +245,13 @@ def test_overview_aggregates_are_not_limited_to_first_detail_page() -> None:
                 "scan-1",
                 ThreatAuditTask(
                     task_id=f"threat-{index}",
-                    status="completed" if index < 110 else "pending",
+                    status=(
+                        "completed"
+                        if index < 110
+                        else "queued"
+                        if index < 120
+                        else "pending"
+                    ),
                     surface_node_id=f"surface-{index}",
                     method_node_id=f"method-{index}",
                 ),
@@ -250,11 +262,13 @@ def test_overview_aggregates_are_not_limited_to_first_detail_page() -> None:
         counts = loaded[2]
         assert counts["candidates"] == 125
         assert counts["candidate_audit_success"] == 101
-        assert counts["candidate_audit_pending"] == 24
+        assert counts["candidate_audit_pending"] == 14
+        assert counts["candidate_audit_queued"] == 10
         assert counts["threat_audit_tasks"] == 127
         assert counts["threat_audit_current"] == 127
         assert counts["threat_audit_completed"] == 110
-        assert counts["threat_audit_pending"] == 17
+        assert counts["threat_audit_pending"] == 7
+        assert counts["threat_audit_queued"] == 10
     finally:
         store.close()
         temporary.cleanup()

@@ -180,6 +180,168 @@ def test_failed_authoritative_report_stays_pending_until_success(tmp_path: Path)
     asyncio.run(exercise())
 
 
+def test_stale_execution_report_is_removed_instead_of_blocked(tmp_path: Path) -> None:
+    class StaleClient:
+        async def post(self, url, json=None, params=None, timeout=None):
+            del json, params, timeout
+            return httpx.Response(
+                409,
+                request=httpx.Request("POST", url),
+                json={"detail": "stale scan execution"},
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    async def exercise() -> None:
+        reporter = Reporter(
+            "http://server",
+            outbox_path=tmp_path / "outbox.sqlite3",
+        )
+        reporter._client = StaleClient()  # type: ignore[assignment]
+        reporter.set_scan_execution("scan-1", 2)
+        await reporter.report_candidate_audit(
+            "scan-1",
+            0,
+            state="failed",
+            result=Vulnerability(
+                file="src/a.c",
+                line=1,
+                function="parse",
+                vuln_type="npd",
+                severity="low",
+                description="superseded result",
+                confirmed=False,
+                ai_verdict="failed",
+                audit_index=0,
+            ),
+        )
+        assert reporter._outbox is not None
+        assert reporter._outbox.pending_count() == 0
+        await reporter.close()
+
+    asyncio.run(exercise())
+
+
+def test_pending_terminal_inventory_reuses_existing_outbox_rows(tmp_path: Path) -> None:
+    outbox_path = tmp_path / "outbox.sqlite3"
+    reporter = Reporter(
+        "http://server",
+        outbox_path=outbox_path,
+    )
+    assert reporter._outbox is not None
+    outbox = reporter._outbox
+    for key in (
+        "scan:scan-1:finish",
+        "scan:scan-1:fp:review-1:finish",
+        "scan:scan-1:validation:7",
+        "scan:scan-1:candidate-audit:3",
+    ):
+        outbox.enqueue(
+            target_url="http://server",
+            stream_key="scan:scan-1",
+            dedupe_key=key,
+            path="/api/report",
+            payload={"key": key},
+        )
+    row_count = outbox.pending_count()
+
+    assert reporter.pending_terminal_work() == {
+        "scans": ["scan-1"],
+        "fp_reviews": [{"scan_id": "scan-1", "review_id": "review-1"}],
+        "validations": [{"scan_id": "scan-1", "vuln_index": 7}],
+    }
+    assert outbox.pending_count() == row_count
+    asyncio.run(reporter.close())
+    connection = sqlite3.connect(outbox_path)
+    try:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert tables <= {"pending_reports", "sqlite_sequence"}
+    finally:
+        connection.close()
+
+
+def test_pool_snapshot_retries_http_413_with_compact_details(tmp_path: Path) -> None:
+    class PayloadClient:
+        def __init__(self) -> None:
+            self.payloads: list[dict] = []
+
+        async def post(self, url, json=None, params=None, timeout=None):
+            del params, timeout
+            self.payloads.append(json)
+            return httpx.Response(
+                413 if len(self.payloads) == 1 else 200,
+                request=httpx.Request("POST", url),
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    async def exercise() -> None:
+        reporter = Reporter(
+            "http://server",
+            outbox_path=tmp_path / "pool-outbox.sqlite3",
+        )
+        fake = PayloadClient()
+        reporter._client = fake  # type: ignore[assignment]
+        pushed = await reporter.push_opencode_pool_status("scan-1", {
+            "scope_id": "scan-1",
+            "queued_tasks": [{
+                "task_id": "queued-1",
+                "prompt": "large prompt",
+                "unbounded_detail": "x" * 1000,
+            }],
+            "models": [{
+                "id": "model-1",
+                "active_tasks": [{"task_id": "active-1", "prompt": "active prompt"}],
+            }],
+        })
+        assert pushed is True
+        assert len(fake.payloads) == 2
+        compact = fake.payloads[1]
+        assert compact["details_truncated"] is True
+        assert compact["queued_tasks"][0]["prompt_length"] == len("large prompt")
+        assert "prompt" not in compact["queued_tasks"][0]
+        assert "unbounded_detail" not in compact["queued_tasks"][0]
+        assert "prompt" not in compact["models"][0]["active_tasks"][0]
+        await reporter.close()
+
+    asyncio.run(exercise())
+
+
+def test_pool_snapshot_http_error_is_reported_as_failed_push(tmp_path: Path) -> None:
+    class FailedClient:
+        async def post(self, url, json=None, params=None, timeout=None):
+            del json, params, timeout
+            return httpx.Response(
+                500,
+                request=httpx.Request("POST", url),
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    async def exercise() -> None:
+        reporter = Reporter(
+            "http://server",
+            outbox_path=tmp_path / "pool-outbox.sqlite3",
+        )
+        reporter._client = FailedClient()  # type: ignore[assignment]
+        assert await reporter.push_opencode_pool_status("scan-1", {
+            "scope_id": "scan-1",
+            "queued_tasks": [],
+            "models": [],
+        }) is False
+        await reporter.close()
+
+    asyncio.run(exercise())
+
+
 def test_distinct_findings_from_one_task_are_not_coalesced(tmp_path: Path) -> None:
     class OfflineClient:
         async def post(self, url, json=None, params=None, timeout=None):

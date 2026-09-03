@@ -1466,6 +1466,215 @@ async def _reattach_active_validations_async(
     return pending_stops
 
 
+def _reported_work_ids(items: object, *keys: str) -> set[tuple[str, ...]]:
+    values: set[tuple[str, ...]] = set()
+    if not isinstance(items, list):
+        return values
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        identity = tuple(
+            str(item.get(key)) if item.get(key) is not None else ""
+            for key in keys
+        )
+        if all(identity):
+            values.add(identity)
+    return values
+
+
+async def _recover_missing_agent_work(
+    agent_id: str,
+    agent: AgentInfo,
+    hello: dict,
+    *,
+    server_url: str,
+) -> None:
+    """Resume durable non-terminal work missing from this Agent process."""
+    store = get_scan_store()
+    inflight = await run_store_call(
+        store,
+        "list_agent_inflight_executions",
+        agent.agent_key,
+        agent_id,
+    )
+    active_scans = _reported_work_ids(hello.get("active_scans"), "scan_id")
+    active_fp = _reported_work_ids(
+        hello.get("active_fp_reviews"),
+        "scan_id",
+        "review_id",
+    )
+    active_validations = _reported_work_ids(
+        hello.get("active_validations"),
+        "scan_id",
+        "vuln_index",
+    )
+    pending = (
+        hello.get("pending_terminal_reports")
+        if isinstance(hello.get("pending_terminal_reports"), dict)
+        else {}
+    )
+    pending_scans = {
+        (str(scan_id),)
+        for scan_id in pending.get("scans", [])
+        if str(scan_id or "")
+    }
+    pending_fp = _reported_work_ids(
+        pending.get("fp_reviews"),
+        "scan_id",
+        "review_id",
+    )
+    pending_validations = _reported_work_ids(
+        pending.get("validations"),
+        "scan_id",
+        "vuln_index",
+    )
+
+    async def adopt(kind: str, work_id: str, sub_id: int | None, row: dict) -> None:
+        previous_session = str(row.get("execution_agent_session_id") or "")
+        if previous_session == agent.agent_session_id:
+            return
+        await run_store_call(
+            store,
+            "adopt_active_execution",
+            kind,
+            work_id,
+            sub_id,
+            previous_session_id=previous_session,
+            agent_session_id=agent.agent_session_id,
+        )
+
+    for row in inflight.get("scans", []):
+        scan_id = str(row.get("scan_id") or "")
+        identity = (scan_id,)
+        if identity in active_scans:
+            await adopt("scan", scan_id, None, row)
+            continue
+        if identity in pending_scans:
+            logger.info(
+                "Deferring scan recovery while its terminal outbox report is pending: %s",
+                scan_id,
+            )
+            continue
+        previous_session = str(row.get("execution_agent_session_id") or "")
+        revision = await run_store_call(
+            store,
+            "claim_scan_for_agent_recovery",
+            scan_id,
+            previous_session_id=previous_session,
+            agent_id=agent_id,
+            agent_session_id=agent.agent_session_id,
+            error_message="Agent 进程已重启，正在自动断点恢复",
+        )
+        if revision is None:
+            continue
+        meta = await run_store_call(store, "get_scan_meta", scan_id)
+        if meta is None:
+            continue
+        from backend.api.scan import _continue_scan
+
+        try:
+            await _continue_scan(
+                scan_id,
+                None,
+                User(
+                    user_id=meta.user_id or agent.user_id,
+                    username="agent-recovery",
+                    role="admin",
+                ),
+                server_url_override=server_url,
+                skip_owner_check=True,
+                claimed_execution_revision=revision,
+            )
+            logger.warning(
+                "Automatically resumed orphaned scan %s after Agent process restart "
+                "session=%s revision=%d",
+                scan_id,
+                agent.agent_session_id,
+                revision,
+            )
+        except Exception:
+            logger.exception("Automatic scan recovery failed for %s", scan_id)
+
+    for row in inflight.get("fp_reviews", []):
+        scan_id = str(row.get("scan_id") or "")
+        review_id = str(row.get("review_id") or "")
+        identity = (scan_id, review_id)
+        if identity in active_fp:
+            await adopt("fp_review", review_id, None, row)
+            continue
+        if identity in pending_fp:
+            continue
+        previous_session = str(row.get("execution_agent_session_id") or "")
+        revision = await run_store_call(
+            store,
+            "claim_fp_review_for_agent_recovery",
+            review_id,
+            previous_session_id=previous_session,
+            agent_session_id=agent.agent_session_id,
+        )
+        if revision is None:
+            continue
+        from backend.api.scan import _start_fp_review
+
+        try:
+            await _start_fp_review(
+                scan_id,
+                server_url,
+                raise_on_error=False,
+                require_unresolved=True,
+                claimed_execution_revision=revision,
+            )
+            logger.warning(
+                "Automatically resumed orphaned FP review %s revision=%d",
+                review_id,
+                revision,
+            )
+        except Exception:
+            logger.exception("Automatic FP review recovery failed for %s", review_id)
+
+    for row in inflight.get("validations", []):
+        scan_id = str(row.get("scan_id") or "")
+        vuln_index = int(row.get("vuln_index") or 0)
+        identity = (scan_id, str(vuln_index))
+        if identity in active_validations:
+            await adopt("validation", scan_id, vuln_index, row)
+            continue
+        if identity in pending_validations:
+            continue
+        previous_session = str(row.get("execution_agent_session_id") or "")
+        revision = await run_store_call(
+            store,
+            "claim_validation_for_agent_recovery",
+            scan_id,
+            vuln_index,
+            previous_session_id=previous_session,
+            agent_session_id=agent.agent_session_id,
+        )
+        if revision is None:
+            continue
+        from backend.api.scan import _trigger_vulnerability_validation
+
+        try:
+            await _trigger_vulnerability_validation(
+                scan_id,
+                vuln_index,
+                server_url,
+                claimed_execution_revision=revision,
+            )
+            logger.warning(
+                "Automatically resumed orphaned validation %s#%d revision=%d",
+                scan_id,
+                vuln_index,
+                revision,
+            )
+        except Exception:
+            logger.exception(
+                "Automatic vulnerability validation recovery failed for %s#%d",
+                scan_id,
+                vuln_index,
+            )
+
+
 def _run_reconnect_helper(coroutine):
     """Keep the established synchronous test/maintenance helper contract."""
     try:
@@ -1506,7 +1715,7 @@ def _reattach_active_validations(
 
 
 def _websocket_server_url(websocket: WebSocket) -> str:
-    server_url = str(websocket.base_url).rstrip("/")
+    server_url = str(getattr(websocket, "base_url", "http://localhost/")).rstrip("/")
     if server_url.startswith("ws://"):
         return "http://" + server_url[len("ws://"):]
     if server_url.startswith("wss://"):
@@ -2072,6 +2281,12 @@ async def agent_websocket(websocket: WebSocket) -> None:
         })
         for command in pending_validation_stops:
             await send_agent_command(agent_id, command)
+        await _recover_missing_agent_work(
+            agent_id,
+            agent_info,
+            msg,
+            server_url=_websocket_server_url(websocket),
+        )
         if final_vulnerability_callbacks:
             await _resume_final_callback_downstream(
                 agent_info,
@@ -2225,6 +2440,8 @@ async def update_agent_opencode_pool(agent_id: str, status: OpenCodePoolStatus) 
     agent = resolved[1] if resolved is not None else None
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
+    if status.agent_session_id and status.agent_session_id != agent.agent_session_id:
+        raise HTTPException(status_code=409, detail="stale Agent session")
     status.agent_name = agent.name
     status.agent_session_id = status.agent_session_id or agent.agent_session_id
     _agent_opencode_pool_latest[agent_id] = status
@@ -4212,6 +4429,19 @@ async def agent_report_candidate_audit(
     body: AgentCandidateAuditResult,
 ) -> dict:
     """Upsert the one authoritative audit result owned by candidate_idx."""
+    store = get_scan_store()
+    if await run_store_call(store, "get_scan_meta", scan_id) is None:
+        _scan_not_found(scan_id, endpoint="candidate-audit", store=store)
+    if not await run_store_call(
+        store,
+        "execution_matches",
+        "scan",
+        scan_id,
+        None,
+        agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
+    ):
+        raise HTTPException(status_code=409, detail="stale scan execution")
     result = body.result
     if result is not None:
         result = _same_pattern_candidate_result(
@@ -4291,6 +4521,19 @@ async def agent_report_vulnerability_validation(
     body: AgentVulnerabilityValidationUpdate,
 ) -> dict:
     """Agent pushes local validation script progress/results for one vulnerability."""
+    store = get_scan_store()
+    if await run_store_call(store, "get_scan_meta", scan_id) is None:
+        _scan_not_found(scan_id, endpoint="validation", store=store)
+    if not await run_store_call(
+        store,
+        "execution_matches",
+        "validation",
+        scan_id,
+        body.vuln_index,
+        agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
+    ):
+        raise HTTPException(status_code=409, detail="stale validation execution")
     validation = VulnerabilityValidation(
         scan_id=scan_id,
         vuln_index=body.vuln_index,
@@ -4313,8 +4556,9 @@ async def agent_report_vulnerability_validation(
         started_at=body.started_at,
         finished_at=body.finished_at,
         updated_at=body.updated_at,
+        execution_agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
     )
-    store = get_scan_store()
     validation = await run_store_call(
         store,
         "upsert_vulnerability_validation",
@@ -4629,6 +4873,19 @@ async def _merge_finish_stage_runs(
 async def agent_finish_scan(scan_id: str, body: AgentScanFinish, request: Request) -> dict:
     """Agent pushes final results when the scan completes, errors, or is cancelled."""
     store = get_scan_store()
+    existing = await run_store_call(store, "get_scan_meta", scan_id)
+    if existing is None:
+        _scan_not_found(scan_id, endpoint="finish", store=store)
+    if not await run_store_call(
+        store,
+        "execution_matches",
+        "scan",
+        scan_id,
+        None,
+        agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
+    ):
+        raise HTTPException(status_code=409, detail="stale scan execution")
 
     status_map = {
         "complete": ScanItemStatus.COMPLETE,
@@ -4885,6 +5142,8 @@ async def agent_finish_scan_v2(
             threat_analysis_run=body.threat_analysis_run,
             mining_engine_runs=body.mining_engine_runs,
             opencode_pool=body.opencode_pool,
+            agent_session_id=body.agent_session_id,
+            execution_revision=body.execution_revision,
         ),
         request,
     )
@@ -5149,7 +5408,19 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
     """Agent pushes the latest OpenCode model-pool status for one scan."""
     store = get_scan_store()
     loaded = await run_store_call(store, "load_scan_overview", scan_id)
-    previous_pool = loaded[0].opencode_pool if loaded is not None else None
+    if loaded is None:
+        _scan_not_found(scan_id, endpoint="opencode-pool", store=store)
+    if not await run_store_call(
+        store,
+        "execution_matches",
+        "scan",
+        scan_id,
+        None,
+        agent_session_id=body.agent_session_id,
+        execution_revision=body.execution_revision,
+    ):
+        raise HTTPException(status_code=409, detail="stale scan execution")
+    previous_pool = loaded[0].opencode_pool
     body = _merge_completed_opencode_tasks(previous_pool, body)
     if hasattr(store, "upsert_scan_opencode_token_usage"):
         await run_store_call(

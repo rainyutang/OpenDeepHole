@@ -217,7 +217,7 @@ class ScanCandidate(Candidate):
     """One persisted candidate and its authoritative scan-local audit result."""
 
     idx: int = Field(ge=0)
-    audit_state: Literal["pending", "running", "success", "failed"] = "pending"
+    audit_state: Literal["pending", "queued", "running", "success", "failed"] = "pending"
     audit_result: Vulnerability | None = None
     vulnerability_idx: int | None = None
     dedup_decision: dict[str, Any] = Field(default_factory=dict)
@@ -227,7 +227,7 @@ class ScanCandidate(Candidate):
     def _require_terminal_result(self):
         if self.audit_state in {"success", "failed"} and self.audit_result is None:
             raise ValueError("terminal scan candidate requires one audit result")
-        if self.audit_state in {"pending", "running"} and self.audit_result is not None:
+        if self.audit_state in {"pending", "queued", "running"} and self.audit_result is not None:
             raise ValueError("non-terminal scan candidate cannot hold an audit result")
         return self
 
@@ -615,6 +615,8 @@ class VulnerabilityValidation(BaseModel):
     started_at: str = ""
     finished_at: str = ""
     updated_at: str = ""
+    execution_agent_session_id: str = ""
+    execution_revision: int = 0
 
 
 class AgentModelTimeWindow(BaseModel):
@@ -683,6 +685,7 @@ class OpenCodePoolStatus(BaseModel):
     scope_id: str = ""
     agent_name: str = ""
     agent_session_id: str = ""
+    execution_revision: int = 0
     global_running: int = 0
     global_queued: int = 0
     total_tasks: int = 0
@@ -693,6 +696,7 @@ class OpenCodePoolStatus(BaseModel):
     token_usage: OpenCodeTokenUsage | None = None
     models: list[OpenCodePoolModelStats] = []
     updated_at: str = ""
+    details_truncated: bool = False
 
 
 class OpenCodeTaskReport(BaseModel):
@@ -798,6 +802,7 @@ class ScanStatus(BaseModel):
 class ScanDetailCounts(BaseModel):
     candidates: int = 0
     candidate_audit_pending: int = 0
+    candidate_audit_queued: int = 0
     candidate_audit_running: int = 0
     candidate_audit_success: int = 0
     candidate_audit_failed: int = 0
@@ -808,6 +813,7 @@ class ScanDetailCounts(BaseModel):
     threat_audit_tasks: int = 0
     threat_audit_current: int = 0
     threat_audit_pending: int = 0
+    threat_audit_queued: int = 0
     threat_audit_running: int = 0
     threat_audit_completed: int = 0
     threat_audit_failed: int = 0
@@ -877,6 +883,8 @@ class AgentScanFinish(BaseModel):
     threat_analysis_run: ThreatAnalysisRunStatus | None = None
     mining_engine_runs: list[MiningEngineRunStatus] = Field(default_factory=list)
     opencode_pool: OpenCodePoolStatus | None = None
+    agent_session_id: str = ""
+    execution_revision: int = 0
 
 
 class AgentVulnerabilityReconcile(BaseModel):
@@ -903,18 +911,20 @@ class AgentCandidateAuditResult(BaseModel):
     """Authoritative result for exactly one persisted candidate index."""
 
     candidate_idx: int = Field(ge=0)
-    state: Literal["pending", "running", "success", "failed"]
+    state: Literal["pending", "queued", "running", "success", "failed"]
     result: Vulnerability | None = None
     vulnerability_idx: int | None = Field(default=None, ge=0)
     dedup_decision: dict[str, Any] = Field(default_factory=dict)
     completed_candidates: int | None = Field(default=None, ge=0)
     total_candidates: int | None = Field(default=None, ge=0)
+    agent_session_id: str = ""
+    execution_revision: int = 0
 
     @model_validator(mode="after")
     def _require_terminal_result(self):
         if self.state in {"success", "failed"} and self.result is None:
             raise ValueError("terminal candidate audit state requires one result")
-        if self.state in {"pending", "running"} and self.result is not None:
+        if self.state in {"pending", "queued", "running"} and self.result is not None:
             raise ValueError("non-terminal candidate audit state cannot include a result")
         return self
 
@@ -945,6 +955,8 @@ class AgentScanFinishV2(BaseModel):
     threat_analysis_run: ThreatAnalysisRunStatus | None = None
     mining_engine_runs: list[MiningEngineRunStatus] = Field(default_factory=list)
     opencode_pool: OpenCodePoolStatus | None = None
+    agent_session_id: str = ""
+    execution_revision: int = 0
 
 
 class AgentVulnerabilityValidationUpdate(BaseModel):
@@ -969,6 +981,8 @@ class AgentVulnerabilityValidationUpdate(BaseModel):
     started_at: str = ""
     finished_at: str = ""
     updated_at: str = ""
+    agent_session_id: str = ""
+    execution_revision: int = 0
 
 
 class AgentInfo(BaseModel):
@@ -1603,6 +1617,8 @@ class ScanMeta(BaseModel):
     agent_id: str = ""
     agent_key: str = ""
     agent_name: str = ""
+    execution_agent_session_id: str = Field(default="", exclude=True)
+    execution_revision: int = Field(default=0, exclude=True)
     project_path: str = ""
     code_scan_path: str = ""
     multi_versions: list[MultiVersionTarget] = Field(default_factory=list)
@@ -1860,6 +1876,8 @@ class FpReviewJob(BaseModel):
     current_vuln_indices: list[int] = []
     results: list[FpReviewResult] = []
     error_message: str | None = None
+    execution_agent_session_id: str = ""
+    execution_revision: int = 0
 
 
 class FpReviewTriggerRequest(BaseModel):
@@ -1880,6 +1898,8 @@ class AgentFpReviewResult(BaseModel):
     match_type: str = ""
     stage_output_sources: dict[str, OutputSource] = Field(default_factory=dict)
     output_source: OutputSource = Field(default_factory=OutputSource)
+    agent_session_id: str = ""
+    execution_revision: int = 0
 
 
 class AgentFpReviewStageOutput(BaseModel):
@@ -1889,6 +1909,8 @@ class AgentFpReviewStageOutput(BaseModel):
     stage: str
     markdown: str
     output_source: OutputSource = Field(default_factory=OutputSource)
+    agent_session_id: str = ""
+    execution_revision: int = 0
 
 
 class AgentFpReviewProgress(BaseModel):
@@ -1897,6 +1919,8 @@ class AgentFpReviewProgress(BaseModel):
     vuln_index: int
     processed: int | None = None
     active_indices: list[int] | None = None  # all vuln indices being reviewed concurrently
+    agent_session_id: str = ""
+    execution_revision: int = 0
 
 
 class AgentFpReviewFinish(BaseModel):
@@ -1904,3 +1928,5 @@ class AgentFpReviewFinish(BaseModel):
     review_id: str
     status: str        # "complete" | "error" | "cancelled"
     error_message: str | None = None
+    agent_session_id: str = ""
+    execution_revision: int = 0

@@ -443,6 +443,7 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "required_bash_success_markers",
         "post_session_validator",
         "post_session_validation_retry_count",
+        "lease_state_callback",
         "session_id",
         "config_path",
         "output",

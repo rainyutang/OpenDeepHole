@@ -282,6 +282,7 @@ def test_acquire_model_lease_filters_by_capability_and_releases() -> None:
 
 def test_immediate_lease_does_not_count_as_queued() -> None:
     async def run():
+        queued_events: list[str] = []
         cfg = SimpleNamespace(
             models=[
                 {"id": "deep", "model": "deep-model", "capability": "high", "max_concurrency": 1},
@@ -292,8 +293,10 @@ def test_immediate_lease_does_not_count_as_queued() -> None:
             global_concurrency=1,
             required_capability="high",
             stats_scope_id="scope-immediate",
+            on_queued=lambda: queued_events.append("queued"),
         )
         try:
+            assert queued_events == []
             snapshot = model_pool_snapshot("scope-immediate")
             assert snapshot["global_running"] == 1
             assert snapshot["global_queued"] == 0
@@ -301,6 +304,47 @@ def test_immediate_lease_does_not_count_as_queued() -> None:
             assert snapshot["models"][0]["queued"] == 0
         finally:
             await release_model_lease(lease, outcome="success", duration_seconds=0.1)
+
+    asyncio.run(run())
+
+
+def test_waiting_lease_reports_queued_before_it_can_run() -> None:
+    async def run() -> None:
+        cfg = SimpleNamespace(models=[{
+            "id": "deep",
+            "model": "deep-model",
+            "capability": "high",
+            "max_concurrency": 1,
+        }])
+        first = await acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="high",
+            stats_scope_id="scope-queued",
+        )
+        queued = asyncio.Event()
+        second_task = asyncio.create_task(acquire_model_lease(
+            cfg,
+            global_concurrency=1,
+            required_capability="high",
+            stats_scope_id="scope-queued",
+            on_queued=queued.set,
+        ))
+        try:
+            await asyncio.wait_for(queued.wait(), timeout=1.0)
+            assert not second_task.done()
+            snapshot = model_pool_snapshot("scope-queued")
+            assert snapshot["global_running"] == 1
+            assert snapshot["global_queued"] == 1
+            await release_model_lease(first, outcome="success")
+            second = await asyncio.wait_for(second_task, timeout=1.0)
+            assert second is not None
+            await release_model_lease(second, outcome="success")
+        finally:
+            if first is not None and model_pool_snapshot("scope-queued")["global_running"]:
+                await release_model_lease(first, outcome="cancelled")
+            if not second_task.done():
+                second_task.cancel()
 
     asyncio.run(run())
 
@@ -1207,6 +1251,12 @@ def test_refresh_configured_model_pool_updates_snapshot_and_wakes_waiters() -> N
         await refresh_configured_model_pool(initial, global_concurrency=1)
         before = {item["id"]: item for item in model_pool_snapshot()["models"]}
         assert before["day"]["model"] == "day-model"
+        scoped_before_first_lease = {
+            item["id"]: item
+            for item in model_pool_snapshot("new-scan")["models"]
+        }
+        assert scoped_before_first_lease["day"]["running"] == 0
+        assert scoped_before_first_lease["day"]["queued"] == 0
 
         await refresh_configured_model_pool(updated, global_concurrency=3)
         after = {item["id"]: item for item in model_pool_snapshot()["models"]}

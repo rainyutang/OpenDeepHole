@@ -35,6 +35,7 @@ from backend.models import (
     ThreatAnalysisRunStatus,
     User,
     Vulnerability,
+    VulnerabilityValidation,
 )
 from backend.store.sqlite import SqliteScanStore
 
@@ -110,6 +111,236 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
         agent_api._agent_ws_locks.clear()
         agent_api._agent_disconnect_tasks.clear()
         agent_api._scan_index_statuses.clear()
+
+    def test_execution_recovery_claims_are_monotonic_and_single_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            meta = _meta().model_copy(update={"agent_key": "stable-agent"})
+            store.save_scan(_scan("scan-1", ScanItemStatus.AUDITING), meta)
+
+            scan_revision = store.begin_scan_execution(
+                "scan-1",
+                agent_id="agent-old",
+                agent_session_id="session-old",
+            )
+            self.assertEqual(scan_revision, 1)
+            store.mark_agent_scans_cancelled(
+                "agent-old",
+                agent_api.AGENT_DISCONNECT_ERROR,
+            )
+            inflight = store.list_agent_inflight_executions(
+                "stable-agent",
+                "agent-new",
+            )
+            self.assertEqual([row["scan_id"] for row in inflight["scans"]], ["scan-1"])
+
+            resumed_revision = store.claim_scan_for_agent_recovery(
+                "scan-1",
+                previous_session_id="session-old",
+                agent_id="agent-new",
+                agent_session_id="session-new",
+                error_message="Agent 进程已重启，正在自动断点恢复",
+            )
+            self.assertEqual(resumed_revision, 2)
+            self.assertIsNone(store.claim_scan_for_agent_recovery(
+                "scan-1",
+                previous_session_id="session-old",
+                agent_id="agent-newer",
+                agent_session_id="session-newer",
+                error_message="duplicate recovery",
+            ))
+            self.assertFalse(store.execution_matches(
+                "scan",
+                "scan-1",
+                None,
+                agent_session_id="session-old",
+                execution_revision=1,
+            ))
+            self.assertTrue(store.execution_matches(
+                "scan",
+                "scan-1",
+                None,
+                agent_session_id="session-new",
+                execution_revision=2,
+            ))
+
+            store.create_fp_review_job(
+                "review-1",
+                "scan-1",
+                1,
+                "2026-01-01T00:00:00+00:00",
+            )
+            self.assertEqual(store.begin_fp_review_execution(
+                "review-1",
+                agent_session_id="session-old",
+            ), 1)
+            store.mark_fp_reviews_for_agent_error(
+                "agent-new",
+                agent_api.AGENT_DISCONNECT_ERROR,
+            )
+            inflight = store.list_agent_inflight_executions(
+                "stable-agent",
+                "agent-new",
+            )
+            self.assertEqual(
+                [row["review_id"] for row in inflight["fp_reviews"]],
+                ["review-1"],
+            )
+            self.assertEqual(store.claim_fp_review_for_agent_recovery(
+                "review-1",
+                previous_session_id="session-old",
+                agent_session_id="session-new",
+            ), 2)
+            self.assertIsNone(store.claim_fp_review_for_agent_recovery(
+                "review-1",
+                previous_session_id="session-old",
+                agent_session_id="session-newer",
+            ))
+
+            store.upsert_vulnerability_validation(
+                "scan-1",
+                VulnerabilityValidation(
+                    scan_id="scan-1",
+                    vuln_index=0,
+                    status="running",
+                    running=True,
+                ),
+            )
+            self.assertEqual(store.begin_validation_execution(
+                "scan-1",
+                0,
+                agent_session_id="session-old",
+            ), 1)
+            self.assertEqual(store.claim_validation_for_agent_recovery(
+                "scan-1",
+                0,
+                previous_session_id="session-old",
+                agent_session_id="session-new",
+            ), 2)
+            self.assertIsNone(store.claim_validation_for_agent_recovery(
+                "scan-1",
+                0,
+                previous_session_id="session-old",
+                agent_session_id="session-newer",
+            ))
+            store.close()
+
+    def test_active_execution_adoption_preserves_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(
+                _scan("scan-1", ScanItemStatus.AUDITING),
+                _meta().model_copy(update={"agent_key": "stable-agent"}),
+            )
+            self.assertEqual(store.begin_scan_execution(
+                "scan-1",
+                agent_id="agent-old",
+                agent_session_id="session-old",
+            ), 1)
+            self.assertTrue(store.adopt_active_execution(
+                "scan",
+                "scan-1",
+                None,
+                previous_session_id="session-old",
+                agent_session_id="session-new",
+            ))
+            persisted = store.get_scan_meta("scan-1")
+            self.assertIsNotNone(persisted)
+            self.assertEqual(persisted.execution_revision, 1)
+            self.assertEqual(persisted.execution_agent_session_id, "session-new")
+            store.close()
+
+    def test_missing_scan_inventory_dispatches_checkpoint_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(
+                _scan("scan-1", ScanItemStatus.AUDITING),
+                _meta().model_copy(update={"agent_key": "stable-agent"}),
+            )
+            store.begin_scan_execution(
+                "scan-1",
+                agent_id="agent-old",
+                agent_session_id="session-old",
+            )
+            agent = AgentInfo(
+                agent_id="agent-new",
+                agent_key="stable-agent",
+                agent_session_id="session-new",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            resume = AsyncMock()
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch("backend.api.scan._continue_scan", new=resume),
+            ):
+                asyncio.run(agent_api._recover_missing_agent_work(
+                    "agent-new",
+                    agent,
+                    {},
+                    server_url="http://server",
+                ))
+
+            resume.assert_awaited_once()
+            self.assertEqual(
+                resume.await_args.kwargs["claimed_execution_revision"],
+                2,
+            )
+            persisted = store.get_scan_meta("scan-1")
+            self.assertEqual(persisted.execution_agent_session_id, "session-new")
+            self.assertEqual(persisted.execution_revision, 2)
+            store.close()
+
+    def test_pending_terminal_scan_report_defers_recovery_without_new_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(
+                _scan("scan-1", ScanItemStatus.AUDITING),
+                _meta().model_copy(update={"agent_key": "stable-agent"}),
+            )
+            store.begin_scan_execution(
+                "scan-1",
+                agent_id="agent-old",
+                agent_session_id="session-old",
+            )
+            agent = AgentInfo(
+                agent_id="agent-new",
+                agent_key="stable-agent",
+                agent_session_id="session-new",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            resume = AsyncMock()
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch("backend.api.scan._continue_scan", new=resume),
+            ):
+                asyncio.run(agent_api._recover_missing_agent_work(
+                    "agent-new",
+                    agent,
+                    {"pending_terminal_reports": {"scans": ["scan-1"]}},
+                    server_url="http://server",
+                ))
+
+            resume.assert_not_awaited()
+            persisted = store.get_scan_meta("scan-1")
+            self.assertEqual(persisted.execution_agent_session_id, "session-old")
+            self.assertEqual(persisted.execution_revision, 1)
+            store.close()
 
     def test_agent_vulnerability_dedup_context_is_paginated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

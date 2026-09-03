@@ -24,9 +24,26 @@
 业务身份幂等接收，所以允许网络层重试而不会重复生成业务结果。普通进度和日志仍是尽力上报，
 不会因为控制端暂时离线而中断正在进行的审计。
 
+重连握手会把当前进程仍在执行的扫描、去误报和验证身份，以及现有 outbox 中尚未确认的终态
+身份发给后端。后端以扫描库中的 Agent process session 和单调递增 execution revision 为权威：
+仍活跃的任务只迁移到新连接，不增加 revision；进程重启后本地清单缺失的任务会被原子认领并按
+服务端检查点重新下发，超过断线宽限期而被标为“Agent 断开连接”的任务也属于可恢复状态；
+用户主动取消的任务不会自动恢复。已有待发终态时后端先等待 outbox 补传，已被新 revision
+取代的旧报告收到 409 后直接从 outbox 删除。该握手不新增客户端数据库表、恢复记录或历史
+副本，只读取 `pending_reports` 中本来就存在的未确认行，因此不会增加持久存储规模。
+
+后端重启或 WebSocket 重连本身不会要求客户端进程重启。代码内会替换进程的路径只有 Agent
+运行时包更新；若扫描、去误报或验证仍在本地执行，更新会记录
+`RUNTIME_UPDATE_DEFERRED reason=local_work_active` 并延后。运行时更新触发的替换会记录
+`RESTART_REQUESTED` 和下一进程的 `PROCESS_RESTARTED reason=runtime_update`；没有内部原因标记的
+启动记录为 `PROCESS_STARTED reason=initial_or_external_supervisor`，用于识别服务管理器或容器的
+外部拉起。
+
 OpenCode 模型池快照继续携带累计 token 与累计计数，但新协议不会在每个快照中重复携带全部
 Session 历史。每个逻辑任务完成时只单独上报一次其最终状态、Session ID 和 Session 尝试轨迹；
 服务端未声明对应 capability 时自动保留旧版累计快照，便于滚动升级。
+候选审计与威胁审计只在共享模型池确实登记等待请求时上报“排队中”，取得模型租约后才上报
+“运行中”；已配置模型会在扫描首次取得租约前以零运行/零排队行出现在扫描级快照中。
 
 扫描任务调用这些入口时都会提供 `kwargs["scan_mode"]`，值为 `quick`、`standard` 或
 `custom`；历史模式在组件边界映射为 `custom`。威胁分析原生五参数入口保持不变，模式只进入
