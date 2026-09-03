@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import shutil
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,6 +79,75 @@ def _archive_failed_threat_analysis(output_path: Path) -> Path | None:
     output_path.rename(archive_path)
     output_path.mkdir(parents=True, exist_ok=False)
     return archive_path
+
+
+async def _archive_failed_lightweight_best_effort(
+    output_path: Path,
+) -> tuple[Path | None, str]:
+    """Archive a lightweight failure without letting Windows locks block fallback."""
+
+    last_error: Exception | None = None
+    for delay in (0.0, 0.05, 0.1, 0.2):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            return _archive_failed_threat_analysis(output_path), ""
+        except PermissionError as exc:
+            last_error = exc
+        except Exception as exc:
+            last_error = exc
+            break
+
+    output_path = Path(output_path)
+    atomic_detail = (
+        f"{type(last_error).__name__}: {last_error}"
+        if last_error is not None
+        else "unknown archive error"
+    )
+    if not output_path.exists():
+        output_path.mkdir(parents=True, exist_ok=True)
+        return None, f"atomic archive failed ({atomic_detail})"
+
+    failed_root = output_path.parent / f"{output_path.name}_failed"
+    try:
+        failed_root.mkdir(parents=True, exist_ok=True)
+        attempt_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        archive_path = failed_root / attempt_id
+        suffix = 1
+        while archive_path.exists():
+            archive_path = failed_root / f"{attempt_id}-{suffix}"
+            suffix += 1
+        shutil.copytree(output_path, archive_path)
+    except Exception as copy_error:
+        return None, (
+            f"atomic archive failed ({atomic_detail}); diagnostic copy failed "
+            f"({type(copy_error).__name__}: {copy_error})"
+        )
+
+    cleanup_errors: list[str] = []
+    try:
+        children = list(output_path.iterdir())
+    except Exception as exc:
+        children = []
+        cleanup_errors.append(f"{output_path}: {type(exc).__name__}: {exc}")
+    for child in children:
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink(missing_ok=True)
+        except Exception as exc:
+            cleanup_errors.append(
+                f"{child}: {type(exc).__name__}: {exc}"
+            )
+
+    warning = (
+        f"atomic archive failed ({atomic_detail}); copied diagnostics to "
+        f"{archive_path}"
+    )
+    if cleanup_errors:
+        warning += "; retained locked source entries: " + "; ".join(cleanup_errors)
+    return archive_path, warning
 
 
 def _resolve_scan_paths(
@@ -934,17 +1004,17 @@ async def run_scan(
                     if cancel_event.is_set():
                         raise RuntimeError(primary_reason)
                     try:
-                        archive_path = (
-                            _archive_failed_threat_analysis(output_path)
-                            if output_path.exists()
-                            else None
+                        archive_path, archive_warning = (
+                            await _archive_failed_lightweight_best_effort(
+                                output_path
+                            )
                         )
                     except Exception as exc:
-                        raise RuntimeError(
-                            f"{primary_name} lightweight threat analysis failed: "
-                            f"{primary_reason}; failed to archive its "
-                            f"artifacts: {type(exc).__name__}: {exc}"
-                        ) from exc
+                        archive_path = None
+                        archive_warning = (
+                            "best-effort archive failed unexpectedly: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
                     await emit(
                         "threat_analysis",
                         f"{primary_name} lightweight threat analysis unavailable or failed; "
@@ -952,6 +1022,11 @@ async def run_scan(
                         + (
                             f" (archived at {archive_path})"
                             if archive_path is not None
+                            else ""
+                        )
+                        + (
+                            f"; archive warning: {archive_warning}"
+                            if archive_warning
                             else ""
                         ),
                     )
@@ -973,7 +1048,13 @@ async def run_scan(
                         )
                         raise RuntimeError(
                             f"{primary_name} lightweight threat analysis failed: "
-                            f"{primary_reason}; DeepHole fallback failed: "
+                            f"{primary_reason}"
+                            + (
+                                f"; archive warning: {archive_warning}"
+                                if archive_warning
+                                else ""
+                            )
+                            + "; DeepHole fallback failed: "
                             f"{fallback_reason}"
                         ) from exc
             else:

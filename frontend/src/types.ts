@@ -438,7 +438,7 @@ export interface OpenCodeTokenUsage extends OpenCodeTokenCounters {
 
 export interface OpenCodeSessionEvent {
   sequence: number;
-  phase: "business" | "json_format" | "json_retry";
+  phase: "business" | "json_format" | "json_retry" | "validation_retry";
   session_id: string;
   session_attempt: number;
   retry_ordinal?: number;

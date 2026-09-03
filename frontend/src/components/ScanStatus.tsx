@@ -76,7 +76,7 @@ interface ScanQueueTask {
 
 interface ScanQueueSessionEvent {
   sequence: number;
-  phase: "business" | "json_format" | "json_retry";
+  phase: "business" | "json_format" | "json_retry" | "validation_retry";
   sessionId: string;
   sessionAttempt: number;
   retryOrdinal: number;
@@ -4802,7 +4802,7 @@ function scanQueueTaskSessionEvents(
     if (typeof value !== "object" || value == null || Array.isArray(value)) return [];
     const event = value as Record<string, unknown>;
     const phaseValue = String(event.phase || "business");
-    const phase = ["business", "json_format", "json_retry"].includes(phaseValue)
+    const phase = ["business", "json_format", "json_retry", "validation_retry"].includes(phaseValue)
       ? phaseValue as ScanQueueSessionEvent["phase"]
       : "business";
     const outcomeValue = String(event.outcome || "unknown");
@@ -4875,6 +4875,10 @@ function scanQueueTaskSessionEvents(
 
 function scanQueueSessionEventLabel(event: ScanQueueSessionEvent): string {
   if (event.phase === "json_format") return "JSON 格式修复 Session";
+  if (event.phase === "validation_retry") {
+    const total = event.retryTotal > 0 ? `/${event.retryTotal}` : "";
+    return `同 Session 校验重试 ${event.retryOrdinal || 1}${total}`;
+  }
   if (event.phase === "json_retry") {
     const total = event.retryTotal > 0 ? `/${event.retryTotal}` : "";
     return `同 Session JSON 重试 ${event.retryOrdinal || 1}${total}`;
@@ -4904,6 +4908,7 @@ function scanQueueFailureKindLabel(kind: string): string {
   if (kind === "quota") return "Provider 配额限制";
   if (kind === "no_available_model") return "没有可用模型";
   if (kind === "quality_error") return "任务质量校验失败";
+  if (kind === "post_session_validation_failed") return "产物校验失败";
   if (kind === "provider_error") return "Provider 请求失败";
   if (kind === "cancelled") return "任务已停止";
   return "执行失败";

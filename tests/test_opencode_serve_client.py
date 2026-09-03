@@ -7,7 +7,7 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -43,11 +43,13 @@ from task_agent.serve_client import (
     _opencode_mcp_tool_ids,
     _opencode_mcp_tool_prefixes,
     _port_bind_error,
+    _run_command_text_async,
     _session_tree_token_entries,
     _serve_context_headers,
     _serve_port,
     _serve_startup_env_debug,
     _serve_startup_shell_debug,
+    _stop_command_probe_process,
     _token_usage_delta,
     _tool_matches_mcp_tool,
     _write_knowledge_binding,
@@ -70,6 +72,15 @@ def _short_event_drain_for_tests(monkeypatch) -> None:
     monkeypatch.setattr(
         "task_agent.serve_client._run_command_text",
         lambda cmd, timeout=3.0: "test-version" if "--version" in cmd else "",
+    )
+
+    async def fake_async_command_text(cmd, timeout=3.0):
+        del timeout
+        return "test-version" if "--version" in cmd else ""
+
+    monkeypatch.setattr(
+        "task_agent.serve_client._run_command_text_async",
+        fake_async_command_text,
     )
     _FakeAsyncClient.message_parts = None
     _FakeAsyncClient.message_info = None
@@ -467,6 +478,63 @@ def test_run_prompt_uses_project_directory_and_default_tools(monkeypatch, tmp_pa
     asyncio.run(run())
 
 
+def test_run_prompt_allows_optional_command_without_completion_audit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        _FakeAsyncClient.instances = []
+        _FakeAsyncClient.init_options = []
+        _FakeAsyncClient.event_lines = []
+        _FakeAsyncClient.tool_ids = ["read", "bash"]
+        monkeypatch.setattr(
+            "task_agent.serve_client.httpx.AsyncClient",
+            _FakeAsyncClient,
+        )
+
+        manager = OpenCodeServeManager()
+        manager._port = 12345
+        manager._acquire_session = AsyncMock()
+        manager.ensure_managed_mcp = AsyncMock()
+        project = tmp_path / "project"
+        runtime = tmp_path / "runtime"
+        project.mkdir()
+        runtime.mkdir()
+        command = "python validate.py"
+
+        with (
+            patch(
+                "task_agent.serve_client._write_command_binding",
+                wraps=_write_command_binding,
+            ) as binding_mock,
+            patch(
+                "task_agent.serve_client._validate_required_command_audit"
+            ) as audit_mock,
+        ):
+            lines = await manager.run_prompt(
+                tool="opencode",
+                executable="opencode",
+                directory=project,
+                config_workspace=runtime,
+                prompt="write artifacts",
+                model="provider/model",
+                timeout=30,
+                allowed_bash_commands=(command,),
+            )
+
+        assert lines == ["done"]
+        assert binding_mock.call_args.kwargs["required_commands"] == (command,)
+        audit_mock.assert_not_called()
+        assert not list(
+            (runtime / ".opendeephole-plugins" / "command-bindings").glob("*")
+        )
+        assert not list(
+            (runtime / ".opendeephole-plugins" / "command-audits").glob("*")
+        )
+
+    asyncio.run(run())
+
+
 def test_run_prompt_binds_knowledge_project_and_hides_control_tools(
     monkeypatch,
     tmp_path: Path,
@@ -775,11 +843,19 @@ def test_managed_file_write_plugin_allows_only_bound_command_for_parent_and_chil
     runtime.mkdir()
     _write_serve_config_file(runtime, "{}")
     command = "python validate.py --input result.json"
-    _, audit_path = _write_command_binding(
+    marker = "VALID: artifacts passed"
+    python_bin = str(tmp_path / "python-bin")
+    binding_path, audit_path = _write_command_binding(
         runtime,
         session_id="parent-session",
         required_commands=(command,),
+        success_markers=((command, marker),),
+        path_prepend=(python_bin,),
     )
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    assert binding["version"] == 2
+    assert binding["success_markers"] == {command: marker}
+    assert binding["path_prepend"] == [python_bin]
     plugin_path = (
         runtime
         / ".opendeephole-plugins"
@@ -790,10 +866,17 @@ import assert from "node:assert/strict"
 import { pathToFileURL } from "node:url"
 
 const command = process.argv[2]
+const marker = process.argv[3]
+const pythonBin = process.argv[4]
 const plugin = await import(pathToFileURL(process.argv[1]).href)
 const hooks = await plugin.OpenDeepHoleFileWriteHook({ directory: process.cwd() })
 const before = hooks["tool.execute.before"]
 const after = hooks["tool.execute.after"]
+const shellEnv = hooks["shell.env"]
+
+const envOutput = { env: { PATH: "/usr/bin" } }
+await shellEnv({ sessionID: "parent-session" }, envOutput)
+assert.equal(envOutput.env.PATH.split(process.platform === "win32" ? ";" : ":")[0], pythonBin)
 
 await before(
   { sessionID: "parent-session", tool: "bash" },
@@ -832,11 +915,20 @@ await after(
     callID: "bash-1",
     args: { command },
   },
-  { metadata: { exitCode: 0 } },
+  { output: `validator diagnostics\n${marker}\n`, metadata: {} },
 )
 '''
     completed = subprocess.run(
-        ["node", "--input-type=module", "-e", script, str(plugin_path), command],
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            script,
+            str(plugin_path),
+            command,
+            marker,
+            python_bin,
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -850,6 +942,9 @@ await after(
     ]
     assert [event["kind"] for event in events] == ["file_write", "command"]
     assert events[-1]["session_id"] == "child-session"
+    assert events[-1]["exit_code"] is None
+    assert events[-1]["success_source"] == "output_marker"
+    assert marker in events[-1]["output_tail"]
 
 
 def test_required_command_audit_rejects_failure_and_post_validation_write(
@@ -864,12 +959,22 @@ def test_required_command_audit_rejects_failure_and_post_validation_write(
             "command": command,
             "exit_code": 1,
             "success": False,
+            "output_tail": "schema mismatch in value-assets.json",
+            "output_bytes": 36,
+            "output_truncated": True,
         })
         + "\n",
         encoding="utf-8",
     )
-    with pytest.raises(OpenCodeTaskQualityError, match="exit=1"):
+    with pytest.raises(OpenCodeTaskQualityError, match="exit=1") as exc_info:
         _validate_required_command_audit(audit_path, (command,))
+    assert exc_info.value.failure_kind == "command_exit_failure"
+    assert exc_info.value.command_failures[0].command == command
+    assert exc_info.value.command_failures[0].exit_code == 1
+    assert exc_info.value.command_failures[0].output_tail == (
+        "schema mismatch in value-assets.json"
+    )
+    assert exc_info.value.command_failures[0].output_truncated is True
 
     audit_path.write_text(
         "\n".join((
@@ -5448,6 +5553,187 @@ def test_windows_batch_executable_uses_command_processor(monkeypatch) -> None:
     ]
     assert "nga.cmd" in argv[4]
     assert "serve --port 4096" in argv[4]
+
+
+def test_async_command_probe_timeout_stops_its_windows_process_tree(
+    monkeypatch,
+) -> None:
+    async def run() -> None:
+        from task_agent import serve_client
+
+        class FakeProc:
+            pid = 24680
+            returncode = None
+
+            async def wait(self):
+                await asyncio.Event().wait()
+
+        captured: dict = {}
+        proc = FakeProc()
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return proc
+
+        async def fake_stop(candidate):
+            assert candidate is proc
+            proc.returncode = -9
+            return True
+
+        monkeypatch.setattr(serve_client.sys, "platform", "win32")
+        monkeypatch.setattr(
+            serve_client.subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            0x200,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            serve_client.asyncio,
+            "create_subprocess_exec",
+            fake_create_subprocess_exec,
+        )
+        monkeypatch.setattr(
+            serve_client,
+            "_stop_command_probe_process",
+            fake_stop,
+        )
+
+        result = await _run_command_text_async(
+            [r"C:\Windows\System32\cmd.exe", "/c", "nga.CMD --version"],
+            timeout=0.01,
+        )
+
+        assert result == ""
+        assert captured["cmd"][-1] == "nga.CMD --version"
+        assert captured["kwargs"]["stdin"] == subprocess.DEVNULL
+        assert captured["kwargs"]["stdout"] != subprocess.PIPE
+        assert captured["kwargs"]["stderr"] == subprocess.STDOUT
+        assert captured["kwargs"]["creationflags"] == 0x200
+
+    asyncio.run(run())
+
+
+def test_async_command_probe_reads_stdout_and_stderr_without_pipes() -> None:
+    result = asyncio.run(_run_command_text_async([
+        sys.executable,
+        "-c",
+        (
+            "import sys; "
+            "print('probe-stdout'); "
+            "print('probe-stderr', file=sys.stderr)"
+        ),
+    ]))
+
+    assert "probe-stdout" in result
+    assert "probe-stderr" in result
+
+
+def test_stop_command_probe_process_uses_windows_taskkill_tree(
+    monkeypatch,
+) -> None:
+    async def run() -> None:
+        from task_agent import serve_client
+
+        class FakeTarget:
+            pid = 24680
+            returncode = None
+
+            async def wait(self):
+                self.returncode = -9
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        class FakeKiller:
+            returncode = None
+
+            async def wait(self):
+                self.returncode = 0
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+        calls: list[tuple] = []
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return FakeKiller()
+
+        monkeypatch.setattr(serve_client.sys, "platform", "win32")
+        monkeypatch.setattr(
+            serve_client.asyncio,
+            "create_subprocess_exec",
+            fake_create_subprocess_exec,
+        )
+
+        target = FakeTarget()
+        assert await _stop_command_probe_process(target) is True
+        assert calls[0][0] == (
+            "taskkill",
+            "/PID",
+            "24680",
+            "/T",
+            "/F",
+        )
+        assert calls[0][1]["stdout"] == subprocess.DEVNULL
+
+    asyncio.run(run())
+
+
+def test_start_locked_publishes_config_before_optional_version_probe(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        from task_agent import serve_client
+
+        workspace = tmp_path / "runtime"
+        (workspace / ".git").mkdir(parents=True)
+        version_calls: list[tuple[list[str], float]] = []
+
+        async def unavailable_version(cmd, timeout):
+            assert (workspace / "opencode.json").is_file()
+            version_calls.append((cmd, timeout))
+            return ""
+
+        monkeypatch.setattr(
+            serve_client,
+            "_resolve_executable",
+            lambda _name: "/opt/nga/bin/nga",
+        )
+        monkeypatch.setattr(
+            serve_client,
+            "_run_command_text_async",
+            unavailable_version,
+        )
+        monkeypatch.setattr(serve_client, "_port_is_in_use", lambda _port: False)
+        manager = OpenCodeServeManager()
+        manager._stop_owned_serve_on_port = AsyncMock(
+            return_value=serve_client._PreviousServeCleanupResult()
+        )
+        manager._start_once_locked = AsyncMock()
+
+        await manager._start_locked(
+            OpenCodeServeKey(
+                tool="opencode",
+                executable="nga",
+                config_content='{"provider": {"corp": {}}}',
+            ),
+            startup_cwd=workspace,
+        )
+
+        assert version_calls == [
+            (["/opt/nga/bin/nga", "--version"], 3.0),
+        ]
+        manager._start_once_locked.assert_awaited_once()
+        assert manager._start_once_locked.await_args.kwargs["executable_version"] == ""
+        published = json.loads((workspace / "opencode.json").read_text(encoding="utf-8"))
+        assert published["provider"] == {"corp": {}}
+
+    asyncio.run(run())
 
 
 def test_wait_health_reports_startup_output_on_early_exit(tmp_path: Path) -> None:

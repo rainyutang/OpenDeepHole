@@ -47,6 +47,8 @@ logger = logging.getLogger(f"opendeephole.{__name__}")
 
 _SERVE_START_TIMEOUT_SECONDS = 60.0
 _SERVE_STOP_TIMEOUT_SECONDS = 5.0
+_SERVE_VERSION_PROBE_TIMEOUT_SECONDS = 3.0
+_COMMAND_PROBE_STOP_TIMEOUT_SECONDS = 2.0
 _SERVE_REQUEST_TIMEOUT_SECONDS = 20.0
 _SERVE_MODEL_FALLBACK_TIMEOUT_SECONDS = 5.0
 _SERVE_HEALTH_POLL_INTERVAL_SECONDS = 1.0
@@ -74,6 +76,7 @@ _SERVE_MANAGED_PLUGIN_DIRNAME = ".opendeephole-plugins"
 _KNOWLEDGE_BINDING_DIRNAME = "knowledge-bindings"
 _COMMAND_BINDING_DIRNAME = "command-bindings"
 _COMMAND_AUDIT_DIRNAME = "command-audits"
+_COMMAND_OUTPUT_TAIL_BYTES = 16 * 1024
 _FILE_WRITE_PLUGIN_METADATA_KEY = "opendeepholeFileWrites"
 _FILE_WRITE_PLUGIN_SOURCE = r'''import crypto from "node:crypto"
 import fs from "node:fs/promises"
@@ -91,7 +94,7 @@ const pathText = (value) => typeof value === "string" ? value.trim() : ""
 const readDirectBinding = async (sessionID) => {
   try {
     const value = JSON.parse(await fs.readFile(bindingPath(sessionID), "utf8"))
-    if (!value || value.version !== 1 || !Array.isArray(value.allowed_commands)) return null
+    if (!value || ![1, 2].includes(value.version) || !Array.isArray(value.allowed_commands)) return null
     if (typeof value.audit_path !== "string" || !value.audit_path.trim()) return null
     return value
   } catch (error) {
@@ -113,6 +116,29 @@ const resolveBinding = async (sessionID) => {
 }
 
 const commandText = (args) => pathText(args?.command) || pathText(args?.cmd)
+const objectValue = (value) => value && typeof value === "object" ? value : {}
+const commandOutputText = (output, metadata) => {
+  const values = [
+    output?.output,
+    metadata.output,
+    metadata.stdout,
+    metadata.stderr,
+  ].filter((value) => typeof value === "string" && value.length)
+  return [...new Set(values)].join("\n")
+}
+const outputTail = (value, limit) => {
+  const raw = Buffer.from(String(value || ""), "utf8")
+  const size = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Number(limit) : 0
+  const truncated = size > 0 && raw.length > size
+  return {
+    output_tail: (truncated ? raw.subarray(raw.length - size) : raw).toString("utf8"),
+    output_bytes: raw.length,
+    output_truncated: truncated,
+  }
+}
+const hasExactLine = (value, marker) => Boolean(marker) && String(value || "")
+  .split(/\r?\n/)
+  .some((line) => line.trim() === marker)
 const appendAudit = async (binding, event) => {
   await fs.appendFile(
     binding.audit_path,
@@ -171,6 +197,17 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
     }
     if (event?.type === "session.deleted" && sessionID) parents.delete(sessionID)
   },
+  "shell.env": async (input, output) => {
+    const binding = await resolveBinding(input?.sessionID)
+    if (!binding || !Array.isArray(binding.path_prepend) || !binding.path_prepend.length) return
+    const env = objectValue(output?.env)
+    const current = pathText(env.PATH) || pathText(env.Path) || pathText(process.env.PATH)
+    const currentEntries = current ? current.split(path.delimiter) : []
+    const prepended = binding.path_prepend.filter((value) => typeof value === "string" && value.trim())
+    const normalized = new Set(prepended.map((value) => process.platform === "win32" ? value.toLowerCase() : value))
+    const retained = currentEntries.filter((value) => !normalized.has(process.platform === "win32" ? value.toLowerCase() : value))
+    output.env = { ...env, PATH: [...prepended, ...retained].join(path.delimiter) }
+  },
   "tool.execute.before": async (input, output) => {
     const binding = await resolveBinding(input?.sessionID)
     if (!binding) return
@@ -194,16 +231,30 @@ export const OpenDeepHoleFileWriteHook = async ({ directory }) => ({
       if (!binding.allowed_commands.includes(command)) {
         throw new Error("Shell command is not bound to this OpenDeepHole task")
       }
+      const outputMetadata = objectValue(output?.structured)
+      const nestedMetadata = objectValue(originalMetadata.structured)
       const rawExitCode = originalMetadata.exitCode ?? originalMetadata.exit_code
-        ?? originalMetadata.exit ?? originalMetadata.code
+        ?? originalMetadata.exit ?? originalMetadata.code ?? nestedMetadata.exit
+        ?? outputMetadata.exit ?? output?.exit
       const exitCode = Number.isFinite(Number(rawExitCode)) ? Number(rawExitCode) : null
+      const commandOutput = commandOutputText(output, originalMetadata)
+      const marker = objectValue(binding.success_markers)[command]
+      const timedOut = Boolean(
+        originalMetadata.timeout ?? originalMetadata.timed_out ?? nestedMetadata.timeout
+        ?? outputMetadata.timeout ?? output?.timeout
+      )
+      const markerMatched = exitCode === null && !timedOut && hasExactLine(commandOutput, marker)
+      const success = !timedOut && (exitCode === 0 || markerMatched)
       await appendAudit(binding, {
         kind: "command",
         session_id: String(input?.sessionID || ""),
         call_id: String(input?.callID || ""),
         command,
         exit_code: exitCode,
-        success: exitCode === 0,
+        timed_out: timedOut,
+        success,
+        success_source: exitCode === 0 ? "exit_code" : markerMatched ? "output_marker" : "",
+        ...outputTail(commandOutput, binding.output_tail_bytes),
       })
       return
     }
@@ -433,8 +484,33 @@ class OpenCodePromptResult:
     raw: Any = field(default=None, repr=False, compare=False)
 
 
+@dataclass(frozen=True)
+class OpenCodeCommandFailure:
+    failure_kind: str
+    command: str = ""
+    exit_code: int | None = None
+    output_tail: str = ""
+    output_bytes: int = 0
+    output_truncated: bool = False
+    timed_out: bool = False
+
+
 class OpenCodeTaskQualityError(RuntimeError):
     """The model response violated a caller-required completion contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: str = "quality_error",
+        command_failures: tuple[OpenCodeCommandFailure, ...] = (),
+        validation_feedback: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = str(failure_kind or "quality_error")
+        self.command_failures = command_failures
+        self.validation_feedback = str(validation_feedback or "")
+        self.prompt_result: OpenCodePromptResult | None = None
 
 
 class OpenCodeServeStartupError(RuntimeError):
@@ -633,6 +709,164 @@ def _executable_argv(executable: str, *arguments: str) -> list[str]:
     ]
 
 
+async def _stop_command_probe_process(
+    proc: asyncio.subprocess.Process,
+) -> bool:
+    """Stop only the process tree created for one diagnostic command."""
+    if proc.returncode is not None:
+        return True
+    if sys.platform == "win32":
+        try:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(proc.pid),
+                "/T",
+                "/F",
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                taskkill_returncode = await asyncio.wait_for(
+                    killer.wait(),
+                    timeout=_COMMAND_PROBE_STOP_TIMEOUT_SECONDS,
+                )
+                if taskkill_returncode != 0:
+                    logger.warning(
+                        "taskkill failed for command probe pid=%s exit_code=%s",
+                        proc.pid,
+                        taskkill_returncode,
+                    )
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    killer.kill()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(killer.wait(), timeout=0.5)
+        except FileNotFoundError:
+            logger.warning(
+                "taskkill is unavailable while stopping command probe pid=%s",
+                proc.pid,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to stop command probe process tree pid=%s",
+                proc.pid,
+                exc_info=True,
+            )
+    else:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(int(proc.pid), signal.SIGTERM)
+
+    try:
+        await asyncio.wait_for(
+            proc.wait(),
+            timeout=_COMMAND_PROBE_STOP_TIMEOUT_SECONDS / 2,
+        )
+    except asyncio.TimeoutError:
+        if sys.platform == "win32":
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        else:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(
+                    int(proc.pid),
+                    signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM,
+                )
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=0.5)
+    return proc.returncode is not None
+
+
+async def _run_command_text_async(
+    cmd: list[str],
+    timeout: float = _SERVE_VERSION_PROBE_TIMEOUT_SECONDS,
+) -> str:
+    """Run a probe without pipe-EOF hangs or event-loop starvation.
+
+    A timed-out Windows ``cmd.exe`` can leave its child holding inherited pipe
+    handles, which makes ``subprocess.run`` wait indefinitely after killing the
+    wrapper. A regular output file removes that EOF dependency, while an owned
+    process group/tree gives timeout cleanup an exact target.
+    """
+    if not cmd:
+        return ""
+    fd, raw_output_path = tempfile.mkstemp(
+        prefix="opendeephole-command-probe-",
+        suffix=".log",
+    )
+    os.close(fd)
+    output_path = Path(raw_output_path)
+    proc: asyncio.subprocess.Process | None = None
+    timed_out = False
+    try:
+        popen_kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            creation_flag = int(
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) or 0
+            )
+            if creation_flag:
+                popen_kwargs["creationflags"] = creation_flag
+        else:
+            popen_kwargs["start_new_session"] = True
+        with output_path.open("wb") as output_handle:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=output_handle,
+                stderr=subprocess.STDOUT,
+                **popen_kwargs,
+            )
+            try:
+                await asyncio.wait_for(
+                    proc.wait(),
+                    timeout=max(0.0, float(timeout)),
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                logger.warning(
+                    "Command probe timed out executable=%s pid=%s timeout_seconds=%s; "
+                    "stopping its process tree",
+                    cmd[0],
+                    proc.pid,
+                    timeout,
+                )
+                stopped = await _stop_command_probe_process(proc)
+                if not stopped:
+                    logger.warning(
+                        "Timed-out command probe process tree may still be running pid=%s",
+                        proc.pid,
+                    )
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            await _stop_command_probe_process(proc)
+        raise
+    except FileNotFoundError:
+        return ""
+    except Exception as exc:
+        logger.debug("Failed to run %s: %s", cmd[0], exc)
+        if proc is not None and proc.returncode is None:
+            await _stop_command_probe_process(proc)
+        return ""
+    finally:
+        try:
+            output = output_path.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            output = ""
+        _remove_file(output_path)
+
+    if timed_out:
+        return ""
+    if proc is not None and proc.returncode != 0:
+        logger.debug(
+            "Command probe failed executable=%s exit_code=%s output=%s",
+            cmd[0],
+            proc.returncode,
+            _one_line_preview(output, 500),
+        )
+    return output
+
+
 def _new_serve_startup_log_path(tool: str, port: int) -> Path:
     safe_tool = re.sub(r"[^A-Za-z0-9_.-]+", "_", tool or "opencode").strip("._") or "opencode"
     fd, raw_path = tempfile.mkstemp(
@@ -788,6 +1022,8 @@ def _write_command_binding(
     *,
     session_id: str,
     required_commands: tuple[str, ...],
+    success_markers: tuple[tuple[str, str], ...] = (),
+    path_prepend: tuple[str, ...] = (),
 ) -> tuple[Path, Path]:
     normalized_commands = tuple(dict.fromkeys(
         str(command or "").strip() for command in required_commands
@@ -803,10 +1039,13 @@ def _write_command_binding(
         binding_path,
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "session_id": str(session_id),
                 "allowed_commands": list(normalized_commands),
                 "audit_path": str(audit_path),
+                "success_markers": dict(success_markers),
+                "path_prepend": list(path_prepend),
+                "output_tail_bytes": _COMMAND_OUTPUT_TAIL_BYTES,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -824,7 +1063,15 @@ def _validate_required_command_audit(
         raw_lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError as exc:
         raise OpenCodeTaskQualityError(
-            "OpenCode did not execute the required validation command"
+            "OpenCode did not execute the required validation command",
+            failure_kind="command_not_executed",
+            command_failures=tuple(
+                OpenCodeCommandFailure(
+                    failure_kind="command_not_executed",
+                    command=command,
+                )
+                for command in required_commands
+            ),
         ) from exc
     events: list[dict[str, Any]] = []
     for line_number, raw in enumerate(raw_lines, start=1):
@@ -834,11 +1081,13 @@ def _validate_required_command_audit(
             value = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise OpenCodeTaskQualityError(
-                f"OpenCode command audit is invalid at line {line_number}"
+                f"OpenCode command audit is invalid at line {line_number}",
+                failure_kind="command_audit_invalid",
             ) from exc
         if not isinstance(value, dict) or value.get("version") != 1:
             raise OpenCodeTaskQualityError(
-                f"OpenCode command audit is invalid at line {line_number}"
+                f"OpenCode command audit is invalid at line {line_number}",
+                failure_kind="command_audit_invalid",
             )
         events.append(value)
 
@@ -846,7 +1095,8 @@ def _validate_required_command_audit(
         command: [] for command in required_commands
     }
     last_write_index = -1
-    failures: dict[str, Any] = {}
+    failures: dict[str, dict[str, Any]] = {}
+    successes: dict[str, dict[str, Any]] = {}
     for index, event in enumerate(events):
         if event.get("kind") == "file_write":
             last_write_index = index
@@ -856,29 +1106,83 @@ def _validate_required_command_audit(
         command = str(event.get("command") or "")
         if command not in successful_indexes:
             continue
-        if event.get("success") is True and event.get("exit_code") == 0:
+        if event.get("success") is True and (
+            event.get("exit_code") == 0
+            or event.get("success_source") == "output_marker"
+        ):
             successful_indexes[command].append(index)
+            successes[command] = event
         else:
-            failures[command] = event.get("exit_code")
+            failures[command] = event
 
     missing = [
         command for command, indexes in successful_indexes.items() if not indexes
     ]
     if missing:
+        command_failures: list[OpenCodeCommandFailure] = []
+        for command in missing:
+            event = failures.get(command, {})
+            exit_code = event.get("exit_code")
+            timed_out = event.get("timed_out") is True
+            if not event:
+                failure_kind = "command_not_executed"
+            elif timed_out:
+                failure_kind = "command_timeout"
+            elif exit_code is None:
+                failure_kind = "command_exit_unknown"
+            else:
+                failure_kind = "command_exit_failure"
+            command_failures.append(OpenCodeCommandFailure(
+                failure_kind=failure_kind,
+                command=command,
+                exit_code=(
+                    int(exit_code)
+                    if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+                    else None
+                ),
+                output_tail=str(event.get("output_tail") or ""),
+                output_bytes=max(0, int(event.get("output_bytes") or 0)),
+                output_truncated=event.get("output_truncated") is True,
+                timed_out=timed_out,
+            ))
         detail = ", ".join(
-            f"{command!r} (exit={failures.get(command)!r})"
+            f"{command!r} (exit={failures.get(command, {}).get('exit_code')!r})"
             for command in missing
         )
         raise OpenCodeTaskQualityError(
             "OpenCode required validation command did not complete successfully: "
-            + detail
+            + detail,
+            failure_kind=command_failures[0].failure_kind,
+            command_failures=tuple(command_failures),
         )
     last_required_index = min(
         max(indexes) for indexes in successful_indexes.values()
     )
     if last_write_index > last_required_index:
+        command_failures = tuple(
+            OpenCodeCommandFailure(
+                failure_kind="files_modified_after_validation",
+                command=command,
+                exit_code=(
+                    int(successes[command].get("exit_code"))
+                    if isinstance(successes.get(command, {}).get("exit_code"), int)
+                    else None
+                ),
+                output_tail=str(successes.get(command, {}).get("output_tail") or ""),
+                output_bytes=max(
+                    0,
+                    int(successes.get(command, {}).get("output_bytes") or 0),
+                ),
+                output_truncated=(
+                    successes.get(command, {}).get("output_truncated") is True
+                ),
+            )
+            for command in required_commands
+        )
         raise OpenCodeTaskQualityError(
-            "OpenCode modified task files after the required validation command"
+            "OpenCode modified task files after the required validation command",
+            failure_kind="files_modified_after_validation",
+            command_failures=command_failures,
         )
 
 
@@ -5911,7 +6215,10 @@ class OpenCodeServeManager:
         log_stage: str = "opencode",
         task_id: str = "",
         task_attempt: int = 0,
+        allowed_bash_commands: tuple[str, ...] = (),
         required_bash_commands: tuple[str, ...] = (),
+        required_bash_success_markers: tuple[tuple[str, str], ...] = (),
+        required_bash_path_prepend: tuple[str, ...] = (),
     ) -> list[str] | OpenCodePromptResult:
         normalized_log_stage = task_output_stage(log_stage)
         active_session_id = str(session_id or "").strip()
@@ -6154,16 +6461,22 @@ class OpenCodeServeManager:
                             active_session_id,
                             _one_line_preview(exc),
                         )
-                if required_bash_commands:
+                bound_bash_commands = tuple(dict.fromkeys((
+                    *allowed_bash_commands,
+                    *required_bash_commands,
+                )))
+                if bound_bash_commands:
                     if binding_workspace is None:
                         raise RuntimeError(
-                            "Managed plugin workspace is unavailable for required shell commands"
+                            "Managed plugin workspace is unavailable for bound shell commands"
                         )
                     command_binding_path, command_audit_path = (
                         _write_command_binding(
                             binding_workspace,
                             session_id=active_session_id,
-                            required_commands=required_bash_commands,
+                            required_commands=bound_bash_commands,
+                            success_markers=required_bash_success_markers,
+                            path_prepend=required_bash_path_prepend,
                         )
                     )
                 elif binding_workspace is not None:
@@ -6599,15 +6912,6 @@ class OpenCodeServeManager:
                                     event_state.handle_part(part)
                     event_state.reconcile_text("text", "".join(response_text))
                     event_state.flush()
-                if required_bash_commands:
-                    if command_audit_path is None:
-                        raise OpenCodeTaskQualityError(
-                            "OpenCode required command audit was not initialized"
-                        )
-                    _validate_required_command_audit(
-                        command_audit_path,
-                        required_bash_commands,
-                    )
                 details = OpenCodePromptResult(
                     session_id=active_session_id,
                     message_id=_response_message_id(response_data),
@@ -6617,6 +6921,19 @@ class OpenCodeServeManager:
                     token_usage=captured_token_usage,
                     raw=response_data,
                 )
+                if required_bash_commands:
+                    if command_audit_path is None:
+                        raise OpenCodeTaskQualityError(
+                            "OpenCode required command audit was not initialized"
+                        )
+                    try:
+                        _validate_required_command_audit(
+                            command_audit_path,
+                            required_bash_commands,
+                        )
+                    except OpenCodeTaskQualityError as exc:
+                        exc.prompt_result = details
+                        raise
                 session_outcome = "success"
                 return details if return_details else lines
         except asyncio.TimeoutError as exc:
@@ -7812,11 +8129,18 @@ class OpenCodeServeManager:
         key: OpenCodeServeKey,
         startup_cwd: Path | None = None,
     ) -> None:
+        resolve_started_at = time.monotonic()
+        logger.info(
+            "OpenCode serve startup preparation step=resolve_executable status=start "
+            "executable_config=%s",
+            key.executable,
+        )
         executable = _resolve_executable(key.executable)
-        version_argv = _executable_argv(executable, "--version")
-        executable_version = _one_line_preview(
-            _run_command_text(version_argv),
-            200,
+        logger.info(
+            "OpenCode serve startup preparation step=resolve_executable status=complete "
+            "executable_resolved=%s elapsed_ms=%s",
+            executable,
+            round((time.monotonic() - resolve_started_at) * 1000),
         )
         requested_port = _serve_port(key.env_overrides)
         explicit_auto_port = (
@@ -7834,8 +8158,40 @@ class OpenCodeServeManager:
             preferred_auto_port or requested_port,
         )
         excluded_ports = set(cleanup_result.avoided_ports)
+        config_started_at = time.monotonic()
+        logger.info(
+            "OpenCode serve startup preparation step=publish_config status=start "
+            "workspace=%s",
+            startup_cwd or "(bootstrap)",
+        )
         prepared_cwd = _prepare_serve_startup_cwd(key.tool, startup_cwd)
         config_path = _write_serve_config_file(prepared_cwd, key.config_content)
+        logger.info(
+            "OpenCode serve startup preparation step=publish_config status=complete "
+            "config_file_path=%s elapsed_ms=%s",
+            config_path,
+            round((time.monotonic() - config_started_at) * 1000),
+        )
+
+        version_argv = _executable_argv(executable, "--version")
+        version_started_at = time.monotonic()
+        logger.info(
+            "OpenCode serve startup preparation step=version_probe status=start "
+            "timeout_seconds=%s",
+            _SERVE_VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+        version_output = await _run_command_text_async(
+            version_argv,
+            _SERVE_VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+        executable_version = _one_line_preview(version_output, 200)
+        logger.info(
+            "OpenCode serve startup preparation step=version_probe status=%s "
+            "executable_version=%s elapsed_ms=%s",
+            "complete" if executable_version else "unavailable",
+            executable_version or "(unknown)",
+            round((time.monotonic() - version_started_at) * 1000),
+        )
         attempted_ports: list[int] = []
         generic_retry_used = False
         port = (

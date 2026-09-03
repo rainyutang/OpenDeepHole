@@ -15,9 +15,11 @@ import pytest
 from backend.models import OutputSource
 from task_agent import OpenCodeResult, run_opencode_task
 from task_agent.api import (
+    _normalize_allowed_bash_commands,
     _normalize_file_write_allowlist,
     _normalize_readable_paths,
     _normalize_required_bash_commands,
+    _normalize_required_bash_success_markers,
     _normalize_writable_paths,
 )
 from task_agent.model_pool import (
@@ -26,6 +28,7 @@ from task_agent.model_pool import (
     ModelOption,
 )
 from task_agent.serve_client import (
+    OpenCodeCommandFailure,
     OpenCodeFileWrite,
     OpenCodePromptResult,
     OpenCodeProviderQuotaError,
@@ -122,11 +125,13 @@ def test_task_permissions_add_read_only_roots_and_exact_shell_command(
 ) -> None:
     writable_root = tmp_path / "generated"
     readable_root = tmp_path / "references"
+    optional_command = "python optional.py"
     command = "python validate.py --input generated/result.json"
 
     permissions = _writable_path_permissions(
         (writable_root,),
         readable_paths=(readable_root,),
+        allowed_bash_commands=(optional_command,),
         required_bash_commands=(command,),
     )
 
@@ -151,6 +156,7 @@ def test_task_permissions_add_read_only_roots_and_exact_shell_command(
     ]
     assert bash_rules == [
         {"permission": "bash", "pattern": "*", "action": "deny"},
+        {"permission": "bash", "pattern": optional_command, "action": "allow"},
         {"permission": "bash", "pattern": command, "action": "allow"},
     ]
 
@@ -431,7 +437,12 @@ def test_public_contract_contains_only_component_owned_fields() -> None:
         "file_write_allowlist",
         "writable_paths",
         "readable_paths",
+        "allowed_bash_commands",
         "required_bash_commands",
+        "required_bash_retry_count",
+        "required_bash_success_markers",
+        "post_session_validator",
+        "post_session_validation_retry_count",
         "session_id",
         "config_path",
         "output",
@@ -468,6 +479,7 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
             },
         )
         service = SimpleNamespace(run_task=AsyncMock(return_value=internal))
+        post_session_validator = lambda: None
         external_dir = tmp_path.parent / f"{tmp_path.name}-external"
         with (
             patch("task_agent.task_service._get_opencode_task_service", return_value=service),
@@ -492,7 +504,14 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
                     "generated",
                 ],
                 readable_paths=["references", external_dir / "schemas"],
+                allowed_bash_commands="python optional.py",
                 required_bash_commands="python validate.py",
+                required_bash_retry_count=1,
+                required_bash_success_markers={
+                    "python validate.py": "VALID: artifacts passed",
+                },
+                post_session_validator=post_session_validator,
+                post_session_validation_retry_count=1,
                 session_id="ses-existing",
             )
 
@@ -523,7 +542,15 @@ def test_public_interface_uses_bound_directories_and_returns_only_public_result(
             (tmp_path / "references").resolve(),
             (external_dir / "schemas").resolve(),
         )
+        assert spec.allowed_bash_commands == ("python optional.py",)
         assert spec.required_bash_commands == ("python validate.py",)
+        assert spec.required_bash_retry_count == 1
+        assert spec.required_bash_success_markers == ((
+            "python validate.py",
+            "VALID: artifacts passed",
+        ),)
+        assert spec.post_session_validator is post_session_validator
+        assert spec.post_session_validation_retry_count == 1
         assert spec.session_id == "ses-existing"
 
         service.run_task.reset_mock()
@@ -927,14 +954,50 @@ def test_public_interface_validates_readable_paths_and_required_commands(
 ) -> None:
     async def run() -> None:
         assert _normalize_readable_paths("references") == ("references",)
+        assert _normalize_allowed_bash_commands("python optional.py") == (
+            "python optional.py",
+        )
         assert _normalize_required_bash_commands("python validate.py") == (
             "python validate.py",
         )
+        assert _normalize_required_bash_success_markers(
+            {"python validate.py": "VALID: artifacts passed"},
+            required_commands=("python validate.py",),
+        ) == (("python validate.py", "VALID: artifacts passed"),)
         with pytest.raises(TypeError, match="required_bash_commands entries"):
             _normalize_required_bash_commands([123])  # type: ignore[list-item]
         for value in ("", "python validate*.py", "python validate.py\necho bad"):
             with pytest.raises(ValueError, match="required_bash_commands"):
                 _normalize_required_bash_commands(value)
+        with pytest.raises(ValueError, match="allowed_bash_commands"):
+            _normalize_allowed_bash_commands("python optional*.py")
+        with pytest.raises(ValueError, match="must match"):
+            _normalize_required_bash_success_markers(
+                {"python other.py": "VALID"},
+                required_commands=("python validate.py",),
+            )
+        with _task_context(tmp_path), pytest.raises(
+            ValueError,
+            match="requires required_bash_commands",
+        ):
+            await run_opencode_task(
+                task_name="invalid required command retry",
+                task_type="threat_analysis",
+                prompt="test",
+                required_capability="high",
+                required_bash_retry_count=1,
+            )
+        with _task_context(tmp_path), pytest.raises(
+            ValueError,
+            match="requires post_session_validator",
+        ):
+            await run_opencode_task(
+                task_name="invalid post-session retry",
+                task_type="threat_analysis",
+                prompt="test",
+                required_capability="high",
+                post_session_validation_retry_count=1,
+            )
         with _task_context(tmp_path), pytest.raises(
             ValueError,
             match="readable_paths.*filesystem root",
@@ -2380,6 +2443,342 @@ def test_required_command_failure_requeues_without_model_health_penalty(
         assert first_release["health_outcome"] is None
         identity = {("provider/model-low", False, "opencode", "opencode")}
         assert acquire_mock.await_args_list[1].kwargs["avoid_model_identities"] == identity
+
+    asyncio.run(run())
+
+
+def test_required_command_failure_is_corrected_in_the_same_session_first(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[tuple[str, str | None]] = []
+
+        async def run_prompt(**kwargs):
+            calls.append((kwargs["prompt"], kwargs["session_id"]))
+            if len(calls) == 1:
+                callback = kwargs["on_session_id"]("ses_quality_failed")
+                if hasattr(callback, "__await__"):
+                    await callback
+                error = OpenCodeTaskQualityError(
+                    "validator rejected value-assets.json",
+                    failure_kind="command_exit_failure",
+                    command_failures=(OpenCodeCommandFailure(
+                        failure_kind="command_exit_failure",
+                        command="python validate.py",
+                        exit_code=1,
+                        output_tail="value-assets.json: missing required field name",
+                        output_bytes=52,
+                    ),),
+                )
+                error.prompt_result = OpenCodePromptResult(
+                    session_id="ses_quality_failed",
+                    message_id="msg_failed",
+                    lines=["validation failed"],
+                    text="validation failed",
+                    model="provider/model-low",
+                )
+                raise error
+            return OpenCodePromptResult(
+                session_id="ses_quality_failed",
+                message_id="msg_success",
+                lines=["done"],
+                text="done",
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2] as release_mock,
+            patches[3] as update_context_mock,
+            patches[4],
+            patches[5],
+        ):
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="same-session validation correction",
+                    prompt="run",
+                    directory=tmp_path,
+                    required_bash_commands=("python validate.py",),
+                    required_bash_retry_count=1,
+                    attempt=1,
+                ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses_quality_failed"
+        assert [session_id for _, session_id in calls] == [
+            None,
+            "ses_quality_failed",
+        ]
+        assert "missing required field name" in calls[1][0]
+        assert "python validate.py" in calls[1][0]
+        assert acquire_mock.await_count == 1
+        assert release_mock.await_args.kwargs["outcome"] == "success"
+        final_updates = update_context_mock.await_args_list[-1].args[1]
+        assert [
+            (event["phase"], event["outcome"])
+            for event in final_updates["session_events"]
+        ] == [
+            ("business", "failure"),
+            ("validation_retry", "success"),
+        ]
+
+    asyncio.run(run())
+
+
+def test_exhausted_same_session_validation_retry_starts_a_fresh_session(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[tuple[str, str | None]] = []
+
+        async def run_prompt(**kwargs):
+            calls.append((kwargs["prompt"], kwargs["session_id"]))
+            if len(calls) <= 2:
+                if len(calls) == 1:
+                    callback = kwargs["on_session_id"]("ses_first")
+                    if hasattr(callback, "__await__"):
+                        await callback
+                error = OpenCodeTaskQualityError(
+                    "validator still failed",
+                    failure_kind="command_exit_failure",
+                    command_failures=(OpenCodeCommandFailure(
+                        failure_kind="command_exit_failure",
+                        command="python validate.py",
+                        exit_code=1,
+                        output_tail=f"failure {len(calls)}",
+                        output_bytes=9,
+                    ),),
+                )
+                error.prompt_result = OpenCodePromptResult(
+                    session_id="ses_first",
+                    message_id=f"msg_failed_{len(calls)}",
+                    lines=[f"failure {len(calls)}"],
+                    text=f"failure {len(calls)}",
+                    model="provider/model-low",
+                )
+                raise error
+            callback = kwargs["on_session_id"]("ses_fresh")
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id="ses_fresh",
+                message_id="msg_success",
+                lines=["done"],
+                text="done",
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2],
+            patches[3] as update_context_mock,
+            patches[4],
+            patches[5],
+        ):
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="fresh session after validation correction",
+                    prompt="run",
+                    directory=tmp_path,
+                    required_bash_commands=("python validate.py",),
+                    required_bash_retry_count=1,
+                    attempt=1,
+                ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses_fresh"
+        assert [session_id for _, session_id in calls] == [
+            None,
+            "ses_first",
+            None,
+        ]
+        assert calls[2][0] == "run"
+        assert acquire_mock.await_count == 2
+        final_updates = update_context_mock.await_args_list[-1].args[1]
+        assert [
+            (event["phase"], event["outcome"], event["session_id"])
+            for event in final_updates["session_events"]
+        ] == [
+            ("business", "failure", "ses_first"),
+            ("validation_retry", "failure", "ses_first"),
+            ("business", "success", "ses_fresh"),
+        ]
+
+    asyncio.run(run())
+
+
+def test_post_session_validator_returns_feedback_to_the_same_session(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[tuple[str, str | None, tuple[str, ...]]] = []
+        rogue_path = tmp_path / "post-validation-rogue.json"
+        validation_calls = 0
+
+        def validate() -> str | None:
+            nonlocal validation_calls
+            validation_calls += 1
+            if validation_calls == 1:
+                return "attack-trees.json: missing required property 'nodes'"
+            return None
+
+        async def run_prompt(**kwargs):
+            calls.append((
+                kwargs["prompt"],
+                kwargs["session_id"],
+                kwargs["allowed_bash_commands"],
+            ))
+            if len(calls) == 1:
+                callback = kwargs["on_session_id"]("ses_post_validation")
+                if hasattr(callback, "__await__"):
+                    await callback
+                rogue_path.write_text("{}", encoding="utf-8")
+                kwargs["on_file_write"](OpenCodeFileWrite(
+                    call_id="post-validation-write",
+                    path=str(rogue_path),
+                    created=True,
+                ))
+            return OpenCodePromptResult(
+                session_id="ses_post_validation",
+                message_id=f"msg_{len(calls)}",
+                lines=["done"],
+                text="done",
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2] as release_mock,
+            patches[3] as update_context_mock,
+            patches[4],
+            patches[5],
+        ):
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="post-session validation correction",
+                    prompt="run",
+                    directory=tmp_path,
+                    allowed_bash_commands=("python validate.py",),
+                    post_session_validator=validate,
+                    post_session_validation_retry_count=1,
+                ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses_post_validation"
+        assert [session_id for _, session_id, _ in calls] == [
+            None,
+            "ses_post_validation",
+        ]
+        assert all(commands == ("python validate.py",) for _, _, commands in calls)
+        assert validation_calls == 2
+        assert not rogue_path.exists()
+        assert "missing required property 'nodes'" in calls[1][0]
+        assert "不要求你在 Session 内执行校验命令" in calls[1][0]
+        assert acquire_mock.await_count == 1
+        assert release_mock.await_args.kwargs["outcome"] == "success"
+        final_updates = update_context_mock.await_args_list[-1].args[1]
+        assert [
+            (event["phase"], event["outcome"], event.get("failure_kind", ""))
+            for event in final_updates["session_events"]
+        ] == [
+            ("business", "failure", "post_session_validation_failed"),
+            ("validation_retry", "success", ""),
+        ]
+
+    asyncio.run(run())
+
+
+def test_exhausted_post_session_validation_uses_existing_fresh_retry(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        service = OpenCodeTaskService()
+        calls: list[tuple[str, str | None]] = []
+        validation_calls = 0
+
+        def validate() -> str | None:
+            nonlocal validation_calls
+            validation_calls += 1
+            return {
+                1: "first failure",
+                2: "second failure",
+            }.get(validation_calls)
+
+        async def run_prompt(**kwargs):
+            calls.append((kwargs["prompt"], kwargs["session_id"]))
+            active_session = "ses_first" if len(calls) <= 2 else "ses_fresh"
+            if kwargs["session_id"] is None:
+                callback = kwargs["on_session_id"](active_session)
+                if hasattr(callback, "__await__"):
+                    await callback
+            return OpenCodePromptResult(
+                session_id=active_session,
+                message_id=f"msg_{len(calls)}",
+                lines=["done"],
+                text="done",
+                model="provider/model-low",
+            )
+
+        manager = SimpleNamespace(run_prompt=run_prompt)
+        service._runtime_for_task = AsyncMock(
+            return_value=(_runtime(tmp_path), "provider/model-low", _source())
+        )
+        patches = _service_patches(manager)
+        with (
+            patches[0],
+            patches[1] as acquire_mock,
+            patches[2] as release_mock,
+            patches[3] as update_context_mock,
+            patches[4],
+            patches[5],
+        ):
+            with _task_context(tmp_path):
+                result = await service.run_task(OpenCodeTaskSpec(
+                    task_name="fresh session after post validation",
+                    prompt="run",
+                    directory=tmp_path,
+                    post_session_validator=validate,
+                    post_session_validation_retry_count=1,
+                    attempt=1,
+                ))
+
+        assert result.status == "success"
+        assert result.session_id == "ses_fresh"
+        assert [session_id for _, session_id in calls] == [None, "ses_first", None]
+        assert validation_calls == 3
+        assert calls[2][0] == "run"
+        assert acquire_mock.await_count == 2
+        assert release_mock.await_args_list[0].kwargs["health_outcome"] is None
+        final_updates = update_context_mock.await_args_list[-1].args[1]
+        assert [
+            (event["phase"], event["outcome"], event["session_id"])
+            for event in final_updates["session_events"]
+        ] == [
+            ("business", "failure", "ses_first"),
+            ("validation_retry", "failure", "ses_first"),
+            ("business", "success", "ses_fresh"),
+        ]
 
     asyncio.run(run())
 

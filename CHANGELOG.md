@@ -1,8 +1,15 @@
 # 更新日志
 
+## 2026-09-03
+
+- **修复** OpenCode 轻量级威胁分析不再把 Prompt 中的产物校验命令作为 Session 完成条件，因此模型未执行命令时不会再报“未执行校验命令”；命令仍被精确允许用于可选自检。Task Agent 会在每次完整消息结束后由宿主校验三份产物，首次失败将诊断回传同一 Session 请求修正，第二次仍失败才进入既有 fresh Session 与 DeepHole fallback。Codex Goal 的命令完成要求保持不变
+- **变更** 轻量威胁分析 Prompt 中的校验命令在各平台统一直接以 `python` 开头，不再暴露当前解释器绝对路径或 Windows 的 `python.exe`；宿主侧校验仍以实际 `sys.executable` argv 执行且不经过 shell
+
 ## 2026-09-02
 
 - **修复** Agent 自动 OpenCode Serve 端口不再在构建任务运行时阶段提前抽取并释放后长期缓存，而是在完成启动配置准备后由 Serve 管理器即时分配；自动模式启动后若 `/global/health` 持续连接超时，会清理精确归属的失败进程并在不同端口最多尝试三次，耗尽后丢弃失败端口。Serve 健康门超时同时改用独立启动异常，不再被任务服务误记为模型消息超时或消耗 fresh Session 重试次数
+- **修复** OpenCode 轻量级威胁分析的必需校验命令失败后，不再立即丢弃 Session：Task Agent 会采集失败类型、退出状态及末尾最多 16 KiB 输出，先在原 Session 追加一次纠正消息并重新执行完全相同的命令，再失败才进入既有 fresh Session 重试；扫描详情同步展示同 Session 校验重试。Windows 校验命令改用 PATH 中的裸 `python.exe` 与双引号参数，并在 Hook 未暴露退出码时用校验器固定成功行兜底，避免 `cmd.exe` 把 POSIX 单引号当作路径字符以及 `exit=None` 被误判。轻量级失败目录遇到 `WinError 5` 时先短暂重试原子归档，再降级复制诊断并尽力清空原目录；归档警告不再阻止唯一一次 DeepHole clean fallback
+- **修复** Windows 客户端从 OpenCode 兼容 Serve 读取模型时，启动前同步执行的 `nga.CMD --version` 若留下仍持有输出管道的子进程，Python 即使触发命令超时也可能继续等待管道 EOF，阻塞 Agent 事件循环并在受管 `opencode.json` 写入前静默停住，最终由控制端在 120 秒后报超时；版本探测现在改用异步子进程和普通临时文件承接输出，3 秒超时后只通过 `taskkill /T /F` 清理本次探测进程树，版本不可用仍继续启动 Serve。旧 Serve 安全清理完成后会先原子发布运行配置再进行该非关键探测，Agent 终端同时记录可执行文件解析、旧进程清理、配置发布及版本探测的阶段和耗时
 - **新增** Agent 将平台选中且探测成功的 OpenCode 模型同步为 Codex 内容寻址模型目录，并在全局托管默认区配置 `model_catalog_json`、`model_context_window` 和 `model_auto_compact_token_limit`：优先读取正整数 `models.<id>.limit.context`，无法读取时按 `128000` 上下文和 `100000` 自动压缩阈值回退；目录模型名使用 Provider 下的原始模型 ID，能力字段与 Codex 直接工具模式契约对齐。用户自有目录指针、上下文和压缩设置继续优先，目录与配置按事务顺序原子替换，失败回滚新目录；模型切换或托管默认移除时只清理根所有权标记有效、未被用户引用的旧托管目录
 - **新增** 扫描详情首页任务队列为每个逻辑任务持久保存完整 OpenCode Session 执行轨迹：任务仍只占一行，展开后按顺序展示业务 Session、fresh Session 超时/失败重试、独立 JSON 格式修复 Session及同 Session JSON 纠正，并保留每个 Session ID、模型、状态、耗时和失败原因；最终成功也不会隐藏之前的异常尝试。任务终态新增超时、无可用模型、Provider/执行错误及 JSON 空输出、无 JSON、语法错误、Schema 不匹配等稳定分类，不保存模型原始回复或字段级校验内容；旧历史继续回退显示最终 Session，Agent 重连与终态快照保留较完整的同版本轨迹
 - **变更** Task Agent 在平台 Agent、standalone、模型列表和任务启动共用的最终配置发布边界，强制把 OpenCode 自动压缩设置为 `auto: true`、`prune: true`、`reserved: 20000`；外部配置中的冲突值会被覆盖，其它合法 `compaction` 子项继续保留，Serve 配置哈希也基于相同的受管结果，避免最终文件相同却触发无效重启

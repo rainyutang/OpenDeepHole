@@ -34,14 +34,20 @@ result = await run_opencode_task(
     file_write_allowlist=None,
     writable_paths=None,
     readable_paths=None,
+    allowed_bash_commands=None,
     required_bash_commands=None,
+    required_bash_retry_count=0,
+    required_bash_success_markers=None,
+    post_session_validator=None,
+    post_session_validation_retry_count=0,
     session_id=None,
+    config_path=None,
     output=None,
     cancel_event=None,
 )
 ```
 
-参数只有以下十五个：
+参数只有以下二十个：
 
 | 参数 | 类型 | 默认值 | 含义 |
 | --- | --- | --- | --- |
@@ -55,13 +61,18 @@ result = await run_opencode_task(
 | `file_write_allowlist` | 单个路径、路径序列或 `None` | `None` | 为本次 Session 额外开放写权限并默认保留的文件或目录；相对路径以 `project_dir` 为基准，绝对路径可位于项目外 |
 | `writable_paths` | 单个路径、路径序列或 `None` | `None` | `file_write_allowlist` 的兼容别名；两者会合并为同一组可写和保留路径 |
 | `readable_paths` | 单个路径、路径序列或 `None` | `None` | 为本次 Session 额外开放只读和外部目录访问；不授予编辑权限，也不改变保留规则 |
+| `allowed_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许但不要求执行的完整 shell 命令；拒绝空值、换行与通配符，不参与完成审计 |
 | `required_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许且必须成功执行的完整 shell 命令；拒绝空值、换行与通配符 |
+| `required_bash_retry_count` | `int` | `0` | 必需命令失败后在原 Session 追加诊断并重新校验的次数；耗尽后才进入 fresh Session 重试 |
+| `required_bash_success_markers` | `Mapping[str, str] \| None` | `None` | 可选的完整命令到单行成功标记映射；只在 Hook 无法取得退出码时使用，键必须属于必需命令 |
+| `post_session_validator` | 无参数 callable 或 `None` | `None` | 每次 Session 消息结束后执行；`None`/空白为通过，非空字符串为失败诊断，awaitable 会被等待 |
+| `post_session_validation_retry_count` | `int` | `0` | 宿主校验失败后向原 Session 回传诊断并请求修正的次数；耗尽后才进入 fresh Session 重试 |
 | `session_id` | `str \| None` | `None` | 为空时创建 Session；非空时续写已有 Session |
 | `config_path` | `str \| PathLike \| None` | `None` | 仅独立模式使用的组件 YAML 路径；后端模式禁止覆盖宿主配置 |
 | `output` | callable 或 `None` | 当前执行上下文 | 覆盖本次任务的流式输出回调；显式 `None` 表示关闭 |
 | `cancel_event` | 提供 `is_set()` 的对象 | 当前执行上下文 | 覆盖本次任务的取消信号 |
 
-不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；`readable_paths` 只增加读取范围。`required_bash_commands` 是唯一的 shell 例外入口，仅允许并要求精确完整命令，不接受调用方自定义原生权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
+不再接受 `directory`、workspace、timeout、priority、attempt、MCP、SKILL、原生 permission 或 CLI 配置对象等参数。`file_write_allowlist` 是推荐的额外写权限入口，兼容参数 `writable_paths` 使用相同语义；`readable_paths` 只增加读取范围。`allowed_bash_commands` 与 `required_bash_commands` 是仅有的 shell 例外入口：两者都只放行精确完整命令，前者不要求执行，后者还执行完成审计；其它 `required_bash_*` 参数只控制必需命令恢复。`post_session_validator` 独立于模型是否执行命令，在每次消息结束后由宿主校验产物并可把诊断回传同一 Session。上述参数都不接受调用方自定义原生权限。后端模式由 Agent 执行上下文和内部任务策略统一提供；独立模式由 `config_path` 指向的组件配置统一提供。业务过程可通过 `output` 和 `cancel_event` 对单次调用做局部覆盖。
 
 返回的 `OpenCodeResult.output_source` 是可 JSON 序列化的 dict，用于由客户端协调器原样上报实际模型和 Session 来源。其中 `serve_session_id` 始终回填为生成该结果的最终 OpenCode `session_id`；问题详情页会把它直接显示在对应输出来源中，历史结果缺少该字段时保持兼容。
 
@@ -190,13 +201,13 @@ model_pool:
 | `context.work_dir` | 必填，不存在时创建 | 本次独立组件固定的可写任务目录。模型生成的补丁、PoC、报告等任务产物应写在这里。 |
 | `context.workspace_dir` | 必填，不存在时创建 | Serve 的稳定启动目录和组件 workspace。运行时会在这里生成 `opencode.json`，也适合保存共享 Skill；不要把每次任务的业务产物写在这里。 |
 
-三个路径都支持 `~`。绝对路径直接使用；相对路径以 `task-agent.yaml` 所在目录为基准，而不是以启动 Python 的当前目录为基准。`project_dir` 必须预先存在；`work_dir` 和 `workspace_dir` 会自动递归创建。standalone 的最终 `workspace_dir/opencode.json` 允许读取项目工作目录、`work_dir`、`workspace_dir/.opencode` 和已注册的 Skill 根；文件编辑工具只能写 `work_dir`，`bash` 在未声明精确必需命令时保持禁用。
+三个路径都支持 `~`。绝对路径直接使用；相对路径以 `task-agent.yaml` 所在目录为基准，而不是以启动 Python 的当前目录为基准。`project_dir` 必须预先存在；`work_dir` 和 `workspace_dir` 会自动递归创建。standalone 的最终 `workspace_dir/opencode.json` 允许读取项目工作目录、`work_dir`、`workspace_dir/.opencode` 和已注册的 Skill 根；文件编辑工具只能写 `work_dir`，`bash` 在未声明精确可选或必需命令时保持禁用。
 
 v1 兼容迁移会把 `serve.tool: nga` 规范为 `tool: opencode`，并在未显式填写 `serve.executable` 时继续使用 `nga`；旧模型行里的 `tool` 和 `executable` 会被忽略。v2 只接受 `serve.tool: opencode`，并拒绝模型行工具或可执行文件覆盖，确保所有模型共用 `serve.executable`。
 
-嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，全局 `bash` 保持拒绝。显式传入 `file_write_allowlist`、兼容参数 `writable_paths`、`readable_paths` 或 `required_bash_commands` 时，动态权限通过 Session 覆盖下发，不进入 Serve 配置哈希。
+嵌入完整 Agent 时，所有已知动态 `work_dir` 都位于四个稳定根目录下：`~/.opendeephole/scans`、`fp_reviews`、`vulnerability_validation` 和 `skill_create`。Task Agent 在 Serve 启动前把这些根目录及 `~/.opendeephole/opencode_workspace/.opencode` 的权限写入最终全局 `opencode.json`；前四个目录可读写，`.opencode` 及其中的 Skill/reference 只读，scans 之外的 `project_dir` 保持只读。Windows 下同时生成原生反斜杠和正斜杠兼容规则，全局 `bash` 保持拒绝。显式传入 `file_write_allowlist`、兼容参数 `writable_paths`、`readable_paths`、`allowed_bash_commands` 或 `required_bash_commands` 时，动态权限通过 Session 覆盖下发，不进入 Serve 配置哈希。
 
-`workspace_dir` 中生成的 `opencode.json` 包含合并后的实际配置，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Task Agent 还会在该 workspace 的私有目录生成受管文件写入/精确命令 Hook 和知识库项目 Hook，并在最终配置的 `plugin` 列表末尾追加文件 URI；调用方已有的插件条目保持原顺序且不会被覆盖，Hook 源码哈希也参与 Serve 配置重载判断。知识库项目 Hook 通过 Session ID 哈希定位 `0600` 私有绑定文件，在 `tool.execute.before` 原地强制覆盖查询工具的 `project_id`，并拒绝平台专用的项目列表/切换工具；文件写入 Hook 同时按 Session 私有绑定约束父、子 Session 的精确命令，只记录执行顺序、完整命令和退出码，不写入 Prompt。绑定和命令审计在业务 prompt 返回后即删除。
+`workspace_dir` 中生成的 `opencode.json` 包含合并后的实际配置，可能带有 Provider Key、MCP Header 等敏感值；运行时在 POSIX 系统上以 `0600` 权限写入，但该目录仍应只对可信用户开放。Task Agent 还会在该 workspace 的私有目录生成受管文件写入/精确命令 Hook 和知识库项目 Hook，并在最终配置的 `plugin` 列表末尾追加文件 URI；调用方已有的插件条目保持原顺序且不会被覆盖，Hook 源码哈希也参与 Serve 配置重载判断。知识库项目 Hook 通过 Session ID 哈希定位 `0600` 私有绑定文件，在 `tool.execute.before` 原地强制覆盖查询工具的 `project_id`，并拒绝平台专用的项目列表/切换工具；文件写入 Hook 同时按 Session 私有绑定约束父、子 Session 的精确命令，记录执行顺序、完整命令、退出状态及末尾最多 16 KiB 输出。这些诊断通常不写入 Prompt；只有调用方启用必需命令同 Session 纠正且校验失败时，才会追加到同一 Session。绑定和命令审计在每次消息返回后即删除。
 
 完整 Agent 与 standalone 共用配置发现与深度合并规则：用户全局目录 < 可执行文件相邻目录 < 项目目录 < 平台 `opencode.config_paths`（standalone 无此层）< `OPENCODE_CONFIG_PATH` / `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR`。standalone 随后再合并 `serve.opencode_config`，所以 YAML 中的映射递归覆盖前述来源，标量和列表整体替换。用户全局目录及显式配置目录兼容旧版 `config.json`；自动发现的可执行文件相邻目录与项目目录只接受 `opencode.json` / `opencode.jsonc`，避免误读安装器、启动器或项目自身的通用 `config.json`。使用 `nga` 可执行文件时还会发现对应的全局 `nga` 配置目录。无效外部 JSON/JSONC 记录警告后忽略，不记录配置值；standalone 的配置快照固定到 `shutdown_opencode()`。
 
@@ -303,6 +314,8 @@ assistant 错误可能把 Provider 原始对象包在 `UnknownError`、类型校
 - 未显式 shutdown 时，组件会登记自己通过 `Popen` 启动的精确 PID 和独立进程组，在解释器正常退出、`SIGINT`（Ctrl-C）或 `SIGTERM` 时同步清理，再恢复或转交宿主原有信号处理器。启动器 PID 退出不再等同于整棵进程树退出：POSIX 会继续检查进程组和已确认归属的监听 PID，发送 `SIGTERM` 5 秒后仍存活则升级为 `SIGKILL`；Windows ownership marker 额外记录进程创建标识，历史 marker 恢复与当前管理器停止共用同一身份分类，只对 `owned` 进程执行 `taskkill /T /F`，`absent`/`foreign` 会清理本方状态且不终止外部 PID，`unknown` 则保留 marker 和管理器状态继续阻断。TCP、监听表和带 `SO_EXCLUSIVEADDRUSE` 的独占绑定分别用于判断端点及端口状态，不再替代进程存活判断：旧进程已消失时删除 marker，端口可用则复用，暂不可绑定则由自动模式避开、固定模式报告。
 - 启动失败会同时报告固定/自动端口模式、已尝试端口、解析后的可执行文件、版本探测 argv 和版本输出，并附上脱敏后的启动日志尾部；Windows `.cmd`/`.bat` shim 通过命令处理器的独立 argv 启动而不使用 `shell=True`。健康失败后的清理若也失败，最终异常会同时保留原始健康错误和清理错误，不再由后者覆盖前者。停止日志会记录重启原因、dirty/restart 标志和当前/目标配置哈希。`OPENCODE_SERVER_PASSWORD is not set` 是 Agent 仅监听 `127.0.0.1` 时的预期警告，日志会明确说明它不是 Serve 退出原因。
 - Serve 冷启动和 Web 模型导入都以 `GET /global/health` 的 HTTP `200` 且 JSON `healthy: true` 作为唯一健康成功条件；其它 2xx、无效 JSON 或 `healthy` 非 true 都继续等待或失败。冷启动健康门耗尽会抛出独立的 Serve 启动异常，在自动模式内部完成换端口恢复，最终失败不会作为模型消息超时进入 fresh Session 重试。复用进程但模型导入健康检查失败时，空闲 Serve 只安全重启一次并复查；存在活动 Session 时不强制重启且不会访问 Provider。Agent 终端会按时间打印请求编号、executable 配置与解析路径、版本、启动命令、端口、健康检查、Provider 耗时和已脱敏的 Serve 启动输出。
+- 启动失败会同时报告固定/自动端口模式、已尝试端口、解析后的可执行文件、版本探测 argv 和版本输出，并附上脱敏后的启动日志尾部；Windows `.cmd`/`.bat` shim 通过命令处理器的独立 argv 启动而不使用 `shell=True`。版本探测只是非阻断诊断：旧受管 Serve 安全清理完成后先原子发布最终 `opencode.json`，再以异步子进程执行探测并用普通临时文件承接输出，避免包装器子进程持有管道时在超时后继续等待 EOF；3 秒内未结束时仅终止该探测的进程树、将版本记为未知并继续启动 Serve。Agent 终端会记录可执行文件解析、旧进程清理、配置发布和版本探测的阶段及耗时。健康失败后的清理若也失败，最终异常会同时保留原始健康错误和清理错误，不再由后者覆盖前者。停止日志会记录重启原因、dirty/restart 标志和当前/目标配置哈希。`OPENCODE_SERVER_PASSWORD is not set` 是 Agent 仅监听 `127.0.0.1` 时的预期警告，日志会明确说明它不是 Serve 退出原因。
+- Serve 冷启动和 Web 模型导入都以 `GET /global/health` 的 HTTP `200` 且 JSON `healthy: true` 作为唯一健康成功条件；其它 2xx、无效 JSON 或 `healthy` 非 true 都继续等待或失败。复用进程但模型导入健康检查失败时，空闲 Serve 只安全重启一次并复查；存在活动 Session 时不强制重启且不会访问 Provider。Agent 终端会按时间打印请求编号、executable 配置与解析路径、版本、启动命令、端口、健康检查、Provider 耗时和已脱敏的 Serve 启动输出。
 - `SIGKILL` 和 `os._exit()` 不运行 Python 的信号处理器或 `atexit` 回调，无法保证当场清理；下次启动会继续使用既有归属标记和端口恢复逻辑回收残留 Serve。
 - 若应用已经注册后端宿主绑定，则完全使用宿主配置，不读取独立 YAML；此时再传 `config_path` 会报冲突。
 
@@ -350,7 +363,10 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 - `work_dir`：当前任务所属的 `.opendeephole` 隔离工作目录，允许文件编辑工具写入。
 - `file_write_allowlist` / `writable_paths`：调用方显式授权的额外文件或目录；两者合并后同时获得写权限和默认保留语义。相对路径以 `project_dir` 为基准，绝对路径允许位于项目外，但不接受 `*`、`?` 或文件系统根目录。
 - `readable_paths`：调用方显式授权的额外只读文件或目录；只获得 `read` 和 `external_directory`，不获得 `edit`，也不参与保留。
-- `required_bash_commands`：调用方声明的精确完整命令；先拒绝 `*`，再按声明顺序逐条放行，命令必须在最后一次受管文件写入后以退出码 0 完成。
+- `allowed_bash_commands`：调用方声明的可选精确命令；先拒绝 `*`，再按声明顺序逐条放行。模型可以不执行，执行失败或之后继续写文件也不参与任务完成审计。
+- `required_bash_commands`：调用方声明的必需精确命令；与可选命令使用同一条精确绑定路径，但命令必须在最后一次受管文件写入后完成，通常要求退出码 0；若调用方为该命令配置 `required_bash_success_markers`，且 OpenCode Hook 无法读取退出码，则允许以输出中完全匹配的一整行标记成功。
+- `required_bash_retry_count`：命令校验失败后在原 Session 追加诊断和纠正消息的次数；纠正消息携带失败类型、命令、退出码、超时状态和末尾最多 16 KiB 输出，并要求修复产物后重新运行完全相同的命令。耗尽后才释放 Lease 并进入 fresh Session 重试。
+- `post_session_validator` / `post_session_validation_retry_count`：每次完整消息返回后调用宿主校验器；`None` 或空白结果表示通过，非空字符串作为诊断回传原 Session，且明确该内容不是新任务指令、无需模型执行校验命令。预算耗尽后沿用现有 fresh Session 重试；同步回调在当前执行点调用，返回 awaitable 时等待完成。
 - `scan_id`、任务元数据、输出回调和取消事件：由编排层绑定并在异步任务树中自动继承。
 - `config_path`：独立过程可绑定自己的 Task Agent YAML；standalone 会合并全局、可执行文件相邻、项目、环境显式配置与 YAML 中的 `serve.opencode_config.skills.paths`，任务级 `skill_paths` 再追加到最终列表。
 - `skill_paths`：为确实需要临时 Skill 根的过程提供任务级注册；威胁分析只绑定当前所选方法的 Skill 根，不把方法目录写入全局运行配置。
@@ -361,7 +377,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 - 允许读取项目工作目录、当前工作目录和全局 workspace 的 `.opencode`；最终配置的 `skills.paths` 以及通用过程显式绑定的临时 `skill_paths` 都会获得完整子路径的 `read: allow` 与外部目录规则，使 `references/`、`assets/`、`scripts/` 等资源可读。
 - 先拒绝所有 `edit`，再允许宿主声明的稳定可写根。完整 Agent 允许写四个 `.opendeephole` 任务根，standalone 允许写固定 `work_dir`；通用嵌入宿主若没有声明覆盖当前 `work_dir` 的稳定根，Task Agent 会把该目录加入本次最终配置。
-- 默认拒绝所有 `bash`；只有当前调用显式声明 `required_bash_commands` 时才放行完全匹配的命令，受管 Hook 会拒绝未绑定、拼接或变形命令，并将缺失、非零退出及校验后再次写文件视为任务质量失败。
+- 默认拒绝所有 `bash`；只有当前调用显式声明 `allowed_bash_commands` 或 `required_bash_commands` 时才放行完全匹配的命令，受管 Hook 会拒绝未绑定、拼接或变形命令。只有后者会把缺失、超时、非零/未知退出及校验后再次写文件视为任务质量失败。Windows 上只对绑定 Session 的 shell 环境临时前置当前 Python 目录；不会授予其它命令权限。
 - 允许加载最终配置注册的 SKILL，以及通用过程通过 `skill_paths` 绑定的临时 SKILL；注册 Skill 本身不会授予编辑权限，是否可写仍只取决于它是否落在 `work_dir` 或宿主可写根内，MCP 可见性继续由受管配置决定。
 
 原生权限规则仍是内部实现细节，组件和 validator 不能直接传 `permission`。Task Agent 每次都以 `work_dir` 加当前调用显式路径生成 Session 权限；续接已有 Session 时会替换旧覆盖，避免上一次调用的额外写路径残留。新 Session 重试会重新应用相同路径，同 Session JSON 纠正复用当前权限而不重复 PATCH。同步过程可以由异步门面通过 `run_sync_component()` 执行；同步实现内部调用 `run_opencode_task()` 时会回到门面所属事件循环，并继续继承同一目录、权限和私有 SKILL 上下文。
@@ -388,7 +404,7 @@ Agent 在扫描、去误报、漏洞验证或其它组件的执行边界绑定�
 
 若同 Session 纠正耗尽，内部服务会按对应任务策略的 `max_retries` 释放 Lease、重新排队并创建全新 Session。模型消息超时和其它可重试执行错误也使用同一预算；`max_retries=2` 表示首次 Session 之外最多再创建 2 个 Session，即最多执行 3 次。业务方不再传 `attempt`。
 
-模型池完成历史仍以逻辑任务为粒度，只追加一个 `completed_tasks` 项，不把 fresh Session、独立格式匹配或同 Session JSON 纠正计为新任务。该项通过 `session_events` 按时间顺序保留 `business`、`json_format` 和 `json_retry` 事件，包括 Session ID（创建前失败时为空）、业务尝试/JSON 重试序号、模型、结果、时间、耗时和失败原因；`serve_session_id` 继续表示最终权威业务 Session。任务最终成功时，之前的超时或输出不合规事件仍会保留。页面在同一任务行的展开详情中展示全部事件，不改变队列计数和分页。
+模型池完成历史仍以逻辑任务为粒度，只追加一个 `completed_tasks` 项，不把 fresh Session、独立格式匹配、同 Session JSON 纠正或同 Session 命令纠正计为新任务。该项通过 `session_events` 按时间顺序保留 `business`、`json_format`、`json_retry` 和 `validation_retry` 事件，包括 Session ID（创建前失败时为空）、业务尝试/重试序号、模型、结果、时间、耗时和失败原因；校验输出正文只用于当次纠正 Prompt，不进入历史。`serve_session_id` 继续表示最终权威业务 Session。任务最终成功时，之前的超时或输出不合规事件仍会保留。页面在同一任务行的展开详情中展示全部事件，不改变队列计数和分页。
 
 JSON 输出不合规只记录稳定大类：`empty_output`、`no_json`、`invalid_json`、`schema_mismatch`，独立格式匹配判定无法无损转换时另记 `source_unrelated`。诊断不会持久化模型原始回复、目标 Schema 或字段路径；普通终态错误会保存 Task Agent 已规范化且长度受限的安全错误说明。旧模型池历史没有 `session_events` 时继续使用最终 `serve_session_id` 兼容展示，无法反推已丢失的中间 Session。
 

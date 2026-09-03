@@ -13,12 +13,18 @@
   逻辑上的 `run_opencode_task(task_type="threat_analysis")` 执行；这是新建扫描的默认选择。
 
 两个方法调用 `lightweight_contract.py` 中同一个 Prompt 构造函数，因此相同源码、上下文、参考资料
-和输出路径会得到字节级一致的用户 Prompt。提示词不超过 4000 字符，只携带路径和关键约束；完整
+和输出路径共享字节级一致的分析主体；只有完成条件按校验责任方区分。提示词不超过 4000 字符，
+只携带路径和关键约束；完整
 接口契约与三份字段 Schema 都来自 Codex 方法目录下的只读 `references/*.json`，校验器也继续位于
 该目录，以保持 Prompt 中的既有路径不变。OpenCode 方法复用 Agent 当前
 `threat_analysis.model_policy` 的超时和全新 Session 重试；Task Agent 只开放 Prompt 内精确的
-校验命令，并要求命令在最后一次文件写入后以退出码 0 完成。标准重试耗尽后，外层扫描编排归档失败
-产物并仅 clean 执行一次 `deephole_threat_analysis`；取消不重试也不回退，历史扫描不迁移方法选择。
+校验命令，但不要求 OpenCode 执行它，也不会产生“未执行校验命令”的完成失败。每次 Session 消息
+完整结束后，宿主使用实际 `sys.executable` argv 校验三份产物；首次失败会把校验诊断追加到原
+Session，要求修正产物但不要求模型自行运行命令，第二次仍失败才进入阶段策略已有的 fresh Session
+重试。Prompt 中的命令在所有平台都直接以 `python` 开头；Windows 参数继续使用双引号，Session 的
+`PATH` 临时前置当前 Python 目录，而宿主校验不经 shell。Codex Goal 仍要求在 Goal 内执行同一条
+提示命令并通过。标准重试耗尽后，外层扫描编排归档失败产物并仅 clean 执行一次
+`deephole_threat_analysis`；取消不重试也不回退，历史扫描不迁移方法选择。
 
 ## 目录约定
 
@@ -144,7 +150,9 @@ return {
 
 两个轻量级方法使用更严格的恢复边界：Codex 失败，或 OpenCode 在当前威胁分析阶段策略配置的
 fresh Session 重试全部耗尽后，直接归档并 clean 执行一次 DeepHole 方法，不再先 clean 重跑同一个
-轻量级方法。DeepHole 回退失败时会同时保留轻量级主错误和回退错误。
+轻量级方法。OpenCode 轻量级失败归档在 Windows 上会先短暂重试原子移动；若目录仍被文件句柄、
+ACL 或安全软件锁定，则复制一份诊断归档并尽力清空原目录，归档警告不会阻止这一次 DeepHole 回退。
+DeepHole 回退失败时会同时保留轻量级主错误、归档警告和回退错误。
 
 该恢复策略属于平台协调逻辑，不要求方法感知扫描整体状态，也不修改
 `methods/deephole_threat_analysis/` 内的原生实现。威胁分析失败只会阻塞消费其结果的

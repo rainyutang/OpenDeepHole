@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import traceback
 from importlib import import_module
 from pathlib import Path
@@ -159,6 +161,16 @@ def _run_goal(
     log_path = artifact_root / _LOG_FILE
     sqlite_home = artifact_root / _CODEX_SQLITE_DIR
     sqlite_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    codex_env = {"CODEX_SQLITE_HOME": str(sqlite_home)}
+    if sys.platform == "win32":
+        interpreter_dir = str(Path(sys.executable).resolve().parent)
+        existing_path = os.environ.get("PATH", "")
+        path_entries = [
+            entry
+            for entry in existing_path.split(os.pathsep)
+            if entry and os.path.normcase(entry) != os.path.normcase(interpreter_dir)
+        ]
+        codex_env["PATH"] = os.pathsep.join((interpreter_dir, *path_entries))
     codex_config = CodexConfig(
         cwd=str(artifact_root),
         launch_args_override=launch_args,
@@ -166,7 +178,7 @@ def _run_goal(
         # Codex process for the user's shared state databases.  Keep auth,
         # models, and config in the existing CODEX_HOME while isolating only
         # the writable SQLite state needed by this resumable Goal.
-        env={"CODEX_SQLITE_HOME": str(sqlite_home)},
+        env=codex_env,
     )
 
     log_mode = "a" if is_resume else "w"
