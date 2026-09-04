@@ -19,11 +19,14 @@ from backend.api.scan import (
 )
 from backend.models import (
     AgentFpReviewFinish,
+    AgentFpReviewResult,
+    AgentFpReviewStageOutput,
     AgentInfo,
     BatchUnmarkRequest,
     FeedbackEntry,
     FpReviewResult,
     FpReviewStatus,
+    OutputSource,
     ScanItemStatus,
     ScanMeta,
     ScanStatus,
@@ -516,6 +519,11 @@ class FpReviewOrderTests(unittest.TestCase):
                 user_id="owner",
             )
             store.save_scan(scan, meta)
+            store.begin_scan_execution(
+                "scan-1",
+                agent_id="agent-1",
+                agent_session_id="session-1",
+            )
             scan_api._running_scans["scan-1"] = scan
             scan_api._scan_owners["scan-1"] = "owner"
             agent_api._registered_agents["agent-1"] = AgentInfo(
@@ -524,12 +532,14 @@ class FpReviewOrderTests(unittest.TestCase):
                 ip="127.0.0.1",
                 last_seen=now,
                 user_id="owner",
+                agent_session_id="session-1",
             )
             agent_api._agent_ws["agent-1"] = object()
             send = AsyncMock(return_value=True)
 
             with (
                 patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.agent.get_scan_store", return_value=store),
                 patch("backend.api.scan.run_store_call", new=_direct_store_call),
                 patch("backend.api.agent.send_agent_command", send),
                 patch(
@@ -614,6 +624,240 @@ class FpReviewOrderTests(unittest.TestCase):
             self.assertEqual(job.status.value, "complete")
             publish.assert_not_called()
 
+    def test_missing_or_stale_identity_defers_review_until_scan_finish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            now = datetime.now(timezone.utc).isoformat()
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_items=["npd"],
+                created_at=now,
+                status=ScanItemStatus.AUDITING,
+                progress=0.5,
+                total_candidates=1,
+                processed_candidates=1,
+                vulnerabilities=[],
+                auto_fp_review=True,
+            )
+            store.save_scan(
+                scan,
+                ScanMeta(
+                    scan_items=["npd"],
+                    created_at=now,
+                    agent_id="agent-1",
+                    auto_fp_review=True,
+                ),
+            )
+            store.begin_scan_execution(
+                "scan-1",
+                agent_id="agent-1",
+                agent_session_id="session-1",
+            )
+            scan_api._running_scans["scan-1"] = scan
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.agent.run_store_call", new=_direct_store_call),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch("backend.sse.publish"),
+            ):
+                response = asyncio.run(agent_api.agent_report_vulnerability(
+                    "scan-1",
+                    Vulnerability(
+                        file="issue.c",
+                        line=20,
+                        function="parse",
+                        vuln_type="npd",
+                        severity="high",
+                        description="confirmed finding",
+                        confirmed=True,
+                        ai_verdict="confirmed",
+                        output_source=OutputSource(
+                            agent_session_id="session-1",
+                        ),
+                    ),
+                ))
+                stale_response = asyncio.run(agent_api.agent_report_vulnerability(
+                    "scan-1",
+                    Vulnerability(
+                        file="stale.c",
+                        line=30,
+                        function="parse_stale",
+                        vuln_type="npd",
+                        severity="high",
+                        description="finding from an old process",
+                        confirmed=True,
+                        ai_verdict="confirmed",
+                        output_source=OutputSource(
+                            agent_session_id="session-old",
+                        ),
+                    ),
+                    supports_fp_review_execution_revision=True,
+                ))
+
+            self.assertNotIn("fp_review", response)
+            self.assertNotIn("fp_review", stale_response)
+            self.assertIsNone(store.get_fp_review_by_scan("scan-1"))
+
+    def test_immediate_review_and_scan_finish_share_execution_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            now = datetime.now(timezone.utc).isoformat()
+            scan = ScanStatus(
+                scan_id="scan-1",
+                project_id="project",
+                scan_items=["npd"],
+                created_at=now,
+                status=ScanItemStatus.AUDITING,
+                progress=0.8,
+                total_candidates=1,
+                processed_candidates=1,
+                auto_fp_review=True,
+                vulnerabilities=[],
+            )
+            meta = ScanMeta(
+                scan_items=["npd"],
+                created_at=now,
+                agent_id="agent-1",
+                agent_key="stable-agent",
+                agent_name="agent",
+                execution_agent_session_id="session-1",
+                execution_revision=1,
+                project_path="/repo/project",
+                scan_name="project",
+                user_id="owner",
+                auto_fp_review=True,
+            )
+            store.save_scan(scan, meta)
+            store.begin_scan_execution(
+                "scan-1",
+                agent_id="agent-1",
+                agent_session_id="session-1",
+            )
+            scan_api._running_scans["scan-1"] = scan
+            send = AsyncMock(return_value=True)
+            resolved_agent = AgentInfo(
+                agent_id="agent-1",
+                agent_key="stable-agent",
+                name="agent",
+                ip="127.0.0.1",
+                last_seen=now,
+                user_id="owner",
+                agent_session_id="session-1",
+            )
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.agent.run_store_call", new=_direct_store_call),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    new=AsyncMock(return_value="agent-1"),
+                ),
+                patch(
+                    "backend.api.agent.resolve_agent_id_connection_async",
+                    new=AsyncMock(return_value=("agent-1", resolved_agent)),
+                ),
+                patch(
+                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "backend.api.agent.create_agent_task_runtime_update_payload_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch("backend.api.agent.send_agent_command", new=send),
+                patch("backend.sse.publish"),
+            ):
+                callback_response = asyncio.run(
+                    agent_api.agent_report_vulnerability(
+                        "scan-1",
+                        Vulnerability(
+                            file="issue.c",
+                            line=20,
+                            function="parse",
+                            vuln_type="npd",
+                            severity="high",
+                            description="confirmed finding",
+                            confirmed=True,
+                            ai_verdict="confirmed",
+                            output_source=OutputSource(
+                                agent_session_id="session-1",
+                            ),
+                        ),
+                        supports_fp_review_execution_revision=True,
+                    )
+                )
+                started = asyncio.run(
+                    scan_api._start_fp_review(
+                        "scan-1",
+                        "http://server",
+                        require_unresolved=True,
+                    )
+                )
+
+                review_id = callback_response["fp_review"]["review_id"]
+                revision = callback_response["fp_review"]["execution_revision"]
+                for stage in ("prove_bug", "prove_fp", "final_judge"):
+                    asyncio.run(scan_api.agent_fp_review_stage_output(
+                        "scan-1",
+                        AgentFpReviewStageOutput(
+                            review_id=review_id,
+                            vuln_index=0,
+                            stage=stage,
+                            markdown=f"# {stage}",
+                            agent_session_id="session-1",
+                            execution_revision=revision,
+                        ),
+                    ))
+                asyncio.run(scan_api.agent_fp_review_result(
+                    "scan-1",
+                    AgentFpReviewResult(
+                        review_id=review_id,
+                        vuln_index=0,
+                        verdict="tp",
+                        severity="high",
+                        reason="final judge confirmed the finding",
+                        stage_outputs={
+                            stage: f"# {stage}"
+                            for stage in ("prove_bug", "prove_fp", "final_judge")
+                        },
+                        agent_session_id="session-1",
+                        execution_revision=revision,
+                    ),
+                ))
+                asyncio.run(scan_api.agent_fp_review_finish(
+                    "scan-1",
+                    AgentFpReviewFinish(
+                        review_id=review_id,
+                        status="complete",
+                        agent_session_id="session-1",
+                        execution_revision=revision,
+                    ),
+                ))
+
+            self.assertEqual(revision, 1)
+            self.assertEqual(started["review_id"], review_id)
+            self.assertEqual(send.await_args.args[1]["execution_revision"], 1)
+            job = store.get_fp_review_job(review_id)
+            self.assertEqual(job.execution_revision, 1)
+            self.assertEqual(job.status, FpReviewStatus.COMPLETE)
+            self.assertIsNone(job.current_vuln_index)
+            self.assertEqual(
+                {
+                    item.stage
+                    for item in store.list_fp_review_stage_outputs_by_review(review_id)
+                },
+                {"prove_bug", "prove_fp", "final_judge"},
+            )
+            self.assertEqual(
+                store.list_fp_review_results_by_scan("scan-1")[0].verdict,
+                "tp",
+            )
+
     def test_unexpected_agent_cancel_is_retryable_for_next_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")
@@ -651,8 +895,14 @@ class FpReviewOrderTests(unittest.TestCase):
                 scan_name="project",
                 user_id="owner",
                 auto_fp_review=True,
+                execution_agent_session_id="session-1",
             )
             store.save_scan(scan, meta)
+            store.begin_scan_execution(
+                "scan-1",
+                agent_id="agent-1",
+                agent_session_id="session-1",
+            )
             store.add_vulnerability("scan-1", scan.vulnerabilities[0])
             store.create_fp_review_job("review-1", "scan-1", 1, now)
             store.update_fp_review_job("review-1", status="running")
@@ -700,12 +950,21 @@ class FpReviewOrderTests(unittest.TestCase):
                         ai_analysis="analysis",
                         confirmed=True,
                         ai_verdict="confirmed",
+                        output_source=OutputSource(
+                            agent_session_id="session-1",
+                        ),
                     ),
+                    supports_fp_review_execution_revision=True,
                 ))
 
             self.assertEqual(response["index"], 1)
             self.assertEqual(response["fp_review"]["review_id"], "review-1")
             self.assertTrue(response["fp_review"]["queued"])
+            self.assertEqual(response["fp_review"]["execution_revision"], 1)
+            self.assertEqual(
+                response["fp_review"]["execution_agent_session_id"],
+                "session-1",
+            )
             resumed = store.get_fp_review_job("review-1")
             self.assertEqual(resumed.status, FpReviewStatus.RUNNING)
             finish_events = [

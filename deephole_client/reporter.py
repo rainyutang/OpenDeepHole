@@ -255,8 +255,14 @@ class Reporter:
     def set_scan_execution(self, scan_id: str, revision: int) -> None:
         self._scan_execution_revisions[str(scan_id)] = max(0, int(revision or 0))
 
-    def set_fp_review_execution(self, review_id: str, revision: int) -> None:
-        self._fp_execution_revisions[str(review_id)] = max(0, int(revision or 0))
+    def set_fp_review_execution(self, review_id: str, revision: int) -> int:
+        normalized_review_id = str(review_id)
+        effective_revision = max(
+            self._fp_execution_revisions.get(normalized_review_id, 0),
+            max(0, int(revision or 0)),
+        )
+        self._fp_execution_revisions[normalized_review_id] = effective_revision
+        return effective_revision
 
     def set_validation_execution(self, scan_id: str, vuln_index: int, revision: int) -> None:
         self._validation_execution_revisions[(str(scan_id), int(vuln_index))] = max(
@@ -610,6 +616,15 @@ class Reporter:
                 # The server has already advanced this work to a newer
                 # execution. Keeping the old payload would only add permanent
                 # client-side storage and can never become valid again.
+                logger.warning(
+                    "REPORT_DISCARDED_STALE key=%s path=%s session=%s "
+                    "revision=%s response=%s",
+                    report.dedupe_key,
+                    report.path,
+                    report.payload.get("agent_session_id", ""),
+                    report.payload.get("execution_revision", 0),
+                    _response_context(response),
+                )
                 self._outbox.acknowledge(report)
                 self._discard_outbox_delivery(report, response)
                 self._wake_outbox()
@@ -803,6 +818,17 @@ class Reporter:
             print(f"  {marker} {vuln.vuln_type.upper()} {vuln.file}:{vuln.line} ({vuln.function})")
             return None
         vuln.output_source = self._with_agent_source(vuln.output_source)
+        query: dict[str, str] = {}
+        if provisional:
+            query.update({
+                "provisional": "true",
+                "report_batch_id": report_batch_id,
+            })
+        elif on_delivered is not None:
+            # This opt-in keeps rolling upgrades safe: an older Agent never
+            # receives an immediate FP-review dispatch that lacks an execution
+            # revision, while an older backend simply ignores the query field.
+            query["supports_fp_review_execution_revision"] = "true"
         if self._outbox is not None:
             identity = (
                 f"audit-{vuln.audit_index}"
@@ -830,11 +856,7 @@ class Reporter:
                 ),
                 path=f"/api/agent/scan/{scan_id}/vulnerability",
                 payload=vuln.model_dump(),
-                query=(
-                    {"provisional": "true", "report_batch_id": report_batch_id}
-                    if provisional
-                    else None
-                ),
+                query=query or None,
                 timeout=10.0,
                 on_delivered=(
                     handle_delivery
@@ -862,6 +884,7 @@ class Reporter:
                 resp = await self._client.post(
                     f"{self.server_url}/api/agent/scan/{scan_id}/vulnerability",
                     json=vuln.model_dump(),
+                    params=query or None,
                     timeout=10.0,
                 )
             resp.raise_for_status()
@@ -2107,11 +2130,12 @@ class Reporter:
             )
             return
         try:
-            await self._client.post(
+            response = await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/result",
                 json=payload,
                 timeout=10.0,
             )
+            response.raise_for_status()
         except Exception as e:
             print(f"Warning: failed to push FP review result: {e}")
 
@@ -2150,11 +2174,12 @@ class Reporter:
             )
             return
         try:
-            await self._client.post(
+            response = await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/stage-output",
                 json=payload,
                 timeout=10.0,
             )
+            response.raise_for_status()
         except Exception as e:
             print(f"Warning: failed to push FP review stage output: {e}")
 
@@ -2181,11 +2206,12 @@ class Reporter:
                 payload["processed"] = processed
             if active_indices is not None:
                 payload["active_indices"] = active_indices
-            await self._client.post(
+            response = await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/progress",
                 json=payload,
                 timeout=10.0,
             )
+            response.raise_for_status()
         except Exception as e:
             print(f"Warning: failed to push FP review progress: {e}")
 
@@ -2217,11 +2243,12 @@ class Reporter:
             )
             return
         try:
-            await self._client.post(
+            response = await self._client.post(
                 f"{self.server_url}/api/scan/{scan_id}/fp_review/finish",
                 json=payload,
                 timeout=10.0,
             )
+            response.raise_for_status()
         except Exception as e:
             print(f"Warning: failed to signal FP review finish: {e}")
 

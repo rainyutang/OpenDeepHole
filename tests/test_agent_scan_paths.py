@@ -44,6 +44,7 @@ from deephole_client.vulnerability_mining.engines.threat_audit.engine import (
 
 def _reporter() -> SimpleNamespace:
     reporter = SimpleNamespace(
+        agent_session_id="session-1",
         send_event=AsyncMock(),
         finish_scan=AsyncMock(),
         send_index_status=AsyncMock(),
@@ -145,6 +146,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "vuln_index": 0,
                 "queued": True,
                 "processed": 0,
+                "execution_agent_session_id": "session-1",
+                "execution_revision": 3,
             },
         }
         config = AgentConfig()
@@ -177,15 +180,60 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(enqueue.await_args.kwargs["method"], "fp_check")
+        self.assertEqual(enqueue.await_args.kwargs["execution_revision"], 3)
         self.assertEqual(len(reported), 1)
         self.assertEqual(reported[0][1]["index"], 0)
+
+    async def test_old_backend_fp_callback_waits_for_scan_finish_dispatch(self) -> None:
+        reporter = _reporter()
+        reporter.report_vulnerability.return_value = {
+            "index": 0,
+            "fp_review": {
+                "review_id": "review-old-backend",
+                "method": "adversarial",
+                "vuln_index": 0,
+                "queued": True,
+                "processed": 0,
+            },
+        }
+        enqueue = AsyncMock()
+        config = AgentConfig()
+        config.vulnerability_validation.enabled = False
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("deephole_client.server.enqueue_fp_review", enqueue),
+        ):
+            project = Path(tmp)
+            await _report_process_vulnerabilities(
+                reporter=reporter,
+                config=config,
+                scan_id="scan-1",
+                project_path=project,
+                code_scan_path=project,
+                product="",
+                validation_environment="",
+                feedback_entries=[],
+                code_graph_mcp=None,
+                engine=MiningEngineSelection(
+                    engine_id="static_candidate",
+                    engine_label="Static",
+                    enabled=True,
+                ),
+                values=[_vulnerability()],
+            )
+
+        enqueue.assert_not_awaited()
 
     async def test_reporter_delivery_callback_dispatches_downstream_once(
         self,
     ) -> None:
+        seen_params: list[dict | None] = []
+
         class SuccessfulClient:
             async def post(self, url, json=None, params=None, timeout=None):
-                del json, params, timeout
+                del json, timeout
+                seen_params.append(params)
                 return httpx.Response(
                     200,
                     request=httpx.Request("POST", url),
@@ -198,6 +246,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                             "vuln_index": 0,
                             "queued": True,
                             "processed": 0,
+                            "execution_agent_session_id": "session-delivered",
+                            "execution_revision": 4,
                         },
                     },
                 )
@@ -213,6 +263,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "http://server",
                 outbox_path=project / "outbox.sqlite3",
             )
+            reporter.agent_session_id = "session-delivered"
             reporter._client = SuccessfulClient()  # type: ignore[assignment]
             with (
                 patch("deephole_client.server.enqueue_fp_review", enqueue),
@@ -249,6 +300,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             enqueue.await_args.kwargs["review_id"],
             "review-delivered",
+        )
+        self.assertEqual(enqueue.await_args.kwargs["execution_revision"], 4)
+        self.assertEqual(
+            seen_params[0],
+            {"supports_fp_review_execution_revision": "true"},
         )
         self.assertEqual(len(reported), 1)
         self.assertEqual(reported[0][1]["index"], 0)

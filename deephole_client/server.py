@@ -539,6 +539,29 @@ async def enqueue_fp_review(
             + (f": {detail}" if detail else "")
         )
         return False
+    incoming_execution_revision = max(0, int(execution_revision or 0))
+    effective_execution_revision = max(
+        _fp_review_execution_revisions.get(review_id, 0),
+        incoming_execution_revision,
+    )
+    if hasattr(effective_reporter, "set_fp_review_execution"):
+        reporter_revision = effective_reporter.set_fp_review_execution(
+            review_id,
+            effective_execution_revision,
+        )
+        if isinstance(reporter_revision, int):
+            effective_execution_revision = max(
+                effective_execution_revision,
+                reporter_revision,
+            )
+    _fp_review_execution_revisions[review_id] = effective_execution_revision
+    if incoming_execution_revision < effective_execution_revision:
+        print(
+            f"Warning: ignoring stale FP review dispatch {review_id} "
+            f"revision={incoming_execution_revision} "
+            f"current_revision={effective_execution_revision}"
+        )
+        return False
     item_key = (review_id, vuln_index)
     if item_key in _fp_review_active_items:
         print(f"Warning: FP review {review_id} vuln[{vuln_index}] already queued/running")
@@ -549,12 +572,6 @@ async def enqueue_fp_review(
         cancel_event = threading.Event()
         _fp_review_cancel_events[review_id] = cancel_event
     _fp_review_scan_ids[review_id] = scan_id
-    _fp_review_execution_revisions[review_id] = max(
-        0,
-        int(execution_revision or 0),
-    )
-    if hasattr(effective_reporter, "set_fp_review_execution"):
-        effective_reporter.set_fp_review_execution(review_id, execution_revision)
     _fp_review_active_items.add(item_key)
     queue = _fp_review_queues.setdefault(review_id, deque())
     queue.append(_FpReviewQueueItem(
@@ -581,7 +598,7 @@ async def enqueue_fp_review(
         cancel_event=cancel_event,
         processed_offset=max(0, int(processed_offset or 0)),
         planned_task_id="",
-        execution_revision=max(0, int(execution_revision or 0)),
+        execution_revision=effective_execution_revision,
     ))
     _fp_review_queue_events.setdefault(review_id, asyncio.Event()).set()
     worker = _fp_review_tasks.get(review_id)

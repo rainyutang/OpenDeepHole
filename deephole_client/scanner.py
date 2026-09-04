@@ -321,32 +321,59 @@ async def _enqueue_vulnerability_downstream(
 ) -> None:
     fp_info = response.get("fp_review")
     if isinstance(fp_info, dict) and fp_info.get("queued"):
-        from . import server as client_server
-
         try:
-            payload = vulnerability.model_dump(mode="json")
-            payload["index"] = int(fp_info["vuln_index"])
-            await client_server.enqueue_fp_review(
-                config=config,
-                reporter=reporter,
-                scan_id=scan_id,
-                scan_mode=scan_mode,
-                review_id=str(fp_info["review_id"]),
-                method=str(fp_info.get("method") or "adversarial"),
-                vulnerability=payload,
-                project_path=str(project_path),
-                code_scan_path=str(code_scan_path),
-                feedback_entries=feedback_entries,
-                processed_offset=int(fp_info.get("processed") or 0),
-                code_graph_mcp=code_graph_mcp,
-                knowledge_base_mcp=knowledge_base_mcp,
-            )
-        except Exception as exc:
+            execution_revision = int(fp_info.get("execution_revision") or 0)
+        except (TypeError, ValueError):
+            execution_revision = 0
+        execution_agent_session_id = str(
+            fp_info.get("execution_agent_session_id") or ""
+        ).strip()
+        current_agent_session_id = str(
+            getattr(reporter, "agent_session_id", "") or ""
+        ).strip()
+        if execution_revision <= 0:
             print(
-                "Warning: failed to queue FP review for "
-                f"{scan_id}#{response.get('index')}: {exc}",
+                "Warning: skipping immediate FP review without an execution "
+                f"revision for {scan_id}#{response.get('index')}",
                 flush=True,
             )
+        elif (
+            not execution_agent_session_id
+            or execution_agent_session_id != current_agent_session_id
+        ):
+            print(
+                "Warning: skipping immediate FP review for a different Agent "
+                f"execution {scan_id}#{response.get('index')}",
+                flush=True,
+            )
+        else:
+            from . import server as client_server
+
+            try:
+                payload = vulnerability.model_dump(mode="json")
+                payload["index"] = int(fp_info["vuln_index"])
+                await client_server.enqueue_fp_review(
+                    config=config,
+                    reporter=reporter,
+                    scan_id=scan_id,
+                    scan_mode=scan_mode,
+                    review_id=str(fp_info["review_id"]),
+                    method=str(fp_info.get("method") or "adversarial"),
+                    vulnerability=payload,
+                    project_path=str(project_path),
+                    code_scan_path=str(code_scan_path),
+                    feedback_entries=feedback_entries,
+                    processed_offset=int(fp_info.get("processed") or 0),
+                    code_graph_mcp=code_graph_mcp,
+                    knowledge_base_mcp=knowledge_base_mcp,
+                    execution_revision=execution_revision,
+                )
+            except Exception as exc:
+                print(
+                    "Warning: failed to queue FP review for "
+                    f"{scan_id}#{response.get('index')}: {exc}",
+                    flush=True,
+                )
     if (
         isinstance(vulnerability_validation, dict)
         and bool(vulnerability_validation.get("enabled"))

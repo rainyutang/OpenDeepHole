@@ -23,6 +23,7 @@ from backend.models import (
     AgentScanFinishV2,
     AgentVulnerabilityReconcile,
     Candidate,
+    FpReviewResult,
     FpReviewStatus,
     MiningEngineRunStatus,
     MiningEngineSelection,
@@ -251,6 +252,165 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertIsNotNone(persisted)
             self.assertEqual(persisted.execution_revision, 1)
             self.assertEqual(persisted.execution_agent_session_id, "session-new")
+            store.close()
+
+    def test_missing_fp_review_inventory_dispatches_unresolved_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(
+                _scan("scan-1", ScanItemStatus.COMPLETE, total=1, processed=1),
+                _meta().model_copy(update={"agent_key": "stable-agent"}),
+            )
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file="issue.c",
+                    line=10,
+                    function="parse",
+                    vuln_type="npd",
+                    severity="high",
+                    description="confirmed finding",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            )
+            store.create_fp_review_job(
+                "review-1",
+                "scan-1",
+                1,
+                "2026-01-01T00:00:00+00:00",
+            )
+            store.update_fp_review_job("review-1", status="running")
+            self.assertEqual(store.begin_fp_review_execution(
+                "review-1",
+                agent_session_id="session-old",
+            ), 1)
+            agent = AgentInfo(
+                agent_id="agent-new",
+                agent_key="stable-agent",
+                agent_session_id="session-new",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            start_review = AsyncMock()
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch("backend.api.scan._start_fp_review", new=start_review),
+            ):
+                asyncio.run(agent_api._recover_missing_agent_work(
+                    "agent-new",
+                    agent,
+                    {},
+                    server_url="http://server",
+                ))
+
+            start_review.assert_awaited_once_with(
+                "scan-1",
+                "http://server",
+                raise_on_error=False,
+                require_unresolved=True,
+                claimed_execution_revision=2,
+            )
+            job = store.get_fp_review_job("review-1")
+            self.assertEqual(job.execution_agent_session_id, "session-new")
+            self.assertEqual(job.execution_revision, 2)
+            store.close()
+
+    def test_recovered_fp_review_with_persisted_result_only_closes_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(
+                _scan("scan-1", ScanItemStatus.COMPLETE, total=1, processed=1),
+                _meta().model_copy(update={"agent_key": "stable-agent"}),
+            )
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file="issue.c",
+                    line=10,
+                    function="parse",
+                    vuln_type="npd",
+                    severity="high",
+                    description="confirmed finding",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            )
+            store.create_fp_review_job(
+                "review-1",
+                "scan-1",
+                1,
+                "2026-01-01T00:00:00+00:00",
+            )
+            store.add_fp_review_result(
+                "review-1",
+                FpReviewResult(
+                    vuln_index=0,
+                    verdict="tp",
+                    severity="high",
+                    reason="final result already persisted",
+                    created_at="2026-01-01T00:00:30+00:00",
+                ),
+            )
+            store.update_fp_review_job("review-1", status="running")
+            store.begin_fp_review_execution(
+                "review-1",
+                agent_session_id="session-old",
+            )
+            revision = store.claim_fp_review_for_agent_recovery(
+                "review-1",
+                previous_session_id="session-old",
+                agent_session_id="session-new",
+            )
+            agent = AgentInfo(
+                agent_id="agent-new",
+                agent_key="stable-agent",
+                agent_session_id="session-new",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            send = AsyncMock(return_value=True)
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    new=AsyncMock(return_value="agent-new"),
+                ),
+                patch(
+                    "backend.api.agent.resolve_agent_id_connection_async",
+                    new=AsyncMock(return_value=("agent-new", agent)),
+                ),
+                patch(
+                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch("backend.api.agent.send_agent_command", new=send),
+            ):
+                result = asyncio.run(scan_api._start_fp_review(
+                    "scan-1",
+                    "http://server",
+                    raise_on_error=False,
+                    require_unresolved=True,
+                    claimed_execution_revision=revision,
+                ))
+
+            self.assertEqual(result["status"], "complete")
+            send.assert_not_awaited()
+            job = store.get_fp_review_job("review-1")
+            self.assertEqual(job.status, FpReviewStatus.COMPLETE)
+            self.assertEqual(job.processed, 1)
+            self.assertIsNone(job.current_vuln_index)
             store.close()
 
     def test_missing_scan_inventory_dispatches_checkpoint_recovery(self) -> None:

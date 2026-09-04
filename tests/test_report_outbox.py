@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -28,6 +29,80 @@ def _enqueue(outbox: ReportOutbox, key: str, *, stream: str = "scan:one"):
         path="/api/report",
         payload={"key": key},
     )
+
+
+def test_reporter_fp_execution_revision_is_monotonic() -> None:
+    reporter = Reporter("http://server", dry_run=True)
+
+    assert reporter.set_fp_review_execution("review-1", 1) == 1
+    assert reporter.set_fp_review_execution("review-1", 0) == 1
+    assert reporter.set_fp_review_execution("review-1", 3) == 3
+
+    asyncio.run(reporter.close())
+
+
+def test_fp_stage_result_and_finish_use_current_execution_revision(
+    tmp_path: Path,
+) -> None:
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.posts: list[tuple[str, dict]] = []
+
+        async def post(self, url, json=None, params=None, timeout=None):
+            del params, timeout
+            self.posts.append((url, dict(json or {})))
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={"ok": True},
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    async def exercise() -> list[tuple[str, dict]]:
+        reporter = Reporter(
+            "http://server",
+            outbox_path=tmp_path / "outbox.sqlite3",
+        )
+        client = RecordingClient()
+        reporter._client = client  # type: ignore[assignment]
+        reporter.agent_session_id = "session-1"
+        reporter.set_fp_review_execution("review-1", 1)
+        reporter.set_fp_review_execution("review-1", 0)
+
+        for stage in ("prove_bug", "prove_fp", "final_judge"):
+            await reporter.push_fp_stage_output(
+                "scan-1",
+                "review-1",
+                0,
+                stage,
+                f"# {stage}",
+            )
+        await reporter.push_fp_result(
+            "scan-1",
+            "review-1",
+            0,
+            "tp",
+            "high",
+            "confirmed",
+        )
+        await reporter.finish_fp_review(
+            "scan-1",
+            "review-1",
+            "complete",
+        )
+        assert reporter._outbox is not None
+        assert reporter._outbox.pending_count() == 0
+        await reporter.close()
+        return client.posts
+
+    posts = asyncio.run(exercise())
+
+    assert len(posts) == 5
+    assert all(payload["execution_revision"] == 1 for _url, payload in posts)
+    assert all(payload["agent_session_id"] == "session-1" for _url, payload in posts)
+    assert posts[-1][0].endswith("/fp_review/finish")
 
 
 def test_outbox_contains_only_unacknowledged_rows(tmp_path: Path) -> None:
@@ -180,7 +255,10 @@ def test_failed_authoritative_report_stays_pending_until_success(tmp_path: Path)
     asyncio.run(exercise())
 
 
-def test_stale_execution_report_is_removed_instead_of_blocked(tmp_path: Path) -> None:
+def test_stale_execution_report_is_removed_instead_of_blocked(
+    tmp_path: Path,
+    caplog,
+) -> None:
     class StaleClient:
         async def post(self, url, json=None, params=None, timeout=None):
             del json, params, timeout
@@ -220,7 +298,10 @@ def test_stale_execution_report_is_removed_instead_of_blocked(tmp_path: Path) ->
         assert reporter._outbox.pending_count() == 0
         await reporter.close()
 
-    asyncio.run(exercise())
+    with caplog.at_level(logging.WARNING, logger="deephole_client.reporter"):
+        asyncio.run(exercise())
+    assert "REPORT_DISCARDED_STALE" in caplog.text
+    assert "revision=2" in caplog.text
 
 
 def test_pending_terminal_inventory_reuses_existing_outbox_rows(tmp_path: Path) -> None:

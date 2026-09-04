@@ -5269,6 +5269,44 @@ class SqliteScanStore(ScanStoreBase):
             raise KeyError(review_id)
         return int(row["execution_revision"])
 
+    def acquire_fp_review_execution(
+        self,
+        review_id: str,
+        *,
+        agent_session_id: str,
+        force_new: bool = False,
+    ) -> int:
+        """Return one stable revision for repeated same-process dispatches."""
+        normalized_session_id = str(agent_session_id or "").strip()
+        if not normalized_session_id:
+            raise ValueError("agent_session_id is required")
+        with self._lock:
+            row = self._conn.execute(
+                """\
+                UPDATE fp_review_jobs
+                SET execution_agent_session_id = ?,
+                    execution_revision = CASE
+                        WHEN ? = 0
+                         AND execution_agent_session_id = ?
+                         AND execution_revision > 0
+                        THEN execution_revision
+                        ELSE execution_revision + 1
+                    END
+                WHERE review_id = ?
+                RETURNING execution_revision
+                """,
+                (
+                    normalized_session_id,
+                    1 if force_new else 0,
+                    normalized_session_id,
+                    review_id,
+                ),
+            ).fetchone()
+            self._conn.commit()
+        if row is None:
+            raise KeyError(review_id)
+        return int(row["execution_revision"])
+
     def begin_validation_execution(
         self,
         scan_id: str,

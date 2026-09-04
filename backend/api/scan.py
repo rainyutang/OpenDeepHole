@@ -835,6 +835,9 @@ def _ensure_fp_review_job_for_scan(
             "created": False,
             "cancelled": False,
             "no_unresolved": True,
+            "previous_status": job.status.value,
+            "execution_agent_session_id": job.execution_agent_session_id,
+            "execution_revision": job.execution_revision,
         }
     cancelled_job = job is not None and job.status == FpReviewStatus.CANCELLED
     if cancelled_job and not allow_cancelled:
@@ -847,6 +850,9 @@ def _ensure_fp_review_job_for_scan(
             "latest_results": latest_fp_results,
             "created": False,
             "cancelled": True,
+            "previous_status": job.status.value,
+            "execution_agent_session_id": job.execution_agent_session_id,
+            "execution_revision": job.execution_revision,
         }
     if job is None or (cancelled_job and allow_cancelled):
         review_id = uuid.uuid4().hex
@@ -889,6 +895,9 @@ def _ensure_fp_review_job_for_scan(
         "created": created,
         "cancelled": False,
         "no_unresolved": False,
+        "previous_status": job.status.value,
+        "execution_agent_session_id": job.execution_agent_session_id,
+        "execution_revision": job.execution_revision,
     }
 
 
@@ -4303,11 +4312,21 @@ async def _start_fp_review(
             return _fail(400, "Agent connection disappeared before FP review dispatch")
         execution_revision = claimed_execution_revision
         if execution_revision is None:
+            previous_status = str(fp_job_info.get("previous_status") or "")
+            force_new_execution = (
+                not require_unresolved
+                or previous_status
+                not in {
+                    FpReviewStatus.PENDING.value,
+                    FpReviewStatus.RUNNING.value,
+                }
+            )
             execution_revision = await run_store_call(
                 store,
-                "begin_fp_review_execution",
+                "acquire_fp_review_execution",
                 review_id,
                 agent_session_id=resolved_agent[1].agent_session_id,
+                force_new=force_new_execution,
             )
         from backend.sse import publish
         publish(scan_id, "fp_review_started", {
