@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 from typing import Awaitable, Callable, Optional
@@ -37,6 +38,16 @@ STAGE_RUN_RETRY_DELAYS = (1.0, 2.0)
 OPENCODE_POOL_FAILURE_LOG_INTERVAL_SECONDS = 30.0
 
 logger = logging.getLogger(__name__)
+
+
+_OutboxDeliveryCallback = Callable[[httpx.Response], Awaitable[None]]
+
+
+@dataclass
+class _OutboxDeliveryReceipt:
+    stream_key: str
+    callback: _OutboxDeliveryCallback | None
+    waiter: asyncio.Future[httpx.Response | None] | None
 
 
 def _compact_pool_task(value: object) -> dict:
@@ -165,6 +176,10 @@ class Reporter:
         self._outbox_stop = asyncio.Event()
         self._outbox_wakeup = asyncio.Event()
         self._outbox_loop: asyncio.AbstractEventLoop | None = None
+        self._outbox_delivery_receipts: dict[
+            tuple[int, int],
+            _OutboxDeliveryReceipt,
+        ] = {}
         self._model_pool_sink_bound = False
         self._static_progress_warning_at: dict[str, float] = {}
         self._batch_lock = asyncio.Lock()
@@ -305,8 +320,11 @@ class Reporter:
         self._wake_outbox()
 
     def start_outbox_worker(self) -> None:
-        if self._outbox is None or self._outbox_task is not None:
+        if self._outbox is None:
             return
+        if self._outbox_task is not None and not self._outbox_task.done():
+            return
+        self._outbox_stop.clear()
         self._outbox_loop = asyncio.get_running_loop()
         self._outbox_task = asyncio.create_task(self._run_outbox_worker())
 
@@ -358,6 +376,118 @@ class Reporter:
             loop.call_soon_threadsafe(self._outbox_wakeup.set)
 
     @staticmethod
+    def _outbox_delivery_key(report: PendingReport) -> tuple[int, int]:
+        return report.row_id, report.generation
+
+    def _register_outbox_delivery(
+        self,
+        report: PendingReport,
+        *,
+        callback: _OutboxDeliveryCallback | None,
+        wait_for_delivery: bool,
+    ) -> asyncio.Future[httpx.Response | None] | None:
+        key = self._outbox_delivery_key(report)
+        waiter = (
+            asyncio.get_running_loop().create_future()
+            if wait_for_delivery
+            else None
+        )
+        self._outbox_delivery_receipts[key] = _OutboxDeliveryReceipt(
+            stream_key=report.stream_key,
+            callback=callback,
+            waiter=waiter,
+        )
+        return waiter
+
+    def _discard_stale_outbox_deliveries(
+        self,
+        report: PendingReport,
+    ) -> None:
+        key = self._outbox_delivery_key(report)
+        for stale_key in [
+            current_key
+            for current_key in self._outbox_delivery_receipts
+            if current_key[0] == report.row_id and current_key != key
+        ]:
+            stale = self._outbox_delivery_receipts.pop(stale_key)
+            if stale.waiter is not None and not stale.waiter.done():
+                stale.waiter.set_result(None)
+
+    async def _complete_outbox_delivery(
+        self,
+        report: PendingReport,
+        response: httpx.Response,
+    ) -> None:
+        receipt = self._outbox_delivery_receipts.pop(
+            self._outbox_delivery_key(report),
+            None,
+        )
+        if receipt is None:
+            return
+        if receipt.callback is not None:
+            try:
+                await receipt.callback(response)
+            except Exception as exc:
+                logger.warning(
+                    "Outbox delivery callback failed key=%s: %s",
+                    report.dedupe_key,
+                    exc,
+                )
+        if receipt.waiter is not None and not receipt.waiter.done():
+            receipt.waiter.set_result(response)
+
+    def _discard_outbox_delivery(
+        self,
+        report: PendingReport,
+        response: httpx.Response | None = None,
+    ) -> None:
+        receipt = self._outbox_delivery_receipts.pop(
+            self._outbox_delivery_key(report),
+            None,
+        )
+        if (
+            receipt is not None
+            and receipt.waiter is not None
+            and not receipt.waiter.done()
+        ):
+            receipt.waiter.set_result(response)
+
+    def _resolve_outbox_stream_waiters(self, stream_key: str) -> None:
+        empty_receipts: list[tuple[int, int]] = []
+        for key, receipt in self._outbox_delivery_receipts.items():
+            if receipt.stream_key != stream_key or receipt.waiter is None:
+                continue
+            if not receipt.waiter.done():
+                receipt.waiter.set_result(None)
+            receipt.waiter = None
+            if receipt.callback is None:
+                empty_receipts.append(key)
+        for key in empty_receipts:
+            self._outbox_delivery_receipts.pop(key, None)
+
+    def _detach_outbox_waiter(
+        self,
+        report: PendingReport,
+        waiter: asyncio.Future[httpx.Response | None],
+    ) -> None:
+        key = self._outbox_delivery_key(report)
+        receipt = self._outbox_delivery_receipts.get(key)
+        if receipt is None or receipt.waiter is not waiter:
+            return
+        receipt.waiter = None
+        if not waiter.done():
+            waiter.cancel()
+        if receipt.callback is None:
+            self._outbox_delivery_receipts.pop(key, None)
+
+    def _clear_outbox_delivery_receipts(self) -> None:
+        receipts = list(self._outbox_delivery_receipts.values())
+        self._outbox_delivery_receipts.clear()
+        for receipt in receipts:
+            if receipt.waiter is not None and not receipt.waiter.done():
+                receipt.waiter.set_result(None)
+
+    @staticmethod
     def _report_hash(value: object) -> str:
         encoded = json.dumps(
             value,
@@ -376,6 +506,8 @@ class Reporter:
         payload: dict,
         query: dict[str, str] | None = None,
         timeout: float = 30.0,
+        on_delivered: _OutboxDeliveryCallback | None = None,
+        wait_for_delivery: bool = False,
     ) -> httpx.Response | None:
         if self._outbox is None:
             response = await self._client.post(
@@ -385,6 +517,15 @@ class Reporter:
                 timeout=timeout,
             )
             response.raise_for_status()
+            if on_delivered is not None:
+                try:
+                    await on_delivered(response)
+                except Exception as exc:
+                    logger.warning(
+                        "Delivery callback failed for %s: %s",
+                        path,
+                        exc,
+                    )
             return response
         report = self._outbox.enqueue(
             target_url=self.server_url,
@@ -395,10 +536,33 @@ class Reporter:
             query=query,
             timeout_seconds=timeout,
         )
+        self._discard_stale_outbox_deliveries(report)
+        waiter = None
+        if on_delivered is not None or wait_for_delivery:
+            waiter = self._register_outbox_delivery(
+                report,
+                callback=on_delivered,
+                wait_for_delivery=wait_for_delivery,
+            )
         self._wake_outbox()
-        if not self._outbox.claim(report):
+        if self._outbox.claim(report):
+            return await self._deliver_outbox_report(report)
+        if waiter is None or not wait_for_delivery:
             return None
-        return await self._deliver_outbox_report(report)
+        self.start_outbox_worker()
+        self._wake_outbox()
+        if not self._outbox.stream_can_progress(report):
+            self._detach_outbox_waiter(report, waiter)
+            return None
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(waiter),
+                timeout=max(1.0, float(timeout) + 1.0),
+            )
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._detach_outbox_waiter(report, waiter)
 
     @staticmethod
     def _retryable_response(response: httpx.Response) -> bool:
@@ -424,6 +588,7 @@ class Reporter:
             return None
         if "{agent_id}" in report.path and not self.agent_id:
             self._outbox.defer(report, "Agent is not connected", retry_after=2.0)
+            self._resolve_outbox_stream_waiters(report.stream_key)
             return None
         path = report.path.replace("{agent_id}", self.agent_id)
         try:
@@ -434,20 +599,30 @@ class Reporter:
                 timeout=report.timeout_seconds,
             )
             if 200 <= response.status_code < 300:
-                self._outbox.acknowledge(report)
+                acknowledged = self._outbox.acknowledge(report)
+                if acknowledged:
+                    await self._complete_outbox_delivery(report, response)
+                else:
+                    self._discard_outbox_delivery(report)
+                self._wake_outbox()
                 return response
             if _is_stale_execution_response(response):
                 # The server has already advanced this work to a newer
                 # execution. Keeping the old payload would only add permanent
                 # client-side storage and can never become valid again.
                 self._outbox.acknowledge(report)
+                self._discard_outbox_delivery(report, response)
+                self._wake_outbox()
                 return response
             error = f"HTTP {response.status_code}: {(response.text or '')[:500]}"
             if self._retryable_response(response):
                 delay = min(60.0, 2.0 ** min(report.attempts, 6))
                 self._outbox.defer(report, error, retry_after=delay)
+                self._resolve_outbox_stream_waiters(report.stream_key)
             else:
                 self._outbox.block(report, error)
+                self._discard_outbox_delivery(report)
+                self._resolve_outbox_stream_waiters(report.stream_key)
                 print(
                     "Warning: authoritative report is blocked in local outbox "
                     f"key={report.dedupe_key} {error}",
@@ -461,6 +636,7 @@ class Reporter:
                 f"{type(exc).__name__}: {exc}",
                 retry_after=delay,
             )
+            self._resolve_outbox_stream_waiters(report.stream_key)
             return None
 
     async def _run_outbox_worker(self) -> None:
@@ -614,8 +790,13 @@ class Reporter:
         *,
         provisional: bool = False,
         report_batch_id: str = "",
+        on_delivered: Callable[[dict], Awaitable[None]] | None = None,
     ) -> dict | None:
-        """Push a single vulnerability result immediately after it is audited."""
+        """Push one vulnerability and consume its eventual acknowledged response.
+
+        ``on_delivered`` also runs when an earlier report temporarily forces
+        this request through the background outbox worker.
+        """
         vuln.provisional = bool(provisional)
         if self.dry_run:
             marker = "[VULN]" if vuln.confirmed else "[  FP]"
@@ -636,6 +817,12 @@ class Reporter:
                     "vulnerability_report": vuln.vulnerability_report,
                 })
             )
+
+            async def handle_delivery(response: httpx.Response) -> None:
+                value = response.json()
+                if on_delivered is not None and isinstance(value, dict):
+                    await on_delivered(value)
+
             response = await self._queue_post(
                 stream_key=f"scan:{scan_id}",
                 dedupe_key=(
@@ -649,6 +836,12 @@ class Reporter:
                     else None
                 ),
                 timeout=10.0,
+                on_delivered=(
+                    handle_delivery
+                    if on_delivered is not None
+                    else None
+                ),
+                wait_for_delivery=on_delivered is not None,
             )
             if response is None:
                 return None
@@ -672,7 +865,17 @@ class Reporter:
                     timeout=10.0,
                 )
             resp.raise_for_status()
-            return resp.json()
+            value = resp.json()
+            if on_delivered is not None and isinstance(value, dict):
+                try:
+                    await on_delivered(value)
+                except Exception as exc:
+                    logger.warning(
+                        "Vulnerability delivery callback failed scan=%s: %s",
+                        scan_id,
+                        exc,
+                    )
+            return value
         except Exception as e:
             if self.protocol_version >= 2:
                 async with self._batch_lock:
@@ -2029,6 +2232,7 @@ class Reporter:
         if self._outbox_task is not None:
             self._outbox_task.cancel()
             await asyncio.gather(self._outbox_task, return_exceptions=True)
+        self._clear_outbox_delivery_receipts()
         tasks = [
             *self._event_flush_tasks.values(),
             *self._processed_flush_tasks.values(),

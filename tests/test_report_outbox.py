@@ -398,6 +398,176 @@ def test_distinct_findings_from_one_task_are_not_coalesced(tmp_path: Path) -> No
     asyncio.run(exercise())
 
 
+def test_queued_vulnerability_receives_response_after_prior_task_report(
+    tmp_path: Path,
+) -> None:
+    class OrderedClient:
+        def __init__(self) -> None:
+            self.task_started = asyncio.Event()
+            self.release_task = asyncio.Event()
+            self.paths: list[str] = []
+
+        async def post(self, url, json=None, params=None, timeout=None):
+            del params, timeout
+            self.paths.append(url)
+            if url.endswith("/opencode-task-report"):
+                self.task_started.set()
+                await self.release_task.wait()
+                payload = {"ok": True}
+            else:
+                payload = {
+                    "ok": True,
+                    "index": 7,
+                    "fp_review": {
+                        "queued": True,
+                        "vuln_index": 7,
+                        "review_id": "review-1",
+                        "method": "adversarial",
+                        "processed": 0,
+                    },
+                }
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json=payload,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    async def exercise() -> None:
+        reporter = Reporter(
+            "http://server",
+            outbox_path=tmp_path / "queued-response.sqlite3",
+        )
+        reporter.set_agent_id("agent-1")
+        fake = OrderedClient()
+        reporter._client = fake  # type: ignore[assignment]
+        reporter.start_outbox_worker()
+        reporter._capture_opencode_task_report({
+            "scope_id": "scan-1",
+            "task_id": "task-1",
+            "revision": 1,
+            "outcome": "success",
+        })
+        await asyncio.wait_for(fake.task_started.wait(), timeout=1.0)
+
+        delivered = AsyncMock()
+        report_task = asyncio.create_task(reporter.report_vulnerability(
+            "scan-1",
+            Vulnerability(
+                file="src/a.c",
+                line=7,
+                function="parse",
+                vuln_type="npd",
+                severity="high",
+                description="confirmed finding",
+                confirmed=True,
+                ai_verdict="confirmed",
+                audit_index=7,
+            ),
+            on_delivered=delivered,
+        ))
+        await asyncio.sleep(0)
+        assert report_task.done() is False
+
+        fake.release_task.set()
+        response = await asyncio.wait_for(report_task, timeout=1.0)
+        assert response is not None
+        assert response["index"] == 7
+        delivered.assert_awaited_once_with(response)
+        assert fake.paths == [
+            "http://server/api/agent/agent-1/opencode-task-report",
+            "http://server/api/agent/scan/scan-1/vulnerability",
+        ]
+        assert reporter._outbox is not None
+        assert reporter._outbox.pending_count() == 0
+        await reporter.close()
+
+    asyncio.run(exercise())
+
+
+def test_deferred_vulnerabilities_do_not_block_and_dispatch_after_retry(
+    tmp_path: Path,
+) -> None:
+    class FlakyClient:
+        def __init__(self) -> None:
+            self.offline = True
+            self.posts = 0
+
+        async def post(self, url, json=None, params=None, timeout=None):
+            del params, timeout
+            self.posts += 1
+            if self.offline:
+                raise httpx.ConnectError(
+                    "backend offline",
+                    request=httpx.Request("POST", url),
+                )
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", url),
+                json={"ok": True, "index": int(json["line"])},
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    async def exercise() -> None:
+        reporter = Reporter(
+            "http://server",
+            outbox_path=tmp_path / "deferred-callback.sqlite3",
+        )
+        fake = FlakyClient()
+        reporter._client = fake  # type: ignore[assignment]
+        reporter.start_outbox_worker()
+        delivered_indexes: list[int] = []
+        both_delivered = asyncio.Event()
+
+        async def delivered(response: dict) -> None:
+            delivered_indexes.append(int(response["index"]))
+            if len(delivered_indexes) == 2:
+                both_delivered.set()
+
+        def vulnerability(line: int) -> Vulnerability:
+            return Vulnerability(
+                file="src/a.c",
+                line=line,
+                function=f"parse_{line}",
+                vuln_type="npd",
+                severity="high",
+                description=f"confirmed finding {line}",
+                confirmed=True,
+                ai_verdict="confirmed",
+                audit_index=line,
+            )
+
+        assert await reporter.report_vulnerability(
+            "scan-1",
+            vulnerability(7),
+            on_delivered=delivered,
+        ) is None
+        assert await asyncio.wait_for(
+            reporter.report_vulnerability(
+                "scan-1",
+                vulnerability(9),
+                on_delivered=delivered,
+            ),
+            timeout=0.25,
+        ) is None
+        assert delivered_indexes == []
+        assert reporter._outbox is not None
+        assert reporter._outbox.pending_count() == 2
+
+        fake.offline = False
+        await asyncio.wait_for(both_delivered.wait(), timeout=4.0)
+        assert delivered_indexes == [7, 9]
+        assert fake.posts == 3
+        assert reporter._outbox.pending_count() == 0
+        await reporter.close()
+
+    asyncio.run(exercise())
+
+
 def test_incremental_pool_snapshot_keeps_counters_but_omits_history(
     tmp_path: Path,
 ) -> None:

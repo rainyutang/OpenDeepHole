@@ -9,7 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 from deephole_client.config import AgentConfig
+from deephole_client.reporter import Reporter
 from deephole_client.codex_runtime import (
     CodexModelConfig,
     CodexRuntimeState,
@@ -174,6 +177,79 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(enqueue.await_args.kwargs["method"], "fp_check")
+        self.assertEqual(len(reported), 1)
+        self.assertEqual(reported[0][1]["index"], 0)
+
+    async def test_reporter_delivery_callback_dispatches_downstream_once(
+        self,
+    ) -> None:
+        class SuccessfulClient:
+            async def post(self, url, json=None, params=None, timeout=None):
+                del json, params, timeout
+                return httpx.Response(
+                    200,
+                    request=httpx.Request("POST", url),
+                    json={
+                        "ok": True,
+                        "index": 0,
+                        "fp_review": {
+                            "review_id": "review-delivered",
+                            "method": "adversarial",
+                            "vuln_index": 0,
+                            "queued": True,
+                            "processed": 0,
+                        },
+                    },
+                )
+
+            async def aclose(self) -> None:
+                return None
+
+        enqueue = AsyncMock(return_value=True)
+        enqueue_validation = AsyncMock(return_value=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            reporter = Reporter(
+                "http://server",
+                outbox_path=project / "outbox.sqlite3",
+            )
+            reporter._client = SuccessfulClient()  # type: ignore[assignment]
+            with (
+                patch("deephole_client.server.enqueue_fp_review", enqueue),
+                patch(
+                    "deephole_client.server.enqueue_vulnerability_validation",
+                    enqueue_validation,
+                ),
+            ):
+                reported = await _report_process_vulnerabilities(
+                    reporter=reporter,
+                    config=AgentConfig(),
+                    scan_id="scan-delivered",
+                    project_path=project,
+                    code_scan_path=project,
+                    product="demo",
+                    validation_environment="",
+                    vulnerability_validation={
+                        "enabled": True,
+                        "method_id": "validator-1",
+                    },
+                    feedback_entries=[],
+                    code_graph_mcp=None,
+                    engine=MiningEngineSelection(
+                        engine_id="multi_version",
+                        engine_label="Multi version",
+                        enabled=True,
+                    ),
+                    values=[_vulnerability()],
+                )
+            await reporter.close()
+
+        enqueue.assert_awaited_once()
+        enqueue_validation.assert_awaited_once()
+        self.assertEqual(
+            enqueue.await_args.kwargs["review_id"],
+            "review-delivered",
+        )
         self.assertEqual(len(reported), 1)
         self.assertEqual(reported[0][1]["index"], 0)
 

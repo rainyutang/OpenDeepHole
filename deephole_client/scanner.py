@@ -302,6 +302,99 @@ async def _finish_scan(
     )
 
 
+async def _enqueue_vulnerability_downstream(
+    *,
+    response: dict[str, Any],
+    vulnerability: Vulnerability,
+    reporter: Reporter,
+    config: AgentConfig,
+    scan_id: str,
+    scan_mode: str,
+    project_path: Path,
+    code_scan_path: Path,
+    product: str,
+    vulnerability_validation: dict[str, Any] | None,
+    feedback_entries: list[dict[str, Any]],
+    code_graph_mcp: dict[str, Any] | None,
+    knowledge_base_mcp: dict[str, Any] | None,
+) -> None:
+    fp_info = response.get("fp_review")
+    if isinstance(fp_info, dict) and fp_info.get("queued"):
+        from . import server as client_server
+
+        try:
+            payload = vulnerability.model_dump(mode="json")
+            payload["index"] = int(fp_info["vuln_index"])
+            await client_server.enqueue_fp_review(
+                config=config,
+                reporter=reporter,
+                scan_id=scan_id,
+                scan_mode=scan_mode,
+                review_id=str(fp_info["review_id"]),
+                method=str(fp_info.get("method") or "adversarial"),
+                vulnerability=payload,
+                project_path=str(project_path),
+                code_scan_path=str(code_scan_path),
+                feedback_entries=feedback_entries,
+                processed_offset=int(fp_info.get("processed") or 0),
+                code_graph_mcp=code_graph_mcp,
+                knowledge_base_mcp=knowledge_base_mcp,
+            )
+        except Exception as exc:
+            print(
+                "Warning: failed to queue FP review for "
+                f"{scan_id}#{response.get('index')}: {exc}",
+                flush=True,
+            )
+    if (
+        isinstance(vulnerability_validation, dict)
+        and bool(vulnerability_validation.get("enabled"))
+        and vulnerability.confirmed
+        and product
+        and response.get("index") is not None
+    ):
+        from . import server as client_server
+
+        try:
+            await client_server.enqueue_vulnerability_validation(
+                config=config,
+                reporter=reporter,
+                scan_id=scan_id,
+                scan_mode=scan_mode,
+                vuln_index=int(response["index"]),
+                vulnerability=vulnerability.model_dump(mode="json"),
+                report_markdown=str(
+                    response.get("report_markdown")
+                    or vulnerability.vulnerability_report
+                    or vulnerability.ai_analysis
+                ),
+                project_path=str(project_path),
+                code_scan_path=str(code_scan_path),
+                product=product,
+                validation_method_id=str(
+                    vulnerability_validation.get("method_id") or ""
+                ),
+                validation_method_label=str(
+                    vulnerability_validation.get("method_label") or ""
+                ),
+                validation_values=dict(
+                    vulnerability_validation.get("values") or {}
+                ),
+                validation_policy=dict(
+                    vulnerability_validation.get("policy") or {}
+                ),
+                report_queued=True,
+                code_graph_mcp=code_graph_mcp,
+                knowledge_base_mcp=knowledge_base_mcp,
+            )
+        except Exception as exc:
+            print(
+                "Warning: failed to queue validation for "
+                f"{scan_id}#{response.get('index')}: {exc}",
+                flush=True,
+            )
+
+
 async def _report_process_vulnerabilities(
     *,
     reporter: Reporter,
@@ -343,10 +436,37 @@ async def _report_process_vulnerabilities(
                     },
                 ))
                 continue
-        if (
-            isinstance(reporter, Reporter)
-            or getattr(reporter, "reconcile_vulnerabilities", None) is not None
-        ):
+        downstream_via_delivery = isinstance(reporter, Reporter) and not provisional
+
+        async def on_delivered(
+            response: dict[str, Any],
+            delivered_vulnerability: Vulnerability = vulnerability,
+        ) -> None:
+            await _enqueue_vulnerability_downstream(
+                response=response,
+                vulnerability=delivered_vulnerability,
+                reporter=reporter,
+                config=config,
+                scan_id=scan_id,
+                scan_mode=scan_mode,
+                project_path=project_path,
+                code_scan_path=code_scan_path,
+                product=product,
+                vulnerability_validation=vulnerability_validation,
+                feedback_entries=feedback_entries,
+                code_graph_mcp=code_graph_mcp,
+                knowledge_base_mcp=knowledge_base_mcp,
+            )
+
+        if isinstance(reporter, Reporter):
+            response = await reporter.report_vulnerability(
+                scan_id,
+                vulnerability,
+                provisional=provisional,
+                report_batch_id=report_batch_id,
+                on_delivered=(on_delivered if downstream_via_delivery else None),
+            )
+        elif getattr(reporter, "reconcile_vulnerabilities", None) is not None:
             response = await reporter.report_vulnerability(
                 scan_id,
                 vulnerability,
@@ -362,85 +482,27 @@ async def _report_process_vulnerabilities(
             vulnerability,
             response if isinstance(response, dict) else None,
         ))
-        if not isinstance(response, dict):
-            continue
-        if provisional:
-            continue
-        fp_info = response.get("fp_review")
-        if isinstance(fp_info, dict) and fp_info.get("queued"):
-            from . import server as client_server
-
-            try:
-                payload = vulnerability.model_dump(mode="json")
-                payload["index"] = int(fp_info["vuln_index"])
-                await client_server.enqueue_fp_review(
-                    config=config,
-                    reporter=reporter,
-                    scan_id=scan_id,
-                    scan_mode=scan_mode,
-                    review_id=str(fp_info["review_id"]),
-                    method=str(fp_info.get("method") or "adversarial"),
-                    vulnerability=payload,
-                    project_path=str(project_path),
-                    code_scan_path=str(code_scan_path),
-                    feedback_entries=feedback_entries,
-                    processed_offset=int(fp_info.get("processed") or 0),
-                    code_graph_mcp=code_graph_mcp,
-                    knowledge_base_mcp=knowledge_base_mcp,
-                )
-            except Exception as exc:
-                print(
-                    "Warning: failed to queue FP review for "
-                    f"{scan_id}#{response.get('index')}: {exc}",
-                    flush=True,
-                )
         if (
-            isinstance(vulnerability_validation, dict)
-            and bool(vulnerability_validation.get("enabled"))
-            and vulnerability.confirmed
-            and product
-            and response.get("index") is not None
+            not isinstance(response, dict)
+            or provisional
+            or downstream_via_delivery
         ):
-            from . import server as client_server
-
-            try:
-                await client_server.enqueue_vulnerability_validation(
-                    config=config,
-                    reporter=reporter,
-                    scan_id=scan_id,
-                    scan_mode=scan_mode,
-                    vuln_index=int(response["index"]),
-                    vulnerability=vulnerability.model_dump(mode="json"),
-                    report_markdown=str(
-                        response.get("report_markdown")
-                        or vulnerability.vulnerability_report
-                        or vulnerability.ai_analysis
-                    ),
-                    project_path=str(project_path),
-                    code_scan_path=str(code_scan_path),
-                    product=product,
-                    validation_method_id=str(
-                        vulnerability_validation.get("method_id") or ""
-                    ),
-                    validation_method_label=str(
-                        vulnerability_validation.get("method_label") or ""
-                    ),
-                    validation_values=dict(
-                        vulnerability_validation.get("values") or {}
-                    ),
-                    validation_policy=dict(
-                        vulnerability_validation.get("policy") or {}
-                    ),
-                    report_queued=True,
-                    code_graph_mcp=code_graph_mcp,
-                    knowledge_base_mcp=knowledge_base_mcp,
-                )
-            except Exception as exc:
-                print(
-                    "Warning: failed to queue validation for "
-                    f"{scan_id}#{response.get('index')}: {exc}",
-                    flush=True,
-                )
+            continue
+        await _enqueue_vulnerability_downstream(
+            response=response,
+            vulnerability=vulnerability,
+            reporter=reporter,
+            config=config,
+            scan_id=scan_id,
+            scan_mode=scan_mode,
+            project_path=project_path,
+            code_scan_path=code_scan_path,
+            product=product,
+            vulnerability_validation=vulnerability_validation,
+            feedback_entries=feedback_entries,
+            code_graph_mcp=code_graph_mcp,
+            knowledge_base_mcp=knowledge_base_mcp,
+        )
     return reported
 
 

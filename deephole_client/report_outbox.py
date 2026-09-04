@@ -212,6 +212,46 @@ class ReportOutbox:
                 claimed.append(report)
             return claimed
 
+    def stream_can_progress(self, report: PendingReport) -> bool:
+        """Return whether a worker can currently advance toward ``report``.
+
+        A caller waiting for an HTTP acknowledgement should not block behind a
+        stream head that has already been deferred or permanently blocked.  An
+        inflight or immediately-ready head can still make progress and wake the
+        caller once ordered delivery reaches its row.
+        """
+        now = time.time()
+        with self._lock:
+            current = self._conn.execute(
+                """
+                SELECT id, generation, blocked, next_attempt_at
+                FROM pending_reports
+                WHERE id = ? AND generation = ?
+                """,
+                (report.row_id, report.generation),
+            ).fetchone()
+            if current is None or bool(current["blocked"]):
+                return False
+            head = self._conn.execute(
+                """
+                SELECT id, blocked, next_attempt_at
+                FROM pending_reports
+                WHERE target_url = ? AND stream_key = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                (report.target_url, report.stream_key),
+            ).fetchone()
+            if head is None:
+                return False
+            head_id = int(head["id"])
+            if head_id in self._inflight_ids:
+                return True
+            return (
+                not bool(head["blocked"])
+                and float(head["next_attempt_at"] or 0.0) <= now
+            )
+
     def acknowledge(self, report: PendingReport) -> bool:
         with self._lock:
             cursor = self._conn.execute(
