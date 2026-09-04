@@ -72,6 +72,18 @@ analysis, prompting, auditing, review, or validation logic:
 7. translate process JSON/events to backend DTOs and upload them
 ```
 
+The `multi_version` engine is a combined special case: it scans and groups
+static candidates across 2--5 source trees, runs threat analysis on the first
+(baseline) tree, and passes those artifacts to the unchanged
+`threat_pattern_audit` engine for the baseline's single-version threat audit.
+Its generic `multi-version-vulnerability-audit` Skill must not be used for that
+baseline audit.  The existing cross-version root-cause matching and per-comparison
+version new/changed-threat audits remain part of the multi-version engine.
+Multi-version static candidate tasks resolve `checker.yaml.skill_name` through
+the same checker catalog as `static_candidate`, invoke that vulnerability-type
+Skill, and add inline multi-version guard/call-path comparison guidance; they do
+not invoke the generic multi-version Skill.
+
 The business processes are independently runnable, expose exactly one public
 async `run_<process>(**kwargs)` entry, reject unknown keys, and document their
 accepted keys in their local README. Static analysis and candidate audit are
