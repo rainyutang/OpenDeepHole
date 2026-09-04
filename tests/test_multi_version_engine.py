@@ -187,6 +187,181 @@ def test_multi_version_indexes_each_version_under_its_scan_path(tmp_path: Path) 
     asyncio.run(scenario())
 
 
+def test_multi_version_resume_reuses_static_results_per_version(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        versions: list[dict] = []
+        for ordinal in (1, 2):
+            project = tmp_path / f"project-{ordinal}"
+            scan_root = project / "src"
+            scan_root.mkdir(parents=True)
+            (scan_root / "example.c").write_text(
+                f"danger_{ordinal}();\n",
+                encoding="utf-8",
+            )
+            versions.append({
+                "ordinal": ordinal,
+                "version_name": f"v{ordinal}",
+                "project_path": project.resolve(),
+                "code_scan_path": scan_root.resolve(),
+            })
+
+        cancel_event = asyncio.Event()
+        graph_calls: list[str] = []
+        static_calls: list[str] = []
+        events: list[dict] = []
+        stop_after_first = True
+
+        async def output(event: dict) -> None:
+            events.append(event)
+
+        async def graph(**kwargs):
+            project_name = Path(kwargs["project_path"]).name
+            graph_calls.append(project_name)
+            index_path = Path(kwargs["index_db_path"]).resolve()
+            index_path.touch()
+            return {
+                "status": "success",
+                "index_db_path": str(index_path),
+                "stats": {"files": 1},
+            }
+
+        async def static(**kwargs):
+            nonlocal stop_after_first
+            project = Path(kwargs["project_path"])
+            static_calls.append(project.name)
+            if stop_after_first:
+                stop_after_first = False
+                cancel_event.set()
+            candidates = []
+            if project.name == "project-2":
+                candidates.append({
+                    "file": "src/example.c",
+                    "line": 1,
+                    "function": "parse",
+                    "description": "Potential out-of-bounds access",
+                    "vuln_type": "oob",
+                    "related_functions": [],
+                    "metadata": {"subject": "buffer"},
+                })
+            return {
+                "status": "success",
+                "candidates": candidates,
+                "stats": {"total": len(candidates)},
+            }
+
+        kwargs = {
+            "work_dir": tmp_path / "work",
+            "index_db_path": tmp_path / "legacy-index.db",
+            "checker_names": ["oob"],
+            "config": SimpleNamespace(static_dedup=True),
+            "output": output,
+            "cancel_event": cancel_event,
+            "is_resume": False,
+        }
+        checkpoint_root = (
+            tmp_path / "work" / "multi_version_task_results"
+            / "static_analysis_version"
+        )
+
+        with (
+            patch(
+                "deephole_client.vulnerability_mining.engines.multi_version.engine.run_code_graph_build",
+                side_effect=graph,
+            ),
+            patch(
+                "deephole_client.vulnerability_mining.engines.multi_version.engine.run_static_analysis",
+                side_effect=static,
+            ),
+        ):
+            first_status, first_candidates = await _scan_versions(
+                versions=versions,
+                kwargs=kwargs,
+                rule_roots=[],
+            )
+            assert first_status == "cancelled"
+            assert first_candidates == [[]]
+            assert len(list(checkpoint_root.glob("*.json"))) == 1
+
+            cancel_event.clear()
+            kwargs["is_resume"] = True
+            resume_event_offset = len(events)
+            second_status, second_candidates = await _scan_versions(
+                versions=versions,
+                kwargs=kwargs,
+                rule_roots=[],
+            )
+            assert second_status == "success"
+            assert [len(items) for items in second_candidates] == [0, 1]
+            assert graph_calls == ["project-1", "project-2"]
+            assert static_calls == ["project-1", "project-2"]
+            assert len(list(checkpoint_root.glob("*.json"))) == 2
+            resumed_events = events[resume_event_offset:]
+            assert any(
+                event["data"].get("reused") is True
+                and event["data"].get("version_name") == "v1"
+                for event in resumed_events
+            )
+            assert not any(
+                event["message"] == "开始静态扫描版本 v1"
+                for event in resumed_events
+            )
+
+            third_status, third_candidates = await _scan_versions(
+                versions=versions,
+                kwargs=kwargs,
+                rule_roots=[],
+            )
+            assert third_status == "success"
+            assert third_candidates == second_candidates
+            assert graph_calls == ["project-1", "project-2"]
+            assert static_calls == ["project-1", "project-2"]
+
+            v2_checkpoint = next(
+                path
+                for path in checkpoint_root.glob("*.json")
+                if json.loads(path.read_text(encoding="utf-8"))[
+                    "input_identity"
+                ]["version"]["version_name"] == "v2"
+            )
+            v2_checkpoint.write_text("not-json", encoding="utf-8")
+            corrupt_event_offset = len(events)
+            fourth_status, fourth_candidates = await _scan_versions(
+                versions=versions,
+                kwargs=kwargs,
+                rule_roots=[],
+            )
+
+            kwargs["config"].static_dedup = False
+            fifth_status, fifth_candidates = await _scan_versions(
+                versions=versions,
+                kwargs=kwargs,
+                rule_roots=[],
+            )
+
+        assert fourth_status == "success"
+        assert fourth_candidates == second_candidates
+        assert fifth_status == "success"
+        assert fifth_candidates == second_candidates
+        assert graph_calls == [
+            "project-1", "project-2", "project-2", "project-1", "project-2",
+        ]
+        assert static_calls == [
+            "project-1", "project-2", "project-2", "project-1", "project-2",
+        ]
+        assert any(
+            event["kind"] == "warning"
+            and event["data"].get("version_name") == "v2"
+            for event in events[corrupt_event_offset:]
+        )
+        assert json.loads(v2_checkpoint.read_text(encoding="utf-8"))[
+            "structured"
+        ]["candidates"]
+
+    asyncio.run(scenario())
+
+
 def test_multi_version_input_requires_unique_two_to_five_targets() -> None:
     values = _validated_multi_versions([
         MultiVersionTarget(version_name="v1", project_path="/repo/v1"),
