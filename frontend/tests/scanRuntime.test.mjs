@@ -8,6 +8,7 @@ const server = await createServer({
   server: { middlewareMode: true },
 });
 const runtime = await server.ssrLoadModule("/src/scanRuntime.ts");
+const miningEngines = await server.ssrLoadModule("/src/miningEngines.ts");
 
 after(async () => {
   await server.close();
@@ -98,6 +99,93 @@ test("normalizes candidate-owned audit state by stable idx", () => {
   assert.equal(candidate.audit_result.file, "same.c");
   assert.equal(candidate.vulnerability_idx, 12);
   assert.deepEqual(candidate.dedup_decision, { method: "semantic" });
+});
+
+test("normalizes optional mining engine progress without inventing legacy counts", () => {
+  const current = runtime.normalizeScanStatus({
+    scan_id: "scan-current",
+    status: "auditing",
+    mining_engine_runs: [{
+      engine_id: "threat_pattern_audit",
+      engine_label: "Pattern audit",
+      status: "running",
+      processed_candidates: 3,
+      total_candidates: 8,
+    }],
+  });
+  const legacy = runtime.normalizeScanStatus({
+    scan_id: "scan-legacy",
+    status: "complete",
+    mining_engine_runs: [{
+      engine_id: "threat_pattern_audit",
+      engine_label: "Pattern audit",
+      status: "success",
+    }],
+  });
+
+  assert.equal(current.mining_engine_runs[0].processed_candidates, 3);
+  assert.equal(current.mining_engine_runs[0].total_candidates, 8);
+  assert.equal(legacy.mining_engine_runs[0].processed_candidates, null);
+  assert.equal(legacy.mining_engine_runs[0].total_candidates, null);
+});
+
+test("formats bounded attack-pattern audit progress", () => {
+  assert.equal(
+    miningEngines.formatMiningEngineAuditProgress({
+      processed_candidates: 3,
+      total_candidates: 8,
+    }),
+    "3/8 已审计",
+  );
+  assert.equal(
+    miningEngines.formatMiningEngineAuditProgress({
+      processed_candidates: 9,
+      total_candidates: 4,
+    }),
+    "4/4 已审计",
+  );
+  assert.equal(
+    miningEngines.formatMiningEngineAuditProgress({
+      processed_candidates: 0,
+      total_candidates: 0,
+    }),
+    "0/0 已审计",
+  );
+  assert.equal(
+    miningEngines.formatMiningEngineAuditProgress({}),
+    null,
+  );
+  assert.equal(
+    miningEngines.threatPatternAuditFlowDetail({
+      status: "running",
+      started_at: "2026-09-04T00:00:00Z",
+    }, true),
+    "正在统计审计任务",
+  );
+  assert.equal(
+    miningEngines.threatPatternAuditFlowDetail({ status: "success" }, true),
+    "历史扫描无进度数据",
+  );
+  assert.equal(
+    miningEngines.threatPatternAuditFlowDetail({
+      status: "error",
+      error_message: "one task failed",
+      processed_candidates: 8,
+      total_candidates: 8,
+    }, true),
+    "8/8 已审计",
+  );
+  assert.equal(
+    miningEngines.threatPatternAuditFlowDetail({
+      status: "error",
+      error_message: "artifact invalid",
+    }, true),
+    "artifact invalid",
+  );
+  assert.equal(
+    miningEngines.threatPatternAuditFlowDetail({ status: "pending" }, false),
+    "等待威胁分析完成",
+  );
 });
 
 test("preserves completed task session traces during pool normalization", () => {

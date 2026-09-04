@@ -36,6 +36,7 @@ from .reporter import Reporter
 from .scan_modes import (
     SCAN_MODE_CUSTOM,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    STATIC_ANALYSIS_ENGINE_IDS,
     THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS,
     component_scan_mode,
     normalize_scan_mode,
@@ -320,32 +321,59 @@ async def _enqueue_vulnerability_downstream(
 ) -> None:
     fp_info = response.get("fp_review")
     if isinstance(fp_info, dict) and fp_info.get("queued"):
-        from . import server as client_server
-
         try:
-            payload = vulnerability.model_dump(mode="json")
-            payload["index"] = int(fp_info["vuln_index"])
-            await client_server.enqueue_fp_review(
-                config=config,
-                reporter=reporter,
-                scan_id=scan_id,
-                scan_mode=scan_mode,
-                review_id=str(fp_info["review_id"]),
-                method=str(fp_info.get("method") or "adversarial"),
-                vulnerability=payload,
-                project_path=str(project_path),
-                code_scan_path=str(code_scan_path),
-                feedback_entries=feedback_entries,
-                processed_offset=int(fp_info.get("processed") or 0),
-                code_graph_mcp=code_graph_mcp,
-                knowledge_base_mcp=knowledge_base_mcp,
-            )
-        except Exception as exc:
+            execution_revision = int(fp_info.get("execution_revision") or 0)
+        except (TypeError, ValueError):
+            execution_revision = 0
+        execution_agent_session_id = str(
+            fp_info.get("execution_agent_session_id") or ""
+        ).strip()
+        current_agent_session_id = str(
+            getattr(reporter, "agent_session_id", "") or ""
+        ).strip()
+        if execution_revision <= 0:
             print(
-                "Warning: failed to queue FP review for "
-                f"{scan_id}#{response.get('index')}: {exc}",
+                "Warning: skipping immediate FP review without an execution "
+                f"revision for {scan_id}#{response.get('index')}",
                 flush=True,
             )
+        elif (
+            not execution_agent_session_id
+            or execution_agent_session_id != current_agent_session_id
+        ):
+            print(
+                "Warning: skipping immediate FP review for a different Agent "
+                f"execution {scan_id}#{response.get('index')}",
+                flush=True,
+            )
+        else:
+            from . import server as client_server
+
+            try:
+                payload = vulnerability.model_dump(mode="json")
+                payload["index"] = int(fp_info["vuln_index"])
+                await client_server.enqueue_fp_review(
+                    config=config,
+                    reporter=reporter,
+                    scan_id=scan_id,
+                    scan_mode=scan_mode,
+                    review_id=str(fp_info["review_id"]),
+                    method=str(fp_info.get("method") or "adversarial"),
+                    vulnerability=payload,
+                    project_path=str(project_path),
+                    code_scan_path=str(code_scan_path),
+                    feedback_entries=feedback_entries,
+                    processed_offset=int(fp_info.get("processed") or 0),
+                    code_graph_mcp=code_graph_mcp,
+                    knowledge_base_mcp=knowledge_base_mcp,
+                    execution_revision=execution_revision,
+                )
+            except Exception as exc:
+                print(
+                    "Warning: failed to queue FP review for "
+                    f"{scan_id}#{response.get('index')}: {exc}",
+                    flush=True,
+                )
     if (
         isinstance(vulnerability_validation, dict)
         and bool(vulnerability_validation.get("enabled"))
@@ -617,6 +645,14 @@ async def run_scan(
     else:
         enabled_selections = configured_enabled_selections
         preserved_completed_engine_count = 0
+    configured_static_analysis = any(
+        item.engine_id in STATIC_ANALYSIS_ENGINE_IDS
+        for item in configured_enabled_selections
+    )
+    running_static_analysis = any(
+        item.engine_id in STATIC_ANALYSIS_ENGINE_IDS
+        for item in enabled_selections
+    )
     index_file_progress = {"current": 0, "total": 0}
 
     async def emit(
@@ -840,73 +876,77 @@ async def run_scan(
             "Scan CodeGraph MCP configured for Codex",
         )
 
-    try:
-        graph_result = await run_code_graph_build(
-            scan_mode=runtime_scan_mode,
-            project_path=project,
-            code_scan_path=scan_root,
-            work_dir=scan_dir / "code_graph_build",
-            reuse_cache=True,
-            output=process_output,
-            cancel_event=cancel_event,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        error = (
-            f"{type(exc).__name__}: {exc}"
-            if str(exc)
-            else type(exc).__name__
-        )
-        await emit(
-            "code_graph_build",
-            f"Code graph build failed: {error}",
-        )
-        graph_result = {
-            "status": "error",
-            "error": error,
-        }
-    if graph_result.get("status") != "success":
-        status = (
-            "cancelled"
-            if graph_result.get("status") == "cancelled"
-            else "error"
-        )
-        error = str(graph_result.get("error") or "")
-        if status == "error":
-            await reporter.send_index_status(
-                scan_id,
-                "error",
-                index_file_progress["current"],
-                index_file_progress["total"],
-                stage="Code graph build failed",
-                error=error,
+    index_path = scan_root / "code_index.db"
+    if running_static_analysis:
+        try:
+            graph_result = await run_code_graph_build(
+                scan_mode=runtime_scan_mode,
+                project_path=project,
+                code_scan_path=scan_root,
+                work_dir=scan_dir / "code_graph_build",
+                reuse_cache=True,
+                output=process_output,
+                cancel_event=cancel_event,
             )
-        await _finish_scan(
-            reporter,
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = (
+                f"{type(exc).__name__}: {exc}"
+                if str(exc)
+                else type(exc).__name__
+            )
+            await emit(
+                "code_graph_build",
+                f"Code graph build failed: {error}",
+            )
+            graph_result = {
+                "status": "error",
+                "error": error,
+            }
+        if graph_result.get("status") != "success":
+            status = (
+                "cancelled"
+                if graph_result.get("status") == "cancelled"
+                else "error"
+            )
+            error = str(graph_result.get("error") or "")
+            if status == "error":
+                await reporter.send_index_status(
+                    scan_id,
+                    "error",
+                    index_file_progress["current"],
+                    index_file_progress["total"],
+                    stage="Code graph build failed",
+                    error=error,
+                )
+            await _finish_scan(
+                reporter,
+                scan_id,
+                status=status,
+                vulnerabilities=[],
+                total=0,
+                processed=0,
+                error=error or None,
+                cancel_event=cancel_event,
+            )
+            return
+        index_path = Path(str(graph_result["index_db_path"]))
+        stats = dict(graph_result.get("stats") or {})
+        await reporter.send_index_status(
             scan_id,
-            status=status,
-            vulnerabilities=[],
-            total=0,
-            processed=0,
-            error=error or None,
-            cancel_event=cancel_event,
+            "done",
+            int(stats.get("files") or 0),
+            int(stats.get("files") or 0),
+            stats=stats,
         )
-        return
-    index_path = Path(str(graph_result["index_db_path"]))
-    stats = dict(graph_result.get("stats") or {})
-    await reporter.send_index_status(
-        scan_id,
-        "done",
-        int(stats.get("files") or 0),
-        int(stats.get("files") or 0),
-        stats=stats,
-    )
+    elif not configured_static_analysis:
+        await reporter.send_index_status(scan_id, "skipped")
+    # A targeted resume may keep a completed static engine in the scan snapshot
+    # without running it again. Preserve that execution's existing index status
+    # instead of rebuilding the database or overwriting the status as skipped.
 
-    if not any(
-        item.engine_id in {"static_candidate", "multi_version"}
-        for item in configured_enabled_selections
-    ):
+    if not configured_static_analysis:
         await reporter.send_static_progress(scan_id, 0, 0, done=True)
 
     pool_stop = asyncio.Event()
@@ -1231,6 +1271,31 @@ async def run_scan(
             engine_id=selection.engine_id,
             engine_label=selection.engine_label,
         )
+        progress_lock = asyncio.Lock()
+
+        async def process_engine_output(event: dict[str, Any]) -> None:
+            await process_output(event)
+            if str(event.get("process") or "") != selection.engine_id:
+                return
+            counts = _event_progress_counts(event)
+            if counts is None:
+                return
+            current, total = counts
+            async with progress_lock:
+                next_total = max(run.total_candidates or 0, total)
+                next_processed = min(
+                    next_total,
+                    max(run.processed_candidates or 0, current),
+                )
+                if (
+                    run.total_candidates == next_total
+                    and run.processed_candidates == next_processed
+                ):
+                    return
+                run.total_candidates = next_total
+                run.processed_candidates = next_processed
+                await _publish_engine_run(reporter, scan_id, run)
+
         if loaded is None:
             run.status = "error"
             run.error_message = "Engine adapter is unavailable"
@@ -1387,7 +1452,7 @@ async def run_scan(
             "retry_processed_offset": retry_processed_offset,
             "resume_threat_analysis": resume_threat_analysis,
             "retry_threat_audit_task_ids": retry_threat_audit_task_ids,
-            "output": process_output,
+            "output": process_engine_output,
             "cancel_event": cancel_event,
             "report_vulnerabilities": report_values,
         }
@@ -1404,6 +1469,17 @@ async def run_scan(
             output = await run_mining_engine(loaded, **engine_kwargs)
             run.status = str(output["status"])
             run.error_message = str(output["error_message"])
+            run.total_candidates = max(
+                run.total_candidates or 0,
+                int(output["total_candidates"]),
+            )
+            run.processed_candidates = min(
+                run.total_candidates,
+                max(
+                    run.processed_candidates or 0,
+                    int(output["processed_candidates"]),
+                ),
+            )
             return run, output
         except asyncio.CancelledError:
             run.status = "cancelled"

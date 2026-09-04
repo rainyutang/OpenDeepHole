@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from backend.api import scan as scan_api
 from backend.models import (
+    AgentInfo,
     FpReviewResult,
     FpReviewStatus,
     OpenCodePoolStatus,
@@ -62,6 +63,18 @@ def _vulnerability(index: int) -> Vulnerability:
         ai_analysis="confirmed issue",
         confirmed=True,
         ai_verdict="confirmed",
+    )
+
+
+def _live_agent() -> AgentInfo:
+    return AgentInfo(
+        agent_id="agent-live",
+        agent_key="stable-agent",
+        agent_session_id="session-live",
+        name="agent-1",
+        ip="127.0.0.1",
+        last_seen="2026-08-11T00:10:00+00:00",
+        user_id="user-1",
     )
 
 
@@ -275,6 +288,10 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
                     new=AsyncMock(return_value="agent-live"),
                 ),
                 patch(
+                    "backend.api.agent.resolve_agent_id_connection_async",
+                    new=AsyncMock(return_value=("agent-live", _live_agent())),
+                ),
+                patch(
                     "backend.api.agent.ensure_agent_accepting_tasks_async",
                     new=AsyncMock(return_value=None),
                 ),
@@ -335,6 +352,10 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
                     new=AsyncMock(return_value="agent-live"),
                 ),
                 patch(
+                    "backend.api.agent.resolve_agent_id_connection_async",
+                    new=AsyncMock(return_value=("agent-live", _live_agent())),
+                ),
+                patch(
                     "backend.api.agent.ensure_agent_accepting_tasks_async",
                     new=AsyncMock(return_value=None),
                 ),
@@ -380,6 +401,10 @@ class ScanFpReviewLifecycleTests(unittest.TestCase):
                 patch(
                     "backend.api.scan._resolve_scan_agent_id",
                     new=AsyncMock(return_value="agent-live"),
+                ),
+                patch(
+                    "backend.api.agent.resolve_agent_id_connection_async",
+                    new=AsyncMock(return_value=("agent-live", _live_agent())),
                 ),
                 patch(
                     "backend.api.agent.ensure_agent_accepting_tasks_async",

@@ -23,6 +23,7 @@ from backend.models import (
     AgentScanFinishV2,
     AgentVulnerabilityReconcile,
     Candidate,
+    FpReviewResult,
     FpReviewStatus,
     MiningEngineRunStatus,
     MiningEngineSelection,
@@ -251,6 +252,165 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertIsNotNone(persisted)
             self.assertEqual(persisted.execution_revision, 1)
             self.assertEqual(persisted.execution_agent_session_id, "session-new")
+            store.close()
+
+    def test_missing_fp_review_inventory_dispatches_unresolved_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(
+                _scan("scan-1", ScanItemStatus.COMPLETE, total=1, processed=1),
+                _meta().model_copy(update={"agent_key": "stable-agent"}),
+            )
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file="issue.c",
+                    line=10,
+                    function="parse",
+                    vuln_type="npd",
+                    severity="high",
+                    description="confirmed finding",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            )
+            store.create_fp_review_job(
+                "review-1",
+                "scan-1",
+                1,
+                "2026-01-01T00:00:00+00:00",
+            )
+            store.update_fp_review_job("review-1", status="running")
+            self.assertEqual(store.begin_fp_review_execution(
+                "review-1",
+                agent_session_id="session-old",
+            ), 1)
+            agent = AgentInfo(
+                agent_id="agent-new",
+                agent_key="stable-agent",
+                agent_session_id="session-new",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            start_review = AsyncMock()
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch("backend.api.scan._start_fp_review", new=start_review),
+            ):
+                asyncio.run(agent_api._recover_missing_agent_work(
+                    "agent-new",
+                    agent,
+                    {},
+                    server_url="http://server",
+                ))
+
+            start_review.assert_awaited_once_with(
+                "scan-1",
+                "http://server",
+                raise_on_error=False,
+                require_unresolved=True,
+                claimed_execution_revision=2,
+            )
+            job = store.get_fp_review_job("review-1")
+            self.assertEqual(job.execution_agent_session_id, "session-new")
+            self.assertEqual(job.execution_revision, 2)
+            store.close()
+
+    def test_recovered_fp_review_with_persisted_result_only_closes_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            store.save_scan(
+                _scan("scan-1", ScanItemStatus.COMPLETE, total=1, processed=1),
+                _meta().model_copy(update={"agent_key": "stable-agent"}),
+            )
+            store.add_vulnerability(
+                "scan-1",
+                Vulnerability(
+                    file="issue.c",
+                    line=10,
+                    function="parse",
+                    vuln_type="npd",
+                    severity="high",
+                    description="confirmed finding",
+                    confirmed=True,
+                    ai_verdict="confirmed",
+                ),
+            )
+            store.create_fp_review_job(
+                "review-1",
+                "scan-1",
+                1,
+                "2026-01-01T00:00:00+00:00",
+            )
+            store.add_fp_review_result(
+                "review-1",
+                FpReviewResult(
+                    vuln_index=0,
+                    verdict="tp",
+                    severity="high",
+                    reason="final result already persisted",
+                    created_at="2026-01-01T00:00:30+00:00",
+                ),
+            )
+            store.update_fp_review_job("review-1", status="running")
+            store.begin_fp_review_execution(
+                "review-1",
+                agent_session_id="session-old",
+            )
+            revision = store.claim_fp_review_for_agent_recovery(
+                "review-1",
+                previous_session_id="session-old",
+                agent_session_id="session-new",
+            )
+            agent = AgentInfo(
+                agent_id="agent-new",
+                agent_key="stable-agent",
+                agent_session_id="session-new",
+                name="agent-1",
+                ip="127.0.0.1",
+                last_seen="2026-01-01T00:01:00+00:00",
+                user_id="user-1",
+            )
+            send = AsyncMock(return_value=True)
+
+            with (
+                patch("backend.api.scan.get_scan_store", return_value=store),
+                patch("backend.api.scan.run_store_call", new=_direct_store_call),
+                patch(
+                    "backend.api.scan._resolve_scan_agent_id",
+                    new=AsyncMock(return_value="agent-new"),
+                ),
+                patch(
+                    "backend.api.agent.resolve_agent_id_connection_async",
+                    new=AsyncMock(return_value=("agent-new", agent)),
+                ),
+                patch(
+                    "backend.api.agent.ensure_agent_accepting_tasks_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch("backend.api.agent.send_agent_command", new=send),
+            ):
+                result = asyncio.run(scan_api._start_fp_review(
+                    "scan-1",
+                    "http://server",
+                    raise_on_error=False,
+                    require_unresolved=True,
+                    claimed_execution_revision=revision,
+                ))
+
+            self.assertEqual(result["status"], "complete")
+            send.assert_not_awaited()
+            job = store.get_fp_review_job("review-1")
+            self.assertEqual(job.status, FpReviewStatus.COMPLETE)
+            self.assertEqual(job.processed, 1)
+            self.assertIsNone(job.current_vuln_index)
             store.close()
 
     def test_missing_scan_inventory_dispatches_checkpoint_recovery(self) -> None:
@@ -1326,6 +1486,36 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.static_total_files, 128)
             self.assertFalse([data for _scan_id, event_type, data in published if event_type == "scan_status"])
 
+    def test_index_status_skipped_does_not_change_static_file_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.PENDING)
+            scan.static_total_files = 128
+            scan.static_scanned_files = 64
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = scan
+
+            published: list[tuple[str, str, dict]] = []
+            body = agent_api._IndexStatusBody(status="skipped")
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+            ):
+                asyncio.run(agent_api.agent_push_index_status("scan-1", body))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.static_scanned_files, 64)
+            self.assertEqual(stored.static_total_files, 128)
+            self.assertEqual(
+                agent_api._scan_index_statuses["scan-1"]["status"],
+                "skipped",
+            )
+            self.assertFalse([
+                data
+                for _scan_id, event_type, data in published
+                if event_type == "scan_status"
+            ])
+
     def test_static_progress_updates_pending_scan_to_analyzing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -1549,6 +1739,60 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertIn("storage_target=%s", warning_args[0])
             self.assertEqual(warning_args[1], "missing-scan")
 
+    def test_mining_engine_progress_persists_and_publishes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-pattern-progress", ScanItemStatus.AUDITING)
+            scan.mining_engines = [MiningEngineSelection(
+                engine_id="threat_pattern_audit",
+                engine_label="DeepHole基于攻击模式的漏洞挖掘引擎",
+            )]
+            scan.mining_engine_runs = [MiningEngineRunStatus(
+                engine_id="threat_pattern_audit",
+                engine_label="DeepHole基于攻击模式的漏洞挖掘引擎",
+                status="pending",
+            )]
+            meta = _meta()
+            meta.mining_engines = scan.mining_engines
+            store.save_scan(scan, meta)
+            published: list[tuple[str, str, dict]] = []
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch(
+                    "backend.sse.publish",
+                    side_effect=lambda scan_id, event_type, data: published.append(
+                        (scan_id, event_type, data),
+                    ),
+                ),
+            ):
+                response = asyncio.run(agent_api.agent_report_mining_engine_run(
+                    "scan-pattern-progress",
+                    MiningEngineRunStatus(
+                        engine_id="threat_pattern_audit",
+                        engine_label="untrusted label",
+                        status="running",
+                        total_candidates=8,
+                        processed_candidates=3,
+                    ),
+                ))
+
+            stored = store.load_scan("scan-pattern-progress")[0]
+            run = stored.mining_engine_runs[0]
+            self.assertEqual(run.processed_candidates, 3)
+            self.assertEqual(run.total_candidates, 8)
+            self.assertEqual(response["run"]["processed_candidates"], 3)
+            self.assertEqual(response["run"]["total_candidates"], 8)
+            self.assertEqual(published[0][1], "mining_engine_run")
+            self.assertEqual(
+                published[0][2]["runs"][0]["processed_candidates"],
+                3,
+            )
+
     def test_v2_finish_merges_terminal_stage_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -1610,6 +1854,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                             engine_label="untrusted label",
                             status="cancelled",
                             finished_at="2026-01-01T00:01:00+00:00",
+                            total_candidates=5,
+                            processed_candidates=3,
                         )],
                     ),
                     SimpleNamespace(base_url="http://testserver/"),
@@ -1619,18 +1865,30 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.threat_analysis_run.status, "error")
             self.assertEqual(
                 {
-                    run.engine_id: (run.engine_label, run.status)
+                    run.engine_id: (
+                        run.engine_label,
+                        run.status,
+                        run.processed_candidates,
+                        run.total_candidates,
+                    )
                     for run in stored.mining_engine_runs
                 },
                 {
-                    "engine_a": ("Engine A", "cancelled"),
-                    "engine_b": ("Engine B", "success"),
+                    "engine_a": ("Engine A", "cancelled", 3, 5),
+                    "engine_b": ("Engine B", "success", None, None),
                 },
             )
             event_types = [event_type for _scan_id, event_type, _data in published]
             self.assertIn("threat_analysis_run", event_types)
             self.assertIn("mining_engine_run", event_types)
             self.assertIn("scan_finish", event_types)
+            engine_event = next(
+                data
+                for _scan_id, event_type, data in published
+                if event_type == "mining_engine_run"
+            )
+            self.assertEqual(engine_event["run"]["processed_candidates"], 3)
+            self.assertEqual(engine_event["run"]["total_candidates"], 5)
 
     def test_finish_missing_scan_returns_structured_404(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

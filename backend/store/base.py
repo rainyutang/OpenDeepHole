@@ -507,6 +507,21 @@ class ScanStoreBase(ABC):
     ) -> int:
         raise NotImplementedError
 
+    def acquire_fp_review_execution(
+        self,
+        review_id: str,
+        *,
+        agent_session_id: str,
+        force_new: bool = False,
+    ) -> int:
+        """Bind an FP-review execution, reusing the active process revision.
+
+        Repeated automatic dispatches to the same Agent process must share one
+        revision.  Explicit reruns can request a fresh revision via
+        ``force_new``.
+        """
+        raise NotImplementedError
+
     def begin_validation_execution(
         self,
         scan_id: str,

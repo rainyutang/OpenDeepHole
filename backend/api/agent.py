@@ -4068,6 +4068,7 @@ async def agent_report_vulnerability(
     vuln: Vulnerability,
     provisional: bool = False,
     report_batch_id: str = "",
+    supports_fp_review_execution_revision: bool = False,
 ) -> dict:
     """Agent pushes a single vulnerability result immediately after auditing it."""
     store = get_scan_store()
@@ -4077,6 +4078,9 @@ async def agent_report_vulnerability(
         vuln,
         selections=meta.mining_engines if meta is not None else [],
     )
+    reported_execution_session_id = str(
+        vuln.output_source.agent_session_id or ""
+    ).strip()
     vuln.provisional = bool(provisional)
     live_scan = _running_scans.get(scan_id)
     if provisional:
@@ -4237,12 +4241,37 @@ async def agent_report_vulnerability(
                     scan,
                 )
             )
-            if auto_fp_review:
-                ensured = _ensure_fp_review_job_for_scan(
+            reported_session_id = reported_execution_session_id
+            scan_session_id = str(
+                meta.execution_agent_session_id if meta is not None else ""
+            ).strip()
+            can_dispatch_immediately = (
+                supports_fp_review_execution_revision
+                and bool(reported_session_id)
+                and reported_session_id == scan_session_id
+            )
+            if (
+                supports_fp_review_execution_revision
+                and reported_session_id
+                and scan_session_id
+                and reported_session_id != scan_session_id
+            ):
+                logger.warning(
+                    "Skipping immediate FP review for stale scan execution "
+                    "scan=%s vuln=%d reported_session=%s current_session=%s",
+                    scan_id,
+                    vuln_index,
+                    reported_session_id,
+                    scan_session_id,
+                )
+            if auto_fp_review and can_dispatch_immediately:
+                ensured = await run_store_call(
+                    store,
+                    _ensure_fp_review_job_for_scan,
                     scan_id,
                     scan,
                     allow_cancelled=False,
-                    publish_started=True,
+                    publish_started=False,
                     require_unresolved=True,
                 )
                 if (
@@ -4253,17 +4282,47 @@ async def agent_report_vulnerability(
                     latest_results = (
                         ensured.get("latest_results") or {}
                     )
+                    queued = vuln_index not in latest_results
                     fp_review_info = {
                         "review_id": ensured["review_id"],
                         "method": fp_review_method,
                         "vuln_index": vuln_index,
-                        "queued": vuln_index not in latest_results,
+                        "queued": queued,
                         "total": ensured["total"],
                         "processed": ensured["processed"],
                     }
+                    if queued:
+                        previous_status = str(
+                            ensured.get("previous_status") or ""
+                        )
+                        execution_revision = await run_store_call(
+                            store,
+                            "acquire_fp_review_execution",
+                            str(ensured["review_id"]),
+                            agent_session_id=scan_session_id,
+                            force_new=(
+                                previous_status
+                                not in {
+                                    FpReviewStatus.PENDING.value,
+                                    FpReviewStatus.RUNNING.value,
+                                }
+                            ),
+                        )
+                        fp_review_info.update({
+                            "execution_agent_session_id": scan_session_id,
+                            "execution_revision": execution_revision,
+                        })
+                        publish(scan_id, "fp_review_started", {
+                            "review_id": ensured["review_id"],
+                            "execution_revision": execution_revision,
+                            "method": fp_review_method,
+                            "status": FpReviewStatus.RUNNING.value,
+                            "total": ensured["total"],
+                            "processed": ensured["processed"],
+                        })
         except Exception as exc:
             logger.warning(
-                "Failed to render vulnerability report for validation scan=%s idx=%s: %s",
+                "Failed to prepare vulnerability downstream work scan=%s idx=%s: %s",
                 scan_id,
                 vuln_index,
                 exc,
@@ -5381,7 +5440,7 @@ async def agent_get_processed_candidate_indexes(scan_id: str) -> list[int]:
 
 
 class _IndexStatusBody(BaseModel):
-    status: str           # "parsing" | "done" | "error"
+    status: str           # "not_started" | "parsing" | "done" | "error" | "skipped"
     parsed_files: int = 0
     total_files: int = 0
     stage: str = ""

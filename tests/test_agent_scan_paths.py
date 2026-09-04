@@ -44,6 +44,7 @@ from deephole_client.vulnerability_mining.engines.threat_audit.engine import (
 
 def _reporter() -> SimpleNamespace:
     reporter = SimpleNamespace(
+        agent_session_id="session-1",
         send_event=AsyncMock(),
         finish_scan=AsyncMock(),
         send_index_status=AsyncMock(),
@@ -145,6 +146,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "vuln_index": 0,
                 "queued": True,
                 "processed": 0,
+                "execution_agent_session_id": "session-1",
+                "execution_revision": 3,
             },
         }
         config = AgentConfig()
@@ -177,15 +180,60 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(enqueue.await_args.kwargs["method"], "fp_check")
+        self.assertEqual(enqueue.await_args.kwargs["execution_revision"], 3)
         self.assertEqual(len(reported), 1)
         self.assertEqual(reported[0][1]["index"], 0)
+
+    async def test_old_backend_fp_callback_waits_for_scan_finish_dispatch(self) -> None:
+        reporter = _reporter()
+        reporter.report_vulnerability.return_value = {
+            "index": 0,
+            "fp_review": {
+                "review_id": "review-old-backend",
+                "method": "adversarial",
+                "vuln_index": 0,
+                "queued": True,
+                "processed": 0,
+            },
+        }
+        enqueue = AsyncMock()
+        config = AgentConfig()
+        config.vulnerability_validation.enabled = False
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("deephole_client.server.enqueue_fp_review", enqueue),
+        ):
+            project = Path(tmp)
+            await _report_process_vulnerabilities(
+                reporter=reporter,
+                config=config,
+                scan_id="scan-1",
+                project_path=project,
+                code_scan_path=project,
+                product="",
+                validation_environment="",
+                feedback_entries=[],
+                code_graph_mcp=None,
+                engine=MiningEngineSelection(
+                    engine_id="static_candidate",
+                    engine_label="Static",
+                    enabled=True,
+                ),
+                values=[_vulnerability()],
+            )
+
+        enqueue.assert_not_awaited()
 
     async def test_reporter_delivery_callback_dispatches_downstream_once(
         self,
     ) -> None:
+        seen_params: list[dict | None] = []
+
         class SuccessfulClient:
             async def post(self, url, json=None, params=None, timeout=None):
-                del json, params, timeout
+                del json, timeout
+                seen_params.append(params)
                 return httpx.Response(
                     200,
                     request=httpx.Request("POST", url),
@@ -198,6 +246,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                             "vuln_index": 0,
                             "queued": True,
                             "processed": 0,
+                            "execution_agent_session_id": "session-delivered",
+                            "execution_revision": 4,
                         },
                     },
                 )
@@ -213,6 +263,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "http://server",
                 outbox_path=project / "outbox.sqlite3",
             )
+            reporter.agent_session_id = "session-delivered"
             reporter._client = SuccessfulClient()  # type: ignore[assignment]
             with (
                 patch("deephole_client.server.enqueue_fp_review", enqueue),
@@ -249,6 +300,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             enqueue.await_args.kwargs["review_id"],
             "review-delivered",
+        )
+        self.assertEqual(enqueue.await_args.kwargs["execution_revision"], 4)
+        self.assertEqual(
+            seen_params[0],
+            {"supports_fp_review_execution_revision": "true"},
         )
         self.assertEqual(len(reported), 1)
         self.assertEqual(reported[0][1]["index"], 0)
@@ -755,6 +811,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "attack_tree_path": str(root / "attack-tree.json"),
                 "high_risk_modules_path": str(root / "risk.json"),
             })
+            graph = AsyncMock(return_value={
+                "status": "success",
+                "index_db_path": str(index_path),
+                "stats": {"files": 0},
+            })
             mining = AsyncMock()
             with (
                 patch("deephole_client.scanner.Path.home", return_value=root),
@@ -765,11 +826,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 ) as scan_context,
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
-                    new=AsyncMock(return_value={
-                        "status": "success",
-                        "index_db_path": str(index_path),
-                        "stats": {"files": 0},
-                    }),
+                    new=graph,
                 ),
                 patch(
                     "deephole_client.scanner.run_threat_analysis",
@@ -801,6 +858,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         analysis.assert_awaited_once()
+        graph.assert_not_awaited()
+        reporter.send_index_status.assert_awaited_once_with(
+            "scan-analysis-only",
+            "skipped",
+        )
         scan_context.assert_called_once()
         self.assertEqual(
             scan_context.call_args.kwargs["project_dir"],
@@ -1677,7 +1739,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         config = AgentConfig()
         started: list[str] = []
         manifests = [
-            SimpleNamespace(engine_id="good", label="Good", fp_review=False),
+            SimpleNamespace(
+                engine_id="static_candidate",
+                label="Static",
+                fp_review=False,
+            ),
             SimpleNamespace(engine_id="bad", label="Bad", fp_review=False),
         ]
         loaded = {
@@ -1700,6 +1766,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             project.mkdir()
             index_path = root / "index.db"
             index_path.touch()
+            graph = AsyncMock(return_value={
+                "status": "success",
+                "index_db_path": str(index_path),
+                "stats": {"files": 0},
+            })
             with (
                 patch("deephole_client.scanner.Path.home", return_value=root),
                 patch("deephole_client.scanner.configure_platform_runtime"),
@@ -1717,11 +1788,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
-                    new=AsyncMock(return_value={
-                        "status": "success",
-                        "index_db_path": str(index_path),
-                        "stats": {"files": 0},
-                    }),
+                    new=graph,
                 ),
             ):
                 await run_scan(
@@ -1739,8 +1806,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     retry_mining_engine_ids=["bad"],
                     mining_engines=[
                         {
-                            "engine_id": "good",
-                            "engine_label": "Good",
+                            "engine_id": "static_candidate",
+                            "engine_label": "Static",
                             "enabled": True,
                         },
                         {
@@ -1752,6 +1819,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(started, ["bad"])
+        graph.assert_not_awaited()
+        reporter.send_index_status.assert_not_awaited()
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
         self.assertIn(
             "Bad: retry still failed",
@@ -2324,14 +2393,21 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(both_started.wait(), timeout=1)
             if engine.manifest.engine_id == "bad":
                 raise RuntimeError("adapter exploded")
+            for current in (0, 2, 1):
+                await engine_kwargs["output"]({
+                    "process": "good",
+                    "kind": "progress",
+                    "message": "Engine progress",
+                    "data": {"current": current, "total": 3},
+                })
             await engine_kwargs["report_vulnerabilities"]([
                 _vulnerability(),
             ])
             return {
                 "status": "success",
                 "error_message": "",
-                "total_candidates": 1,
-                "processed_candidates": 1,
+                "total_candidates": 3,
+                "processed_candidates": 3,
             }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2465,6 +2541,27 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("success", run_states)
         self.assertIn("error", run_states)
         self.assertEqual(run_states.count("error"), 2)
+        good_runs = [
+            call.args[1]
+            for call in reporter.report_mining_engine_run.await_args_list
+            if call.args[1]["engine_id"] == "good"
+        ]
+        self.assertEqual(
+            [
+                (
+                    run["status"],
+                    run["processed_candidates"],
+                    run["total_candidates"],
+                )
+                for run in good_runs
+            ],
+            [
+                ("running", None, None),
+                ("running", 0, 3),
+                ("running", 2, 3),
+                ("success", 3, 3),
+            ],
+        )
 
     async def test_missing_codex_only_blocks_engines_that_require_it(
         self,

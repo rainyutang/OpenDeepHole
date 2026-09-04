@@ -7,6 +7,46 @@ from backend.store.sqlite import SqliteScanStore
 
 
 class FpReviewStoreTests(unittest.TestCase):
+    def test_acquire_fp_review_execution_reuses_one_agent_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scan.db")
+            store.create_fp_review_job(
+                "review",
+                "scan-1",
+                1,
+                "2026-01-01T00:00:00+00:00",
+            )
+
+            first = store.acquire_fp_review_execution(
+                "review",
+                agent_session_id="session-1",
+            )
+            repeated = store.acquire_fp_review_execution(
+                "review",
+                agent_session_id="session-1",
+            )
+            rerun = store.acquire_fp_review_execution(
+                "review",
+                agent_session_id="session-1",
+                force_new=True,
+            )
+            repeated_rerun = store.acquire_fp_review_execution(
+                "review",
+                agent_session_id="session-1",
+            )
+            restarted_agent = store.acquire_fp_review_execution(
+                "review",
+                agent_session_id="session-2",
+            )
+
+            self.assertEqual((first, repeated), (1, 1))
+            self.assertEqual((rerun, repeated_rerun), (2, 2))
+            self.assertEqual(restarted_agent, 3)
+            job = store.get_fp_review_job("review")
+            self.assertIsNotNone(job)
+            self.assertEqual(job.execution_agent_session_id, "session-2")
+            self.assertEqual(job.execution_revision, 3)
+
     def test_lists_results_for_scan_oldest_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scan.db")

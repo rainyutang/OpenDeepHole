@@ -652,7 +652,7 @@ export interface CodeIndexStats {
 }
 
 export interface IndexStatus {
-  status: "not_started" | "parsing" | "done" | "error" | "unknown";
+  status: "not_started" | "parsing" | "done" | "error" | "skipped" | "unknown";
   parsed_files?: number;
   total_files?: number;
   stage?: string;
@@ -835,6 +835,8 @@ export interface MiningEngineRunStatus {
   error_message: string;
   started_at: string;
   finished_at: string;
+  total_candidates?: number | null;
+  processed_candidates?: number | null;
 }
 
 export interface ThreatAnalysisRunStatus {

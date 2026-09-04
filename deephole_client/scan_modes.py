@@ -16,6 +16,10 @@ SCAN_MODE_THREAT_ANALYSIS_ONLY = "threat_analysis_only"
 # Used only when resolving newly created quick/standard scans. Resumes keep the
 # engine selections persisted with the original scan.
 BUILTIN_PROFILE_ENGINE_IDS = ("static_candidate", "threat_pattern_audit")
+STATIC_ANALYSIS_ENGINE_IDS = frozenset({
+    "static_candidate",
+    "multi_version",
+})
 THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS = frozenset({
     "threat_audit",
     "threat_pattern_audit",

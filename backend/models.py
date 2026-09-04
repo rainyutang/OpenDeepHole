@@ -263,6 +263,8 @@ class MiningEngineRunStatus(BaseModel):
     error_message: str = ""
     started_at: str = ""
     finished_at: str = ""
+    total_candidates: int | None = Field(default=None, ge=0)
+    processed_candidates: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _canonicalize_engine_label(self):
@@ -270,6 +272,14 @@ class MiningEngineRunStatus(BaseModel):
             self.engine_id,
             self.engine_label,
         )
+        if (
+            self.total_candidates is not None
+            and self.processed_candidates is not None
+            and self.processed_candidates > self.total_candidates
+        ):
+            raise ValueError(
+                "processed_candidates must not exceed total_candidates",
+            )
         return self
 
 

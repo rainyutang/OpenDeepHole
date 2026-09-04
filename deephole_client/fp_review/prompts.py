@@ -38,7 +38,7 @@ def build_skill_prompt(
     sections: Iterable[tuple[str, str]],
     output_schema: dict[str, Any],
 ) -> str:
-    """Build ``/skill`` + task + Markdown reports + the output schema."""
+    """Build ``/skill`` + task + reports + schema + language instruction."""
     normalized_skill = str(skill_name or "").strip().lstrip("/")
     normalized_task = str(task or "").strip()
     if not normalized_skill:
@@ -63,6 +63,8 @@ def build_skill_prompt(
         "```json",
         json.dumps(output_schema, ensure_ascii=False, indent=2),
         "```",
+        "",
+        "请使用中文输出",
     ])
     return "\n".join(parts)
 

@@ -5,7 +5,7 @@ import unittest
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from deephole_client import server
 
@@ -19,6 +19,54 @@ class FpReviewAgentDispatchTests(unittest.IsolatedAsyncioTestCase):
         server._fp_review_queue_events.clear()
         server._fp_review_active_items.clear()
         server._fp_review_running_indices.clear()
+        server._fp_review_execution_revisions.clear()
+
+    async def test_duplicate_dispatch_updates_revision_before_queue_dedup(self) -> None:
+        reporter = SimpleNamespace(
+            set_fp_review_execution=MagicMock(return_value=2),
+        )
+        review_id = "review-revision"
+        item_key = (review_id, 7)
+        server._fp_review_active_items.add(item_key)
+        server._fp_review_execution_revisions[review_id] = 1
+
+        queued = await server.enqueue_fp_review(
+            config=SimpleNamespace(),
+            reporter=reporter,
+            scan_id="scan-1",
+            review_id=review_id,
+            method="adversarial",
+            project_path="/repo",
+            code_scan_path="/repo/src",
+            vulnerability={"index": 7},
+            execution_revision=2,
+        )
+
+        self.assertFalse(queued)
+        self.assertEqual(server._fp_review_execution_revisions[review_id], 2)
+        reporter.set_fp_review_execution.assert_called_once_with(review_id, 2)
+
+    async def test_delayed_dispatch_cannot_downgrade_known_revision(self) -> None:
+        reporter = SimpleNamespace(
+            set_fp_review_execution=MagicMock(return_value=3),
+        )
+        server._fp_review_execution_revisions["review-stale"] = 3
+
+        queued = await server.enqueue_fp_review(
+            config=SimpleNamespace(),
+            reporter=reporter,
+            scan_id="scan-1",
+            review_id="review-stale",
+            method="adversarial",
+            project_path="/repo",
+            code_scan_path="/repo/src",
+            vulnerability={"index": 8},
+            execution_revision=2,
+        )
+
+        self.assertFalse(queued)
+        self.assertEqual(server._fp_review_execution_revisions["review-stale"], 3)
+        self.assertNotIn(("review-stale", 8), server._fp_review_active_items)
 
     async def test_manifest_controls_worker_concurrency(self) -> None:
         original_config = server._config

@@ -81,6 +81,8 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("# Prove Bug Skill", prompt)
         self.assertIn("## 输出 JSON Schema", prompt)
         self.assertIn('"verdict"', prompt)
+        self.assertTrue(prompt.endswith("\n\n请使用中文输出"))
+        self.assertEqual(prompt.count("请使用中文输出"), 1)
         self.assertNotIn("invalid_json_retry_prompt", invoke.await_args.kwargs)
         self.assertIn("output_schema", invoke.await_args.kwargs)
         self.assertEqual(
@@ -152,6 +154,13 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## 输出 JSON Schema", final_prompt)
         self.assertIn('"verdict"', final_prompt)
         for call in invoke.await_args_list:
+            self.assertTrue(
+                call.kwargs["prompt"].endswith("\n\n请使用中文输出")
+            )
+            self.assertEqual(
+                call.kwargs["prompt"].count("请使用中文输出"),
+                1,
+            )
             self.assertEqual(
                 _prompt_schema(call.kwargs["prompt"]),
                 call.kwargs["output_schema"],

@@ -276,6 +276,100 @@ def test_code_graph_build_stages_database_beside_final_index() -> None:
         asyncio.run(scenario(Path(temp)))
 
 
+def test_code_graph_build_defaults_to_and_indexes_the_scan_root() -> None:
+    async def scenario(root: Path) -> None:
+        project = root / "project"
+        scan_root = project / "services" / "api"
+        scan_root.mkdir(parents=True)
+        legacy_index = project / "code_index.db"
+        legacy_index.write_bytes(b"legacy-project-index")
+        analyzed_roots: list[Path] = []
+
+        def analyze(
+            _self,
+            directory,
+            *,
+            on_progress,
+            on_stage_progress,
+            cancel_check,
+        ) -> None:
+            del on_progress, on_stage_progress, cancel_check
+            analyzed_roots.append(Path(directory))
+
+        with patch.object(
+            CppAnalyzer,
+            "analyze_directory",
+            autospec=True,
+            side_effect=analyze,
+        ):
+            result = await run_code_graph_build(
+                project_path=project,
+                code_scan_path=scan_root,
+                work_dir=root / "work",
+                reuse_cache=False,
+            )
+
+        expected_index = scan_root / "code_index.db"
+        assert result["status"] == "success"
+        assert Path(result["index_db_path"]) == expected_index.resolve()
+        assert analyzed_roots == [scan_root.resolve()]
+        assert expected_index.is_file()
+        assert legacy_index.read_bytes() == b"legacy-project-index"
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
+
+
+def test_static_candidate_paths_remain_project_relative_for_scan_root_index() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        project = Path(temp) / "project"
+        scan_root = project / "src"
+        scan_root.mkdir(parents=True)
+        (project / "same.c").write_text("project", encoding="utf-8")
+        (scan_root / "same.c").write_text("scan", encoding="utf-8")
+
+        scan_relative = static_analysis_runner._normalize_candidate(
+            Candidate(
+                file="same.c",
+                line=1,
+                function="scan_relative",
+                description="candidate",
+                vuln_type="demo",
+            ),
+            project,
+            scan_root,
+        )
+        project_relative = static_analysis_runner._normalize_candidate(
+            Candidate(
+                file="src/same.c",
+                line=1,
+                function="project_relative",
+                description="candidate",
+                vuln_type="demo",
+            ),
+            project,
+            scan_root,
+        )
+        project_level = static_analysis_runner._normalize_candidate(
+            Candidate(
+                file="src",
+                line=1,
+                function=static_analysis_runner.PROJECT_LEVEL_FUNCTION,
+                description="project candidate",
+                vuln_type="demo",
+            ),
+            project,
+            scan_root,
+        )
+
+    assert scan_relative is not None
+    assert scan_relative.file == "src/same.c"
+    assert project_relative is not None
+    assert project_relative.file == "src/same.c"
+    assert project_level is not None
+    assert project_level.file == "src"
+
+
 def test_code_graph_progress_gate_reports_each_stage_by_decile() -> None:
     gate = _StageProgressGate()
 

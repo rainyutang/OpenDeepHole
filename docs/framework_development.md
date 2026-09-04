@@ -39,8 +39,10 @@ Web 服务负责创建任务、固化选择并通过 WebSocket 下发；Agent �
 flowchart TD
     A[Web 创建扫描并固化配置] --> B[Agent 接收任务]
     B --> C[准备扫描目录和可选代码图谱 MCP]
-    C --> D[构建或复用 code_index.db]
-    D --> E{扫描模式与固化选择}
+    C --> D{本轮运行静态分析引擎?}
+    D -->|是| IDX[在 code_scan_path 构建或复用 code_index.db]
+    D -->|否| E{扫描模式与固化选择}
+    IDX --> E
 
     E -->|启用| TA[威胁分析]
     E -->|选择引擎| ME[并发启动漏洞挖掘引擎]
@@ -70,8 +72,10 @@ flowchart TD
 1. `quick` 与 `standard` 固定启用威胁分析、`static_candidate`、`threat_pattern_audit` 和自动去误报；
    `custom` 使用创建请求中的原有开关与引擎选择。三个模式分别读取 Agent 高级配置中的
    Checker 排除列表，并在创建时固化实际规则快照。
-2. 代码图谱构建是扫描的前置基础过程。构建失败时，不启动后续分析。
-3. 代码图谱成功后，独立威胁分析和已选漏洞挖掘引擎可以并发执行。
+2. 只有本轮运行 `static_candidate` 或 `multi_version` 时才构建代码图谱；构建失败时，
+   不启动后续分析。未运行静态分析消费者时直接跳过该过程。
+3. 需要代码图谱时，构建成功后独立威胁分析和已选漏洞挖掘引擎可以并发执行；跳过时
+   直接进入同一调度阶段。
 4. `static_candidate` 引擎内部先执行静态分析，再把候选点交给候选点审计。
 5. `threat_pattern_audit` 与 `threat_audit` 都是漏洞挖掘引擎，不是威胁分析的一部分；
    它们必须等待威胁分析成功，再读取攻击树和高风险模块产物。
@@ -95,7 +99,7 @@ flowchart TD
 
 | 过程 | 公开入口 | 主要输入 | 主要返回 |
 | --- | --- | --- | --- |
-| 代码图谱构建 | `run_code_graph_build(**kwargs)` | 项目路径、扫描范围、工作目录 | `status`、`index_db_path`、`cache_hit`、`stats`、`indexer_version` |
+| 代码图谱构建 | `run_code_graph_build(**kwargs)` | 项目路径、实际索引的扫描路径、工作目录 | `status`、`index_db_path`、`cache_hit`、`stats`、`indexer_version` |
 | 威胁分析 | `threat_analysis_runner.run_threat_analysis(**kwargs)` | 项目总路径、代码扫描路径、产物目录、恢复标记 | 原生 `result`、失败 `reason`，以及三类 JSON 产物路径 |
 | 静态分析 | `run_static_analysis(**kwargs)` | 代码索引、规则目录、Checker 选择 | `status`、`candidates`、`stats` |
 | 候选点审计 | `run_candidate_audit(**kwargs)` | 带扫描内 `idx` 的候选点、规则 Skill、代码索引 | `status`、单候选唯一 `vulnerabilities`、`processed_candidate_indexes` |
@@ -176,6 +180,8 @@ def run_threat_analysis(
 框架还会向内置引擎传入 `reporter`；第三方引擎不应依赖该平台对象，应优先使用
 `output` 和 `report_vulnerabilities`。`threat_analysis_result` 只传给内置的
 `threat_audit` 与 `threat_pattern_audit`，普通扩展引擎不应假设该 key 存在。
+`index_db_path` 只有在本轮运行 `static_candidate` 或 `multi_version` 时保证对应文件存在；
+其默认位置是 `<code_scan_path>/code_index.db`，内容及缓存复用范围也只覆盖该扫描路径。
 
 服务端续扫命令中的 `retry_mining_engine_ids` 由 Agent 扫描协调器消费，用来筛选本轮实际启动
 的引擎，不属于单个引擎的 `kwargs`。因此第三方引擎仍只需通过 `is_resume` 和自己的细粒度
