@@ -399,6 +399,8 @@ export function normalizeScanStatus(value: unknown): ScanStatus | null {
       ...item,
       engine_id: text(item.engine_id),
       status: text(item.status),
+      total_candidates: nullableFiniteNumber(item.total_candidates),
+      processed_candidates: nullableFiniteNumber(item.processed_candidates),
     })) as ScanStatus["mining_engine_runs"],
     created_at: text(value.created_at),
     status,

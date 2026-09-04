@@ -19,9 +19,11 @@ import {
   STATIC_CANDIDATE_ENGINE_LABEL,
   THREAT_AUDIT_ENGINE_ID as THREAT_ENGINE_ID,
   THREAT_AUDIT_ENGINE_LABEL,
+  THREAT_PATTERN_AUDIT_ENGINE_ID as THREAT_PATTERN_ENGINE_ID,
   THREAT_PATTERN_AUDIT_ENGINE_LABEL,
   canonicalMiningEngineLabel,
   miningEngineRequiresCodeIndex,
+  threatPatternAuditFlowDetail,
 } from "../miningEngines";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
@@ -2772,6 +2774,8 @@ function buildProcessFlowModel({
         : scan.threat_analysis
           ? "等待创建审计任务"
           : "等待威胁分析完成"
+      : engine.engine_id === THREAT_PATTERN_ENGINE_ID
+        ? threatPatternAuditFlowDetail(run, Boolean(scan.threat_analysis))
       : run?.error_message
         || (engine.engine_id === STATIC_ENGINE_ID && staticRunning
           ? `静态分析 ${scan.static_scanned_files}/${scan.static_total_files || "?"} 文件`

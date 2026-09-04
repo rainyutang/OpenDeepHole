@@ -207,6 +207,8 @@ class AgentReporterTests(unittest.TestCase):
                     "engine_id": "static_candidate",
                     "engine_label": "Static",
                     "status": "success",
+                    "total_candidates": 4,
+                    "processed_candidates": 4,
                 },
             )
             await reporter.report_mining_engine_run(
@@ -238,6 +240,14 @@ class AgentReporterTests(unittest.TestCase):
         self.assertEqual(
             [run["engine_id"] for run in finish["json"]["mining_engine_runs"]],
             ["static_candidate"],
+        )
+        self.assertEqual(
+            finish["json"]["mining_engine_runs"][0]["processed_candidates"],
+            4,
+        )
+        self.assertEqual(
+            finish["json"]["mining_engine_runs"][0]["total_candidates"],
+            4,
         )
         self.assertNotIn("scan-1", reporter._threat_analysis_run_snapshots)
         self.assertNotIn("scan-1", reporter._mining_engine_run_snapshots)

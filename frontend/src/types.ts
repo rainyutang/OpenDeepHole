@@ -835,6 +835,8 @@ export interface MiningEngineRunStatus {
   error_message: string;
   started_at: string;
   finished_at: string;
+  total_candidates?: number | null;
+  processed_candidates?: number | null;
 }
 
 export interface ThreatAnalysisRunStatus {

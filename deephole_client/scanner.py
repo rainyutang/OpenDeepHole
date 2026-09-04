@@ -1244,6 +1244,31 @@ async def run_scan(
             engine_id=selection.engine_id,
             engine_label=selection.engine_label,
         )
+        progress_lock = asyncio.Lock()
+
+        async def process_engine_output(event: dict[str, Any]) -> None:
+            await process_output(event)
+            if str(event.get("process") or "") != selection.engine_id:
+                return
+            counts = _event_progress_counts(event)
+            if counts is None:
+                return
+            current, total = counts
+            async with progress_lock:
+                next_total = max(run.total_candidates or 0, total)
+                next_processed = min(
+                    next_total,
+                    max(run.processed_candidates or 0, current),
+                )
+                if (
+                    run.total_candidates == next_total
+                    and run.processed_candidates == next_processed
+                ):
+                    return
+                run.total_candidates = next_total
+                run.processed_candidates = next_processed
+                await _publish_engine_run(reporter, scan_id, run)
+
         if loaded is None:
             run.status = "error"
             run.error_message = "Engine adapter is unavailable"
@@ -1400,7 +1425,7 @@ async def run_scan(
             "retry_processed_offset": retry_processed_offset,
             "resume_threat_analysis": resume_threat_analysis,
             "retry_threat_audit_task_ids": retry_threat_audit_task_ids,
-            "output": process_output,
+            "output": process_engine_output,
             "cancel_event": cancel_event,
             "report_vulnerabilities": report_values,
         }
@@ -1417,6 +1442,17 @@ async def run_scan(
             output = await run_mining_engine(loaded, **engine_kwargs)
             run.status = str(output["status"])
             run.error_message = str(output["error_message"])
+            run.total_candidates = max(
+                run.total_candidates or 0,
+                int(output["total_candidates"]),
+            )
+            run.processed_candidates = min(
+                run.total_candidates,
+                max(
+                    run.processed_candidates or 0,
+                    int(output["processed_candidates"]),
+                ),
+            )
             return run, output
         except asyncio.CancelledError:
             run.status = "cancelled"

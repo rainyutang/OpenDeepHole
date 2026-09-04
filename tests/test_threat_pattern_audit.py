@@ -172,6 +172,7 @@ def test_engine_writes_and_validates_one_result(tmp_path: Path) -> None:
     attack_tree_path, modules_path = _artifacts(tmp_path)
     captured: dict = {}
     reported: list[dict] = []
+    events: list[dict] = []
 
     class Reporter:
         async def get_vulnerability_dedup_context(self, scan_id: str):
@@ -197,8 +198,8 @@ def test_engine_writes_and_validates_one_result(tmp_path: Path) -> None:
         reported.extend(values)
         return [(values[0], {"deduplicated": True, "index": 3})]
 
-    async def output(_event):
-        return None
+    async def output(event):
+        events.append(event)
 
     kwargs = {
         "engine_id": "threat_pattern_audit",
@@ -246,6 +247,11 @@ def test_engine_writes_and_validates_one_result(tmp_path: Path) -> None:
     assert reported[0]["analysis_source"] == "threat_pattern_audit"
     assert reported[0]["confirmed"] is True
     assert reported[0]["vulnerability_report"].startswith("# 漏洞报告")
+    assert [
+        (event["data"]["current"], event["data"]["total"])
+        for event in events
+        if event["message"] == "攻击模式审计进度"
+    ] == [(0, 1), (1, 1)]
 
     schema_path = work_dir / "threat-pattern-result.schema.json"
     result_paths = list((work_dir / "task-results").glob("*.json"))
@@ -331,6 +337,189 @@ def test_engine_treats_empty_result_as_completed(tmp_path: Path) -> None:
     ) == []
     assert "JSON Schema 文件：" in captured["prompt"]
     assert '"minItems"' not in captured["prompt"]
+
+
+def test_failed_audit_advances_processed_progress(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    work_dir = tmp_path / "work"
+    project_path.mkdir()
+    attack_tree_path, modules_path = _artifacts(tmp_path)
+    events: list[dict] = []
+
+    async def fake_run_opencode_task(**_kwargs):
+        raise RuntimeError("provider failed")
+
+    async def output(event):
+        events.append(event)
+
+    with patch.object(engine, "run_opencode_task", new=fake_run_opencode_task):
+        result = asyncio.run(engine.run(
+            engine_id="threat_pattern_audit",
+            scan_id="scan-failed",
+            project_path=project_path,
+            code_scan_path=project_path,
+            work_dir=work_dir,
+            config=SimpleNamespace(
+                opencode_concurrency=1,
+                vulnerability_mining=SimpleNamespace(
+                    required_capability="high",
+                ),
+            ),
+            feedback_entries=[],
+            code_graph_mcp=None,
+            knowledge_base_mcp=None,
+            cancel_event=threading.Event(),
+            output=output,
+            report_vulnerabilities=lambda _values: None,
+            threat_analysis_result={
+                "result": True,
+                "attack_tree_path": str(attack_tree_path),
+                "high_risk_modules_path": str(modules_path),
+            },
+        ))
+
+    assert result["status"] == "error"
+    assert result["total_candidates"] == 1
+    assert result["processed_candidates"] == 1
+    assert "provider failed" in result["error_message"]
+    assert [
+        (event["data"]["current"], event["data"]["total"])
+        for event in events
+        if event["message"] == "攻击模式审计进度"
+    ] == [(0, 1), (1, 1)]
+
+
+def test_engine_reports_zero_progress_when_there_are_no_targets(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    work_dir = tmp_path / "work"
+    project_path.mkdir()
+    attack_tree_path, modules_path = _artifacts(tmp_path)
+    events: list[dict] = []
+
+    async def output(event):
+        events.append(event)
+
+    async def report_vulnerabilities(_values):
+        raise AssertionError("an empty target set must not report findings")
+
+    with patch.object(engine, "_build_targets", return_value=[]):
+        result = asyncio.run(engine.run(
+            engine_id="threat_pattern_audit",
+            scan_id="scan-empty-targets",
+            project_path=project_path,
+            code_scan_path=project_path,
+            work_dir=work_dir,
+            config=SimpleNamespace(
+                opencode_concurrency=1,
+                vulnerability_mining=SimpleNamespace(
+                    required_capability="high",
+                ),
+            ),
+            feedback_entries=[],
+            code_graph_mcp=None,
+            knowledge_base_mcp=None,
+            cancel_event=threading.Event(),
+            output=output,
+            report_vulnerabilities=report_vulnerabilities,
+            threat_analysis_result={
+                "result": True,
+                "attack_tree_path": str(attack_tree_path),
+                "high_risk_modules_path": str(modules_path),
+            },
+        ))
+
+    assert result == {
+        "status": "success",
+        "error_message": "",
+        "total_candidates": 0,
+        "processed_candidates": 0,
+    }
+    assert [
+        (event["data"]["current"], event["data"]["total"])
+        for event in events
+        if event["message"] == "攻击模式审计进度"
+    ] == [(0, 0)]
+
+
+def test_cancelled_engine_counts_only_finished_audits(tmp_path: Path) -> None:
+    project_path = tmp_path / "project"
+    work_dir = tmp_path / "work"
+    project_path.mkdir()
+    attack_tree_path, modules_path = _artifacts(tmp_path)
+    attack_tree = json.loads(attack_tree_path.read_text(encoding="utf-8"))
+    attack_tree["attack_trees"][0]["attack_paths"][0]["attack_patterns"].append({
+        "pattern_id": "SYS-AUTH-03",
+        "pattern_name": "认证绕过",
+        "association_description": "攻击者绕过身份校验访问受保护功能。",
+    })
+    attack_tree_path.write_text(
+        json.dumps(attack_tree, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    cancel_event = threading.Event()
+    events: list[dict] = []
+    task_calls = 0
+
+    async def fake_run_opencode_task(**_kwargs):
+        nonlocal task_calls
+        task_calls += 1
+        return OpenCodeResult(
+            session_id=f"session-{task_calls}",
+            status="success",
+            text="[]",
+            structured=[],
+            model="provider/model",
+            output_source={},
+        )
+
+    async def output(event):
+        events.append(event)
+        if (
+            event["message"] == "攻击模式审计进度"
+            and event["data"].get("current") == 1
+        ):
+            cancel_event.set()
+
+    with patch.object(engine, "run_opencode_task", new=fake_run_opencode_task):
+        result = asyncio.run(engine.run(
+            engine_id="threat_pattern_audit",
+            scan_id="scan-cancelled",
+            project_path=project_path,
+            code_scan_path=project_path,
+            work_dir=work_dir,
+            config=SimpleNamespace(
+                opencode_concurrency=1,
+                vulnerability_mining=SimpleNamespace(
+                    required_capability="high",
+                ),
+            ),
+            feedback_entries=[],
+            code_graph_mcp=None,
+            knowledge_base_mcp=None,
+            cancel_event=cancel_event,
+            output=output,
+            report_vulnerabilities=lambda _values: None,
+            threat_analysis_result={
+                "result": True,
+                "attack_tree_path": str(attack_tree_path),
+                "high_risk_modules_path": str(modules_path),
+            },
+        ))
+
+    assert task_calls == 1
+    assert result == {
+        "status": "cancelled",
+        "error_message": "",
+        "total_candidates": 2,
+        "processed_candidates": 1,
+    }
+    assert [
+        (event["data"]["current"], event["data"]["total"])
+        for event in events
+        if event["message"] == "攻击模式审计进度"
+    ] == [(0, 2), (1, 2)]
 
 
 def shlex_command_fragment(executable: str) -> str:

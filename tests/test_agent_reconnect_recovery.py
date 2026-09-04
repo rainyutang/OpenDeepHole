@@ -1579,6 +1579,60 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertIn("storage_target=%s", warning_args[0])
             self.assertEqual(warning_args[1], "missing-scan")
 
+    def test_mining_engine_progress_persists_and_publishes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-pattern-progress", ScanItemStatus.AUDITING)
+            scan.mining_engines = [MiningEngineSelection(
+                engine_id="threat_pattern_audit",
+                engine_label="DeepHole基于攻击模式的漏洞挖掘引擎",
+            )]
+            scan.mining_engine_runs = [MiningEngineRunStatus(
+                engine_id="threat_pattern_audit",
+                engine_label="DeepHole基于攻击模式的漏洞挖掘引擎",
+                status="pending",
+            )]
+            meta = _meta()
+            meta.mining_engines = scan.mining_engines
+            store.save_scan(scan, meta)
+            published: list[tuple[str, str, dict]] = []
+
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch(
+                    "backend.api.agent.run_store_call",
+                    side_effect=_direct_store_call,
+                ),
+                patch(
+                    "backend.sse.publish",
+                    side_effect=lambda scan_id, event_type, data: published.append(
+                        (scan_id, event_type, data),
+                    ),
+                ),
+            ):
+                response = asyncio.run(agent_api.agent_report_mining_engine_run(
+                    "scan-pattern-progress",
+                    MiningEngineRunStatus(
+                        engine_id="threat_pattern_audit",
+                        engine_label="untrusted label",
+                        status="running",
+                        total_candidates=8,
+                        processed_candidates=3,
+                    ),
+                ))
+
+            stored = store.load_scan("scan-pattern-progress")[0]
+            run = stored.mining_engine_runs[0]
+            self.assertEqual(run.processed_candidates, 3)
+            self.assertEqual(run.total_candidates, 8)
+            self.assertEqual(response["run"]["processed_candidates"], 3)
+            self.assertEqual(response["run"]["total_candidates"], 8)
+            self.assertEqual(published[0][1], "mining_engine_run")
+            self.assertEqual(
+                published[0][2]["runs"][0]["processed_candidates"],
+                3,
+            )
+
     def test_v2_finish_merges_terminal_stage_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")
@@ -1640,6 +1694,8 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                             engine_label="untrusted label",
                             status="cancelled",
                             finished_at="2026-01-01T00:01:00+00:00",
+                            total_candidates=5,
+                            processed_candidates=3,
                         )],
                     ),
                     SimpleNamespace(base_url="http://testserver/"),
@@ -1649,18 +1705,30 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.threat_analysis_run.status, "error")
             self.assertEqual(
                 {
-                    run.engine_id: (run.engine_label, run.status)
+                    run.engine_id: (
+                        run.engine_label,
+                        run.status,
+                        run.processed_candidates,
+                        run.total_candidates,
+                    )
                     for run in stored.mining_engine_runs
                 },
                 {
-                    "engine_a": ("Engine A", "cancelled"),
-                    "engine_b": ("Engine B", "success"),
+                    "engine_a": ("Engine A", "cancelled", 3, 5),
+                    "engine_b": ("Engine B", "success", None, None),
                 },
             )
             event_types = [event_type for _scan_id, event_type, _data in published]
             self.assertIn("threat_analysis_run", event_types)
             self.assertIn("mining_engine_run", event_types)
             self.assertIn("scan_finish", event_types)
+            engine_event = next(
+                data
+                for _scan_id, event_type, data in published
+                if event_type == "mining_engine_run"
+            )
+            self.assertEqual(engine_event["run"]["processed_candidates"], 3)
+            self.assertEqual(engine_event["run"]["total_candidates"], 5)
 
     def test_finish_missing_scan_returns_structured_404(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2337,14 +2337,21 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(both_started.wait(), timeout=1)
             if engine.manifest.engine_id == "bad":
                 raise RuntimeError("adapter exploded")
+            for current in (0, 2, 1):
+                await engine_kwargs["output"]({
+                    "process": "good",
+                    "kind": "progress",
+                    "message": "Engine progress",
+                    "data": {"current": current, "total": 3},
+                })
             await engine_kwargs["report_vulnerabilities"]([
                 _vulnerability(),
             ])
             return {
                 "status": "success",
                 "error_message": "",
-                "total_candidates": 1,
-                "processed_candidates": 1,
+                "total_candidates": 3,
+                "processed_candidates": 3,
             }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2478,6 +2485,27 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("success", run_states)
         self.assertIn("error", run_states)
         self.assertEqual(run_states.count("error"), 2)
+        good_runs = [
+            call.args[1]
+            for call in reporter.report_mining_engine_run.await_args_list
+            if call.args[1]["engine_id"] == "good"
+        ]
+        self.assertEqual(
+            [
+                (
+                    run["status"],
+                    run["processed_candidates"],
+                    run["total_candidates"],
+                )
+                for run in good_runs
+            ],
+            [
+                ("running", None, None),
+                ("running", 0, 3),
+                ("running", 2, 3),
+                ("success", 3, 3),
+            ],
+        )
 
     async def test_missing_codex_only_blocks_engines_that_require_it(
         self,
