@@ -52,6 +52,7 @@ Markdown fallback。
 后续阶段只允许追加确有依赖的 `stage_markdown`（为空时回退 `reason`），不得内联人工反馈、
 历史模式、`prior_stages` JSON 或 Skill 正文。同一 Schema 也必须通过公共 Task Agent 参数传入：
 Prompt 负责首轮模型输出约束，`output_schema` 负责程序侧解析、校验与失败纠正。
+每个阶段的业务 Prompt 都必须在 JSON Schema 之后以“请使用中文输出”结尾。
 
 内置 `adversarial` 依次使用 `/prove-bug`、`/prove-fp` 和 `/final-judge`；正方判定误报时仍
 直接早退，否则最终裁决只接收原始、正方和反方三份 Markdown 报告。内置 `fp_check` 的所有阶段

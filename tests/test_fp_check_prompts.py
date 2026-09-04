@@ -149,6 +149,8 @@ class FpCheckPromptTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('"prior_stages"', prompt)
             self.assertNotIn("# Trail of Bits fp-check 复核", prompt)
             self.assertIn("## 输出 JSON Schema", prompt)
+            self.assertTrue(prompt.endswith("\n\n请使用中文输出"))
+            self.assertEqual(prompt.count("请使用中文输出"), 1)
         self.assertIn('"route"', claim_prompt)
         self.assertIn('"decision"', standard_prompt)
         self.assertIn("output_schema", invoke.await_args_list[0].kwargs)
