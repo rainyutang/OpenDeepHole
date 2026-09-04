@@ -8,8 +8,8 @@
 | `project_path` | 是 | path | - | 项目根目录 |
 | `scan_mode` | 否 | str | `custom` | 扫描模式：`quick`、`standard` 或 `custom` |
 | `work_dir` | 是 | path | - | 过程工作目录；SQLite 发布临时库固定与最终索引同目录 |
-| `code_scan_path` | 否 | path | `project_path` | 校验并记录的扫描范围 |
-| `index_db_path` | 否 | path | `<project_path>/code_index.db` | 最终索引文件 |
+| `code_scan_path` | 否 | path | `project_path` | 实际建立索引的源码范围，必须位于项目内 |
+| `index_db_path` | 否 | path | `<code_scan_path>/code_index.db` | 最终索引文件 |
 | `reuse_cache` | 否 | bool | `true` | 复用版本匹配且完整的索引 |
 | `ctags_executable` | 否 | str | `ctags` | Universal Ctags 可执行文件 |
 | `output` | 否 | callable | `None` | 同步或异步结构化事件回调 |
@@ -17,6 +17,9 @@
 
 返回值包含 `status`、`index_db_path`、`cache_hit`、`stats` 和
 `indexer_version`。取消或失败不会用半成品覆盖已有索引。
+Agent 扫描只在本轮选择静态分析消费者时调用本过程；扫描子目录时不会回退读取或删除
+`<project_path>/code_index.db`。显式 `index_db_path` 仍供独立调用和测试覆盖输出位置，
+但索引内容始终以 `code_scan_path` 为根。
 
 ```bash
 python -m deephole_client.code_graph_build \

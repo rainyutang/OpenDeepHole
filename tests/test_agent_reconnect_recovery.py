@@ -1326,6 +1326,36 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             self.assertEqual(stored.static_total_files, 128)
             self.assertFalse([data for _scan_id, event_type, data in published if event_type == "scan_status"])
 
+    def test_index_status_skipped_does_not_change_static_file_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteScanStore(Path(tmp) / "scans.db")
+            scan = _scan("scan-1", ScanItemStatus.PENDING)
+            scan.static_total_files = 128
+            scan.static_scanned_files = 64
+            store.save_scan(scan, _meta())
+            agent_api._running_scans["scan-1"] = scan
+
+            published: list[tuple[str, str, dict]] = []
+            body = agent_api._IndexStatusBody(status="skipped")
+            with (
+                patch("backend.api.agent.get_scan_store", return_value=store),
+                patch("backend.sse.publish", side_effect=lambda scan_id, event_type, data: published.append((scan_id, event_type, data))),
+            ):
+                asyncio.run(agent_api.agent_push_index_status("scan-1", body))
+
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.static_scanned_files, 64)
+            self.assertEqual(stored.static_total_files, 128)
+            self.assertEqual(
+                agent_api._scan_index_statuses["scan-1"]["status"],
+                "skipped",
+            )
+            self.assertFalse([
+                data
+                for _scan_id, event_type, data in published
+                if event_type == "scan_status"
+            ])
+
     def test_static_progress_updates_pending_scan_to_analyzing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteScanStore(Path(tmp) / "scans.db")

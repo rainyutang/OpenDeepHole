@@ -755,6 +755,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 "attack_tree_path": str(root / "attack-tree.json"),
                 "high_risk_modules_path": str(root / "risk.json"),
             })
+            graph = AsyncMock(return_value={
+                "status": "success",
+                "index_db_path": str(index_path),
+                "stats": {"files": 0},
+            })
             mining = AsyncMock()
             with (
                 patch("deephole_client.scanner.Path.home", return_value=root),
@@ -765,11 +770,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 ) as scan_context,
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
-                    new=AsyncMock(return_value={
-                        "status": "success",
-                        "index_db_path": str(index_path),
-                        "stats": {"files": 0},
-                    }),
+                    new=graph,
                 ),
                 patch(
                     "deephole_client.scanner.run_threat_analysis",
@@ -801,6 +802,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         analysis.assert_awaited_once()
+        graph.assert_not_awaited()
+        reporter.send_index_status.assert_awaited_once_with(
+            "scan-analysis-only",
+            "skipped",
+        )
         scan_context.assert_called_once()
         self.assertEqual(
             scan_context.call_args.kwargs["project_dir"],
@@ -1677,7 +1683,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         config = AgentConfig()
         started: list[str] = []
         manifests = [
-            SimpleNamespace(engine_id="good", label="Good", fp_review=False),
+            SimpleNamespace(
+                engine_id="static_candidate",
+                label="Static",
+                fp_review=False,
+            ),
             SimpleNamespace(engine_id="bad", label="Bad", fp_review=False),
         ]
         loaded = {
@@ -1700,6 +1710,11 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             project.mkdir()
             index_path = root / "index.db"
             index_path.touch()
+            graph = AsyncMock(return_value={
+                "status": "success",
+                "index_db_path": str(index_path),
+                "stats": {"files": 0},
+            })
             with (
                 patch("deephole_client.scanner.Path.home", return_value=root),
                 patch("deephole_client.scanner.configure_platform_runtime"),
@@ -1717,11 +1732,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "deephole_client.scanner.run_code_graph_build",
-                    new=AsyncMock(return_value={
-                        "status": "success",
-                        "index_db_path": str(index_path),
-                        "stats": {"files": 0},
-                    }),
+                    new=graph,
                 ),
             ):
                 await run_scan(
@@ -1739,8 +1750,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     retry_mining_engine_ids=["bad"],
                     mining_engines=[
                         {
-                            "engine_id": "good",
-                            "engine_label": "Good",
+                            "engine_id": "static_candidate",
+                            "engine_label": "Static",
                             "enabled": True,
                         },
                         {
@@ -1752,6 +1763,8 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(started, ["bad"])
+        graph.assert_not_awaited()
+        reporter.send_index_status.assert_not_awaited()
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
         self.assertIn(
             "Bad: retry still failed",

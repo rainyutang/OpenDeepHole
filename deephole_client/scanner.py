@@ -36,6 +36,7 @@ from .reporter import Reporter
 from .scan_modes import (
     SCAN_MODE_CUSTOM,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    STATIC_ANALYSIS_ENGINE_IDS,
     THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS,
     component_scan_mode,
     normalize_scan_mode,
@@ -617,6 +618,14 @@ async def run_scan(
     else:
         enabled_selections = configured_enabled_selections
         preserved_completed_engine_count = 0
+    configured_static_analysis = any(
+        item.engine_id in STATIC_ANALYSIS_ENGINE_IDS
+        for item in configured_enabled_selections
+    )
+    running_static_analysis = any(
+        item.engine_id in STATIC_ANALYSIS_ENGINE_IDS
+        for item in enabled_selections
+    )
     index_file_progress = {"current": 0, "total": 0}
 
     async def emit(
@@ -840,73 +849,77 @@ async def run_scan(
             "Scan CodeGraph MCP configured for Codex",
         )
 
-    try:
-        graph_result = await run_code_graph_build(
-            scan_mode=runtime_scan_mode,
-            project_path=project,
-            code_scan_path=scan_root,
-            work_dir=scan_dir / "code_graph_build",
-            reuse_cache=True,
-            output=process_output,
-            cancel_event=cancel_event,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        error = (
-            f"{type(exc).__name__}: {exc}"
-            if str(exc)
-            else type(exc).__name__
-        )
-        await emit(
-            "code_graph_build",
-            f"Code graph build failed: {error}",
-        )
-        graph_result = {
-            "status": "error",
-            "error": error,
-        }
-    if graph_result.get("status") != "success":
-        status = (
-            "cancelled"
-            if graph_result.get("status") == "cancelled"
-            else "error"
-        )
-        error = str(graph_result.get("error") or "")
-        if status == "error":
-            await reporter.send_index_status(
-                scan_id,
-                "error",
-                index_file_progress["current"],
-                index_file_progress["total"],
-                stage="Code graph build failed",
-                error=error,
+    index_path = scan_root / "code_index.db"
+    if running_static_analysis:
+        try:
+            graph_result = await run_code_graph_build(
+                scan_mode=runtime_scan_mode,
+                project_path=project,
+                code_scan_path=scan_root,
+                work_dir=scan_dir / "code_graph_build",
+                reuse_cache=True,
+                output=process_output,
+                cancel_event=cancel_event,
             )
-        await _finish_scan(
-            reporter,
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = (
+                f"{type(exc).__name__}: {exc}"
+                if str(exc)
+                else type(exc).__name__
+            )
+            await emit(
+                "code_graph_build",
+                f"Code graph build failed: {error}",
+            )
+            graph_result = {
+                "status": "error",
+                "error": error,
+            }
+        if graph_result.get("status") != "success":
+            status = (
+                "cancelled"
+                if graph_result.get("status") == "cancelled"
+                else "error"
+            )
+            error = str(graph_result.get("error") or "")
+            if status == "error":
+                await reporter.send_index_status(
+                    scan_id,
+                    "error",
+                    index_file_progress["current"],
+                    index_file_progress["total"],
+                    stage="Code graph build failed",
+                    error=error,
+                )
+            await _finish_scan(
+                reporter,
+                scan_id,
+                status=status,
+                vulnerabilities=[],
+                total=0,
+                processed=0,
+                error=error or None,
+                cancel_event=cancel_event,
+            )
+            return
+        index_path = Path(str(graph_result["index_db_path"]))
+        stats = dict(graph_result.get("stats") or {})
+        await reporter.send_index_status(
             scan_id,
-            status=status,
-            vulnerabilities=[],
-            total=0,
-            processed=0,
-            error=error or None,
-            cancel_event=cancel_event,
+            "done",
+            int(stats.get("files") or 0),
+            int(stats.get("files") or 0),
+            stats=stats,
         )
-        return
-    index_path = Path(str(graph_result["index_db_path"]))
-    stats = dict(graph_result.get("stats") or {})
-    await reporter.send_index_status(
-        scan_id,
-        "done",
-        int(stats.get("files") or 0),
-        int(stats.get("files") or 0),
-        stats=stats,
-    )
+    elif not configured_static_analysis:
+        await reporter.send_index_status(scan_id, "skipped")
+    # A targeted resume may keep a completed static engine in the scan snapshot
+    # without running it again. Preserve that execution's existing index status
+    # instead of rebuilding the database or overwriting the status as skipped.
 
-    if not any(
-        item.engine_id in {"static_candidate", "multi_version"}
-        for item in configured_enabled_selections
-    ):
+    if not configured_static_analysis:
         await reporter.send_static_progress(scan_id, 0, 0, done=True)
 
     pool_stop = asyncio.Event()

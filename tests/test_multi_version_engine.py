@@ -17,6 +17,7 @@ from deephole_client.vulnerability_mining.engines.multi_version.engine import (
     _candidate_similarity,
     _group_candidates,
     _report_value,
+    _scan_versions,
     _source_evidence,
     run as run_multi_version,
 )
@@ -59,6 +60,70 @@ def test_multi_version_mode_selects_only_its_combined_engine() -> None:
     )
 
     assert [item.engine_id for item in selections] == ["multi_version"]
+
+
+def test_multi_version_indexes_each_version_under_its_scan_path(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        versions = []
+        expected_indexes = []
+        for ordinal in (1, 2):
+            project = tmp_path / f"project-{ordinal}"
+            scan_root = project / "src"
+            scan_root.mkdir(parents=True)
+            versions.append({
+                "ordinal": ordinal,
+                "version_name": f"v{ordinal}",
+                "project_path": project.resolve(),
+                "code_scan_path": scan_root.resolve(),
+            })
+            expected_indexes.append((scan_root / "code_index.db").resolve())
+
+        graph_indexes: list[Path] = []
+        static_indexes: list[Path] = []
+
+        async def graph(**kwargs):
+            index_path = Path(kwargs["index_db_path"]).resolve()
+            graph_indexes.append(index_path)
+            index_path.touch()
+            return {
+                "status": "success",
+                "index_db_path": str(index_path),
+                "stats": {"files": 0},
+            }
+
+        async def static(**kwargs):
+            static_indexes.append(Path(kwargs["index_db_path"]).resolve())
+            return {"status": "success", "candidates": []}
+
+        with (
+            patch(
+                "deephole_client.vulnerability_mining.engines.multi_version.engine.run_code_graph_build",
+                side_effect=graph,
+            ),
+            patch(
+                "deephole_client.vulnerability_mining.engines.multi_version.engine.run_static_analysis",
+                side_effect=static,
+            ),
+        ):
+            status, candidates = await _scan_versions(
+                versions=versions,
+                kwargs={
+                    "work_dir": tmp_path / "work",
+                    "index_db_path": tmp_path / "legacy-index.db",
+                    "checker_names": ["oob"],
+                    "config": SimpleNamespace(static_dedup=True),
+                    "output": None,
+                    "cancel_event": asyncio.Event(),
+                },
+                rule_roots=[],
+            )
+
+        assert status == "success"
+        assert candidates == [[], []]
+        assert graph_indexes == expected_indexes
+        assert static_indexes == expected_indexes
+
+    asyncio.run(scenario())
 
 
 def test_multi_version_input_requires_unique_two_to_five_targets() -> None:

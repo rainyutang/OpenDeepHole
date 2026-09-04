@@ -151,7 +151,7 @@ async def _run_in_daemon_thread(function: Any) -> Any:
 
 
 async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
-    """Build or reuse ``code_index.db`` for one source project."""
+    """Build or reuse ``code_index.db`` for one source scan root."""
     unknown = sorted(set(kwargs) - _ALLOWED_KEYS)
     if unknown:
         raise TypeError(
@@ -191,7 +191,7 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
             "indexer_version": CodeDatabase.INDEXER_VERSION,
         }
 
-    default_path = IndexStore().db_path(project)
+    default_path = IndexStore().db_path(scan_root)
     index_path = Path(kwargs.get("index_db_path") or default_path).expanduser().resolve()
     index_path.parent.mkdir(parents=True, exist_ok=True)
     reuse_cache = bool(kwargs.get("reuse_cache", True))
@@ -257,7 +257,7 @@ async def run_code_graph_build(**kwargs: Any) -> dict[str, Any]:
                 ctags_executable=str(kwargs.get("ctags_executable") or "ctags"),
             )
             analyzer.analyze_directory(
-                project,
+                scan_root,
                 on_progress=lambda current, total: schedule(
                     "progress",
                     "Indexing source files",

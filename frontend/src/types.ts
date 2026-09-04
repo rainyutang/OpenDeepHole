@@ -652,7 +652,7 @@ export interface CodeIndexStats {
 }
 
 export interface IndexStatus {
-  status: "not_started" | "parsing" | "done" | "error" | "unknown";
+  status: "not_started" | "parsing" | "done" | "error" | "skipped" | "unknown";
   parsed_files?: number;
   total_files?: number;
   stage?: string;

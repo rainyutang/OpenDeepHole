@@ -62,7 +62,8 @@ Config update via `PUT /api/agent/{id}/config` is also pushed to the agent's liv
 analysis, prompting, auditing, review, or validation logic:
 
 ```
-1. `run_code_graph_build()` creates/reuses `code_index.db`
+1. when a static-analysis engine runs, `run_code_graph_build()` creates/reuses
+   `<code_scan_path>/code_index.db`; other scans skip this step
 2. start the scan-local MCP gateway for source queries
 3. start `run_threat_analysis()` in the background when enabled
 4. `run_static_analysis()` consumes the existing index and returns candidates
@@ -85,7 +86,11 @@ not parse whole-repo functions. Candidate descriptions should stay minimal;
 `pattern_filter` is owned by the candidate-audit process.
 
 **Resume support**: scan dir at `~/.opendeephole/scans/<scan_id>/` is preserved on cancel/error.  
-**Index storage**: `code_index.db` is stored directly in the project directory (`<project_path>/code_index.db`). Re-scanning the same project reuses the existing index.
+**Index storage**: `code_index.db` is stored directly in the resolved scan root
+(`<code_scan_path>/code_index.db`) and contains only that directory. It is built
+only when the current execution runs `static_candidate` or `multi_version`.
+Subdirectory scans ignore (and never delete) a legacy project-root index;
+re-scanning the same source scope reuses the complete scan-local index.
 
 ## Agent — FP Review Process (`deephole_client/fp_review/`)
 
@@ -194,8 +199,10 @@ Neither consumer imports the graph-build implementation.
 
 Indexing requires `ctags` from Universal Ctags with JSON output support. The Windows Agent package includes `ctags-p6.2.20260517.0-x64/ctags.exe`; `run_agent.bat` and Git Bash/MSYS/Cygwin runs of `run_agent.sh` prepend that directory to `PATH`. Linux/macOS still require a system Universal Ctags install. Missing or incompatible tools are treated as hard indexing errors.
 
-The client indexes on demand before starting consumer processes. The MCP
-Server opens the index read-only per call using `project_id`.
+The client indexes the resolved `code_scan_path` on demand only when the current
+execution includes a static-analysis consumer. Static analysis opens the
+returned index path read-only. The standalone MCP server remains an optional,
+separate consumer and is not loaded by the Agent by default.
 
 The legacy `POST /api/upload` endpoint only stores and extracts source archives;
 it does not execute code-graph construction in the backend.

@@ -105,6 +105,7 @@ from deephole_client.scan_modes import (
     SCAN_MODE_STANDARD,
     SCAN_MODE_MULTI_VERSION,
     SCAN_MODE_THREAT_ANALYSIS_ONLY,
+    STATIC_ANALYSIS_ENGINE_IDS,
     THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS,
     component_scan_mode,
     normalize_scan_mode,
@@ -1534,7 +1535,7 @@ async def create_agent_scan(
     )
     requested_checkers = checker_names if checker_names is not None else body.checkers
     static_engine_enabled = any(
-        item.enabled and item.engine_id in {"static_candidate", "multi_version"}
+        item.enabled and item.engine_id in STATIC_ANALYSIS_ENGINE_IDS
         for item in mining_engine_selections
     )
     if not static_engine_enabled:
@@ -2810,7 +2811,7 @@ async def _continue_scan(
                     bool(meta.mining_engines)
                     and not any(
                         item.enabled
-                        and item.engine_id in {"static_candidate", "multi_version"}
+                        and item.engine_id in STATIC_ANALYSIS_ENGINE_IDS
                         for item in meta.mining_engines
                     )
                 )

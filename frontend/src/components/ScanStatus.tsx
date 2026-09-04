@@ -21,6 +21,7 @@ import {
   THREAT_AUDIT_ENGINE_LABEL,
   THREAT_PATTERN_AUDIT_ENGINE_LABEL,
   canonicalMiningEngineLabel,
+  miningEngineRequiresCodeIndex,
 } from "../miningEngines";
 import VulnerabilityList from "./VulnerabilityList";
 import FeedbackManager from "./FeedbackManager";
@@ -636,18 +637,22 @@ function formatIndexProgress(indexStatus: IndexStatus | null, scan: ScanStatusTy
   done: boolean;
   running: boolean;
   failed: boolean;
+  skipped: boolean;
   stage: string;
   stageCurrent: number;
   stageTotal: number;
   stats?: CodeIndexStats;
 } {
   const status = indexStatus?.status ?? "unknown";
+  const skipped = status === "skipped" || !effectiveMiningEngines(scan).some(
+    (engine) => miningEngineRequiresCodeIndex(engine.engine_id),
+  );
   const statsFiles = indexStatus?.stats?.files ?? 0;
   const total = indexStatus?.total_files || statsFiles || scan.static_total_files || 0;
   let current = indexStatus?.parsed_files ?? scan.static_scanned_files ?? 0;
-  const failed = status === "error";
-  const running = status === "parsing";
-  const done = !running && (
+  const failed = !skipped && status === "error";
+  const running = !skipped && status === "parsing";
+  const done = !skipped && !running && (
     status === "done"
     || scan.static_analysis_done
     || (indexStatus == null && (scan.static_total_files > 0 || scan.status === "complete"))
@@ -659,6 +664,7 @@ function formatIndexProgress(indexStatus: IndexStatus | null, scan: ScanStatusTy
     done,
     running,
     failed,
+    skipped,
     stage: indexStatus?.stage ?? "",
     stageCurrent: indexStatus?.stage_current ?? 0,
     stageTotal: indexStatus?.stage_total ?? 0,
@@ -2141,9 +2147,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         {activeTab === "index" && (
           <TaskPanel
             title="代码图谱构建"
-            status={taskStateLabel(indexProgress.done, indexProgress.running, indexProgress.failed)}
+            status={indexProgress.skipped ? "已跳过" : taskStateLabel(indexProgress.done, indexProgress.running, indexProgress.failed)}
             tone={indexProgress.failed ? "red" : indexProgress.done ? "green" : indexProgress.running ? "blue" : "slate"}
-            summary="作为扫描底层能力，为静态分析、威胁分析和漏洞挖掘提供调用关系与代码上下文。"
+            summary="作为静态分析的底层能力，提供扫描路径内的函数、结构体与调用关系。"
           >
             <CallGraphBuildPanel
               indexStatus={indexStatus}
@@ -2588,6 +2594,7 @@ function buildProcessFlowModel({
     || scan.vulnerabilities.length
   );
   const staticSelected = engines.some((engine) => engine.engine_id === STATIC_ENGINE_ID);
+  const indexRequired = engines.some((engine) => miningEngineRequiresCodeIndex(engine.engine_id));
   const staticRun = miningEngineRun(scan, STATIC_ENGINE_ID);
   const staticRunning = staticSelected && scan.status === "analyzing" && !scan.static_analysis_done;
   const staticDone = staticSelected && (
@@ -2618,18 +2625,22 @@ function buildProcessFlowModel({
   const indexNode: FlowNodeView = {
     id: "index",
     label: "代码图谱构建",
-    detail: indexProgress.total > 0
-      ? `${indexProgress.current}/${indexProgress.total} 文件`
-      : "为全流程提供调用关系与代码上下文",
-    status: indexProgress.failed
-      ? "error"
-      : indexProgress.done
-        ? "done"
-        : indexProgress.running
-          ? "running"
-          : scan.status === "cancelled"
-            ? "cancelled"
-            : "pending",
+    detail: !indexRequired || indexProgress.skipped
+      ? "本次扫描未选择静态分析引擎"
+      : indexProgress.total > 0
+        ? `${indexProgress.current}/${indexProgress.total} 文件`
+        : "为静态分析提供调用关系与代码上下文",
+    status: !indexRequired || indexProgress.skipped
+      ? "disabled"
+      : indexProgress.failed
+        ? "error"
+        : indexProgress.done
+          ? "done"
+          : indexProgress.running
+            ? "running"
+            : scan.status === "cancelled"
+              ? "cancelled"
+              : "pending",
     active: activeTab === "index",
     tone: "blue",
   };
@@ -4254,10 +4265,14 @@ function ScanOverview({
           <div className="space-y-3">
             <TaskSummaryRow
               label="代码图谱构建（底层能力）"
-              status={taskStateLabel(indexProgress.done, indexProgress.running, indexProgress.failed)}
+              status={indexProgress.skipped ? "已跳过" : taskStateLabel(indexProgress.done, indexProgress.running, indexProgress.failed)}
               tone={indexProgress.failed ? "red" : indexProgress.done ? "green" : indexProgress.running ? "amber" : "slate"}
               progress={indexProgress.total ? percent(indexProgress.current, indexProgress.total) : undefined}
-              detail={indexProgress.total ? `${indexProgress.current}/${indexProgress.total} 文件` : "等待代码图谱状态"}
+              detail={indexProgress.skipped
+                ? "本次扫描未选择静态分析引擎"
+                : indexProgress.total
+                  ? `${indexProgress.current}/${indexProgress.total} 文件`
+                  : "等待代码图谱状态"}
             />
             <TaskSummaryRow
               label="静态分析"
@@ -5313,11 +5328,13 @@ function CallGraphBuildPanel({
   const globalRefs = stats?.global_variable_references ?? 0;
   const statusText = indexProgress.failed
     ? (indexStatus?.error || "索引构建失败")
-    : indexProgress.done
-      ? "索引已完成"
-      : indexProgress.running
-        ? "索引构建中"
-        : "等待索引状态";
+    : indexProgress.skipped
+      ? "本次扫描未启用静态分析，无需构建代码索引"
+      : indexProgress.done
+        ? "索引已完成"
+        : indexProgress.running
+          ? "索引构建中"
+          : "等待索引状态";
 
   return (
     <>

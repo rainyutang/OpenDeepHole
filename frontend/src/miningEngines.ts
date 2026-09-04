@@ -11,6 +11,10 @@ export const THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS = new Set([
   THREAT_AUDIT_ENGINE_ID,
   THREAT_PATTERN_AUDIT_ENGINE_ID,
 ]);
+export const STATIC_ANALYSIS_ENGINE_IDS = new Set([
+  STATIC_CANDIDATE_ENGINE_ID,
+  MULTI_VERSION_ENGINE_ID,
+]);
 
 const BUILTIN_MINING_ENGINE_LABELS: Record<string, string> = {
   [STATIC_CANDIDATE_ENGINE_ID]: STATIC_CANDIDATE_ENGINE_LABEL,
@@ -21,6 +25,10 @@ const BUILTIN_MINING_ENGINE_LABELS: Record<string, string> = {
 
 export function miningEngineRequiresThreatAnalysis(engineId: string): boolean {
   return THREAT_ANALYSIS_DEPENDENT_ENGINE_IDS.has(engineId);
+}
+
+export function miningEngineRequiresCodeIndex(engineId: string): boolean {
+  return STATIC_ANALYSIS_ENGINE_IDS.has(engineId);
 }
 
 export function canonicalMiningEngineLabel(engineId: string, label = ""): string {

@@ -5381,7 +5381,7 @@ async def agent_get_processed_candidate_indexes(scan_id: str) -> list[int]:
 
 
 class _IndexStatusBody(BaseModel):
-    status: str           # "parsing" | "done" | "error"
+    status: str           # "not_started" | "parsing" | "done" | "error" | "skipped"
     parsed_files: int = 0
     total_files: int = 0
     stage: str = ""
