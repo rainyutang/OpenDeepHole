@@ -3,6 +3,7 @@ import time
 
 import httpx
 
+import backend.store.postgres as postgres_store
 from backend.models import Candidate, ScanEvent, Vulnerability
 from backend.sse import (
     configure_distributed_sse,
@@ -10,7 +11,7 @@ from backend.sse import (
     run_distributed_sse_writer,
 )
 from backend.store.async_ops import run_store_call
-from backend.store.postgres import _Connection, _sqlite_schema
+from backend.store.postgres import PostgresScanStore, _Connection, _sqlite_schema
 from deephole_client.reporter import AGENT_BATCH_SIZE, Reporter
 
 
@@ -79,6 +80,75 @@ def test_postgres_schema_is_portable_and_dependency_ordered() -> None:
     assert _Connection._sql("SELECT '?' AS literal, value = ?") == (
         "SELECT '?' AS literal, value = %s"
     )
+
+
+def test_postgres_bootstrap_adds_legacy_columns_before_indexes(monkeypatch) -> None:
+    executed: list[str] = []
+
+    class FakeResult:
+        @staticmethod
+        def fetchall() -> list[dict]:
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        def execute(self, statement, params=None) -> FakeResult:
+            executed.append(" ".join(str(statement).split()))
+            return FakeResult()
+
+        @staticmethod
+        def executemany(statement, params) -> None:
+            return None
+
+        @staticmethod
+        def commit() -> None:
+            return None
+
+    connection = FakeConnection()
+
+    class FakePool:
+        @staticmethod
+        def connection() -> FakeConnection:
+            return connection
+
+    schema = [
+        "CREATE TABLE IF NOT EXISTS scan_candidates (scan_id TEXT)",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_scan_candidates_audit_state "
+            "ON scan_candidates(scan_id, audit_state)"
+        ),
+    ]
+    monkeypatch.setattr(postgres_store, "_sqlite_schema", lambda: schema)
+    monkeypatch.setattr(postgres_store, "_COORDINATION_SCHEMA", "")
+    monkeypatch.setattr(
+        PostgresScanStore,
+        "_backfill_candidate_audits",
+        lambda self: None,
+    )
+
+    store = object.__new__(PostgresScanStore)
+    store._pool = FakePool()
+    store._conn = connection
+    store._bootstrap()
+
+    alter_position = next(
+        index
+        for index, statement in enumerate(executed)
+        if statement.startswith(
+            "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS audit_state"
+        )
+    )
+    index_position = next(
+        index
+        for index, statement in enumerate(executed)
+        if "idx_scan_candidates_audit_state" in statement
+    )
+    assert alter_position < index_position
 
 
 def test_reporter_v2_chunks_and_uses_lightweight_finish() -> None:

@@ -39,6 +39,10 @@ _AUTOINCREMENT = re.compile(
     r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b",
     flags=re.IGNORECASE,
 )
+_CREATE_INDEX = re.compile(
+    r"^CREATE\s+(?:UNIQUE\s+)?INDEX\b",
+    flags=re.IGNORECASE,
+)
 _SCHEMA_BOOTSTRAP_LOCK_KEY = 5711767769877594435
 
 
@@ -447,9 +451,17 @@ class PostgresScanStore(SqliteScanStore):
                 "SELECT pg_advisory_xact_lock(%s)",
                 (_SCHEMA_BOOTSTRAP_LOCK_KEY,),
             )
-            deferred_report_batch_index = "idx_vulnerabilities_report_batch"
-            for statement in _sqlite_schema():
-                if deferred_report_batch_index in statement:
+            schema_statements = _sqlite_schema()
+            # Existing PostgreSQL tables can predate columns referenced by the
+            # latest SQLite-derived indexes.  Create/upgrade every table first,
+            # then add all indexes after the compatibility ALTER statements.
+            deferred_indexes = [
+                statement
+                for statement in schema_statements
+                if _CREATE_INDEX.match(statement.lstrip())
+            ]
+            for statement in schema_statements:
+                if _CREATE_INDEX.match(statement.lstrip()):
                     continue
                 connection.execute(statement)
             for statement in filter(str.strip, _COORDINATION_SCHEMA.split(";")):
@@ -494,14 +506,8 @@ class PostgresScanStore(SqliteScanStore):
                 "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS audit_updated_at TEXT NOT NULL DEFAULT ''",
             ):
                 connection.execute(statement)
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_vulnerabilities_report_batch "
-                "ON vulnerabilities(scan_id, report_batch_id)"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_scan_candidates_audit_state "
-                "ON scan_candidates(scan_id, audit_state)"
-            )
+            for statement in deferred_indexes:
+                connection.execute(statement)
             connection.execute(
                 "UPDATE scans SET user_id = '' WHERE user_id IS NULL"
             )
