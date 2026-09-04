@@ -2566,6 +2566,11 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             scan = _scan("scan-1", ScanItemStatus.CANCELLED, total=3, processed=2)
             scan.static_analysis_done = True
             scan.threat_analysis_enabled = True
+            scan.threat_analysis_run = ThreatAnalysisRunStatus(
+                status="success",
+                started_at="2026-01-01T00:00:00+00:00",
+                finished_at="2026-01-01T00:01:00+00:00",
+            )
             scan.mining_engines = [
                 MiningEngineSelection(
                     engine_id="static_candidate",
@@ -2625,6 +2630,28 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
             meta.threat_analysis_enabled = True
             meta.mining_engines = scan.mining_engines
             store.save_scan(scan, meta)
+            store.replace_threat_analysis("scan-1", {
+                "entrypoint_result": {
+                    "result": True,
+                    "value_asset_path": "final/value-assets.json",
+                    "attack_tree_path": "final/attack-trees.json",
+                    "high_risk_modules_path": "final/high-risk-modules.json",
+                },
+                "artifacts": {
+                    "value_asset_path": {
+                        "path": "final/value-assets.json",
+                        "content": [],
+                    },
+                    "attack_tree_path": {
+                        "path": "final/attack-trees.json",
+                        "content": {"attack_trees": []},
+                    },
+                    "high_risk_modules_path": {
+                        "path": "final/high-risk-modules.json",
+                        "content": [],
+                    },
+                },
+            })
             store.add_processed_key("scan-1", ("done.c", 1, "done", "npd"))
             store.add_processed_key("scan-1", ("failed.c", 2, "failed", "npd"))
             store.add_vulnerability(
@@ -2755,6 +2782,16 @@ class AgentReconnectRecoveryTests(unittest.TestCase):
                 {"hash": "remote-runtime", "archive_sha256": "archive-hash"},
             )
             self.assertEqual(store.get_processed_keys("scan-1"), {("done.c", 1, "done", "npd")})
+            stored = store.load_scan("scan-1")[0]
+            self.assertEqual(stored.threat_analysis_run.status, "success")
+            self.assertEqual(
+                stored.threat_analysis_run.started_at,
+                "2026-01-01T00:00:00+00:00",
+            )
+            self.assertEqual(
+                stored.threat_analysis_run.finished_at,
+                "2026-01-01T00:01:00+00:00",
+            )
 
     def test_resume_preserves_analysis_only_empty_engine_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

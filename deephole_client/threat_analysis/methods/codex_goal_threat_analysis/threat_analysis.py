@@ -50,8 +50,9 @@ def run_threat_analysis(
 
         if is_resume and _completed_goal_outputs(artifact_root, paths):
             return _success(paths)
-        if not is_resume:
-            _clear_outputs(paths)
+        # Only a completed Goal is reusable across a scan continuation. An
+        # incomplete/failed Goal starts from a clean thread and clean outputs.
+        _clear_outputs(paths)
 
         context_path = artifact_root / _CONTEXT_FILE
         _write_json(
@@ -85,7 +86,7 @@ def run_threat_analysis(
         goal_status = _run_goal(
             prompt=prompt,
             artifact_root=artifact_root,
-            is_resume=bool(is_resume),
+            is_resume=False,
         )
         if goal_status != "complete":
             return {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -50,6 +51,61 @@ def _candidate(
         "code_line": code,
         "code_context": context,
         "metadata": {"subject": subject} if subject else {},
+    }
+
+
+def _audit_item(
+    *,
+    confirmed: bool,
+    version_name: str = "v1",
+    file: str = "src/parser.c",
+    line: int = 17,
+) -> dict:
+    return {
+        "confirmed": confirmed,
+        "severity": "high" if confirmed else "low",
+        "file": file,
+        "line": line,
+        "function": "parse_request",
+        "vuln_type": "command_injection",
+        "description": "命令注入" if confirmed else "已有边界校验，不构成漏洞",
+        "attack_entry": "网络请求" if confirmed else "",
+        "trigger_conditions": "参数可控" if confirmed else "",
+        "vulnerable_code": "run(input)" if confirmed else "",
+        "root_cause": "缺少过滤" if confirmed else "",
+        "call_chain": "entry -> parse_request" if confirmed else "",
+        "impact": "执行任意命令" if confirmed else "",
+        "affected_versions": [{
+            "version_name": version_name,
+            "exists": confirmed,
+            "file": file,
+            "line": line,
+            "function": "parse_request",
+            "reason": "同一根因" if confirmed else "已有有效校验",
+        }],
+    }
+
+
+def _version_match() -> dict:
+    return {
+        "affected_versions": [
+            {
+                "version_name": "v1",
+                "exists": True,
+                "file": "src/parser.c",
+                "line": 17,
+                "function": "parse_request",
+                "reason": "基准版本已确认",
+            },
+            {
+                "version_name": "v2",
+                "exists": True,
+                "file": "src/parser.c",
+                "line": 24,
+                "function": "parse_request",
+                "reason": "存在同一根因",
+            },
+        ],
     }
 
 
@@ -437,7 +493,7 @@ def test_difference_threat_prompt_audits_all_function_and_code_differences() -> 
     assert "maxItems" not in _AUDIT_LIST_SCHEMA
 
 
-def test_static_group_audit_honors_configured_concurrency() -> None:
+def test_static_group_audit_honors_configured_concurrency(tmp_path: Path) -> None:
     async def scenario() -> None:
         active = 0
         maximum_active = 0
@@ -484,6 +540,7 @@ def test_static_group_audit_honors_configured_concurrency() -> None:
         ]
         kwargs = {
             "scan_id": "scan-concurrent",
+            "work_dir": tmp_path / "work",
             "config": SimpleNamespace(
                 opencode_concurrency=2,
                 vulnerability_mining=SimpleNamespace(required_capability="high"),
@@ -506,11 +563,95 @@ def test_static_group_audit_honors_configured_concurrency() -> None:
         assert processed == 4
         assert confirmed == 0
         assert maximum_active == 2
-        assert set(task_names) == {
-            f"multi-version-codepoint-scan-concurrent-{index}"
-            for index in range(1, 5)
-        }
+        assert len(set(task_names)) == 4
+        assert all(
+            name.startswith("multi-version-codepoint-scan-concurrent-")
+            for name in task_names
+        )
         assert all(prompt.startswith("/oob-audit\n") for prompt in prompts)
+
+    asyncio.run(scenario())
+
+
+def test_static_group_resume_reuses_only_valid_success_checkpoint(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        calls: list[dict] = []
+
+        async def run_task(**kwargs):
+            calls.append(dict(kwargs))
+            return SimpleNamespace(
+                status="success",
+                structured=_audit_item(confirmed=False),
+                output_source={"provider": "test"},
+            )
+
+        group = [[_candidate(
+            "v1",
+            file="src/a.c",
+            line=7,
+            function="parse",
+            code="read();",
+        )]]
+        versions = [
+            {
+                "version_name": "v1",
+                "project_path": Path("/repo/v1"),
+                "code_scan_path": Path("/repo/v1"),
+            },
+            {
+                "version_name": "v2",
+                "project_path": Path("/repo/v2"),
+                "code_scan_path": Path("/repo/v2"),
+            },
+        ]
+        kwargs = {
+            "scan_id": "scan-static-resume",
+            "work_dir": tmp_path / "work",
+            "config": SimpleNamespace(
+                opencode_concurrency=1,
+                vulnerability_mining=SimpleNamespace(required_capability="high"),
+            ),
+            "output": None,
+            "cancel_event": asyncio.Event(),
+            "report_vulnerabilities": lambda _values: None,
+            "is_resume": False,
+        }
+
+        first = await _audit_static_groups(
+            groups=group,
+            versions=versions,
+            kwargs=kwargs,
+            task_runner=run_task,
+        )
+        kwargs["is_resume"] = True
+        second = await _audit_static_groups(
+            groups=group,
+            versions=versions,
+            kwargs=kwargs,
+            task_runner=run_task,
+        )
+
+        assert first == (1, 0)
+        assert second == (1, 0)
+        assert len(calls) == 1
+        checkpoints = list(
+            (tmp_path / "work" / "multi_version_task_results"
+             / "static_candidate_group").glob("*.json")
+        )
+        assert len(checkpoints) == 1
+
+        checkpoints[0].write_text("not-json", encoding="utf-8")
+        third = await _audit_static_groups(
+            groups=group,
+            versions=versions,
+            kwargs=kwargs,
+            task_runner=run_task,
+        )
+        assert third == (1, 0)
+        assert len(calls) == 2
+        assert all("session_id" not in call for call in calls)
 
     asyncio.run(scenario())
 
@@ -654,14 +795,147 @@ def test_threat_audit_delegates_baseline_to_threat_pattern_then_matches_versions
             attack_tree_path
         )
         assert call["engine_id"] == "multi_version"
-        assert task_names == [
-            "multi-version-threat-difference-v2-scan-threat",
-            "multi-version-compare-scan-threat-1",
-        ]
+        assert len(task_names) == 2
+        assert task_names[0].startswith(
+            "multi-version-threat-difference-v2-scan-threat-"
+        )
+        assert task_names[1].startswith("multi-version-compare-scan-threat-")
+        assert call["is_resume"] is False
         assert len(reported) == 1
         assert reported[0]["source_task_id"] == "threat-pattern-audit-1"
         assert reported[0]["version_labels"] == ["v1", "v2"]
         assert "受影响版本" in reported[0]["vulnerability_report"]
+
+    asyncio.run(scenario())
+
+
+def test_threat_workflow_resume_reuses_analysis_difference_and_matches(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        analysis_calls: list[dict] = []
+        pattern_calls: list[dict] = []
+        task_calls: list[dict] = []
+        reported: list[dict] = []
+
+        async def analyze(**kwargs):
+            analysis_calls.append(dict(kwargs))
+            final = Path(kwargs["output_path"]) / "final"
+            final.mkdir(parents=True, exist_ok=True)
+            value_assets = final / "value-assets.json"
+            attack_tree = final / "attack-trees.json"
+            high_risk = final / "high-risk-modules.json"
+            value_assets.write_text("[]", encoding="utf-8")
+            attack_tree.write_text(
+                json.dumps({"attack_trees": []}),
+                encoding="utf-8",
+            )
+            high_risk.write_text("[]", encoding="utf-8")
+            return {
+                "result": True,
+                "value_asset_path": str(value_assets),
+                "attack_tree_path": str(attack_tree),
+                "high_risk_modules_path": str(high_risk),
+            }
+
+        async def threat_pattern_audit(**kwargs):
+            pattern_calls.append(dict(kwargs))
+            await kwargs["report_vulnerabilities"]([{
+                **_audit_item(confirmed=True),
+                "source_task_id": "threat-pattern-stable",
+                "output_source": {"provider": "test"},
+            }])
+            return {"status": "success", "error_message": ""}
+
+        async def run_task(**kwargs):
+            task_calls.append(dict(kwargs))
+            if "threat-difference" in kwargs["task_name"]:
+                return SimpleNamespace(
+                    status="success",
+                    structured=[_audit_item(
+                        confirmed=True,
+                        version_name="v2",
+                        file="src/difference.c",
+                        line=31,
+                    )],
+                    output_source={"provider": "test"},
+                )
+            return SimpleNamespace(
+                status="success",
+                structured=_version_match(),
+                output_source={"provider": "test"},
+            )
+
+        async def report_vulnerabilities(values):
+            reported.extend(values)
+
+        versions = [
+            {
+                "version_name": "v1",
+                "project_path": tmp_path / "v1",
+                "code_scan_path": tmp_path / "v1",
+                "ordinal": 1,
+            },
+            {
+                "version_name": "v2",
+                "project_path": tmp_path / "v2",
+                "code_scan_path": tmp_path / "v2",
+                "ordinal": 2,
+            },
+        ]
+        for version in versions:
+            version["project_path"].mkdir()
+        kwargs = {
+            "scan_id": "scan-threat-resume",
+            "work_dir": tmp_path / "work",
+            "config": SimpleNamespace(
+                opencode_concurrency=2,
+                vulnerability_mining=SimpleNamespace(required_capability="high"),
+            ),
+            "output": None,
+            "cancel_event": asyncio.Event(),
+            "feedback_entries": [],
+            "report_vulnerabilities": report_vulnerabilities,
+            "is_resume": False,
+        }
+
+        with (
+            patch(
+                "deephole_client.vulnerability_mining.engines.multi_version.engine.run_threat_analysis",
+                new=analyze,
+            ),
+            patch(
+                "deephole_client.vulnerability_mining.engines.multi_version.engine.run_threat_pattern_audit",
+                new=threat_pattern_audit,
+            ),
+        ):
+            first = await _audit_threats(
+                versions=versions,
+                kwargs=kwargs,
+                task_runner=run_task,
+            )
+            first_task_count = len(task_calls)
+            kwargs["is_resume"] = True
+            second = await _audit_threats(
+                versions=versions,
+                kwargs=kwargs,
+                task_runner=run_task,
+            )
+
+        assert first == 2
+        assert second == 2
+        assert len(analysis_calls) == 1
+        assert first_task_count == 3
+        assert len(task_calls) == first_task_count
+        assert len(pattern_calls) == 2
+        assert pattern_calls[0]["is_resume"] is False
+        assert pattern_calls[1]["is_resume"] is True
+        assert len(reported) == 4
+        assert all("session_id" not in call for call in task_calls)
+        result_root = (
+            tmp_path / "work" / "multi_version_task_results"
+        )
+        assert len(list(result_root.rglob("*.json"))) == 4
 
     asyncio.run(scenario())
 

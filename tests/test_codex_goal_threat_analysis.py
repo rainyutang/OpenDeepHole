@@ -299,6 +299,87 @@ def test_method_runs_one_goal_and_returns_schema_valid_artifacts(
     }
 
 
+def test_resume_reuses_only_completed_goal_outputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    implementation = _implementation()
+    code_root = tmp_path / "source"
+    artifact_root = tmp_path / "artifacts"
+    code_root.mkdir()
+    _write_valid_artifacts(artifact_root)
+    (artifact_root / "codex-goal-state.json").write_text(
+        json.dumps({
+            "thread_id": "thread-complete",
+            "goal_status": "complete",
+            "validation_policy_version": 1,
+        }),
+        encoding="utf-8",
+    )
+
+    def unexpected_goal(**_kwargs: Any) -> str:
+        raise AssertionError("completed Goal must not run again")
+
+    monkeypatch.setattr(
+        implementation,
+        "_run_goal",
+        unexpected_goal,
+    )
+
+    result = implementation.run_threat_analysis(
+        code_root,
+        artifact_root,
+        is_resume=True,
+    )
+
+    assert result["result"] is True
+
+
+def test_resume_after_incomplete_goal_clears_outputs_and_starts_fresh_thread(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    implementation = _implementation()
+    code_root = tmp_path / "source"
+    artifact_root = tmp_path / "artifacts"
+    code_root.mkdir()
+    _write_valid_artifacts(artifact_root)
+    (artifact_root / "codex-goal-state.json").write_text(
+        json.dumps({
+            "thread_id": "thread-failed",
+            "goal_status": "failed",
+            "validation_policy_version": 1,
+        }),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_run_goal(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        assert not any(
+            path.exists()
+            for path in implementation._artifact_paths(artifact_root).values()
+        )
+        _write_valid_artifacts(kwargs["artifact_root"])
+        return "complete"
+
+    monkeypatch.setattr(implementation, "_run_goal", fake_run_goal)
+
+    result = implementation.run_threat_analysis(
+        code_root,
+        artifact_root,
+        is_resume=True,
+    )
+
+    assert result["result"] is True
+    assert len(calls) == 1
+    assert calls[0]["is_resume"] is False
+    context = json.loads(
+        (artifact_root / "scan-context.json").read_text(encoding="utf-8")
+    )
+    assert context["resume_requested"] is True
+
+
 def test_method_does_not_revalidate_goal_output_after_completion(
     tmp_path: Path,
     monkeypatch,

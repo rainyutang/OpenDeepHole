@@ -46,8 +46,10 @@ def run_threat_analysis(
 
         if is_resume and _completed_outputs(artifact_root, paths, guidance_path):
             return _success(paths)
-        if not is_resume:
-            _clear_outputs(paths)
+        # A completed Session is reused through its validated artifacts. Any
+        # incomplete attempt starts a fresh Session and must not inherit partial
+        # output files from the failed/cancelled attempt.
+        _clear_outputs(paths)
 
         context_path = artifact_root / _CONTEXT_FILE
         _write_json(
@@ -78,16 +80,13 @@ def run_threat_analysis(
         )
         (artifact_root / _PROMPT_FILE).write_text(prompt + "\n", encoding="utf-8")
         command = validation_command(guidance_path=guidance_path, paths=paths)
-        saved_state = _read_state(artifact_root / _STATE_FILE) if is_resume else {}
-        saved_session_id = str(saved_state.get("session_id") or "").strip() or None
-
         result = _run_sync(_run_task(
             prompt=prompt,
             reference_root=reference_root(),
             validation_command_value=command,
             guidance_path=guidance_path,
             paths=paths,
-            session_id=saved_session_id,
+            session_id=None,
         ))
         (artifact_root / _LOG_FILE).write_text(
             str(getattr(result, "text", "") or "") + "\n",

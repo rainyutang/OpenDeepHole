@@ -2653,6 +2653,10 @@ async def _continue_scan(
         # from the current Agent process. Resume analysis so it can reuse or
         # reconstruct that object before the engines run.
         resume_threat_analysis = True
+    rerun_threat_analysis = resume_threat_analysis and (
+        _threat_analysis_run_needs_retry(scan)
+        or scan.threat_analysis is None
+    )
     if meta.threat_analysis_enabled:
         try:
             _resolve_threat_analysis_method(meta.threat_analysis_method)
@@ -2752,7 +2756,7 @@ async def _continue_scan(
     ]
     pending_threat_analysis_run = (
         ThreatAnalysisRunStatus()
-        if resume_threat_analysis
+        if rerun_threat_analysis
         else previous_threat_analysis_run
     )
     engine_runs_by_id = {

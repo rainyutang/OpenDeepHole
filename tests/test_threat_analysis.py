@@ -22,7 +22,10 @@ from backend.models import (
 )
 from backend.store.sqlite import SqliteScanStore
 from backend.threat_data import parse_threat_analysis_data
-from deephole_client.process_artifacts import collect_json_artifacts
+from deephole_client.process_artifacts import (
+    collect_json_artifacts,
+    restore_json_artifacts,
+)
 from deephole_client.threat_analysis_runner import run_threat_analysis
 from deephole_client.vulnerability_mining.engines.threat_audit.engine import (
     _legacy_non_leaf_tasks,
@@ -495,6 +498,43 @@ def test_collect_json_artifacts_rejects_output_root_escape(tmp_path: Path) -> No
             {"result": True, "attack_tree_path": str(outside)},
             output_root=output_root,
         )
+
+
+def test_restore_json_artifacts_materializes_native_absolute_paths(
+    tmp_path: Path,
+) -> None:
+    bundle = _artifact_bundle()
+    output_root = tmp_path / "restored"
+
+    result = restore_json_artifacts(
+        bundle,
+        output_root=output_root,
+        required_keys=(
+            "value_asset_path",
+            "attack_tree_path",
+            "high_risk_modules_path",
+        ),
+    )
+
+    assert result["result"] is True
+    for key, artifact in bundle["artifacts"].items():
+        path = Path(result[key])
+        assert path.is_file()
+        assert path.resolve().is_relative_to(output_root.resolve())
+        assert json.loads(path.read_text(encoding="utf-8")) == artifact["content"]
+
+
+@pytest.mark.parametrize("unsafe_path", ["../outside.json", "/tmp/outside.json"])
+def test_restore_json_artifacts_rejects_unsafe_paths(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    bundle = _artifact_bundle()
+    bundle["entrypoint_result"]["attack_tree_path"] = unsafe_path
+    bundle["artifacts"]["attack_tree_path"]["path"] = unsafe_path
+
+    with pytest.raises(ValueError, match="escapes output root"):
+        restore_json_artifacts(bundle, output_root=tmp_path / "restored")
 
 
 def test_opaque_artifact_bundle_round_trips_without_schema_conversion() -> None:

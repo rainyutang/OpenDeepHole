@@ -319,7 +319,7 @@ def test_resume_reuses_valid_completed_outputs_without_new_task(
     runner.assert_not_awaited()
 
 
-def test_failed_task_persists_session_for_resume(
+def test_failed_task_persists_session_for_diagnostics(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -348,3 +348,51 @@ def test_failed_task_persists_session_for_resume(
     )
     assert state["session_id"] == "ses-failed"
     assert state["status"] == "failure"
+
+
+def test_resume_after_failure_starts_fresh_session_and_clears_partial_outputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    implementation = _implementation()
+    code_root = tmp_path / "source"
+    artifact_root = tmp_path / "artifacts"
+    code_root.mkdir()
+    paths = implementation._artifact_paths(artifact_root)
+    _write_dummy_artifacts(paths)
+    (artifact_root / "opencode-task-state.json").write_text(
+        json.dumps({
+            "session_id": "ses-failed",
+            "status": "failure",
+            "validation_policy_version": 1,
+        }),
+        encoding="utf-8",
+    )
+    calls: list[dict] = []
+
+    async def fake_run_task(**kwargs):
+        calls.append(kwargs)
+        assert all(not path.exists() for path in paths.values())
+        _write_dummy_artifacts(paths)
+        return SimpleNamespace(
+            session_id="ses-fresh",
+            status="success",
+            text="completed",
+        )
+
+    monkeypatch.setattr(implementation, "_run_task", fake_run_task)
+    monkeypatch.setattr(
+        implementation,
+        "validate_artifacts_locally",
+        lambda **_: None,
+    )
+
+    result = implementation.run_threat_analysis(
+        code_root,
+        artifact_root,
+        is_resume=True,
+    )
+
+    assert result["result"] is True
+    assert len(calls) == 1
+    assert calls[0]["session_id"] is None

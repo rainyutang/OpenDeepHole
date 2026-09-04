@@ -6,7 +6,7 @@ import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -257,6 +257,16 @@ def test_engine_writes_and_validates_one_result(tmp_path: Path) -> None:
     result_paths = list((work_dir / "task-results").glob("*.json"))
     assert schema_path.is_file()
     assert len(result_paths) == 1
+    completion_markers = list(
+        (work_dir / ".completed-task-results").glob("*.json")
+    )
+    assert len(completion_markers) == 1
+    assert json.loads(
+        completion_markers[0].read_text(encoding="utf-8")
+    )["output_source"] == {
+        "backend": "api",
+        "model": "provider/model",
+    }
     assert (work_dir / "validate_result.py").is_file()
     previous = json.loads(
         (work_dir / "previous-findings.json").read_text(encoding="utf-8")
@@ -337,6 +347,214 @@ def test_engine_treats_empty_result_as_completed(tmp_path: Path) -> None:
     ) == []
     assert "JSON Schema 文件：" in captured["prompt"]
     assert '"minItems"' not in captured["prompt"]
+
+
+def test_session_success_at_stop_boundary_is_reused_on_resume(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "project"
+    work_dir = tmp_path / "work"
+    project_path.mkdir()
+    attack_tree_path, modules_path = _artifacts(tmp_path)
+    stop_event = threading.Event()
+
+    async def complete_while_stopping(**_kwargs):
+        stop_event.set()
+        return OpenCodeResult(
+            session_id="session-finished-at-stop",
+            status="success",
+            text="[]",
+            structured=[],
+            model="provider/model",
+            output_source={"model": "provider/model"},
+        )
+
+    async def report_vulnerabilities(_values):
+        raise AssertionError("empty result must not be reported")
+
+    kwargs = {
+        "engine_id": "threat_pattern_audit",
+        "scan_id": "scan-stop-boundary",
+        "project_path": project_path,
+        "code_scan_path": project_path,
+        "work_dir": work_dir,
+        "config": SimpleNamespace(
+            opencode_concurrency=1,
+            vulnerability_mining=SimpleNamespace(required_capability="high"),
+        ),
+        "feedback_entries": [],
+        "code_graph_mcp": None,
+        "knowledge_base_mcp": None,
+        "cancel_event": stop_event,
+        "output": None,
+        "report_vulnerabilities": report_vulnerabilities,
+        "threat_analysis_result": {
+            "result": True,
+            "attack_tree_path": str(attack_tree_path),
+            "high_risk_modules_path": str(modules_path),
+        },
+    }
+
+    with patch.object(
+        engine,
+        "run_opencode_task",
+        new=complete_while_stopping,
+    ):
+        first = asyncio.run(engine.run(**kwargs))
+
+    assert first["status"] == "cancelled"
+    assert len(list(
+        (work_dir / ".completed-task-results").glob("*.json")
+    )) == 1
+
+    kwargs["cancel_event"] = threading.Event()
+    kwargs["is_resume"] = True
+    runner = AsyncMock()
+    with patch.object(engine, "run_opencode_task", new=runner):
+        resumed = asyncio.run(engine.run(**kwargs))
+
+    runner.assert_not_awaited()
+    assert resumed["status"] == "success"
+    assert resumed["processed_candidates"] == 1
+
+
+@pytest.mark.parametrize(
+    ("cached_result", "expected_report_count"),
+    [([], 0), ([_finding()], 1)],
+)
+def test_resume_reuses_completed_module_pattern_result_without_new_session(
+    tmp_path: Path,
+    cached_result: list[dict],
+    expected_report_count: int,
+) -> None:
+    project_path = tmp_path / "project"
+    work_dir = tmp_path / "work"
+    project_path.mkdir()
+    work_dir.mkdir()
+    attack_tree_path, modules_path = _artifacts(tmp_path)
+    target = engine._build_targets(
+        json.loads(attack_tree_path.read_text(encoding="utf-8")),
+        json.loads(modules_path.read_text(encoding="utf-8")),
+        fallback_code_path=project_path,
+    )[0]
+    task_id = engine._task_id("scan-resume", target)
+    result_path = work_dir / "task-results" / f"{task_id}.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(cached_result, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    reported: list[dict] = []
+    events: list[dict] = []
+    runner = AsyncMock()
+
+    async def report_vulnerabilities(values):
+        reported.extend(values)
+
+    async def output(event):
+        events.append(event)
+
+    with patch.object(engine, "run_opencode_task", new=runner):
+        result = asyncio.run(engine.run(
+            engine_id="threat_pattern_audit",
+            scan_id="scan-resume",
+            project_path=project_path,
+            code_scan_path=project_path,
+            work_dir=work_dir,
+            config=SimpleNamespace(
+                opencode_concurrency=1,
+                vulnerability_mining=SimpleNamespace(required_capability="high"),
+            ),
+            feedback_entries=[],
+            code_graph_mcp=None,
+            knowledge_base_mcp=None,
+            cancel_event=threading.Event(),
+            output=output,
+            report_vulnerabilities=report_vulnerabilities,
+            is_resume=True,
+            threat_analysis_result={
+                "result": True,
+                "attack_tree_path": str(attack_tree_path),
+                "high_risk_modules_path": str(modules_path),
+            },
+        ))
+
+    runner.assert_not_awaited()
+    assert result["status"] == "success"
+    assert result["processed_candidates"] == 1
+    assert len(reported) == expected_report_count
+    assert any(event["data"].get("reused") is True for event in events)
+
+
+@pytest.mark.parametrize(
+    ("stored_result", "has_completion_policy"),
+    [("not-json", False), ("[]", True)],
+)
+def test_resume_reruns_untrusted_module_pattern_result_in_fresh_session(
+    tmp_path: Path,
+    stored_result: str,
+    has_completion_policy: bool,
+) -> None:
+    project_path = tmp_path / "project"
+    work_dir = tmp_path / "work"
+    project_path.mkdir()
+    work_dir.mkdir()
+    attack_tree_path, modules_path = _artifacts(tmp_path)
+    target = engine._build_targets(
+        json.loads(attack_tree_path.read_text(encoding="utf-8")),
+        json.loads(modules_path.read_text(encoding="utf-8")),
+        fallback_code_path=project_path,
+    )[0]
+    task_id = engine._task_id("scan-corrupt", target)
+    result_path = work_dir / "task-results" / f"{task_id}.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(stored_result, encoding="utf-8")
+    if has_completion_policy:
+        (work_dir / "completion-policy.json").write_text(
+            json.dumps({"completion_policy_version": 1}),
+            encoding="utf-8",
+        )
+    calls: list[dict] = []
+
+    async def run_task(**kwargs):
+        calls.append(kwargs)
+        return OpenCodeResult(
+            session_id="session-fresh",
+            status="success",
+            text="[]",
+            structured=[],
+            model="provider/model",
+            output_source={},
+        )
+
+    with patch.object(engine, "run_opencode_task", new=run_task):
+        result = asyncio.run(engine.run(
+            engine_id="threat_pattern_audit",
+            scan_id="scan-corrupt",
+            project_path=project_path,
+            code_scan_path=project_path,
+            work_dir=work_dir,
+            config=SimpleNamespace(
+                opencode_concurrency=1,
+                vulnerability_mining=SimpleNamespace(required_capability="high"),
+            ),
+            feedback_entries=[],
+            code_graph_mcp=None,
+            knowledge_base_mcp=None,
+            cancel_event=threading.Event(),
+            output=None,
+            report_vulnerabilities=lambda _values: None,
+            is_resume=True,
+            threat_analysis_result={
+                "result": True,
+                "attack_tree_path": str(attack_tree_path),
+                "high_risk_modules_path": str(modules_path),
+            },
+        ))
+
+    assert result["status"] == "success"
+    assert len(calls) == 1
+    assert "session_id" not in calls[0]
 
 
 def test_failed_audit_advances_processed_progress(tmp_path: Path) -> None:

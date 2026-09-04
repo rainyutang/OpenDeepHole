@@ -26,6 +26,7 @@ from deephole_client.scanner import (
     _format_process_event_message,
     _report_process_vulnerabilities,
     _resolve_scan_paths,
+    _stored_threat_analysis_matches_scope,
     run_scan,
 )
 from deephole_client.task_manager import ScanCancellationEvent
@@ -59,6 +60,7 @@ def _reporter() -> SimpleNamespace:
         report_processed_key=AsyncMock(),
         report_candidate_audit=AsyncMock(return_value={"ok": True}),
         get_threat_audit_tasks=AsyncMock(return_value=[]),
+        get_threat_analysis=AsyncMock(return_value=None),
         push_threat_analysis=AsyncMock(),
         report_threat_analysis_run=AsyncMock(),
         push_threat_audit_task=AsyncMock(),
@@ -100,6 +102,38 @@ def _threat_vulnerability() -> dict:
         "threat_surface_node_id": "TREE-1:NODE-1",
         "threat_method_node_id": "PATTERN-1",
     }
+
+
+def test_stored_threat_analysis_scope_matches_resume_paths(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    code = project / "src"
+    code.mkdir(parents=True)
+
+    assert _stored_threat_analysis_matches_scope(
+        {},
+        project_path=project,
+        code_scan_path=code,
+    )
+    assert _stored_threat_analysis_matches_scope(
+        {
+            "scan_scope": {
+                "project_path": str(project),
+                "code_scan_path": str(code),
+            },
+        },
+        project_path=project,
+        code_scan_path=code,
+    )
+    assert not _stored_threat_analysis_matches_scope(
+        {
+            "scan_scope": {
+                "project_path": str(project),
+                "code_scan_path": str(project / "other"),
+            },
+        },
+        project_path=project,
+        code_scan_path=code,
+    )
 
 
 class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
@@ -892,6 +926,115 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
 
+    async def test_resume_reuses_stored_threat_analysis_for_dependent_engine(
+        self,
+    ) -> None:
+        reporter = _reporter()
+        manifest = SimpleNamespace(
+            engine_id="threat_pattern_audit",
+            label="Threat pattern audit",
+            fp_review=False,
+        )
+        loaded = SimpleNamespace(manifest=manifest)
+        registry = SimpleNamespace(
+            errors=[],
+            manifests=lambda: [manifest],
+            get=lambda engine_id: (
+                loaded if engine_id == "threat_pattern_audit" else None
+            ),
+        )
+        observed: dict = {}
+
+        async def run_engine(_loaded, **kwargs):
+            observed.update(kwargs)
+            return {
+                "status": "success",
+                "error_message": "",
+                "total_candidates": 0,
+                "processed_candidates": 0,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            reporter.get_threat_analysis.return_value = {
+                "entrypoint_result": {
+                    "result": True,
+                    "value_asset_path": "final/value-assets.json",
+                    "attack_tree_path": "final/attack-trees.json",
+                    "high_risk_modules_path": "final/high-risk-modules.json",
+                },
+                "artifacts": {
+                    "value_asset_path": {
+                        "path": "final/value-assets.json",
+                        "content": [],
+                    },
+                    "attack_tree_path": {
+                        "path": "final/attack-trees.json",
+                        "content": {"attack_trees": []},
+                    },
+                    "high_risk_modules_path": {
+                        "path": "final/high-risk-modules.json",
+                        "content": [],
+                    },
+                },
+                "scan_scope": {
+                    "project_path": str(project.resolve()),
+                    "code_scan_path": str(project.resolve()),
+                },
+            }
+            analysis = AsyncMock()
+            with (
+                patch("deephole_client.scanner.Path.home", return_value=root),
+                patch("deephole_client.scanner.configure_platform_runtime"),
+                patch(
+                    "deephole_client.scanner.opencode_task_context",
+                    return_value=nullcontext(),
+                ),
+                patch(
+                    "deephole_client.scanner.load_mining_engines",
+                    return_value=registry,
+                ),
+                patch(
+                    "deephole_client.scanner.run_mining_engine",
+                    side_effect=run_engine,
+                ),
+                patch(
+                    "deephole_client.scanner.run_threat_analysis",
+                    new=analysis,
+                ),
+            ):
+                await run_scan(
+                    config=AgentConfig(),
+                    project_path=project,
+                    code_scan_path=project,
+                    reporter=reporter,
+                    scan_name="analysis-reuse",
+                    product="",
+                    validation_environment="",
+                    checker_names=[],
+                    scan_id="scan-analysis-reuse",
+                    cancel_event=threading.Event(),
+                    is_resume=True,
+                    resume_threat_analysis=True,
+                    threat_analysis_enabled=True,
+                    retry_mining_engine_ids=["threat_pattern_audit"],
+                    mining_engines=[{
+                        "engine_id": "threat_pattern_audit",
+                        "engine_label": "Threat pattern audit",
+                        "enabled": True,
+                    }],
+                )
+            restored = observed["threat_analysis_result"]
+            assert Path(restored["attack_tree_path"]).is_file()
+            assert Path(restored["high_risk_modules_path"]).is_file()
+
+        analysis.assert_not_awaited()
+        reporter.report_threat_analysis_run.assert_not_awaited()
+        reporter.push_threat_analysis.assert_not_awaited()
+        self.assertEqual(reporter.finish_scan.await_args.args[2], "complete")
+
     async def test_threat_analysis_error_is_reported_and_kept_visible(self) -> None:
         reporter = _reporter()
         config = AgentConfig()
@@ -1074,7 +1217,7 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
             reporter.finish_scan.await_args.kwargs["error_message"],
         )
 
-    async def test_threat_analysis_resume_falls_back_once_from_clean_artifacts(
+    async def test_threat_analysis_resume_starts_one_fresh_attempt(
         self,
     ) -> None:
         reporter = _reporter()
@@ -1092,19 +1235,13 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                 attempts.append(bool(kwargs["is_resume"]))
                 output_path = Path(kwargs["output_path"])
                 output_path.mkdir(parents=True, exist_ok=True)
-                if len(attempts) == 1:
-                    (output_path / "poisoned.json").write_text(
-                        '{"cached": true}',
-                        encoding="utf-8",
-                    )
-                    return {
-                        "result": False,
-                        "reason": "cached semantic mismatch",
-                    }
+                (output_path / "poisoned.json").write_text(
+                    '{"cached": true}',
+                    encoding="utf-8",
+                )
                 return {
-                    "result": True,
-                    "attack_tree_path": str(root / "attack-tree.json"),
-                    "high_risk_modules_path": str(root / "risk.json"),
+                    "result": False,
+                    "reason": "fresh attempt failed",
                 }
 
             with (
@@ -1150,24 +1287,14 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     mining_engines=[],
                 )
 
-            failed_root = (
-                root
-                / ".opendeephole"
-                / "scans"
-                / "scan-analysis-resume"
-                / "threat_analysis_failed"
-            )
-            archives = list(failed_root.iterdir())
-            self.assertEqual(attempts, [True, False])
-            self.assertEqual(len(archives), 1)
-            self.assertTrue((archives[0] / "poisoned.json").is_file())
+            self.assertEqual(attempts, [False])
             self.assertEqual(
                 reporter.finish_scan.await_args.args[2],
-                "complete",
+                "error",
             )
             self.assertEqual(reporter.finish_scan.await_args.args[3:5], (7, 5))
 
-    async def test_threat_analysis_resume_clean_fallback_is_not_repeated(
+    async def test_threat_analysis_failed_resume_attempt_is_not_repeated(
         self,
     ) -> None:
         reporter = _reporter()
@@ -1228,11 +1355,10 @@ class AgentScanPathTests(unittest.IsolatedAsyncioTestCase):
                     mining_engines=[],
                 )
 
-        self.assertEqual(attempts, [True, False])
+        self.assertEqual(attempts, [False])
         self.assertEqual(reporter.finish_scan.await_args.args[2], "error")
         self.assertIn(
-            "Incremental threat-analysis resume failed: attempt 1 failed; "
-            "clean fallback failed: attempt 2 failed",
+            "attempt 1 failed",
             reporter.finish_scan.await_args.kwargs["error_message"],
         )
 

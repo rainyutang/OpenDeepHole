@@ -17,6 +17,10 @@ from backend.models import (
     Vulnerability,
 )
 from backend.scan_event_log import is_agent_local_task_output
+from backend.threat_data import (
+    REQUIRED_THREAT_ANALYSIS_ARTIFACTS,
+    parse_threat_analysis_data,
+)
 from backend.vulnerability_identity import vulnerability_report_identity
 from task_agent import opencode_task_context
 from task_agent.model_pool import clear_planned_task, register_planned_task
@@ -31,7 +35,7 @@ from .codex_runtime import (
 )
 from .config import AgentConfig
 from .platform_runtime import configure_platform_runtime
-from .process_artifacts import collect_json_artifacts
+from .process_artifacts import collect_json_artifacts, restore_json_artifacts
 from .reporter import Reporter
 from .scan_modes import (
     SCAN_MODE_CUSTOM,
@@ -62,6 +66,41 @@ LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_IDS = frozenset({
     CODEX_THREAT_ANALYSIS_METHOD_ID,
     OPENCODE_LIGHTWEIGHT_THREAT_ANALYSIS_METHOD_ID,
 })
+
+
+def _threat_analysis_scan_scope(
+    project_path: Path,
+    code_scan_path: Path,
+) -> dict[str, str]:
+    return {
+        "project_path": str(Path(project_path).expanduser().resolve()),
+        "code_scan_path": str(Path(code_scan_path).expanduser().resolve()),
+    }
+
+
+def _stored_threat_analysis_matches_scope(
+    bundle: dict[str, Any],
+    *,
+    project_path: Path,
+    code_scan_path: Path,
+) -> bool:
+    scope = bundle.get("scan_scope")
+    if scope is None:
+        # Historical opaque bundles are already scoped by their immutable
+        # scan_id, so absence of optional metadata remains compatible.
+        return True
+    if not isinstance(scope, dict):
+        return False
+    stored_project = str(scope.get("project_path") or "").strip()
+    stored_code = str(scope.get("code_scan_path") or "").strip()
+    if not stored_project or not stored_code:
+        return False
+    return (
+        Path(stored_project).expanduser().resolve()
+        == Path(project_path).expanduser().resolve()
+        and Path(stored_code).expanduser().resolve()
+        == Path(code_scan_path).expanduser().resolve()
+    )
 
 
 def _archive_failed_threat_analysis(output_path: Path) -> Path | None:
@@ -999,6 +1038,49 @@ async def run_scan(
 
     async def execute_threat_analysis(
     ) -> tuple[ThreatAnalysisRunStatus, dict[str, Any] | None]:
+        output_path = scan_dir / "threat_analysis"
+        allow_local_completed_reuse = is_resume
+        if is_resume:
+            fetch_stored = getattr(reporter, "get_threat_analysis", None)
+            stored: dict[str, Any] | None = None
+            if fetch_stored is not None:
+                try:
+                    value = await fetch_stored(scan_id)
+                    stored = value if isinstance(value, dict) else None
+                except Exception as exc:
+                    await emit(
+                        "threat_analysis",
+                        "读取已完成威胁分析结果失败，将重新执行："
+                        f"{type(exc).__name__}: {str(exc).strip()}",
+                    )
+            if stored is not None:
+                try:
+                    parse_threat_analysis_data(stored)
+                    if not _stored_threat_analysis_matches_scope(
+                        stored,
+                        project_path=project,
+                        code_scan_path=scan_root,
+                    ):
+                        raise ValueError("stored scan scope does not match resume paths")
+                    restored = restore_json_artifacts(
+                        stored,
+                        output_root=output_path,
+                        required_keys=REQUIRED_THREAT_ANALYSIS_ARTIFACTS,
+                    )
+                except Exception as exc:
+                    allow_local_completed_reuse = False
+                    await emit(
+                        "threat_analysis",
+                        "已保存的威胁分析结果不可复用，将新建任务重新执行："
+                        f"{type(exc).__name__}: {str(exc).strip()}",
+                    )
+                else:
+                    await emit(
+                        "threat_analysis",
+                        "复用本次扫描已成功的威胁分析结果，不创建新的分析 Session",
+                    )
+                    return ThreatAnalysisRunStatus(status="success"), restored
+
         run = ThreatAnalysisRunStatus(
             status="running",
             started_at=datetime.now(timezone.utc).isoformat(),
@@ -1007,7 +1089,6 @@ async def run_scan(
             scan_id,
             run.model_copy(deep=True),
         )
-        output_path = scan_dir / "threat_analysis"
         result: dict[str, Any] | None = None
 
         async def run_method_attempt(
@@ -1113,7 +1194,7 @@ async def run_scan(
                     try:
                         result = await run_method_attempt(
                             threat_analysis_method_id,
-                            resume=is_resume,
+                            resume=allow_local_completed_reuse,
                         )
                         require_success(result)
                         artifact_bundle = collect_json_artifacts(
@@ -1186,64 +1267,17 @@ async def run_scan(
             else:
                 result = await run_method_attempt(
                     threat_analysis_method_id,
-                    resume=is_resume,
+                    resume=False,
                 )
-                if (
-                    is_resume
-                    and result.get("result") is not True
-                    and not cancel_event.is_set()
-                ):
-                    incremental_reason = str(
-                        result.get("reason") or "Threat analysis failed"
-                    )
-                    try:
-                        archive_path = _archive_failed_threat_analysis(
-                            output_path,
-                        )
-                    except Exception as exc:
-                        raise RuntimeError(
-                            "Incremental threat-analysis resume failed: "
-                            f"{incremental_reason}; failed to archive its "
-                            f"artifacts: {type(exc).__name__}: {exc}"
-                        ) from exc
-                    print(
-                        _format_process_console_line(
-                            "threat_analysis",
-                            "Incremental resume failed; starting one clean "
-                            "fallback"
-                            + (
-                                f" (archived at {archive_path})"
-                                if archive_path is not None
-                                else ""
-                            ),
-                        ),
-                        flush=True,
-                    )
-                    clean_result = await run_method_attempt(
-                        threat_analysis_method_id,
-                        resume=False,
-                    )
-                    if clean_result.get("result") is not True:
-                        clean_reason = str(
-                            clean_result.get("reason")
-                            or "Threat analysis failed"
-                        )
-                        result = {
-                            **clean_result,
-                            "result": False,
-                            "reason": (
-                                "Incremental threat-analysis resume failed: "
-                                f"{incremental_reason}; clean fallback "
-                                f"failed: {clean_reason}"
-                            ),
-                        }
-                    else:
-                        result = clean_result
                 require_success(result)
                 artifact_bundle = collect_json_artifacts(
                     result,
                     output_root=output_path,
                 )
+            artifact_bundle["scan_scope"] = _threat_analysis_scan_scope(
+                project,
+                scan_root,
+            )
             await reporter.push_threat_analysis(scan_id, artifact_bundle)
             run.status = "success"
             return run, result
