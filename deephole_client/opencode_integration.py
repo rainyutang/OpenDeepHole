@@ -324,10 +324,10 @@ def _remove_legacy_managed_threat_analysis_skills(workspace: Path) -> Path:
 def get_global_opencode_workspace() -> Path:
     """Return and initialize the single Agent-wide OpenCode workspace.
 
-    The workspace contains stable MCP/Skill configuration, an explicit
-    read-only grant for ``.opencode``, and writable grants for the Agent-owned
-    task stores. Scan-specific state (scope and selected feedback) is attached
-    to each task by :mod:`task_agent.task_service`.
+    The workspace contains stable MCP/Skill configuration, the global read
+    policy, and scoped writable grants for the Agent-owned task stores.
+    Scan-specific state (scope and selected feedback) is attached to each task
+    by :mod:`task_agent.task_service`.
     """
     workspace = _GLOBAL_WORKSPACE
     workspace.mkdir(parents=True, exist_ok=True)
@@ -407,7 +407,7 @@ def build_opencode_config(
 ) -> dict:
     """Build the canonical opencode.json content for DeepHole 2.0 workspaces."""
     read_permissions = {"*": "allow"}
-    external_permissions = {"*": "deny"}
+    external_permissions = {"*": "allow"}
     edit_permissions = {"*": "deny"}
 
     def add_path_rules(
@@ -495,7 +495,7 @@ def _has_managed_permissions(config_path: Path, workspace: Path) -> bool:
                 permission.get(name, {}).get("*") == "allow"
                 for name in ("list", "glob", "grep")
             )
-            and external.get("*") == "deny"
+            and external.get("*") == "allow"
             and edit.get("*") == "deny"
             and permission.get("bash", {}).get("*") == "deny"
             and permission.get("skill", {}).get("*") == "allow"

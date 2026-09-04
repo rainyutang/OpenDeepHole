@@ -35,7 +35,7 @@ def assert_opencode_read_permissions(
         testcase.assertEqual(permission.get(key, {}).get("*"), "allow")
     testcase.assertEqual(
         permission.get("external_directory", {}).get("*"),
-        "deny",
+        "allow",
     )
     testcase.assertEqual(permission.get("edit", {}).get("*"), "deny")
     testcase.assertEqual(permission.get("bash"), {"*": "deny"})
@@ -624,6 +624,37 @@ class OpencodeWorkspaceTests(unittest.TestCase):
                 for pattern in writable_edit_patterns(reference_root):
                     config["permission"]["read"].pop(pattern, None)
                     config["permission"]["external_directory"].pop(pattern, None)
+                config_path.write_text(json.dumps(config), encoding="utf-8")
+
+                get_global_opencode_workspace()
+
+            refreshed = json.loads(config_path.read_text(encoding="utf-8"))
+            assert_opencode_read_permissions(self, refreshed, workspace)
+
+    def test_denied_global_external_read_permission_triggers_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_path = Path(tmp) / "opencode_workspace"
+            fake_config = SimpleNamespace(
+                code_graph=SimpleNamespace(enabled=False, name="codegraph"),
+                product_info=SimpleNamespace(
+                    enabled=False,
+                    name="product-info",
+                ),
+            )
+            with (
+                patch(
+                    "deephole_client.opencode_integration._GLOBAL_WORKSPACE",
+                    workspace_path,
+                ),
+                patch(
+                    "deephole_client.opencode_integration.get_config",
+                    return_value=fake_config,
+                ),
+            ):
+                workspace = get_global_opencode_workspace()
+                config_path = managed_opencode_config_path(workspace)
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                config["permission"]["external_directory"]["*"] = "deny"
                 config_path.write_text(json.dumps(config), encoding="utf-8")
 
                 get_global_opencode_workspace()

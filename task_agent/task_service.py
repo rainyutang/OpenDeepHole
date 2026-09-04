@@ -3196,7 +3196,7 @@ def _runtime_with_permissions(
         "grep": {"*": "allow"},
         "external_directory": path_rules(
             readable_roots,
-            default="deny",
+            default="allow",
             action="allow",
         ),
         "edit": path_rules(

@@ -577,6 +577,8 @@ def test_public_task_bootstraps_standalone_context_and_reuses_session(
             ]
             permission = runtime_config["permission"]
             assert permission["bash"] == {"*": "deny"}
+            assert permission["read"]["*"] == "allow"
+            assert permission["external_directory"]["*"] == "allow"
             assert permission["edit"]["*"] == "deny"
             assert permission["read"][str(skill_root.resolve())] == "allow"
             assert (

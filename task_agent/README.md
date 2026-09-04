@@ -65,7 +65,7 @@ result = await run_opencode_task(
 | `invalid_json_retry_prompt` | `str` 或 `None` | `None` | JSON 校验失败后的可选纠正提示词。传入非空字符串时，每次纠错都原样重复发送；`None` 使用组件当前包含完整 Schema 的中文默认提示词。 |
 | `file_write_allowlist` | 单个路径、路径序列或 `None` | `None` | 本次 Session 额外允许写入并默认保留的文件或目录。相对路径以 `project_dir` 为基准，绝对路径可位于项目外；路径自身及所有后代会获得 `read`、`external_directory` 和 `edit` 权限。不允许通配符或文件系统根目录。 |
 | `writable_paths` | 单个路径、路径序列或 `None` | `None` | `file_write_allowlist` 的兼容别名；两者同时传入时合并去重，并使用完全相同的写权限和保留语义。 |
-| `readable_paths` | 单个路径、路径序列或 `None` | `None` | 为本次 Session 额外开放只读及外部目录访问；不会获得编辑权限，也不参与文件保留。 |
+| `readable_paths` | 单个路径、路径序列或 `None` | `None` | 保留的兼容参数，用于显式声明本次 Session 的只读路径意图；最终全局配置已经允许读取全部本地路径，该参数不会获得编辑权限，也不参与文件保留。 |
 | `allowed_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许但不要求执行的命令。拒绝空值、换行和通配符；不会参与 Session 完成审计。 |
 | `required_bash_commands` | 单个字符串、字符串序列或 `None` | `None` | 精确允许且必须成功执行的命令。拒绝空值、换行和通配符；除明确列出的完整命令外仍拒绝所有 shell。 |
 | `required_bash_retry_count` | `int` | `0` | 必需命令校验失败后，在同一个 Session 追加诊断和纠正消息的次数；耗尽后才进入既有 fresh Session 重试。大于 `0` 时必须同时声明 `required_bash_commands`。 |
@@ -87,15 +87,15 @@ result = await run_opencode_task(
 
 过程门面还可以通过 `opencode_task_context(..., config_path=..., skill_paths=[...])` 绑定独立
 配置和临时 SKILL 根。绑定值会被内部 `run_opencode_task()` 继承，SKILL 路径仅合并到该
-任务的 Serve 配置，不会修改宿主的持久受管 Skill 注册；Task Agent 会在最终
-`opencode.json` 中从 `skills.paths` 和临时 `skill_paths` 推导显式 `read: allow` 与外部目录规则，使
-`references/`、`assets/`、`scripts/` 等资源可读。standalone 默认仍只允许写 `work_dir`；
-嵌入宿主可通过 `OpenCodeHostBindings.readable_roots` 声明额外稳定只读根，通过
-`OpenCodeHostBindings.writable_roots` 声明额外稳定可写根；只读根只获得 `read` 和
-`external_directory`，不会获得 `edit`。每次调用都会把
+任务的 Serve 配置，不会修改宿主的持久受管 Skill 注册；最终 `opencode.json` 全局允许
+`read`、`list`、`glob`、`grep` 和 `external_directory`，因此 `skills.paths`、临时
+`skill_paths` 及其它运行账户可访问路径中的 `references/`、`assets/`、`scripts/` 都可读。
+standalone 默认仍只允许写 `work_dir`；嵌入宿主可通过
+`OpenCodeHostBindings.readable_roots` 保留稳定只读根声明，通过
+`OpenCodeHostBindings.writable_roots` 声明额外稳定可写根；只读声明不会获得 `edit`。每次调用都会把
 `work_dir` 与 `file_write_allowlist`、兼容参数 `writable_paths` 合并为当前 Session 的窄化
-`permission` 覆盖；`readable_paths` 只追加读取权限，因此续接 Session 不会继承上一次调用未再次
-声明的额外路径。调用方不能传原生权限规则，`project_dir` 默认只读，`bash` 默认保持禁用。显式
+`permission` 覆盖；兼容参数 `readable_paths` 继续显式记录只读路径，但全局读取不依赖该参数。
+调用方不能传原生权限规则，所有非白名单路径仍不可编辑，`bash` 默认保持禁用。显式
 传入 `allowed_bash_commands` 或 `required_bash_commands` 时，Task Agent 才会先拒绝所有命令再按
 完整字符串放行；受管 Session 绑定 Hook 对父、子 Session 再做一次精确检查。前者只提供可选执行
 权限，不会因为缺失或失败阻止 Session 完成；后者还记录命令退出码和文件写入顺序，并要求每条必需

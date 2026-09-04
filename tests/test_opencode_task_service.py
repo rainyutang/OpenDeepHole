@@ -385,6 +385,8 @@ def test_runtime_permissions_are_written_to_global_config(
     assert permission["task"] == {"*": "allow"}
     assert permission["bash"] == {"*": "deny"}
     assert permission["skill"] == {"*": "allow"}
+    assert permission["read"]["*"] == "allow"
+    assert permission["external_directory"]["*"] == "allow"
     assert permission["edit"]["*"] == "deny"
     assert str(work_dir.resolve()) not in permission["edit"]
     for root in (workspace / ".opencode", skill_root):
