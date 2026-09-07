@@ -223,13 +223,11 @@ function isValidationTerminalStatus(status: string): boolean {
   return ["verified", "success", "failed", "error", "timeout", "cancelled", "skipped"].includes(status);
 }
 
-function validatedIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
+function humanConfirmedIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
   const issueIndices = finalReviewedIssueIndices(fpReview);
-  const validationMap = new Map((scan.validations ?? []).map((item) => [item.vuln_index, item]));
-  return [...issueIndices].filter((index) => {
-    const validation = validationMap.get(index);
-    return Boolean(validation && !validation.running && isValidationTerminalStatus(validation.status));
-  }).length;
+  return scan.vulnerabilities.filter((vuln) => (
+    issueIndices.has(vuln.vuln_index) && vuln.user_verdict === "confirmed"
+  )).length;
 }
 
 function scanEventKey(item: ScanEvent): string {
@@ -1495,10 +1493,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   const requiredDetailResources = useMemo(() => {
     const resources = detailResourcesForTab(activeTab, activeEngineId);
-    const needsCompleteIssueValidationCount = finalReviewedIssueCount(fpReview) > 0;
+    const needsCompleteIssueConfirmationCount = finalReviewedIssueCount(fpReview) > 0;
     return Array.from(new Set<DetailResource>([
       ...resources,
-      ...(needsCompleteIssueValidationCount ? ["validations" as DetailResource] : []),
+      ...(needsCompleteIssueConfirmationCount ? ["vulnerabilities" as DetailResource] : []),
       ...(logOpen ? ["events" as DetailResource] : []),
     ]));
   }, [activeEngineId, activeTab, fpReview, logOpen]);
@@ -1842,7 +1840,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const activeReport = displayedReports[activeReportIndex] ?? displayedReports[0];
   const continuableCount = scan.continuable_task_count || 0;
   const issueCount = finalReviewedIssueCount(fpReview);
-  const verifiedIssueCount = validatedIssueCount(scan, fpReview);
+  const confirmedIssueCount = humanConfirmedIssueCount(scan, fpReview);
   const variantIssueCount = scan.vulnerabilities.filter((v) => Boolean(v?.variant_of)).length;
   const showGitHistoryStages = gitHistory.length > 0
     || variantIssueCount > 0
@@ -1915,7 +1913,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         flow={flowModel}
         activeTab={activeTab}
         issueCount={issueCount}
-        verifiedIssueCount={verifiedIssueCount}
+        confirmedIssueCount={confirmedIssueCount}
         feedbackCount={feedbackCount}
         modelRunningCount={scan.opencode_pool?.global_running ?? 0}
         hasReportModeSkill={hasReportModeSkill}
@@ -2147,7 +2145,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             isFpReviewing={isFpReviewing}
             currentFpReviewTargets={currentFpReviewTargets}
             hasReportModeSkill={hasReportModeSkill}
-            verifiedIssueCount={verifiedIssueCount}
+            confirmedIssueCount={confirmedIssueCount}
             onNavigate={setActiveTab}
           />
         )}
@@ -3119,7 +3117,7 @@ interface ScanDetailSidebarProps {
   flow: ProcessFlowModel;
   activeTab: MainTab;
   issueCount: number;
-  verifiedIssueCount: number;
+  confirmedIssueCount: number;
   feedbackCount: number;
   modelRunningCount: number;
   hasReportModeSkill: boolean;
@@ -3172,7 +3170,7 @@ function ScanSidebarContent({
   flow,
   activeTab,
   issueCount,
-  verifiedIssueCount,
+  confirmedIssueCount,
   feedbackCount,
   modelRunningCount,
   hasReportModeSkill,
@@ -3227,7 +3225,7 @@ function ScanSidebarContent({
           />
           <SidebarNavigationButton
             label="疑似问题"
-            detail={`问题总数：${issueCount}，已验证：${verifiedIssueCount}`}
+            detail={`问题总数：${issueCount}，确认问题：${confirmedIssueCount}`}
             current={activeTab === "issues"}
             tone="red"
             badge={issueCount}
@@ -4211,7 +4209,7 @@ function ScanOverview({
   isFpReviewing,
   currentFpReviewTargets,
   hasReportModeSkill,
-  verifiedIssueCount,
+  confirmedIssueCount,
   onNavigate,
 }: {
   scan: ScanStatusType;
@@ -4229,7 +4227,7 @@ function ScanOverview({
   isFpReviewing: boolean;
   currentFpReviewTargets: Vulnerability[];
   hasReportModeSkill: boolean;
-  verifiedIssueCount: number;
+  confirmedIssueCount: number;
   onNavigate: (tab: MainTab) => void;
 }) {
   const engines = effectiveMiningEngines(scan);
@@ -4282,7 +4280,7 @@ function ScanOverview({
         {staticEngineSelected && (
           <OverviewMetric icon="target" label="候选点" value={scan.total_candidates || scan.vulnerabilities.length} detail={`${scan.processed_candidates} 已审计`} tone="blue" />
         )}
-        <OverviewMetric icon="alert" label="疑似问题" value={issueCount} detail={`${verifiedIssueCount} 已验证`} tone="red" onClick={() => onNavigate("issues")} />
+        <OverviewMetric icon="alert" label="疑似问题" value={issueCount} detail={`${confirmedIssueCount} 确认问题`} tone="red" onClick={() => onNavigate("issues")} />
         {showGitHistoryStages && (
           <OverviewMetric icon="history" label="历史模式" value={gitHistoryCount} detail={`${variantIssueCount} 个变体候选`} tone="purple" onClick={() => onNavigate("threat")} />
         )}
