@@ -63,6 +63,10 @@ _STAGE_TASKS = {
     "final_judge": (
         "请使用中文结合下面三份报告完成最终裁决。必须重新核对项目中的真实代码，"
         "分别判断正方和反方证据是否成立，不得按两边结论投票，也不得修改任何项目文件。"
+        "最终 verdict 必须且只能为 true_positive 或 false_positive，不允许 uncertain 或其他值。"
+        "reason、stage_markdown 中的最终结论必须与 verdict 一致。"
+        "已经确认真实代码缺陷，但外部触发证据不足时，应判定为 true_positive，"
+        "并按 Skill 的规则说明严重性和证据限制。"
         "最终只返回本 Skill 约定的 JSON。"
     ),
 }
@@ -87,6 +91,16 @@ _STAGE_SCHEMA: dict[str, Any] = {
         "vulnerability_report",
         "stage_markdown",
     ],
+}
+_FINAL_JUDGE_SCHEMA: dict[str, Any] = {
+    **_STAGE_SCHEMA,
+    "properties": {
+        **_STAGE_SCHEMA["properties"],
+        "verdict": {
+            "type": "string",
+            "enum": ["true_positive", "false_positive"],
+        },
+    },
 }
 
 
@@ -235,6 +249,9 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             vuln_index=item_index,
             stage=stage,
         )
+        output_schema = (
+            _FINAL_JUDGE_SCHEMA if stage == "final_judge" else _STAGE_SCHEMA
+        )
         prompt = build_skill_prompt(
             skill_name=_STAGE_SKILLS[stage],
             task=_STAGE_TASKS[stage],
@@ -242,7 +259,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
                 ("原始漏洞报告", report_markdown),
                 *report_sections,
             ),
-            output_schema=_STAGE_SCHEMA,
+            output_schema=output_schema,
         )
         result = await run_opencode_task(
             task_name=(
@@ -251,7 +268,7 @@ async def run(**kwargs: Any) -> dict[str, Any]:
             task_type="fp_review",
             prompt=prompt,
             required_capability=capability,
-            output_schema=_STAGE_SCHEMA,
+            output_schema=output_schema,
             invalid_json_retry_count=retry_count,
             config_path=kwargs.get("task_agent_config"),
             output=None,

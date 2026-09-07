@@ -58,6 +58,13 @@ Prompt 负责首轮模型输出约束，`output_schema` 负责程序侧解析、
 直接早退，否则最终裁决只接收原始、正方和反方三份 Markdown 报告。内置 `fp_check` 的所有阶段
 使用 `/fp-check`，每个后续阶段按执行顺序接收已经完成的阶段报告。
 
+`final_judge` 使用独立的二元裁决 Schema，`verdict` 只接受字符串 `true_positive` 或
+`false_positive`；正方、反方中间阶段仍可返回 `uncertain`。最终裁决 Prompt、Skill 和实际
+传给 Task Agent 的 Schema 使用相同的合法取值，报告结论必须与 `verdict` 一致。真实代码
+缺陷已经确认、仅外部触发证据不足时，按现有规则输出 `true_positive` 和 `medium`。
+最终裁决返回 `uncertain` 或其他非法值会进入 Task Agent 既有结构化输出纠正流程，重试
+耗尽后按失败处理。升级前未形成有效结论的项目可通过“启动复核”补跑，已有有效结果保持原样。
+
 ## 清单
 
 `method.yaml` 严格接受 `label`、`description`、`default`、`max_concurrency`、`stages`
