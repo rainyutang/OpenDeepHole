@@ -29,6 +29,7 @@ from backend.models import (
     MarkRequest,
     ScanKnowledgeBaseRequest,
     ScanStatus,
+    ThreatAuditTaskResult,
     ScanVulnerabilityValidationRequest,
     UnmarkRequest,
     User,
@@ -272,10 +273,9 @@ async def _public_user_for_scan_async(scan_id: str, token: str) -> User:
     if not token:
         raise HTTPException(status_code=401, detail="Missing scan access token")
     store = get_scan_store()
-    loaded = await run_store_call(store, "load_scan", scan_id)
-    if loaded is None:
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
-    _, meta = loaded
     if not meta.public_access_token or not secrets.compare_digest(
         token,
         meta.public_access_token,
@@ -552,6 +552,18 @@ async def get_public_scan_git_history(
     current_user: User = Depends(_public_user_dependency),
 ) -> list[HistoryPattern]:
     return await scan_api.get_scan_git_history(scan_id, current_user)
+
+
+@router.get(
+    "/api/public/scans/{scan_id}/threat-audit-results",
+    response_model=list[ThreatAuditTaskResult],
+)
+async def get_public_threat_audit_results(
+    scan_id: str,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(_public_user_dependency),
+) -> list[ThreatAuditTaskResult]:
+    return await scan_api.get_scan_threat_audit_results_v2(scan_id, task_ids, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/threat-analysis", response_model=dict)

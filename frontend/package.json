@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "test:scan-runtime": "node tests/scanRuntime.test.mjs",
     "test:static-audit": "node tests/staticAudit.test.mjs",
+    "test:threat-audit": "node tests/threatAuditResults.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

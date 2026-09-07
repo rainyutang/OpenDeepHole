@@ -1,4 +1,5 @@
 import axios from "axios";
+import type { ThreatAuditTaskResult } from "../types";
 import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanStopResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 import {
   isRecord,
@@ -438,6 +439,40 @@ export async function getScanEventsPage(
     next_cursor: typeof data.next_cursor === "number" ? data.next_cursor : null,
     has_more: data.has_more === true,
   };
+}
+
+export async function getScanThreatAuditResults(
+  scanId: string,
+  taskIds: string[],
+  signal?: AbortSignal,
+): Promise<ThreatAuditTaskResult[]> {
+  const ids = [...new Set(taskIds)];
+  if (ids.length === 0) return [];
+  if (ids.length > 100) throw new Error("每次最多读取 100 个审计任务结果");
+  const params = new URLSearchParams();
+  ids.forEach((id) => params.append("task_ids", id));
+  const publicAccess = isPublicScan(scanId);
+  if (publicAccess) params.set("token", publicParams()!.token);
+  const { data } = await api.get<ThreatAuditTaskResult[]>(
+    publicAccess
+      ? publicScanPath("/threat-audit-results")
+      : `/api/v2/scans/${scanId}/threat-audit-results`,
+    { params, signal },
+  );
+  if (!Array.isArray(data) || data.length !== ids.length || data.some((item) => (
+    !isRecord(item) || !ids.includes(item.task_id) || !Array.isArray(item.findings)
+    || !Number.isInteger(item.confirmed_issue_count) || item.confirmed_issue_count < 0
+    || typeof item.association_complete !== "boolean"
+    || item.findings.some((finding) => (
+      !isRecord(finding) || !Number.isInteger(finding.vuln_index) || finding.vuln_index < 0
+      || typeof finding.description !== "string"
+      || !["confirmed", "false_positive", "unreviewed", "not_confirmed"].includes(finding.verdict)
+      || !["human", "fp_review", "audit"].includes(finding.verdict_source)
+    ))
+  )) || new Set(data.map((item) => item.task_id)).size !== ids.length) {
+    throw new Error("审计结果响应无效");
+  }
+  return data;
 }
 
 export async function getScanThreatTasksPage(

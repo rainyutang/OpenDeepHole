@@ -71,6 +71,7 @@ from backend.models import (
     MULTI_VERSION_ENGINE_LABEL,
     ThreatAuditTask,
     ThreatAuditTaskPage,
+    ThreatAuditTaskResult,
     ThreatAnalysisMethodCatalog,
     ThreatAnalysisMethodSelection,
     ThreatAnalysisRunStatus,
@@ -2309,6 +2310,21 @@ async def get_scan_events_v2(
         items=[event for _, event in reversed(rows)],
         has_more=has_more,
         next_cursor=next_cursor if has_more else None,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/threat-audit-results",
+    response_model=list[ThreatAuditTaskResult],
+)
+async def get_scan_threat_audit_results_v2(
+    scan_id: str,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(get_current_user),
+) -> list[ThreatAuditTaskResult]:
+    await _check_scan_owner_v2(scan_id, current_user)
+    return await run_store_call(
+        get_scan_store(), "get_threat_audit_task_results", scan_id, task_ids,
     )
 
 

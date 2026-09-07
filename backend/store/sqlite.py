@@ -51,6 +51,7 @@ from backend.models import (
     SkillReport,
     THREAT_AUDIT_ENGINE_LABEL,
     ThreatAuditTask,
+    ThreatAuditTaskResult,
     ThreatAnalysisMethodSelection,
     ThreatAnalysisRunStatus,
     ThreatCodePath,
@@ -63,6 +64,7 @@ from backend.models import (
 from backend.vulnerability_identity import vulnerability_report_identity
 
 from .base import DuplicateScanNameError, ScanStoreBase
+from .threat_audit_results import read_threat_audit_task_results
 
 
 # Kept only to satisfy the legacy SQLite column without retaining behavioral
@@ -4595,6 +4597,12 @@ class SqliteScanStore(ScanStoreBase):
             )
             self._conn.commit()
         return stored
+
+    def get_threat_audit_task_results(
+        self, scan_id: str, task_ids: list[str],
+    ) -> list[ThreatAuditTaskResult]:
+        with self._lock:
+            return read_threat_audit_task_results(self._conn, scan_id, task_ids)
 
     def list_threat_audit_tasks(
         self,

@@ -602,6 +602,26 @@ class ThreatAuditTask(BaseModel):
     updated_at: str = ""
 
 
+class ThreatAuditFindingSummary(BaseModel):
+    """A linked audit finding with its current effective conclusion."""
+    vuln_index: int
+    vuln_type: str = ""
+    severity: str = ""
+    description: str = ""
+    file: str = ""
+    line: int = 0
+    function: str = ""
+    verdict: Literal["confirmed", "false_positive", "unreviewed", "not_confirmed"]
+    verdict_source: Literal["human", "fp_review", "audit"]
+
+
+class ThreatAuditTaskResult(BaseModel):
+    task_id: str
+    findings: list[ThreatAuditFindingSummary] = Field(default_factory=list)
+    confirmed_issue_count: int = 0
+    association_complete: bool = True
+
+
 class VulnerabilityValidation(BaseModel):
     """Runtime validation status and artifacts for one vulnerability."""
     scan_id: str = ""

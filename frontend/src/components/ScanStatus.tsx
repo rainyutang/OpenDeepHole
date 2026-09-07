@@ -10,6 +10,8 @@ import {
   ThreatAnalysisPanel,
 } from "../features/threatAnalysis";
 import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
+import { ThreatAuditFindingBadge, ThreatAuditResults, useThreatAuditResults } from "../features/threatAudit/ThreatAuditResults";
+import type { ThreatAuditTaskResult } from "../types";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexedVulnerability, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
@@ -736,6 +738,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // FP review state
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
+  const [threatResultRevision, setThreatResultRevision] = useState(0);
   const [fpReviewHydrated, setFpReviewHydrated] = useState(false);
   const [fpReviewLoading, setFpReviewLoading] = useState(false);
   const [fpReviewStopping, setFpReviewStopping] = useState(false);
@@ -1037,6 +1040,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // SSE event handlers — update state incrementally
   const sseHandlers = useMemo<ScanSSEHandlers>(() => ({
+    onStateRefresh: () => setThreatResultRevision((value) => value + 1),
     onScanStatus: (data) => {
       setScan((prev) => {
         if (!prev) {
@@ -1891,6 +1895,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       onFeedbackCreated={addSelectedFeedbackIds}
       onFeedbackRemoved={removeSelectedFeedbackIds}
       onVulnMarked={() => {
+        setThreatResultRevision((value) => value + 1);
         if (skillOpen && skillType) {
           if (skillType === "__fp_review__") {
             getFpReviewSkill(scanId).then(setSkillContent).catch(() => {});
@@ -2202,6 +2207,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           <ThreatAuditPanel
             scan={scan}
             events={threatAuditEvents}
+            fpReview={fpReview}
+            resultRevision={threatResultRevision}
           />
         )}
         {activeTab === "mining" && activeEngine && ![STATIC_ENGINE_ID, THREAT_ENGINE_ID].includes(activeEngine.engine_id) && (
@@ -3762,9 +3769,13 @@ function engineRunDuration(run: MiningEngineRunStatus | null): string {
 function ThreatAuditPanel({
   scan,
   events,
+  fpReview,
+  resultRevision,
 }: {
   scan: ScanStatusType;
   events: ScanEvent[];
+  fpReview: FpReviewJob | null;
+  resultRevision: number;
 }) {
   const [statusFilter, setStatusFilter] = useState("__all__");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -3802,6 +3813,12 @@ function ThreatAuditPanel({
   );
   const selected = tasks.find((task) => task.task_id === selectedTaskId) ?? null;
   const selectedRuntime = selected ? runtimeByTaskId.get(selected.task_id) ?? null : null;
+  const auditResults = useThreatAuditResults(
+    scan,
+    [...pagedTasks.map((task) => task.task_id), ...(selected ? [selected.task_id] : [])],
+    fpReview,
+    resultRevision,
+  );
   const statusCounts = useMemo(() => {
     const counts = new Map<string, number>();
     currentTasks.forEach((task) => {
@@ -3910,7 +3927,10 @@ function ThreatAuditPanel({
                           }`}
                         >
                           <div className="flex items-start gap-2">
-                            <StatusPill label={threatAuditStatusLabel(status)} tone={threatAuditStatusTone(status)} />
+                            <div className="flex shrink-0 flex-col items-start gap-1">
+                              <StatusPill label={threatAuditStatusLabel(status)} tone={threatAuditStatusTone(status)} />
+                              <ThreatAuditFindingBadge result={auditResults.results.get(task.task_id)} />
+                            </div>
                             <div className="min-w-0">
                               <div className="truncate text-sm font-medium text-slate-200">
                                 {task.method_name || "未命名攻击模式"}
@@ -3960,7 +3980,14 @@ function ThreatAuditPanel({
 
           <div className="min-h-[28rem] rounded-xl border border-slate-700 bg-slate-900/40">
             {selected ? (
-              <ThreatAuditTaskDetail task={selected} runtime={selectedRuntime} />
+              <ThreatAuditTaskDetail
+                task={selected}
+                runtime={selectedRuntime}
+                result={auditResults.results.get(selected.task_id)}
+                resultLoading={auditResults.loading}
+                resultError={auditResults.error}
+                onRetryResult={auditResults.retry}
+              />
             ) : (
               <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
                 从左侧选择一个威胁审计任务查看详情
@@ -4025,9 +4052,17 @@ function threatAuditStatusTone(status: string): TaskTone {
 function ThreatAuditTaskDetail({
   task,
   runtime,
+  result,
+  resultLoading,
+  resultError,
+  onRetryResult,
 }: {
   task: ThreatAuditTask;
   runtime: ScanQueueTask | null;
+  result?: ThreatAuditTaskResult;
+  resultLoading: boolean;
+  resultError: string;
+  onRetryResult: () => void;
 }) {
   const prompt = runtime ? scanQueueTaskPrompt(runtime.task) : "";
   const sessionId = runtime ? scanQueueTaskSessionId(runtime.task) : "";
@@ -4044,6 +4079,15 @@ function ThreatAuditTaskDetail({
         </div>
         <div className="mt-2 break-all font-mono text-[11px] text-slate-600">{task.task_id}</div>
       </div>
+      <ThreatAuditDetailSection title="审计结果">
+        <ThreatAuditResults
+          result={result}
+          status={status}
+          loading={resultLoading}
+          error={resultError}
+          onRetry={onRetryResult}
+        />
+      </ThreatAuditDetailSection>
       <ThreatAuditDetailSection title="审计目标">
         <DetailGrid items={[
           ["叶子节点", task.surface_name || task.surface_node_id || "—"],
@@ -4085,7 +4129,11 @@ function ThreatAuditTaskDetail({
           ["开始时间", task.started_at ? formatDateTime(task.started_at) : "—"],
           ["结束时间", task.finished_at ? formatDateTime(task.finished_at) : "—"],
           ["输出来源", source || "—"],
-          ["结果索引", task.result_vuln_indexes?.length ? task.result_vuln_indexes.map((value) => `#${value}`).join("、") : "无漏洞结果"],
+          ["结果索引", result?.findings.length
+            ? result.findings.map((finding) => `#${finding.vuln_index}`).join("、")
+            : task.result_vuln_indexes?.length
+              ? task.result_vuln_indexes.map((value) => `#${value}`).join("、")
+              : "未记录结果索引"],
         ]} />
       </ThreatAuditDetailSection>
       {tokenUsage && (

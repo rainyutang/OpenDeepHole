@@ -365,6 +365,25 @@ export interface ThreatAuditTask {
   updated_at?: string;
 }
 
+export interface ThreatAuditFindingSummary {
+  vuln_index: number;
+  vuln_type: string;
+  severity: string;
+  description: string;
+  file: string;
+  line: number;
+  function: string;
+  verdict: "confirmed" | "false_positive" | "unreviewed" | "not_confirmed";
+  verdict_source: "human" | "fp_review" | "audit";
+}
+
+export interface ThreatAuditTaskResult {
+  task_id: string;
+  findings: ThreatAuditFindingSummary[];
+  confirmed_issue_count: number;
+  association_complete: boolean;
+}
+
 export interface Candidate {
   file: string;
   line: number;

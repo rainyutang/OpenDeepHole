@@ -156,6 +156,7 @@ interface MiningEngineRunEvent {
 /* ------------------------------------------------------------------ */
 
 export interface ScanSSEHandlers {
+  onStateRefresh?: () => void;
   onScanStatus?: (data: ScanStatusEvent) => void;
   onOpenCodeTaskReport?: (data: OpenCodeTaskReportEvent) => void;
   onScanCandidates?: (data: ScanCandidatesEvent) => void;
@@ -410,7 +411,9 @@ export function useScanSSE(
       scanId,
       stateSettersRef.current,
       () => activeScanIdRef.current === scanId,
-    );
+    ).finally(() => {
+      if (activeScanIdRef.current === scanId) handlersRef.current.onStateRefresh?.();
+    });
   }, [scanId]);
 
   useEffect(() => {

@@ -28,6 +28,7 @@ from backend.models import (
     ScanSummary,
     SkillReport,
     ThreatAuditTask,
+    ThreatAuditTaskResult,
     ThreatAnalysisRunStatus,
     UserInDB,
     Vulnerability,
@@ -382,6 +383,12 @@ class ScanStoreBase(ABC):
     @abstractmethod
     def list_threat_audit_tasks(self, scan_id: str) -> list[ThreatAuditTask]:
         """Return threat-analysis-derived audit tasks for a scan."""
+
+    def get_threat_audit_task_results(
+        self, scan_id: str, task_ids: list[str],
+    ) -> list[ThreatAuditTaskResult]:
+        """Read linked findings and effective conclusions for a bounded task batch."""
+        raise NotImplementedError
 
     @abstractmethod
     def get_incomplete_threat_audit_counts(self, scan_ids: list[str]) -> dict[str, int]:
