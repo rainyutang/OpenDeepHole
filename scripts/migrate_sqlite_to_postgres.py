@@ -34,6 +34,12 @@ _COORDINATION_TABLES = {
     "agent_sessions",
     "backend_workers",
     "scan_stream_events",
+    "schema_migrations",
+    "scan_summary_state",
+    "scan_issue_facts",
+    "scan_checker_totals",
+    "scan_resource_counts",
+    "storage_maintenance_jobs",
 }
 _ROOT_TABLES = {
     "agents",
@@ -81,7 +87,21 @@ def _business_tables(connection: sqlite3.Connection) -> list[str]:
         """
     ).fetchall()
     names = [str(row[0]) for row in rows if str(row[0]) not in _COORDINATION_TABLES]
-    return sorted(names, key=lambda name: (name not in _ROOT_TABLES, name))
+    pending = set(names)
+    ordered = []
+    while pending:
+        ready = [name for name in pending if not (
+            ({str(row[2]) for row in connection.execute(f"PRAGMA foreign_key_list({_identifier(name)})").fetchall()}
+             | ({"scans"} if name == "fp_review_jobs" else set())) & pending
+        )]
+        if not ready:
+            raise RuntimeError("Cyclic scan-storage references")
+        for name in sorted(ready):
+            pending.remove(name)
+            ordered.append(name)
+    # Install tombstones only after copying their remaining business children;
+    # deletion guards correctly reject writes once a tombstone exists.
+    return [name for name in ordered if name != "scan_deletions"] + (["scan_deletions"] if "scan_deletions" in ordered else [])
 
 
 def _source_counts(connection: sqlite3.Connection, tables: list[str]) -> dict[str, int]:

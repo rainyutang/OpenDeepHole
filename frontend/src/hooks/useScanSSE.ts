@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { scanSSEUrl, getScanOverview, getFpReview, getAgentIndexStatus } from "../api/client";
+import { scanSSEUrl, getScanOverview, getScanStatus, getScanDetailItem, getFpReview, getFpReviewOverview, getAgentIndexStatus } from "../api/client";
 import { getScanThreatAnalysis } from "../features/threatAnalysis/api";
 import {
   isRecord,
@@ -47,7 +47,9 @@ interface ScanStatusEvent {
 }
 
 interface OpenCodeTaskReportEvent {
-  task: OpenCodeCompletedTask;
+  task?: OpenCodeCompletedTask;
+  task_id?: string;
+  revision?: number;
   completed_task_count: number;
   total_tasks: number;
 }
@@ -222,33 +224,9 @@ async function refreshFullState(
   }
   if (!isCurrent()) return;
   try {
-    const job = await getFpReview(scanId);
+    const job = await getFpReviewOverview(scanId);
     if (!isCurrent() || job.scan_id !== scanId) return;
-    // Merge with existing state to preserve in-progress stage_outputs
-    // that arrived via SSE but are not yet part of a completed result.
-    setFpReview((prev) => {
-      if (!isCurrent()) return prev;
-      if (!prev) return job;
-      if (prev.review_id !== job.review_id) return job;
-      const mergedResults = job.results.map((r) => {
-        const existing = prev.results.find((p) => p.vuln_index === r.vuln_index);
-        if (existing) {
-          return {
-            ...r,
-            stage_outputs: { ...(existing.stage_outputs ?? {}), ...(r.stage_outputs ?? {}) },
-            stage_output_sources: { ...(existing.stage_output_sources ?? {}), ...(r.stage_output_sources ?? {}) },
-          };
-        }
-        return r;
-      });
-      // Keep entries that only exist locally (in-progress, not yet in DB).
-      const inProgressOnly = prev.results.filter(
-        (p) =>
-          !job.results.some((r) => r.vuln_index === p.vuln_index) &&
-          Object.keys(p.stage_outputs ?? {}).length > 0,
-      );
-      return { ...job, results: [...mergedResults, ...inProgressOnly] };
-    });
+    setFpReview((previous) => previous ? { ...previous, ...job, results: previous.results } : job);
   } catch {
     // 404 = no review yet
   }
@@ -261,13 +239,7 @@ async function refreshFullState(
     // transient — index_status SSE may still arrive later
   }
   if (!isCurrent()) return;
-  try {
-    const analysis = await getScanThreatAnalysis(scanId);
-    if (!isCurrent()) return;
-    setScan((prev) => prev?.scan_id === scanId ? { ...prev, threat_analysis: analysis } : prev);
-  } catch {
-    // 404 = no threat analysis snapshot yet
-  }
+
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -311,8 +283,7 @@ function isValidPayload(eventType: string, value: unknown): value is Record<stri
         && (value.static_analysis_done == null || typeof value.static_analysis_done === "boolean")
         && (value.opencode_pool === undefined || value.opencode_pool === null || isRecord(value.opencode_pool));
     case "opencode_task_report":
-      return isRecord(value.task)
-        && isString(value.task.task_id)
+      return (isString(value.task_id) || isRecord(value.task) && isString(value.task.task_id))
         && isFiniteNumber(value.completed_task_count)
         && isFiniteNumber(value.total_tasks);
     case "scan_candidates":
@@ -405,12 +376,12 @@ export function useScanSSE(
   const activeScanIdRef = useRef(scanId);
   activeScanIdRef.current = scanId;
 
+  const refreshInFlight = useRef<string | null>(null);
   const refreshState = useCallback(() => {
-    void refreshFullState(
-      scanId,
-      stateSettersRef.current,
-      () => activeScanIdRef.current === scanId,
-    );
+    if (document.hidden || refreshInFlight.current === scanId) return;
+    refreshInFlight.current = scanId;
+    void refreshFullState(scanId, stateSettersRef.current, () => activeScanIdRef.current === scanId)
+      .finally(() => { if (refreshInFlight.current === scanId) refreshInFlight.current = null; });
   }, [scanId]);
 
   useEffect(() => {
@@ -503,6 +474,61 @@ export function useScanSSE(
       setConnected(true);
     });
 
+    let resourceTimer: number | null = null;
+    const pendingResources = new Map<string, { resource: string; index?: number }>();
+    let fullRefresh = false;
+    let resourceRunning = false;
+    const reloadResources = async () => {
+      resourceTimer = null;
+      if (disposed || document.hidden || resourceRunning) return;
+      resourceRunning = true;
+      const reloadAll = fullRefresh;
+      fullRefresh = false;
+      const notices = [...pendingResources.values()];
+      pendingResources.clear();
+      try {
+        if (reloadAll || notices.some((notice) => typeof notice.index !== "number" && notice.resource !== "threat-analysis")) {
+          const data = await getScanStatus(scanId);
+          if (!disposed) stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId ? data : previous);
+          const job = await getFpReview(scanId).catch(() => null);
+          if (!disposed && job) stateSettersRef.current.setFpReview(job);
+        } else {
+          for (const notice of notices) {
+            if (disposed) break;
+            if (notice.resource === "threat-analysis") {
+              const analysis = await getScanThreatAnalysis(scanId);
+              if (!disposed) stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId ? { ...previous, threat_analysis: analysis } : previous);
+              continue;
+            }
+            const item = await getScanDetailItem(scanId, notice.resource, notice.index!, notice.resource !== "validations");
+            if (disposed) break;
+            if (notice.resource === "candidates") handlersRef.current.onScanCandidateAudit?.({ candidate: normalizeScanCandidate(item, notice.index!) });
+            if (notice.resource === "vulnerabilities") handlersRef.current.onScanVulnerability?.({ index: notice.index!, vulnerability: normalizeVulnerability(item) });
+            if (notice.resource === "validations") handlersRef.current.onVulnerabilityValidation?.({ validation: normalizeValidation(item) });
+            if (notice.resource === "fp-review") stateSettersRef.current.setFpReview((previous) => previous ? { ...previous, results: [...previous.results.filter((result) => result.vuln_index !== notice.index), item] } : previous);
+          }
+        }
+      } catch {
+        fullRefresh = true;
+      } finally {
+        resourceRunning = false;
+        refreshState();
+        if (!disposed && (fullRefresh || pendingResources.size)) resourceTimer = window.setTimeout(reloadResources, 1000);
+      }
+    };
+    const scheduleResources = () => { if (resourceTimer == null) resourceTimer = window.setTimeout(reloadResources, 150); };
+    es.addEventListener("resource_changed", ((event: MessageEvent) => {
+      try {
+        const notice = JSON.parse(event.data);
+        pendingResources.set(`${notice.resource}:${notice.index}`, notice);
+        if (pendingResources.size > 100) { pendingResources.clear(); fullRefresh = true; }
+        scheduleResources();
+      } catch { fullRefresh = true; scheduleResources(); }
+    }) as EventListener);
+    es.addEventListener("resync_required", () => { fullRefresh = true; scheduleResources(); });
+    const onVisible = () => { if (!document.hidden) { fullRefresh = true; scheduleResources(); refreshState(); } };
+    document.addEventListener("visibilitychange", onVisible);
+
     // Register typed event listeners
     handle<ScanStatusEvent>("scan_status", queueScanStatus);
     handle<OpenCodeTaskReportEvent>("opencode_task_report", (d) => (
@@ -560,6 +586,8 @@ export function useScanSSE(
 
     return () => {
       disposed = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      if (resourceTimer != null) window.clearTimeout(resourceTimer);
       es.close();
       clearInterval(fallbackTimer);
       if (eventFlushTimer != null) window.clearTimeout(eventFlushTimer);

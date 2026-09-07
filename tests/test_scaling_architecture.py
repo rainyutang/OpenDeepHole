@@ -87,6 +87,10 @@ def test_postgres_bootstrap_adds_legacy_columns_before_indexes(monkeypatch) -> N
 
     class FakeResult:
         @staticmethod
+        def fetchone():
+            return {"name": None, "fingerprint": "test-schema"}
+
+        @staticmethod
         def fetchall() -> list[dict]:
             return []
 

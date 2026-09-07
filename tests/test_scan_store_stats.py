@@ -158,9 +158,9 @@ class ScanEventStoreTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM events WHERE scan_id = ?",
                 ("scan-events",),
             ).fetchone()[0]
-            self.assertEqual(count, SCAN_EVENT_RETENTION_LIMIT)
+            self.assertEqual(count, SCAN_EVENT_RETENTION_LIMIT + 5)
 
-    def test_migration_filters_existing_task_output_and_prunes_history(
+    def test_migration_preserves_existing_history_and_returns_bounded_tail(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,17 +202,22 @@ class ScanEventStoreTests(unittest.TestCase):
                 """,
                 rows,
             )
+            # Simulate a database predating the versioned migration ledger.
+            store._conn.execute("DELETE FROM schema_migrations")
             store._conn.commit()
             store._conn.close()
 
             migrated = SqliteScanStore(db_path)
             events = migrated.get_events("scan-events")
             self.assertEqual(len(events), SCAN_EVENT_RETENTION_LIMIT)
-            self.assertEqual(events[0].message, "event-5")
+            self.assertEqual(events[0].message, "event-7")
             self.assertEqual(
                 events[-1].message,
-                f"event-{SCAN_EVENT_RETENTION_LIMIT + 4}",
+                "[2026-08-03 12:00:00] [candidate_audit][session-2][skill] loaded",
             )
+            self.assertEqual(migrated._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], SCAN_EVENT_RETENTION_LIMIT + 7)
+            self.assertEqual(migrated._conn.execute("SELECT message FROM events ORDER BY id LIMIT 1").fetchone()[0], "event-0")
+            migrated.close()
 
 
 class ScanHistoryPaginationTests(unittest.TestCase):
@@ -350,7 +355,7 @@ class VulnerabilityStoreTests(unittest.TestCase):
             store.add_vulnerability("scan-chain", current)
             store.add_vulnerability("scan-chain", legacy)
             store._conn.execute(
-                "UPDATE vulnerabilities SET call_chain = ? WHERE scan_id = ? AND idx = ?",
+                "UPDATE vulnerabilities SET call_chain = ?, audit_body_id = NULL WHERE scan_id = ? AND idx = ?",
                 (
                     json.dumps([
                         "legacy_entry",

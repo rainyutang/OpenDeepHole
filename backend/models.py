@@ -158,6 +158,7 @@ class VersionVulnerabilityLocation(BaseModel):
 
 class Vulnerability(BaseModel):
     """A confirmed or assessed vulnerability after AI analysis."""
+    vuln_index: int | None = None  # Stable persisted index; list positions may have gaps.
     file: str
     line: int
     function: str
@@ -993,6 +994,18 @@ class AgentVulnerabilityValidationUpdate(BaseModel):
     updated_at: str = ""
     agent_session_id: str = ""
     execution_revision: int = 0
+
+
+class ValidationOutputChange(BaseModel):
+    field: str = Field(min_length=1, max_length=1024)
+    operation: Literal["append", "set", "alias"]
+    content: str = Field(max_length=2097152)
+
+
+class AgentValidationDelta(BaseModel):
+    state: AgentVulnerabilityValidationUpdate
+    sequence: int = Field(gt=0)
+    changes: list[ValidationOutputChange] = Field(default_factory=list, max_length=500)
 
 
 class AgentInfo(BaseModel):
@@ -1904,6 +1917,9 @@ class FpReviewResult(BaseModel):
     stage_output_sources: dict[str, OutputSource] = Field(default_factory=dict)
     output_source: OutputSource = Field(default_factory=OutputSource)
     created_at: str
+    execution_revision: int = 0
+    review_id: str = ""
+    pending_stage_outputs: dict[str, str] = Field(default_factory=dict)
 
 
 class FpReviewStageOutput(BaseModel):
@@ -1929,6 +1945,7 @@ class FpReviewJob(BaseModel):
     current_vuln_index: int | None = None
     current_vuln_indices: list[int] = []
     results: list[FpReviewResult] = []
+    result_counts: dict[str, int] = Field(default_factory=dict)
     error_message: str | None = None
     execution_agent_session_id: str = ""
     execution_revision: int = 0

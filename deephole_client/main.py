@@ -528,6 +528,7 @@ async def _ws_loop(config, task_manager, reporter) -> None:
                     "capabilities": {
                         "final_vulnerability_callbacks": True,
                         "incremental_opencode_task_reports": True,
+                        "incremental_validation_output": True,
                     },
                     "name": name,
                     "machine_name": socket.gethostname(),

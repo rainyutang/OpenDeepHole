@@ -159,6 +159,21 @@ class VulnerabilityValidationConfig(BaseModel):
     environments: dict[str, ValidationEnvironmentConfig] = {}
 
 
+class StorageMaintenanceConfig(BaseModel):
+    enabled: bool = True
+    interval_seconds: int = Field(default=60, ge=60)
+    batch_rows: int = Field(default=1000, ge=1, le=1000)
+    delivered_payload_seconds: int = Field(default=86400, ge=1)
+    delivered_command_seconds: int = Field(default=604800, ge=1)
+    failed_command_seconds: int = Field(default=2592000, ge=1)
+    session_seconds: int = Field(default=604800, ge=1)
+    worker_seconds: int = Field(default=604800, ge=1)
+    rpc_seconds: int = Field(default=86400, ge=1)
+    sse_seconds: int = Field(default=86400, ge=1)
+    sse_rows: int = Field(default=50000, ge=1, le=1000000)
+    sse_bytes: int = Field(default=134217728, ge=1024)
+
+
 class StorageConfig(BaseModel):
     projects_dir: str = str(_DEFAULT_DATA_ROOT / "projects")
     scans_dir: str = str(_DEFAULT_DATA_ROOT / "scans")
@@ -167,6 +182,7 @@ class StorageConfig(BaseModel):
     database_url: str = ""
     postgres_pool_min_size: int = Field(default=1, ge=1, le=50)
     postgres_pool_max_size: int = Field(default=10, ge=1, le=100)
+    maintenance: StorageMaintenanceConfig = Field(default_factory=StorageMaintenanceConfig)
 
 
 class LoggingConfig(BaseModel):

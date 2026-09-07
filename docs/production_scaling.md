@@ -175,3 +175,8 @@ OPENDEEPHOLE_TEST_POSTGRES_DSN='postgresql://user:password@127.0.0.1:5432/opende
 ```
 
 该测试覆盖 schema 初始化、SQLite 迁移、分页详情、并行连接、Agent 会话与命令、RPC、SSE 和 leader advisory lock；测试不会清空目标数据库，并会拒绝非空目标。
+
+
+## 扫描历史存储升级
+
+2026-09-07 起的任务正文去重、历史回填、运行数据保留和停写回滚使用 [扫描存储迁移指南](database-storage-migration.md)。生产电脑上的数据库需在生产环境执行迁移；开发库的迁移进度不能代替生产迁移。该流程与上文 SQLite 转 PostgreSQL 是两个独立操作，已有 PostgreSQL 不需要重新导入 SQLite。

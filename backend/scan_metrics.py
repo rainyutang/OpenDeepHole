@@ -39,6 +39,7 @@ class VulnStat:
     user_verdict: str | None
     analysis_source: str = "static_candidate"
     provisional: bool = False
+    vuln_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,7 @@ def calculate_issue_metrics(
     accuracy_basis_count = 0
 
     for index, vuln in enumerate(vulnerabilities):
+        index = vuln.vuln_index if getattr(vuln, "vuln_index", None) is not None else index
         if checker is not None and vuln.vuln_type != checker:
             continue
 
@@ -157,6 +159,7 @@ def calculate_validated_issue_count(
 
     total = 0
     for index, vulnerability in enumerate(vulnerabilities):
+        index = vulnerability.vuln_index if getattr(vulnerability, "vuln_index", None) is not None else index
         if not is_llm_issue(vulnerability):
             continue
         fp_result = fp_results.get(index)

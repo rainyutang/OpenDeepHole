@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, HTTPException
 
 from backend.auth import get_current_user, require_admin
 from backend.models import (
@@ -32,6 +32,64 @@ from backend.store.async_ops import run_store_call
 
 router = APIRouter()
 UNCONFIGURED_PRODUCT = "__unconfigured__"
+
+
+def _build_checker_dashboard_v2(store, product=None, user_id=None):
+    from backend.store.sqlite import _token_usage_from_rows
+    data = store.get_checker_dashboard_aggregates(user_id=user_id, product=product)
+    registry = refresh_registry()
+    checkers = {name: CheckerDashboardStats(checker=name, label=entry.label, description=entry.description, user_created=entry.user_created)
+                for name, entry in registry.items()}
+    for row in data["checkers"]:
+        previous = checkers.get(row["checker"])
+        checkers[row["checker"]] = CheckerDashboardStats(**row, label=previous.label if previous else row["checker"].upper(),
+            description=previous.description if previous else "", user_created=previous.user_created if previous else False,
+            accuracy=accuracy(row["human_confirmed_count"], row["accuracy_basis_count"]), ticket_accuracy=accuracy(row["ticket_submitted_count"], row["accuracy_basis_count"]))
+    builtin = [item for item in checkers.values() if not item.user_created]
+    keys = ("static_issue_count", "llm_issue_count", "fp_review_issue_count", "fp_review_false_positive_count", "human_confirmed_count", "ticket_submitted_count", "accuracy_basis_count")
+    totals = {key: sum(getattr(item, key) for item in builtin) for key in keys}
+    token_data = store.dashboard_token_aggregates(user_id=user_id)
+    token_rows = {}
+    for row in token_data["usage"]:
+        token_rows.setdefault((row["agent_key"], row["user_id"], row["legacy_name"]), []).append(row)
+    agents = []
+    total_usage = _MutableTokenTotals()
+    scan_count = tracked = 0
+    for row in token_data["groups"]:
+        usage = _token_usage_from_rows(token_rows.get((row["agent_key"], row["user_id"], row["legacy_name"]), [])) or OpenCodeTokenUsage(complete=False)
+        usage.complete = usage.complete and row["scan_count"] == row["tracked_scan_count"]
+        total_usage.add(usage)
+        scan_count += row["scan_count"]
+        tracked += row["tracked_scan_count"]
+        agents.append(CheckerDashboardAgentTokenUsage(agent_key=row["agent_key"], agent_name=row["agent_name"], machine_name=row["machine_name"], ip=row["ip"],
+            owner_user_id=row["user_id"], owner_username=row["username"], scan_count=row["scan_count"], tracked_scan_count=row["tracked_scan_count"], usage=usage))
+    return CheckerDashboardResponse(summary=CheckerDashboardSummary(**data["counts"], **totals, checker_count=len(builtin),
+        total_issue_count=totals["llm_issue_count"] - totals["fp_review_false_positive_count"],
+        accuracy=accuracy(totals["human_confirmed_count"], totals["accuracy_basis_count"]), ticket_accuracy=accuracy(totals["ticket_submitted_count"], totals["accuracy_basis_count"])),
+        checkers=sorted(checkers.values(), key=lambda item: (item.user_created, item.scan_count == 0, item.checker)),
+        products=[value for value in data["products"] if value], has_unconfigured_product="" in data["products"],
+        token_usage=CheckerDashboardTokenUsage(scan_count=scan_count, tracked_scan_count=tracked, usage=total_usage.response(coverage_complete=scan_count == tracked),
+            agents=sorted(agents, key=lambda item: (-item.usage.total_tokens, item.agent_name, item.owner_username))))
+
+
+@router.get("/api/v2/checker-dashboard", response_model=CheckerDashboardResponse)
+async def get_checker_dashboard_v2(product: str | None = None, current_user: User = Depends(get_current_user)):
+    return await run_store_call(get_scan_store(), _build_checker_dashboard_v2, get_scan_store(), product, None if current_user.role == "admin" else current_user.user_id)
+
+
+@router.get("/api/v2/checker-dashboard/{checker}/scans")
+async def get_checker_scans_v2(checker: str, product: str | None = None, cursor: str | None = None,
+                                limit: int = Query(50, ge=1, le=100), current_user: User = Depends(get_current_user)):
+    from backend.pagination import decode_cursor, encode_cursor
+    try:
+        before = decode_cursor(cursor, size=2) if cursor else (None, None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid cursor") from exc
+    rows = await run_store_call(get_scan_store(), "list_checker_scans_page", checker, product=product,
+        user_id=None if current_user.role == "admin" else current_user.user_id, before_created_at=before[0], before_scan_id=before[1], limit=limit + 1)
+    items = [CheckerScanDashboardStats(**row, accuracy=accuracy(row["human_confirmed_count"], row["accuracy_basis_count"]),
+        ticket_accuracy=accuracy(row["ticket_submitted_count"], row["accuracy_basis_count"])) for row in rows[:limit]]
+    return {"items": items, "next_cursor": encode_cursor(items[-1].created_at, items[-1].scan_id) if len(rows) > limit else None}
 
 
 @router.get("/api/admin/runtime/metrics")

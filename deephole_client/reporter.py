@@ -200,6 +200,10 @@ class Reporter:
         self._scan_execution_revisions: dict[str, int] = {}
         self._fp_execution_revisions: dict[str, int] = {}
         self._validation_execution_revisions: dict[tuple[str, int], int] = {}
+        self._validation_delta_bodies: dict[tuple[str, int, int], dict] = {}
+        self._validation_streamed_fields: dict[tuple[str, int, int], set[str]] = {}
+        self._validation_delta_sequences: dict[tuple[str, int, int], int] = {}
+        self._validation_delta_lock = asyncio.Lock()
         self._opencode_pool_push_failures: dict[str, tuple[int, float]] = {}
 
     def _record_opencode_pool_push_failure(
@@ -293,7 +297,7 @@ class Reporter:
                     "scan_id": parts[1],
                     "review_id": parts[3],
                 })
-            elif len(parts) == 4 and parts[0] == "scan" and parts[2] == "validation":
+            elif (len(parts) == 4 or (len(parts) > 4 and parts[-1] == "terminal")) and parts[0] == "scan" and parts[2] == "validation":
                 try:
                     vuln_index = int(parts[3])
                 except ValueError:
@@ -1150,6 +1154,41 @@ class Reporter:
                 )
                 return
 
+    async def _queue_validation_update(self, scan_id: str, state: dict, changes: list[dict]) -> None:
+        from deephole_client.validation_delta import validation_change_batches
+        batches = iter(validation_change_batches(changes))
+        current = next(batches)
+        for following in batches:
+            await self._enqueue_validation_update(scan_id, {**state, "status": "running", "running": True}, current)
+            current = following
+        await self._enqueue_validation_update(scan_id, state, current)
+
+    async def _enqueue_validation_update(self, scan_id: str, state: dict, changes: list[dict]) -> None:
+        key = (scan_id, int(state["vuln_index"]), int(state["execution_revision"]))
+        scope = f"{self.server_url}:validation:{scan_id}:{key[1]}:{key[2]}"
+        sequence = self._outbox.next_sequence(scope) if self._outbox else self._validation_delta_sequences.get(key, 0) + 1
+        path = f"/api/agent/v2/scan/{scan_id}/validation"
+        update = {"state": state, "changes": changes, "sequence": sequence}
+        if self._outbox is not None:
+            await self._queue_post(stream_key=f"scan:{scan_id}", dedupe_key=f"scan:{scan_id}:validation:{key[1]}:revision:{key[2]}:sequence:{sequence}" + (":terminal" if state.get("status") in {"verified", "success", "failed", "error", "timeout", "skipped", "cancelled"} else ""), path=path, payload=update,
+                timeout=10.0, wait_for_delivery=False)
+        else:
+            response = await self._client.post(f"{self.server_url}{path}", json=update, timeout=10.0)
+            response.raise_for_status()
+        self._validation_delta_sequences[key] = sequence
+
+    async def report_validation_body_changes(self, scan_id: str, state: dict, changes: list[dict]) -> None:
+        if self.dry_run or not self.capabilities.get("incremental_validation_output"):
+            return
+        state = dict(state)
+        index = int(state["vuln_index"])
+        state["agent_session_id"] = self.agent_session_id
+        state["execution_revision"] = self._validation_execution_revisions.get((scan_id, index), 0)
+        async with self._validation_delta_lock:
+            await self._queue_validation_update(scan_id, state, changes)
+            key = (scan_id, index, state["execution_revision"])
+            self._validation_streamed_fields.setdefault(key, set()).update(change["field"] for change in changes if change["field"].startswith("["))
+
     async def report_vulnerability_validation(
         self,
         scan_id: str,
@@ -1164,6 +1203,16 @@ class Reporter:
             (scan_id, validation.vuln_index),
             validation.execution_revision,
         )
+        if self.capabilities.get("incremental_validation_output"):
+            from deephole_client.validation_delta import validation_delta
+            async with self._validation_delta_lock:
+                key = (scan_id, validation.vuln_index, int(payload["execution_revision"]))
+                state, changes, fields = validation_delta(payload, self._validation_delta_bodies.get(key))
+                streamed = self._validation_streamed_fields.get(key, set())
+                changes = [change for change in changes if change["field"] not in streamed]
+                await self._queue_validation_update(scan_id, state, changes)
+                self._validation_delta_bodies[key] = fields
+            return
         if self._outbox is not None and validation.status in {
             "verified", "failed", "error", "timeout", "skipped", "cancelled"
         }:

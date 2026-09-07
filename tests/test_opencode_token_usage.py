@@ -141,6 +141,7 @@ def test_scan_token_usage_is_deleted_with_scan(tmp_path: Path) -> None:
     )
 
     assert store.get_scan_opencode_token_usage("scan-1") is not None
+    store.update_scan_progress("scan-1", status=ScanItemStatus.COMPLETE)
     assert store.delete_scan("scan-1") is True
     assert store.get_scan_opencode_token_usage("scan-1") is None
 

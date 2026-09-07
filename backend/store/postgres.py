@@ -31,7 +31,10 @@ from .sqlite import (
     _deduplicated_scan_names,
     _terminal_opencode_pool_json,
     _retire_agent_opencode_config,
+    STORAGE_COLUMNS,
 )
+from .summaries import summary_triggers
+from .deletion import deletion_triggers
 
 
 _QUESTION_MARK = re.compile(r"\?")
@@ -368,19 +371,24 @@ def _sqlite_schema() -> list[str]:
         rows = [
             row
             for row in rows
-            if str(row[1]) != "idx_scans_user_scan_name_unique"
+            if str(row[1]) != "idx_scans_user_scan_name_unique" and str(row[0]) != "trigger"
         ]
         # PostgreSQL requires referenced tables to exist when a foreign key is
         # declared.  SQLite's catalog ordering is alphabetical, so create the
         # independent roots before all dependent tables and indexes.
-        rows = sorted(
-            rows,
-            key=lambda row: (
-                0 if str(row[0]) == "table" and str(row[1]) in root_tables else 1,
-                0 if str(row[0]) == "table" else 1,
-                str(row[1]),
-            ),
-        )
+        # Topological order also covers version/body references several levels
+        # below a scan. A hardcoded roots list silently breaks as tables grow.
+        pending = {str(row[1]): row for row in rows if str(row[0]) == "table"}
+        ordered = []
+        while pending:
+            ready = [name for name, row in pending.items() if not (
+                set(re.findall(r"REFERENCES\s+(\w+)", str(row[2]), re.I)) & pending.keys()
+            )]
+            if not ready:
+                raise RuntimeError("Cyclic scan-store schema dependencies")
+            for name in sorted(ready):
+                ordered.append(pending.pop(name))
+        rows = ordered + [row for row in rows if str(row[0]) != "table"]
         ddl = [str(row[2]) for row in rows]
         sqlite_store.close()
     portable: list[str] = []
@@ -419,6 +427,8 @@ class PostgresScanStore(SqliteScanStore):
         *,
         pool_min_size: int = 1,
         pool_max_size: int = 10,
+        initialize: bool = True,
+        readonly: bool = False,
     ) -> None:
         try:
             from psycopg.rows import dict_row
@@ -434,24 +444,45 @@ class PostgresScanStore(SqliteScanStore):
             conninfo=dsn,
             min_size=max(1, int(pool_min_size)),
             max_size=max(int(pool_min_size), int(pool_max_size)),
-            kwargs={"row_factory": dict_row},
+            kwargs={"row_factory": dict_row, **({"options": "-c default_transaction_read_only=on"} if readonly else {})},
             check=ConnectionPool.check_connection,
             open=True,
         )
         self._conn = _Connection(self._pool)
         self._lock = _TransactionLock(self._conn)
         self._advisory_connections: dict[int, Any] = {}
-        self._bootstrap()
+        if initialize and not readonly:
+            self._bootstrap()
 
     def _bootstrap(self) -> None:
         with self._pool.connection() as connection:
             # Uvicorn workers start concurrently.  Serialize DDL so every
             # worker observes a completely initialized schema.
+            connection.execute("SET LOCAL lock_timeout = '2s'")
             connection.execute(
                 "SELECT pg_advisory_xact_lock(%s)",
                 (_SCHEMA_BOOTSTRAP_LOCK_KEY,),
             )
             schema_statements = _sqlite_schema()
+            import hashlib
+            schema_signature = hashlib.sha256(json.dumps([
+                schema_statements, STORAGE_COLUMNS, _COORDINATION_SCHEMA,
+                summary_triggers(postgres=True), list(deletion_triggers(postgres=True)),
+            ], sort_keys=True).encode()).hexdigest()
+            fingerprint_sql = "SELECT MD5(COALESCE(string_agg(c.relname || ':' || a.attname || ':' || a.atttypid::text || ':' || a.attnotnull::text, ',' ORDER BY c.relname, a.attnum), '')) AS fingerprint FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped"
+            ledger_exists = connection.execute("SELECT to_regclass('schema_migrations') AS name").fetchone()["name"]
+            if ledger_exists:
+                marker = connection.execute("SELECT cursor_json FROM schema_migrations WHERE name = 'scan-storage-expand-v1' AND status = 'complete'").fetchone()
+                if marker:
+                    saved = json.loads(marker["cursor_json"])
+                    fingerprint = connection.execute(fingerprint_sql).fetchone()["fingerprint"]
+                    if saved.get("signature") == schema_signature and saved.get("fingerprint") == fingerprint:
+                        return
+            old_columns = {(row["table_name"], row["column_name"]) for row in connection.execute(
+                "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name IN ('scans', 'scan_candidates')"
+            ).fetchall()}
+            legacy_data_needed = not {("scans", "mining_engine_runs_json"), ("scans", "user_id"), ("scan_candidates", "audit_state")} <= old_columns
+            connection.execute("SET LOCAL lock_timeout = '2s'")
             # Existing PostgreSQL tables can predate columns referenced by the
             # latest SQLite-derived indexes.  Create/upgrade every table first,
             # then add all indexes after the compatibility ALTER statements.
@@ -466,6 +497,7 @@ class PostgresScanStore(SqliteScanStore):
                 connection.execute(statement)
             for statement in filter(str.strip, _COORDINATION_SCHEMA.split(";")):
                 connection.execute(statement)
+            connection.execute("ALTER TABLE agent_commands ADD COLUMN IF NOT EXISTS finished_at TEXT")
             # Safe for databases initialized by an earlier pre-release build.
             connection.execute(
                 "ALTER TABLE scans ADD COLUMN IF NOT EXISTS "
@@ -506,67 +538,71 @@ class PostgresScanStore(SqliteScanStore):
                 "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS audit_updated_at TEXT NOT NULL DEFAULT ''",
             ):
                 connection.execute(statement)
+            for table, columns in STORAGE_COLUMNS.items():
+                for column, definition in columns.items():
+                    connection.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
             for statement in deferred_indexes:
                 connection.execute(statement)
-            connection.execute(
-                "UPDATE scans SET user_id = '' WHERE user_id IS NULL"
-            )
-            historical_scan_rows = connection.execute(
-                """\
-                SELECT scan_id, user_id, scan_name, project_path
-                FROM scans
-                ORDER BY created_at ASC, scan_id ASC
-                """
-            ).fetchall()
-            scan_name_updates = _deduplicated_scan_names(historical_scan_rows)
-            if scan_name_updates:
-                connection.executemany(
-                    "UPDATE scans SET scan_name = %s WHERE scan_id = %s",
-                    scan_name_updates,
-                )
-            connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "idx_scans_user_scan_name_unique ON scans(user_id, scan_name)"
-            )
-            for row in connection.execute(
-                "SELECT scan_id, mining_engines_json, mining_engine_runs_json FROM scans"
-            ).fetchall():
-                selections_json = _canonicalize_mining_engine_json(
-                    row["mining_engines_json"],
-                )
-                runs_json = _canonicalize_mining_engine_json(
-                    row["mining_engine_runs_json"],
-                )
-                if selections_json is None and runs_json is None:
-                    continue
+            if legacy_data_needed:
                 connection.execute(
-                    """
-                    UPDATE scans
-                    SET mining_engines_json = %s, mining_engine_runs_json = %s
-                    WHERE scan_id = %s
-                    """,
-                    (
-                        selections_json or row["mining_engines_json"],
-                        runs_json or row["mining_engine_runs_json"],
-                        row["scan_id"],
-                    ),
+                    "UPDATE scans SET user_id = '' WHERE user_id IS NULL"
                 )
-            for engine_id, engine_label in (
-                ("static_candidate", STATIC_CANDIDATE_ENGINE_LABEL),
-                ("threat_audit", THREAT_AUDIT_ENGINE_LABEL),
-            ):
+                historical_scan_rows = connection.execute(
+                    """\
+                    SELECT scan_id, user_id, scan_name, project_path
+                    FROM scans
+                    ORDER BY created_at ASC, scan_id ASC
+                    """
+                ).fetchall()
+                scan_name_updates = _deduplicated_scan_names(historical_scan_rows)
+                if scan_name_updates:
+                    connection.executemany(
+                        "UPDATE scans SET scan_name = %s WHERE scan_id = %s",
+                        scan_name_updates,
+                    )
                 connection.execute(
-                    """
-                    UPDATE vulnerabilities
-                    SET engine_label = %s
-                    WHERE engine_id = %s AND engine_label <> %s
-                    """,
-                    (engine_label, engine_id, engine_label),
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "idx_scans_user_scan_name_unique ON scans(user_id, scan_name)"
                 )
-            connection.execute(
-                "ALTER TABLE vulnerabilities ALTER COLUMN engine_label SET DEFAULT "
-                "'DeepHole基于代码风险点的漏洞挖掘引擎'"
-            )
+                for row in connection.execute(
+                    "SELECT scan_id, mining_engines_json, mining_engine_runs_json FROM scans"
+                ).fetchall():
+                    selections_json = _canonicalize_mining_engine_json(
+                        row["mining_engines_json"],
+                    )
+                    runs_json = _canonicalize_mining_engine_json(
+                        row["mining_engine_runs_json"],
+                    )
+                    if selections_json is None and runs_json is None:
+                        continue
+                    connection.execute(
+                        """
+                        UPDATE scans
+                        SET mining_engines_json = %s, mining_engine_runs_json = %s
+                        WHERE scan_id = %s
+                        """,
+                        (
+                            selections_json or row["mining_engines_json"],
+                            runs_json or row["mining_engine_runs_json"],
+                            row["scan_id"],
+                        ),
+                    )
+                for engine_id, engine_label in (
+                    ("static_candidate", STATIC_CANDIDATE_ENGINE_LABEL),
+                    ("threat_audit", THREAT_AUDIT_ENGINE_LABEL),
+                ):
+                    connection.execute(
+                        """
+                        UPDATE vulnerabilities
+                        SET engine_label = %s
+                        WHERE engine_id = %s AND engine_label <> %s
+                        """,
+                        (engine_label, engine_id, engine_label),
+                    )
+                connection.execute(
+                    "ALTER TABLE vulnerabilities ALTER COLUMN engine_label SET DEFAULT "
+                    "'DeepHole基于代码风险点的漏洞挖掘引擎'"
+                )
             connection.execute(
                 "ALTER TABLE agent_commands ADD COLUMN IF NOT EXISTS "
                 "attempts INTEGER NOT NULL DEFAULT 0"
@@ -590,15 +626,16 @@ class PostgresScanStore(SqliteScanStore):
                 "ALTER TABLE agents DROP COLUMN IF EXISTS "
                 "opencode_runtime_config_json"
             )
-            for row in connection.execute(
-                "SELECT agent_key, config_json FROM agents"
-            ).fetchall():
-                migrated_config = _retire_agent_opencode_config(row["config_json"])
-                if migrated_config is not None:
-                    connection.execute(
-                        "UPDATE agents SET config_json = %s WHERE agent_key = %s",
-                        (migrated_config, row["agent_key"]),
-                    )
+            if legacy_data_needed:
+                for row in connection.execute(
+                    "SELECT agent_key, config_json FROM agents"
+                ).fetchall():
+                    migrated_config = _retire_agent_opencode_config(row["config_json"])
+                    if migrated_config is not None:
+                        connection.execute(
+                            "UPDATE agents SET config_json = %s WHERE agent_key = %s",
+                            (migrated_config, row["agent_key"]),
+                        )
             # SQLite uses rowid to break equal created_at ties for FP jobs.
             # PostgreSQL needs an explicit monotonic key to preserve the same
             # "most recently inserted" contract across workers.
@@ -611,9 +648,68 @@ class PostgresScanStore(SqliteScanStore):
                 "idx_fp_review_jobs_created_order "
                 "ON fp_review_jobs(created_order)"
             )
+            for statement in summary_triggers(postgres=True):
+                connection.execute(statement)
+            for statement in deletion_triggers(postgres=True):
+                connection.execute(statement)
+            # A changed trigger definition may change aggregate semantics.
+            # Existing summaries must be reverified before serving them.
+            connection.execute("UPDATE scan_summary_state SET ready = 0")
+            fingerprint = connection.execute(fingerprint_sql).fetchone()["fingerprint"]
+            connection.execute("INSERT INTO schema_migrations (name, status, cursor_json) VALUES ('scan-storage-expand-v1', 'complete', %s) ON CONFLICT(name) DO UPDATE SET status = 'complete', cursor_json = excluded.cursor_json",
+                (json.dumps({"signature": schema_signature, "fingerprint": fingerprint}),))
             connection.commit()
-        self._backfill_candidate_audits()
+        if legacy_data_needed:
+            self._backfill_candidate_audits()
         self._conn.commit()
+
+    def prepare_storage_online_indexes(self) -> dict:
+        """Explicit production operation, outside the bootstrap transaction."""
+        indexes = {
+            "storage_idx_fp_jobs_scan_created": "fp_review_jobs(scan_id, created_at DESC, review_id)",
+            "storage_idx_fp_results_vuln_review": "fp_review_results(vuln_index, review_id, created_at DESC, id DESC)",
+            "storage_idx_feedback_scan_type": "feedback_entries(source_scan_id, vuln_type)",
+            "storage_idx_reports_version": "opencode_task_reports(record_id)",
+            "storage_idx_commands_retention": "agent_commands(status, delivered_at, id)",
+            "storage_idx_commands_finished": "agent_commands(status, finished_at, id)",
+            "storage_idx_rpc_expiry": "agent_rpc_responses(created_at)",
+            "storage_idx_stream_expiry": "scan_stream_events(created_at, id)",
+            "storage_idx_sessions_disconnected": "agent_sessions(disconnected_at)",
+            "storage_idx_workers_seen": "backend_workers(last_seen)",
+        }
+        with self._pool.connection() as connection:
+            connection.autocommit = True
+            acquired = False
+            try:
+                acquired = connection.execute("SELECT pg_try_advisory_lock(73925164) AS acquired").fetchone()["acquired"]
+                if not acquired:
+                    return {"skipped": "another index migration is running"}
+                connection.execute("SET lock_timeout = '2s'")
+                for name, definition in indexes.items():
+                    row = connection.execute("SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND c.relname = %s", (name,)).fetchone()
+                    if row and not row["indisvalid"]:
+                        connection.execute(f"DROP INDEX CONCURRENTLY {name}")
+                    connection.execute(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {definition}")
+                present = connection.execute("SELECT 1 FROM pg_constraint WHERE conrelid = 'fp_review_jobs'::regclass AND conname = 'storage_fk_fp_jobs_scan'").fetchone()
+                if not present:
+                    connection.execute("ALTER TABLE fp_review_jobs ADD CONSTRAINT storage_fk_fp_jobs_scan FOREIGN KEY (scan_id) REFERENCES scans(scan_id) ON DELETE CASCADE NOT VALID")
+                connection.execute("INSERT INTO schema_migrations (name, status, updated_at) VALUES ('scan-storage-indexes-v1', 'complete', %s) ON CONFLICT(name) DO UPDATE SET status = 'complete', updated_at = excluded.updated_at", (datetime.now(timezone.utc).isoformat(),))
+                return {"indexes": list(indexes), "foreign_key": "installed_not_validated"}
+            finally:
+                connection.execute("RESET lock_timeout")
+                if acquired:
+                    connection.execute("SELECT pg_advisory_unlock(73925164)")
+                connection.autocommit = False
+
+    def validate_storage_constraints(self) -> dict:
+        with self._pool.connection() as connection:
+            orphans = connection.execute("SELECT COUNT(*) AS n FROM fp_review_jobs j WHERE NOT EXISTS (SELECT 1 FROM scans s WHERE s.scan_id = j.scan_id)").fetchone()["n"]
+            if orphans:
+                raise ValueError(f"{orphans} historical orphan FP jobs retained; restore their scan association before validating the constraint")
+            connection.execute("SET LOCAL lock_timeout = '2s'")
+            connection.execute("ALTER TABLE fp_review_jobs VALIDATE CONSTRAINT storage_fk_fp_jobs_scan")
+            connection.execute("INSERT INTO schema_migrations (name, status, updated_at) VALUES ('scan-storage-constraints-v1', 'complete', %s) ON CONFLICT(name) DO UPDATE SET status = 'complete', updated_at = excluded.updated_at", (datetime.now(timezone.utc).isoformat(),))
+        return {"validated": True, "orphan_fp_jobs": 0}
 
     def close(self) -> None:
         for key in list(self._advisory_connections):
@@ -943,11 +1039,11 @@ class PostgresScanStore(SqliteScanStore):
             self._conn.execute(
                 """\
                 UPDATE agent_commands
-                SET status = ?, delivered_at = ?, error_message = ?,
+                SET status = ?, delivered_at = ?, error_message = ?, finished_at = ?,
                     target_worker = COALESCE(?, target_worker), claimed_at = NULL
                 WHERE id = ?
                 """,
-                (status, delivered_at, error, target_worker, int(command_id)),
+                (status, delivered_at, error, datetime.now(timezone.utc).isoformat() if status in {"delivered", "failed"} else None, target_worker, int(command_id)),
             )
             if retry:
                 self._conn.execute(
@@ -1001,7 +1097,6 @@ class PostgresScanStore(SqliteScanStore):
 
     def put_agent_rpc_response(self, request_id: str, payload: dict) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         with self._lock:
             self._conn.execute(
                 """\
@@ -1016,10 +1111,6 @@ class PostgresScanStore(SqliteScanStore):
                     json.dumps(payload, ensure_ascii=False, default=str),
                     now,
                 ),
-            )
-            self._conn.execute(
-                "DELETE FROM agent_rpc_responses WHERE created_at < ?",
-                (cutoff,),
             )
             self._conn.commit()
 
@@ -1109,6 +1200,8 @@ class PostgresScanStore(SqliteScanStore):
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
+            # Allocate IDs in commit order across workers.
+            self._conn.execute("SELECT pg_advisory_xact_lock(73925163)")
             row = self._conn.execute(
                 """\
                 INSERT INTO scan_stream_events (
@@ -1128,14 +1221,6 @@ class PostgresScanStore(SqliteScanStore):
             self._conn.execute(
                 "SELECT pg_notify('opendeephole_scan_events', ?)",
                 (str(event_id),),
-            )
-            self._conn.execute(
-                """\
-                DELETE FROM scan_stream_events
-                WHERE id < (
-                    SELECT COALESCE(MAX(id) - 50000, 0) FROM scan_stream_events
-                )
-                """
             )
             self._conn.commit()
         return event_id
@@ -1165,6 +1250,8 @@ class PostgresScanStore(SqliteScanStore):
             for scan_id, event_type, data in events
         ]
         with self._lock:
+            # Allocate IDs in commit order across workers.
+            self._conn.execute("SELECT pg_advisory_xact_lock(73925163)")
             self._conn.executemany(
                 """\
                 INSERT INTO scan_stream_events (
@@ -1179,14 +1266,6 @@ class PostgresScanStore(SqliteScanStore):
             self._conn.execute(
                 "SELECT pg_notify('opendeephole_scan_events', ?)",
                 (str(latest["id"] or 0),),
-            )
-            self._conn.execute(
-                """\
-                DELETE FROM scan_stream_events
-                WHERE id < (
-                    SELECT COALESCE(MAX(id) - 50000, 0) FROM scan_stream_events
-                )
-                """
             )
             self._conn.commit()
         return len(rows)

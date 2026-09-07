@@ -13,7 +13,6 @@ from backend.scan_metrics import VulnStat
 from backend.scan_event_log import (
     SCAN_EVENT_RETENTION_LIMIT,
     is_agent_local_task_output,
-    task_output_glob_patterns,
 )
 from backend.scan_runtime import (
     is_terminal_scan_status,
@@ -63,6 +62,18 @@ from backend.models import (
 from backend.vulnerability_identity import vulnerability_report_identity
 
 from .base import DuplicateScanNameError, ScanStoreBase
+from .history import HISTORY_COLUMNS, HISTORY_SCHEMA, ScanHistoryMixin
+from .summaries import SUMMARY_SCHEMA, ScanSummariesMixin, summary_triggers
+from .maintenance import MAINTENANCE_SCHEMA, StorageMaintenanceMixin
+from .body_migration import BodyMigrationMixin
+from .deletion import DELETION_SCHEMA, ScanDeletionMixin, deletion_triggers
+from .dashboard import DashboardStoreMixin
+from .validation_history import VALIDATION_SCHEMA, VALIDATION_COLUMNS, ValidationHistoryMixin
+from .rollback import StorageRollbackMixin
+from .migration import ScanStorageMigrationMixin
+from .bodies import AUDIT_BODY_FIELDS, BODY_COLUMNS, BODY_SCHEMA, ScanBodiesMixin
+
+STORAGE_COLUMNS = {**HISTORY_COLUMNS, **BODY_COLUMNS, **VALIDATION_COLUMNS}
 
 
 # Kept only to satisfy the legacy SQLite column without retaining behavioral
@@ -299,11 +310,14 @@ def _terminal_opencode_pool_json(value: str | None) -> str:
 
 
 def _vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
+    if "audit_body_json" in row.keys():
+        row = {**dict(row), **json.loads(row["audit_body_json"])}
     keys = row.keys()
     analysis_source = (
         row["analysis_source"] if "analysis_source" in keys else "static_candidate"
     ) or "static_candidate"
     return Vulnerability(
+        vuln_index=int(row["idx"]),
         file=row["file"],
         line=row["line"],
         function=row["function"],
@@ -387,7 +401,9 @@ def _scan_candidate_from_row(row: sqlite3.Row) -> ScanCandidate:
             (row["audit_result"] if "audit_result" in keys else None) or "null"
         )
         audit_result = (
-            Vulnerability.model_validate(audit_payload)
+            Vulnerability.model_validate({**audit_payload, **json.loads(row["audit_body_json"])})
+            if isinstance(audit_payload, dict) and "audit_body_json" in keys
+            else Vulnerability.model_validate(audit_payload)
             if isinstance(audit_payload, dict)
             else None
         )
@@ -951,23 +967,91 @@ ON opencode_task_reports(scan_id, sequence);
 """
 
 
-class SqliteScanStore(ScanStoreBase):
+_SCHEMA += HISTORY_SCHEMA
+_SCHEMA += SUMMARY_SCHEMA
+_SCHEMA += BODY_SCHEMA
+_SCHEMA += MAINTENANCE_SCHEMA
+_SCHEMA += DELETION_SCHEMA
+_SCHEMA += VALIDATION_SCHEMA
+
+
+class _SqliteTransactionLock:
+    """Roll back failed compound writes before another request can commit them."""
+
+    def __init__(self, connection):
+        self._connection = connection
+        self._mutex = threading.Lock()
+
+    def __enter__(self):
+        self._mutex.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            if exc_type is not None:
+                self._connection.rollback()
+        finally:
+            self._mutex.release()
+
+
+class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigrationMixin, ScanBodiesMixin, BodyMigrationMixin, StorageMaintenanceMixin, ScanDeletionMixin, DashboardStoreMixin, ValidationHistoryMixin, StorageRollbackMixin, ScanStoreBase):
     """SQLite-backed scan store using WAL mode for concurrent access."""
 
-    def __init__(self, db_path: Path) -> None:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: Path, *, initialize: bool = True, readonly: bool = False) -> None:
+        if not readonly:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
-            str(db_path), check_same_thread=False
+            db_path.resolve().as_uri() + "?mode=ro" if readonly else str(db_path),
+            check_same_thread=False, uri=readonly,
         )
         # 统一在此设置一次 Row 工厂；连接被多线程共享，
         # 各读方法中反复赋值属于对共享状态的无锁突变。
         self._conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()  # 保护多线程下 execute+commit 的原子性
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._lock = _SqliteTransactionLock(self._conn)
+        if not readonly:
+            self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
-        self._migrate()
+        if initialize and not readonly:
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
+            migrated = self._conn.execute(
+                "SELECT cursor_json FROM schema_migrations WHERE name = 'legacy-schema-20260903' AND status = 'complete'",
+            ).fetchone()
+            schema_version = int(self._conn.execute("PRAGMA schema_version").fetchone()[0])
+            if migrated is None or json.loads(migrated["cursor_json"]).get("schema_version") != schema_version:
+                # Historical DDL can temporarily lack columns referenced by
+                # newer summary triggers. Readers use the source tables until
+                # reconciliation; no business data is removed here.
+                self._conn.execute("UPDATE scan_summary_state SET ready = 0")
+                for statement in summary_triggers(postgres=False):
+                    name = statement.split()[5]
+                    self._conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                self._migrate()
+                self._conn.execute(
+                    "INSERT INTO schema_migrations (name, status) VALUES ('legacy-schema-20260903', 'complete') "
+                    "ON CONFLICT(name) DO UPDATE SET status = 'complete'",
+                )
+            for table, columns in STORAGE_COLUMNS.items():
+                existing = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                for column, definition in columns.items():
+                    if column not in existing:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            trigger_statements = [*summary_triggers(postgres=False), *deletion_triggers(postgres=False)]
+            signature = hashlib.sha256("\n".join(trigger_statements).encode()).hexdigest()
+            trigger_marker = self._conn.execute("SELECT cursor_json FROM schema_migrations WHERE name = 'scan-storage-triggers-v1'").fetchone()
+            if trigger_marker is None or json.loads(trigger_marker[0]).get("signature") != signature:
+                self._conn.execute("UPDATE scan_summary_state SET ready = 0")
+                for statement in trigger_statements:
+                    self._conn.execute(f"DROP TRIGGER IF EXISTS {statement.split()[5]}")
+            for statement in trigger_statements:
+                self._conn.execute(statement)
+            self._conn.execute("INSERT INTO schema_migrations (name, status, cursor_json) VALUES ('scan-storage-triggers-v1', 'complete', ?) ON CONFLICT(name) DO UPDATE SET status = 'complete', cursor_json = excluded.cursor_json",
+                (json.dumps({"signature": signature}),))
+            self._conn.execute(
+                "UPDATE schema_migrations SET cursor_json = ? WHERE name = 'legacy-schema-20260903'",
+                (json.dumps({"schema_version": int(self._conn.execute("PRAGMA schema_version").fetchone()[0])}),),
+            )
+            self._conn.commit()
 
     def _migrate(self) -> None:
         """Add columns that may not exist in older databases."""
@@ -1809,33 +1893,6 @@ class SqliteScanStore(ScanStoreBase):
             "CREATE INDEX IF NOT EXISTS idx_threat_audit_tasks_cursor "
             "ON threat_audit_tasks(scan_id, created_at, task_id)"
         )
-        task_output_patterns = task_output_glob_patterns()
-        task_output_clauses = " OR ".join(
-            "message GLOB ?" for _ in task_output_patterns
-        )
-        self._conn.execute(
-            f"DELETE FROM events WHERE {task_output_clauses}",
-            task_output_patterns,
-        )
-        self._conn.execute(
-            """\
-            DELETE FROM events
-            WHERE id IN (
-                SELECT id
-                FROM (
-                    SELECT
-                        id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY scan_id
-                            ORDER BY id DESC
-                        ) AS event_rank
-                    FROM events
-                )
-                WHERE event_rank > ?
-            )
-            """,
-            (SCAN_EVENT_RETENTION_LIMIT,),
-        )
         self._backfill_candidate_audits()
         self._conn.commit()
 
@@ -1887,7 +1944,7 @@ class SqliteScanStore(ScanStoreBase):
                 )
 
             selected = max(candidates, key=rank)
-            result = _vulnerability_from_row(selected)
+            result = _vulnerability_from_row(self._hydrate_audit_rows([selected])[0])
             verdict = str(result.ai_verdict or "").strip().lower()
             dedup_decision: dict[str, str] = {}
             if verdict == "filtered_same_pattern":
@@ -1925,6 +1982,10 @@ class SqliteScanStore(ScanStoreBase):
             current = Candidate.model_validate_json(row["current_candidate"])
         scan_status = ScanItemStatus(row["status"])
         pool = _opencode_pool_status(row["opencode_pool"])
+        if include_details:
+            pool = self.hydrate_pool_history(row["scan_id"], pool)
+        elif pool is not None:
+            pool.completed_tasks = []
         if is_terminal_scan_status(scan_status):
             pool = terminal_opencode_pool_status(pool)
         return ScanStatus(
@@ -2105,6 +2166,9 @@ class SqliteScanStore(ScanStoreBase):
         )
         try:
             with self._lock:
+                previous = self._locked_scan(scan.scan_id)
+                if previous is not None:
+                    self._normalize_legacy_pool_locked(previous)
                 self._conn.execute(
                 """\
                 INSERT INTO scans
@@ -2162,7 +2226,6 @@ class SqliteScanStore(ScanStoreBase):
                     validation_method_id = excluded.validation_method_id,
                     validation_method_label = excluded.validation_method_label,
                     public_access_token = excluded.public_access_token,
-                    opencode_pool = excluded.opencode_pool,
                     code_graph_mcp_json = excluded.code_graph_mcp_json,
                     knowledge_base_mcp_json = excluded.knowledge_base_mcp_json,
                     vulnerability_validation_json = excluded.vulnerability_validation_json,
@@ -2225,7 +2288,7 @@ class SqliteScanStore(ScanStoreBase):
                     meta.validation_method_id,
                     meta.validation_method_label,
                     meta.public_access_token,
-                    scan.opencode_pool.model_dump_json() if scan.opencode_pool else "{}",
+                    "{}",
                     (
                         meta.code_graph_mcp.model_dump_json()
                         if meta.code_graph_mcp is not None
@@ -2264,6 +2327,7 @@ class SqliteScanStore(ScanStoreBase):
                     ),
                 ),
             )
+                self._store_pool_locked(scan.scan_id, scan.opencode_pool or OpenCodePoolStatus())
                 self._replace_scan_candidates_locked(scan.scan_id, scan.candidates)
                 self._conn.commit()
         except Exception as exc:
@@ -2365,6 +2429,13 @@ class SqliteScanStore(ScanStoreBase):
             return None
         return self._row_to_scan_status(row), self._row_to_meta(row)
 
+    def load_scan_runtime(self, scan_id: str):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_scan_path,created_at,current_candidate,error_message,execution_agent_session_id,execution_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engine_runs_json,mining_engines_json,multi_versions_json,opencode_pool,processed_candidates,product,progress,project_id,project_path,public_access_token,scan_id,scan_items,scan_mode,scan_name,static_analysis_done,static_scanned_files,static_total_files,status,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,threat_analysis_run_json,total_candidates,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,),
+            ).fetchone()
+            return (self._row_to_scan_status(row, include_details=False), self._row_to_meta(row)) if row else None
+
     def load_scan_overview(
         self,
         scan_id: str,
@@ -2377,68 +2448,19 @@ class SqliteScanStore(ScanStoreBase):
             row = cur.fetchone()
             if row is None:
                 return None
-            counts_row = self._conn.execute(
-                """\
-                SELECT
-                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ?) AS candidates,
-                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'pending') AS candidate_audit_pending,
-                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'queued') AS candidate_audit_queued,
-                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'running') AS candidate_audit_running,
-                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'success') AS candidate_audit_success,
-                  (SELECT COUNT(*) FROM scan_candidates WHERE scan_id = ? AND audit_state = 'failed') AS candidate_audit_failed,
-                  (SELECT COUNT(*) FROM vulnerabilities WHERE scan_id = ?) AS vulnerabilities,
-                  (SELECT COUNT(*) FROM events WHERE scan_id = ?) AS events,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ?) AS threat_audit_tasks,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) <> 'superseded') AS threat_audit_current,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'pending') AS threat_audit_pending,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'queued') AS threat_audit_queued,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) IN ('running', 'analyzing', 'auditing')) AS threat_audit_running,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'completed') AS threat_audit_completed,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) IN ('failed', 'failure', 'error', 'timeout', 'no_result')) AS threat_audit_failed,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'cancelled') AS threat_audit_cancelled,
-                  (SELECT COUNT(*) FROM threat_audit_tasks WHERE scan_id = ? AND LOWER(status) = 'superseded') AS threat_audit_superseded,
-                  (SELECT COUNT(*) FROM vulnerability_validations WHERE scan_id = ?) AS validations,
-                  (SELECT COUNT(*) FROM skill_reports WHERE scan_id = ?) AS skill_reports
-                """,
-                (scan_id,) * 19,
-            ).fetchone()
+            counts = self.get_scan_detail_counts(scan_id)
             scan = self._row_to_scan_status(row, include_details=False)
             meta = self._row_to_meta(row)
-            counts = {
-                key: int(counts_row[key] or 0)
-                for key in (
-                    "candidates",
-                    "candidate_audit_pending",
-                    "candidate_audit_queued",
-                    "candidate_audit_running",
-                    "candidate_audit_success",
-                    "candidate_audit_failed",
-                    "vulnerabilities",
-                    "events",
-                    "threat_audit_tasks",
-                    "threat_audit_current",
-                    "threat_audit_pending",
-                    "threat_audit_queued",
-                    "threat_audit_running",
-                    "threat_audit_completed",
-                    "threat_audit_failed",
-                    "threat_audit_cancelled",
-                    "threat_audit_superseded",
-                    "validations",
-                    "skill_reports",
-                )
-            }
         return scan, meta, counts
 
     def get_scan_meta(self, scan_id: str) -> ScanMeta | None:
         cur = self._conn.execute(
-            "SELECT * FROM scans WHERE scan_id = ?", (scan_id,)
+            "SELECT agent_id,agent_key,agent_name,auto_fp_review,code_graph_mcp_json,code_scan_path,created_at,execution_agent_session_id,execution_revision,feedback_ids,fp_review_method,fp_review_method_selection_json,knowledge_base_enabled,knowledge_base_mcp_json,mining_engines_json,multi_versions_json,product,project_path,public_access_token,scan_items,scan_mode,scan_name,threat_analysis_enabled,threat_analysis_method,threat_analysis_method_selection_json,user_id,validation_environment,validation_method_id,validation_method_label,vulnerability_validation_enabled,vulnerability_validation_json FROM scans WHERE scan_id = ?", (scan_id,)
         )
         row = cur.fetchone()
         return None if row is None else self._row_to_meta(row)
 
     def _row_to_scan_summary(self, row: sqlite3.Row) -> ScanSummary:
-        pool = _opencode_pool_status(row["opencode_pool"])
         return ScanSummary(
             scan_id=row["scan_id"],
             project_id=row["project_id"],
@@ -2461,8 +2483,8 @@ class SqliteScanStore(ScanStoreBase):
             total_candidates=row["total_candidates"],
             processed_candidates=row["processed_candidates"],
             vulnerability_count=row["vuln_count"],
-            total_task_count=pool.total_tasks if pool is not None else 0,
-            completed_task_count=pool.completed_task_count if pool is not None else 0,
+            total_task_count=int(row["total_task_count"] or 0),
+            completed_task_count=int(row["completed_task_count"] or 0),
             scan_items=json.loads(row["scan_items"]),
             user_id=row["user_id"] if row["user_id"] is not None else "",
             username=row["username"] if "username" in row.keys() and row["username"] is not None else "",
@@ -2485,15 +2507,27 @@ class SqliteScanStore(ScanStoreBase):
             ),
         )
 
+    def _scan_summary_columns(self) -> str:
+        columns = 's.agent_name, s.created_at, s.knowledge_base_enabled, s.mining_engine_runs_json, s.mining_engines_json, s.processed_candidates, s.product, s.progress, s.project_id, s.scan_id, s.scan_items, s.scan_mode, s.scan_name, s.status, s.threat_analysis_enabled, s.threat_analysis_run_json, s.total_candidates, s.user_id, s.validation_environment, s.validation_method_id, s.validation_method_label, s.vulnerability_validation_enabled'
+        for column, legacy_key in (("total_task_count", "total_tasks"), ("completed_task_count", "completed_task_count")):
+            legacy = (
+                f"COALESCE((NULLIF(s.opencode_pool, '')::jsonb ->> '{legacy_key}')::BIGINT, 0)"
+                if getattr(self, "distributed", False)
+                else f"CASE WHEN json_valid(s.opencode_pool) THEN COALESCE(json_extract(s.opencode_pool, '$.{legacy_key}'), 0) ELSE 0 END"
+            )
+            columns += f", CASE WHEN s.history_version = 1 THEN s.{column} ELSE {legacy} END AS {column}"
+        return columns
+
     def list_scans(self) -> list[ScanSummary]:
         with self._lock:
             cur = self._conn.execute(
-                """\
-                SELECT s.*,
-                       (SELECT COUNT(*) FROM vulnerabilities v WHERE v.scan_id = s.scan_id) AS vuln_count,
+                f"""\
+                SELECT {self._scan_summary_columns()},
+                       CASE WHEN EXISTS (SELECT 1 FROM scan_summary_state st WHERE st.scan_id = s.scan_id AND st.ready = 1) THEN (SELECT COALESCE(SUM(t.static_issue_count), 0) FROM scan_checker_totals t WHERE t.scan_id = s.scan_id) ELSE (SELECT COUNT(*) FROM vulnerabilities v WHERE v.scan_id = s.scan_id) END AS vuln_count,
                        u.username
                 FROM scans s
                 LEFT JOIN users u ON s.user_id = u.user_id
+                WHERE NOT EXISTS (SELECT 1 FROM scan_deletions d WHERE d.scan_id = s.scan_id)
                 ORDER BY s.created_at DESC, s.scan_id DESC
                 """
             )
@@ -2503,13 +2537,13 @@ class SqliteScanStore(ScanStoreBase):
     def list_scans_by_user(self, user_id: str) -> list[ScanSummary]:
         with self._lock:
             cur = self._conn.execute(
-                """\
-                SELECT s.*,
-                       (SELECT COUNT(*) FROM vulnerabilities v WHERE v.scan_id = s.scan_id) AS vuln_count,
+                f"""\
+                SELECT {self._scan_summary_columns()},
+                       CASE WHEN EXISTS (SELECT 1 FROM scan_summary_state st WHERE st.scan_id = s.scan_id AND st.ready = 1) THEN (SELECT COALESCE(SUM(t.static_issue_count), 0) FROM scan_checker_totals t WHERE t.scan_id = s.scan_id) ELSE (SELECT COUNT(*) FROM vulnerabilities v WHERE v.scan_id = s.scan_id) END AS vuln_count,
                        u.username
                 FROM scans s
                 LEFT JOIN users u ON s.user_id = u.user_id
-                WHERE s.user_id = ?
+                WHERE s.user_id = ? AND NOT EXISTS (SELECT 1 FROM scan_deletions d WHERE d.scan_id = s.scan_id)
                 ORDER BY s.created_at DESC, s.scan_id DESC
                 """,
                 (user_id,),
@@ -2525,7 +2559,7 @@ class SqliteScanStore(ScanStoreBase):
         before_created_at: str | None = None,
         before_scan_id: str | None = None,
     ) -> list[ScanSummary]:
-        conditions: list[str] = []
+        conditions: list[str] = ["NOT EXISTS (SELECT 1 FROM scan_deletions d WHERE d.scan_id = s.scan_id)"]
         params: list[object] = []
         if user_id is not None:
             conditions.append("s.user_id = ?")
@@ -2540,8 +2574,8 @@ class SqliteScanStore(ScanStoreBase):
         with self._lock:
             cur = self._conn.execute(
                 f"""\
-                SELECT s.*,
-                       (SELECT COUNT(*) FROM vulnerabilities v WHERE v.scan_id = s.scan_id) AS vuln_count,
+                SELECT {self._scan_summary_columns()},
+                       CASE WHEN EXISTS (SELECT 1 FROM scan_summary_state st WHERE st.scan_id = s.scan_id AND st.ready = 1) THEN (SELECT COALESCE(SUM(t.static_issue_count), 0) FROM scan_checker_totals t WHERE t.scan_id = s.scan_id) ELSE (SELECT COUNT(*) FROM vulnerabilities v WHERE v.scan_id = s.scan_id) END AS vuln_count,
                        u.username
                 FROM scans s
                 LEFT JOIN users u ON s.user_id = u.user_id
@@ -2568,21 +2602,7 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.commit()
 
     def update_opencode_pool_status(self, scan_id: str, status: OpenCodePoolStatus) -> None:
-        active_json = status.model_dump_json()
-        terminal_status = terminal_opencode_pool_status(status) or OpenCodePoolStatus()
-        with self._lock:
-            self._conn.execute(
-                """\
-                UPDATE scans
-                SET opencode_pool = CASE
-                    WHEN status IN ('pending', 'analyzing', 'auditing') THEN ?
-                    ELSE ?
-                END
-                WHERE scan_id = ?
-                """,
-                (active_json, terminal_status.model_dump_json(), scan_id),
-            )
-            self._conn.commit()
+        self.persist_opencode_pool(scan_id, status)
 
     def upsert_scan_opencode_token_usage(
         self,
@@ -2600,20 +2620,9 @@ class SqliteScanStore(ScanStoreBase):
             for row in _token_usage_rows(status.token_usage)
         ]
         with self._lock:
-            self._conn.execute(
-                "DELETE FROM scan_opencode_token_usage "
-                "WHERE scan_id = ? AND agent_session_id = ?",
-                (scan_id, session_id),
-            )
-            self._conn.executemany(
-                """\
-                INSERT INTO scan_opencode_token_usage (
-                    scan_id, agent_session_id, model, input_tokens, output_tokens,
-                    reasoning_tokens, cache_read_tokens, cache_write_tokens,
-                    complete, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
+            self._diff_snapshot_locked(
+                "scan_opencode_token_usage", ['scan_id', 'agent_session_id', 'model', 'input_tokens', 'output_tokens', 'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens', 'complete', 'updated_at'], ['scan_id', 'agent_session_id', 'model'],
+                "scan_id = ? AND agent_session_id = ?", (scan_id, session_id), rows,
             )
             self._conn.commit()
 
@@ -2624,72 +2633,17 @@ class SqliteScanStore(ScanStoreBase):
         )
         return _token_usage_from_rows(cur.fetchall())
 
-    def upsert_opencode_task_report(
-        self,
-        *,
-        agent_key: str,
-        scan_id: str,
-        agent_session_id: str,
-        task_id: str,
-        revision: int,
-        task: dict,
-    ) -> bool:
-        """Insert one immutable terminal task report; return False for a duplicate."""
-        serialized = json.dumps(
-            task,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        with self._lock:
-            existing = self._conn.execute(
-                """
-                SELECT task_json FROM opencode_task_reports
-                WHERE agent_key = ? AND scan_id = ? AND task_id = ? AND revision = ?
-                """,
-                (agent_key, scan_id, task_id, max(1, int(revision))),
-            ).fetchone()
-            if existing is not None:
-                if str(existing["task_json"]) != serialized:
-                    raise ValueError("OpenCode task report idempotency conflict")
-                return False
-            self._conn.execute(
-                """
-                INSERT INTO opencode_task_reports (
-                    agent_key, scan_id, agent_session_id, task_id, revision,
-                    task_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    agent_key,
-                    scan_id,
-                    agent_session_id,
-                    task_id,
-                    max(1, int(revision)),
-                    serialized,
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            self._conn.commit()
-        return True
+    def upsert_opencode_task_report(self, **kwargs) -> bool:
+        return self.persist_opencode_task_report(**kwargs)
 
     def list_opencode_task_reports(self, scan_id: str) -> list[dict]:
-        cur = self._conn.execute(
-            """
-            SELECT task_json FROM opencode_task_reports
-            WHERE scan_id = ? ORDER BY sequence
-            """,
+        rows = self._conn.execute(
+            "SELECT COALESCE(v.task_json, r.task_json) AS task_json "
+            "FROM opencode_task_reports r LEFT JOIN scan_task_versions v "
+            "ON v.record_id = r.record_id WHERE r.scan_id = ? ORDER BY r.sequence",
             (scan_id,),
-        )
-        reports: list[dict] = []
-        for row in cur.fetchall():
-            try:
-                value = json.loads(row["task_json"] or "{}")
-            except Exception:
-                continue
-            if isinstance(value, dict):
-                reports.append(value)
-        return reports
+        ).fetchall()
+        return [json.loads(row["task_json"]) for row in rows]
 
     def get_vulnerability_indexes_by_source_task(
         self,
@@ -2774,20 +2728,9 @@ class SqliteScanStore(ScanStoreBase):
             for row in _token_usage_rows(status.token_usage)
         ]
         with self._lock:
-            self._conn.execute(
-                "DELETE FROM agent_opencode_token_usage "
-                "WHERE agent_key = ? AND user_id = ? AND agent_session_id = ?",
-                (agent_key, user_id or "", session_id),
-            )
-            self._conn.executemany(
-                """\
-                INSERT INTO agent_opencode_token_usage (
-                    agent_key, user_id, agent_session_id, model, input_tokens,
-                    output_tokens, reasoning_tokens, cache_read_tokens,
-                    cache_write_tokens, complete, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
+            self._diff_snapshot_locked(
+                "agent_opencode_token_usage", ['agent_key', 'user_id', 'agent_session_id', 'model', 'input_tokens', 'output_tokens', 'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens', 'complete', 'updated_at'], ['agent_key', 'user_id', 'agent_session_id', 'model'],
+                "agent_key = ? AND user_id = ? AND agent_session_id = ?", (agent_key, user_id or "", session_id), rows,
             )
             self._conn.commit()
 
@@ -2849,25 +2792,18 @@ class SqliteScanStore(ScanStoreBase):
                 now,
             ))
         with self._lock:
-            # Each report is a complete snapshot for one Agent session.  Clear
-            # the prior transient/configured state first so omitted models (and
-            # an explicitly empty pool) cannot remain schedulable in history.
+            model_ids = [row[3] for row in rows]
+            omitted = " AND model_id NOT IN (" + ",".join("?" for _ in model_ids) + ")" if model_ids else ""
             self._conn.execute(
-                """\
-                UPDATE agent_opencode_pool_models
-                SET enabled = 0,
-                    available = 0,
-                    running = 0,
-                    queued = 0,
-                    active_tasks = '[]',
-                    effective_weight = weight,
-                    health_penalty_level = 0,
-                    last_health_failure_at = '',
-                    last_health_failure_kind = '',
-                    updated_at = CASE WHEN ? <> '' THEN ? ELSE updated_at END
-                WHERE agent_name = ? AND user_id = ? AND agent_session_id = ?
-                """,
-                (now, now, agent_name, user_id or "", session_id),
+                "UPDATE agent_opencode_pool_models SET enabled = 0, available = 0, "
+                "running = 0, queued = 0, active_tasks = '[]', effective_weight = weight, "
+                "health_penalty_level = 0, last_health_failure_at = '', last_health_failure_kind = '', "
+                "updated_at = CASE WHEN ? <> '' THEN ? ELSE updated_at END "
+                "WHERE agent_name = ? AND user_id = ? AND agent_session_id = ? "
+                "AND (enabled <> 0 OR available <> 0 OR running <> 0 OR queued <> 0 "
+                "OR active_tasks <> '[]' OR effective_weight <> weight OR health_penalty_level <> 0 "
+                "OR last_health_failure_at <> '' OR last_health_failure_kind <> '')" + omitted,
+                (now, now, agent_name, user_id or "", session_id, *model_ids),
             )
             if rows:
                 self._conn.executemany(
@@ -2908,6 +2844,7 @@ class SqliteScanStore(ScanStoreBase):
                     last_finished_at = excluded.last_finished_at,
                     active_tasks = excluded.active_tasks,
                     updated_at = excluded.updated_at
+                WHERE agent_opencode_pool_models.model <> excluded.model OR agent_opencode_pool_models.use_default_model <> excluded.use_default_model OR agent_opencode_pool_models.capability <> excluded.capability OR agent_opencode_pool_models.weight <> excluded.weight OR agent_opencode_pool_models.effective_weight <> excluded.effective_weight OR agent_opencode_pool_models.health_penalty_level <> excluded.health_penalty_level OR agent_opencode_pool_models.last_health_failure_at <> excluded.last_health_failure_at OR agent_opencode_pool_models.last_health_failure_kind <> excluded.last_health_failure_kind OR agent_opencode_pool_models.max_concurrency <> excluded.max_concurrency OR agent_opencode_pool_models.enabled <> excluded.enabled OR agent_opencode_pool_models.available <> excluded.available OR agent_opencode_pool_models.time_windows <> excluded.time_windows OR agent_opencode_pool_models.running <> excluded.running OR agent_opencode_pool_models.queued <> excluded.queued OR agent_opencode_pool_models.total <> excluded.total OR agent_opencode_pool_models.success <> excluded.success OR agent_opencode_pool_models.failure <> excluded.failure OR agent_opencode_pool_models.timeout <> excluded.timeout OR agent_opencode_pool_models.cancelled <> excluded.cancelled OR agent_opencode_pool_models.total_duration_seconds <> excluded.total_duration_seconds OR agent_opencode_pool_models.last_status <> excluded.last_status OR agent_opencode_pool_models.last_started_at <> excluded.last_started_at OR agent_opencode_pool_models.last_finished_at <> excluded.last_finished_at OR agent_opencode_pool_models.active_tasks <> excluded.active_tasks
                 """,
                     rows,
                 )
@@ -3032,12 +2969,12 @@ class SqliteScanStore(ScanStoreBase):
         )
 
     def delete_scan(self, scan_id: str) -> bool:
-        with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM scans WHERE scan_id = ?", (scan_id,)
-            )
-            self._conn.commit()
-            return cur.rowcount > 0
+        """Synchronous compatibility entry; HTTP uses the persistent job API."""
+        if self.request_scan_deletion(scan_id) is None:
+            return False
+        while self.process_scan_deletions(scan_id=scan_id).get("status") != "complete":
+            pass
+        return True
 
     def count_scans_for_project(self, project_id: str) -> int:
         cur = self._conn.execute(
@@ -3342,7 +3279,7 @@ class SqliteScanStore(ScanStoreBase):
             (scan_id,),
         )
 
-        return [_scan_candidate_from_row(row) for row in cur.fetchall()]
+        return [_scan_candidate_from_row(row) for row in self._hydrate_audit_rows(cur.fetchall())]
 
     def list_scan_candidates_page(
         self,
@@ -3362,7 +3299,7 @@ class SqliteScanStore(ScanStoreBase):
                 (scan_id, int(after_index), max(1, int(limit))),
             ).fetchall()
 
-        return [_scan_candidate_from_row(row) for row in rows]
+        return [_scan_candidate_from_row(row) for row in self._hydrate_audit_rows(rows)]
 
     def update_scan_candidate_audit(
         self,
@@ -3385,11 +3322,19 @@ class SqliteScanStore(ScanStoreBase):
         if result is not None:
             result = result.model_copy(update={"audit_index": candidate_idx})
         with self._lock:
+            old = self._conn.execute("SELECT * FROM scan_candidates WHERE scan_id = ? AND idx = ?", (scan_id, candidate_idx)).fetchone()
+            if old is None:
+                return None
+            if old["audit_result"] and not old["audit_body_id"]:
+                self._archive_legacy_locked(scan_id, f"candidate:{candidate_idx}", json.dumps(dict(old), ensure_ascii=False))
+            body_id = self._store_audit_body_locked(scan_id, candidate_idx, result, candidate_index=candidate_idx) if result is not None else None
+            if result is not None:
+                result = result.model_copy(update={key: "" for key in AUDIT_BODY_FIELDS})
             cursor = self._conn.execute(
                 """\
                 UPDATE scan_candidates
                 SET audit_state = ?, audit_result = ?, vulnerability_idx = ?,
-                    dedup_decision = ?, audit_updated_at = ?
+                    dedup_decision = ?, audit_updated_at = ?, audit_body_id = ?
                 WHERE scan_id = ? AND idx = ?
                 """,
                 (
@@ -3398,6 +3343,7 @@ class SqliteScanStore(ScanStoreBase):
                     vulnerability_idx,
                     json.dumps(dedup_decision or {}, ensure_ascii=False),
                     updated_at,
+                    body_id,
                     scan_id,
                     candidate_idx,
                 ),
@@ -3410,7 +3356,7 @@ class SqliteScanStore(ScanStoreBase):
                 (scan_id, candidate_idx),
             ).fetchone()
             self._conn.commit()
-        return _scan_candidate_from_row(row) if row is not None else None
+        return _scan_candidate_from_row(self._hydrate_audit_rows([row])[0]) if row is not None else None
 
     def get_processed_candidate_indexes(self, scan_id: str) -> set[int]:
         rows = self._conn.execute(
@@ -3443,7 +3389,7 @@ class SqliteScanStore(ScanStoreBase):
             self._conn.executemany(
                 """\
                 UPDATE scan_candidates
-                SET audit_state = 'pending', audit_result = NULL,
+                SET audit_state = 'pending', audit_result = NULL, audit_body_id = NULL,
                     vulnerability_idx = NULL, dedup_decision = '{}',
                     audit_updated_at = ''
                 WHERE scan_id = ? AND idx = ?
@@ -3492,6 +3438,8 @@ class SqliteScanStore(ScanStoreBase):
         provisional: bool = False,
         report_batch_id: str = "",
     ) -> None:
+        body_id = self._store_audit_body_locked(scan_id, index, vuln)
+        vuln = vuln.model_copy(update={key: "" for key in AUDIT_BODY_FIELDS})
         columns = (
             "scan_id, idx, audit_index, file, line, function, call_chain, "
             "vuln_type, severity, description, impact, vulnerable_code, "
@@ -3502,7 +3450,7 @@ class SqliteScanStore(ScanStoreBase):
             "analysis_source, engine_id, engine_label, fp_review_eligible, "
             "source_task_id, threat_surface_node_id, threat_method_node_id, "
             "threat_code_path, provisional, report_batch_id, output_source"
-            ", version_labels_json, version_locations_json"
+            ", version_labels_json, version_locations_json, audit_body_id"
         )
         values = (
             scan_id,
@@ -3549,6 +3497,7 @@ class SqliteScanStore(ScanStoreBase):
                 ensure_ascii=False,
             ),
         )
+        values = (*values, body_id)
         placeholders = ", ".join("?" for _ in values)
         self._conn.execute(
             f"INSERT INTO vulnerabilities ({columns}) VALUES ({placeholders})",
@@ -3564,6 +3513,15 @@ class SqliteScanStore(ScanStoreBase):
         provisional: bool = False,
         report_batch_id: str = "",
     ) -> None:
+        self._preserve_old_finding_body_locked(scan_id, index)
+        previous = self._conn.execute(
+            "SELECT user_verdict, user_verdict_reason, ticket_submitted, ticket_id FROM vulnerabilities WHERE scan_id = ? AND idx = ?",
+            (scan_id, index),
+        ).fetchone()
+        if previous is not None:
+            vuln = vuln.model_copy(update={**dict(previous), "ticket_submitted": bool(previous["ticket_submitted"])})
+        body_id = self._store_audit_body_locked(scan_id, index, vuln)
+        vuln = vuln.model_copy(update={key: "" for key in AUDIT_BODY_FIELDS})
         assignments = (
             "audit_index = ?, file = ?, line = ?, function = ?, "
             "call_chain = ?, vuln_type = ?, severity = ?, description = ?, "
@@ -3577,7 +3535,7 @@ class SqliteScanStore(ScanStoreBase):
             "source_task_id = ?, threat_surface_node_id = ?, "
             "threat_method_node_id = ?, threat_code_path = ?, provisional = ?, "
             "report_batch_id = ?, output_source = ?, version_labels_json = ?, "
-            "version_locations_json = ?"
+            "version_locations_json = ?, audit_body_id = ?"
         )
         self._conn.execute(
             f"UPDATE vulnerabilities SET {assignments} "
@@ -3624,6 +3582,7 @@ class SqliteScanStore(ScanStoreBase):
                     [item.model_dump(mode="json") for item in vuln.version_locations],
                     ensure_ascii=False,
                 ),
+                body_id,
                 scan_id,
                 index,
             ),
@@ -3631,6 +3590,7 @@ class SqliteScanStore(ScanStoreBase):
 
     def add_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
         with self._lock:
+            self._locked_scan(scan_id, include_pool=False)
             cur = self._conn.execute(
                 "SELECT COALESCE(MAX(idx), -1) FROM vulnerabilities WHERE scan_id = ?",
                 (scan_id,),
@@ -3648,6 +3608,7 @@ class SqliteScanStore(ScanStoreBase):
     def upsert_incomplete_vulnerability(self, scan_id: str, vuln: Vulnerability) -> int:
         """Replace an existing timeout/no-result row for this candidate, else append."""
         with self._lock:
+            self._locked_scan(scan_id, include_pool=False)
             cur = self._conn.execute(
                 """\
                 SELECT idx
@@ -3682,79 +3643,7 @@ class SqliteScanStore(ScanStoreBase):
             row = cur.fetchone()
             if row is not None:
                 idx = int(row["idx"])
-                self._conn.execute(
-                    """\
-                    UPDATE vulnerabilities
-                    SET audit_index = ?,
-                        call_chain = ?,
-                        severity = ?,
-                        description = ?,
-                        impact = ?,
-                        vulnerable_code = ?,
-                        attack_entry = ?,
-                        root_cause = ?,
-                        trigger_conditions = ?,
-                        ai_analysis = ?,
-                        vulnerability_report = ?,
-                        confirmed = ?,
-                        ai_verdict = ?,
-                        failure_reason = ?,
-                        user_verdict = NULL,
-                        user_verdict_reason = NULL,
-                        ticket_submitted = 0,
-                        ticket_id = '',
-                        function_source = ?,
-                        function_start_line = ?,
-                        variant_of = ?,
-                        analysis_source = ?,
-                        engine_id = ?,
-                        engine_label = ?,
-                        fp_review_eligible = ?,
-                        source_task_id = ?,
-                        threat_surface_node_id = ?,
-                        threat_method_node_id = ?,
-                        threat_code_path = ?,
-                        output_source = ?,
-                        version_labels_json = ?,
-                        version_locations_json = ?
-                    WHERE scan_id = ? AND idx = ?
-                    """,
-                    (
-                        vuln.audit_index,
-                        vuln.call_chain,
-                        vuln.severity,
-                        vuln.description,
-                        vuln.impact,
-                        vuln.vulnerable_code,
-                        vuln.attack_entry,
-                        vuln.root_cause,
-                        vuln.trigger_conditions,
-                        vuln.ai_analysis,
-                        vuln.vulnerability_report,
-                        1 if vuln.confirmed else 0,
-                        vuln.ai_verdict,
-                        vuln.failure_reason,
-                        vuln.function_source,
-                        vuln.function_start_line,
-                        vuln.variant_of,
-                        vuln.analysis_source,
-                        vuln.engine_id,
-                        vuln.engine_label,
-                        _LEGACY_FP_REVIEW_ELIGIBLE,
-                        vuln.source_task_id,
-                        vuln.threat_surface_node_id,
-                        vuln.threat_method_node_id,
-                        vuln.threat_code_path,
-                        vuln.output_source.model_dump_json(),
-                        json.dumps(vuln.version_labels, ensure_ascii=False),
-                        json.dumps(
-                            [item.model_dump(mode="json") for item in vuln.version_locations],
-                            ensure_ascii=False,
-                        ),
-                        scan_id,
-                        idx,
-                    ),
-                )
+                self._overwrite_vulnerability_locked(scan_id, idx, vuln)
                 self._conn.commit()
                 return idx
 
@@ -3763,65 +3652,7 @@ class SqliteScanStore(ScanStoreBase):
                 (scan_id,),
             )
             next_idx = cur.fetchone()[0] + 1
-            self._conn.execute(
-                """\
-                INSERT INTO vulnerabilities
-                    (scan_id, idx, audit_index, file, line, function, call_chain, vuln_type,
-                     severity, description, impact, vulnerable_code, attack_entry,
-                     root_cause, trigger_conditions, ai_analysis, vulnerability_report, confirmed,
-                     ai_verdict, failure_reason, user_verdict, user_verdict_reason,
-                     ticket_submitted, ticket_id,
-                     function_source, function_start_line, variant_of,
-                     analysis_source, engine_id, engine_label,
-                     fp_review_eligible, source_task_id, threat_surface_node_id,
-                     threat_method_node_id, threat_code_path, output_source,
-                     version_labels_json, version_locations_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    scan_id,
-                    next_idx,
-                    vuln.audit_index,
-                    vuln.file,
-                    vuln.line,
-                    vuln.function,
-                    vuln.call_chain,
-                    vuln.vuln_type,
-                    vuln.severity,
-                    vuln.description,
-                    vuln.impact,
-                    vuln.vulnerable_code,
-                    vuln.attack_entry,
-                    vuln.root_cause,
-                    vuln.trigger_conditions,
-                    vuln.ai_analysis,
-                    vuln.vulnerability_report,
-                    1 if vuln.confirmed else 0,
-                    vuln.ai_verdict,
-                    vuln.failure_reason,
-                    vuln.user_verdict,
-                    vuln.user_verdict_reason,
-                    1 if vuln.ticket_submitted else 0,
-                    vuln.ticket_id if vuln.ticket_submitted else "",
-                    vuln.function_source,
-                    vuln.function_start_line,
-                    vuln.variant_of,
-                    vuln.analysis_source,
-                    vuln.engine_id,
-                    vuln.engine_label,
-                    _LEGACY_FP_REVIEW_ELIGIBLE,
-                    vuln.source_task_id,
-                    vuln.threat_surface_node_id,
-                    vuln.threat_method_node_id,
-                    vuln.threat_code_path,
-                    vuln.output_source.model_dump_json(),
-                    json.dumps(vuln.version_labels, ensure_ascii=False),
-                    json.dumps(
-                        [item.model_dump(mode="json") for item in vuln.version_locations],
-                        ensure_ascii=False,
-                    ),
-                ),
-            )
+            self._insert_vulnerability_locked(scan_id, next_idx, vuln)
             self._conn.commit()
             return next_idx
 
@@ -3858,7 +3689,7 @@ class SqliteScanStore(ScanStoreBase):
                     """,
                     (scan_id, normalized_batch_id),
                 ).fetchall()
-                for row in rows:
+                for row in self._hydrate_audit_rows(rows):
                     if (
                         vulnerability_report_identity(
                             _vulnerability_from_row(row)
@@ -3960,7 +3791,7 @@ class SqliteScanStore(ScanStoreBase):
                     tuple[object, ...], tuple[int, Vulnerability]
                 ] = {}
                 for row in remaining_rows:
-                    stored = _vulnerability_from_row(row)
+                    stored = _vulnerability_from_row(self._hydrate_audit_rows([row])[0])
                     if not stored.provisional:
                         remaining_by_identity.setdefault(
                             vulnerability_report_identity(stored),
@@ -4199,7 +4030,7 @@ class SqliteScanStore(ScanStoreBase):
             """,
             (scan_id,),
         )
-        return [_vulnerability_from_row(row) for row in cur.fetchall()]
+        return [_vulnerability_from_row(row) for row in self._hydrate_audit_rows(cur.fetchall())]
 
     def get_vulnerabilities_page(
         self,
@@ -4220,7 +4051,7 @@ class SqliteScanStore(ScanStoreBase):
             ).fetchall()
         return [
             (int(row["idx"]), _vulnerability_from_row(row))
-            for row in rows
+            for row in self._hydrate_audit_rows(rows)
         ]
 
     def upsert_vulnerability_validation(
@@ -4234,6 +4065,8 @@ class SqliteScanStore(ScanStoreBase):
             return 1 if value else 0
 
         with self._lock:
+            self._locked_scan(scan_id, include_pool=False)
+            self._preserve_validation_locked(scan_id, validation.vuln_index, validation.model_dump())
             self._conn.execute(
                 """\
                 INSERT INTO vulnerability_validations
@@ -4245,6 +4078,7 @@ class SqliteScanStore(ScanStoreBase):
                      execution_agent_session_id, execution_revision)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scan_id, vuln_index) DO UPDATE SET
+                    output_storage_version = 0, output_sequence = 0,
                     status = excluded.status,
                     running = excluded.running,
                     product = excluded.product,
@@ -4302,6 +4136,7 @@ class SqliteScanStore(ScanStoreBase):
         *,
         after_index: int | None = None,
         limit: int | None = None,
+        include_body: bool = True,
     ) -> list[VulnerabilityValidation]:
         conditions = ["scan_id = ?"]
         params: list[object] = [scan_id]
@@ -4312,9 +4147,14 @@ class SqliteScanStore(ScanStoreBase):
         if limit is not None:
             limit_sql = "LIMIT ?"
             params.append(max(1, int(limit)))
+        body_fields = {"validation_code", "validation_output", "intermediate_output", "final_output", "output_sections", "artifacts"}
+        columns = "*" if include_body else ", ".join(
+            ("'[]'" if field in {"output_sections", "artifacts"} else "''") + f" AS {field}" if field in body_fields else field
+            for field in VulnerabilityValidation.model_fields
+        )
         cur = self._conn.execute(
             f"""\
-            SELECT *
+            SELECT {columns}
             FROM vulnerability_validations
             WHERE {' AND '.join(conditions)}
             ORDER BY vuln_index
@@ -4366,7 +4206,7 @@ class SqliteScanStore(ScanStoreBase):
                     else 0
                 ),
             )
-            for r in cur.fetchall()
+            for r in self._hydrate_validation_rows(cur.fetchall())
         ]
 
     def get_vulnerability_validation_states(
@@ -4399,7 +4239,7 @@ class SqliteScanStore(ScanStoreBase):
                 placeholders = ",".join("?" * len(chunk))
                 cur = self._conn.execute(
                     f"""\
-                    SELECT scan_id, vuln_type, ai_verdict, confirmed, user_verdict,
+                    SELECT scan_id, idx, vuln_type, ai_verdict, confirmed, user_verdict,
                            analysis_source, provisional
                     FROM vulnerabilities
                     WHERE scan_id IN ({placeholders})
@@ -4410,6 +4250,7 @@ class SqliteScanStore(ScanStoreBase):
                 for r in cur.fetchall():
                     out[r["scan_id"]].append(
                         VulnStat(
+                            vuln_index=int(r["idx"]),
                             vuln_type=r["vuln_type"],
                             ai_verdict=r["ai_verdict"] or "",
                             confirmed=bool(r["confirmed"]),
@@ -4742,20 +4583,6 @@ class SqliteScanStore(ScanStoreBase):
                 if inserted != 1:
                     self._conn.rollback()
                     return False
-                self._conn.execute(
-                    """\
-                    DELETE FROM events
-                    WHERE scan_id = ?
-                      AND id NOT IN (
-                          SELECT id
-                          FROM events
-                          WHERE scan_id = ?
-                          ORDER BY id DESC
-                          LIMIT ?
-                      )
-                    """,
-                    (scan_id, scan_id, SCAN_EVENT_RETENTION_LIMIT),
-                )
                 self._conn.commit()
             except BaseException as exc:
                 self._conn.rollback()
@@ -4801,19 +4628,6 @@ class SqliteScanStore(ScanStoreBase):
                 if inserted != len(retained):
                     self._conn.rollback()
                     return 0
-                self._conn.execute(
-                    """\
-                    DELETE FROM events
-                    WHERE scan_id = ?
-                      AND id NOT IN (
-                          SELECT id FROM events
-                          WHERE scan_id = ?
-                          ORDER BY id DESC
-                          LIMIT ?
-                      )
-                    """,
-                    (scan_id, scan_id, SCAN_EVENT_RETENTION_LIMIT),
-                )
                 self._conn.commit()
             except BaseException as exc:
                 self._conn.rollback()
@@ -4965,10 +4779,6 @@ class SqliteScanStore(ScanStoreBase):
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
-            self._conn.execute(
-                "DELETE FROM agent_resume_manifests WHERE expires_at <= ?",
-                (now,),
-            )
             self._conn.execute(
                 """\
                 INSERT INTO agent_resume_manifests
@@ -5315,11 +5125,13 @@ class SqliteScanStore(ScanStoreBase):
         agent_session_id: str,
     ) -> int:
         with self._lock:
+            self._locked_scan(scan_id, include_pool=False)
+            self._preserve_validation_locked(scan_id, vuln_index)
             row = self._conn.execute(
                 """\
                 UPDATE vulnerability_validations
                 SET execution_agent_session_id = ?,
-                    execution_revision = execution_revision + 1
+                    execution_revision = execution_revision + 1, output_storage_version = 0, output_sequence = 0
                 WHERE scan_id = ? AND vuln_index = ?
                 RETURNING execution_revision
                 """,
@@ -5847,7 +5659,7 @@ class SqliteScanStore(ScanStoreBase):
                 """,
                 (scan_id,),
             )
-            return [self._row_to_fp_review_result(r) for r in cur.fetchall()]
+            return [self._row_to_fp_review_result(r) for r in self._hydrate_fp_result_rows(cur.fetchall())]
 
     def list_fp_review_verdicts_by_scans(self, scan_ids: list[str]) -> dict[str, list[FpReviewResult]]:
         out: dict[str, list[FpReviewResult]] = {sid: [] for sid in scan_ids}
@@ -5891,20 +5703,33 @@ class SqliteScanStore(ScanStoreBase):
         markdown: str,
         timestamp: str,
         output_source: OutputSource | None = None,
+        *,
+        execution_revision: int = 0,
     ) -> None:
         source = output_source or OutputSource()
         with self._lock:
+            revision = self._fp_execution_revision_locked(review_id)
+            if execution_revision and execution_revision != revision:
+                raise ValueError("stale FP review execution")
+            old = self._conn.execute(
+                "SELECT * FROM fp_review_stage_outputs WHERE review_id = ? AND vuln_index = ? AND stage = ?",
+                (review_id, vuln_index, stage),
+            ).fetchone()
+            if old is not None and not old["stage_version_id"]:
+                self._store_fp_stage_locked(review_id, vuln_index, 0, stage, old["markdown"], old["output_source"], old["updated_at"])
+            version_id = self._store_fp_stage_locked(review_id, vuln_index, revision, stage, markdown, source.model_dump_json(), timestamp)
             self._conn.execute(
                 """\
                 INSERT INTO fp_review_stage_outputs
-                    (review_id, vuln_index, stage, markdown, output_source, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (review_id, vuln_index, stage, markdown, output_source, created_at, updated_at, stage_version_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(review_id, vuln_index, stage) DO UPDATE SET
                     markdown = excluded.markdown,
                     output_source = excluded.output_source,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    stage_version_id = excluded.stage_version_id
                 """,
-                (review_id, vuln_index, stage, markdown, source.model_dump_json(), timestamp, timestamp),
+                (review_id, vuln_index, stage, "", source.model_dump_json(), timestamp, timestamp, version_id),
             )
             self._conn.commit()
 
@@ -5929,19 +5754,17 @@ class SqliteScanStore(ScanStoreBase):
                     created_at=r["created_at"],
                     updated_at=r["updated_at"],
                 )
-                for r in cur.fetchall()
+                for r in self._hydrate_fp_stage_rows(cur.fetchall())
             ]
 
-    def _row_to_fp_review_job(self, row: sqlite3.Row) -> FpReviewJob:
+    def _row_to_fp_review_job(self, row: sqlite3.Row, *, include_results: bool = True) -> FpReviewJob:
         review_id = row["review_id"]
-        cur = self._conn.execute(
-            "SELECT * FROM fp_review_results WHERE review_id = ? ORDER BY id",
-            (review_id,),
-        )
-        results = [
-            self._row_to_fp_review_result(r)
-            for r in cur.fetchall()
-        ]
+        results = []
+        if include_results:
+            cur = self._conn.execute(
+                "SELECT * FROM fp_review_results WHERE review_id = ? ORDER BY id", (review_id,),
+            )
+            results = [self._row_to_fp_review_result(r) for r in self._hydrate_fp_result_rows(cur.fetchall())]
         raw_indices = row["current_vuln_indices"] if "current_vuln_indices" in row.keys() else "[]"
         try:
             current_vuln_indices = [int(i) for i in json.loads(raw_indices or "[]")]
@@ -5978,12 +5801,10 @@ class SqliteScanStore(ScanStoreBase):
     def _row_to_fp_review_result(self, row: sqlite3.Row) -> FpReviewResult:
         stage_outputs = _json_dict(row["stage_outputs"] if "stage_outputs" in row.keys() else "{}")
         stage_output_sources = _output_source_map(row["stage_output_sources"] if "stage_output_sources" in row.keys() else "{}")
-        if not stage_outputs:
-            stage_outputs = self._stage_outputs_for_result(row["review_id"], row["vuln_index"])
-        if not stage_output_sources:
-            stage_output_sources = self._stage_output_sources_for_result(row["review_id"], row["vuln_index"])
         return FpReviewResult(
+            review_id=row["review_id"],
             vuln_index=row["vuln_index"],
+            execution_revision=int(row["execution_revision"] or 0) if "execution_revision" in row.keys() else 0,
             verdict=row["verdict"],
             severity=row["severity"] or "low",
             reason=row["reason"],
@@ -5995,6 +5816,82 @@ class SqliteScanStore(ScanStoreBase):
             output_source=_output_source(row["output_source"] if "output_source" in row.keys() else "{}"),
             created_at=row["created_at"],
         )
+
+    def get_fp_review_job_state(self, review_id: str) -> FpReviewJob | None:
+        row = self._conn.execute("SELECT review_id, scan_id, method, status, created_at, total, processed, current_vuln_index, current_vuln_indices, error_message, execution_agent_session_id, execution_revision FROM fp_review_jobs WHERE review_id = ?", (review_id,)).fetchone()
+        return self._row_to_fp_review_job(row, include_results=False) if row else None
+
+    def get_fp_review_overview(self, scan_id: str) -> FpReviewJob | None:
+        row = self._conn.execute(
+            "SELECT review_id, scan_id, method, status, created_at, total, processed, current_vuln_index, current_vuln_indices, error_message, execution_agent_session_id, execution_revision FROM fp_review_jobs WHERE scan_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", (scan_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        job = self._row_to_fp_review_job(row, include_results=False)
+        totals = self.get_scan_totals([scan_id]).get(scan_id)
+        if totals:
+            job.result_counts = {"tp": int(totals["fp_review_issue_count"]), "fp": int(totals["fp_review_false_positive_count"]),
+                                 "unresolved": int(totals["fp_unresolved_count"])}
+        else:
+            from .summaries import METRICS, fact_select
+            counts = self._conn.execute(
+                "SELECT " + ", ".join(f"COALESCE(SUM({key}), 0) AS {key}" for key in METRICS)
+                + " FROM (" + fact_select("v.scan_id = ?") + ") facts", (scan_id,),
+            ).fetchone()
+            job.result_counts = {"tp": int(counts["fp_review_issue_count"]), "fp": int(counts["fp_review_false_positive_count"]),
+                                 "unresolved": int(counts["fp_unresolved_count"])}
+        return job
+
+    def list_fp_results_page(self, scan_id: str, *, after_index: int = -1, limit: int = 50) -> list[FpReviewResult]:
+        from .summaries import EFFECTIVE_FP
+        indexes = self._conn.execute(
+            "SELECT vuln_index FROM (SELECT r.vuln_index FROM fp_review_results r JOIN fp_review_jobs j ON j.review_id = r.review_id "
+            "WHERE j.scan_id = ? AND r.vuln_index > ? UNION SELECT o.vuln_index FROM fp_review_stage_outputs o "
+            "JOIN fp_review_jobs j ON j.review_id = o.review_id WHERE j.scan_id = ? AND o.vuln_index > ? "
+            "UNION SELECT idx AS vuln_index FROM vulnerabilities WHERE scan_id = ? AND idx > ? "
+            "AND confirmed = 1 AND provisional = 0 AND COALESCE(user_verdict, '') = '') indexes "
+            "ORDER BY vuln_index LIMIT ?", (scan_id, after_index, scan_id, after_index, scan_id, after_index, max(1, min(101, limit))),
+        ).fetchall()
+        if not indexes:
+            return []
+        ids = [int(row["vuln_index"]) for row in indexes]
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            "WITH ranked AS (SELECT r.id, ROW_NUMBER() OVER (PARTITION BY r.vuln_index ORDER BY "
+            f"CASE WHEN {EFFECTIVE_FP} THEN 1 ELSE 0 END DESC, j.created_at DESC, r.created_at DESC, r.id DESC) AS n "
+            "FROM fp_review_results r JOIN fp_review_jobs j ON j.review_id = r.review_id "
+            f"WHERE j.scan_id = ? AND r.vuln_index IN ({placeholders})) "
+            "SELECT r.* FROM fp_review_results r JOIN ranked k ON k.id = r.id WHERE k.n = 1 ORDER BY r.vuln_index",
+            (scan_id, *ids),
+        ).fetchall()
+        results = {row["vuln_index"]: self._row_to_fp_review_result(row) for row in self._hydrate_fp_result_rows(rows)}
+        job = self.get_fp_review_overview(scan_id)
+        if job:
+            stages = self._conn.execute(
+                f"SELECT * FROM fp_review_stage_outputs WHERE review_id = ? AND vuln_index IN ({placeholders})",
+                (job.review_id, *ids),
+            ).fetchall()
+            for stage in self._hydrate_fp_stage_rows(stages):
+                index = int(stage["vuln_index"])
+                result = results.setdefault(index, FpReviewResult(review_id=job.review_id, vuln_index=index,
+                    verdict="uncertain", reason="", created_at=stage["updated_at"]))
+                if result.verdict == "uncertain":
+                    result.stage_outputs[stage["stage"]] = stage["markdown"]
+                    result.stage_output_sources[stage["stage"]] = _output_source(stage["output_source"])
+                elif job.status in {FpReviewStatus.PENDING, FpReviewStatus.RUNNING} and (
+                    result.review_id != job.review_id or result.execution_revision != job.execution_revision
+                ):
+                    result.pending_stage_outputs[stage["stage"]] = stage["markdown"]
+        return [results.get(index) or FpReviewResult(vuln_index=index, verdict="uncertain", reason="", created_at="") for index in ids]
+
+    def get_vulnerabilities_by_indexes(self, scan_id: str, indexes: list[int]) -> list[Vulnerability]:
+        if not indexes:
+            return []
+        rows = self._conn.execute(
+            f"SELECT * FROM vulnerabilities WHERE scan_id = ? AND idx IN ({','.join('?' for _ in indexes)}) ORDER BY idx",
+            (scan_id, *indexes),
+        ).fetchall()
+        return [_vulnerability_from_row(row) for row in self._hydrate_audit_rows(rows)]
 
     def _stage_outputs_for_result(self, review_id: str, vuln_index: int) -> dict[str, str]:
         cur = self._conn.execute(
@@ -6066,13 +5963,14 @@ class SqliteScanStore(ScanStoreBase):
 
     def add_fp_review_result(self, review_id: str, result: FpReviewResult) -> None:
         with self._lock:
+            refs, revision = self._prepare_fp_result_locked(review_id, result)
             self._conn.execute(
                 """\
                 INSERT INTO fp_review_results
                     (review_id, vuln_index, verdict, severity, reason, vulnerability_report,
                      stage_outputs, match_reference, match_type,
-                     stage_output_sources, output_source, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     stage_output_sources, output_source, created_at, stage_version_refs, execution_revision, stage_snapshot_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(review_id, vuln_index) DO UPDATE SET
                     verdict = excluded.verdict,
                     severity = excluded.severity,
@@ -6083,7 +5981,8 @@ class SqliteScanStore(ScanStoreBase):
                     match_type = excluded.match_type,
                     stage_output_sources = excluded.stage_output_sources,
                     output_source = excluded.output_source,
-                    created_at = excluded.created_at
+                    created_at = excluded.created_at,
+                    stage_version_refs = excluded.stage_version_refs, execution_revision = excluded.execution_revision, stage_snapshot_version = 1
                 """,
                 (
                     review_id,
@@ -6092,7 +5991,7 @@ class SqliteScanStore(ScanStoreBase):
                     result.severity,
                     result.reason,
                     result.vulnerability_report,
-                    json.dumps(result.stage_outputs, ensure_ascii=False),
+                    "{}",
                     result.match_reference,
                     result.match_type,
                     json.dumps(
@@ -6101,6 +6000,8 @@ class SqliteScanStore(ScanStoreBase):
                     ),
                     result.output_source.model_dump_json(),
                     result.created_at,
+                    json.dumps(refs, ensure_ascii=False),
+                    revision,
                 ),
             )
             self._conn.commit()

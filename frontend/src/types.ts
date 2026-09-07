@@ -187,6 +187,8 @@ export interface IndexedVulnerability extends Vulnerability {
 
 export interface VulnerabilityValidation {
   scan_id?: string;
+  execution_revision?: number;
+  execution_agent_session_id?: string;
   vuln_index: number;
   status: string;
   running: boolean;
@@ -993,6 +995,9 @@ export interface FpReviewMethodSelection {
 }
 
 export interface FpReviewResult {
+  review_id?: string;
+  execution_revision?: number;
+  pending_stage_outputs?: Record<string, string>;
   vuln_index: number;
   verdict: "tp" | "fp" | "uncertain";
   severity: "high" | "medium" | "low";
@@ -1007,6 +1012,10 @@ export interface FpReviewResult {
 }
 
 export interface FpReviewJob {
+  execution_revision?: number;
+  result_counts?: { tp: number; fp: number; unresolved: number };
+  next_cursor?: number | null;
+  result_vulnerabilities?: IndexedVulnerability[];
   review_id: string;
   scan_id: string;
   method: FpReviewMethod;

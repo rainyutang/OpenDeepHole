@@ -126,8 +126,6 @@ async def _fan_out_stream_events(store, last_id: int) -> int:
         for row in rows:
             event_id = int(row["id"])
             last_id = max(last_id, event_id)
-            if str(row["source_worker"]) == WORKER_ID:
-                continue
             try:
                 data = json.loads(str(row["data_json"]))
             except Exception:

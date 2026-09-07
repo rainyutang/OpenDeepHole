@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { getCheckerDashboard } from "../api/client";
+import { getCheckerDashboard, getCheckerScansPage } from "../api/client";
 import type {
   CheckerDashboardResponse,
   CheckerDashboardStats,
@@ -187,6 +187,8 @@ export default function CheckerDashboardPage({ onBack, onViewScan, user }: Props
               <div className="min-w-0">
                 {selected ? (
                   <CheckerDetail
+                    key={`${selected.checker}:${productFilter}`}
+                    product={productFilter}
                     checker={selected}
                     onViewScan={onViewScan}
                     showCreator={user.role === "admin"}
@@ -368,13 +370,28 @@ function CheckerCard({
 
 function CheckerDetail({
   checker,
+  product,
   onViewScan,
   showCreator,
 }: {
   checker: CheckerDashboardStats;
+  product: string;
   onViewScan: (scanId: string) => void;
   showCreator: boolean;
 }) {
+  const [scans, setScans] = useState<CheckerScanDashboardStats[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true); setError("");
+    getCheckerScansPage(checker.checker, product).then((page) => {
+      if (!cancelled) { setScans(page.items); setCursor(page.next_cursor); }
+    }).catch(() => { if (!cancelled) setError("扫描列表加载失败"); }).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [checker, product]);
+  const projects = [...new Set(scans.map((scan) => scan.scan_name || scan.project_id))];
   return (
     <div className="border border-slate-800 bg-slate-900/70 rounded-lg overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-800">
@@ -420,12 +437,12 @@ function CheckerDetail({
       </div>
 
       <div className="px-5 py-4 border-b border-slate-800">
-        <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">扫描过的项目</h3>
-        {checker.projects.length === 0 ? (
+        <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">当前已加载的项目</h3>
+        {projects.length === 0 ? (
           <span className="text-sm text-slate-500">暂无项目</span>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {checker.projects.map((project) => (
+            {projects.map((project) => (
               <span
                 key={project}
                 className="text-xs text-slate-300 bg-slate-800 border border-slate-700 rounded px-2 py-1 max-w-xs truncate"
@@ -458,20 +475,29 @@ function CheckerDetail({
             </tr>
           </thead>
           <tbody>
-            {checker.scans.length === 0 ? (
+            {scans.length === 0 ? (
               <tr>
                 <td colSpan={showCreator ? 13 : 12} className="px-4 py-10 text-center text-sm text-slate-500">
                   这个 SKILL 还没有扫描记录
                 </td>
               </tr>
             ) : (
-              checker.scans.map((scan) => (
+              scans.map((scan) => (
                 <ScanRow key={scan.scan_id} scan={scan} onViewScan={onViewScan} showCreator={showCreator} />
               ))
             )}
           </tbody>
         </table>
       </div>
+      {(cursor || error) && <div className="p-4">
+        <button disabled={loading} className="rounded border border-slate-600 px-3 py-2 text-sm" onClick={async () => {
+          setLoading(true); setError("");
+          try { const page = await getCheckerScansPage(checker.checker, product, cursor); setScans((old) => cursor ? [...old, ...page.items] : page.items); setCursor(page.next_cursor); }
+          catch { setError("扫描列表加载失败，请重试"); }
+          finally { setLoading(false); }
+        }}>{loading ? "加载中..." : error ? "重试" : "加载更多扫描"}</button>
+        {error && <span className="ml-3 text-red-300">{error}</span>}
+      </div>}
     </div>
   );
 }

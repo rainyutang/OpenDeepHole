@@ -74,6 +74,10 @@ class ReportOutbox:
                 ON pending_reports(target_url, blocked, next_attempt_at, id);
                 CREATE INDEX IF NOT EXISTS idx_pending_reports_stream
                 ON pending_reports(target_url, stream_key, id);
+                CREATE TABLE IF NOT EXISTS report_sequences (
+                    scope TEXT PRIMARY KEY,
+                    sequence INTEGER NOT NULL
+                );
                 """
             )
             self._conn.commit()
@@ -85,6 +89,16 @@ class ReportOutbox:
     @staticmethod
     def _json(value: object) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    def next_sequence(self, scope: str) -> int:
+        """Persistent sequence allocation; gaps are harmless, reuse is not."""
+        with self._lock:
+            row = self._conn.execute(
+                "INSERT INTO report_sequences (scope, sequence) VALUES (?, 1) ON CONFLICT(scope) DO UPDATE SET sequence = report_sequences.sequence + 1 RETURNING sequence",
+                (scope,),
+            ).fetchone()
+            self._conn.commit()
+            return int(row[0])
 
     def enqueue(
         self,

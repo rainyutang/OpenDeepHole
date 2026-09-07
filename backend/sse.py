@@ -61,31 +61,35 @@ def publish_local(
 ) -> None:
     """Broadcast an event to all subscribers of a scan.
 
-    Non-blocking.  If a subscriber's queue is full the event is silently
-    dropped (the 30s fallback poll on the frontend will compensate).
+    Non-blocking. A full queue is replaced with a resynchronization notice.
     """
     subs = _scan_subscribers.get(scan_id)
     if not subs:
         return
+    event_type, data = storage_notification(event_type, data)
     msg = {"event": event_type, "data": data, "id": event_id}
     for queue in list(subs):
         try:
             queue.put_nowait(msg)
         except asyncio.QueueFull:
-            pass
+            while not queue.empty():
+                queue.get_nowait()
+            queue.put_nowait({"event": "resync_required", "data": {"reason": "subscriber_overflow"}, "id": event_id})
 
 
 def publish(scan_id: str, event_type: str, data: Any) -> None:
     """Publish locally and durably fan out when PostgreSQL is configured."""
     global _last_drop_log_at
-    publish_local(scan_id, event_type, data)
+    event_type, data = storage_notification(event_type, data)
     queue = _distributed_event_queue
     if _distributed_store is None or queue is None:
+        publish_local(scan_id, event_type, data)
         return
     try:
         queue.put_nowait((scan_id, event_type, data))
         runtime_metrics.stream_event_enqueued(queue.qsize())
     except asyncio.QueueFull:
+        publish_local(scan_id, "resync_required", {"reason": "writer_overflow"})
         runtime_metrics.stream_event_dropped(queue.qsize())
         now = time.monotonic()
         if now - _last_drop_log_at >= 5.0:
@@ -93,6 +97,46 @@ def publish(scan_id: str, event_type: str, data: Any) -> None:
                 "Distributed SSE persistence queue full; events are being dropped"
             )
             _last_drop_log_at = now
+
+
+def storage_notification(event_type: str, data: Any) -> tuple[str, Any]:
+    """Durable SSE carries invalidations; full reports remain in detail APIs."""
+    if isinstance(data, dict):
+        if event_type == "opencode_task_report":
+            task = data.get("task") if isinstance(data.get("task"), dict) else {}
+            data = {"task_id": data.get("task_id", task.get("task_id", "")),
+                    "revision": data.get("revision", task.get("revision", 1)),
+                    "completed_task_count": data.get("completed_task_count", 0), "total_tasks": data.get("total_tasks", 0)}
+        resources = {"scan_candidate_audit": ("candidates", "candidate"),
+                     "scan_vulnerability": ("vulnerabilities", "vulnerability"),
+                     "vulnerability_validation": ("validations", "validation"),
+                     "fp_review_result": ("fp-review", ""),
+                     "fp_review_stage_output": ("fp-review", ""),
+                     "threat_analysis": ("threat-analysis", ""),
+                     "threat_audit_task": ("threat-audit-tasks", "task"),
+                     "scan_candidates": ("candidates", "")}
+        if event_type in resources:
+            resource, field = resources[event_type]
+            detail = data.get(field) if field else data
+            detail = detail if isinstance(detail, dict) else {}
+            index = data.get("index", detail.get("vuln_index", detail.get("idx")))
+            return "resource_changed", {"resource": resource, "index": index}
+        if event_type == "scan_status" and isinstance(data.get("opencode_pool"), dict):
+            from backend.store.history import TASK_METADATA_FIELDS
+            data = {**data, "opencode_pool": dict(data["opencode_pool"])}
+            for field in ("completed_tasks", "queued_tasks", "planned_tasks"):
+                data["opencode_pool"][field] = [
+                    {key: value for key, value in task.items() if key in TASK_METADATA_FIELDS}
+                    for task in data["opencode_pool"].get(field, []) if isinstance(task, dict)
+                ] if field != "completed_tasks" else []
+            data["opencode_pool"]["models"] = [
+                {**model, "active_tasks": [{key: value for key, value in task.items() if key in TASK_METADATA_FIELDS}
+                                          for task in model.get("active_tasks", []) if isinstance(task, dict)]}
+                for model in data["opencode_pool"].get("models", []) if isinstance(model, dict)
+            ]
+    if len(json.dumps(data, ensure_ascii=False, default=str).encode()) > 32768:
+        return "resync_required", {"reason": "large_resource_changed"}
+    return event_type, data
 
 
 async def run_distributed_sse_writer() -> None:
@@ -126,6 +170,8 @@ async def run_distributed_sse_writer() -> None:
                 raise
             except Exception:
                 if attempt == 2:
+                    for scan_id in {item[0] for item in batch}:
+                        publish_local(scan_id, "resync_required", {"reason": "persistence_unavailable"})
                     runtime_metrics.stream_events_dropped(
                         len(batch),
                         queue.qsize(),

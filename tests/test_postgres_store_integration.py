@@ -161,6 +161,7 @@ def test_sqlite_migration_and_distributed_store_round_trip(tmp_path: Path) -> No
             "threat_audit_superseded": 0,
             "validations": 1,
             "skill_reports": 0,
+            "fp_review_active": 0,
         }
         assert store.get_vulnerability_validation_states(
             "postgres-integration-scan",

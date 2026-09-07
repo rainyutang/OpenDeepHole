@@ -114,7 +114,9 @@ from backend.scan_runtime import (
 from backend.threat_data import parse_threat_analysis_data
 from backend.vulnerability_identity import vulnerability_report_identity
 
-router = APIRouter(prefix="/api/agent")
+from backend.report_routes import HistoricalReportRoute
+
+router = APIRouter(prefix="/api/agent", route_class=HistoricalReportRoute)
 public_router = APIRouter()  # Routes not under /api/agent prefix
 logger = get_logger(__name__)
 _HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -1920,7 +1922,7 @@ async def _ensure_running_scan(scan_id: str) -> ScanStatus | None:
     distributed = bool(getattr(store, "distributed", False))
     loaded = await run_store_call(
         store,
-        "load_scan_overview" if distributed else "load_scan",
+        "load_scan_runtime" if distributed else "load_scan",
         scan_id,
     )
     if loaded is None:
@@ -1990,6 +1992,8 @@ def _merge_completed_opencode_tasks(
             previous_item = ordered[index_by_key[key]]
             previous_revision = task_revision(previous_item)
             current_revision = task_revision(item)
+            if current_revision < previous_revision:
+                continue
             if current_revision == previous_revision:
                 previous_events = previous_item.get("session_events")
                 current_events = item.get("session_events")
@@ -2069,7 +2073,7 @@ async def _mark_agent_scans_cancelled_async(agent_id: str) -> None:
                     scan.opencode_pool,
                 )
             continue
-        loaded = await run_store_call(store, "load_scan_overview", scan_id)
+        loaded = await run_store_call(store, "load_scan_runtime", scan_id)
         if loaded is not None and loaded[0].status not in _RUNNING_SCAN_STATUSES:
             stale_local_scan_ids.add(scan_id)
 
@@ -2081,7 +2085,7 @@ async def _mark_agent_scans_cancelled_async(agent_id: str) -> None:
         from backend.sse import publish
 
         refreshed = await asyncio.gather(*(
-            run_store_call(store, "load_scan_overview", scan_id)
+            run_store_call(store, "load_scan_runtime", scan_id)
             for scan_id in sorted(cancelled_scan_ids)
         ))
         for scan_id, loaded in zip(sorted(cancelled_scan_ids), refreshed):
@@ -2304,6 +2308,7 @@ async def agent_websocket(websocket: WebSocket) -> None:
                 "event_batches": protocol_version >= 2,
                 "lightweight_finish": protocol_version >= 2,
                 "resume_manifest": protocol_version >= 2,
+                "incremental_validation_output": reported_capabilities.get("incremental_validation_output") is True,
                 "incremental_opencode_task_reports": (
                     incremental_opencode_task_reports
                 ),
@@ -2567,7 +2572,7 @@ async def report_agent_opencode_task(
             detail={"code": "agent_not_found", "agent_id": agent_id},
         )
     store = get_scan_store()
-    loaded = await run_store_call(store, "load_scan_overview", body.scope_id)
+    loaded = await run_store_call(store, "get_scan_identity", body.scope_id)
     if loaded is None:
         raise HTTPException(
             status_code=404,
@@ -2591,34 +2596,18 @@ async def report_agent_opencode_task(
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    previous_pool = loaded[0].opencode_pool
-    incoming = (
-        previous_pool.model_copy(deep=True)
-        if previous_pool is not None
-        else OpenCodePoolStatus(scope_id=body.scope_id)
-    )
-    incoming.completed_tasks = [dict(body.task)]
-    incoming.completed_task_count = max(
-        incoming.completed_task_count,
-        1,
-    )
-    status = _merge_completed_opencode_tasks(previous_pool, incoming)
-    await run_store_call(
-        store,
-        "update_opencode_pool_status",
-        body.scope_id,
-        status,
-    )
-    scan = await _ensure_running_scan(body.scope_id)
-    if scan is not None:
+    status = await run_store_call(store, "get_opencode_pool_status", body.scope_id)
+    scan = _running_scans.get(body.scope_id)
+    if scan is not None and status is not None:
         scan.opencode_pool = status
     if inserted:
         from backend.sse import publish
 
         publish(body.scope_id, "opencode_task_report", {
-            "task": body.task,
-            "completed_task_count": status.completed_task_count,
-            "total_tasks": status.total_tasks,
+            "task_id": body.task_id,
+            "revision": body.revision,
+            "completed_task_count": status.completed_task_count if status else 0,
+            "total_tasks": status.total_tasks if status else 0,
         })
     return {"ok": True, "duplicate": not inserted}
 
@@ -4007,7 +3996,7 @@ async def agent_report_mining_engine_run(
         if current is None:
             refreshed = await run_store_call(
                 store,
-                "load_scan_overview",
+                "load_scan_runtime",
                 scan_id,
             )
             current = refreshed[0] if refreshed is not None else None
@@ -4431,10 +4420,11 @@ async def agent_report_scan_candidates(scan_id: str, body: AgentScanCandidates) 
         )
 
     store = get_scan_store()
-    existing = await run_store_call(store, "load_scan_overview", scan_id)
+    existing = await run_store_call(store, "load_scan_runtime", scan_id)
     if existing is not None and existing[0].static_analysis_done:
+        existing_counts = await run_store_call(store, "get_scan_detail_counts", scan_id)
         preserved_total = max(
-            int(existing[2]["candidates"] or 0),
+            int(existing_counts["candidates"] or 0),
             int(existing[0].total_candidates or 0),
         )
         logger.info(
@@ -4502,10 +4492,11 @@ async def agent_report_scan_candidates_v2(
             static_candidates.append(candidate)
 
     store = get_scan_store()
-    existing = await run_store_call(store, "load_scan_overview", scan_id)
+    existing = await run_store_call(store, "load_scan_runtime", scan_id)
     if existing is not None and existing[0].static_analysis_done:
+        existing_counts = await run_store_call(store, "get_scan_detail_counts", scan_id)
         preserved_total = max(
-            int(existing[2]["candidates"] or 0),
+            int(existing_counts["candidates"] or 0),
             int(existing[0].total_candidates or 0),
         )
         logger.info(
@@ -4742,6 +4733,22 @@ async def agent_report_vulnerability_validation(
     return {"ok": True}
 
 
+from backend.models import AgentValidationDelta
+
+
+@router.post("/v2/scan/{scan_id}/validation")
+async def agent_report_validation_delta(scan_id: str, body: AgentValidationDelta) -> dict:
+    try:
+        result = await run_store_call(get_scan_store(), "apply_validation_delta", scan_id, body.state.model_dump(),
+            [change.model_dump() for change in body.changes], body.sequence)
+    except LookupError:
+        _scan_not_found(scan_id, endpoint="validation-delta", store=get_scan_store())
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    publish(scan_id, "resource_changed", {"resource": "validations", "index": body.state.vuln_index})
+    return result
+
+
 @router.post("/scan/{scan_id}/git_history")
 async def agent_push_git_history(scan_id: str, body: AgentGitHistory) -> dict:
     """Agent uploads the mined git-history security problem patterns for a scan."""
@@ -4774,7 +4781,7 @@ async def agent_push_threat_analysis(scan_id: str, body: dict) -> dict:
         raise HTTPException(status_code=400, detail=f"Invalid threat analysis JSON: {exc}") from exc
 
     store = get_scan_store()
-    loaded = await run_store_call(store, "load_scan_overview", scan_id)
+    loaded = await run_store_call(store, "load_scan_runtime", scan_id)
     if loaded is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     stored_scan = loaded[0]
@@ -5520,7 +5527,7 @@ async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) ->
     """Agent pushes static analysis progress (function/file counts)."""
     store = get_scan_store()
     scan = await _ensure_running_scan(scan_id)
-    loaded = await run_store_call(store, "load_scan_overview", scan_id)
+    loaded = await run_store_call(store, "load_scan_runtime", scan_id)
     stored_scan = loaded[0] if loaded is not None else None
     current_status = scan.status if scan is not None else (stored_scan.status if stored_scan is not None else None)
     effective_done = body.done or (scan.static_analysis_done if scan is not None else False)
@@ -5575,7 +5582,7 @@ async def agent_push_static_progress(scan_id: str, body: _StaticProgressBody) ->
 async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> dict:
     """Agent pushes the latest OpenCode model-pool status for one scan."""
     store = get_scan_store()
-    loaded = await run_store_call(store, "load_scan_overview", scan_id)
+    loaded = await run_store_call(store, "get_scan_identity", scan_id)
     if loaded is None:
         _scan_not_found(scan_id, endpoint="opencode-pool", store=store)
     if not await run_store_call(
@@ -5588,8 +5595,6 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
         execution_revision=body.execution_revision,
     ):
         raise HTTPException(status_code=409, detail="stale scan execution")
-    previous_pool = loaded[0].opencode_pool
-    body = _merge_completed_opencode_tasks(previous_pool, body)
     if hasattr(store, "upsert_scan_opencode_token_usage"):
         await run_store_call(
             store,
@@ -5604,23 +5609,22 @@ async def agent_push_opencode_pool(scan_id: str, body: OpenCodePoolStatus) -> di
             "get_scan_opencode_token_usage",
             scan_id,
         )
-    terminal = loaded is not None and loaded[0].status not in _RUNNING_SCAN_STATUSES
+    terminal = loaded is not None and loaded["status"] not in _RUNNING_SCAN_STATUSES
     status = _terminal_opencode_pool_status(body) if terminal else body
-    await run_store_call(
+    status = await run_store_call(
         store,
-        "update_opencode_pool_status",
+        "persist_opencode_pool",
         scan_id,
         status,
     )
 
-    scan = None if terminal else await _ensure_running_scan(scan_id)
+    scan = None if terminal else _running_scans.get(scan_id)
     if scan is not None:
         scan.opencode_pool = status
 
     from backend.sse import publish
     live_pool = status.model_dump()
-    if not body.completed_tasks:
-        live_pool.pop("completed_tasks", None)
+    live_pool.pop("completed_tasks", None)
     publish(scan_id, "scan_status", {
         "status": scan.status if scan else None,
         "progress": scan.progress if scan else None,

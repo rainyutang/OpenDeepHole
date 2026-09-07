@@ -41,6 +41,63 @@ from backend.store.async_ops import run_store_call
 
 router = APIRouter()
 
+
+@router.get("/api/public/scans/{scan_id}/details/{resource}/{index}")
+async def get_public_detail_item(scan_id: str, resource: str, index: int, token: str = Query(...), include_body: bool = True):
+    return await scan_api.get_scan_detail_item(scan_id, resource, index, await _public_user_for_scan_async(scan_id, token), include_body=include_body)
+
+
+@router.get("/api/public/scans/{scan_id}/fp-review/overview")
+async def get_public_fp_overview(scan_id: str, token: str = Query(...)):
+    return await scan_api.get_fp_review_overview_v2(scan_id, await _public_user_for_scan_async(scan_id, token))
+
+
+@router.get("/api/public/scans/{scan_id}/fp-review/results")
+async def get_public_fp_results(scan_id: str, token: str = Query(...), after: int = -1,
+                               limit: int = Query(50, ge=1, le=100)):
+    return await scan_api.get_fp_review_results_v2(scan_id, after, limit, await _public_user_for_scan_async(scan_id, token))
+
+
+@router.get("/api/public/scans/{scan_id}/overview")
+async def get_public_overview(scan_id: str, token: str = Query(...)):
+    return await scan_api.get_scan_overview_v2(scan_id, await _public_user_for_scan_async(scan_id, token))
+
+
+@router.get("/api/public/scans/{scan_id}/tasks")
+async def get_public_tasks(scan_id: str, token: str = Query(...), cursor: str | None = None,
+                           limit: int = Query(50, ge=1, le=100)):
+    return await scan_api.get_scan_tasks_page(scan_id, cursor, limit, await _public_user_for_scan_async(scan_id, token))
+
+
+@router.get("/api/public/scans/{scan_id}/tasks/{task_id}")
+async def get_public_task(scan_id: str, task_id: str, token: str = Query(...),
+                          revision: int | None = None, record_id: str | None = None):
+    return await scan_api.get_scan_task_detail(scan_id, task_id, revision, record_id, await _public_user_for_scan_async(scan_id, token))
+
+
+@router.get("/api/public/scans/{scan_id}/candidates")
+async def get_public_candidates(scan_id: str, token: str = Query(...), after: int = -1,
+                                limit: int = Query(50, ge=1, le=100)):
+    return await scan_api.get_scan_candidates_v2(scan_id, limit, after, await _public_user_for_scan_async(scan_id, token))
+
+
+@router.get("/api/public/scans/{scan_id}/event-history")
+async def get_public_event_history(scan_id: str, token: str = Query(...), before: int | None = None,
+                                   limit: int = Query(50, ge=1, le=100)):
+    return await scan_api.get_scan_events_v2(scan_id, limit, before, await _public_user_for_scan_async(scan_id, token))
+
+
+@router.get("/api/public/scans/{scan_id}/threat-audit-tasks")
+async def get_public_threat_tasks(scan_id: str, token: str = Query(...), cursor: str | None = None,
+                                 limit: int = Query(50, ge=1, le=100)):
+    return await scan_api.get_scan_threat_audit_tasks_v2(scan_id, limit, cursor, await _public_user_for_scan_async(scan_id, token))
+
+
+@router.get("/api/public/scans/{scan_id}/validations")
+async def get_public_validations(scan_id: str, token: str = Query(...), after: int = -1,
+                                limit: int = Query(50, ge=1, le=100)):
+    return await scan_api.get_scan_validations_v2(scan_id, limit, after, await _public_user_for_scan_async(scan_id, token))
+
 INTEGRATION_TOKEN = "opendeephole-integration-token"
 INTEGRATION_USERNAME = "opendeephole_integration"
 INTEGRATION_PASSWORD = "opendeephole_integration_password"
@@ -258,10 +315,9 @@ def _public_user_for_scan(scan_id: str, token: str) -> User:
     if not token:
         raise HTTPException(status_code=401, detail="Missing scan access token")
     store = get_scan_store()
-    loaded = store.load_scan(scan_id)
-    if loaded is None:
+    meta = store.get_scan_meta(scan_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
-    _, meta = loaded
     if not meta.public_access_token or not secrets.compare_digest(token, meta.public_access_token):
         raise HTTPException(status_code=403, detail="Invalid scan access token")
     owner = store.get_user_by_id(meta.user_id) if meta.user_id else None
@@ -272,10 +328,9 @@ async def _public_user_for_scan_async(scan_id: str, token: str) -> User:
     if not token:
         raise HTTPException(status_code=401, detail="Missing scan access token")
     store = get_scan_store()
-    loaded = await run_store_call(store, "load_scan", scan_id)
-    if loaded is None:
+    meta = await run_store_call(store, "get_scan_meta", scan_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Scan not found")
-    _, meta = loaded
     if not meta.public_access_token or not secrets.compare_digest(
         token,
         meta.public_access_token,

@@ -1355,6 +1355,10 @@ async def _run_single_validation(item: _ValidationQueueItem) -> None:
             )
 
         async def process_output(event: dict[str, Any]) -> None:
+            if event.get("type") == "validation_delta" or event.get("kind") == "validation_delta":
+                if item.reporter is not None and hasattr(item.reporter, "report_validation_body_changes"):
+                    await item.reporter.report_validation_body_changes(item.scan_id, event["data"]["state"], event["data"]["changes"])
+                return
             message = str(event.get("message") or "")
             if message and item.reporter is not None:
                 await item.reporter.send_event(

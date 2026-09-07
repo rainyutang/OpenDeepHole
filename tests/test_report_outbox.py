@@ -342,7 +342,7 @@ def test_pending_terminal_inventory_reuses_existing_outbox_rows(tmp_path: Path) 
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-        assert tables <= {"pending_reports", "sqlite_sequence"}
+        assert tables <= {"pending_reports", "sqlite_sequence", "report_sequences"}
     finally:
         connection.close()
 

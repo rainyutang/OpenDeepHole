@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getCheckerCatalog, getMiningEngineCatalog, isPublicScan, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
+import { getScanDetailItem, getScanTaskDetail, getScanTasksPage, getFpReviewResultsPage, getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getCheckerCatalog, getMiningEngineCatalog, isPublicScan, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import {
   getThreatAnalysisResultCounts,
   getScanThreatAnalysis,
@@ -32,6 +32,7 @@ import {
   findIndexedVulnerability,
   mergeIndexedVulnerabilities,
   normalizeOpenCodePool,
+  normalizeValidation,
   selectOpenCodePoolSnapshot,
   sameOpenCodePoolSnapshot,
 } from "../scanRuntime";
@@ -214,7 +215,7 @@ function finalReviewedIssueIndices(fpReview: FpReviewJob | null): Set<number> {
 }
 
 function finalReviewedIssueCount(fpReview: FpReviewJob | null): number {
-  return finalReviewedIssueIndices(fpReview).size;
+  return fpReview?.result_counts?.tp ?? finalReviewedIssueIndices(fpReview).size;
 }
 
 function isValidationTerminalStatus(status: string): boolean {
@@ -222,6 +223,7 @@ function isValidationTerminalStatus(status: string): boolean {
 }
 
 function validatedIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
+  if (scan.detail_counts?.validated_issue_count != null) return scan.detail_counts.validated_issue_count;
   const issueIndices = finalReviewedIssueIndices(fpReview);
   const validationMap = new Map((scan.validations ?? []).map((item) => [item.vuln_index, item]));
   return [...issueIndices].filter((index) => {
@@ -891,7 +893,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     );
     let failed = false;
     try {
-      while (cursor != null && !signal.aborted && isCurrentGeneration()) {
+      if (cursor != null && !signal.aborted && isCurrentGeneration()) {
         let page: LoadedDetailPage | null = null;
         let lastError: unknown = null;
         for (let attempt = 0; attempt < 4 && !signal.aborted; attempt += 1) {
@@ -1112,6 +1114,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           models: [],
           updated_at: "",
         };
+        if (!data.task) return { ...prev, opencode_pool: {
+          ...pool, completed_task_count: Math.max(pool.completed_task_count, data.completed_task_count),
+          total_tasks: Math.max(pool.total_tasks, data.total_tasks),
+        } };
         const taskId = String(data.task.task_id || "");
         if (!taskId) return prev;
         const completedTasks = [...(pool.completed_tasks ?? [])];
@@ -1511,29 +1517,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   }, [activeEngineId, activeTab, logOpen]);
 
   useEffect(() => {
-    if (!scan?.detail_pages) return;
-    const availableSlots = Math.max(0, 2 - detailLoadingResources.size);
-    if (availableSlots === 0) return;
-    const pending = requiredDetailResources.filter((resource) => (
-      detailCursor(scan, resource) != null
-      && !detailLoadingResources.has(resource)
-      && !detailFailedResources.has(resource)
-    ));
-    for (const resource of pending.slice(0, availableSlots)) {
-      void loadDetailResource(resource);
-    }
-  }, [
-    detailFailedResources,
-    detailLoadingResources,
-    loadDetailResource,
-    requiredDetailResources,
-    scan?.detail_pages,
-  ]);
-
-  useEffect(() => {
     if (!isRunning || !scan?.detail_counts) return;
     const interval = window.setInterval(() => {
-      void refreshOverviewSummary();
+      if (!document.hidden) void refreshOverviewSummary();
     }, 10_000);
     return () => window.clearInterval(interval);
   }, [isRunning, refreshOverviewSummary, scan?.detail_counts]);
@@ -2121,8 +2107,20 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             }`}
           >
             {activeDetailFailed
-              ? "部分详情自动加载失败；重新进入该页签时会从当前进度继续。"
-              : "正在自动分批加载当前页签的完整详情…"}
+              ? "部分详情加载失败，可点击下方按钮重试。"
+              : "正在加载下一页详情…"}
+          </div>
+        )}
+        {requiredDetailResources.some((resource) => detailCursor(scan, resource) != null) && (
+          <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+            <span>已加载当前部分记录</span>
+            {requiredDetailResources.filter((resource) => detailCursor(scan, resource) != null).map((resource) => (
+              <button key={resource} type="button" disabled={detailLoadingResources.has(resource)}
+                onClick={() => void loadDetailResource(resource)}
+                className="rounded border border-slate-700 px-3 py-2 hover:bg-slate-800 disabled:opacity-40">
+                加载更多{({ candidates: "候选点", vulnerabilities: "漏洞", events: "日志", threat_tasks: "审计任务", validations: "验证记录" })[resource]}
+              </button>
+            ))}
           </div>
         )}
         {activeTab === "overview" && (
@@ -2248,16 +2246,14 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         {activeTab === "fp_review" && (
           <FpReviewPanel
             vulnerabilities={scan.vulnerabilities}
-            reviewDataLoaded={
-              fpReviewHydrated
-              && (
-                !scan.detail_pages
-                || (
-                  scan.detail_pages.vulnerabilities_next_cursor == null
-                  && !detailLoadingResources.has("vulnerabilities")
-                )
-              )
-            }
+            scanId={scanId}
+            reviewDataLoaded={fpReviewHydrated}
+            onLoadResults={(page) => setFpReview((previous) => previous?.scan_id === scanId ? {
+              ...previous,
+              results: [...new Map([...previous.results, ...page.items].map((item) => [item.vuln_index, item])).values()],
+              result_vulnerabilities: mergeIndexedVulnerabilities(previous.result_vulnerabilities ?? [], page.vulnerabilities.map((v) => ({ index: v.vuln_index, vulnerability: v }))),
+              next_cursor: page.next_cursor,
+            } : previous)}
             fpReview={fpReview}
             methodLabel={fpReviewMethodLabel(selectedFpReviewMethod, selectedFpReviewSelection)}
             methodDescription={selectedFpReviewSelection?.description ?? "按漏洞粒度逐条执行去误报复核。"}
@@ -4258,7 +4254,7 @@ function ScanOverview({
       </div>
 
       <ScanTokenUsagePanel usage={scan.opencode_pool?.token_usage ?? null} />
-      <ScanTaskQueuePanel pool={scan.opencode_pool ?? null} />
+      <ScanTaskQueuePanel key={scan.scan_id} scanId={scan.scan_id} pool={scan.opencode_pool ?? null} />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_22rem]">
         <section className="rounded-lg border border-slate-700 bg-slate-900/50 p-4">
@@ -4478,20 +4474,105 @@ function ScanTokenUsagePanel({ usage }: { usage: OpenCodeTokenUsage | null }) {
   </section>;
 }
 
-function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
+function ScanTaskQueuePanel({ scanId, pool }: { scanId: string; pool: OpenCodePoolStatus | null }) {
   const [page, setPage] = useState(1);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
-  const tasks = useMemo(() => collectScanQueueTasks(pool), [pool]);
+  const [history, setHistory] = useState<Record<string, unknown>[]>([]);
+  const [details, setDetails] = useState<Record<string, Record<string, unknown>>>({});
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  const [detailLoading, setDetailLoading] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const loadedMore = useRef(false);
+  const historyCount = useRef(0);
+  const nextCursorRef = useRef<string | null>(null);
+  const activeScanId = useRef(scanId);
+  activeScanId.current = scanId;
+  useEffect(() => {
+    setPage(1);
+    setHistory([]);
+    setDetails({});
+    setExpandedTaskId(null);
+    setNextCursor(null);
+    loadedMore.current = false;
+    historyCount.current = 0;
+    nextCursorRef.current = null;
+  }, [scanId]);
+  const cacheKey = (task: Record<string, unknown>) => String(task.record_id || `${task.task_id}:${task.revision || 1}`);
+  const mergeHistory = (incoming: Record<string, unknown>[]) => {
+    setHistory((previous) => {
+      const merged = new Map(previous.map((task) => [String(task.task_id), task]));
+      incoming.forEach((task) => {
+        const previousTask = merged.get(String(task.task_id));
+        if (!previousTask || Number(task.revision || 1) >= Number(previousTask.revision || 1)) merged.set(String(task.task_id), task);
+      });
+      historyCount.current = merged.size;
+      return [...merged.values()];
+    });
+  };
+  useEffect(() => {
+    let cancelled = false;
+    if (document.hidden) return;
+    getScanTasksPage(scanId).then((result) => {
+      if (cancelled) return;
+      mergeHistory(result.items);
+      if (!loadedMore.current || (nextCursorRef.current == null && (pool?.completed_task_count ?? 0) > historyCount.current)) {
+        nextCursorRef.current = result.next_cursor;
+        setNextCursor(result.next_cursor);
+      }
+      setHistoryError(false);
+    }).catch(() => { if (!cancelled) setHistoryError(true); });
+    return () => { cancelled = true; };
+  }, [scanId, pool]);
+  const loadHistory = async () => {
+    if (historyLoading) return;
+    setHistoryLoading(true);
+    setHistoryError(false);
+    try {
+      const result = await getScanTasksPage(scanId, nextCursor);
+      if (activeScanId.current !== scanId) return;
+      mergeHistory(result.items);
+      loadedMore.current = true;
+      nextCursorRef.current = result.next_cursor;
+      setNextCursor(result.next_cursor);
+    } catch { setHistoryError(true); }
+    finally { setHistoryLoading(false); }
+  };
+  const loadTask = async (task: Record<string, unknown>) => {
+    const key = cacheKey(task);
+    if (details[key] || detailLoading === key) return;
+    setDetailLoading(key);
+    setDetailError(null);
+    try {
+      const result = await getScanTaskDetail(scanId, task);
+      setDetails((previous) => ({ ...previous, [key]: { ...task, ...result, task_id: task.task_id } }));
+    } catch { setDetailError(key); }
+    finally { setDetailLoading((current) => current === key ? null : current); }
+  };
+  const tasks = useMemo(() => {
+    const merged = new Map((pool?.completed_tasks ?? []).map((task) => [String(task.task_id), task]));
+    history.forEach((task) => {
+      const previous = merged.get(String(task.task_id));
+      if (!previous || Number(task.revision || 1) >= Number(previous.revision || 1)) merged.set(String(task.task_id), details[cacheKey(task)] ?? task);
+    });
+    const combined = { scope_id: scanId, global_running: 0, global_queued: 0, total_tasks: 0,
+      completed_task_count: 0, models: [], queued_tasks: [], planned_tasks: [], updated_at: "", ...pool,
+      completed_tasks: [...merged.values()] };
+    return collectScanQueueTasks(combined);
+  }, [scanId, pool, history, details]);
   const runningCount = tasks.filter((task) => task.status === "running").length;
   const queuedCount = tasks.filter((task) => task.status === "queued").length;
   const plannedCount = tasks.filter((task) => task.status === "planned").length;
-  const completedCount = tasks.filter((task) => !["planned", "queued", "running"].includes(task.status)).length;
+  const completedCount = Math.max(pool?.completed_task_count ?? 0, tasks.filter((task) => !["planned", "queued", "running"].includes(task.status)).length);
   const unsuccessfulCount = tasks.filter((task) => ["failure", "timeout", "cancelled", "unknown"].includes(task.status)).length;
   const totalPages = Math.max(1, Math.ceil(tasks.length / SCAN_QUEUE_PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const pagedTasks = tasks.slice((safePage - 1) * SCAN_QUEUE_PAGE_SIZE, safePage * SCAN_QUEUE_PAGE_SIZE);
   const toggleTask = (taskId: string) => {
     setExpandedTaskId((current) => (current === taskId ? null : taskId));
+    const selected = tasks.find((task) => scanQueueTaskKey(task) === taskId);
+    if (selected && !["planned", "queued", "running"].includes(selected.status)) void loadTask(selected.task);
   };
 
   useEffect(() => {
@@ -4518,10 +4599,15 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
           <StatusPill label={`排队中 ${queuedCount}`} tone="amber" />
           <StatusPill label={`运行中 ${runningCount}`} tone="cyan" />
           <StatusPill label={`已执行 ${completedCount}`} tone="green" />
-          {unsuccessfulCount > 0 && <StatusPill label={`未成功 ${unsuccessfulCount}`} tone="red" />}
+          {unsuccessfulCount > 0 && <StatusPill label={`已加载未成功 ${unsuccessfulCount}`} tone="red" />}
         </div>
       </div>
 
+      {historyError && <p className="my-2 text-xs text-amber-300">历史任务加载失败，请重试。</p>}
+      {(nextCursor || historyError) && <button type="button" onClick={() => void loadHistory()} disabled={historyLoading}
+        className="my-3 rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 disabled:opacity-40">
+        {historyLoading ? "加载中…" : historyError ? "重试加载历史任务" : `加载更多历史任务（已加载 ${history.length} 条）`}
+      </button>}
       {tasks.length === 0 ? (
         <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 px-4 py-6 text-center text-sm text-slate-500">
           当前扫描还没有 OpenCode 任务记录
@@ -4618,6 +4704,9 @@ function ScanTaskQueuePanel({ pool }: { pool: OpenCodePoolStatus | null }) {
                       {isExpanded && (
                         <tr className="border-t border-slate-800/70 bg-slate-950/60">
                           <td colSpan={5} className="px-3 pb-4 pt-0">
+                            {detailLoading === cacheKey(task.task) && <p className="mb-3 text-xs text-slate-400">正在加载完整 Prompt 和 Session 轨迹…</p>}
+                            {detailError === cacheKey(task.task) && <button type="button" onClick={() => void loadTask(task.task)} className="mb-3 text-xs text-amber-300">完整任务加载失败，点击重试</button>}
+
                             <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
                               {terminalFailureReason && (
                                 <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2">
@@ -5613,6 +5702,8 @@ function AuditTaskPanel({
 
 function FpReviewPanel({
   vulnerabilities,
+  scanId,
+  onLoadResults,
   reviewDataLoaded,
   fpReview,
   methodLabel,
@@ -5626,6 +5717,8 @@ function FpReviewPanel({
   onStop,
 }: {
   vulnerabilities: IndexedVulnerability[];
+  scanId: string;
+  onLoadResults: (page: Awaited<ReturnType<typeof getFpReviewResultsPage>>) => void;
   reviewDataLoaded: boolean;
   fpReview: FpReviewJob | null;
   methodLabel: string;
@@ -5639,15 +5732,25 @@ function FpReviewPanel({
   onStop: () => void | Promise<void>;
 }) {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [pageError, setPageError] = useState("");
+  const [unstartedPage, setUnstartedPage] = useState<Awaited<ReturnType<typeof getFpReviewResultsPage>> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setUnstartedPage(null);
+    if (!fpReview) getFpReviewResultsPage(scanId).then((page) => { if (!cancelled) setUnstartedPage(page); }).catch(() => { if (!cancelled) setPageError("待复核问题读取失败"); });
+    return () => { cancelled = true; };
+  }, [scanId, Boolean(fpReview)]);
+  const nextCursor = fpReview?.next_cursor ?? (fpReview ? null : unstartedPage?.next_cursor);
   const confirmed = useMemo(
-    () => vulnerabilities
+    () => mergeIndexedVulnerabilities(vulnerabilities, (fpReview?.result_vulnerabilities ?? unstartedPage?.vulnerabilities ?? []).map((v) => ({ index: v.vuln_index, vulnerability: v })))
       .map((vuln) => ({ vuln, index: vuln.vuln_index }))
       .filter(({ vuln }) => (
         !vuln.provisional
         && isAiConfirmed(vuln)
         && !hasFinalUserVerdict(vuln)
       )),
-    [vulnerabilities],
+    [vulnerabilities, fpReview?.result_vulnerabilities, unstartedPage],
   );
   const resultByIndex = useMemo(
     () => new Map((fpReview?.results ?? []).map((result) => [result.vuln_index, result])),
@@ -5674,16 +5777,14 @@ function FpReviewPanel({
         .sort((a, b) => fpReviewSortRank(a.result, a.running) - fpReviewSortRank(b.result, b.running) || a.index - b.index),
     [confirmed, currentIndices, resultByIndex],
   );
-  const waitingCount = items.filter(
+  const waitingCount = fpReview?.result_counts?.unresolved ?? items.filter(
     (item) => !isEffectiveFpReviewResult(item.result) && !item.running,
   ).length;
-  const allReviewed = reviewDataLoaded
-    && items.length > 0
-    && items.every((item) => isEffectiveFpReviewResult(item.result));
-  const tpCount = items.filter(
+  const allReviewed = reviewDataLoaded && (fpReview?.result_counts ? (fpReview.result_counts.tp + fpReview.result_counts.fp > 0 && fpReview.result_counts.unresolved === 0) : items.length > 0 && items.every((item) => isEffectiveFpReviewResult(item.result)));
+  const tpCount = fpReview?.result_counts?.tp ?? items.filter(
     (item) => isEffectiveFpReviewResult(item.result) && item.result.verdict === "tp",
   ).length;
-  const fpCount = items.filter(
+  const fpCount = fpReview?.result_counts?.fp ?? items.filter(
     (item) => isEffectiveFpReviewResult(item.result) && item.result.verdict === "fp",
   ).length;
   const status = isFpReviewing
@@ -5732,7 +5833,7 @@ function FpReviewPanel({
       summary={methodDescription}
     >
       <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-        <MiniMetric label="确认问题" value={confirmed.length} tone="red" />
+        <MiniMetric label="确认问题" value={fpReview?.result_counts ? tpCount + fpCount + waitingCount : confirmed.length} tone="red" />
         <MiniMetric label="等待复核" value={waitingCount} />
         <MiniMetric label="复核中" value={currentIndices.size} tone="amber" />
         <MiniMetric label="保留正报" value={tpCount} tone="red" />
@@ -5745,7 +5846,7 @@ function FpReviewPanel({
             onClick={onTrigger}
             disabled={!canTrigger}
             title={!reviewDataLoaded
-              ? "正在加载复核状态与完整漏洞列表"
+              ? "正在加载复核状态"
               : allReviewed
                 ? "全部问题均已形成有效结论，点击后重新复核全部问题"
                 : `仅复核 ${waitingCount} 个尚未形成有效结论的问题`}
@@ -5815,6 +5916,17 @@ function FpReviewPanel({
                   );
                 })}
               </ul>
+              {nextCursor != null && <button type="button" disabled={pageLoading} className="m-3 rounded border border-slate-600 px-3 py-2 text-sm" onClick={async () => {
+                setPageLoading(true); setPageError("");
+                try {
+                  const page = await getFpReviewResultsPage(scanId, nextCursor);
+                  if (fpReview) onLoadResults(page);
+                  else setUnstartedPage((previous) => ({ ...page, vulnerabilities: [...(previous?.vulnerabilities ?? []), ...page.vulnerabilities], items: [...(previous?.items ?? []), ...page.items] }));
+                }
+                catch { setPageError("复核结果加载失败，请重试"); }
+                finally { setPageLoading(false); }
+              }}>{pageLoading ? "加载中..." : "加载更多复核结果"}</button>}
+              {pageError && <div className="p-3 text-red-300">{pageError}</div>}
             </div>
           </div>
           <div className="min-h-[20rem] rounded-xl border border-slate-700 bg-slate-900/40">
@@ -5914,6 +6026,12 @@ function FpReviewDetail({
                 </div>
               </section>
             )}
+            {Object.entries(result.pending_stage_outputs ?? {}).map(([stage, content]) => (
+              <section key={`pending-${stage}`} className="rounded-lg border border-amber-800/50 p-3">
+                <h4 className="mb-2 text-xs text-amber-300">当前复核 · {stageLabels[stage] ?? stage}</h4>
+                <MarkdownContent content={content} />
+              </section>
+            ))}
             {stageEntries.length > 0 && (
               <section className="space-y-3">
                 <h4 className="text-xs font-semibold uppercase text-slate-500">阶段输出</h4>
@@ -6086,7 +6204,7 @@ function ValidationPanel({
 function ValidationDetail({
   index,
   vulnerability,
-  validation,
+  validation: summary,
   stopping = false,
   onStopValidation,
 }: {
@@ -6096,11 +6214,36 @@ function ValidationDetail({
   stopping?: boolean;
   onStopValidation?: (index: number) => void | Promise<void>;
 }) {
+  const [loaded, setLoaded] = useState<VulnerabilityValidation | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const scanId = summary?.scan_id;
+  useEffect(() => {
+    let disposed = false;
+    let loading = false;
+    setLoaded(null);
+    setLoadError(false);
+    const refresh = async () => {
+      if (!scanId || disposed || loading || document.hidden) return;
+      loading = true;
+      try {
+        const value = normalizeValidation(await getScanDetailItem(scanId, "validations", index));
+        if (!disposed) { setLoaded(value); setLoadError(false); }
+      } catch { if (!disposed) setLoadError(true); }
+      finally { loading = false; }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 2000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [scanId, index, summary?.execution_revision, summary?.status]);
+  const validation = loaded?.scan_id === scanId && loaded?.vuln_index === index ? { ...loaded, ...summary, validation_code: loaded.validation_code,
+    validation_output: loaded.validation_output, final_output: loaded.final_output, intermediate_output: loaded.intermediate_output,
+    output_sections: loaded.output_sections, artifacts: loaded.artifacts } : summary;
   const status = validation?.status || "pending";
   const tone = validationTone(validation);
   const canStop = Boolean(onStopValidation && (stopping || validation?.running || status === "queued" || status === "running"));
   return (
     <div className="max-h-[70vh] overflow-y-auto p-4">
+      {loadError && <p className="mb-2 text-xs text-amber-400">验证详情读取失败，正在重试</p>}
       <div className="border-b border-slate-800 pb-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
