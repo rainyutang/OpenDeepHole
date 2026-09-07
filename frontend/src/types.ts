@@ -384,6 +384,21 @@ export interface ThreatAuditTaskResult {
   association_complete: boolean;
 }
 
+export interface CandidateAuditTaskResult {
+  candidate_index: number;
+  findings: ThreatAuditFindingSummary[];
+  confirmed_issue_count: number;
+  association_complete: boolean;
+}
+
+export interface VulnerabilityAuditSource {
+  vuln_index: number;
+  status: "resolved" | "missing" | "ambiguous" | "unsupported";
+  kind: "threat_audit" | "static_candidate" | null;
+  threat_task: ThreatAuditTask | null;
+  candidate: ScanCandidate | null;
+}
+
 export interface Candidate {
   file: string;
   line: number;

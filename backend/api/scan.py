@@ -16,7 +16,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Annotated, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -27,6 +27,8 @@ from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
+    CandidateAuditTaskResult,
+    VulnerabilityAuditSource,
     AgentMcpConfig,
     AgentValidatorCatalog,
     AgentValidatorMethod,
@@ -2311,6 +2313,36 @@ async def get_scan_events_v2(
         has_more=has_more,
         next_cursor=next_cursor if has_more else None,
     )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/candidate-audit-results",
+    response_model=list[CandidateAuditTaskResult],
+)
+async def get_scan_candidate_audit_results_v2(
+    scan_id: str,
+    candidate_indexes: list[Annotated[int, Query(ge=0)]] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(get_current_user),
+) -> list[CandidateAuditTaskResult]:
+    await _check_scan_owner_v2(scan_id, current_user)
+    return await run_store_call(
+        get_scan_store(), "get_candidate_audit_results", scan_id, candidate_indexes,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/vulnerabilities/{idx}/audit-source",
+    response_model=VulnerabilityAuditSource,
+)
+async def get_scan_vulnerability_audit_source_v2(
+    scan_id: str,
+    idx: int,
+    current_user: User = Depends(get_current_user),
+) -> VulnerabilityAuditSource:
+    await _check_scan_owner_v2(scan_id, current_user)
+    if idx < 0:
+        raise HTTPException(status_code=422, detail="Invalid vulnerability index")
+    return await run_store_call(get_scan_store(), "get_vulnerability_audit_source", scan_id, idx)
 
 
 @router.get(

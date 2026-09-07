@@ -9,20 +9,14 @@ from __future__ import annotations
 
 import json
 
-from backend.models import FpReviewResult, ThreatAuditFindingSummary, ThreatAuditTaskResult
-from backend.scan_metrics import latest_fp_review_result_map
+from backend.models import ThreatAuditTaskResult
+from .audit_results import FINDING_COLUMNS as _FINDING_COLUMNS, summarize_findings
 
 
 _TASK_COLUMNS = (
     "task_id, surface_node_id, method_node_id, code_path, code_paths, "
     "result_vuln_indexes"
 )
-_FINDING_COLUMNS = (
-    "idx, source_task_id, threat_surface_node_id, threat_method_node_id, "
-    "threat_code_path, file, line, function, vuln_type, severity, description, "
-    "confirmed, ai_verdict, user_verdict"
-)
-
 
 def _json_list(raw):
     try:
@@ -80,29 +74,29 @@ def _index_conflicts(task, finding) -> bool:
     )
 
 
-def _summary(finding, fp_result: FpReviewResult | None) -> ThreatAuditFindingSummary:
-    human = finding["user_verdict"]
-    if human in {"confirmed", "false_positive"}:
-        verdict, source = human, "human"
-    elif fp_result is not None:
-        verdict = "confirmed" if fp_result.verdict == "tp" else "false_positive"
-        source = "fp_review"
+def resolve_threat_audit_source(conn, scan_id: str, finding) -> tuple[str, str | None]:
+    """Resolve the reverse link with the same precedence as task summaries."""
+    source = finding["source_task_id"] or ""
+    if source:
+        row = conn.execute(
+            "SELECT task_id FROM threat_audit_tasks WHERE scan_id = ? AND task_id = ?",
+            (scan_id, source),
+        ).fetchone()
+        return ("resolved", source) if row else ("missing", None)
+    # Only old records without a source ID need the scan's task-link metadata.
+    # Do not hydrate all tasks, their descriptions, or any finding report bodies.
+    tasks = conn.execute(
+        f"SELECT {_TASK_COLUMNS} FROM threat_audit_tasks WHERE scan_id = ?",
+        (scan_id,),
+    ).fetchall()
+    owners = [task for task in tasks if finding["idx"] in _indexes(task["result_vuln_indexes"])[0]]
+    if owners:
+        matches = [task for task in owners if not _index_conflicts(task, finding)]
     else:
-        audit_confirmed = (
-            finding["ai_verdict"] == "confirmed"
-            if finding["ai_verdict"] else bool(finding["confirmed"])
-        )
-        verdict = "unreviewed" if audit_confirmed else "not_confirmed"
-        source = "audit"
-    return ThreatAuditFindingSummary(
-        vuln_index=finding["idx"],
-        **{key: finding[key] or "" for key in (
-            "vuln_type", "severity", "description", "file", "function",
-        )},
-        line=finding["line"] or 0,
-        verdict=verdict,
-        verdict_source=source,
-    )
+        matches = [task for task in tasks if all(_pair(task)) and _legacy_matches(task, finding)]
+    if len(matches) == 1:
+        return "resolved", matches[0]["task_id"]
+    return ("ambiguous" if len(matches) > 1 else "missing"), None
 
 
 def read_threat_audit_task_results(conn, scan_id: str, task_ids: list[str]) -> list[ThreatAuditTaskResult]:
@@ -198,23 +192,11 @@ def read_threat_audit_task_results(conn, scan_id: str, task_ids: list[str]) -> l
                 if task_id in results:
                     results[task_id].association_complete = False
 
-    linked_indexes = sorted({index for indexes in linked.values() for index in indexes})
-    fp_results = []
-    for offset in range(0, len(linked_indexes), 400):
-        chunk = linked_indexes[offset:offset + 400]
-        indexes_sql = ",".join("?" for _ in chunk)
-        rows = conn.execute(
-            "SELECT r.vuln_index, r.verdict, r.severity, r.reason, r.created_at, "
-            "CASE WHEN COALESCE(r.vulnerability_report, '') <> '' THEN '1' ELSE '' END AS vulnerability_report "
-            "FROM fp_review_results r JOIN fp_review_jobs j ON j.review_id = r.review_id "
-            f"WHERE j.scan_id = ? AND r.vuln_index IN ({indexes_sql}) "
-            "ORDER BY j.created_at ASC, r.created_at ASC, r.id ASC",
-            (scan_id, *chunk),
-        ).fetchall()
-        fp_results.extend(FpReviewResult(**dict(row)) for row in rows)
-    latest = latest_fp_review_result_map(fp_results)
+    summaries = summarize_findings(conn, scan_id, {
+        index: findings[index] for indexes in linked.values() for index in indexes
+    })
     for task_id, indexes in linked.items():
         result = results[task_id]
-        result.findings = [_summary(findings[index], latest.get(index)) for index in sorted(indexes)]
+        result.findings = [summaries[index] for index in sorted(indexes)]
         result.confirmed_issue_count = sum(item.verdict == "confirmed" for item in result.findings)
     return list(results.values())

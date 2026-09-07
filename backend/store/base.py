@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 
 from backend.scan_metrics import VulnStat
 from backend.models import (
+    CandidateAuditTaskResult,
+    VulnerabilityAuditSource,
     Candidate,
     FeedbackEntry,
     FpReviewJob,
@@ -388,6 +390,18 @@ class ScanStoreBase(ABC):
         self, scan_id: str, task_ids: list[str],
     ) -> list[ThreatAuditTaskResult]:
         """Read linked findings and effective conclusions for a bounded task batch."""
+        raise NotImplementedError
+
+    def get_candidate_audit_results(
+        self, scan_id: str, candidate_indexes: list[int],
+    ) -> list[CandidateAuditTaskResult]:
+        """Read final issue summaries for a bounded candidate batch."""
+        raise NotImplementedError
+
+    def get_vulnerability_audit_source(
+        self, scan_id: str, vuln_index: int,
+    ) -> VulnerabilityAuditSource:
+        """Read one finding's uniquely linked audit task, if it still exists."""
         raise NotImplementedError
 
     @abstractmethod

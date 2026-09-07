@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { RefCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getCheckerCatalog, getMiningEngineCatalog, isPublicScan, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
@@ -12,6 +13,11 @@ import {
 import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
 import { ThreatAuditFindingBadge, ThreatAuditResults, useThreatAuditResults } from "../features/threatAudit/ThreatAuditResults";
 import type { ThreatAuditTaskResult } from "../types";
+import { AuditFindingBadge, AuditResults } from "../features/auditResults/AuditResults";
+import { useCandidateAuditResults } from "../features/auditResults/useAuditResults";
+import { useAuditNavigation, useListFocus } from "../auditNavigation";
+import type { AuditTarget, ListFocusRequest } from "../auditNavigation";
+import type { CandidateAuditTaskResult } from "../types";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexedVulnerability, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
@@ -706,6 +712,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const pendingInitialOpenCodePoolRef = useRef<OpenCodePoolStatus | null | undefined>(
     undefined,
   );
+  const navigateToAuditTarget = useCallback((kind: AuditTarget["kind"]) => {
+    setSidebarOpen(false);
+    if (kind === "issue") setActiveTab("issues");
+    else if (kind === "static_candidate") setActiveTab("static");
+    else {
+      setActiveEngineId(THREAT_ENGINE_ID);
+      setActiveTab("mining");
+    }
+  }, []);
+  const auditNavigation = useAuditNavigation(scanId, scanRef, setScan, navigateToAuditTarget);
 
   // Feedback panel state
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -1708,6 +1724,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   };
 
   const handleFlowNodeClick = (node: FlowNodeId) => {
+    auditNavigation.cancel();
     if (node === "issues") {
       setActiveTab("issues");
       return;
@@ -1847,7 +1864,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     || hasEvent(scan.events, ["git_history", "variant_hunt"]);
   const indexProgress = formatIndexProgress(indexStatus, scan);
   const selectedEngines = effectiveMiningEngines(scan);
-  const activeEngine = selectedEngines.find((item) => item.engine_id === activeEngineId) ?? null;
+  const activeEngine = selectedEngines.find((item) => item.engine_id === activeEngineId)
+    ?? (auditNavigation.focus?.kind === "threat_audit" && activeEngineId === THREAT_ENGINE_ID
+      ? { engine_id: THREAT_ENGINE_ID, engine_label: THREAT_AUDIT_ENGINE_LABEL, enabled: true }
+      : null);
   const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis"]);
   const threatAuditEvents = filterEvents(scan.events, ["threat_audit"]);
   const miningEvents = filterEvents(scan.events, ["auditing", "fp_review", "opencode_output"]);
@@ -1883,6 +1903,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       currentFpReviewIndices={currentFpReviewIndices}
       fpReviewRunning={isFpReviewing}
       viewMode="final_tp"
+      focusRequest={auditNavigation.focus?.kind === "issue" ? auditNavigation.focus : undefined}
+      onOpenAuditSource={auditNavigation.openSource}
       staticRuleTypeLabels={staticRuleTypeLabels}
       validations={scan.validations ?? []}
       validatingIndices={launchingValidations}
@@ -1933,8 +1955,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                     ? "logs"
                     : null}
         onClose={() => setSidebarOpen(false)}
-        onHome={() => setActiveTab("overview")}
-        onIssues={() => setActiveTab("issues")}
+        onHome={() => { auditNavigation.cancel(); setActiveTab("overview"); }}
+        onIssues={() => { auditNavigation.cancel(); setActiveTab("issues"); }}
         onNodeClick={handleFlowNodeClick}
         onOpenScanInfo={() => setScanInfoOpen(true)}
         onOpenFeedback={() => setFeedbackOpen(true)}
@@ -2114,6 +2136,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           ].join(":")}
         >
         <>
+        {(auditNavigation.loading || auditNavigation.error) && (
+          <div role={auditNavigation.error ? "alert" : "status"} className="mb-4 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-slate-200">
+            {auditNavigation.loading ? "正在定位目标记录…" : auditNavigation.error}
+            {auditNavigation.error && <button type="button" onClick={auditNavigation.retry} className="ml-3 text-blue-300 underline">重试</button>}
+            <button type="button" onClick={auditNavigation.cancel} className="ml-3 text-slate-400 underline">{auditNavigation.loading ? "取消" : "关闭"}</button>
+          </div>
+        )}
         {(activeDetailLoading || activeDetailFailed) && (
           <div
             role="status"
@@ -2170,6 +2199,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             candidates={scan.candidates ?? []}
             vulnerabilities={scan.vulnerabilities}
             events={filterEvents(scan.events, ["static_analysis"])}
+            fpReview={fpReview}
+            resultRevision={threatResultRevision}
+            focusRequest={auditNavigation.focus?.kind === "static_candidate" ? auditNavigation.focus : undefined}
+            onOpenIssue={auditNavigation.openIssue}
           />
         )}
         {activeTab === "threat" && isThreatAnalysisSelected(scan) && (
@@ -2207,6 +2240,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             events={threatAuditEvents}
             fpReview={fpReview}
             resultRevision={threatResultRevision}
+            focusRequest={auditNavigation.focus?.kind === "threat_audit" ? auditNavigation.focus : undefined}
+            onOpenIssue={auditNavigation.openIssue}
           />
         )}
         {activeTab === "mining" && activeEngine && ![STATIC_ENGINE_ID, THREAT_ENGINE_ID].includes(activeEngine.engine_id) && (
@@ -3764,19 +3799,23 @@ function engineRunDuration(run: MiningEngineRunStatus | null): string {
   return `${minutes} 分 ${remaining} 秒`;
 }
 
-function ThreatAuditPanel({
+export function ThreatAuditPanel({
   scan,
   events,
   fpReview,
   resultRevision,
+  focusRequest,
+  onOpenIssue,
 }: {
   scan: ScanStatusType;
   events: ScanEvent[];
   fpReview: FpReviewJob | null;
   resultRevision: number;
+  focusRequest?: ListFocusRequest<string>;
+  onOpenIssue: (index: number) => void;
 }) {
   const [statusFilter, setStatusFilter] = useState("__all__");
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(focusRequest?.key ?? null);
   const [page, setPage] = useState(1);
   const tasks = scan.threat_audit_tasks ?? [];
   const currentTasks = useMemo(() => currentThreatAuditTasks(tasks), [tasks]);
@@ -3852,7 +3891,11 @@ function ThreatAuditPanel({
     setPage(1);
   }, [statusFilter]);
 
+  const listFocus = useListFocus(focusRequest, visibleTasks.map((task) => task.task_id), THREAT_AUDIT_PAGE_SIZE,
+    setSelectedTaskId, setPage, () => setStatusFilter("__all__"));
+
   useEffect(() => {
+    if (listFocus.pinned !== null || listFocus.pending) return;
     if (visibleTasks.length === 0) {
       setSelectedTaskId(null);
       return;
@@ -3860,7 +3903,7 @@ function ThreatAuditPanel({
     if (!selectedTaskId || !visibleTasks.some((task) => task.task_id === selectedTaskId)) {
       setSelectedTaskId(visibleTasks[0].task_id);
     }
-  }, [selectedTaskId, visibleTasks]);
+  }, [selectedTaskId, visibleTasks, listFocus.pinned, listFocus.pending]);
 
   return (
     <TaskPanel
@@ -3889,7 +3932,7 @@ function ThreatAuditPanel({
           label="状态"
           value={statusFilter}
           options={threatAuditStatusOptions(tasks, runtimeByTaskId)}
-          onChange={setStatusFilter}
+          onChange={(value) => { listFocus.release(); setStatusFilter(value); }}
         />
       </div>
 
@@ -3915,7 +3958,9 @@ function ThreatAuditPanel({
                       <li key={task.task_id}>
                         <button
                           type="button"
-                          onClick={() => setSelectedTaskId(task.task_id)}
+                          ref={listFocus.pinned === task.task_id ? listFocus.targetRef : undefined}
+                          aria-current={selectedTaskId === task.task_id ? "true" : undefined}
+                          onClick={() => { listFocus.release(); setSelectedTaskId(task.task_id); }}
                           className={`w-full px-3 py-3 text-left transition-colors ${
                             selectedTaskId === task.task_id
                               ? "bg-cyan-500/15"
@@ -3958,7 +4003,7 @@ function ThreatAuditPanel({
                 <button
                   type="button"
                   disabled={safePage === 1}
-                  onClick={() => setPage((value) => Math.max(1, value - 1))}
+                  onClick={() => { listFocus.release(); setPage((value) => Math.max(1, value - 1)); }}
                   className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
                 >
                   上一页
@@ -3967,7 +4012,7 @@ function ThreatAuditPanel({
                 <button
                   type="button"
                   disabled={safePage === totalPages}
-                  onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+                  onClick={() => { listFocus.release(); setPage((value) => Math.min(totalPages, value + 1)); }}
                   className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
                 >
                   下一页
@@ -3979,12 +4024,14 @@ function ThreatAuditPanel({
           <div className="min-h-[28rem] rounded-xl border border-slate-700 bg-slate-900/40">
             {selected ? (
               <ThreatAuditTaskDetail
+                key={selected.task_id}
                 task={selected}
                 runtime={selectedRuntime}
                 result={auditResults.results.get(selected.task_id)}
                 resultLoading={auditResults.loading}
                 resultError={auditResults.error}
                 onRetryResult={auditResults.retry}
+                onOpenIssue={onOpenIssue}
               />
             ) : (
               <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
@@ -4054,6 +4101,7 @@ function ThreatAuditTaskDetail({
   resultLoading,
   resultError,
   onRetryResult,
+  onOpenIssue,
 }: {
   task: ThreatAuditTask;
   runtime: ScanQueueTask | null;
@@ -4061,6 +4109,7 @@ function ThreatAuditTaskDetail({
   resultLoading: boolean;
   resultError: string;
   onRetryResult: () => void;
+  onOpenIssue: (index: number) => void;
 }) {
   const prompt = runtime ? scanQueueTaskPrompt(runtime.task) : "";
   const sessionId = runtime ? scanQueueTaskSessionId(runtime.task) : "";
@@ -4084,6 +4133,7 @@ function ThreatAuditTaskDetail({
           loading={resultLoading}
           error={resultError}
           onRetry={onRetryResult}
+          onOpenIssue={onOpenIssue}
         />
       </ThreatAuditDetailSection>
       <ThreatAuditDetailSection title="审计目标">
@@ -5164,20 +5214,28 @@ function OverviewMetric({
   return <div className={cls}>{content}</div>;
 }
 
-function StaticTaskPanel({
+export function StaticTaskPanel({
   scan,
   indexProgress,
   candidates,
   vulnerabilities,
   events,
+  fpReview,
+  resultRevision,
+  focusRequest,
+  onOpenIssue,
 }: {
   scan: ScanStatusType;
   indexProgress: ReturnType<typeof formatIndexProgress>;
   candidates: ScanCandidate[];
   vulnerabilities: IndexedVulnerability[];
   events: ScanEvent[];
+  fpReview: FpReviewJob | null;
+  resultRevision: number;
+  focusRequest?: ListFocusRequest<number>;
+  onOpenIssue: (index: number) => void;
 }) {
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(focusRequest?.key ?? null);
   const [typeFilter, setTypeFilter] = useState(ALL_STATIC_FILTER);
   const [auditFilter, setAuditFilter] = useState(ALL_STATIC_FILTER);
   const [currentPage, setCurrentPage] = useState(1);
@@ -5267,7 +5325,17 @@ function StaticTaskPanel({
     setCurrentPage(1);
   }, [auditFilter, typeFilter]);
 
+  const listFocus = useListFocus(focusRequest, visible.map((item) => item.candidate.idx), STATIC_CANDIDATE_PAGE_SIZE,
+    setSelectedIndex, setCurrentPage, () => {
+      setTypeFilter(ALL_STATIC_FILTER);
+      setAuditFilter(ALL_STATIC_FILTER);
+    });
+  const auditResults = useCandidateAuditResults(scan,
+    [...paged.map((item) => item.candidate.idx), ...(selected ? [selected.candidate.idx] : [])],
+    fpReview, resultRevision);
+
   useEffect(() => {
+    if (listFocus.pinned !== null || listFocus.pending) return;
     if (visible.length === 0) {
       if (selectedIndex !== null) setSelectedIndex(null);
       return;
@@ -5275,7 +5343,7 @@ function StaticTaskPanel({
     if (selectedIndex === null || !visible.some((item) => item.candidate.idx === selectedIndex)) {
       setSelectedIndex(visible[0].candidate.idx);
     }
-  }, [selectedIndex, visible]);
+  }, [selectedIndex, visible, listFocus.pinned, listFocus.pending]);
 
   return (
     <TaskPanel
@@ -5298,8 +5366,8 @@ function StaticTaskPanel({
         <MiniMetric label="审计中" value={completeAuditCounts.running} tone="blue" />
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <StaticFilterSelect label="类型" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />
-        <StaticFilterSelect label="审计" value={auditFilter} options={auditOptions} onChange={setAuditFilter} />
+        <StaticFilterSelect label="类型" value={typeFilter} options={typeOptions} onChange={(value) => { listFocus.release(); setTypeFilter(value); }} />
+        <StaticFilterSelect label="审计" value={auditFilter} options={auditOptions} onChange={(value) => { listFocus.release(); setAuditFilter(value); }} />
       </div>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,24rem)_1fr]">
         <div className="flex flex-col rounded-xl border border-slate-700 bg-slate-900/40">
@@ -5314,8 +5382,10 @@ function StaticTaskPanel({
                   <StaticCandidateListItem
                     key={item.candidate.idx}
                     item={item}
+                    result={auditResults.results.get(item.candidate.idx)}
+                    focusRef={listFocus.pinned === item.candidate.idx ? listFocus.targetRef : undefined}
                     active={selectedIndex === item.candidate.idx}
-                    onClick={() => setSelectedIndex(item.candidate.idx)}
+                    onClick={() => { listFocus.release(); setSelectedIndex(item.candidate.idx); }}
                   />
                 ))}
               </ul>
@@ -5326,7 +5396,7 @@ function StaticTaskPanel({
               <button
                 type="button"
                 disabled={safePage === 1}
-                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                onClick={() => { listFocus.release(); setCurrentPage((page) => Math.max(1, page - 1)); }}
                 className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
               >
                 上一页
@@ -5337,7 +5407,7 @@ function StaticTaskPanel({
               <button
                 type="button"
                 disabled={safePage === totalPages}
-                onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                onClick={() => { listFocus.release(); setCurrentPage((page) => Math.min(totalPages, page + 1)); }}
                 className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
               >
                 下一页
@@ -5347,7 +5417,15 @@ function StaticTaskPanel({
         </div>
         <div className="min-h-[20rem] rounded-xl border border-slate-700 bg-slate-900/40">
           {selected ? (
-            <StaticCandidateDetail item={selected} />
+            <StaticCandidateDetail
+              key={selected.candidate.idx}
+              item={selected}
+              result={auditResults.results.get(selected.candidate.idx)}
+              resultLoading={auditResults.loading}
+              resultError={auditResults.error}
+              onRetryResult={auditResults.retry}
+              onOpenIssue={onOpenIssue}
+            />
           ) : (
             <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
               从左侧选择一个候选点查看详情
@@ -5489,18 +5567,24 @@ function StaticFilterSelect({
 
 function StaticCandidateListItem({
   item,
+  result,
   active,
   onClick,
+  focusRef,
 }: {
   item: StaticCandidateItem;
+  result?: CandidateAuditTaskResult;
   active: boolean;
   onClick: () => void;
+  focusRef?: RefCallback<HTMLButtonElement>;
 }) {
   const fileName = item.candidate.file.split("/").pop() || item.candidate.file;
   return (
     <li>
       <button
         type="button"
+        ref={focusRef}
+        aria-current={active ? "true" : undefined}
         onClick={onClick}
         className={`w-full px-3 py-2.5 text-left transition-colors ${
           active ? "bg-blue-500/15" : item.auditStatus === "running" ? "bg-blue-500/10 hover:bg-blue-500/15" : "hover:bg-slate-800/60"
@@ -5520,6 +5604,7 @@ function StaticCandidateListItem({
             {item.candidate.vuln_type}
           </span>
           <StatusPill label={STATIC_AUDIT_STATUS_LABELS[item.auditStatus]} tone={staticAuditTone(item.auditStatus)} />
+          <AuditFindingBadge result={result} />
         </div>
         {item.candidate.function && (
           <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={item.candidate.function}>
@@ -5531,7 +5616,14 @@ function StaticCandidateListItem({
   );
 }
 
-function StaticCandidateDetail({ item }: { item: StaticCandidateItem }) {
+function StaticCandidateDetail({ item, result, resultLoading, resultError, onRetryResult, onOpenIssue }: {
+  item: StaticCandidateItem;
+  result?: CandidateAuditTaskResult;
+  resultLoading: boolean;
+  resultError: string;
+  onRetryResult: () => void;
+  onOpenIssue: (index: number) => void;
+}) {
   const metadata = item.candidate.metadata && Object.keys(item.candidate.metadata).length > 0
     ? JSON.stringify(item.candidate.metadata, null, 2)
     : "";
@@ -5559,6 +5651,11 @@ function StaticCandidateDetail({ item }: { item: StaticCandidateItem }) {
         </div>
       </div>
       <div className="mt-4 space-y-4">
+        <section>
+          <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">审计结果</h4>
+          <AuditResults result={result} status={item.auditStatus} loading={resultLoading}
+            error={resultError} onRetry={onRetryResult} onOpenIssue={onOpenIssue} />
+        </section>
         <section>
           <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">候选描述</h4>
           <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">

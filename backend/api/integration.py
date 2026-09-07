@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
+from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -14,6 +15,8 @@ from backend.api import feedback as feedback_api
 from backend.api import scan as scan_api
 from backend.auth import hash_password
 from backend.models import (
+    CandidateAuditTaskResult,
+    VulnerabilityAuditSource,
     AgentInfo,
     AgentMcpConfig,
     AgentRemoteConfig,
@@ -552,6 +555,30 @@ async def get_public_scan_git_history(
     current_user: User = Depends(_public_user_dependency),
 ) -> list[HistoryPattern]:
     return await scan_api.get_scan_git_history(scan_id, current_user)
+
+
+@router.get(
+    "/api/public/scans/{scan_id}/candidate-audit-results",
+    response_model=list[CandidateAuditTaskResult],
+)
+async def get_public_candidate_audit_results(
+    scan_id: str,
+    candidate_indexes: list[Annotated[int, Query(ge=0)]] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(_public_user_dependency),
+) -> list[CandidateAuditTaskResult]:
+    return await scan_api.get_scan_candidate_audit_results_v2(scan_id, candidate_indexes, current_user)
+
+
+@router.get(
+    "/api/public/scans/{scan_id}/vulnerabilities/{idx}/audit-source",
+    response_model=VulnerabilityAuditSource,
+)
+async def get_public_vulnerability_audit_source(
+    scan_id: str,
+    idx: int,
+    current_user: User = Depends(_public_user_dependency),
+) -> VulnerabilityAuditSource:
+    return await scan_api.get_scan_vulnerability_audit_source_v2(scan_id, idx, current_user)
 
 
 @router.get(

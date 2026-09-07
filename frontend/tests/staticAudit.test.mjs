@@ -30,17 +30,19 @@ test("keeps the requested status labels and order", () => {
     "success",
     "failed",
     "pending",
+    "queued",
     "running",
   ]);
   assert.deepEqual(audit.STATIC_AUDIT_STATUS_LABELS, {
     success: "审计成功",
     failed: "审计失败",
     pending: "待审计",
+    queued: "排队中",
     running: "审计中",
   });
 });
 
-test("classifies the four static audit states", () => {
+test("classifies static audit outcomes", () => {
   assert.equal(audit.staticAuditStatus(vulnerability({
     ai_verdict: "confirmed",
     confirmed: true,

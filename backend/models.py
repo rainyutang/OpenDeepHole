@@ -622,6 +622,21 @@ class ThreatAuditTaskResult(BaseModel):
     association_complete: bool = True
 
 
+class CandidateAuditTaskResult(BaseModel):
+    candidate_index: int = Field(ge=0)
+    findings: list[ThreatAuditFindingSummary] = Field(default_factory=list)
+    confirmed_issue_count: int = 0
+    association_complete: bool = True
+
+
+class VulnerabilityAuditSource(BaseModel):
+    vuln_index: int = Field(ge=0)
+    status: Literal["resolved", "missing", "ambiguous", "unsupported"]
+    kind: Literal["threat_audit", "static_candidate"] | None = None
+    threat_task: ThreatAuditTask | None = None
+    candidate: ScanCandidate | None = None
+
+
 class VulnerabilityValidation(BaseModel):
     """Runtime validation status and artifacts for one vulnerability."""
     scan_id: str = ""

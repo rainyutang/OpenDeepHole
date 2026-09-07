@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { ThreatAuditTaskResult } from "../types";
+import type { CandidateAuditTaskResult, ThreatAuditTaskResult, VulnerabilityAuditSource } from "../types";
 import type { AgentInfo, AgentMcpConfig, AgentMcpProbeResult, AgentMcpStatusResponse, AgentMcpTarget, AgentOpenCodeModelsResult, AgentOpenCodePoolStatus, AgentRemoteConfig, AgentRuntimeManifest, AgentRuntimeUpdateResponse, AgentValidatorCatalog, Announcement, CheckerCatalogItem, CheckerDashboardResponse, CheckerInfo, FeedbackEntry, FpReviewJob, FpReviewMethod, FpReviewMethodCatalog, HistoryPattern, IndexStatus, MiningEngineCatalog, MiningEngineRequest, ScanCandidatePage, ScanConfigMemory, ScanEventPage, ScanStatus, ScanStartResponse, ScanStopResponse, ScanSummary, ScanSummaryPage, SkillCreateJob, SkillImportFile, SkillReport, ThreatAnalysisMethodCatalog, ThreatAuditTaskPage, TokenResponse, User, UserFeedbackVerdict, VulnerabilityPage, VulnerabilityValidationPage } from "../types";
 import {
   isRecord,
@@ -399,6 +399,7 @@ export async function getScanVulnerabilitiesPage(
   scanId: string,
   after?: number | null,
   signal?: AbortSignal,
+  limit?: number,
 ): Promise<VulnerabilityPage> {
   const publicScan = isPublicScan(scanId);
   const { data } = await api.get<unknown>(
@@ -409,6 +410,7 @@ export async function getScanVulnerabilitiesPage(
       params: {
         ...(publicScan ? publicParams() : {}),
         ...(after == null ? {} : { after }),
+        ...(limit == null ? {} : { limit }),
       },
       signal,
     },
@@ -460,19 +462,81 @@ export async function getScanThreatAuditResults(
     { params, signal },
   );
   if (!Array.isArray(data) || data.length !== ids.length || data.some((item) => (
-    !isRecord(item) || !ids.includes(item.task_id) || !Array.isArray(item.findings)
-    || !Number.isInteger(item.confirmed_issue_count) || item.confirmed_issue_count < 0
-    || typeof item.association_complete !== "boolean"
-    || item.findings.some((finding) => (
-      !isRecord(finding) || !Number.isInteger(finding.vuln_index) || finding.vuln_index < 0
-      || typeof finding.description !== "string"
-      || !["confirmed", "false_positive", "unreviewed", "not_confirmed"].includes(finding.verdict)
-      || !["human", "fp_review", "audit"].includes(finding.verdict_source)
-    ))
+    !isRecord(item) || !ids.includes(item.task_id) || !validAuditResult(item)
   )) || new Set(data.map((item) => item.task_id)).size !== ids.length) {
     throw new Error("审计结果响应无效");
   }
   return data;
+}
+
+export async function getScanCandidateAuditResults(
+  scanId: string,
+  candidateIndexes: number[],
+  signal?: AbortSignal,
+): Promise<CandidateAuditTaskResult[]> {
+  const indexes = [...new Set(candidateIndexes)];
+  if (indexes.length === 0) return [];
+  if (indexes.length > 100 || indexes.some((index) => !Number.isInteger(index) || index < 0)) {
+    throw new Error("每次最多读取 100 个有效候选点索引");
+  }
+  const params = new URLSearchParams();
+  indexes.forEach((index) => params.append("candidate_indexes", String(index)));
+  const publicAccess = isPublicScan(scanId);
+  if (publicAccess) params.set("token", publicParams()!.token);
+  const { data } = await api.get<CandidateAuditTaskResult[]>(
+    publicAccess ? publicScanPath("/candidate-audit-results") : `/api/v2/scans/${scanId}/candidate-audit-results`,
+    { params, signal },
+  );
+  if (!Array.isArray(data) || data.length !== indexes.length || data.some((item) => (
+    !isRecord(item) || !indexes.includes(item.candidate_index)
+    || !validAuditResult(item)
+  )) || new Set(data.map((item) => item.candidate_index)).size !== indexes.length) {
+    throw new Error("候选点审计结果响应无效");
+  }
+  return data;
+}
+
+function validAuditResult(item: Record<string, unknown>): boolean {
+  return Array.isArray(item.findings)
+    && Number.isInteger(item.confirmed_issue_count) && Number(item.confirmed_issue_count) >= 0
+    && typeof item.association_complete === "boolean"
+    && item.findings.every((finding) => (
+      isRecord(finding) && Number.isInteger(finding.vuln_index) && Number(finding.vuln_index) >= 0
+      && typeof finding.description === "string"
+      && ["confirmed", "false_positive", "unreviewed", "not_confirmed"].includes(String(finding.verdict))
+      && ["human", "fp_review", "audit"].includes(String(finding.verdict_source))
+    ));
+}
+
+export async function getScanVulnerabilityAuditSource(
+  scanId: string,
+  index: number,
+  signal?: AbortSignal,
+): Promise<VulnerabilityAuditSource> {
+  if (!Number.isInteger(index) || index < 0) throw new Error("问题索引无效");
+  const publicAccess = isPublicScan(scanId);
+  const suffix = `/vulnerabilities/${index}/audit-source`;
+  const { data } = await api.get<VulnerabilityAuditSource>(
+    publicAccess ? publicScanPath(suffix) : `/api/v2/scans/${scanId}${suffix}`,
+    { params: publicAccess ? publicParams() : undefined, signal },
+  );
+  if (!isRecord(data) || data.vuln_index !== index
+    || !["resolved", "missing", "ambiguous", "unsupported"].includes(data.status)
+    || ![null, "threat_audit", "static_candidate"].includes(data.kind)
+    || (data.status === "resolved" && (
+      (data.kind === "threat_audit" && (!isRecord(data.threat_task)
+        || !data.threat_task.task_id || data.threat_task.scan_id !== scanId))
+      || (data.kind === "static_candidate" && (!isRecord(data.candidate)
+        || !Number.isInteger(data.candidate.idx) || data.candidate.idx < 0))
+      || data.kind === null
+    ))) {
+    throw new Error("审计来源响应无效");
+  }
+  return {
+    ...data,
+    threat_task: data.threat_task ? normalizeThreatTask(data.threat_task) : null,
+    candidate: data.candidate ? normalizeScanCandidate(data.candidate, data.candidate.idx) : null,
+  };
 }
 
 export async function getScanThreatTasksPage(
