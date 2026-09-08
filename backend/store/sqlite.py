@@ -5882,8 +5882,13 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
         return self._row_to_fp_review_job(row, include_results=False) if row else None
 
     def get_fp_review_overview(self, scan_id: str) -> FpReviewJob | None:
+        tie_breaker = "created_order" if getattr(self, "distributed", False) else "rowid"
         row = self._conn.execute(
-            "SELECT review_id, scan_id, method, status, created_at, total, processed, current_vuln_index, current_vuln_indices, error_message, execution_agent_session_id, execution_revision FROM fp_review_jobs WHERE scan_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", (scan_id,),
+            "SELECT review_id, scan_id, method, status, created_at, total, processed, "
+            "current_vuln_index, current_vuln_indices, error_message, "
+            "execution_agent_session_id, execution_revision FROM fp_review_jobs "
+            f"WHERE scan_id = ? ORDER BY created_at DESC, {tie_breaker} DESC LIMIT 1",
+            (scan_id,),
         ).fetchone()
         if row is None:
             return None

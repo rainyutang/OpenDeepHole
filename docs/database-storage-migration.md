@@ -90,6 +90,16 @@ python scripts/migrate_scan_storage.py --config config.yaml validate-constraints
 
 迁移成功条件：`scan-history-v1`、`scan-bodies-v1`、`scan-summaries-v1` 的状态为 `complete`，`remaining_scans`、`remaining_receipts`、`remaining_summaries`、`unverified_archives` 为 0，`verify` 无失败，且人工抽查通过。孤立任务应从备份恢复真实父扫描/关联，不要虚构扫描信息来让核对通过。
 
+## 升级后的复核概览与模型池上报
+
+如果 PostgreSQL 的 `/api/v2/scans/{scan_id}/fp-review/overview` 返回 `column "rowid" does not exist`，需要部署包含概览排序修复的后端。复核任务以 `created_at` 排序，时间相同时 PostgreSQL 使用已有的 `created_order`，SQLite 使用 `rowid`。此修复不需要新增迁移或重建索引；登录页、公开页及复核结果分页共用该查询。
+
+扫描级 `POST /api/agent/scan/{scan_id}/opencode-pool` 返回 `409`、`detail="stale scan execution"`，表示上报的 `agent_session_id` 或 `execution_revision` 与当前扫描执行不一致，服务端已在模型池、Token 写入和 SSE 广播前拒绝该请求。Agent 级 `/api/agent/{agent_id}/opencode-pool` 的 `stale Agent session` 表示 Agent 会话已过期。索引创建本身不会产生这两种业务冲突。
+
+新版 Agent 收到明确的过期响应后，只停止对应身份的模型池上报，包括后续状态变化、心跳和退出补发，并记录一次 `OPENCODE_POOL_DISCARDED_STALE`（目标、原请求会话、执行版本及响应原因）。新执行或新会话会恢复上报，其他扫描和正常任务继续运行。网络错误、5xx 及非过期 409 按普通失败处理，从本次尝试完成后至少等待 2 秒再重试，避免心跳期限过后密集发送。
+
+后端部署后，还需通过现有 Agent runtime 更新流程部署并重启持续发送请求的 Agent，使停报逻辑生效；已经运行的旧 Agent 进程不会因后端升级自动改变重试行为。验收时确认概览正常返回、过期身份只记录一次停报日志、新执行能重新上报，并观察后端不再收到该旧身份的持续请求。
+
 ## 清理与回滚
 
 运行数据保留策略与业务历史迁移分别管理。历史重复数据的清理必须独立执行，不能仅凭“回填命令结束”就清空旧字段。

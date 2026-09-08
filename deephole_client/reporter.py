@@ -36,11 +36,13 @@ AGENT_BATCH_SIZE = 100
 AGENT_BATCH_FLUSH_SECONDS = 0.25
 STAGE_RUN_RETRY_DELAYS = (1.0, 2.0)
 OPENCODE_POOL_FAILURE_LOG_INTERVAL_SECONDS = 30.0
+OPENCODE_POOL_RETRY_SECONDS = 2.0
 
 logger = logging.getLogger(__name__)
 
 
 _OutboxDeliveryCallback = Callable[[httpx.Response], Awaitable[None]]
+_PoolIdentity = tuple[str, str, int]
 
 
 @dataclass
@@ -163,7 +165,7 @@ class Reporter:
         self.dry_run = dry_run
         self.agent_id = ""
         self.agent_name = ""
-        self.agent_session_id = uuid4().hex
+        self._agent_session_id = uuid4().hex
         self.protocol_version = 1
         self.capabilities: dict[str, bool] = {}
         self._client = httpx.AsyncClient(timeout=30.0)
@@ -205,6 +207,44 @@ class Reporter:
         self._validation_delta_sequences: dict[tuple[str, int, int], int] = {}
         self._validation_delta_lock = asyncio.Lock()
         self._opencode_pool_push_failures: dict[str, tuple[int, float]] = {}
+        self._opencode_pool_stale_identities: set[_PoolIdentity] = set()
+        self._opencode_pool_wakeups: dict[str, set[asyncio.Event]] = {}
+
+    @property
+    def agent_session_id(self) -> str:
+        return self._agent_session_id
+
+    @agent_session_id.setter
+    def agent_session_id(self, value: str) -> None:
+        if value != self._agent_session_id:
+            self._agent_session_id = value
+            self._wake_opencode_pool_publishers()
+
+    def _pool_identity(self, scope_id: str) -> _PoolIdentity:
+        return (
+            f"scan:{scope_id}" if scope_id else f"agent:{self.agent_id}",
+            self.agent_session_id,
+            self._scan_execution_revisions.get(scope_id, 0) if scope_id else 0,
+        )
+
+    def _wake_opencode_pool_publishers(self, scope_id: str | None = None) -> None:
+        for scope, wakeups in self._opencode_pool_wakeups.items():
+            if scope_id is None or scope == scope_id:
+                for wakeup in wakeups:
+                    wakeup.set()
+
+    def _discard_stale_pool_identity(
+        self, scope_id: str, identity: _PoolIdentity, response: httpx.Response,
+    ) -> None:
+        if identity in self._opencode_pool_stale_identities:
+            return
+        self._opencode_pool_stale_identities.add(identity)
+        self._wake_opencode_pool_publishers(scope_id)
+        logger.warning(
+            "OPENCODE_POOL_DISCARDED_STALE target=%s session=%s revision=%s%s",
+            *identity,
+            _response_context(response),
+        )
 
     def _record_opencode_pool_push_failure(
         self,
@@ -257,7 +297,11 @@ class Reporter:
             )
 
     def set_scan_execution(self, scan_id: str, revision: int) -> None:
-        self._scan_execution_revisions[str(scan_id)] = max(0, int(revision or 0))
+        scope_id = str(scan_id)
+        previous = self._pool_identity(scope_id)
+        self._scan_execution_revisions[scope_id] = max(0, int(revision or 0))
+        if self._pool_identity(scope_id) != previous:
+            self._wake_opencode_pool_publishers(scope_id)
 
     def set_fp_review_execution(self, review_id: str, revision: int) -> int:
         normalized_review_id = str(review_id)
@@ -309,7 +353,10 @@ class Reporter:
         return result
 
     def set_agent_id(self, agent_id: str) -> None:
+        previous = self.agent_id
         self.agent_id = agent_id
+        if agent_id != previous:
+            self._wake_opencode_pool_publishers("")
         self._wake_outbox()
 
     def set_agent_name(self, agent_name: str) -> None:
@@ -1852,36 +1899,50 @@ class Reporter:
 
     async def push_opencode_pool_status(self, scan_id: str, snapshot: dict) -> bool:
         """Push the latest OpenCode model-pool status snapshot."""
-        if self.dry_run:
+        return await self._push_pool_snapshot(scan_id, snapshot)
+
+    async def _push_pool_snapshot(self, scope_id: str, snapshot: dict) -> bool:
+        if self.dry_run or (not scope_id and not self.agent_id):
             return True
+        # Capture the request identity before yielding: a late response must
+        # never disable a newer execution or change the 413 retry's target.
+        identity = self._pool_identity(scope_id)
+        if identity in self._opencode_pool_stale_identities:
+            return False
+        failure_key, session_id, revision = identity
+        target = f"scan/{scope_id}" if scope_id else self.agent_id
+        url = f"{self.server_url}/api/agent/{target}/opencode-pool"
         payload = dict(snapshot)
-        payload["agent_session_id"] = self.agent_session_id
-        payload["execution_revision"] = self._scan_execution_revisions.get(scan_id, 0)
-        failure_key = f"scan:{scan_id}"
+        payload["agent_session_id"] = session_id
+        if scope_id:
+            payload["execution_revision"] = revision
         if self._model_pool_sink_bound:
             payload.pop("completed_tasks", None)
         try:
             response = await self._client.post(
-                f"{self.server_url}/api/agent/scan/{scan_id}/opencode-pool",
+                url,
                 json=payload,
                 timeout=5.0,
             )
             if response.status_code == 413:
                 response = await self._client.post(
-                    f"{self.server_url}/api/agent/scan/{scan_id}/opencode-pool",
+                    url,
                     json=_compact_pool_snapshot(payload),
                     timeout=5.0,
                 )
+            if _is_stale_execution_response(response):
+                self._discard_stale_pool_identity(scope_id, identity, response)
+                return False
             response.raise_for_status()
             self._record_opencode_pool_push_success(
                 failure_key,
-                scope_id=scan_id,
+                scope_id=scope_id,
             )
             return True
         except Exception as exc:
             self._record_opencode_pool_push_failure(
                 failure_key,
-                scope_id=scan_id,
+                scope_id=scope_id,
                 snapshot=payload,
                 error=exc,
             )
@@ -1907,39 +1968,7 @@ class Reporter:
 
     async def push_agent_opencode_pool_status(self, snapshot: dict) -> bool:
         """Push the latest Agent-wide OpenCode model-pool status snapshot."""
-        if self.dry_run or not self.agent_id:
-            return True
-        payload = dict(snapshot)
-        payload["agent_session_id"] = self.agent_session_id
-        failure_key = f"agent:{self.agent_id}"
-        if self._model_pool_sink_bound:
-            payload.pop("completed_tasks", None)
-        try:
-            response = await self._client.post(
-                f"{self.server_url}/api/agent/{self.agent_id}/opencode-pool",
-                json=payload,
-                timeout=5.0,
-            )
-            if response.status_code == 413:
-                response = await self._client.post(
-                    f"{self.server_url}/api/agent/{self.agent_id}/opencode-pool",
-                    json=_compact_pool_snapshot(payload),
-                    timeout=5.0,
-                )
-            response.raise_for_status()
-            self._record_opencode_pool_push_success(
-                failure_key,
-                scope_id="",
-            )
-            return True
-        except Exception as exc:
-            self._record_opencode_pool_push_failure(
-                failure_key,
-                scope_id="",
-                snapshot=payload,
-                error=exc,
-            )
-            return False
+        return await self._push_pool_snapshot("", snapshot)
 
     async def publish_agent_opencode_pool_until(
         self,
@@ -1973,78 +2002,116 @@ class Reporter:
         from task_agent.model_pool import wait_for_model_pool_update
 
         last_signature: str | None = None
+        last_identity: _PoolIdentity | None = None
         last_seen_updated_at = ""
         last_sent_at = 0.0
-        last_send_succeeded = True
+        retry_at = 0.0
         heartbeat_seconds = (
             interval_seconds if interval_seconds is not None else unchanged_heartbeat_seconds
         )
         heartbeat_seconds = max(0.001, heartbeat_seconds)
         debounce_seconds = max(0.0, debounce_seconds)
+        identity_changed = asyncio.Event()
+        wakeups = self._opencode_pool_wakeups.setdefault(scope_id, set())
+        wakeups.add(identity_changed)
 
         async def publish_if_needed(*, force: bool = False) -> None:
-            nonlocal last_seen_updated_at, last_signature, last_sent_at, last_send_succeeded
+            nonlocal last_seen_updated_at, last_signature, last_sent_at, retry_at
+            identity = self._pool_identity(scope_id)
+            if (
+                identity != last_identity
+                or identity in self._opencode_pool_stale_identities
+                or time.monotonic() < retry_at
+            ):
+                return
             snapshot = model_pool_snapshot(scope_id)
             last_seen_updated_at = str(snapshot.get("updated_at") or "")
             signature = _snapshot_signature(snapshot)
-            now = time.monotonic()
             if not force and signature == last_signature:
                 return
-            if await push_snapshot(snapshot):
+            succeeded = await push_snapshot(snapshot)
+            if self._pool_identity(scope_id) != identity:
+                return
+            # Failed sends have their own deadline; an overdue successful
+            # heartbeat must not turn retries into a zero-delay loop.
+            finished_at = time.monotonic()
+            if succeeded:
                 last_signature = signature
-                last_sent_at = now
-                last_send_succeeded = True
+                last_sent_at = finished_at
+                retry_at = 0.0
             else:
-                last_send_succeeded = False
+                retry_at = finished_at + OPENCODE_POOL_RETRY_SECONDS
 
-        async def wait_for_update_or_stop(timeout: float | None) -> tuple[str, bool]:
-            update_task = asyncio.create_task(
-                wait_for_model_pool_update(
-                    scope_id,
-                    last_updated_at=last_seen_updated_at,
-                    timeout=timeout,
-                )
-            )
+        async def wait_for_change(timeout: float | None, *, updates: bool = True) -> str:
             stop_task = asyncio.create_task(stop_event.wait())
-            done, pending = await asyncio.wait(
-                {update_task, stop_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            if stop_task in done:
-                return last_seen_updated_at, True
-            return update_task.result(), False
+            identity_task = asyncio.create_task(identity_changed.wait())
+            tasks = {stop_task, identity_task}
+            update_task = None
+            if updates:
+                update_task = asyncio.create_task(wait_for_model_pool_update(
+                    scope_id, last_updated_at=last_seen_updated_at, timeout=timeout,
+                ))
+                tasks.add(update_task)
+            try:
+                done, _ = await asyncio.wait(
+                    tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED,
+                )
+                if stop_task in done:
+                    return "stop"
+                if identity_task in done:
+                    return "identity"
+                if update_task in done and update_task.result() != last_seen_updated_at:
+                    return "update"
+                return "timer"
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         try:
-            await publish_if_needed(force=True)
             while not stop_event.is_set():
-                if last_sent_at > 0:
-                    wait_timeout = max(
-                        0.0,
-                        heartbeat_seconds - (time.monotonic() - last_sent_at),
-                    )
-                else:
-                    wait_timeout = heartbeat_seconds
-                if not last_send_succeeded:
-                    wait_timeout = min(wait_timeout, 2.0)
-                next_updated_at, stopped = await wait_for_update_or_stop(wait_timeout)
-                if stopped:
+                identity_changed.clear()
+                identity = self._pool_identity(scope_id)
+                if identity != last_identity:
+                    last_identity = identity
+                    last_signature = None
+                    last_sent_at = retry_at = 0.0
+                if identity in self._opencode_pool_stale_identities:
+                    # Model updates and heartbeats cannot revive a rejected
+                    # identity. Only a new execution/session can do so.
+                    await wait_for_change(None, updates=False)
+                    continue
+                remaining_retry = retry_at - time.monotonic()
+                if remaining_retry > 0:
+                    await wait_for_change(remaining_retry, updates=False)
+                    continue
+                if last_sent_at == 0.0 or retry_at > 0:
+                    await publish_if_needed(force=True)
+                    continue
+                wait_timeout = max(0.0, heartbeat_seconds - (time.monotonic() - last_sent_at))
+                change = await wait_for_change(wait_timeout)
+                if change == "stop":
                     break
-                if next_updated_at == last_seen_updated_at:
+                if change == "identity":
+                    continue
+                if change == "timer":
                     await publish_if_needed(force=True)
                     continue
                 if debounce_seconds > 0:
-                    try:
-                        await asyncio.wait_for(stop_event.wait(), timeout=debounce_seconds)
+                    change = await wait_for_change(debounce_seconds, updates=False)
+                    if change == "stop":
                         break
-                    except asyncio.TimeoutError:
-                        pass
+                    if change == "identity":
+                        continue
                 await publish_if_needed()
         finally:
-            await publish_if_needed(force=True)
+            try:
+                await publish_if_needed(force=True)
+            finally:
+                wakeups.discard(identity_changed)
+                if not wakeups:
+                    self._opencode_pool_wakeups.pop(scope_id, None)
 
     async def get_processed_keys(self, scan_id: str) -> set[tuple[str, int, str, str]]:
         """Fetch already-processed candidate keys for resume (skip these on restart)."""
