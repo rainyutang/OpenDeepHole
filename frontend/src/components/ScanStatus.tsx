@@ -73,6 +73,7 @@ const THREAT_AUDIT_PAGE_SIZE = 20;
 
 type MainTab = "overview" | "index" | "static" | "threat" | "mining" | "validation" | "fp_review" | "issues";
 type DetailResource = "candidates" | "vulnerabilities" | "events" | "threat_tasks" | "validations";
+const ISSUE_DETAIL_RESOURCES: DetailResource[] = ["vulnerabilities", "validations"];
 type TaskTone = "slate" | "cyan" | "amber" | "green" | "red" | "purple" | "blue";
 type ScanQueueTaskStatus = "planned" | "queued" | "running" | "success" | "failure" | "timeout" | "cancelled" | "unknown";
 type FlowNodeId = "index" | "static" | "threat" | "fp_review" | "validation" | "issues" | `engine:${string}` | `threat_result:${ThreatAnalysisResultTab}`;
@@ -276,7 +277,8 @@ function detailResourcesForTab(tab: MainTab, engineId: string): DetailResource[]
   if (tab === "static") {
     return ["candidates", "vulnerabilities", "events"];
   }
-  if (tab === "issues" || tab === "validation" || tab === "fp_review") {
+  if (tab === "issues") return ISSUE_DETAIL_RESOURCES;
+  if (tab === "validation" || tab === "fp_review") {
     return ["vulnerabilities", "validations", "events"];
   }
   if (tab === "mining") {
@@ -758,6 +760,9 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
   const [threatResultRevision, setThreatResultRevision] = useState(0);
   const [fpReviewHydrated, setFpReviewHydrated] = useState(false);
+  const [fpReviewPageLoading, setFpReviewPageLoading] = useState(false);
+  const [fpReviewPageFailed, setFpReviewPageFailed] = useState(false);
+  const [fpReviewPageRetry, setFpReviewPageRetry] = useState(0);
   const [fpReviewLoading, setFpReviewLoading] = useState(false);
   const [fpReviewStopping, setFpReviewStopping] = useState(false);
   const [launchingValidations, setLaunchingValidations] = useState<Set<number>>(new Set());
@@ -891,7 +896,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const loadDetailResource = useCallback(async (resource: DetailResource) => {
     if (detailLoadingRef.current.has(resource)) return;
     const current = scanRef.current;
-    let cursor = current ? detailCursor(current, resource) : null;
+    const cursor = current ? detailCursor(current, resource) : null;
     if (cursor == null) return;
 
     detailLoadingRef.current.add(resource);
@@ -906,7 +911,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     const vulnerabilityGeneration = resource === "vulnerabilities"
       ? vulnerabilityListGenerationRef.current
       : null;
-    const isCurrentGeneration = () => (
+    const isCurrentGeneration = () => !signal.aborted && (
       vulnerabilityGeneration == null
       || vulnerabilityGeneration === vulnerabilityListGenerationRef.current
     );
@@ -929,11 +934,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         }
         if (signal.aborted || !isCurrentGeneration()) return;
         if (!page) throw lastError ?? new Error("详情分页加载失败");
-        if (page.nextCursor != null && page.nextCursor === cursor) {
+        if (page.nextCursor != null && (page.nextCursor === cursor
+          || (resource !== "events" && typeof cursor === "number" && typeof page.nextCursor === "number" && page.nextCursor < cursor))) {
           throw new Error(`详情游标未前进: ${resource}`);
         }
-        setScan((previous) => previous ? mergeDetailPage(previous, page) : previous);
-        cursor = page.nextCursor;
+        setScan((previous) => isCurrentGeneration() && previous?.scan_id === scanId && detailCursor(previous, resource) === cursor
+          ? mergeDetailPage(previous, page) : previous);
       }
     } catch (error) {
       if (!signal.aborted && isCurrentGeneration()) {
@@ -1537,6 +1543,58 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     });
   }, [activeEngineId, activeTab, logOpen]);
 
+  // The issues list and its filters need every finding, review and validation.
+  // Follow each cursor automatically, retaining completed pages for retries.
+  useEffect(() => {
+    if (activeTab !== "issues" || scan?.scan_id !== scanId) return;
+    for (const resource of ISSUE_DETAIL_RESOURCES) {
+      if (detailCursor(scan, resource) != null
+        && !detailLoadingResources.has(resource)
+        && !detailFailedResources.has(resource)) {
+        void loadDetailResource(resource);
+      }
+    }
+  }, [activeTab, scanId, scan?.scan_id, scan?.detail_pages, detailLoadingResources, detailFailedResources, loadDetailResource]);
+
+  useEffect(() => {
+    setFpReviewPageFailed(false);
+    const cursor = fpReview?.next_cursor;
+    if (activeTab !== "issues" || fpReview?.scan_id !== scanId || cursor == null) {
+      setFpReviewPageLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setFpReviewPageLoading(true);
+    getFpReviewResultsPage(scanId, cursor, 50, controller.signal)
+      .then((page) => {
+        if (controller.signal.aborted) return;
+        if (page.next_cursor != null && page.next_cursor <= cursor) {
+          throw new Error("复核结果游标未前进");
+        }
+        setFpReview((previous) => {
+          if (controller.signal.aborted || previous?.scan_id !== scanId
+            || previous.review_id !== fpReview.review_id
+            || previous.execution_revision !== fpReview.execution_revision
+            || previous.next_cursor !== cursor) return previous;
+          return {
+            ...previous,
+            // Prefer any live result received while this page was in flight.
+            results: [...new Map([...page.items, ...previous.results].map((item) => [item.vuln_index, item])).values()],
+            result_vulnerabilities: mergeIndexedVulnerabilities(page.vulnerabilities,
+              (previous.result_vulnerabilities ?? []).map((v) => ({ index: v.vuln_index, vulnerability: v }))),
+            next_cursor: page.next_cursor,
+          };
+        });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setFpReviewPageFailed(true);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setFpReviewPageLoading(false);
+      });
+    return () => controller.abort();
+  }, [activeTab, scanId, fpReview?.scan_id, fpReview?.review_id, fpReview?.execution_revision, fpReview?.next_cursor, fpReviewPageRetry]);
+
   useEffect(() => {
     if (!isRunning || !scan?.detail_counts) return;
     const interval = window.setInterval(() => {
@@ -1877,8 +1935,14 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     isDone: !!isDone,
     isFpReviewing,
   });
-  const activeDetailLoading = requiredDetailResources.some((resource) => detailLoadingResources.has(resource));
-  const activeDetailFailed = requiredDetailResources.some((resource) => detailFailedResources.has(resource));
+  const activeDetailLoading = requiredDetailResources.some((resource) => detailLoadingResources.has(resource))
+    || (activeTab === "issues" && (!fpReviewHydrated || fpReviewPageLoading
+      || (!fpReviewPageFailed && fpReview?.next_cursor != null)
+      || ISSUE_DETAIL_RESOURCES.some((resource) => detailCursor(scan, resource) != null && !detailFailedResources.has(resource))));
+  const activeDetailFailed = requiredDetailResources.some((resource) => detailFailedResources.has(resource))
+    || (activeTab === "issues" && fpReviewPageFailed);
+  const manualDetailResources = requiredDetailResources.filter((resource) => detailCursor(scan, resource) != null
+    && (activeTab !== "issues" || !ISSUE_DETAIL_RESOURCES.includes(resource)));
   const issuesView = (
     <VulnerabilityList
       scanId={scanId}
@@ -2144,13 +2208,21 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           >
             {activeDetailFailed
               ? "部分详情加载失败，可点击下方按钮重试。"
-              : "正在加载下一页详情…"}
+              : activeTab === "issues" ? "正在加载全部问题…" : "正在加载下一页详情…"}
+            {activeTab === "issues" && activeDetailFailed && (
+              <button type="button" className="ml-3 text-blue-300 underline" onClick={() => {
+                for (const resource of ISSUE_DETAIL_RESOURCES) {
+                  if (detailFailedResources.has(resource)) void loadDetailResource(resource);
+                }
+                if (fpReviewPageFailed) setFpReviewPageRetry((value) => value + 1);
+              }}>重试加载问题</button>
+            )}
           </div>
         )}
-        {requiredDetailResources.some((resource) => detailCursor(scan, resource) != null) && (
+        {manualDetailResources.length > 0 && (
           <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-400">
             <span>已加载当前部分记录</span>
-            {requiredDetailResources.filter((resource) => detailCursor(scan, resource) != null).map((resource) => (
+            {manualDetailResources.map((resource) => (
               <button key={resource} type="button" disabled={detailLoadingResources.has(resource)}
                 onClick={() => void loadDetailResource(resource)}
                 className="rounded border border-slate-700 px-3 py-2 hover:bg-slate-800 disabled:opacity-40">

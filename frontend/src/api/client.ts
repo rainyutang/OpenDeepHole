@@ -1027,9 +1027,10 @@ export async function getScanDetailItem(scanId: string, resource: string, index:
   return data;
 }
 
-export async function getFpReviewResultsPage(scanId: string, after = -1, limit = 50) {
+export async function getFpReviewResultsPage(scanId: string, after = -1, limit = 50, signal?: AbortSignal) {
   const { data } = await api.get(scanV2Path(scanId, "/fp-review/results"), {
     params: { ...(isPublicScan(scanId) ? publicParams() : {}), after, limit },
+    signal,
   });
   const normalized = normalizeFpReviewJob({ review_id: "", scan_id: scanId, results: data.items });
   return {

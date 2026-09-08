@@ -10,6 +10,7 @@
     "test:static-audit": "node tests/staticAudit.test.mjs",
     "test:threat-audit": "node tests/threatAuditResults.test.mjs",
     "test:audit-navigation": "node tests/auditNavigation.test.mjs",
+    "test:issue-loading": "node tests/issueLoading.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
