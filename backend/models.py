@@ -603,6 +603,41 @@ class ThreatAuditTask(BaseModel):
     updated_at: str = ""
 
 
+class ThreatAuditFindingSummary(BaseModel):
+    """A linked audit finding with its current effective conclusion."""
+    vuln_index: int
+    vuln_type: str = ""
+    severity: str = ""
+    description: str = ""
+    file: str = ""
+    line: int = 0
+    function: str = ""
+    verdict: Literal["confirmed", "false_positive", "unreviewed", "not_confirmed"]
+    verdict_source: Literal["human", "fp_review", "audit"]
+
+
+class ThreatAuditTaskResult(BaseModel):
+    task_id: str
+    findings: list[ThreatAuditFindingSummary] = Field(default_factory=list)
+    confirmed_issue_count: int = 0
+    association_complete: bool = True
+
+
+class CandidateAuditTaskResult(BaseModel):
+    candidate_index: int = Field(ge=0)
+    findings: list[ThreatAuditFindingSummary] = Field(default_factory=list)
+    confirmed_issue_count: int = 0
+    association_complete: bool = True
+
+
+class VulnerabilityAuditSource(BaseModel):
+    vuln_index: int = Field(ge=0)
+    status: Literal["resolved", "missing", "ambiguous", "unsupported"]
+    kind: Literal["threat_audit", "static_candidate"] | None = None
+    threat_task: ThreatAuditTask | None = None
+    candidate: ScanCandidate | None = None
+
+
 class VulnerabilityValidation(BaseModel):
     """Runtime validation status and artifacts for one vulnerability."""
     scan_id: str = ""
@@ -819,6 +854,7 @@ class ScanDetailCounts(BaseModel):
     candidate_audit_failed: int = 0
     vulnerabilities: int = 0
     effective_issue_count: int = 0
+    human_confirmed_issue_count: int = 0
     validated_issue_count: int = 0
     events: int = 0
     threat_audit_tasks: int = 0

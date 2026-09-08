@@ -86,6 +86,14 @@ class ScanOverviewCountTests(unittest.IsolatedAsyncioTestCase):
                     reason="false positive",
                     created_at="2026-08-05T00:02:00+00:00",
                 ))
+                for index in (103, 104):
+                    store.add_fp_review_result("review-1", FpReviewResult(
+                        vuln_index=index, verdict="tp", reason="reviewed issue",
+                        created_at="2026-08-05T00:03:00+00:00",
+                    ))
+                    store.update_vulnerability(scan_id, index, "confirmed", "human confirmation")
+                # A human verdict alone does not satisfy the final-TP condition.
+                store.update_vulnerability(scan_id, 0, "confirmed", "human confirmation")
                 for index, status in ((0, "verified"), (1, "success"), (2, "success")):
                     store.upsert_vulnerability_validation(
                         scan_id,
@@ -113,6 +121,7 @@ class ScanOverviewCountTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(overview.detail_counts.vulnerabilities, 105)
                 self.assertEqual(overview.detail_counts.effective_issue_count, 103)
                 self.assertEqual(overview.detail_counts.validated_issue_count, 1)
+                self.assertEqual(overview.detail_counts.human_confirmed_issue_count, 2)
                 self.assertEqual(overview.candidates, [])
                 self.assertEqual(overview.vulnerabilities, [])
                 self.assertEqual(
@@ -123,6 +132,16 @@ class ScanOverviewCountTests(unittest.IsolatedAsyncioTestCase):
                         2: ("success", False),
                     },
                 )
+                store._conn.execute("UPDATE scan_summary_state SET ready = 0 WHERE scan_id = ?", (scan_id,))
+                store._conn.commit()
+                with (
+                    patch("backend.api.scan.get_scan_store", return_value=store),
+                    patch("backend.api.scan.run_store_call", side_effect=_direct_store_call),
+                ):
+                    legacy = await get_scan_overview_v2(
+                        scan_id, User(user_id="user-1", username="ordinary", role="user"),
+                    )
+                self.assertEqual(legacy.detail_counts.human_confirmed_issue_count, 2)
             finally:
                 store.close()
 

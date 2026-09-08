@@ -325,21 +325,29 @@ class ScanHistoryMixin:
         pool.completed_tasks = []
         return pool
 
-    def list_task_page(self, scan_id: str, *, limit: int = 50, after_task_id: str = "") -> list[dict]:
+    def list_task_page(self, scan_id: str, *, limit: int = 50, after_task_id: str = "",
+                       task_name: str | None = None) -> list[dict]:
         legacy = self._conn.execute("SELECT history_version FROM scans WHERE scan_id = ?", (scan_id,)).fetchone()
         if legacy and not legacy["history_version"]:
             pool = self.hydrate_pool_history(scan_id, self._legacy_pool(scan_id))
             tasks = []
             for task in pool.completed_tasks if pool else []:
                 key, revision = task_identity(task)
-                if key > after_task_id:
+                if key > after_task_id and (task_name is None or task.get("task_name") == task_name):
                     tasks.append({**{k: v for k, v in task.items() if k in TASK_METADATA_FIELDS}, "task_id": key, "revision": revision})
             return sorted(tasks, key=lambda item: item["task_id"])[:max(1, min(101, limit))]
+        name_filter = ""
+        params: list[object] = [scan_id, after_task_id]
+        if task_name is not None:
+            name_expression = "CAST(v.metadata_json AS jsonb) ->> 'task_name'" if getattr(self, "distributed", False) else "json_extract(v.metadata_json, '$.task_name')"
+            name_filter = f" AND ({name_expression}) = ?"
+            params.append(task_name)
+        params.append(max(1, min(101, limit)))
         rows = self._conn.execute(
             "SELECT v.metadata_json FROM scan_task_current c "
             "JOIN scan_task_versions v ON v.record_id = c.record_id "
-            "WHERE c.scan_id = ? AND c.task_id > ? ORDER BY c.task_id LIMIT ?",
-            (scan_id, after_task_id, max(1, min(101, limit))),
+            "WHERE c.scan_id = ? AND c.task_id > ?" + name_filter + " ORDER BY c.task_id LIMIT ?",
+            params,
         ).fetchall()
         return [json.loads(row["metadata_json"]) for row in rows]
 

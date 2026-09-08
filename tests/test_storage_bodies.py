@@ -22,6 +22,9 @@ def test_candidate_and_promoted_finding_share_body_without_changing_human_state(
         assert store.get_vulnerabilities("s")[0].user_verdict == "false_positive"
         assert store.list_scan_candidates("s")[0].audit_result.user_verdict is None
         assert store.get_vulnerabilities("s")[0].vulnerability_report == result.vulnerability_report
+        source = store.get_vulnerability_audit_source("s", 0)
+        assert source.status == "resolved"
+        assert source.candidate.audit_result.vulnerability_report == result.vulnerability_report
     finally:
         store.close()
 

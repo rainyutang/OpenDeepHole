@@ -140,3 +140,30 @@ def test_task_page_has_no_bodies_and_stable_cursor(tmp_path):
         assert all("prompt" not in x and "session_events" not in x for x in first)
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_task_name_filter_matches_exact_history_without_report_bodies(tmp_path, legacy):
+    store = make_store(tmp_path)
+    name = "candidate-audit-s-0"
+    values = [
+        {**task(1), "task_name": name},
+        {**task(2), "task_name": name + "1"},
+        {**task(3), "task_name": name},
+    ]
+    try:
+        if legacy:
+            store._conn.execute("UPDATE scans SET opencode_pool = ?, history_version = 0 WHERE scan_id = 's'",
+                                (json.dumps({"completed_tasks": values}),))
+            store._conn.commit()
+        else:
+            for value in values:
+                receipt(store, value)
+        first = store.list_task_page("s", task_name=name, limit=1)
+        second = store.list_task_page("s", task_name=name, after_task_id=first[0]["task_id"])
+        assert [item["task_id"] for item in first + second] == [values[0]["task_id"], values[2]["task_id"]]
+        assert all("prompt" not in item and "session_events" not in item for item in first + second)
+        assert store.get_task_detail("s", second[0]["task_id"])["prompt"] == values[2]["prompt"]
+        assert store.list_task_page("s", task_name="candidate-audit-other-0") == []
+    finally:
+        store.close()

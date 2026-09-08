@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
+from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -14,6 +15,8 @@ from backend.api import feedback as feedback_api
 from backend.api import scan as scan_api
 from backend.auth import hash_password
 from backend.models import (
+    CandidateAuditTaskResult,
+    VulnerabilityAuditSource,
     AgentInfo,
     AgentMcpConfig,
     AgentRemoteConfig,
@@ -29,6 +32,7 @@ from backend.models import (
     MarkRequest,
     ScanKnowledgeBaseRequest,
     ScanStatus,
+    ThreatAuditTaskResult,
     ScanVulnerabilityValidationRequest,
     UnmarkRequest,
     User,
@@ -65,8 +69,8 @@ async def get_public_overview(scan_id: str, token: str = Query(...)):
 
 @router.get("/api/public/scans/{scan_id}/tasks")
 async def get_public_tasks(scan_id: str, token: str = Query(...), cursor: str | None = None,
-                           limit: int = Query(50, ge=1, le=100)):
-    return await scan_api.get_scan_tasks_page(scan_id, cursor, limit, await _public_user_for_scan_async(scan_id, token))
+                           limit: int = Query(50, ge=1, le=100), task_name: str | None = None):
+    return await scan_api.get_scan_tasks_page(scan_id, cursor, limit, await _public_user_for_scan_async(scan_id, token), task_name=task_name)
 
 
 @router.get("/api/public/scans/{scan_id}/tasks/{task_id}")
@@ -607,6 +611,42 @@ async def get_public_scan_git_history(
     current_user: User = Depends(_public_user_dependency),
 ) -> list[HistoryPattern]:
     return await scan_api.get_scan_git_history(scan_id, current_user)
+
+
+@router.get(
+    "/api/public/scans/{scan_id}/candidate-audit-results",
+    response_model=list[CandidateAuditTaskResult],
+)
+async def get_public_candidate_audit_results(
+    scan_id: str,
+    candidate_indexes: list[Annotated[int, Query(ge=0)]] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(_public_user_dependency),
+) -> list[CandidateAuditTaskResult]:
+    return await scan_api.get_scan_candidate_audit_results_v2(scan_id, candidate_indexes, current_user)
+
+
+@router.get(
+    "/api/public/scans/{scan_id}/vulnerabilities/{idx}/audit-source",
+    response_model=VulnerabilityAuditSource,
+)
+async def get_public_vulnerability_audit_source(
+    scan_id: str,
+    idx: int,
+    current_user: User = Depends(_public_user_dependency),
+) -> VulnerabilityAuditSource:
+    return await scan_api.get_scan_vulnerability_audit_source_v2(scan_id, idx, current_user)
+
+
+@router.get(
+    "/api/public/scans/{scan_id}/threat-audit-results",
+    response_model=list[ThreatAuditTaskResult],
+)
+async def get_public_threat_audit_results(
+    scan_id: str,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(_public_user_dependency),
+) -> list[ThreatAuditTaskResult]:
+    return await scan_api.get_scan_threat_audit_results_v2(scan_id, task_ids, current_user)
 
 
 @router.get("/api/public/scans/{scan_id}/threat-analysis", response_model=dict)

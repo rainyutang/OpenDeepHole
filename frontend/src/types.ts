@@ -367,6 +367,40 @@ export interface ThreatAuditTask {
   updated_at?: string;
 }
 
+export interface ThreatAuditFindingSummary {
+  vuln_index: number;
+  vuln_type: string;
+  severity: string;
+  description: string;
+  file: string;
+  line: number;
+  function: string;
+  verdict: "confirmed" | "false_positive" | "unreviewed" | "not_confirmed";
+  verdict_source: "human" | "fp_review" | "audit";
+}
+
+export interface ThreatAuditTaskResult {
+  task_id: string;
+  findings: ThreatAuditFindingSummary[];
+  confirmed_issue_count: number;
+  association_complete: boolean;
+}
+
+export interface CandidateAuditTaskResult {
+  candidate_index: number;
+  findings: ThreatAuditFindingSummary[];
+  confirmed_issue_count: number;
+  association_complete: boolean;
+}
+
+export interface VulnerabilityAuditSource {
+  vuln_index: number;
+  status: "resolved" | "missing" | "ambiguous" | "unsupported";
+  kind: "threat_audit" | "static_candidate" | null;
+  threat_task: ThreatAuditTask | null;
+  candidate: ScanCandidate | null;
+}
+
 export interface Candidate {
   file: string;
   line: number;
@@ -567,6 +601,7 @@ export interface ScanDetailCounts {
   candidate_audit_failed?: number;
   vulnerabilities: number;
   effective_issue_count?: number;
+  human_confirmed_issue_count?: number;
   validated_issue_count?: number;
   events: number;
   threat_audit_tasks: number;

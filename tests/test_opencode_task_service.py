@@ -2037,6 +2037,69 @@ def test_invalid_json_is_corrected_in_the_same_session(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("corrected_verdict", ["true_positive", "false_positive", "uncertain"])
+def test_enum_mismatch_requires_a_valid_verdict_after_correction(
+    tmp_path: Path, corrected_verdict: str,
+) -> None:
+    async def run() -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "verdict": {
+                    "type": "string",
+                    "enum": ["true_positive", "false_positive"],
+                },
+            },
+            "required": ["verdict"],
+        }
+        texts = [
+            '{"verdict":"uncertain"}',
+            "__OPENDEEPHOLE_JSON_FORMAT_UNRELATED__",
+            json.dumps({"verdict": corrected_verdict}),
+        ]
+        sessions = ["ses_verdict", "ses_formatter", "ses_verdict"]
+        calls: list[dict] = []
+
+        async def run_prompt(**kwargs):
+            index = len(calls)
+            calls.append(kwargs)
+            callback = kwargs["on_session_id"](sessions[index])
+            if hasattr(callback, "__await__"):
+                await callback
+            return OpenCodePromptResult(
+                session_id=sessions[index],
+                message_id=f"msg_{index}",
+                lines=[texts[index]],
+                text=texts[index],
+                model="provider/model-low",
+            )
+
+        result = await _run_service_task(
+            tmp_path,
+            run_prompt,
+            OpenCodeTaskSpec(
+                task_name="binary verdict",
+                prompt="return a final verdict",
+                directory=tmp_path,
+                output_schema=schema,
+                output_retry_count=1,
+                attempt=0,
+            ),
+        )
+
+        assert [call["session_id"] for call in calls] == [None, None, "ses_verdict"]
+        assert calls[2]["prompt"].endswith(json.dumps(schema, ensure_ascii=False, indent=2))
+        if corrected_verdict == "uncertain":
+            assert result.status == "failure"
+            assert result.structured is None
+            assert result.text == texts[-1]
+        else:
+            assert result.status == "success"
+            assert result.structured == {"verdict": corrected_verdict}
+
+    asyncio.run(run())
+
+
 def test_custom_json_correction_prompt_is_repeated_verbatim(tmp_path: Path) -> None:
     async def run() -> None:
         service = OpenCodeTaskService()

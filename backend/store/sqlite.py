@@ -19,6 +19,8 @@ from backend.scan_runtime import (
     terminal_opencode_pool_status,
 )
 from backend.models import (
+    CandidateAuditTaskResult,
+    VulnerabilityAuditSource,
     Announcement,
     AgentMcpConfig,
     AgentOpenCodePoolStatus,
@@ -50,6 +52,7 @@ from backend.models import (
     SkillReport,
     THREAT_AUDIT_ENGINE_LABEL,
     ThreatAuditTask,
+    ThreatAuditTaskResult,
     ThreatAnalysisMethodSelection,
     ThreatAnalysisRunStatus,
     ThreatCodePath,
@@ -62,6 +65,8 @@ from backend.models import (
 from backend.vulnerability_identity import vulnerability_report_identity
 
 from .base import DuplicateScanNameError, ScanStoreBase
+from .audit_results import audit_source_kind, read_candidate_audit_results
+from .threat_audit_results import read_threat_audit_task_results, resolve_threat_audit_source
 from .history import HISTORY_COLUMNS, HISTORY_SCHEMA, ScanHistoryMixin
 from .summaries import SUMMARY_SCHEMA, ScanSummariesMixin, summary_triggers
 from .maintenance import MAINTENANCE_SCHEMA, StorageMaintenanceMixin
@@ -3313,11 +3318,11 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
     ) -> ScanCandidate | None:
         updated_at = datetime.now(timezone.utc).isoformat()
         candidate_idx = int(candidate_idx)
-        if state not in {"pending", "running", "success", "failed"}:
+        if state not in {"pending", "queued", "running", "success", "failed"}:
             raise ValueError(f"invalid candidate audit state: {state}")
         if state in {"success", "failed"} and result is None:
             raise ValueError("terminal candidate audit state requires one result")
-        if state in {"pending", "running"} and result is not None:
+        if state in {"pending", "queued", "running"} and result is not None:
             raise ValueError("non-terminal candidate audit state cannot include a result")
         if result is not None:
             result = result.model_copy(update={"audit_index": candidate_idx})
@@ -4437,6 +4442,57 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
             self._conn.commit()
         return stored
 
+    def get_threat_audit_task_results(
+        self, scan_id: str, task_ids: list[str],
+    ) -> list[ThreatAuditTaskResult]:
+        with self._lock:
+            return read_threat_audit_task_results(self._conn, scan_id, task_ids)
+
+    def get_candidate_audit_results(
+        self, scan_id: str, candidate_indexes: list[int],
+    ) -> list[CandidateAuditTaskResult]:
+        with self._lock:
+            return read_candidate_audit_results(self._conn, scan_id, candidate_indexes)
+
+    def get_vulnerability_audit_source(
+        self, scan_id: str, vuln_index: int,
+    ) -> VulnerabilityAuditSource:
+        result = VulnerabilityAuditSource(vuln_index=vuln_index, status="missing")
+        with self._lock:
+            finding = self._conn.execute(
+                "SELECT idx, audit_index, analysis_source, engine_id, vuln_type, source_task_id, "
+                "threat_surface_node_id, threat_method_node_id, threat_code_path "
+                "FROM vulnerabilities WHERE scan_id = ? AND idx = ?",
+                (scan_id, vuln_index),
+            ).fetchone()
+            if finding is None:
+                return result
+            result.kind = audit_source_kind(finding)
+            if result.kind == "threat_audit":
+                result.status, task_id = resolve_threat_audit_source(self._conn, scan_id, finding)
+                if task_id is not None:
+                    tasks = self.list_threat_audit_tasks(scan_id, task_id=task_id, limit=1)
+                    if tasks:
+                        result.threat_task = tasks[0]
+                    else:
+                        result.status = "missing"
+            elif result.kind == "static_candidate":
+                # audit_index is the stable candidate identity; never match by location.
+                column = "idx" if finding["audit_index"] is not None else "vulnerability_idx"
+                value = finding["audit_index"] if finding["audit_index"] is not None else vuln_index
+                rows = self._conn.execute(
+                    f"SELECT * FROM scan_candidates WHERE scan_id = ? AND {column} = ? LIMIT 2",
+                    (scan_id, value),
+                ).fetchall()
+                if len(rows) == 1:
+                    result.candidate = _scan_candidate_from_row(self._hydrate_audit_rows(rows)[0])
+                    result.status = "resolved"
+                elif len(rows) > 1:
+                    result.status = "ambiguous"
+            else:
+                result.status = "unsupported"
+        return result
+
     def list_threat_audit_tasks(
         self,
         scan_id: str,
@@ -4444,9 +4500,13 @@ class SqliteScanStore(ScanHistoryMixin, ScanSummariesMixin, ScanStorageMigration
         after_created_at: str | None = None,
         after_task_id: str | None = None,
         limit: int | None = None,
+        task_id: str | None = None,
     ) -> list[ThreatAuditTask]:
         conditions = ["scan_id = ?"]
         params: list[object] = [scan_id]
+        if task_id is not None:
+            conditions.append("task_id = ?")
+            params.append(task_id)
         if after_created_at is not None and after_task_id is not None:
             conditions.append(
                 "(created_at > ? OR (created_at = ? AND task_id > ?))"

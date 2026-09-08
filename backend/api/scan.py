@@ -16,7 +16,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import Annotated, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -27,6 +27,8 @@ from backend.auth import get_current_user
 from backend.config import get_config
 from backend.logger import get_logger
 from backend.models import (
+    CandidateAuditTaskResult,
+    VulnerabilityAuditSource,
     AgentMcpConfig,
     AgentValidatorCatalog,
     AgentValidatorMethod,
@@ -71,6 +73,7 @@ from backend.models import (
     MULTI_VERSION_ENGINE_LABEL,
     ThreatAuditTask,
     ThreatAuditTaskPage,
+    ThreatAuditTaskResult,
     ThreatAnalysisMethodCatalog,
     ThreatAnalysisMethodSelection,
     ThreatAnalysisRunStatus,
@@ -121,14 +124,15 @@ logger = get_logger(__name__)
 @router.get("/api/v2/scans/{scan_id}/tasks")
 async def get_scan_tasks_page(scan_id: str, cursor: str | None = None,
                               limit: int = Query(default=50, ge=1, le=100),
-                              current_user: User = Depends(get_current_user)) -> dict:
+                              current_user: User = Depends(get_current_user),
+                              task_name: str | None = None) -> dict:
     await _check_scan_owner(scan_id, current_user)
     try:
         after_task_id = decode_cursor(cursor, size=1)[0] if cursor else ""
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid cursor") from exc
     rows = await run_store_call(get_scan_store(), "list_task_page", scan_id,
-                                limit=limit + 1, after_task_id=after_task_id)
+                                limit=limit + 1, after_task_id=after_task_id, task_name=task_name)
     more = len(rows) > limit
     items = rows[:limit]
     return {"items": items, "next_cursor": encode_cursor(items[-1]["task_id"]) if more else None}
@@ -2234,6 +2238,7 @@ async def get_scan_overview_v2(
     issue_metrics = metrics_from_totals(fast_totals) if fast_totals is not None else calculate_issue_metrics(vulnerabilities, fp_result_map)
     counts.update({
         "effective_issue_count": issue_metrics.effective_issue_count,
+        "human_confirmed_issue_count": issue_metrics.human_confirmed_issue_count,
         "validated_issue_count": int(fast_totals["validated_issue_count"]) if fast_totals is not None else calculate_validated_issue_count(
             vulnerabilities,
             fp_result_map,
@@ -2385,6 +2390,51 @@ async def get_scan_events_v2(
         items=[event for _, event in reversed(rows)],
         has_more=has_more,
         next_cursor=next_cursor if has_more else None,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/candidate-audit-results",
+    response_model=list[CandidateAuditTaskResult],
+)
+async def get_scan_candidate_audit_results_v2(
+    scan_id: str,
+    candidate_indexes: list[Annotated[int, Query(ge=0)]] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(get_current_user),
+) -> list[CandidateAuditTaskResult]:
+    await _check_scan_owner_v2(scan_id, current_user)
+    return await run_store_call(
+        get_scan_store(), "get_candidate_audit_results", scan_id, candidate_indexes,
+    )
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/vulnerabilities/{idx}/audit-source",
+    response_model=VulnerabilityAuditSource,
+)
+async def get_scan_vulnerability_audit_source_v2(
+    scan_id: str,
+    idx: int,
+    current_user: User = Depends(get_current_user),
+) -> VulnerabilityAuditSource:
+    await _check_scan_owner_v2(scan_id, current_user)
+    if idx < 0:
+        raise HTTPException(status_code=422, detail="Invalid vulnerability index")
+    return await run_store_call(get_scan_store(), "get_vulnerability_audit_source", scan_id, idx)
+
+
+@router.get(
+    "/api/v2/scans/{scan_id}/threat-audit-results",
+    response_model=list[ThreatAuditTaskResult],
+)
+async def get_scan_threat_audit_results_v2(
+    scan_id: str,
+    task_ids: list[str] = Query(..., min_length=1, max_length=100),
+    current_user: User = Depends(get_current_user),
+) -> list[ThreatAuditTaskResult]:
+    await _check_scan_owner_v2(scan_id, current_user)
+    return await run_store_call(
+        get_scan_store(), "get_threat_audit_task_results", scan_id, task_ids,
     )
 
 

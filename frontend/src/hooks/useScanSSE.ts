@@ -158,6 +158,7 @@ interface MiningEngineRunEvent {
 /* ------------------------------------------------------------------ */
 
 export interface ScanSSEHandlers {
+  onStateRefresh?: () => void;
   onScanStatus?: (data: ScanStatusEvent) => void;
   onOpenCodeTaskReport?: (data: OpenCodeTaskReportEvent) => void;
   onScanCandidates?: (data: ScanCandidatesEvent) => void;
@@ -380,8 +381,14 @@ export function useScanSSE(
   const refreshState = useCallback(() => {
     if (document.hidden || refreshInFlight.current === scanId) return;
     refreshInFlight.current = scanId;
-    void refreshFullState(scanId, stateSettersRef.current, () => activeScanIdRef.current === scanId)
-      .finally(() => { if (refreshInFlight.current === scanId) refreshInFlight.current = null; });
+    void refreshFullState(
+      scanId,
+      stateSettersRef.current,
+      () => activeScanIdRef.current === scanId,
+    ).finally(() => {
+      if (refreshInFlight.current === scanId) refreshInFlight.current = null;
+      if (activeScanIdRef.current === scanId) handlersRef.current.onStateRefresh?.();
+    });
   }, [scanId]);
 
   useEffect(() => {

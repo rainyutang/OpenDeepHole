@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { RefCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getScanDetailItem, getScanTaskDetail, getScanTasksPage, getFpReviewResultsPage, getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getCheckerCatalog, getMiningEngineCatalog, isPublicScan, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
@@ -10,6 +11,13 @@ import {
   ThreatAnalysisPanel,
 } from "../features/threatAnalysis";
 import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
+import { ThreatAuditFindingBadge, ThreatAuditResults, useThreatAuditResults } from "../features/threatAudit/ThreatAuditResults";
+import type { ThreatAuditTaskResult } from "../types";
+import { AuditFindingBadge, AuditResults } from "../features/auditResults/AuditResults";
+import { useCandidateAuditResults } from "../features/auditResults/useAuditResults";
+import { useAuditNavigation, useListFocus } from "../auditNavigation";
+import type { AuditTarget, ListFocusRequest } from "../auditNavigation";
+import type { CandidateAuditTaskResult } from "../types";
 import type { Candidate, CodeIndexStats, FpReviewJob, FpReviewMethod, FpReviewMethodSelection, FpReviewStageConfig, HistoryPattern, IndexedVulnerability, IndexStatus, ScanItemStatus, ScanStatus as ScanStatusType, ScanEvent, CheckerInfo, SkillReport, OpenCodePoolStatus, OpenCodeTokenUsage, ScanCandidate, Vulnerability, OutputSource, ThreatAnalysis, ThreatAuditTask, VulnerabilityValidation, MiningEngineCatalogItem, MiningEngineRunStatus, MiningEngineSelection } from "../types";
 import { useScanSSE } from "../hooks/useScanSSE";
 import type { ScanSSEHandlers, SSEStateSetters } from "../hooks/useScanSSE";
@@ -41,6 +49,8 @@ import {
   STATIC_AUDIT_STATUS_ORDER,
   staticAuditConclusion,
   staticAuditStatus,
+  staticCandidateRelatedVariable,
+  staticCandidateTaskName,
 } from "../staticAudit";
 import type { StaticAuditStatus } from "../staticAudit";
 import RuntimeErrorBoundary from "./RuntimeErrorBoundary";
@@ -222,14 +232,12 @@ function isValidationTerminalStatus(status: string): boolean {
   return ["verified", "success", "failed", "error", "timeout", "cancelled", "skipped"].includes(status);
 }
 
-function validatedIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
-  if (scan.detail_counts?.validated_issue_count != null) return scan.detail_counts.validated_issue_count;
+function humanConfirmedIssueCount(scan: ScanStatusType, fpReview: FpReviewJob | null): number {
+  if (scan.detail_counts?.human_confirmed_issue_count != null) return scan.detail_counts.human_confirmed_issue_count;
   const issueIndices = finalReviewedIssueIndices(fpReview);
-  const validationMap = new Map((scan.validations ?? []).map((item) => [item.vuln_index, item]));
-  return [...issueIndices].filter((index) => {
-    const validation = validationMap.get(index);
-    return Boolean(validation && !validation.running && isValidationTerminalStatus(validation.status));
-  }).length;
+  return scan.vulnerabilities.filter((vuln) => (
+    issueIndices.has(vuln.vuln_index) && vuln.user_verdict === "confirmed"
+  )).length;
 }
 
 function scanEventKey(item: ScanEvent): string {
@@ -708,6 +716,16 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const pendingInitialOpenCodePoolRef = useRef<OpenCodePoolStatus | null | undefined>(
     undefined,
   );
+  const navigateToAuditTarget = useCallback((kind: AuditTarget["kind"]) => {
+    setSidebarOpen(false);
+    if (kind === "issue") setActiveTab("issues");
+    else if (kind === "static_candidate") setActiveTab("static");
+    else {
+      setActiveEngineId(THREAT_ENGINE_ID);
+      setActiveTab("mining");
+    }
+  }, []);
+  const auditNavigation = useAuditNavigation(scanId, scanRef, setScan, navigateToAuditTarget);
 
   // Feedback panel state
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -738,6 +756,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // FP review state
   const [fpReview, setFpReview] = useState<FpReviewJob | null>(null);
+  const [threatResultRevision, setThreatResultRevision] = useState(0);
   const [fpReviewHydrated, setFpReviewHydrated] = useState(false);
   const [fpReviewLoading, setFpReviewLoading] = useState(false);
   const [fpReviewStopping, setFpReviewStopping] = useState(false);
@@ -1039,6 +1058,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // SSE event handlers — update state incrementally
   const sseHandlers = useMemo<ScanSSEHandlers>(() => ({
+    onStateRefresh: () => setThreatResultRevision((value) => value + 1),
     onScanStatus: (data) => {
       setScan((prev) => {
         if (!prev) {
@@ -1497,13 +1517,14 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   const requiredDetailResources = useMemo(() => {
     const resources = detailResourcesForTab(activeTab, activeEngineId);
-    const needsCompleteIssueValidationCount = finalReviewedIssueCount(fpReview) > 0;
+    const needsCompleteIssueConfirmationCount = scan?.detail_counts?.human_confirmed_issue_count == null
+      && finalReviewedIssueCount(fpReview) > 0;
     return Array.from(new Set<DetailResource>([
       ...resources,
-      ...(needsCompleteIssueValidationCount ? ["validations" as DetailResource] : []),
+      ...(needsCompleteIssueConfirmationCount ? ["vulnerabilities" as DetailResource] : []),
       ...(logOpen ? ["events" as DetailResource] : []),
     ]));
-  }, [activeEngineId, activeTab, fpReview, logOpen]);
+  }, [activeEngineId, activeTab, fpReview, logOpen, scan?.detail_counts?.human_confirmed_issue_count]);
 
   useEffect(() => {
     setDetailFailedResources((previous) => {
@@ -1692,6 +1713,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   };
 
   const handleFlowNodeClick = (node: FlowNodeId) => {
+    auditNavigation.cancel();
     if (node === "issues") {
       setActiveTab("issues");
       return;
@@ -1824,14 +1846,17 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   const activeReport = displayedReports[activeReportIndex] ?? displayedReports[0];
   const continuableCount = scan.continuable_task_count || 0;
   const issueCount = finalReviewedIssueCount(fpReview);
-  const verifiedIssueCount = validatedIssueCount(scan, fpReview);
+  const confirmedIssueCount = humanConfirmedIssueCount(scan, fpReview);
   const variantIssueCount = scan.vulnerabilities.filter((v) => Boolean(v?.variant_of)).length;
   const showGitHistoryStages = gitHistory.length > 0
     || variantIssueCount > 0
     || hasEvent(scan.events, ["git_history", "variant_hunt"]);
   const indexProgress = formatIndexProgress(indexStatus, scan);
   const selectedEngines = effectiveMiningEngines(scan);
-  const activeEngine = selectedEngines.find((item) => item.engine_id === activeEngineId) ?? null;
+  const activeEngine = selectedEngines.find((item) => item.engine_id === activeEngineId)
+    ?? (auditNavigation.focus?.kind === "threat_audit" && activeEngineId === THREAT_ENGINE_ID
+      ? { engine_id: THREAT_ENGINE_ID, engine_label: THREAT_AUDIT_ENGINE_LABEL, enabled: true }
+      : null);
   const threatAnalysisEvents = filterEvents(scan.events, ["threat_analysis"]);
   const threatAuditEvents = filterEvents(scan.events, ["threat_audit"]);
   const miningEvents = filterEvents(scan.events, ["auditing", "fp_review", "opencode_output"]);
@@ -1867,6 +1892,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       currentFpReviewIndices={currentFpReviewIndices}
       fpReviewRunning={isFpReviewing}
       viewMode="final_tp"
+      focusRequest={auditNavigation.focus?.kind === "issue" ? auditNavigation.focus : undefined}
+      onOpenAuditSource={auditNavigation.openSource}
       staticRuleTypeLabels={staticRuleTypeLabels}
       validations={scan.validations ?? []}
       validatingIndices={launchingValidations}
@@ -1877,6 +1904,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       onFeedbackCreated={addSelectedFeedbackIds}
       onFeedbackRemoved={removeSelectedFeedbackIds}
       onVulnMarked={() => {
+        setThreatResultRevision((value) => value + 1);
+        scheduleOverviewSummaryRefresh(0);
         if (skillOpen && skillType) {
           if (skillType === "__fp_review__") {
             getFpReviewSkill(scanId).then(setSkillContent).catch(() => {});
@@ -1896,7 +1925,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         flow={flowModel}
         activeTab={activeTab}
         issueCount={issueCount}
-        verifiedIssueCount={verifiedIssueCount}
+        confirmedIssueCount={confirmedIssueCount}
         feedbackCount={feedbackCount}
         modelRunningCount={scan.opencode_pool?.global_running ?? 0}
         hasReportModeSkill={hasReportModeSkill}
@@ -1916,8 +1945,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
                     ? "logs"
                     : null}
         onClose={() => setSidebarOpen(false)}
-        onHome={() => setActiveTab("overview")}
-        onIssues={() => setActiveTab("issues")}
+        onHome={() => { auditNavigation.cancel(); setActiveTab("overview"); }}
+        onIssues={() => { auditNavigation.cancel(); setActiveTab("issues"); }}
         onNodeClick={handleFlowNodeClick}
         onOpenScanInfo={() => setScanInfoOpen(true)}
         onOpenFeedback={() => setFeedbackOpen(true)}
@@ -2097,6 +2126,13 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           ].join(":")}
         >
         <>
+        {(auditNavigation.loading || auditNavigation.error) && (
+          <div role={auditNavigation.error ? "alert" : "status"} className="mb-4 rounded-lg border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-sm text-slate-200">
+            {auditNavigation.loading ? "正在定位目标记录…" : auditNavigation.error}
+            {auditNavigation.error && <button type="button" onClick={auditNavigation.retry} className="ml-3 text-blue-300 underline">重试</button>}
+            <button type="button" onClick={auditNavigation.cancel} className="ml-3 text-slate-400 underline">{auditNavigation.loading ? "取消" : "关闭"}</button>
+          </div>
+        )}
         {(activeDetailLoading || activeDetailFailed) && (
           <div
             role="status"
@@ -2140,7 +2176,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             isFpReviewing={isFpReviewing}
             currentFpReviewTargets={currentFpReviewTargets}
             hasReportModeSkill={hasReportModeSkill}
-            verifiedIssueCount={verifiedIssueCount}
+            confirmedIssueCount={confirmedIssueCount}
             onNavigate={setActiveTab}
           />
         )}
@@ -2165,6 +2201,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             candidates={scan.candidates ?? []}
             vulnerabilities={scan.vulnerabilities}
             events={filterEvents(scan.events, ["static_analysis"])}
+            fpReview={fpReview}
+            resultRevision={threatResultRevision}
+            focusRequest={auditNavigation.focus?.kind === "static_candidate" ? auditNavigation.focus : undefined}
+            onOpenIssue={auditNavigation.openIssue}
           />
         )}
         {activeTab === "threat" && isThreatAnalysisSelected(scan) && (
@@ -2200,6 +2240,10 @@ export default function ScanStatus({ scanId, onBack }: Props) {
           <ThreatAuditPanel
             scan={scan}
             events={threatAuditEvents}
+            fpReview={fpReview}
+            resultRevision={threatResultRevision}
+            focusRequest={auditNavigation.focus?.kind === "threat_audit" ? auditNavigation.focus : undefined}
+            onOpenIssue={auditNavigation.openIssue}
           />
         )}
         {activeTab === "mining" && activeEngine && ![STATIC_ENGINE_ID, THREAT_ENGINE_ID].includes(activeEngine.engine_id) && (
@@ -3108,7 +3152,7 @@ interface ScanDetailSidebarProps {
   flow: ProcessFlowModel;
   activeTab: MainTab;
   issueCount: number;
-  verifiedIssueCount: number;
+  confirmedIssueCount: number;
   feedbackCount: number;
   modelRunningCount: number;
   hasReportModeSkill: boolean;
@@ -3161,7 +3205,7 @@ function ScanSidebarContent({
   flow,
   activeTab,
   issueCount,
-  verifiedIssueCount,
+  confirmedIssueCount,
   feedbackCount,
   modelRunningCount,
   hasReportModeSkill,
@@ -3216,7 +3260,7 @@ function ScanSidebarContent({
           />
           <SidebarNavigationButton
             label="疑似问题"
-            detail={`问题总数：${issueCount}，已验证：${verifiedIssueCount}`}
+            detail={`问题总数：${issueCount}，确认问题：${confirmedIssueCount}`}
             current={activeTab === "issues"}
             tone="red"
             badge={issueCount}
@@ -3755,15 +3799,23 @@ function engineRunDuration(run: MiningEngineRunStatus | null): string {
   return `${minutes} 分 ${remaining} 秒`;
 }
 
-function ThreatAuditPanel({
+export function ThreatAuditPanel({
   scan,
   events,
+  fpReview,
+  resultRevision,
+  focusRequest,
+  onOpenIssue,
 }: {
   scan: ScanStatusType;
   events: ScanEvent[];
+  fpReview: FpReviewJob | null;
+  resultRevision: number;
+  focusRequest?: ListFocusRequest<string>;
+  onOpenIssue: (index: number) => void;
 }) {
   const [statusFilter, setStatusFilter] = useState("__all__");
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(focusRequest?.key ?? null);
   const [page, setPage] = useState(1);
   const tasks = scan.threat_audit_tasks ?? [];
   const currentTasks = useMemo(() => currentThreatAuditTasks(tasks), [tasks]);
@@ -3798,6 +3850,12 @@ function ThreatAuditPanel({
   );
   const selected = tasks.find((task) => task.task_id === selectedTaskId) ?? null;
   const selectedRuntime = selected ? runtimeByTaskId.get(selected.task_id) ?? null : null;
+  const auditResults = useThreatAuditResults(
+    scan,
+    [...pagedTasks.map((task) => task.task_id), ...(selected ? [selected.task_id] : [])],
+    fpReview,
+    resultRevision,
+  );
   const statusCounts = useMemo(() => {
     const counts = new Map<string, number>();
     currentTasks.forEach((task) => {
@@ -3833,7 +3891,11 @@ function ThreatAuditPanel({
     setPage(1);
   }, [statusFilter]);
 
+  const listFocus = useListFocus(focusRequest, visibleTasks.map((task) => task.task_id), THREAT_AUDIT_PAGE_SIZE,
+    setSelectedTaskId, setPage, () => setStatusFilter("__all__"));
+
   useEffect(() => {
+    if (listFocus.pinned !== null || listFocus.pending) return;
     if (visibleTasks.length === 0) {
       setSelectedTaskId(null);
       return;
@@ -3841,7 +3903,7 @@ function ThreatAuditPanel({
     if (!selectedTaskId || !visibleTasks.some((task) => task.task_id === selectedTaskId)) {
       setSelectedTaskId(visibleTasks[0].task_id);
     }
-  }, [selectedTaskId, visibleTasks]);
+  }, [selectedTaskId, visibleTasks, listFocus.pinned, listFocus.pending]);
 
   return (
     <TaskPanel
@@ -3870,7 +3932,7 @@ function ThreatAuditPanel({
           label="状态"
           value={statusFilter}
           options={threatAuditStatusOptions(tasks, runtimeByTaskId)}
-          onChange={setStatusFilter}
+          onChange={(value) => { listFocus.release(); setStatusFilter(value); }}
         />
       </div>
 
@@ -3896,7 +3958,9 @@ function ThreatAuditPanel({
                       <li key={task.task_id}>
                         <button
                           type="button"
-                          onClick={() => setSelectedTaskId(task.task_id)}
+                          ref={listFocus.pinned === task.task_id ? listFocus.targetRef : undefined}
+                          aria-current={selectedTaskId === task.task_id ? "true" : undefined}
+                          onClick={() => { listFocus.release(); setSelectedTaskId(task.task_id); }}
                           className={`w-full px-3 py-3 text-left transition-colors ${
                             selectedTaskId === task.task_id
                               ? "bg-cyan-500/15"
@@ -3906,7 +3970,10 @@ function ThreatAuditPanel({
                           }`}
                         >
                           <div className="flex items-start gap-2">
-                            <StatusPill label={threatAuditStatusLabel(status)} tone={threatAuditStatusTone(status)} />
+                            <div className="flex shrink-0 flex-col items-start gap-1">
+                              <StatusPill label={threatAuditStatusLabel(status)} tone={threatAuditStatusTone(status)} />
+                              <ThreatAuditFindingBadge result={auditResults.results.get(task.task_id)} />
+                            </div>
                             <div className="min-w-0">
                               <div className="truncate text-sm font-medium text-slate-200">
                                 {task.method_name || "未命名攻击模式"}
@@ -3936,7 +4003,7 @@ function ThreatAuditPanel({
                 <button
                   type="button"
                   disabled={safePage === 1}
-                  onClick={() => setPage((value) => Math.max(1, value - 1))}
+                  onClick={() => { listFocus.release(); setPage((value) => Math.max(1, value - 1)); }}
                   className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
                 >
                   上一页
@@ -3945,7 +4012,7 @@ function ThreatAuditPanel({
                 <button
                   type="button"
                   disabled={safePage === totalPages}
-                  onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+                  onClick={() => { listFocus.release(); setPage((value) => Math.min(totalPages, value + 1)); }}
                   className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
                 >
                   下一页
@@ -3956,7 +4023,17 @@ function ThreatAuditPanel({
 
           <div className="min-h-[28rem] rounded-xl border border-slate-700 bg-slate-900/40">
             {selected ? (
-              <ThreatAuditTaskDetail task={selected} runtime={selectedRuntime} />
+              <ThreatAuditTaskDetail
+                key={selected.task_id}
+                scan={scan}
+                task={selected}
+                runtime={selectedRuntime}
+                result={auditResults.results.get(selected.task_id)}
+                resultLoading={auditResults.loading}
+                resultError={auditResults.error}
+                onRetryResult={auditResults.retry}
+                onOpenIssue={onOpenIssue}
+              />
             ) : (
               <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
                 从左侧选择一个威胁审计任务查看详情
@@ -4019,13 +4096,24 @@ function threatAuditStatusTone(status: string): TaskTone {
 }
 
 function ThreatAuditTaskDetail({
+  scan,
   task,
   runtime,
+  result,
+  resultLoading,
+  resultError,
+  onRetryResult,
+  onOpenIssue,
 }: {
+  scan: ScanStatusType;
   task: ThreatAuditTask;
   runtime: ScanQueueTask | null;
+  result?: ThreatAuditTaskResult;
+  resultLoading: boolean;
+  resultError: string;
+  onRetryResult: () => void;
+  onOpenIssue: (index: number) => void;
 }) {
-  const prompt = runtime ? scanQueueTaskPrompt(runtime.task) : "";
   const sessionId = runtime ? scanQueueTaskSessionId(runtime.task) : "";
   const tokenUsage = runtime ? taskTokenUsage(runtime.task) : null;
   const source = formatOutputSource(task.output_source);
@@ -4040,7 +4128,17 @@ function ThreatAuditTaskDetail({
         </div>
         <div className="mt-2 break-all font-mono text-[11px] text-slate-600">{task.task_id}</div>
       </div>
-      <ThreatAuditDetailSection title="审计目标">
+      <AuditDetailSection title="审计结果">
+        <ThreatAuditResults
+          result={result}
+          status={status}
+          loading={resultLoading}
+          error={resultError}
+          onRetry={onRetryResult}
+          onOpenIssue={onOpenIssue}
+        />
+      </AuditDetailSection>
+      <AuditDetailSection title="审计目标">
         <DetailGrid items={[
           ["叶子节点", task.surface_name || task.surface_node_id || "—"],
           ["攻击模式", task.method_name || task.method_node_id || "—"],
@@ -4049,14 +4147,14 @@ function ThreatAuditTaskDetail({
           ["风险", task.risk_name || task.risk_id || "—"],
           ["攻击路径", task.attack_path_id || "—"],
         ]} />
-      </ThreatAuditDetailSection>
+      </AuditDetailSection>
       {(task.description || task.code_path_description) && (
-        <ThreatAuditDetailSection title="任务说明">
+        <AuditDetailSection title="任务说明">
           <MarkdownContent content={task.description || task.code_path_description || ""} />
-        </ThreatAuditDetailSection>
+        </AuditDetailSection>
       )}
       {(task.code_path || codePaths.length > 0) && (
-        <ThreatAuditDetailSection title="代码路径">
+        <AuditDetailSection title="代码路径">
           <div className="space-y-2">
             {(codePaths.length > 0 ? codePaths : [{ path: task.code_path, description: task.code_path_description }]).map((item, index) => (
               <div key={`${item.path}-${index}`} className="rounded border border-slate-800 bg-slate-950/60 px-3 py-2">
@@ -4065,27 +4163,31 @@ function ThreatAuditTaskDetail({
               </div>
             ))}
           </div>
-        </ThreatAuditDetailSection>
+        </AuditDetailSection>
       )}
       {task.failure_reason && (
-        <ThreatAuditDetailSection title="失败原因">
+        <AuditDetailSection title="失败原因">
           <div className="whitespace-pre-wrap break-words rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
             {task.failure_reason}
           </div>
-        </ThreatAuditDetailSection>
+        </AuditDetailSection>
       )}
-      <ThreatAuditDetailSection title="执行信息">
+      <AuditDetailSection title="执行信息">
         <DetailGrid items={[
           ["模型", runtime?.modelId || task.output_source?.model || task.output_source?.model_id || "—"],
           ["OpenCode Session ID", sessionId || "尚无记录"],
           ["开始时间", task.started_at ? formatDateTime(task.started_at) : "—"],
           ["结束时间", task.finished_at ? formatDateTime(task.finished_at) : "—"],
           ["输出来源", source || "—"],
-          ["结果索引", task.result_vuln_indexes?.length ? task.result_vuln_indexes.map((value) => `#${value}`).join("、") : "无漏洞结果"],
+          ["结果索引", result?.findings.length
+            ? result.findings.map((finding) => `#${finding.vuln_index}`).join("、")
+            : task.result_vuln_indexes?.length
+              ? task.result_vuln_indexes.map((value) => `#${value}`).join("、")
+              : "未记录结果索引"],
         ]} />
-      </ThreatAuditDetailSection>
+      </AuditDetailSection>
       {tokenUsage && (
-        <ThreatAuditDetailSection title="Token 用量">
+        <AuditDetailSection title="Token 用量">
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {[
               ["输入", tokenUsage.input_tokens],
@@ -4098,24 +4200,83 @@ function ThreatAuditTaskDetail({
               <MiniMetric key={String(label)} label={String(label)} value={Number(value)} />
             ))}
           </div>
-        </ThreatAuditDetailSection>
+        </AuditDetailSection>
       )}
-      <ThreatAuditDetailSection title="Prompt">
-        {prompt ? (
-          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300">
-            {prompt}
-          </pre>
-        ) : (
-          <div className="rounded border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">
-            {runtime ? "该任务记录未保存完整 Prompt。" : "尚未匹配到该任务的 OpenCode 队列或历史记录。"}
-          </div>
-        )}
-      </ThreatAuditDetailSection>
+      <AuditPromptSection scan={scan} taskName={task.task_id} runtime={runtime} />
     </div>
   );
 }
 
-function ThreatAuditDetailSection({
+function AuditPromptSection({ scan, taskName, runtime, pending = false }: {
+  scan: ScanStatusType;
+  taskName: string;
+  runtime: ScanQueueTask | null;
+  pending?: boolean;
+}) {
+  const inlinePrompt = runtime ? scanQueueTaskPrompt(runtime.task) : "";
+  const notGenerated = runtime?.status === "planned" || (!runtime && pending);
+  const canLoadHistory = Boolean(scan.detail_counts) && !inlinePrompt && !notGenerated
+    && !["queued", "running"].includes(runtime?.status ?? "");
+  const lookupKey = JSON.stringify([scan.scan_id, taskName, runtime?.id, runtime?.task.revision,
+    runtime?.task.record_id, scan.completed_task_count, runtime?.status]);
+  const runtimeRef = useRef(runtime);
+  runtimeRef.current = runtime;
+  const [attempt, setAttempt] = useState(0);
+  const [history, setHistory] = useState<{ key: string; task: Record<string, unknown> | null; error: boolean } | null>(null);
+  useEffect(() => {
+    if (!canLoadHistory) return;
+    const controller = new AbortController();
+    setHistory(null);
+    const load = async () => {
+      let task = runtimeRef.current?.task ?? null;
+      if (!task) {
+        const matches: Record<string, unknown>[] = [];
+        let cursor: string | null = null;
+        do {
+          const page = await getScanTasksPage(scan.scan_id, cursor, taskName, controller.signal);
+          matches.push(...page.items.filter((item) => item.task_name === taskName
+            && (!item.scope_id || item.scope_id === scan.scan_id)));
+          if (page.next_cursor && page.next_cursor === cursor) throw new Error("任务游标未前进");
+          cursor = page.next_cursor;
+        } while (cursor && !controller.signal.aborted);
+        task = matches.sort((a, b) => compareScanQueueTime(
+          String(b.finished_at || b.started_at || ""), String(a.finished_at || a.started_at || ""),
+        ))[0] ?? null;
+      }
+      const detail = task && !controller.signal.aborted
+        ? await getScanTaskDetail(scan.scan_id, task, controller.signal) : null;
+      if (!controller.signal.aborted) setHistory({ key: lookupKey, task: detail, error: false });
+    };
+    void load().catch(() => {
+      if (!controller.signal.aborted) setHistory({ key: lookupKey, task: null, error: true });
+    });
+    return () => controller.abort();
+  }, [canLoadHistory, lookupKey, scan.scan_id, taskName, attempt]);
+  const loaded = history?.key === lookupKey ? history : null;
+  const prompt = inlinePrompt || (canLoadHistory && loaded?.task ? scanQueueTaskPrompt(loaded.task) : "");
+  return (
+    <AuditDetailSection title="Prompt">
+      {prompt ? (
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300 [overflow-wrap:anywhere]">
+          {prompt}
+        </pre>
+      ) : canLoadHistory && !loaded ? (
+        <p className="text-xs text-slate-400">正在读取完整 Prompt…</p>
+      ) : canLoadHistory && loaded?.error ? (
+        <button type="button" className="text-xs text-amber-300" onClick={() => setAttempt((value) => value + 1)}>
+          完整 Prompt 加载失败，点击重试
+        </button>
+      ) : (
+        <div className="rounded border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">
+          {notGenerated ? "Prompt 尚未生成，进入排队或运行后显示。"
+            : runtime || loaded?.task ? "该任务记录未保存完整 Prompt。" : "尚未匹配到该任务的 OpenCode 队列或历史记录。"}
+        </div>
+      )}
+    </AuditDetailSection>
+  );
+}
+
+function AuditDetailSection({
   title,
   children,
 }: {
@@ -4159,7 +4320,7 @@ function ScanOverview({
   isFpReviewing,
   currentFpReviewTargets,
   hasReportModeSkill,
-  verifiedIssueCount,
+  confirmedIssueCount,
   onNavigate,
 }: {
   scan: ScanStatusType;
@@ -4177,7 +4338,7 @@ function ScanOverview({
   isFpReviewing: boolean;
   currentFpReviewTargets: Vulnerability[];
   hasReportModeSkill: boolean;
-  verifiedIssueCount: number;
+  confirmedIssueCount: number;
   onNavigate: (tab: MainTab) => void;
 }) {
   const engines = effectiveMiningEngines(scan);
@@ -4230,7 +4391,7 @@ function ScanOverview({
         {staticEngineSelected && (
           <OverviewMetric icon="target" label="候选点" value={scan.total_candidates || scan.vulnerabilities.length} detail={`${scan.processed_candidates} 已审计`} tone="blue" />
         )}
-        <OverviewMetric icon="alert" label="疑似问题" value={issueCount} detail={`${verifiedIssueCount} 已验证`} tone="red" onClick={() => onNavigate("issues")} />
+        <OverviewMetric icon="alert" label="疑似问题" value={issueCount} detail={`${confirmedIssueCount} 确认问题`} tone="red" onClick={() => onNavigate("issues")} />
         {showGitHistoryStages && (
           <OverviewMetric icon="history" label="历史模式" value={gitHistoryCount} detail={`${variantIssueCount} 个变体候选`} tone="purple" onClick={() => onNavigate("threat")} />
         )}
@@ -5207,22 +5368,31 @@ function OverviewMetric({
   return <div className={cls}>{content}</div>;
 }
 
-function StaticTaskPanel({
+export function StaticTaskPanel({
   scan,
   indexProgress,
   candidates,
   vulnerabilities,
   events,
+  fpReview,
+  resultRevision,
+  focusRequest,
+  onOpenIssue,
 }: {
   scan: ScanStatusType;
   indexProgress: ReturnType<typeof formatIndexProgress>;
   candidates: ScanCandidate[];
   vulnerabilities: IndexedVulnerability[];
   events: ScanEvent[];
+  fpReview: FpReviewJob | null;
+  resultRevision: number;
+  focusRequest?: ListFocusRequest<number>;
+  onOpenIssue: (index: number) => void;
 }) {
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(focusRequest?.key ?? null);
   const [typeFilter, setTypeFilter] = useState(ALL_STATIC_FILTER);
   const [auditFilter, setAuditFilter] = useState(ALL_STATIC_FILTER);
+  const [findingFilter, setFindingFilter] = useState(ALL_STATIC_FILTER);
   const [currentPage, setCurrentPage] = useState(1);
   const running = scan.status === "analyzing" && !scan.static_analysis_done;
   const seen = scan.static_analysis_done || running || scan.status === "auditing" || events.length > 0;
@@ -5270,18 +5440,47 @@ function StaticTaskPanel({
     () => countStaticAuditOptions(annotated.map((item) => item.auditStatus)),
     [annotated],
   );
-  const visible = useMemo(() => {
+  const matchingCandidates = useMemo(() => {
     let list = annotated;
     if (typeFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.candidate.vuln_type === typeFilter);
     if (auditFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.auditStatus === auditFilter);
     return list;
   }, [annotated, auditFilter, typeFilter]);
-  const totalPages = Math.max(1, Math.ceil(visible.length / STATIC_CANDIDATE_PAGE_SIZE));
-  const safePage = Math.min(currentPage, totalPages);
-  const paged = visible.slice((safePage - 1) * STATIC_CANDIDATE_PAGE_SIZE, safePage * STATIC_CANDIDATE_PAGE_SIZE);
   const selected = selectedIndex === null
     ? null
     : annotated.find((item) => item.candidate.idx === selectedIndex) ?? null;
+  const findingFilterActive = findingFilter === "found";
+  const summaryPage = Math.min(currentPage, Math.max(1, Math.ceil(matchingCandidates.length / STATIC_CANDIDATE_PAGE_SIZE)));
+  const summaryCandidates = findingFilterActive ? matchingCandidates : matchingCandidates.slice(
+    (summaryPage - 1) * STATIC_CANDIDATE_PAGE_SIZE, summaryPage * STATIC_CANDIDATE_PAGE_SIZE,
+  );
+  const auditResults = useCandidateAuditResults(scan,
+    [...summaryCandidates.map((item) => item.candidate.idx), ...(selected ? [selected.candidate.idx] : [])],
+    fpReview, resultRevision);
+  const visible = useMemo(() => findingFilterActive
+    ? matchingCandidates.filter((item) => (auditResults.results.get(item.candidate.idx)?.confirmed_issue_count ?? 0) > 0)
+    : matchingCandidates,
+  [matchingCandidates, findingFilterActive, auditResults.results]);
+  const candidatesLoading = scan.detail_pages?.candidates_next_cursor != null
+    || (candidates.length === 0 && scan.detail_pages?.vulnerabilities_next_cursor != null);
+  const filterLoading = findingFilterActive && (candidatesLoading || auditResults.loading);
+  const filterError = findingFilterActive ? auditResults.error : "";
+  const totalPages = Math.max(1, Math.ceil(visible.length / STATIC_CANDIDATE_PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paged = visible.slice((safePage - 1) * STATIC_CANDIDATE_PAGE_SIZE, safePage * STATIC_CANDIDATE_PAGE_SIZE);
+  const runtimeByTaskName = useMemo(() => {
+    const result = new Map<string, ScanQueueTask>();
+    // Queue collection puts active work first and historical attempts newest first.
+    for (const task of collectScanQueueTasks(scan.opencode_pool ?? null)) {
+      if (task.scopeId && task.scopeId !== scan.scan_id) continue;
+      const name = String(task.task.task_name || "");
+      if (name && !result.has(name)) result.set(name, task);
+    }
+    return result;
+  }, [scan.scan_id, scan.opencode_pool]);
+  const selectedRuntime = selected
+    ? runtimeByTaskName.get(staticCandidateTaskName(scan.scan_id, selected.candidate)) ?? null
+    : null;
   const auditCounts = useMemo(() => {
     const counts: Record<StaticAuditStatus, number> = {
       success: 0,
@@ -5308,9 +5507,17 @@ function StaticTaskPanel({
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [auditFilter, typeFilter]);
+  }, [auditFilter, typeFilter, findingFilter]);
+
+  const listFocus = useListFocus(focusRequest, visible.map((item) => item.candidate.idx), STATIC_CANDIDATE_PAGE_SIZE,
+    setSelectedIndex, setCurrentPage, () => {
+      setTypeFilter(ALL_STATIC_FILTER);
+      setAuditFilter(ALL_STATIC_FILTER);
+      setFindingFilter(ALL_STATIC_FILTER);
+    });
 
   useEffect(() => {
+    if (listFocus.pinned !== null || listFocus.pending || filterLoading || filterError) return;
     if (visible.length === 0) {
       if (selectedIndex !== null) setSelectedIndex(null);
       return;
@@ -5318,7 +5525,7 @@ function StaticTaskPanel({
     if (selectedIndex === null || !visible.some((item) => item.candidate.idx === selectedIndex)) {
       setSelectedIndex(visible[0].candidate.idx);
     }
-  }, [selectedIndex, visible]);
+  }, [selectedIndex, visible, listFocus.pinned, listFocus.pending, filterLoading, filterError]);
 
   return (
     <TaskPanel
@@ -5341,13 +5548,24 @@ function StaticTaskPanel({
         <MiniMetric label="审计中" value={completeAuditCounts.running} tone="blue" />
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <StaticFilterSelect label="类型" value={typeFilter} options={typeOptions} onChange={setTypeFilter} />
-        <StaticFilterSelect label="审计" value={auditFilter} options={auditOptions} onChange={setAuditFilter} />
+        <StaticFilterSelect label="类型" value={typeFilter} options={typeOptions} onChange={(value) => { listFocus.release(); setTypeFilter(value); }} />
+        <StaticFilterSelect label="审计" value={auditFilter} options={auditOptions} onChange={(value) => { listFocus.release(); setAuditFilter(value); }} />
+        <StaticFilterSelect label="问题" value={findingFilter} options={[{ value: "found", label: "发现问题" }]}
+          onChange={(value) => { listFocus.release(); setFindingFilter(value); }} />
       </div>
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,24rem)_1fr]">
-        <div className="flex flex-col rounded-xl border border-slate-700 bg-slate-900/40">
-          <div className="max-h-[70vh] flex-1 overflow-y-auto">
-            {visible.length === 0 ? (
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
+        <div className="flex min-w-0 flex-col rounded-xl border border-slate-700 bg-slate-900/40">
+          <div className="max-h-[72vh] flex-1 overflow-y-auto" aria-busy={filterLoading}>
+            {filterError ? (
+              <div role="alert" className="px-4 py-4 text-sm text-amber-300">
+                问题筛选结果读取失败。<button type="button" onClick={auditResults.retry} className="ml-2 underline">重试</button>
+              </div>
+            ) : filterLoading && (
+              <div role="status" className="px-4 py-4 text-xs text-slate-400">
+                {candidatesLoading ? "正在加载候选点，筛选结果尚未完整…" : "正在读取问题筛选结果…"}
+              </div>
+            )}
+            {visible.length === 0 ? !filterLoading && !filterError && (
               <div className="px-4 py-10 text-center text-sm text-slate-500">
                 {displayedCandidates.length === 0 ? "暂无静态分析候选点" : "当前筛选条件下无候选点"}
               </div>
@@ -5357,8 +5575,10 @@ function StaticTaskPanel({
                   <StaticCandidateListItem
                     key={item.candidate.idx}
                     item={item}
+                    result={auditResults.results.get(item.candidate.idx)}
+                    focusRef={listFocus.pinned === item.candidate.idx ? listFocus.targetRef : undefined}
                     active={selectedIndex === item.candidate.idx}
-                    onClick={() => setSelectedIndex(item.candidate.idx)}
+                    onClick={() => { listFocus.release(); setSelectedIndex(item.candidate.idx); }}
                   />
                 ))}
               </ul>
@@ -5369,7 +5589,7 @@ function StaticTaskPanel({
               <button
                 type="button"
                 disabled={safePage === 1}
-                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                onClick={() => { listFocus.release(); setCurrentPage((page) => Math.max(1, page - 1)); }}
                 className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
               >
                 上一页
@@ -5380,7 +5600,7 @@ function StaticTaskPanel({
               <button
                 type="button"
                 disabled={safePage === totalPages}
-                onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                onClick={() => { listFocus.release(); setCurrentPage((page) => Math.min(totalPages, page + 1)); }}
                 className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-30"
               >
                 下一页
@@ -5388,9 +5608,19 @@ function StaticTaskPanel({
             </div>
           )}
         </div>
-        <div className="min-h-[20rem] rounded-xl border border-slate-700 bg-slate-900/40">
+        <div className="min-h-[20rem] min-w-0 rounded-xl border border-slate-700 bg-slate-900/40">
           {selected ? (
-            <StaticCandidateDetail item={selected} />
+            <StaticCandidateDetail
+              key={selected.candidate.idx}
+              scan={scan}
+              item={selected}
+              runtime={selectedRuntime}
+              result={auditResults.results.get(selected.candidate.idx)}
+              resultLoading={auditResults.loading}
+              resultError={auditResults.error}
+              onRetryResult={auditResults.retry}
+              onOpenIssue={onOpenIssue}
+            />
           ) : (
             <div className="flex h-full items-center justify-center px-4 py-16 text-sm text-slate-500">
               从左侧选择一个候选点查看详情
@@ -5461,7 +5691,7 @@ const ALL_STATIC_FILTER = "__all__";
 interface StaticFilterOption {
   value: string;
   label: string;
-  count: number;
+  count?: number;
 }
 
 interface StaticCandidateItem {
@@ -5522,7 +5752,7 @@ function StaticFilterSelect({
         <option value={ALL_STATIC_FILTER}>全部</option>
         {options.map((option) => (
           <option key={option.value} value={option.value}>
-            {option.label} ({option.count})
+            {option.label}{option.count === undefined ? "" : ` (${option.count})`}
           </option>
         ))}
       </select>
@@ -5532,18 +5762,24 @@ function StaticFilterSelect({
 
 function StaticCandidateListItem({
   item,
+  result,
   active,
   onClick,
+  focusRef,
 }: {
   item: StaticCandidateItem;
+  result?: CandidateAuditTaskResult;
   active: boolean;
   onClick: () => void;
+  focusRef?: RefCallback<HTMLButtonElement>;
 }) {
   const fileName = item.candidate.file.split("/").pop() || item.candidate.file;
   return (
     <li>
       <button
         type="button"
+        ref={focusRef}
+        aria-current={active ? "true" : undefined}
         onClick={onClick}
         className={`w-full px-3 py-2.5 text-left transition-colors ${
           active ? "bg-blue-500/15" : item.auditStatus === "running" ? "bg-blue-500/10 hover:bg-blue-500/15" : "hover:bg-slate-800/60"
@@ -5563,6 +5799,7 @@ function StaticCandidateListItem({
             {item.candidate.vuln_type}
           </span>
           <StatusPill label={STATIC_AUDIT_STATUS_LABELS[item.auditStatus]} tone={staticAuditTone(item.auditStatus)} />
+          <AuditFindingBadge result={result} />
         </div>
         {item.candidate.function && (
           <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={item.candidate.function}>
@@ -5574,13 +5811,22 @@ function StaticCandidateListItem({
   );
 }
 
-function StaticCandidateDetail({ item }: { item: StaticCandidateItem }) {
+function StaticCandidateDetail({ scan, item, runtime, result, resultLoading, resultError, onRetryResult, onOpenIssue }: {
+  scan: ScanStatusType;
+  item: StaticCandidateItem;
+  runtime: ScanQueueTask | null;
+  result?: CandidateAuditTaskResult;
+  resultLoading: boolean;
+  resultError: string;
+  onRetryResult: () => void;
+  onOpenIssue: (index: number) => void;
+}) {
   const metadata = item.candidate.metadata && Object.keys(item.candidate.metadata).length > 0
     ? JSON.stringify(item.candidate.metadata, null, 2)
     : "";
   const related = item.candidate.related_functions ?? [];
   return (
-    <div className="max-h-[70vh] overflow-y-auto p-4">
+    <div className="max-h-[72vh] min-w-0 space-y-4 overflow-y-auto p-4">
       <div className="border-b border-slate-800 pb-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -5593,46 +5839,44 @@ function StaticCandidateDetail({ item }: { item: StaticCandidateItem }) {
                 </span>
               )}
             </div>
-            <div className="mt-1 break-all font-mono text-xs text-slate-300">{item.candidate.file}:{item.candidate.line}</div>
-            <div className="mt-1 truncate font-mono text-xs text-slate-500">{item.candidate.function}</div>
           </div>
           <div className="flex flex-wrap gap-2">
             <StatusPill label={STATIC_AUDIT_STATUS_LABELS[item.auditStatus]} tone={staticAuditTone(item.auditStatus)} />
+            <AuditFindingBadge result={result} />
           </div>
         </div>
       </div>
-      <div className="mt-4 space-y-4">
-        <section>
-          <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">候选描述</h4>
-          <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
-            <MarkdownContent content={item.candidate.description || "（无描述）"} />
+      <AuditDetailSection title="审计结果">
+        <AuditResults result={result} status={item.auditStatus} loading={resultLoading}
+          error={resultError} onRetry={onRetryResult} onOpenIssue={onOpenIssue} />
+      </AuditDetailSection>
+      <AuditDetailSection title="审计目标">
+        <DetailGrid items={[
+          ["文件路径", item.candidate.file || "未指定"],
+          ["行号", String(Math.max(1, item.candidate.line || 1))],
+          ["函数", item.candidate.function || "未指定"],
+          ["相关变量", staticCandidateRelatedVariable(item.candidate)],
+          ["问题类型", item.candidate.vuln_type || "未指定"],
+          ...(related.length ? [["相关函数", related.join("、")] as [string, string]] : []),
+        ]} />
+      </AuditDetailSection>
+      {item.vulnerability && (
+        <AuditDetailSection title="AI 审计结论">
+          <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2 [overflow-wrap:anywhere]">
+            <MarkdownContent content={staticAuditConclusion(item.vulnerability)} />
           </div>
-        </section>
-        {item.vulnerability && (
-          <section>
-            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">AI 审计结论</h4>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
-              <MarkdownContent content={staticAuditConclusion(item.vulnerability)} />
-            </div>
-          </section>
-        )}
-        {related.length > 0 && (
-          <section>
-            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">相关函数</h4>
-            <div className="rounded border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-300">
-              {related.join(", ")}
-            </div>
-          </section>
-        )}
-        {metadata && (
-          <section>
-            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">候选元数据</h4>
-            <pre className="max-h-72 overflow-auto rounded border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs leading-5 text-slate-300">
-              {metadata}
-            </pre>
-          </section>
-        )}
-      </div>
+        </AuditDetailSection>
+      )}
+      <AuditPromptSection scan={scan} taskName={staticCandidateTaskName(scan.scan_id, item.candidate)}
+        runtime={runtime} pending={item.auditStatus === "pending"} />
+      {metadata && (
+        <details className="rounded border border-slate-800 bg-slate-950/40">
+          <summary className="cursor-pointer px-3 py-2 text-xs text-slate-500 hover:text-slate-300">候选元数据</summary>
+          <pre className="max-h-72 overflow-auto border-t border-slate-800 px-3 py-2 font-mono text-xs leading-5 text-slate-300">
+            {metadata}
+          </pre>
+        </details>
+      )}
     </div>
   );
 }

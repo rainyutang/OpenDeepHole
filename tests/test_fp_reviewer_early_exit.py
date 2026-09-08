@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from deephole_client.fp_review import run_fp_review
+from task_agent.llm_json import LLMJsonParseError, parse_llm_json_schema
 
 
 def _prompt_schema(prompt: str) -> dict:
@@ -165,6 +166,77 @@ class FpReviewerEarlyExitTests(unittest.IsolatedAsyncioTestCase):
                 _prompt_schema(call.kwargs["prompt"]),
                 call.kwargs["output_schema"],
             )
+
+        for call in invoke.await_args_list[:2]:
+            schema = call.kwargs["output_schema"]
+            payload = _stage_result("uncertain").structured
+            self.assertEqual(
+                parse_llm_json_schema(json.dumps(payload), schema),
+                payload,
+            )
+        final_schema = invoke.await_args_list[2].kwargs["output_schema"]
+        self.assertEqual(
+            final_schema["properties"]["verdict"]["enum"],
+            ["true_positive", "false_positive"],
+        )
+        for verdict in ("true_positive", "false_positive"):
+            with self.subTest(accepted_verdict=verdict):
+                payload = _stage_result(verdict).structured
+                self.assertEqual(
+                    parse_llm_json_schema(json.dumps(payload), final_schema),
+                    payload,
+                )
+        for verdict in ("uncertain", "", None, True, False, "tp", "fp"):
+            with self.subTest(rejected_verdict=verdict):
+                payload = {
+                    **_stage_result("true_positive", reason="缺陷确认").structured,
+                    "verdict": verdict,
+                }
+                with self.assertRaises(LLMJsonParseError) as caught:
+                    parse_llm_json_schema(json.dumps(payload), final_schema)
+                self.assertEqual(caught.exception.reason, "schema_mismatch")
+
+    async def test_final_judge_false_positive_and_failure_preserve_stage_reports(self) -> None:
+        failed_stage = SimpleNamespace(
+            status="failure",
+            text="Final verdict still violates the JSON Schema after retries",
+            structured=None,
+            output_source={},
+        )
+        for final_stage in (_stage_result("false_positive"), failed_stage):
+            with self.subTest(final_status=final_stage.status):
+                invoke = AsyncMock(side_effect=[
+                    _stage_result("true_positive", reason="正方报告"),
+                    _stage_result("uncertain", reason="反方报告"),
+                    final_stage,
+                ])
+                with tempfile.TemporaryDirectory() as tmp, patch(
+                    "task_agent.run_opencode_task", new=invoke,
+                ):
+                    result = await run_fp_review(
+                        method_id="adversarial",
+                        project_path=tmp,
+                        code_scan_path=tmp,
+                        work_dir=Path(tmp) / "work",
+                        scan_id="scan-1",
+                        review_id="review-final",
+                        vuln_index=3,
+                        vulnerability=_vulnerability(),
+                    )
+                self.assertEqual(invoke.await_count, 3)
+                self.assertEqual(
+                    list(result["stage_outputs"]),
+                    ["prove_bug", "prove_fp", "final_judge"],
+                )
+                self.assertIn("正方报告", result["stage_outputs"]["prove_bug"])
+                self.assertIn("反方报告", result["stage_outputs"]["prove_fp"])
+                if final_stage.status == "success":
+                    self.assertEqual(result["status"], "success")
+                    self.assertEqual(result["verdict"], "false_positive")
+                else:
+                    self.assertEqual(result["status"], "error")
+                    self.assertNotIn("verdict", result)
+                    self.assertEqual(result["error_message"], failed_stage.text)
 
     async def test_history_input_no_longer_adds_history_match_stage(self) -> None:
         invoke = AsyncMock(return_value=_stage_result("false_positive"))

@@ -31,6 +31,16 @@ Prompt 末尾同时提供输出 JSON Schema。你必须审查三份报告的完�
 
 如果正方和反方冲突，以真实代码证据为准。不能因为问题难利用就判定误报；也不能因为静态分析命中就判定真实问题。
 
+已经确认真实代码缺陷，但外部触发证据不足时，应返回
+`verdict=true_positive`、`revised_severity=medium`，并在报告中明确说明证据限制。
+
+`reason`、`stage_markdown` 和 `vulnerability_report` 中的最终结论必须与 `verdict`
+一致。报告已经确认缺陷时，`verdict` 必须为 `true_positive`；报告最终判定误报时，
+`verdict` 必须为 `false_positive`。
+
+仍未验证的触发条件、影响范围或其他限制应在报告的 `Residual Risk` 中说明，
+不能用 `uncertain` 代替最终裁决。
+
 ## 阶段 Markdown 输出
 
 你必须在最终 JSON 的 `stage_markdown` 字段中返回完整裁决，包含完整代码链、关键代码片段和证据说明，风格参考 memleak：读者不重新查看代码也能判断是否是问题。
@@ -49,9 +59,9 @@ Markdown 至少包含：
 
 分析完成后，最终回复必须输出 JSON，提供：
 
-- `verdict`：`true_positive` / `false_positive` / `uncertain`
+- `verdict`：必须为字符串 `true_positive` 或 `false_positive`，只能选择一个
 - `revised_severity`：`high` / `medium` / `low`，无法定级时为空字符串
-- `reason`：一句话总结最终裁决
+- `reason`：非空的一句话总结最终裁决，必须与 `verdict` 一致
 - `evidence`：关键 `path:line` 及证据数组
 - `stage_markdown`：包含完整代码链、关键代码片段和说明，读者不重新查看代码也能判断结论
 - `vulnerability_report`：`verdict=true_positive` 时必须填写 Markdown 问题报告
@@ -62,7 +72,7 @@ Markdown 至少包含：
 [FINAL-JUDGE-RESULT]
 
 Verdict:
-TRUE_POSITIVE / FALSE_POSITIVE
+true_positive 或 false_positive，填写与 JSON verdict 完全相同的一个值。
 
 Severity:
 high / medium / low
@@ -83,10 +93,10 @@ Why Prove-FP Is Accepted Or Rejected:
 说明反方证据哪些成立、哪些不成立。
 
 Final Reason:
-给出最终判断。
+给出与 verdict 一致的最终判断。
 
 Residual Risk:
-说明仍不确定的点。
+说明仍未验证的触发条件、影响范围或其他证据限制。
 ```
 
 如果最终仍认为是问题，`vulnerability_report` 必须包含这些 Markdown 二级标题：

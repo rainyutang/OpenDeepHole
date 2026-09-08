@@ -1,4 +1,20 @@
-import type { Vulnerability } from "./types";
+import type { Candidate, ScanCandidate, Vulnerability } from "./types";
+
+export function staticCandidateRelatedVariable(candidate: Candidate): string {
+  const metadata = candidate.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return "未指定";
+  // Keep the same precedence as candidate_audit.runner._related_variable().
+  const subject = String(metadata.subject || "").trim();
+  if (subject) return subject;
+  const variables = [metadata.focus_variable, metadata.target_variable]
+    .map((value) => String(value || "").trim()).filter(Boolean);
+  return [...new Set(variables)].join("、") || "未指定";
+}
+
+export function staticCandidateTaskName(scanId: string, candidate: ScanCandidate): string {
+  const prefix = candidate.function === "__project__" ? "project-audit" : "candidate-audit";
+  return `${prefix}-${scanId}-${candidate.idx}`;
+}
 
 export const STATIC_AUDIT_STATUS_ORDER = [
   "success",
