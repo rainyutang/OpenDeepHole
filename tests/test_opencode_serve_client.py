@@ -5667,25 +5667,89 @@ def test_start_locked_uses_bootstrap_cwd_without_runtime_workspace(monkeypatch, 
     asyncio.run(run())
 
 
-def test_windows_batch_executable_uses_command_processor(monkeypatch) -> None:
+@pytest.mark.parametrize("executable", [
+    r"C:\Program Files\nodejs\opencode.CMD",
+    r"C:\Program Files\中文目录\opencode.bAt",
+    r"C:\Users\tester\AppData\Roaming\npm\nga.cmd",
+])
+@pytest.mark.parametrize("arguments", [
+    ("--version",),
+    ("serve", "--hostname", "127.0.0.1", "--port", "51612"),
+])
+def test_windows_batch_executable_uses_command_processor(
+    monkeypatch,
+    executable: str,
+    arguments: tuple[str, ...],
+) -> None:
     monkeypatch.setattr("task_agent.serve_client.sys.platform", "win32")
     monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
 
-    argv = _executable_argv(
-        r"C:\Users\tester\AppData\Roaming\npm\nga.cmd",
-        "serve",
-        "--port",
-        "4096",
-    )
+    argv = _executable_argv(executable, *arguments)
 
-    assert argv[:4] == [
+    assert argv == [
         r"C:\Windows\System32\cmd.exe",
         "/d",
-        "/s",
         "/c",
+        "call",
+        executable,
+        *arguments,
     ]
-    assert "nga.cmd" in argv[4]
-    assert "serve --port 4096" in argv[4]
+    # This is the final conversion Popen performs before CreateProcess.
+    rendered = subprocess.list2cmdline(argv)
+    assert r'\"' not in rendered
+    if " " in executable:
+        assert f'"{executable}"' in rendered
+
+
+@pytest.mark.parametrize(("platform", "executable"), [
+    ("win32", r"C:\Program Files\OpenCode\opencode.exe"),
+    ("linux", "/opt/program files/opencode"),
+    ("linux", "/opt/program files/opencode.cmd"),
+])
+def test_native_executable_preserves_separate_arguments(
+    monkeypatch,
+    platform: str,
+    executable: str,
+) -> None:
+    monkeypatch.setattr("task_agent.serve_client.sys.platform", platform)
+
+    assert _executable_argv(executable, "serve", "--port", "51612") == [
+        executable, "serve", "--port", "51612",
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows cmd.exe")
+def test_windows_batch_path_with_spaces_runs_version_and_serve(tmp_path: Path) -> None:
+    executable = tmp_path / "Program Files" / "中文目录" / "opencode.CMD"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(
+        b'@echo off\r\n'
+        b'if "%~1"=="--version" (\r\n'
+        b'  echo 1.2.3\r\n'
+        b'  exit /b 0\r\n'
+        b')\r\n'
+        b'echo %*\r\n'
+        b'exit /b 0\r\n'
+    )
+
+    version = asyncio.run(_run_command_text_async(
+        _executable_argv(str(executable), "--version"),
+    ))
+    assert version.strip() == "1.2.3"
+
+    completed = subprocess.run(
+        _executable_argv(
+            str(executable), "serve", "--hostname", "127.0.0.1", "--port", "51612",
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "serve --hostname 127.0.0.1 --port 51612"
 
 
 def test_async_command_probe_timeout_stops_its_windows_process_tree(
@@ -5760,6 +5824,20 @@ def test_async_command_probe_reads_stdout_and_stderr_without_pipes() -> None:
 
     assert "probe-stdout" in result
     assert "probe-stderr" in result
+
+
+def test_async_command_probe_nonzero_exit_keeps_error_out_of_version(caplog) -> None:
+    from task_agent import serve_client
+
+    caplog.set_level("DEBUG", logger=serve_client.logger.name)
+    result = asyncio.run(_run_command_text_async([
+        sys.executable,
+        "-c",
+        "import sys; print('probe-failed', file=sys.stderr); sys.exit(1)",
+    ]))
+
+    assert result == ""
+    assert "exit_code=1 output=probe-failed" in caplog.text
 
 
 def test_stop_command_probe_process_uses_windows_taskkill_tree(

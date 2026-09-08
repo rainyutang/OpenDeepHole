@@ -702,12 +702,14 @@ def _executable_argv(executable: str, *arguments: str) -> list[str]:
         or shutil.which("cmd.exe")
         or "cmd.exe"
     )
+    # Popen serializes argv on Windows. Prejoining it would escape the quotes
+    # around paths with spaces a second time, which cmd.exe treats literally.
     return [
         command_processor,
         "/d",
-        "/s",
         "/c",
-        subprocess.list2cmdline(direct),
+        "call",
+        *direct,
     ]
 
 
@@ -866,6 +868,7 @@ async def _run_command_text_async(
             proc.returncode,
             _one_line_preview(output, 500),
         )
+        return ""
     return output
 
 
