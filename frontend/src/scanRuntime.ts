@@ -352,6 +352,15 @@ export function normalizeOpenCodePool(value: unknown): OpenCodePoolStatus | null
   } as OpenCodePoolStatus;
 }
 
+/** Overview-based snapshots omit artifacts; their null is not a deletion. */
+export function mergeScanSnapshot(previous: ScanStatus | null, incoming: ScanStatus): ScanStatus {
+  if (previous?.scan_id !== incoming.scan_id) return incoming;
+  return {
+    ...incoming,
+    threat_analysis: incoming.threat_analysis ?? previous.threat_analysis,
+  };
+}
+
 export function normalizeScanStatus(value: unknown): ScanStatus | null {
   if (
     !isRecord(value)

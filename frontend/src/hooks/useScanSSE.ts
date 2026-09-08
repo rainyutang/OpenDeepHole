@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { scanSSEUrl, getScanOverview, getScanStatus, getScanDetailItem, getFpReview, getFpReviewOverview, getAgentIndexStatus } from "../api/client";
-import { getScanThreatAnalysis } from "../features/threatAnalysis/api";
 import {
   isRecord,
+  mergeScanSnapshot,
   normalizeScanCandidate,
   normalizeScanEvent,
   selectOpenCodePoolSnapshot,
@@ -176,6 +176,7 @@ export interface ScanSSEHandlers {
   onFpReviewFinish?: (data: FpReviewFinishEvent) => void;
   onVulnerabilityValidation?: (data: VulnerabilityValidationEvent) => void;
   onThreatAnalysis?: (data: ThreatAnalysisEvent) => void;
+  onThreatAnalysisRefresh?: (force?: boolean) => void;
   onThreatAnalysisRun?: (data: ThreatAnalysisRunEvent) => void;
   onThreatAuditTask?: (data: ThreatAuditTaskEvent) => void;
   onMiningEngineRun?: (data: MiningEngineRunEvent) => void;
@@ -204,11 +205,10 @@ async function refreshFullState(
       if (!isCurrent()) return previous;
       if (!previous || previous.scan_id !== scanId) return data;
       return {
-        ...data,
+        ...mergeScanSnapshot(previous, data),
         candidates: previous.candidates,
         vulnerabilities: previous.vulnerabilities,
         skill_reports: previous.skill_reports,
-        threat_analysis: previous.threat_analysis,
         threat_audit_tasks: previous.threat_audit_tasks,
         validations: previous.validations,
         events: previous.events,
@@ -493,20 +493,21 @@ export function useScanSSE(
       fullRefresh = false;
       const notices = [...pendingResources.values()];
       pendingResources.clear();
+      // Artifact invalidations also apply when another notice requires a full
+      // scan refresh. The overview itself intentionally has no artifact body.
+      if (reloadAll || notices.some((notice) => notice.resource === "threat-analysis")) {
+        handlersRef.current.onThreatAnalysisRefresh?.(true);
+      }
       try {
         if (reloadAll || notices.some((notice) => typeof notice.index !== "number" && notice.resource !== "threat-analysis")) {
           const data = await getScanStatus(scanId);
-          if (!disposed) stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId ? data : previous);
+          if (!disposed) stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, data) : previous);
           const job = await getFpReview(scanId).catch(() => null);
           if (!disposed && job) stateSettersRef.current.setFpReview(job);
         } else {
           for (const notice of notices) {
             if (disposed) break;
-            if (notice.resource === "threat-analysis") {
-              const analysis = await getScanThreatAnalysis(scanId);
-              if (!disposed) stateSettersRef.current.setScan((previous) => previous?.scan_id === scanId ? { ...previous, threat_analysis: analysis } : previous);
-              continue;
-            }
+            if (notice.resource === "threat-analysis") continue;
             const item = await getScanDetailItem(scanId, notice.resource, notice.index!, notice.resource !== "validations");
             if (disposed) break;
             if (notice.resource === "candidates") handlersRef.current.onScanCandidateAudit?.({ candidate: normalizeScanCandidate(item, notice.index!) });
@@ -562,6 +563,7 @@ export function useScanSSE(
     handle<ScanFinishEvent>("scan_finish", (d) => {
       flushPendingStatus();
       handlersRef.current.onScanFinish?.(d);
+      handlersRef.current.onThreatAnalysisRefresh?.();
     });
     handle<FpReviewStartedEvent>("fp_review_started", (d) => handlersRef.current.onFpReviewStarted?.(d));
     handle<FpReviewProgressEvent>("fp_review_progress", (d) => handlersRef.current.onFpReviewProgress?.(d));
@@ -572,7 +574,10 @@ export function useScanSSE(
       validation: normalizeValidation(d.validation),
     }));
     handle<ThreatAnalysisEvent>("threat_analysis", (d) => handlersRef.current.onThreatAnalysis?.(d));
-    handle<ThreatAnalysisRunEvent>("threat_analysis_run", (d) => handlersRef.current.onThreatAnalysisRun?.(d));
+    handle<ThreatAnalysisRunEvent>("threat_analysis_run", (d) => {
+      handlersRef.current.onThreatAnalysisRun?.(d);
+      if (d.run.status === "success") handlersRef.current.onThreatAnalysisRefresh?.(true);
+    });
     handle<ThreatAuditTaskEvent>("threat_audit_task", (d) => handlersRef.current.onThreatAuditTask?.({
       task: normalizeThreatTask(d.task),
     }));
@@ -582,6 +587,7 @@ export function useScanSSE(
     es.onopen = () => {
       setConnected(true);
       refreshState();
+      handlersRef.current.onThreatAnalysisRefresh?.(true);
     };
 
     es.onerror = () => {
@@ -589,7 +595,10 @@ export function useScanSSE(
     };
 
     // Fallback poll every 30s as safety net
-    const fallbackTimer = setInterval(refreshState, 30_000);
+    const fallbackTimer = setInterval(() => {
+      refreshState();
+      handlersRef.current.onThreatAnalysisRefresh?.();
+    }, 30_000);
 
     return () => {
       disposed = true;

@@ -11,6 +11,7 @@
     "test:threat-audit": "node tests/threatAuditResults.test.mjs",
     "test:audit-navigation": "node tests/auditNavigation.test.mjs",
     "test:issue-loading": "node tests/issueLoading.test.mjs",
+    "test:threat-analysis-loading": "node tests/threatAnalysisLoading.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

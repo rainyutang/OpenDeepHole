@@ -5,12 +5,12 @@ import remarkGfm from "remark-gfm";
 import { getScanDetailItem, getScanTaskDetail, getScanTasksPage, getFpReviewResultsPage, getScanStatus, getScanOverview, getScanCandidatesPage, getScanEventsPage, getScanThreatTasksPage, getScanValidationsPage, getScanVulnerabilitiesPage, stopScan, resumeScan, downloadScanReport, downloadScanReportZip, getCheckers, getCheckerCatalog, getMiningEngineCatalog, isPublicScan, updateScanFeedback, getSkillContent, triggerFpReview, stopFpReview, getFpReview, getFpReviewSkill, getScanGitHistory, getSkillReports, getAgentIndexStatus, triggerVulnerabilityValidation, stopVulnerabilityValidation } from "../api/client";
 import {
   getThreatAnalysisResultCounts,
-  getScanThreatAnalysis,
   isThreatAnalysisResultReady,
   THREAT_ANALYSIS_RESULT_TABS,
   ThreatAnalysisPanel,
 } from "../features/threatAnalysis";
 import type { ThreatAnalysisResultTab } from "../features/threatAnalysis";
+import { useThreatAnalysisResult } from "../features/threatAnalysis/useThreatAnalysisResult";
 import { ThreatAuditFindingBadge, ThreatAuditResults, useThreatAuditResults } from "../features/threatAudit/ThreatAuditResults";
 import type { ThreatAuditTaskResult } from "../types";
 import { AuditFindingBadge, AuditResults } from "../features/auditResults/AuditResults";
@@ -39,6 +39,7 @@ import { ThemeToggle } from "./ThemeToggle";
 import {
   findIndexedVulnerability,
   mergeIndexedVulnerabilities,
+  mergeScanSnapshot,
   normalizeOpenCodePool,
   normalizeValidation,
   selectOpenCodePoolSnapshot,
@@ -773,7 +774,11 @@ export default function ScanStatus({ scanId, onBack }: Props) {
 
   // Git history mined patterns
   const [gitHistory, setGitHistory] = useState<HistoryPattern[]>([]);
-  const [threatAnalysisLoading, setThreatAnalysisLoading] = useState(false);
+  const {
+    loading: threatAnalysisLoading,
+    refresh: refreshThreatAnalysis,
+    acceptAnalysis: acceptThreatAnalysis,
+  } = useThreatAnalysisResult(scanId, scan, setScan);
 
   const completeButThreatActive = Boolean(scan && scan.status === "complete" && hasActiveThreatWork(scan));
   const isRunning = scan && (
@@ -991,7 +996,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
   // Initial full-state hydration on mount
   useEffect(() => {
     let cancelled = false;
-    let loadedThreatAnalysis: ThreatAnalysis | null = null;
     pendingInitialOpenCodePoolRef.current = undefined;
     setScan((previous) => previous?.scan_id === scanId ? previous : null);
     setSelectedFeedbackIds(null);
@@ -1018,11 +1022,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
             { allowClear: pendingPool === null },
           );
           return {
-            ...data,
+            ...mergeScanSnapshot(previous, data),
             opencode_pool: opencodePool,
-            threat_analysis: loadedThreatAnalysis
-              ?? (previous?.scan_id === scanId ? previous.threat_analysis : null)
-              ?? data.threat_analysis,
           };
         });
         setSelectedFeedbackIds(new Set(data.feedback_ids ?? []));
@@ -1046,17 +1047,6 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         if (!cancelled) setGitHistory(Array.isArray(history) ? history : []);
       })
       .catch(() => {});
-    setThreatAnalysisLoading(true);
-    getScanThreatAnalysis(scanId)
-      .then((analysis) => {
-        if (cancelled) return;
-        loadedThreatAnalysis = analysis;
-        setScan((prev) => prev?.scan_id === scanId ? { ...prev, threat_analysis: analysis } : prev);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setThreatAnalysisLoading(false);
-      });
     return () => {
       cancelled = true;
     };
@@ -1333,13 +1323,12 @@ export default function ScanStatus({ scanId, onBack }: Props) {
       scheduleOverviewSummaryRefresh();
     },
     onThreatAnalysis: (data) => {
-      setThreatAnalysisLoading(false);
+      acceptThreatAnalysis(data.analysis);
       setScan((prev) => {
         if (!prev) return prev;
         const previousRun = prev.threat_analysis_run;
         return {
           ...prev,
-          threat_analysis: data.analysis,
           threat_analysis_run: {
             status: "success",
             error_message: "",
@@ -1349,10 +1338,8 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         };
       });
     },
+    onThreatAnalysisRefresh: refreshThreatAnalysis,
     onThreatAnalysisRun: (data) => {
-      if (["success", "error", "cancelled"].includes(data.run.status)) {
-        setThreatAnalysisLoading(false);
-      }
       setScan((prev) => prev ? { ...prev, threat_analysis_run: data.run } : prev);
     },
     onThreatAuditTask: (data) => {
@@ -1511,7 +1498,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         } : prev);
       }
     },
-  }), [scanId, scheduleOverviewSummaryRefresh]);
+  }), [scanId, scheduleOverviewSummaryRefresh, refreshThreatAnalysis, acceptThreatAnalysis]);
 
   const sseStateSetters = useMemo<SSEStateSetters>(() => ({
     setScan,
@@ -1690,7 +1677,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
         alert("已记录停止请求，但 Agent 暂未确认；重连后将继续停止。");
       }
       const next = await getScanStatus(scanId);
-      setScan(next);
+      setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, next) : previous);
     } catch {
       // The next poll can still reconcile an Agent-side stop.
     } finally {
@@ -1703,7 +1690,7 @@ export default function ScanStatus({ scanId, onBack }: Props) {
     try {
       await resumeScan(scanId);
       const next = await getScanStatus(scanId);
-      setScan(next);
+      setScan((previous) => previous?.scan_id === scanId ? mergeScanSnapshot(previous, next) : previous);
     } catch (err: unknown) {
       const msg = err && typeof err === "object" && "response" in err
         ? (err as { response: { data: { detail: string } } }).response?.data?.detail
