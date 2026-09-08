@@ -3381,11 +3381,11 @@ class SqliteScanStore(ScanStoreBase):
     ) -> ScanCandidate | None:
         updated_at = datetime.now(timezone.utc).isoformat()
         candidate_idx = int(candidate_idx)
-        if state not in {"pending", "running", "success", "failed"}:
+        if state not in {"pending", "queued", "running", "success", "failed"}:
             raise ValueError(f"invalid candidate audit state: {state}")
         if state in {"success", "failed"} and result is None:
             raise ValueError("terminal candidate audit state requires one result")
-        if state in {"pending", "running"} and result is not None:
+        if state in {"pending", "queued", "running"} and result is not None:
             raise ValueError("non-terminal candidate audit state cannot include a result")
         if result is not None:
             result = result.model_copy(update={"audit_index": candidate_idx})

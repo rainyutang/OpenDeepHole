@@ -5,6 +5,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+import pytest
+from fastapi import FastAPI
+
 from backend.api import agent as agent_api
 from backend.api import scan as scan_api
 from backend.models import (
@@ -73,6 +77,163 @@ def _store() -> tuple[tempfile.TemporaryDirectory, SqliteScanStore]:
     )
     store.save_scan(scan, meta)
     return temporary, store
+
+
+@pytest.fixture
+def candidate_store():
+    temporary, store = _store()
+    try:
+        store.replace_scan_candidates("scan-1", [ScanCandidate(
+            idx=7,
+            file="same.c",
+            line=7,
+            function="same_function",
+            description="candidate",
+            vuln_type="npd",
+        )])
+        yield store
+    finally:
+        store.close()
+        temporary.cleanup()
+
+
+async def _post_candidate_audit(payload: dict) -> httpx.Response:
+    app = FastAPI()
+    app.include_router(agent_api.router)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post("/api/agent/scan/scan-1/candidate-audit", json=payload)
+
+
+@pytest.mark.parametrize("terminal_state", ["success", "failed"])
+def test_candidate_audit_lifecycle_counts_only_terminal_results(
+    candidate_store: SqliteScanStore,
+    terminal_state: str,
+) -> None:
+    store = candidate_store
+    for state in ("pending", "queued", "running", terminal_state):
+        terminal = state == terminal_state
+        result = (
+            _vulnerability(
+                audit_index=99,
+                verdict="not_confirmed" if terminal_state == "success" else "failed",
+            )
+            if terminal
+            else None
+        )
+        updated = store.update_scan_candidate_audit(
+            "scan-1",
+            7,
+            state=state,
+            result=result,
+            vulnerability_idx=None,
+            dedup_decision={},
+        )
+        persisted = store.list_scan_candidates("scan-1")[0]
+        assert persisted == updated
+        assert persisted.idx == 7
+        assert persisted.audit_state == state
+        assert persisted.audit_updated_at
+        if terminal:
+            assert persisted.audit_result == result.model_copy(update={"audit_index": 7})
+        else:
+            assert persisted.audit_result is None
+        assert store.count_terminal_candidate_audits("scan-1") == int(terminal)
+        assert store.get_processed_candidate_indexes("scan-1") == ({7} if terminal else set())
+        counts = store.load_scan_overview("scan-1")[2]
+        assert counts["candidates"] == 1
+        for audit_state in ("pending", "queued", "running", "success", "failed"):
+            assert counts[f"candidate_audit_{audit_state}"] == int(audit_state == state)
+
+
+def test_agent_queued_candidate_report_persists_and_publishes_without_advancing_progress(
+    candidate_store: SqliteScanStore,
+) -> None:
+    store = candidate_store
+    live = store.load_scan("scan-1")[0]
+    with (
+        patch("backend.api.agent.get_scan_store", return_value=store),
+        patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
+        patch("backend.api.agent._running_scans", {"scan-1": live}),
+        patch("backend.sse.publish") as publish,
+    ):
+        response = asyncio.run(_post_candidate_audit({
+            "candidate_idx": 7,
+            "state": "queued",
+            "result": None,
+            "completed_candidates": 1,
+            "total_candidates": 1,
+        }))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "candidate_idx": 7,
+        "state": "queued",
+        "processed": 0,
+        "total": 1,
+        "vulnerability_idx": None,
+    }
+    persisted = store.list_scan_candidates("scan-1")[0]
+    assert persisted.audit_state == "queued"
+    assert persisted.audit_result is None
+    assert persisted.audit_updated_at
+    assert live.candidates == [persisted]
+    assert live.processed_candidates == 0
+    assert store.load_scan("scan-1")[0].processed_candidates == 0
+    assert store.load_scan_overview("scan-1")[2]["candidate_audit_queued"] == 1
+    publish.assert_any_call("scan-1", "scan_candidate_audit", {
+        "candidate": persisted.model_dump(mode="json"),
+    })
+    status_events = [
+        call.args[2] for call in publish.call_args_list
+        if call.args[1] == "scan_status"
+    ]
+    assert status_events[-1]["processed_candidates"] == 0
+
+
+@pytest.mark.parametrize(("state", "with_result", "error"), [
+    ("unknown", False, "invalid candidate audit state"),
+    ("pending", True, "non-terminal candidate audit state cannot include a result"),
+    ("queued", True, "non-terminal candidate audit state cannot include a result"),
+    ("running", True, "non-terminal candidate audit state cannot include a result"),
+    ("success", False, "terminal candidate audit state requires one result"),
+    ("failed", False, "terminal candidate audit state requires one result"),
+])
+def test_invalid_candidate_audit_reports_do_not_change_stored_candidate(
+    candidate_store: SqliteScanStore,
+    state: str,
+    with_result: bool,
+    error: str,
+) -> None:
+    store = candidate_store
+    before = store.list_scan_candidates("scan-1")[0]
+    result = _vulnerability(audit_index=7, verdict="not_confirmed") if with_result else None
+    with (
+        patch("backend.api.agent.get_scan_store", return_value=store),
+        patch("backend.api.agent.run_store_call", side_effect=_direct_store_call),
+        patch("backend.api.agent._running_scans", {}),
+        patch("backend.sse.publish") as publish,
+    ):
+        response = asyncio.run(_post_candidate_audit({
+            "candidate_idx": 7,
+            "state": state,
+            "result": result.model_dump(mode="json") if result is not None else None,
+        }))
+    assert response.status_code == 422
+    publish.assert_not_called()
+    assert store.list_scan_candidates("scan-1") == [before]
+
+    with pytest.raises(ValueError, match=error):
+        store.update_scan_candidate_audit(
+            "scan-1",
+            7,
+            state=state,
+            result=result,
+            vulnerability_idx=None,
+            dedup_decision={},
+        )
+    assert store.list_scan_candidates("scan-1") == [before]
 
 
 def test_same_location_candidates_keep_distinct_results_by_index() -> None:
