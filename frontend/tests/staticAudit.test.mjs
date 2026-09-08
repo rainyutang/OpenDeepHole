@@ -25,6 +25,22 @@ function vulnerability(overrides = {}) {
   };
 }
 
+test("candidate variables use the same subject and fallback order as the audit prompt", () => {
+  const candidate = { description: "变量 old_description 不应参与取值" };
+  assert.equal(audit.staticCandidateRelatedVariable({ ...candidate,
+    metadata: { subject: " data->buffer ", focus_variable: "length", target_variable: "destination" },
+  }), "data->buffer");
+  assert.equal(audit.staticCandidateRelatedVariable({ ...candidate,
+    metadata: { subject: " ", focus_variable: " length ", target_variable: "destination" },
+  }), "length、destination");
+  assert.equal(audit.staticCandidateRelatedVariable({ ...candidate,
+    metadata: { focus_variable: " length ", target_variable: "length" },
+  }), "length");
+  for (const metadata of [undefined, null, {}, [], "length", { subject: " ", target_variable: "" }]) {
+    assert.equal(audit.staticCandidateRelatedVariable({ ...candidate, metadata }), "未指定");
+  }
+});
+
 test("keeps the requested status labels and order", () => {
   assert.deepEqual(audit.STATIC_AUDIT_STATUS_ORDER, [
     "success",

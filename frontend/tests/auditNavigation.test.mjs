@@ -75,6 +75,203 @@ async function mount(component, props, options) {
   return root;
 }
 
+function staticProps(value, overrides = {}) {
+  return { scan: value, indexProgress: { current: 0, total: 0 }, candidates: value.candidates,
+    vulnerabilities: value.vulnerabilities, events: [], fpReview: null, resultRevision: 0,
+    onOpenIssue: () => {}, ...overrides };
+}
+function staticRows(root) {
+  return root.root.findAllByType("button").filter((item) => item.parent?.type === "li");
+}
+function staticIndexes(root) {
+  return staticRows(root).map((item) => Number(textContent(item).match(/^#(\d+)/)[1]));
+}
+function filter(root, label) {
+  const select = root.root.findAllByType("select").find((item) => textContent(item.parent).startsWith(label));
+  assert.ok(select, `Missing filter: ${label}`);
+  return select;
+}
+async function setFilter(root, label, value) {
+  await act(async () => filter(root, label).props.onChange({ target: { value } }));
+}
+function promptText(root) {
+  const title = root.root.findAllByType("h4").find((item) => textContent(item) === "Prompt");
+  assert.ok(title, "Missing Prompt section");
+  return textContent(title.parent);
+}
+
+test("static details show prompt inputs and associate the complete prompt by exact scan and candidate identity", async () => {
+  const candidates = [candidate(0, { file: "src/very-long-directory/copy.c", function: "copy_payload",
+    related_functions: ["check_length"], metadata: { focus_variable: "length", target_variable: "destination" } }),
+  candidate(5, { function: "__project__" })];
+  const fullPrompt = "/oob-audit\n实际的原始 Prompt\n\n历史人工反馈：保持换行\nJSON Schema\n请使用中文输出";
+  const completed = (id, taskName, time, prompt, overrides = {}) => ({ task_id: id, task_name: taskName,
+    finished_at: `2026-09-08T00:00:${time}Z`, outcome: "success", prompt, ...overrides });
+  const pool = { scope_id: "s", models: [], queued_tasks: [], completed_tasks: [
+    completed("old", "candidate-audit-s-0", "01", "旧 Prompt"),
+    completed("latest", "candidate-audit-s-0", "02", fullPrompt),
+    completed("project", "project-audit-s-5", "03", "项目级实际 Prompt"),
+    completed("foreign", "candidate-audit-other-0", "09", "其它扫描 Prompt"),
+    completed("wrong-scope", "candidate-audit-s-0", "09", "跨扫描同名 Prompt", { scope_id: "other" }),
+    completed("prefix", "candidate-audit-s-01", "09", "另一候选 Prompt"),
+    completed("repair", "candidate-audit-s-0 [JSON format repair]", "09", "JSON 修复 Prompt"),
+  ] };
+  client.api.defaults.adapter = async (config) => response(config,
+    config.params.getAll("candidate_indexes").map((index) => result(Number(index))));
+  const value = scan({ candidates, opencode_pool: pool });
+  const root = await mount(StaticTaskPanel, staticProps(value));
+  assert.equal(promptText(root), `Prompt${fullPrompt}`);
+  assert.match(text(root), /文件路径src\/very-long-directory\/copy.c行号17函数copy_payload相关变量length、destination/);
+  assert.match(text(root), /相关函数check_length/);
+  assert.doesNotMatch(text(root), /候选描述/);
+  assert.equal(root.root.findByType("details").props.open, undefined);
+  await act(async () => staticRows(root)[1].props.onClick());
+  assert.equal(promptText(root), "Prompt项目级实际 Prompt");
+  assert.match(text(root), /相关变量未指定/);
+  await act(async () => staticRows(root)[0].props.onClick());
+  const active = scan({ candidates, opencode_pool: { ...pool,
+    queued_tasks: [{ task_name: "candidate-audit-s-0", prompt: "排队 Prompt" }],
+    models: [{ id: "model", active_tasks: [{ task_name: "candidate-audit-s-0", prompt: "当前运行 Prompt" }] }],
+  } });
+  await act(async () => root.update(createElement(StaticTaskPanel, staticProps(active))));
+  assert.equal(promptText(root), "Prompt当前运行 Prompt");
+  await act(async () => root.update(createElement(StaticTaskPanel, staticProps(scan({ candidates,
+    opencode_pool: { ...pool, queued_tasks: [{ task_name: "candidate-audit-s-0", prompt: "排队 Prompt" }] },
+  })))));
+  assert.equal(promptText(root), "Prompt排队 Prompt");
+});
+
+test("static prompt distinguishes not-yet-generated, missing history and unsaved text", async () => {
+  client.api.defaults.adapter = async (config) => response(config,
+    config.params.getAll("candidate_indexes").map((index) => result(Number(index), "unreviewed")));
+  const states = [
+    [scan({ candidates: [candidate(0, { audit_state: "pending", audit_result: null })] }), /Prompt 尚未生成/],
+    [scan({ candidates: [candidate(0)] }), /尚未匹配到该任务/],
+    [scan({ candidates: [candidate(0)], opencode_pool: { scope_id: "s", models: [], queued_tasks: [], completed_tasks: [
+      { task_name: "candidate-audit-s-0", outcome: "success", prompt_length: 500 },
+    ] } }), /未保存完整 Prompt/],
+  ];
+  const root = await mount(StaticTaskPanel, staticProps(states[0][0]));
+  for (const [value, expected] of states) {
+    await act(async () => root.update(createElement(StaticTaskPanel, staticProps(value))));
+    assert.match(promptText(root), expected);
+    assert.doesNotMatch(promptText(root), /白盒审计专家/);
+  }
+});
+
+test("finding filter reads all pages with at most two 100-candidate requests and supports combined filters", async () => {
+  const candidates = Array.from({ length: 225 }, (_, i) => candidate(i, { vuln_type: i === 224 ? "npd" : "oob" }));
+  const value = scan({ candidates });
+  let defer = false;
+  const pending = [];
+  const batches = [];
+  let inFlight = 0;
+  let maximum = 0;
+  client.api.defaults.adapter = (config) => {
+    const indexes = config.params.getAll("candidate_indexes").map(Number);
+    batches.push(indexes);
+    const data = indexes.map((index) => result(index, index >= 200 ? "confirmed" : index === 0 ? "false_positive" : "unreviewed"));
+    if (!defer) return Promise.resolve(response(config, data));
+    inFlight += 1;
+    maximum = Math.max(maximum, inFlight);
+    return new Promise((resolve) => pending.push(() => { inFlight -= 1; resolve(response(config, data)); }));
+  };
+  const root = await mount(StaticTaskPanel, staticProps(value));
+  assert.ok(batches.every((batch) => batch.length <= 21), "default browsing should only read the visible page");
+  batches.length = 0;
+  defer = true;
+  await setFilter(root, "问题", "found");
+  assert.equal(pending.length, 2);
+  assert.match(text(root), /正在读取问题筛选结果/);
+  assert.doesNotMatch(text(root), /当前筛选条件下无候选点/);
+  while (pending.length) {
+    const ready = pending.splice(0);
+    await act(async () => ready.forEach((resolve) => resolve()));
+  }
+  assert.equal(maximum, 2);
+  assert.ok(batches.every((batch) => batch.length <= 100));
+  assert.equal(new Set(batches.flat()).size, 225);
+  assert.deepEqual(staticIndexes(root), Array.from({ length: 20 }, (_, i) => 200 + i));
+  assert.match(text(root), /第 1\/2 页 · 共 25 条/);
+  await act(async () => button(root, "下一页").props.onClick());
+  assert.deepEqual(staticIndexes(root), [220, 221, 222, 223, 224]);
+  assert.match(text(root), /第 2\/2 页/);
+  defer = false;
+  await setFilter(root, "类型", "npd");
+  assert.deepEqual(staticIndexes(root), [224]);
+  await setFilter(root, "审计", "failed");
+  assert.deepEqual(staticIndexes(root), []);
+  assert.match(text(root), /当前筛选条件下无候选点/);
+  await setFilter(root, "审计", "__all__");
+  assert.deepEqual(staticIndexes(root), [224]);
+  await act(async () => root.update(createElement(StaticTaskPanel,
+    staticProps(value, { focusRequest: { key: 0, revision: 1 } }))));
+  assert.equal(filter(root, "问题").props.value, "__all__");
+  assert.equal(filter(root, "类型").props.value, "__all__");
+  assert.equal(textContent(staticRows(root).find((item) => item.props["aria-current"] === "true")).startsWith("#0"), true);
+});
+
+test("finding filter refreshes final verdicts and retries failures without reporting an empty result", async () => {
+  const value = scan({ candidates: Array.from({ length: 125 }, (_, i) => candidate(i)) });
+  let failing = true;
+  let confirmedIndex = 124;
+  client.api.defaults.adapter = async (config) => {
+    const indexes = config.params.getAll("candidate_indexes").map(Number);
+    if (indexes.length > 21 && failing) throw new Error("offline");
+    return response(config, indexes.map((index) => result(index, index === confirmedIndex ? "confirmed" : "false_positive")));
+  };
+  const props = staticProps(value);
+  const root = await mount(StaticTaskPanel, props);
+  await setFilter(root, "问题", "found");
+  assert.match(text(root), /问题筛选结果读取失败/);
+  assert.doesNotMatch(text(root), /当前筛选条件下无候选点/);
+  failing = false;
+  await act(async () => button(root, "重试").props.onClick());
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+  assert.deepEqual(staticIndexes(root), [124]);
+  confirmedIndex = 0;
+  await act(async () => root.update(createElement(StaticTaskPanel, { ...props, resultRevision: 1 })));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
+  assert.deepEqual(staticIndexes(root), [0]);
+  assert.match(text(root), /已关联问题简介 0/);
+  assert.doesNotMatch(text(root), /已关联问题简介 124/);
+});
+
+test("leaving the finding filter cancels pending batches and ignores late responses", async () => {
+  const value = scan({ candidates: Array.from({ length: 225 }, (_, i) => candidate(i)) });
+  const pending = [];
+  client.api.defaults.adapter = (config) => {
+    const indexes = config.params.getAll("candidate_indexes").map(Number);
+    const data = indexes.map((index) => result(index));
+    if (indexes.length <= 21) return Promise.resolve(response(config, data));
+    return new Promise((resolve) => pending.push({ signal: config.signal, resolve: () => resolve(response(config, data)) }));
+  };
+  const root = await mount(StaticTaskPanel, staticProps(value));
+  await setFilter(root, "问题", "found");
+  assert.equal(pending.length, 2);
+  await setFilter(root, "问题", "__all__");
+  assert.ok(pending.every((request) => request.signal.aborted));
+  await act(async () => pending.forEach((request) => request.resolve()));
+  assert.equal(pending.length, 2, "cancelled workers must not launch another batch");
+  assert.deepEqual(staticIndexes(root), Array.from({ length: 20 }, (_, i) => i));
+  assert.doesNotMatch(text(root), /读取失败|正在读取问题筛选结果/);
+});
+
+test("finding filter waits for later candidate pages before declaring that no matches exist", async () => {
+  client.api.defaults.adapter = async (config) => response(config,
+    config.params.getAll("candidate_indexes").map((index) => result(Number(index), Number(index) === 200 ? "confirmed" : "unreviewed")));
+  const value = scan({ candidates: [candidate(0)] });
+  value.detail_pages = { candidates_next_cursor: 0 };
+  const root = await mount(StaticTaskPanel, staticProps(value));
+  await setFilter(root, "问题", "found");
+  assert.match(text(root), /正在加载候选点，筛选结果尚未完整/);
+  assert.doesNotMatch(text(root), /当前筛选条件下无候选点/);
+  const complete = scan({ candidates: [candidate(0), candidate(200)] });
+  await act(async () => root.update(createElement(StaticTaskPanel, staticProps(complete))));
+  assert.deepEqual(staticIndexes(root), [200]);
+  assert.doesNotMatch(text(root), /筛选结果尚未完整/);
+});
+
 test("cached reports, threat tasks and candidate zero navigate without requests", async () => {
   client.api.defaults.adapter = () => assert.fail("cached navigation made an HTTP request");
   const value = scan({
@@ -214,7 +411,7 @@ test("static tasks focus the requested candidate and refresh only visible final 
   }) });
   assert.match(text(root), /第 3\/3 页/);
   assert.match(text(root), /已关联问题简介 44/);
-  assert.match(text(root), /发现问题/);
+  assert.ok(root.root.findAllByType("span").some((item) => textContent(item) === "发现问题"));
   assert.equal(scrolledRows.length, 1);
   assert.match(scrolledRows[0], /#44/);
   assert.ok(batches.every((batch) => batch.length <= 21));
@@ -223,7 +420,8 @@ test("static tasks focus the requested candidate and refresh only visible final 
   verdict = "false_positive";
   await act(async () => root.update(createElement(StaticTaskPanel, { ...props, resultRevision: 1 })));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 350)); });
-  assert.doesNotMatch(text(root), /发现问题|查看问题报告/);
+  assert.ok(root.root.findAllByType("span").every((item) => textContent(item) !== "发现问题"));
+  assert.doesNotMatch(text(root), /查看问题报告/);
   assert.match(text(root), /非问题/);
   assert.equal(scrolledRows.length, 1, "refreshes should not keep pulling the user's scroll position back");
 });

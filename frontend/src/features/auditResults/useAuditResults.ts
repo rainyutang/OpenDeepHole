@@ -89,12 +89,47 @@ function useAuditResults<K extends string | number, R>(
 const threatId = (result: ThreatAuditTaskResult) => result.task_id;
 const candidateId = (result: CandidateAuditTaskResult) => result.candidate_index;
 
+async function getCandidateAuditResultBatches(scanId: string, indexes: number[], signal: AbortSignal) {
+  if (indexes.length <= 100) return getScanCandidateAuditResults(scanId, indexes, signal);
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  const batches: CandidateAuditTaskResult[][] = [];
+  let offset = 0;
+  const worker = async () => {
+    try {
+      while (offset < indexes.length) {
+        controller.signal.throwIfAborted();
+        const start = offset;
+        offset += 100;
+        batches[start / 100] = await getScanCandidateAuditResults(
+          scanId, indexes.slice(start, start + 100), controller.signal,
+        );
+      }
+    } catch (error) {
+      abort();
+      throw error;
+    }
+  };
+  try {
+    // A filter can span every candidate page; keep each request and concurrency bounded.
+    const outcomes = await Promise.allSettled([worker(), worker()]);
+    for (const outcome of outcomes) {
+      if (outcome.status === "rejected") throw outcome.reason;
+    }
+    return batches.flat();
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
 export function useThreatAuditResults(scan: ScanStatus, taskIds: string[], fpReview: FpReviewJob | null, revision: number) {
   return useAuditResults(scan.scan_id, taskIds, getScanThreatAuditResults, threatId,
     [scan.threat_audit_tasks, scan.vulnerabilities, fpReview?.results, revision]);
 }
 
 export function useCandidateAuditResults(scan: ScanStatus, indexes: number[], fpReview: FpReviewJob | null, revision: number) {
-  return useAuditResults(scan.scan_id, indexes, getScanCandidateAuditResults, candidateId,
+  return useAuditResults(scan.scan_id, indexes, getCandidateAuditResultBatches, candidateId,
     [scan.candidates, scan.vulnerabilities, fpReview?.results, revision]);
 }

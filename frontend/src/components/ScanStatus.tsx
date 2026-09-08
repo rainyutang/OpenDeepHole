@@ -48,6 +48,8 @@ import {
   STATIC_AUDIT_STATUS_ORDER,
   staticAuditConclusion,
   staticAuditStatus,
+  staticCandidateRelatedVariable,
+  staticCandidateTaskName,
 } from "../staticAudit";
 import type { StaticAuditStatus } from "../staticAudit";
 import RuntimeErrorBoundary from "./RuntimeErrorBoundary";
@@ -4111,7 +4113,6 @@ function ThreatAuditTaskDetail({
   onRetryResult: () => void;
   onOpenIssue: (index: number) => void;
 }) {
-  const prompt = runtime ? scanQueueTaskPrompt(runtime.task) : "";
   const sessionId = runtime ? scanQueueTaskSessionId(runtime.task) : "";
   const tokenUsage = runtime ? taskTokenUsage(runtime.task) : null;
   const source = formatOutputSource(task.output_source);
@@ -4126,7 +4127,7 @@ function ThreatAuditTaskDetail({
         </div>
         <div className="mt-2 break-all font-mono text-[11px] text-slate-600">{task.task_id}</div>
       </div>
-      <ThreatAuditDetailSection title="审计结果">
+      <AuditDetailSection title="审计结果">
         <ThreatAuditResults
           result={result}
           status={status}
@@ -4135,8 +4136,8 @@ function ThreatAuditTaskDetail({
           onRetry={onRetryResult}
           onOpenIssue={onOpenIssue}
         />
-      </ThreatAuditDetailSection>
-      <ThreatAuditDetailSection title="审计目标">
+      </AuditDetailSection>
+      <AuditDetailSection title="审计目标">
         <DetailGrid items={[
           ["叶子节点", task.surface_name || task.surface_node_id || "—"],
           ["攻击模式", task.method_name || task.method_node_id || "—"],
@@ -4145,14 +4146,14 @@ function ThreatAuditTaskDetail({
           ["风险", task.risk_name || task.risk_id || "—"],
           ["攻击路径", task.attack_path_id || "—"],
         ]} />
-      </ThreatAuditDetailSection>
+      </AuditDetailSection>
       {(task.description || task.code_path_description) && (
-        <ThreatAuditDetailSection title="任务说明">
+        <AuditDetailSection title="任务说明">
           <MarkdownContent content={task.description || task.code_path_description || ""} />
-        </ThreatAuditDetailSection>
+        </AuditDetailSection>
       )}
       {(task.code_path || codePaths.length > 0) && (
-        <ThreatAuditDetailSection title="代码路径">
+        <AuditDetailSection title="代码路径">
           <div className="space-y-2">
             {(codePaths.length > 0 ? codePaths : [{ path: task.code_path, description: task.code_path_description }]).map((item, index) => (
               <div key={`${item.path}-${index}`} className="rounded border border-slate-800 bg-slate-950/60 px-3 py-2">
@@ -4161,16 +4162,16 @@ function ThreatAuditTaskDetail({
               </div>
             ))}
           </div>
-        </ThreatAuditDetailSection>
+        </AuditDetailSection>
       )}
       {task.failure_reason && (
-        <ThreatAuditDetailSection title="失败原因">
+        <AuditDetailSection title="失败原因">
           <div className="whitespace-pre-wrap break-words rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
             {task.failure_reason}
           </div>
-        </ThreatAuditDetailSection>
+        </AuditDetailSection>
       )}
-      <ThreatAuditDetailSection title="执行信息">
+      <AuditDetailSection title="执行信息">
         <DetailGrid items={[
           ["模型", runtime?.modelId || task.output_source?.model || task.output_source?.model_id || "—"],
           ["OpenCode Session ID", sessionId || "尚无记录"],
@@ -4183,9 +4184,9 @@ function ThreatAuditTaskDetail({
               ? task.result_vuln_indexes.map((value) => `#${value}`).join("、")
               : "未记录结果索引"],
         ]} />
-      </ThreatAuditDetailSection>
+      </AuditDetailSection>
       {tokenUsage && (
-        <ThreatAuditDetailSection title="Token 用量">
+        <AuditDetailSection title="Token 用量">
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {[
               ["输入", tokenUsage.input_tokens],
@@ -4198,24 +4199,33 @@ function ThreatAuditTaskDetail({
               <MiniMetric key={String(label)} label={String(label)} value={Number(value)} />
             ))}
           </div>
-        </ThreatAuditDetailSection>
+        </AuditDetailSection>
       )}
-      <ThreatAuditDetailSection title="Prompt">
-        {prompt ? (
-          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300">
-            {prompt}
-          </pre>
-        ) : (
-          <div className="rounded border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">
-            {runtime ? "该任务记录未保存完整 Prompt。" : "尚未匹配到该任务的 OpenCode 队列或历史记录。"}
-          </div>
-        )}
-      </ThreatAuditDetailSection>
+      <AuditPromptSection runtime={runtime} />
     </div>
   );
 }
 
-function ThreatAuditDetailSection({
+function AuditPromptSection({ runtime, pending = false }: { runtime: ScanQueueTask | null; pending?: boolean }) {
+  const prompt = runtime ? scanQueueTaskPrompt(runtime.task) : "";
+  const notGenerated = runtime?.status === "planned" || (!runtime && pending);
+  return (
+    <AuditDetailSection title="Prompt">
+      {prompt ? (
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300 [overflow-wrap:anywhere]">
+          {prompt}
+        </pre>
+      ) : (
+        <div className="rounded border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs text-slate-500">
+          {notGenerated ? "Prompt 尚未生成，进入排队或运行后显示。"
+            : runtime ? "该任务记录未保存完整 Prompt。" : "尚未匹配到该任务的 OpenCode 队列或历史记录。"}
+        </div>
+      )}
+    </AuditDetailSection>
+  );
+}
+
+function AuditDetailSection({
   title,
   children,
 }: {
@@ -5238,6 +5248,7 @@ export function StaticTaskPanel({
   const [selectedIndex, setSelectedIndex] = useState<number | null>(focusRequest?.key ?? null);
   const [typeFilter, setTypeFilter] = useState(ALL_STATIC_FILTER);
   const [auditFilter, setAuditFilter] = useState(ALL_STATIC_FILTER);
+  const [findingFilter, setFindingFilter] = useState(ALL_STATIC_FILTER);
   const [currentPage, setCurrentPage] = useState(1);
   const running = scan.status === "analyzing" && !scan.static_analysis_done;
   const seen = scan.static_analysis_done || running || scan.status === "auditing" || events.length > 0;
@@ -5285,18 +5296,47 @@ export function StaticTaskPanel({
     () => countStaticAuditOptions(annotated.map((item) => item.auditStatus)),
     [annotated],
   );
-  const visible = useMemo(() => {
+  const matchingCandidates = useMemo(() => {
     let list = annotated;
     if (typeFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.candidate.vuln_type === typeFilter);
     if (auditFilter !== ALL_STATIC_FILTER) list = list.filter((item) => item.auditStatus === auditFilter);
     return list;
   }, [annotated, auditFilter, typeFilter]);
-  const totalPages = Math.max(1, Math.ceil(visible.length / STATIC_CANDIDATE_PAGE_SIZE));
-  const safePage = Math.min(currentPage, totalPages);
-  const paged = visible.slice((safePage - 1) * STATIC_CANDIDATE_PAGE_SIZE, safePage * STATIC_CANDIDATE_PAGE_SIZE);
   const selected = selectedIndex === null
     ? null
     : annotated.find((item) => item.candidate.idx === selectedIndex) ?? null;
+  const findingFilterActive = findingFilter === "found";
+  const summaryPage = Math.min(currentPage, Math.max(1, Math.ceil(matchingCandidates.length / STATIC_CANDIDATE_PAGE_SIZE)));
+  const summaryCandidates = findingFilterActive ? matchingCandidates : matchingCandidates.slice(
+    (summaryPage - 1) * STATIC_CANDIDATE_PAGE_SIZE, summaryPage * STATIC_CANDIDATE_PAGE_SIZE,
+  );
+  const auditResults = useCandidateAuditResults(scan,
+    [...summaryCandidates.map((item) => item.candidate.idx), ...(selected ? [selected.candidate.idx] : [])],
+    fpReview, resultRevision);
+  const visible = useMemo(() => findingFilterActive
+    ? matchingCandidates.filter((item) => (auditResults.results.get(item.candidate.idx)?.confirmed_issue_count ?? 0) > 0)
+    : matchingCandidates,
+  [matchingCandidates, findingFilterActive, auditResults.results]);
+  const candidatesLoading = scan.detail_pages?.candidates_next_cursor != null
+    || (candidates.length === 0 && scan.detail_pages?.vulnerabilities_next_cursor != null);
+  const filterLoading = findingFilterActive && (candidatesLoading || auditResults.loading);
+  const filterError = findingFilterActive ? auditResults.error : "";
+  const totalPages = Math.max(1, Math.ceil(visible.length / STATIC_CANDIDATE_PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paged = visible.slice((safePage - 1) * STATIC_CANDIDATE_PAGE_SIZE, safePage * STATIC_CANDIDATE_PAGE_SIZE);
+  const runtimeByTaskName = useMemo(() => {
+    const result = new Map<string, ScanQueueTask>();
+    // Queue collection puts active work first and historical attempts newest first.
+    for (const task of collectScanQueueTasks(scan.opencode_pool ?? null)) {
+      if (task.scopeId && task.scopeId !== scan.scan_id) continue;
+      const name = String(task.task.task_name || "");
+      if (name && !result.has(name)) result.set(name, task);
+    }
+    return result;
+  }, [scan.scan_id, scan.opencode_pool]);
+  const selectedRuntime = selected
+    ? runtimeByTaskName.get(staticCandidateTaskName(scan.scan_id, selected.candidate)) ?? null
+    : null;
   const auditCounts = useMemo(() => {
     const counts: Record<StaticAuditStatus, number> = {
       success: 0,
@@ -5323,19 +5363,17 @@ export function StaticTaskPanel({
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [auditFilter, typeFilter]);
+  }, [auditFilter, typeFilter, findingFilter]);
 
   const listFocus = useListFocus(focusRequest, visible.map((item) => item.candidate.idx), STATIC_CANDIDATE_PAGE_SIZE,
     setSelectedIndex, setCurrentPage, () => {
       setTypeFilter(ALL_STATIC_FILTER);
       setAuditFilter(ALL_STATIC_FILTER);
+      setFindingFilter(ALL_STATIC_FILTER);
     });
-  const auditResults = useCandidateAuditResults(scan,
-    [...paged.map((item) => item.candidate.idx), ...(selected ? [selected.candidate.idx] : [])],
-    fpReview, resultRevision);
 
   useEffect(() => {
-    if (listFocus.pinned !== null || listFocus.pending) return;
+    if (listFocus.pinned !== null || listFocus.pending || filterLoading || filterError) return;
     if (visible.length === 0) {
       if (selectedIndex !== null) setSelectedIndex(null);
       return;
@@ -5343,7 +5381,7 @@ export function StaticTaskPanel({
     if (selectedIndex === null || !visible.some((item) => item.candidate.idx === selectedIndex)) {
       setSelectedIndex(visible[0].candidate.idx);
     }
-  }, [selectedIndex, visible, listFocus.pinned, listFocus.pending]);
+  }, [selectedIndex, visible, listFocus.pinned, listFocus.pending, filterLoading, filterError]);
 
   return (
     <TaskPanel
@@ -5368,11 +5406,22 @@ export function StaticTaskPanel({
       <div className="flex flex-wrap items-center gap-2">
         <StaticFilterSelect label="类型" value={typeFilter} options={typeOptions} onChange={(value) => { listFocus.release(); setTypeFilter(value); }} />
         <StaticFilterSelect label="审计" value={auditFilter} options={auditOptions} onChange={(value) => { listFocus.release(); setAuditFilter(value); }} />
+        <StaticFilterSelect label="问题" value={findingFilter} options={[{ value: "found", label: "发现问题" }]}
+          onChange={(value) => { listFocus.release(); setFindingFilter(value); }} />
       </div>
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,24rem)_1fr]">
-        <div className="flex flex-col rounded-xl border border-slate-700 bg-slate-900/40">
-          <div className="max-h-[70vh] flex-1 overflow-y-auto">
-            {visible.length === 0 ? (
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)]">
+        <div className="flex min-w-0 flex-col rounded-xl border border-slate-700 bg-slate-900/40">
+          <div className="max-h-[72vh] flex-1 overflow-y-auto" aria-busy={filterLoading}>
+            {filterError ? (
+              <div role="alert" className="px-4 py-4 text-sm text-amber-300">
+                问题筛选结果读取失败。<button type="button" onClick={auditResults.retry} className="ml-2 underline">重试</button>
+              </div>
+            ) : filterLoading && (
+              <div role="status" className="px-4 py-4 text-xs text-slate-400">
+                {candidatesLoading ? "正在加载候选点，筛选结果尚未完整…" : "正在读取问题筛选结果…"}
+              </div>
+            )}
+            {visible.length === 0 ? !filterLoading && !filterError && (
               <div className="px-4 py-10 text-center text-sm text-slate-500">
                 {displayedCandidates.length === 0 ? "暂无静态分析候选点" : "当前筛选条件下无候选点"}
               </div>
@@ -5415,11 +5464,12 @@ export function StaticTaskPanel({
             </div>
           )}
         </div>
-        <div className="min-h-[20rem] rounded-xl border border-slate-700 bg-slate-900/40">
+        <div className="min-h-[20rem] min-w-0 rounded-xl border border-slate-700 bg-slate-900/40">
           {selected ? (
             <StaticCandidateDetail
               key={selected.candidate.idx}
               item={selected}
+              runtime={selectedRuntime}
               result={auditResults.results.get(selected.candidate.idx)}
               resultLoading={auditResults.loading}
               resultError={auditResults.error}
@@ -5496,7 +5546,7 @@ const ALL_STATIC_FILTER = "__all__";
 interface StaticFilterOption {
   value: string;
   label: string;
-  count: number;
+  count?: number;
 }
 
 interface StaticCandidateItem {
@@ -5557,7 +5607,7 @@ function StaticFilterSelect({
         <option value={ALL_STATIC_FILTER}>全部</option>
         {options.map((option) => (
           <option key={option.value} value={option.value}>
-            {option.label} ({option.count})
+            {option.label}{option.count === undefined ? "" : ` (${option.count})`}
           </option>
         ))}
       </select>
@@ -5616,8 +5666,9 @@ function StaticCandidateListItem({
   );
 }
 
-function StaticCandidateDetail({ item, result, resultLoading, resultError, onRetryResult, onOpenIssue }: {
+function StaticCandidateDetail({ item, runtime, result, resultLoading, resultError, onRetryResult, onOpenIssue }: {
   item: StaticCandidateItem;
+  runtime: ScanQueueTask | null;
   result?: CandidateAuditTaskResult;
   resultLoading: boolean;
   resultError: string;
@@ -5629,7 +5680,7 @@ function StaticCandidateDetail({ item, result, resultLoading, resultError, onRet
     : "";
   const related = item.candidate.related_functions ?? [];
   return (
-    <div className="max-h-[70vh] overflow-y-auto p-4">
+    <div className="max-h-[72vh] min-w-0 space-y-4 overflow-y-auto p-4">
       <div className="border-b border-slate-800 pb-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -5642,51 +5693,43 @@ function StaticCandidateDetail({ item, result, resultLoading, resultError, onRet
                 </span>
               )}
             </div>
-            <div className="mt-1 break-all font-mono text-xs text-slate-300">{item.candidate.file}:{item.candidate.line}</div>
-            <div className="mt-1 truncate font-mono text-xs text-slate-500">{item.candidate.function}</div>
           </div>
           <div className="flex flex-wrap gap-2">
             <StatusPill label={STATIC_AUDIT_STATUS_LABELS[item.auditStatus]} tone={staticAuditTone(item.auditStatus)} />
+            <AuditFindingBadge result={result} />
           </div>
         </div>
       </div>
-      <div className="mt-4 space-y-4">
-        <section>
-          <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">审计结果</h4>
-          <AuditResults result={result} status={item.auditStatus} loading={resultLoading}
-            error={resultError} onRetry={onRetryResult} onOpenIssue={onOpenIssue} />
-        </section>
-        <section>
-          <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">候选描述</h4>
-          <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
-            <MarkdownContent content={item.candidate.description || "（无描述）"} />
+      <AuditDetailSection title="审计结果">
+        <AuditResults result={result} status={item.auditStatus} loading={resultLoading}
+          error={resultError} onRetry={onRetryResult} onOpenIssue={onOpenIssue} />
+      </AuditDetailSection>
+      <AuditDetailSection title="审计目标">
+        <DetailGrid items={[
+          ["文件路径", item.candidate.file || "未指定"],
+          ["行号", String(Math.max(1, item.candidate.line || 1))],
+          ["函数", item.candidate.function || "未指定"],
+          ["相关变量", staticCandidateRelatedVariable(item.candidate)],
+          ["问题类型", item.candidate.vuln_type || "未指定"],
+          ...(related.length ? [["相关函数", related.join("、")] as [string, string]] : []),
+        ]} />
+      </AuditDetailSection>
+      {item.vulnerability && (
+        <AuditDetailSection title="AI 审计结论">
+          <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2 [overflow-wrap:anywhere]">
+            <MarkdownContent content={staticAuditConclusion(item.vulnerability)} />
           </div>
-        </section>
-        {item.vulnerability && (
-          <section>
-            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">AI 审计结论</h4>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-2">
-              <MarkdownContent content={staticAuditConclusion(item.vulnerability)} />
-            </div>
-          </section>
-        )}
-        {related.length > 0 && (
-          <section>
-            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">相关函数</h4>
-            <div className="rounded border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-300">
-              {related.join(", ")}
-            </div>
-          </section>
-        )}
-        {metadata && (
-          <section>
-            <h4 className="mb-1 text-xs font-semibold uppercase text-slate-500">候选元数据</h4>
-            <pre className="max-h-72 overflow-auto rounded border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs leading-5 text-slate-300">
-              {metadata}
-            </pre>
-          </section>
-        )}
-      </div>
+        </AuditDetailSection>
+      )}
+      <AuditPromptSection runtime={runtime} pending={item.auditStatus === "pending"} />
+      {metadata && (
+        <details className="rounded border border-slate-800 bg-slate-950/40">
+          <summary className="cursor-pointer px-3 py-2 text-xs text-slate-500 hover:text-slate-300">候选元数据</summary>
+          <pre className="max-h-72 overflow-auto border-t border-slate-800 px-3 py-2 font-mono text-xs leading-5 text-slate-300">
+            {metadata}
+          </pre>
+        </details>
+      )}
     </div>
   );
 }
